@@ -1,5 +1,6 @@
 """Nightly selection, the off switch, and the ingest payload. Synthetic folders only. No model call."""
 import json
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -208,10 +209,14 @@ def bundle_env(monkeypatch):
     monkeypatch.setenv("REB_INDEX_READ_TOKEN", "")
     ran = []
 
-    def fake_rows(uids, day, cfg, tmp, fetch=None, outcomes=None):
+    own_day = {}  # uid -> the consult's own IST date, when it is not the run day
+
+    def fake_rows(uids, day, cfg, tmp, fetch=None, outcomes=None, dates=None):
         bad = {"nl": "not_eligible:missing_layers", "nd": "not_eligible:not_this_day", "bf": "bundle_failed"}
         uids = [t for t in uids if not (t[0] in bad and outcomes is not None and outcomes.setdefault(t[0], bad[t[0]]))]
-        rows = [{"uid": u, "ist_date": day, "room_slug": "synth-room", "job_id": j, "doctor_uid8": None} for u, j, _ in uids]
+        if dates is not None:
+            dates.update({u: own_day.get(u, day) for u, _, _ in uids})
+        rows = [{"uid": u, "ist_date": own_day.get(u, day), "room_slug": "synth-room", "job_id": j, "doctor_uid8": None} for u, j, _ in uids]
         return rows, {u: object() for u, _, _ in uids}, {"bundle_failed": 0, "missing_layers": 0, "not_this_day": 0}
 
     monkeypatch.setattr(nightly, "bundle_rows", fake_rows)
@@ -225,6 +230,7 @@ def bundle_env(monkeypatch):
             "pulse_link": {"consult_uid": uid}, "generator": {"code_sha256": "a" * 64, "prompt_sha256": "b" * 64},
             "completion_required": [], "note_text": "Medication:"}}
 
+    run_one.own_day = own_day
     return ran, run_one
 
 
@@ -422,7 +428,7 @@ def test_backfill_is_newest_first_and_continues_on_exit_2(tmp_path, monkeypatch,
     assert backfill(_bcfg(tmp_path), "2026-10-03", "2026-10-05") == 2
     assert seen == ["2026-10-05", "2026-10-04", "2026-10-03"]
     total = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert total == {"total": True, "days": 3, "eligible": 9, "posted": 3, "skipped_existing": 3, "rejected": 3, "failed": 0,
+    assert total == {"total": True, "days": 3, "eligible": 9, "written": 3, "skipped_existing": 3, "rejected": 3, "failed": 0,
                      "missing_layers": 0, "bundle_failed": 0, "cost_usd": 0.75}
 
 
@@ -502,7 +508,7 @@ def test_backfill_from_index_uses_the_index_uids_not_the_sealed_feed(tmp_path, b
     out = capsys.readouterr().out
     assert MARKER not in out and '"malformed": 3' in out
     total = json.loads(out.strip().splitlines()[-1])
-    assert total["days"] == 3 and total["posted"] == 1 and total["skipped_existing"] == 1
+    assert total["days"] == 3 and total["written"] == 1 and total["skipped_existing"] == 1
 
 
 def test_consult_state_ledger_has_every_state(tmp_path, bundle_env):
@@ -531,7 +537,7 @@ def test_consult_state_ledger_has_every_state(tmp_path, bundle_env):
     by = {l["consult_uid"]: l for l in lines}
     assert {k: by[k]["state"] for k in by} == {
         "have": "skipped_existing", "rej": "rejected", "okk": "written", "boom": "failed:RuntimeError",
-        "nl": "not_eligible:missing_layers", "nd": "not_eligible:not_this_day", "bf": "bundle_failed", "pf": "failed:PostRejected"}
+        "nl": "not_eligible:missing_layers", "nd": "not_eligible:not_this_day", "bf": "bundle_failed", "pf": "post_failed"}
     assert by["have"]["artifact_id"] == "3" and by["rej"]["artifact_id"] == "7" and by["okk"]["artifact_id"] == "8"
     assert by["boom"]["artifact_id"] is None and by["nl"]["artifact_id"] is None
     for l in lines:
@@ -544,3 +550,186 @@ def test_ledger_not_written_without_out_or_on_dry_run(tmp_path, bundle_env):
     run(_bcfg(tmp_path, out=""), "2026-10-05", **kw)
     run(_bcfg(tmp_path, out=str(tmp_path / "k")), "2026-10-05", dry_run=True, **kw)
     assert not (tmp_path / "k").exists() and not list(tmp_path.glob("**/consult-state.jsonl"))
+
+
+# ---- fix round 2: lock, per-consult ledger, seed lines, post_failed repost, ledger failure, pending bypass, own date ----
+
+def _lines(cfg):
+    p = Path(cfg["out"]) / "consult-state.jsonl"
+    rows = []
+    for l in (p.read_text().splitlines() if p.exists() else []):
+        try:
+            r = json.loads(l)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and isinstance(r.get("consult_uid"), str):
+            rows.append(r)
+    return rows
+
+
+def test_a_held_lock_prints_locked_and_runs_nothing(tmp_path, bundle_env, capsys):
+    import fcntl
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    Path(cfg["out"]).mkdir(parents=True)
+    fd = os.open(Path(cfg["out"]) / ".nightly.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # another process holds it
+    try:
+        kw = dict(run_one=run_one, post=lambda b: {"ok": True}, pending=False, sealed=["a"], day_read=lambda *_: [])
+        assert run(cfg, "2026-10-05", skip_existing=True, **kw) == 0
+        out = [json.loads(l) for l in capsys.readouterr().out.splitlines() if l.startswith("{")]
+        assert len(out) == 1 and out[0]["locked"] is True
+        assert hourly(cfg, now=_ist(2026, 10, 14, 0, 30), **kw) == 0
+        assert backfill(cfg, "2026-10-04", "2026-10-05", **kw) == 0
+        assert [json.loads(l)["locked"] for l in capsys.readouterr().out.splitlines() if l.startswith("{")] == [True, True]
+        assert ran == [] and _lines(cfg) == []
+    finally:
+        os.close(fd)
+    assert run(cfg, "2026-10-05", skip_existing=True, **kw) == 0  # the lock is free again
+    assert ran == ["a"]
+
+
+def test_the_lock_is_released_on_exit_and_a_nested_call_does_not_deadlock(tmp_path, bundle_env):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    kw = dict(run_one=run_one, post=lambda b: {"ok": True, "inserted": 1}, pending=False, sealed=["a"], day_read=lambda *_: [])
+    assert hourly(cfg, now=_ist(2026, 10, 14, 0, 30), **kw) == 0  # hourly holds it and run takes it again
+    assert not nightly._HELD_LOCKS
+    with nightly.nightly_lock(cfg["out"]) as st:
+        assert st == "ok"
+    assert (Path(cfg["out"]) / ".nightly.lock").exists()
+
+
+def test_the_ledger_is_written_per_consult_so_a_crash_keeps_what_was_done(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+
+    def crashing(uid):
+        if uid == "c":
+            raise KeyboardInterrupt  # not an Exception: it ends the process, not the consult
+        return run_one(uid)
+
+    with pytest.raises(KeyboardInterrupt):
+        _call(cfg, "2026-10-05", crashing, ["a", "b", "c", "d"], lambda *_: ([], True))
+    assert [(l["consult_uid"], l["state"]) for l in _lines(cfg)] == [("a", "written"), ("b", "written")]
+    assert not nightly._HELD_LOCKS
+    ran.clear()
+    assert _call(cfg, "2026-10-05", run_one, ["a", "b", "c", "d"], lambda *_: ([], True)) == 0
+    assert ran == ["c", "d"]  # a and b are skipped by the ledger alone
+
+
+def test_a_seed_line_skips_whatever_its_code_sha_and_extra_or_missing_fields(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-NEW")
+    root = Path(cfg["out"])
+    root.mkdir(parents=True)
+    (root / "consult-state.jsonl").write_text("\n".join([
+        json.dumps({"consult_uid": "s1", "state": "written", "code_sha256": "seed"}),  # no ist_date, run_ts, artifact_id
+        json.dumps({"consult_uid": "s2", "state": "written", "code_sha256": "seed", "artifact_id": 5, "source": "store", "n": [1]}),
+        json.dumps(["not", "a", "row"]), "not json at all", json.dumps({"consult_uid": 7, "state": "written"}), ""]) + "\n")
+    assert _call(cfg, "2026-10-05", run_one, ["s1", "s2", "n1"], lambda *_: ([], True)) == 0
+    assert ran == ["n1"]
+    assert {l["consult_uid"]: l["state"] for l in _lines(cfg)[-3:]} == {"s1": "skipped_existing", "s2": "skipped_existing", "n1": "written"}
+
+
+def test_ingest_down_for_three_hourly_runs_costs_one_bedrock_run(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    posts = []
+
+    def keeping(uid):  # the real runner keeps the artifact and its validation file under out/<uid>
+        log = run_one(uid)
+        d = Path(cfg["out"]) / uid
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "artifact.json").write_text(json.dumps(log["artifact"]))
+        (d / "artifact.validation.json").write_text(json.dumps({"final_valid": True, "final_errors": [], "cost_usd": 0.5}))
+        return log
+
+    state = {"up": False}
+
+    def post(body):
+        posts.append(body["consult_uid"])
+        if not state["up"]:
+            raise ConnectionError("down")
+        return {"ok": True, "inserted": 1, "run_id": 21}
+
+    kw = dict(run_one=keeping, post=post, sealed=["a"], pending=[], day_read=lambda *_: ([], True))
+    for h in (10, 11, 12):
+        assert hourly(cfg, now=_ist(2026, 10, 14, h, 5), **kw) == 1
+    assert ran == ["a"] and posts == ["a", "a", "a"]  # one Bedrock run, three POST attempts
+    assert [l["state"] for l in _lines(cfg)] == ["post_failed"] * 3
+    assert all(l["code_sha256"] == "sha-A" for l in _lines(cfg))
+    state["up"] = True
+    assert hourly(cfg, now=_ist(2026, 10, 14, 13, 5), **kw) == 0
+    assert ran == ["a"] and posts[-1] == "a" and _lines(cfg)[-1]["state"] == "written" and _lines(cfg)[-1]["artifact_id"] == "21"
+    assert hourly(cfg, now=_ist(2026, 10, 14, 14, 5), **kw) == 0  # written now: nothing posts again
+    assert len(posts) == 4
+
+
+def test_post_failed_without_a_kept_artifact_or_at_a_new_code_sha_reruns(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _ledger(cfg, [("nokeep", "post_failed", None, "sha-A"), ("oldsha", "post_failed", None, "sha-0")])
+    d = Path(cfg["out"]) / "oldsha"
+    d.mkdir()
+    (d / "artifact.json").write_text(json.dumps({"schema_version": "x"}))
+    assert _call(cfg, "2026-10-05", run_one, ["nokeep", "oldsha"], lambda *_: ([], True)) == 0
+    assert ran == ["nokeep", "oldsha"]
+
+
+def test_a_ledger_write_failure_prints_the_flag_and_exits_1_fatal(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    real = nightly.append_states
+
+    def failing(root, lines):
+        if any(l["consult_uid"] == "b" for l in lines):
+            raise OSError(28, "no space")
+        real(root, lines)
+
+    monkeypatch.setattr(nightly, "append_states", failing)
+    out = {}
+    assert run(cfg, "2026-10-05", run_one=run_one, post=lambda b: {"ok": True, "inserted": 1}, pending=False, sealed=["a", "b", "c"],
+               skip_existing=True, day_read=lambda *_: [], out=out) == 1
+    line = json.loads([l for l in capsys.readouterr().out.splitlines() if l.startswith("{")][-1])
+    assert line["ledger_write_failed"] is True and out["fatal"] is True
+    assert ran == ["a", "b"]  # it stops after the consult whose line could not be written
+    # backfill stops on it
+    seen = []
+    monkeypatch.setattr(nightly, "append_states", failing)
+
+    def fake_inner(cfg_, day, **kw):
+        seen.append(day)
+        kw["out"].update(fatal=True, ledger_write_failed=True)
+        return 1
+
+    monkeypatch.setattr(nightly, "run", fake_inner)
+    assert backfill(cfg, "2026-10-03", "2026-10-05") == 1 and seen == ["2026-10-05"]
+
+
+def test_a_pending_job_bypasses_skip_existing_and_its_ledger_line_has_the_job_id(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _ledger(cfg, [("w", "written", "9", "sha-A"), ("other", "written", "8", "sha-A")])
+    jobs = [{"consult_uid": "w", "job_id": "job-1"}]
+    assert run(cfg, "2026-10-05", run_one=run_one, post=lambda b: {"ok": True, "inserted": 1, "run_id": 30}, pending=lambda *_: jobs,
+               sealed=["other"], skip_existing=True, day_read=lambda *_: [{"consult_uid": "w", "state": "ok", "run_id": 9}]) == 0
+    assert ran == ["w"]  # the sealed uid is skipped; the pending rerun is served
+    by = {l["consult_uid"]: l for l in _lines(cfg)[2:]}
+    assert by["w"]["state"] == "written" and by["w"]["job_id"] == "job-1" and by["w"]["artifact_id"] == "30"
+    assert by["other"]["state"] == "skipped_existing" and "job_id" not in by["other"]
+
+
+def test_the_ledger_ist_date_is_the_consults_own_day_not_the_run_day(tmp_path, bundle_env):
+    ran, run_one = bundle_env
+    run_one.own_day["old"] = "2026-09-30"
+    cfg = _bcfg(tmp_path)
+    assert run(cfg, "2026-10-05", run_one=run_one, post=lambda b: {"ok": True, "inserted": 1}, pending=lambda *_: [{"consult_uid": "old", "job_id": "j"}],
+               sealed=["new"], skip_existing=True, day_read=lambda *_: []) == 0
+    by = {l["consult_uid"]: l for l in _lines(cfg)}
+    assert by["old"]["ist_date"] == "2026-09-30" and by["new"]["ist_date"] == "2026-10-05"

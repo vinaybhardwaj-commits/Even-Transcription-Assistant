@@ -20,6 +20,8 @@ See NIGHTLY.md.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -49,6 +51,10 @@ DEFAULTS = {
 
 
 class NightlyError(RuntimeError):
+    pass
+
+
+class LedgerWriteError(NightlyError):
     pass
 
 
@@ -462,7 +468,7 @@ def fetch_bundle(cmd: list[str], cwd: str, uid: str, tmp: Path) -> dict:
     return doc
 
 
-def bundle_rows(uids: list[tuple[str, str | None, bool]], day: str, cfg: dict, tmp: Path, fetch=None, outcomes: dict | None = None) -> tuple[list[dict], dict, dict]:
+def bundle_rows(uids: list[tuple[str, str | None, bool]], day: str, cfg: dict, tmp: Path, fetch=None, outcomes: dict | None = None, dates: dict | None = None) -> tuple[list[dict], dict, dict]:
     """(rows, consults by uid, counts). Eligibility is spec section 2.5: a translate or stt layer, a role layer, a clip start on ``day``.
 
     A pending job is an explicit request: it skips the day check. A consult that fails is counted once and never fetched again. ids and counts only; the Consults stay in memory.
@@ -471,6 +477,7 @@ def bundle_rows(uids: list[tuple[str, str | None, bool]], day: str, cfg: dict, t
     fetch = fetch or (lambda uid: fetch_bundle(cfg["bundle_cmd"], cfg["bundle_cwd"], uid, tmp))
     counts = {"bundle_failed": 0, "missing_layers": 0, "not_this_day": 0}
     outcomes = outcomes if outcomes is not None else {}  # uid -> ledger state for every uid that is not eligible
+    dates = dates if dates is not None else {}  # uid -> the consult's own IST date, once its bundle is read
     rows, consults, seen = [], {}, set()
     for uid, job_id, check_day in uids:
         if uid in seen:
@@ -485,6 +492,7 @@ def bundle_rows(uids: list[tuple[str, str | None, bool]], day: str, cfg: dict, t
                 outcomes[uid] = "not_eligible:missing_layers"
                 continue
             t0, _t1, room = bundle_window(b)
+            dates[uid] = ist_date_of_ms(t0)
             if check_day and ist_date_of_ms(t0) != day:
                 counts["not_this_day"] += 1
                 outcomes[uid] = "not_eligible:not_this_day"
@@ -519,7 +527,11 @@ def _default_run(data: Path, out: Path, uid: str) -> dict:
 
 
 def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_result=None) -> dict:
-    """Run and post. ``run_one(uid) -> pipeline log``. ``post(payload) -> response``. Prints counts only."""
+    """Run and post. ``run_one(uid) -> pipeline log``. ``post(payload) -> response``. Prints counts only.
+
+    ``on_result`` is called as soon as each consult's state is known. If it raises LedgerWriteError the loop stops and the
+    summary carries ``ledger_write_failed``.
+    """
     cap = int(cfg.get("max_consults") or 40)
     chosen, overflow = rows[:cap], rows[cap:]
     note = on_result or (lambda uid, state, artifact_id=None: None)
@@ -530,53 +542,60 @@ def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_res
         return {"dry_run": True, "n": len(chosen), "skipped": skipped, "posted": 0, "rejected": 0, "failed": 0, "cost_usd": 0.0}
     data, out = Path(cfg["data"]), Path(cfg.get("out") or str(Path(cfg["data"]) / "_eta2freescript"))
     out.mkdir(parents=True, exist_ok=True)
-    for r in chosen:
-        try:
-            log = (run_one or (lambda uid: _default_run(data, out, uid)))(r["uid"])
-        except Exception as e:
-            failed += 1
-            note(r["uid"], "failed:" + type(e).__name__)
-            print(r["uid"], "ERROR", type(e).__name__, flush=True)
-            continue
-        art = log.get("artifact") if isinstance(log, dict) else None
-        if not isinstance(art, dict):
-            failed += 1
-            note(r["uid"], "failed:NoArtifact")
-            print(r["uid"], "not-valid", flush=True)
-            continue
-        valid = bool(log.get("final_valid"))
-        cost = log.get("cost_usd")
-        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-            spent += cost
-        body = payload_from_artifact(
-            art, errors=log.get("final_errors") or [],
-            cost_usd=cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
-            job_id=r.get("job_id"), room_slug=r.get("room_slug"), ist_date=r.get("ist_date"), doctor_uid8=r.get("doctor_uid8"),
-        )
-        try:
-            res = post(body)
-        except Exception as e:
-            failed += 1
-            note(r["uid"], "failed:" + type(e).__name__)
-            print(r["uid"], "POST", type(e).__name__, flush=True)
-            continue
-        ok = isinstance(res, dict) and res.get("ok")
-        rid = res.get("run_id") if isinstance(res, dict) else None
-        rid = str(rid) if isinstance(rid, (int, str)) and not isinstance(rid, bool) else None
-        if ok and valid:
-            note(r["uid"], "written", rid)
-            posted += 1
-            print(r["uid"], "posted", "inserted=" + str(res.get("inserted")), flush=True)
-        elif ok:
-            note(r["uid"], "rejected", rid)
-            rejected += 1
-            print(r["uid"], "rejected", flush=True)
-        else:
-            note(r["uid"], "failed:PostRejected")
-            failed += 1
-            print(r["uid"], "post-rejected", "inserted=" + str((res or {}).get("inserted")), flush=True)
-    return {"dry_run": False, "n": len(chosen), "skipped": skipped, "posted": posted, "rejected": rejected, "failed": failed,
-            "cost_usd": round(spent, 6)}
+    ledger_failed = False
+    try:
+        for r in chosen:
+            try:
+                log = (run_one or (lambda uid: _default_run(data, out, uid)))(r["uid"])
+            except Exception as e:
+                failed += 1
+                note(r["uid"], "failed:" + type(e).__name__)
+                print(r["uid"], "ERROR", type(e).__name__, flush=True)
+                continue
+            art = log.get("artifact") if isinstance(log, dict) else None
+            if not isinstance(art, dict):
+                failed += 1
+                note(r["uid"], "failed:NoArtifact")
+                print(r["uid"], "not-valid", flush=True)
+                continue
+            valid = bool(log.get("final_valid"))
+            cost = log.get("cost_usd")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool) and not log.get("reposted"):
+                spent += cost  # a re-post of a kept artifact spends nothing new
+            body = payload_from_artifact(
+                art, errors=log.get("final_errors") or [],
+                cost_usd=cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
+                job_id=r.get("job_id"), room_slug=r.get("room_slug"), ist_date=r.get("ist_date"), doctor_uid8=r.get("doctor_uid8"),
+            )
+            try:
+                res = post(body)
+            except Exception as e:
+                failed += 1
+                note(r["uid"], "post_failed")  # the artifact exists; the next run at this code sha re-posts it
+                print(r["uid"], "POST", type(e).__name__, flush=True)
+                continue
+            ok = isinstance(res, dict) and res.get("ok")
+            rid = res.get("run_id") if isinstance(res, dict) else None
+            rid = str(rid) if isinstance(rid, (int, str)) and not isinstance(rid, bool) else None
+            if ok and valid:
+                note(r["uid"], "written", rid)
+                posted += 1
+                print(r["uid"], "posted", "inserted=" + str(res.get("inserted")), flush=True)
+            elif ok:
+                note(r["uid"], "rejected", rid)
+                rejected += 1
+                print(r["uid"], "rejected", flush=True)
+            else:
+                note(r["uid"], "post_failed")
+                failed += 1
+                print(r["uid"], "post-rejected", "inserted=" + str((res or {}).get("inserted")), flush=True)
+    except LedgerWriteError:
+        ledger_failed = True
+    summary = {"dry_run": False, "n": len(chosen), "skipped": skipped, "posted": posted, "rejected": rejected, "failed": failed,
+               "cost_usd": round(spent, 6)}
+    if ledger_failed:
+        summary["ledger_write_failed"] = True
+    return summary
 
 
 def _post_factory(cfg: dict, secret: str):
@@ -647,6 +666,7 @@ def _abort_summary(dry_run: bool, day: str, out: dict | None) -> None:
 
 
 STATE_FILE = "consult-state.jsonl"
+LOCK_FILE = ".nightly.lock"
 
 
 def append_states(out_root: str, lines: list[dict]) -> None:
@@ -665,9 +685,96 @@ def append_states(out_root: str, lines: list[dict]) -> None:
     os.chmod(path, 0o600)
 
 
+_HELD_LOCKS: set[str] = set()
+
+
+@contextlib.contextmanager
+def nightly_lock(out_root: str):
+    """One non-blocking flock on <out_root>/.nightly.lock. Yields "ok", "locked" (another process holds it) or "error".
+
+    Re-entrant inside one process (hourly and backfill call run). Released when the block exits.
+    """
+    key = os.path.realpath(out_root)
+    if key in _HELD_LOCKS:
+        yield "ok"
+        return
+    try:
+        root = Path(out_root)
+        root.mkdir(parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+        fd = os.open(root / LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        yield "error"
+        return
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield "locked"
+            return
+        _HELD_LOCKS.add(key)
+        try:
+            yield "ok"
+        finally:
+            _HELD_LOCKS.discard(key)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _locked(cfg: dict, dry_run: bool, label: str, fn, day: str | None = None, out: dict | None = None) -> int:
+    """Run ``fn()`` under the nightly lock. A held lock prints one {"locked": true} line and exits 0 without running anything."""
+    if not cfg.get("enabled") or dry_run or not cfg.get("out"):
+        return fn()
+    with nightly_lock(cfg["out"]) as st:
+        if st == "locked":
+            line = {"locked": True, "cmd": label}
+            if day:
+                line["date"] = day
+            print(json.dumps(line))
+            return 0
+        if st == "error":
+            print("config error: cannot open the lock file under out")
+            if out is not None:
+                out.update(fatal=True)
+            return 1
+        return fn()
+
+
+def _repost_log(out_root: str, uid: str) -> dict | None:
+    """A run log rebuilt from the kept <out>/<uid>/artifact.json (+ validation file, + cost from runs.jsonl). None if nothing usable is kept."""
+    if not isinstance(uid, str) or not _SAFE_UID.fullmatch(uid):
+        return None
+    art = _read(Path(out_root) / uid / "artifact.json")
+    if not art:
+        return None
+    val = _read(Path(out_root) / uid / "artifact.validation.json") or {}
+    errs = val.get("final_errors") if isinstance(val.get("final_errors"), list) else []
+    cost = val.get("cost_usd")
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool):
+        cost = None
+        try:
+            with open(Path(out_root) / "runs.jsonl", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(r, dict) and r.get("uid") == uid and isinstance(r.get("cost_usd"), (int, float)) \
+                            and not isinstance(r.get("cost_usd"), bool):
+                        cost = r["cost_usd"]
+        except OSError:
+            pass
+    valid = bool(val["final_valid"]) if "final_valid" in val else not errs
+    return {"artifact": art, "final_errors": errs, "final_valid": valid, "cost_usd": cost, "reposted": True}
+
+
 def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed, secret: str, reb_token: str,
                 skip_existing: bool = False, day_read=None, out: dict | None = None) -> int:
-    """Bundle mode: uids = the sealed feed + pending jobs; every bundle lives in one TemporaryDirectory that is gone when this returns."""
+    """Bundle mode: uids = the sealed feed + pending jobs; every bundle lives in one TemporaryDirectory that is gone when this returns.
+
+    Each consult's ledger line is appended the moment its state is known, so a crash keeps what was done.
+    """
     sealed_uids = [u for u in (_sealed_uids(cfg, day, sealed, reb_token) or []) if isinstance(u, str) and u]
     jobs_by_uid: dict[str, str | None] = {}
     unexpanded = 0
@@ -689,20 +796,40 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
     skipped_existing = 0
     flags: dict = {}
     code_sha = current_code_sha()
-    states: dict[str, tuple[str, str | None]] = {}  # uid -> (state, artifact_id) for the ledger
+    job_of = {u: j for u, j, _ in uids}
+    dates: dict[str, str] = {}  # uid -> the consult's own IST date (bundle read); sealed uids fall back to the run day
+    day_of = {u: day for u, _j, chk in uids if chk}
+    ledger_failed = False
+
+    def emit(uid: str, state: str, aid: str | None = None) -> None:
+        line = {"consult_uid": uid, "ist_date": dates.get(uid) or day_of.get(uid), "state": state, "artifact_id": aid,
+                "run_ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "code_sha256": code_sha}
+        if job_of.get(uid):
+            line["job_id"] = job_of[uid]
+        if not cfg.get("out") or dry_run:
+            return
+        try:
+            append_states(cfg["out"], [line])
+        except OSError:
+            raise LedgerWriteError("ledger write failed") from None
+
+    have: dict[str, tuple[str, str | None]] = {}
+    repost: set[str] = set()
     if skip_existing:
         got = _skip_map(cfg, day, secret, day_read, code_sha)
         if got is None:
             _abort_summary(dry_run, day, out)
             return 1
         have, flags = got
-        kept = [t for t in uids if t[0] not in have]
-        for t in uids:
-            if t[0] in have:
-                states[t[0]] = have[t[0]]
-        skipped_existing, uids = len(uids) - len(kept), kept
+        ledger = read_ledger(cfg["out"]) or {}
+        repost = {u for u, row in ledger.items() if row.get("state") == "post_failed" and row.get("code_sha256") == code_sha}
+    # an explicit pending scribe_freescript job is a deliberate rerun request: it bypasses skip-existing
+    kept = [t for t in uids if not t[2] or t[0] not in have]
     cap = int(cfg.get("max_consults") or 40)
-    overflow, uids = len(uids) - cap if len(uids) > cap else 0, uids[:cap]
+    overflow, kept_capped = len(kept) - cap if len(kept) > cap else 0, kept[:cap]
+    skipped = [t for t in uids if t[2] and t[0] in have]
+    skipped_existing = len(skipped)
+    uids = kept_capped
     sender = post or (_post_factory(cfg, secret) if (not dry_run and secret and cfg.get("app_url")) else None)
     if sender is None and not dry_run:
         print("no ingest target")
@@ -710,31 +837,53 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
         if out is not None:
             out.update(fatal=True)
         return 1
-    with tempfile.TemporaryDirectory(prefix="freescript-bundle-") as td:
-        tmp = Path(td)
-        (tmp / "bundles").mkdir()
-        outcomes: dict[str, str] = {}
-        rows, consults, counts = bundle_rows(uids, day, cfg, tmp / "bundles", outcomes=outcomes)
-        for u, st in outcomes.items():
-            states[u] = (st, None)
-        nothing = not rows and not counts["bundle_failed"] and not counts["missing_layers"] and not unexpanded
-        if nothing:
-            print("nothing", day)
-            summary = {"dry_run": dry_run, "n": 0, "skipped": 0, "posted": 0, "rejected": 0, "failed": 0, "cost_usd": 0.0}
-        else:
-            # every pipeline output goes inside the temp dir; _bundle_runner copies out only the derived files
-            bcfg = dict(cfg, data=str(tmp), out=str(tmp / "out"))
-            summary = execute(rows, bcfg, dry_run=dry_run, run_one=run_one or _bundle_runner(consults, tmp / "out", cfg.get("out")),
-                              post=sender or (lambda _p: {"ok": True, "inserted": 0}),
-                              on_result=lambda u, st, aid=None: states.__setitem__(u, (st, aid)))
-    if cfg.get("out") and not dry_run:
-        run_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        append_states(cfg["out"], [{"consult_uid": u, "ist_date": day, "state": st, "artifact_id": aid, "run_ts": run_ts,
-                                    "code_sha256": code_sha}
-                                   for u, (st, aid) in states.items()])
+    rows: list[dict] = []
+    counts = {"bundle_failed": 0, "missing_layers": 0, "not_this_day": 0}
+    summary: dict = {}
+    nothing = False
+    try:
+        for t in skipped:
+            emit(t[0], *have[t[0]])
+        with tempfile.TemporaryDirectory(prefix="freescript-bundle-") as td:
+            tmp = Path(td)
+            (tmp / "bundles").mkdir()
+            outcomes: dict[str, str] = {}
+            rows, consults, counts = bundle_rows(uids, day, cfg, tmp / "bundles", outcomes=outcomes, dates=dates)
+            for u, st in outcomes.items():
+                emit(u, st)
+            nothing = not rows and not counts["bundle_failed"] and not counts["missing_layers"] and not unexpanded
+            if nothing:
+                print("nothing", day)
+                summary = {"dry_run": dry_run, "n": 0, "skipped": 0, "posted": 0, "rejected": 0, "failed": 0, "cost_usd": 0.0}
+            else:
+                # every pipeline output goes inside the temp dir; _bundle_runner copies out only derived files
+                bcfg = dict(cfg, data=str(tmp), out=str(tmp / "out"))
+                base = run_one or _bundle_runner(consults, tmp / "out", cfg.get("out"))
+                kept_logs = {}
+                if not dry_run:
+                    for r in rows:
+                        u = r["uid"]
+                        if u in repost and not job_of.get(u):
+                            lg = _repost_log(cfg["out"], u)
+                            if lg:
+                                kept_logs[u] = lg
+                summary = execute(rows, bcfg, dry_run=dry_run, run_one=lambda u: kept_logs[u] if u in kept_logs else base(u),
+                                  post=sender or (lambda _p: {"ok": True, "inserted": 0}),
+                                  on_result=emit)
+    except LedgerWriteError:
+        ledger_failed = True
+        summary = {"dry_run": dry_run, "n": 0, "skipped": 0, "posted": 0, "rejected": 0, "failed": 0, "cost_usd": 0.0}
+    if summary.get("ledger_write_failed"):
+        ledger_failed = True
     summary.update(counts, **flags, mode="bundle", skipped_existing=skipped_existing, date=day, eligible=len(rows))
     summary["skipped"] = summary.get("skipped", 0) + overflow
     summary["missing"] = counts["missing_layers"] + unexpanded
+    if ledger_failed:
+        summary["ledger_write_failed"] = True
+        _finish(summary, dry_run, extra_failed=counts["bundle_failed"], out=out)
+        if out is not None:
+            out.update(fatal=True)
+        return 1
     rc = _finish(summary, dry_run, extra_failed=counts["bundle_failed"], out=out)
     return 0 if nothing else rc
 
@@ -820,7 +969,7 @@ def _finish(summary: dict, dry_run: bool, extra_failed: int = 0, out: dict | Non
     keys = ("dry_run", "n", "posted", "rejected", "failed", "skipped", "missing", "mode", "bundle_failed", "missing_layers", "not_this_day",
             "skipped_existing", "cost_usd")
     line = {k: summary[k] for k in keys}
-    line.update({k: True for k in ("day_read_partial", "day_read_failed") if summary.get(k)})
+    line.update({k: True for k in ("day_read_partial", "day_read_failed", "ledger_write_failed") if summary.get(k)})
     if summary.get("date"):
         line = {"date": summary["date"], **line}
     print(json.dumps(line))
@@ -834,8 +983,13 @@ def _finish(summary: dict, dry_run: bool, extra_failed: int = 0, out: dict | Non
     return 0
 
 
-def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, pending=None, sealed=None, roles=None,
-        skip_existing: bool = False, day_read=None, out: dict | None = None) -> int:
+def run(cfg: dict, day: str, *, dry_run: bool = False, out: dict | None = None, **kw) -> int:
+    """One day's run, under the nightly lock (see ``nightly_lock``)."""
+    return _locked(cfg, dry_run, "run", lambda: _run_day(cfg, day, dry_run=dry_run, out=out, **kw), day=day, out=out)
+
+
+def _run_day(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, pending=None, sealed=None, roles=None,
+             skip_existing: bool = False, day_read=None, out: dict | None = None) -> int:
     if not cfg.get("enabled"):
         print("disabled")
         return 0
@@ -918,6 +1072,10 @@ def _worse(a: int, b: int) -> int:
 
 
 def hourly(cfg: dict, *, now: datetime | None = None, dry_run: bool = False, **kw) -> int:
+    return _locked(cfg, dry_run, "hourly", lambda: _hourly(cfg, now=now, dry_run=dry_run, **kw))
+
+
+def _hourly(cfg: dict, *, now: datetime | None = None, dry_run: bool = False, **kw) -> int:
     """run --skip-existing for today (IST), and for yesterday too while the IST hour is < 2. Pending jobs are drained once (the first day)."""
     now = now or datetime.now(timezone.utc)
     days = [current_ist_day(now)]
@@ -964,10 +1122,16 @@ def load_index(path: str, date_from: str, date_to: str) -> tuple[dict[str, list[
         if date_from <= day <= date_to and mins >= MIN_INDEX_MINUTES:
             by_day.setdefault(day, []).append(uid)
     return by_day, bad
-_TOTAL_KEYS = ("eligible", "posted", "skipped_existing", "rejected", "failed", "missing_layers", "bundle_failed")
+
+_TOTAL_KEYS = ("eligible", "written", "skipped_existing", "rejected", "failed", "missing_layers", "bundle_failed")
+_TOTAL_SOURCE = {"written": "posted"}  # the per-day summary still says posted; the total line says written
 
 
 def backfill(cfg: dict, date_from: str, date_to: str, *, dry_run: bool = False, uids_from_index: str | None = None, **kw) -> int:
+    return _locked(cfg, dry_run, "backfill", lambda: _backfill(cfg, date_from, date_to, dry_run=dry_run, uids_from_index=uids_from_index, **kw))
+
+
+def _backfill(cfg: dict, date_from: str, date_to: str, *, dry_run: bool = False, uids_from_index: str | None = None, **kw) -> int:
     """run --skip-existing for each day from ``date_to`` back to ``date_from``. Stops on a config or day-read failure; partial continues."""
     try:
         d0, d1 = datetime.fromisoformat(date_from).date(), datetime.fromisoformat(date_to).date()
@@ -999,7 +1163,7 @@ def backfill(cfg: dict, date_from: str, date_to: str, *, dry_run: bool = False, 
         days += 1
         rc = _worse(rc, code)
         for k in _TOTAL_KEYS:
-            total[k] += int(out.get(k) or 0)
+            total[k] += int(out.get(_TOTAL_SOURCE.get(k, k)) or 0)
         total["cost_usd"] += float(out.get("cost_usd") or 0.0)
         if code == 1 and out.get("fatal"):
             break
@@ -1077,7 +1241,8 @@ def _drain(cfg: dict, dry_run: bool) -> int:
             print("no ingest target")
             _config_error_summary(dry_run)
             return 1
-        return _run_bundle(cfg, previous_ist_day(), dry_run=dry_run, run_one=None, post=None, pending=None, sealed=False, secret=secret, reb_token="")
+        return _locked(cfg, dry_run, "drain", lambda: _run_bundle(cfg, previous_ist_day(), dry_run=dry_run, run_one=None, post=None, pending=None,
+                                                                  sealed=False, secret=secret, reb_token=""))
     data = Path(cfg["data"]) if cfg.get("data") else None
     if not data or not cfg.get("app_url") or not secret:
         print("no ingest target")
