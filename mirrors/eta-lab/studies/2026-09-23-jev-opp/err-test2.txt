@@ -1,1 +1,0 @@
-[even-jev-mcp] tool=jev_ask input_bytes=286 questions=1 latency_ms=496 status=200

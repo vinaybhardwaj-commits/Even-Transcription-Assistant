@@ -1,9 +1,0 @@
-#!/bin/zsh
-TMUX=/opt/homebrew/bin/tmux
-[ -x "$TMUX" ] || TMUX=/usr/local/bin/tmux
-T=split-speaker:1.1
-$TMUX send-keys -t $T C-u; sleep 1
-$TMUX send-keys -t $T "V has finished all 48 roll-call clips. Score it. Counts only, no transcript text. THE CONTROLS FIRST, because they decide whether anything else is usable: of the 10 clips presented under the WRONG doctor's name, how many did V confirm as that doctor, how many rejected, how many cant tell. Give the exact 95 percent interval. If he confirmed a large share, the roster cannot even be trusted to FIND candidates and the whole enrolment-harvest plan fails - say that plainly rather than softening it. Then per doctor for the 38 genuine clips: confirmed, rejected, cant tell, and usable seconds of CONFIRMED audio per doctor. Then the mis-segmentation question - V was asked to flag clips where he heard two voices; report which clips he flagged and whether they concentrate in the Shankar clips sampled from inside the 78-523 second blocks, because that is the test of whether the diarizer glued doctor and patient onto one label. Then your reading in under 200 words covering: whether we have enough CONFIRMED room-domain audio per doctor to build a centroid under V's durable-centroids ruling; which doctors fall short and by how much; and whether the control result changes how much you trust the genuine labels. One thing to be careful about: a doctor being rejected on most of his clips is not necessarily the roster being wrong - it may be that the slot was right and the speaking voice was the patient, which is the same glued-audio problem in a different costume. Distinguish those if the data lets you, and say so if it does not. Do not enrol anyone, do not touch a centroid, do not create clinician records. Leave all four servers up."; sleep 2
-$TMUX send-keys -t $T Enter; sleep 2
-$TMUX send-keys -t $T Enter; sleep 1
-echo sent

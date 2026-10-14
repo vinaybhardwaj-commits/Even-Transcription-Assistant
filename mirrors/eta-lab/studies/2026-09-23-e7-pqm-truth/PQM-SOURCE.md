@@ -1,3 +1,0 @@
-# PQM source (Fable, 23 Sep 15:50)
-- pqm-consults.csv: 669 CONSULTATION steps, called_at 2026-09-20..23 IST (Metabase db 13, queue_token_steps JOIN queue_tokens). Columns: token_uid, doctor_uid, doctor_name, token_created_at, called_at, completed_at, cycle_bucket. Per day: 20th 46, 21st 240, 22nd 258, 23rd 125 (partial, to ~15:45). 659 have completed_at.
-- Room->doctor: the display-board config is NOT in the warehouse. even_hospitals.doctor_opd_rooms exists but is NULL on all 3 hospital rows. So the room->doctor map for E-7 = voiceprint attribution (voiceprint-attribution.json). Room-days with no confident doctor voice stay unmapped; list them.

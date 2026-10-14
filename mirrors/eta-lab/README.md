@@ -1,37 +1,28 @@
-# eta-lab
+# even-orbox-lab
 
-The private home for ETA lab work. Ratified by V, 2026-09-23 (`orders/CONSOLIDATE-ETA-LAB.md`).
+Code and records of the ETA ORBOX thread (orbox-lead), which runs the OT recorders:
 
-## The three homes
+- **ORB2** (vinay-orb2): records OT2.
+- **ORB3** (orbox3): the lab box.
 
-1. **What Are Next (WAN)** — every task, decision, and result summary (one line + a path
-   to the file that has the detail). Fable maintains it. Nothing here duplicates it, and
-   nothing here edits it.
-2. **This repo, `eta-lab`** — every text artefact: orders, scripts, results, reports, the
-   findings ledger, the herdr kit, pane messages. Private. Never patient content.
-3. **`eta-data`** — one folder per study, `/Volumes/Air Drive/eta-data/<study>/` on the
-   Mini and `~/eta-data/<study>/` on the Yoga. Audio, transcripts, anything with patient
-   content. Never in git. A study closes by writing `<study>/.closed` (date); a daily job
-   deletes it 14 days later and logs what it deleted (names and sizes only) to
-   `kit/cleanup.log`. Never deletes a folder without `.closed`.
+No audio, tape, transcripts or patient data are kept in this repo. Those stay on the ORBoxes, on the clinical rail. The repo holds only scripts and the written orders, reports and verdicts.
 
 ## Layout
+- **orders/** holds the written records:
+  - lead orders: ORDERS-O*, ORDERS-R* and ORDERS-W*;
+  - builder reports: O*-REPORT;
+  - refuter verdicts: R*-VERDICT;
+  - the ORBox design, kit and handover notes.
+- **builder/o1..o5** holds the builder scripts:
+  - o1 and o2: tests of noise removal and of picking the better mic.
+  - o3 and o4: the deterministic lab scorer. scorer4 is lab scorer v4: faster-whisper with temperature=0.0 and no_repeat_ngram_size=3.
+  - o5: the ORB2 case cutter. cutter_v1.py is rule v1.1.
+- **refuter/**, **orb3-remote/r3,r4** and **orb2-cutter/r5** hold the refuter's independent scripts.
+- **orb2-cutter/** holds the cutter and the R5 checker as deployed on ORB2 (~/orbox-lab/o5 and ~/orbox-lab/r5).
+- **orb3-lab/** holds the ORB3 lab scripts from /var/lib/orb3-lab: runs 1-4, the room map and the OT scans.
+- **metasurfer/** holds the repeatable warehouse SQL for EHRC OT bookings.
 
-- `orders/` — every order this lab has received, flat, one file per order.
-- `studies/<YYYY-MM-DD>-<slug>/` — one folder per study: README (question, owner,
-  status, date), scripts, results (JSON/MD), REPORT.md where one exists.
-- `kit/` — herdr-ctl, hsend/hread, dispatch, spawn scripts, status/q/verdicts helpers,
-  the herdr registry. Compat symlinks at the repo root (`hsend.sh`, `dispatch.sh`, …)
-  keep old absolute paths working for panes that still type them.
-- `ledger/ETA-FINDINGS-LEDGER.md` — the findings ledger, moved here from the (public)
-  ETA repo, which now carries a one-line pointer at the old path.
-- `bus/` — eta-bus message exports (wiring is the herdr-kit's job) and `msgs/`-era pane
-  message drafts.
-- `scratch/` — git-ignored, genuinely temporary.
-
-## `_fable`
-
-`~/dev/_fable` is now a symlink to this repo, so anything that still types the old path
-keeps working. New work should use `~/dev/eta-lab` directly.
-
-See `MIGRATION.md` for the full old-path → new-path table.
+## Status (8 Oct 2026)
+- Lab scorer v4 is adopted.
+- The three OT-2 cases from 8 Oct have been cut into case packages on ORB2 (/var/lib/orbox-cases), and the refuter confirmed them (R5).
+- The full story is in the Claude project docs claude/ETA-ORBOX-THREAD-BRIEF-07-OCT-2026.md and claude/ORB3-LAB-O1-R1-07-OCT-2026.md.
