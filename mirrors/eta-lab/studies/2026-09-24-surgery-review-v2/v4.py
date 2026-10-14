@@ -10,10 +10,10 @@ ones, unchanged, and are shown when EITHER is yes (>= 0.5). Keys that do not app
 """
 import copy
 import v3
-from jevconfig import RECALL_CUT  # W41 F4: moved, not changed (still 0.25)
 
 WORDING_VERSION = "u9-v4.0"
 FROZEN_SHA256 = "b2ebc86f5a74987172d8464529748920b26c4cf1ec9c737c44124dcc961ad960"  # V4-WORDING-FROZEN.md (Fable ruling 148, 24 Sep 2026); check_frozen() refuses a changed wording
+RECALL_CUT = 0.25
 
 A = {
     "named": {"type": "noul", "instructions":
