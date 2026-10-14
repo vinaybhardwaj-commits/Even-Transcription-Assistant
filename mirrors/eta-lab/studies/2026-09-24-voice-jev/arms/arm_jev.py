@@ -50,13 +50,13 @@ def main():
     ap.add_argument("--backend", choices=["jev", "mock"], default="jev"); ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--select", choices=["all", "doubtful", "doubtful+page"], default="doubtful+page",
                     help="which turns to run (needs --arm1): every DOUBTFUL turn plus the confident sample = the 40 confident items of the Who-is-speaking page (default; needs --confident-ids; ruling 169)")
-    ap.add_argument("--arm1", help="out/arm1.jsonl (doubtful flags)"); ap.add_argument("--confident-ids", help="file, one turn_id per line: the page's confident items"); ap.add_argument("--extra-ids", help="file, one turn_id per line: turns with NO arm 1 row that must still run (E3X pseudo-turns, ruling 290); ids only"); ap.add_argument("--turn-ids", help="file, one turn_id per line: restrict further (refuter re-query)")
+    ap.add_argument("--arm1", help="out/arm1.jsonl (doubtful flags)"); ap.add_argument("--confident-ids", help="file, one turn_id per line: the page's confident items"); ap.add_argument("--turn-ids", help="file, one turn_id per line: restrict further (refuter re-query)")
     a = ap.parse_args()
     C.freeze_text()
     rows = C.read_jsonl(a.inp); C.blind_check(a.inp, rows)
     if a.select != "all":
         if not a.arm1: raise SystemExit("--select needs --arm1")
-        keep = C.select_turns(C.read_jsonl(a.arm1), a.select, open(a.turn_ids).read().split() if a.turn_ids else None, open(a.confident_ids).read().split() if a.confident_ids else None, open(a.extra_ids).read().split() if a.extra_ids else None)
+        keep = C.select_turns(C.read_jsonl(a.arm1), a.select, open(a.turn_ids).read().split() if a.turn_ids else None, open(a.confident_ids).read().split() if a.confident_ids else None)
         rows = [r for r in rows if r["turn_id"] in keep]
     cur = {r["turn_id"]: input_sha(r, a.arm) for r in rows}
     done = {r["turn_id"] for r in C.read_jsonl(a.out) if "error" not in r and r.get("input_sha12") == cur.get(r["turn_id"])} if os.path.exists(a.out) else set()   # a changed card re-runs

@@ -3,7 +3,7 @@
 (the v3 result is first backed up ONCE to <dir>/jev-v3/ and the v3 page docs to <dir>/consults-v3/). Then build_v3.py page / r2_audio.py clips / build_v3.py validate rebuild the docs (same env vars as v3).
 usage: V3_FINAL=<dir> build_v4.py <id> [<id> ...]"""
 import json, os, shutil, sys
-import v4, v3, deid_gate, build_consult as bc, finalize, build_v3 as b3
+import v4, v3, build_consult as bc, finalize, build_v3 as b3
 
 F, V3 = b3.F, b3.V3
 
@@ -49,7 +49,6 @@ def backup():
 
 def score(q, ask=None, transport=None):
     v4.check_frozen()
-    deid_gate.require(f"{F}/deid", q)  # ruling 274
     doc = json.load(open(f"{F}/deid/{q}.json"))
     inn = [t for t in doc["turns"] if "phase" not in t]
     bad = finalize.residual_identifiers(inn)

@@ -23,7 +23,7 @@ export default {
       if (url.pathname !== "/v1/inventory") return json(404, { error: "not found" });
       if (request.method !== "GET") return json(405, { error: "GET only" });
       const prefix = url.searchParams.get("prefix") || "";
-      if (!["runs/", "manifests/", "index/", "annotations/"].some((p) => prefix.startsWith(p)) || /[^A-Za-z0-9._\/-]/.test(prefix)) return json(400, { error: "prefix must start with runs/, manifests/, index/ or annotations/" });
+      if (!["runs/", "manifests/", "index/"].some((p) => prefix.startsWith(p)) || /[^A-Za-z0-9._\/-]/.test(prefix)) return json(400, { error: "prefix must start with runs/, manifests/ or index/" });
       const page = await env.RESULTS.list({ prefix, limit: 1000, cursor: url.searchParams.get("cursor") || undefined, include: ["customMetadata"] });
       return json(200, {
         objects: page.objects.map((o) => ({ key: o.key, size: o.size, sha256: o.customMetadata?.sha256 ?? null })),

@@ -11,7 +11,7 @@ sys.argv = [sys.argv[0]] + sys.argv[1:]
 PD, LX, DATES = sys.argv[1], sys.argv[2], sys.argv[3].split(",")
 sys.path.insert(0, LX); sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import segmenter as S, doctor_room_align as A
-PL = float(os.environ.get("PLACEBO_H", "0")); DOFF = int(os.environ.get("PLACEBO_DOFF", "0")); SUF = f"-pl{os.environ['PLACEBO_H']}" if PL else (f"-pd{DOFF}" if DOFF else "")   # placebo arm: consult times shifted by a wrong number of hours
+PL = float(os.environ.get("PLACEBO_H", "0")); SUF = f"-pl{os.environ['PLACEBO_H']}" if PL else ""   # placebo arm: consult times shifted by a wrong number of hours
 TOLS, SHIFTS, MIN_TURNS = ((180_000, 300_000), (240_000, 360_000), (300_000, 480_000)), (-3, -2, 2, 3), 300   # lx #739 tolerance pairs, declared before scoring
 def faux_levels(turns):
     a = min(t["s_ms"] for t in turns) // 1000; b = max(t["e_ms"] for t in turns) // 1000; sp = set()
@@ -28,15 +28,9 @@ for date in DATES:
         ts = [dict(t, s_ms=int(t["s_ms"]), e_ms=int(t["e_ms"])) for t in r["turns"] if t.get("s_ms") and t.get("e_ms")]
         hyps[r["room"]["room_day_id"]] = S.arm_a(faux_levels(ts), labels_of(r["windows"]), date)
     by = {}
-    ALT, SHIFT_MS = date, 0
-    if DOFF:
-        _has_rx = lambda d: os.path.getsize(f"{PD}/rx-{d}.json") > 5
-        pool = sorted(os.path.basename(p)[4:14] for p in glob.glob(f"{PD}/pqm-2026-09-??.csv") if os.path.exists(f"{PD}/rx-{os.path.basename(p)[4:14]}.json") and _has_rx(os.path.basename(p)[4:14]) == _has_rx(date)); ALT = pool[(pool.index(date) + DOFF) % len(pool)]
-        from datetime import datetime as _dt
-        SHIFT_MS = (_dt.fromisoformat(date + "T00:00:00+05:30") - _dt.fromisoformat(ALT + "T00:00:00+05:30")).days * 86_400_000
-    for p in csv.DictReader(open(f"{PD}/pqm-{ALT}.csv")):
+    for p in csv.DictReader(open(f"{PD}/pqm-{date}.csv")):
         if p["called_at"] and p["completed_at"]:
-            a, b = A._ms(p["called_at"]) + int(PL * 3_600_000) + SHIFT_MS, A._ms(p["completed_at"]) + int(PL * 3_600_000) + SHIFT_MS
+            a, b = A._ms(p["called_at"]) + int(PL * 3_600_000), A._ms(p["completed_at"]) + int(PL * 3_600_000)
             if 60_000 <= b - a <= 3_600_000: by.setdefault(p["doctor_uid"], []).append((a, b))
     out = {rd: {} for rd in hyps}
     for doc, cs in by.items():

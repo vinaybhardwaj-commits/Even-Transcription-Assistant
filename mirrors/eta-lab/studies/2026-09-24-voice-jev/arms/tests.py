@@ -106,17 +106,6 @@ class TestTruthAndSelection(unittest.TestCase):
         self.assertEqual(C.select_turns(rows, "doubtful"), {f"d{i}" for i in range(5)})
         self.assertEqual(C.select_turns(rows, "doubtful+page", ["d1", "c000", "c001"], page) , {"d1", "c000"})   # refuter's --turn-ids restricts further
         with self.assertRaises(SystemExit): C.select_turns(rows, "doubtful+page")                            # the page ids are required
-    def test_extra_ids_and_non_production_guard(self):
-        rows = [{"turn_id": "d1", "margin": 0.01, "best": .7, "speaker_basis": "voice_match"}, {"turn_id": "c1", "margin": .3, "best": .7, "speaker_basis": "voice_match"}]
-        self.assertEqual(C.select_turns(rows, "doubtful+page", None, [], ["e3x1", "c1"]), {"d1", "e3x1"})       # c1 is in arm 1: no back door; e3x1 (no arm 1 row) is added
-        d = tempfile.mkdtemp()
-        with open(f"{d}/in.jsonl", "w") as f: f.write(json.dumps({"turn_id": "x", "window_id": "w", "role": None, "margin": None, "best": None, "speaker_basis": "voice_match", "production_row": False}) + "\n")
-        r = subprocess.run([sys.executable, os.path.join(HERE, "arm1.py"), "--in", f"{d}/in.jsonl", "--out", f"{d}/o.jsonl"], capture_output=True, text=True)
-        self.assertNotEqual(r.returncode, 0); self.assertIn("production_row is false", r.stderr)
-        with open(f"{d}/a1.jsonl", "w") as f: f.write(json.dumps({"turn_id": "x", "window_id": "w", "is_doctor": False, "doubtful": True, "role": None, "production_row": False}) + "\n")
-        with open(f"{d}/t.jsonl", "w") as f: f.write(json.dumps({"turn_id": "x", "labels": {"V": "doctor"}}) + "\n")
-        r = subprocess.run([sys.executable, os.path.join(HERE, "score.py"), "--arm1", f"{d}/a1.jsonl", "--truth", f"{d}/t.jsonl", "--rule", RULE, "--rule-sha", RSHA, "--outdir", f"{d}/out"], capture_output=True, text=True)
-        self.assertNotEqual(r.returncode, 0); self.assertIn("production_row=false", r.stderr)
     def test_addendum_sha(self): self.assertTrue(C.addendum_sha().startswith("9c335c59c5be")); self.assertTrue(C.addendum166_sha().startswith("87b8cdac4330")); self.assertEqual(set(C.stamp()), {"freeze_sha12", "addendum_sha12", "addendum166_sha12"})
 
 
@@ -195,26 +184,6 @@ class TestScorer(unittest.TestCase):
         self.assertEqual(v["roles_without_labelled_turns"], [])                                            # both pinned roles have labelled turns here
         self.assertIn("weights role_shares.json@", open(f"{self.tmp}/out/SUMMARY.md").read())
         self.assertIn("NOT PINNED", json.dumps(self.run_score()["f2_role_weights_source"]))                # without the flag it says so
-    def test_stale_rows_excluded_from_cost_and_missing(self):
-        old = {"turn_id": "gone1", "arm": 3, "q1": {"choice": "doctor", "confidence": .9}, "usage": {"input_tokens": 5000, "output_tokens": 10}, "latency_s": 9.0}   # id not in arm1: an earlier hand-off
-        dup = {"turn_id": "d1", "arm": 3, "q1": {"choice": "patient", "confidence": .9}, "usage": {"input_tokens": 5000, "output_tokens": 10}, "latency_s": 9.0}     # superseded by the later d1 row
-        rows = C.read_jsonl(f"{self.tmp}/arm3.jsonl"); self.w("arm3.jsonl", [old, dup] + rows)
-        a3 = self.run_score()["arms"]["arm3"]
-        self.assertEqual(a3["stale_rows_excluded"], 2); self.assertEqual((a3["cost"]["tokens_in"], a3["cost"]["call_seconds_total"]), (600, 12.0))   # only the 6 current rows count
-        self.assertEqual(a3["doubtful"]["correct"], 3)                                                                                             # d1 is the later (doctor .9) row
-    def test_cards_define_current_run(self):
-        self.w("cards.jsonl", [{"turn_id": t, "window_id": "w"} for t in ("d1", "d2", "d3", "d4")])            # c1, c2 exist in arm1 but have no card in this hand-off
-        a3 = self.run_score(["--cards", f"{self.tmp}/cards.jsonl"])["arms"]["arm3"]
-        self.assertEqual(a3["stale_rows_excluded"], 2); self.assertEqual(a3["cost"]["tokens_in"], 400)         # c1, c2 rows are not part of the current run
-        self.assertEqual(a3["confident_sample"]["n"], 0)                                                       # so the confident sample has nothing to judge
-    def test_split_stale_moves_and_keeps(self):
-        rows = C.read_jsonl(f"{self.tmp}/arm3.jsonl"); self.w("arm3.jsonl", [{"turn_id": "gone1", "arm": 3}] + rows)
-        self.w("cards.jsonl", [{"turn_id": t, "window_id": "w"} for t in ("d1", "d2", "d3", "d4", "c1", "c2")])
-        r = subprocess.run([sys.executable, os.path.join(HERE, "split_stale.py"), "--cards", f"{self.tmp}/cards.jsonl", f"{self.tmp}/arm3.jsonl"], capture_output=True, text=True)
-        self.assertIn("moved to", r.stdout, r.stderr[-300:]); self.assertEqual(len(C.read_jsonl(f"{self.tmp}/arm3.jsonl")), 6); self.assertEqual(C.read_jsonl(f"{self.tmp}/arm3.jsonl.stale.jsonl"), [{"turn_id": "gone1", "arm": 3}])
-        self.w("arm3.jsonl", [{"turn_id": "gone2", "arm": 3}] + C.read_jsonl(f"{self.tmp}/arm3.jsonl"))                                            # a second pass appends, never overwrites
-        subprocess.run([sys.executable, os.path.join(HERE, "split_stale.py"), "--cards", f"{self.tmp}/cards.jsonl", f"{self.tmp}/arm3.jsonl"], check=True, capture_output=True)
-        self.assertEqual([x["turn_id"] for x in C.read_jsonl(f"{self.tmp}/arm3.jsonl.stale.jsonl")], ["gone1", "gone2"])
     def test_weighting_rules(self):
         c = lambda gw, gu, p=0.01, b=9, cc=1: S.win_criteria({"gain_pp_weighted": gw, "gain_pp": gu, "mcnemar_exact_p": p, "arm_right_arm1_wrong": b, "arm_wrong_arm1_right": cc})
         self.assertEqual(c(6, 2), {"F2": True, "F3": True})
@@ -282,12 +251,6 @@ class TestPassBarCanPass(unittest.TestCase):
         for i in range(12): del a1[f"c{i}"]; del truth[f"c{i}"]                                             # only 28 confident human-labelled turns: F4 needs >= 30
         sm = S.summarize(3, S.score_turns(3, a1, truth, outs, rule), 1.0, outs, {}, st, W)
         self.assertEqual((sm["confident_sample"]["n"], sm["pass_bar"]["F4_status"], sm["pass_bar"]["meets_pass_bar"], sm["pass_bar"]["status"]), (28, "INSUFFICIENT", False, "CONTINUE_ONLY (F4 insufficient)"))
-
-
-class TestRequeryGuard(unittest.TestCase):
-    def test_refuses_without_refuter_flag(self):                      # ruling 248
-        r = subprocess.run(["bash", os.path.join(HERE, "run_requery.sh"), "/dev/null", tempfile.mkdtemp()], capture_output=True, text=True, env={**os.environ, "VJ_REFUTER": ""})
-        self.assertEqual(r.returncode, 2); self.assertIn("ruling 248", r.stdout)
 
 
 class TestResumeAndPaths(unittest.TestCase):

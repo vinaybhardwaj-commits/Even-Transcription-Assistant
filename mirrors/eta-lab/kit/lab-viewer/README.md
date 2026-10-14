@@ -1,4 +1,4 @@
-# eta-lab-viewer ("ETA Lab Transcripts"), ruling 184 part B; rebuilt around the transcript by ruling 328
+# eta-lab-viewer ("ETA Lab Transcripts"), ruling 184 part B
 
 Read-only viewer over the `eta-lab-results` vault. Phone-first SPA (Days grid + filters + search, Window
 turns with original/English and ▶ per line + full-window player, Runs). No third-party scripts, no analytics,
@@ -40,31 +40,3 @@ directory and put its usr/lib/x86_64-linux-gnu on LD_LIBRARY_PATH. Build a temp 
 (`LAB_VAULT_STAGED=<dir> build-index.py --date 20260101`), then
 `PW_DIR=<dir with node_modules> SMOKE_INDEX_DIR=<dir> node tools/browser_smoke.mjs`.
 This found real bugs the unit tests could not (arrays passed to replaceChildren, an inline-style CSP violation).
-
-## Doctor-voice-check page check (tools/voice_check_smoke.mjs)
-Same idea for tools/doctor-voice-check/page.html on a real batch (counts and states only, no card text printed; harness page, copied
-audio and screenshots stay in a 0700 dir): every card renders, no "[object"/undefined strings, no hidden-field words, clips play from
-Blob URLs, 390 px layout and tap targets, the answer flows (agree / disagree + who / not sure / note / keyboard / pair), the Results
-tab, and the blind-first evidence mode (`config/settings = {evidence:"after"}`). Build the harness with the page's own make-harness.py
-(MOCK_DIR=<batch>/links, EVIDENCE=after for the blind mode), then `node tools/voice_check_smoke.mjs <out_dir> x before|after`.
-
-## Transcript-first view (ruling 328)
-* **Window page:** room NAME, IST date and time range, language, engine; then one line per segment `[mm:ss–mm:ss] (lang) text`
-  (refused segments greyed with the reason, English under a line when present); a player only when audio is stored, else "No audio stored
-  for this window"; an empty window says why in one line (no speech / NO_SIGNAL / refused / failed), never JSON. ALL technical data
-  (provenance, stack, guards, context, payload fields, download) is in one collapsed "Technical details" section at the bottom.
-* **Days:** date → room name → windows (time range, language, words, first ~12 words); "only windows with text" is ON by default;
-  a coverage line at the top and per day: windows indexed / with text / run files in the vault, and whether last night's HIST windows are there.
-* **Data:** records keep their text at the top level (`segments`, hist writers) or under `payload.segments` (parity writer); both are read.
-  Room names come from the room slug in the audio keys (`bench/<room-slug>/...`, e.g. `opd-5-dr-salanki-wxmp` -> "OPD 5 Dr Salanki").
-  The Days list reads `index/view-<YYYYMMDDHHMM>.jsonl` (built by `build-index.py --view-only`, hourly at :12, written only when something changed);
-  `/api/vault-counts` lists `runs/` for the per-day "run files in the vault" numbers.
-* `tools/browser_smoke.mjs` checks all of this in a real browser at 390 px and 1280 px against real records.
-
-## Consult view (ruling 337a)
-`#/consult/<room_id>/<ist_date>`: one continuous transcript for a room and day, from `GET /api/consult/<room_id>/<date>`: the windows of that
-room-day in time order (one window per time slot; mostly-overlapping duplicates dropped), every segment as `[HH:MM:SS] (lang) text` in IST,
-the English line under every non-English line, unclear lines collapsed behind "show unclear lines (n)" (provisional rule in `isUnclear`, replaced by
-a measured flag whenever one exists), one plain line for every window without speech, and a search box that highlights matches.
-Overlays are additive vault files `annotations/<kind>/<room_id>/<ist_date>/<YYYYMMDDHHMM>-<producer>.json` (kind = translation | readability |
-retranscription; items `{k: "<run_id>/<room_id>/<date>/<window_id>", i: <segment index>, ...}`); later files win per (k, i); the native text is never touched.

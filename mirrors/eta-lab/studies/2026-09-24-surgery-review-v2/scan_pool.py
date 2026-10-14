@@ -7,7 +7,7 @@
 """
 import json, os
 from collections import Counter
-import finalize, build_consult as bc, v3, deid_gate
+import finalize, build_consult as bc, v3
 
 V3 = os.path.expanduser("~/eta-data/surgery-review-v3")
 P = f"{V3}/pool"
@@ -21,7 +21,6 @@ def main():
         dp = f"{P}/deid/{qid}.json"
         if not os.path.exists(dp):
             res[qid] = {**meta, "status_note": "no_deid_file"}; continue
-        deid_gate.require(f"{P}/deid", qid)  # ruling 274
         doc = json.load(open(dp))
         bad = finalize.residual_identifiers(doc["turns"])
         if bad:

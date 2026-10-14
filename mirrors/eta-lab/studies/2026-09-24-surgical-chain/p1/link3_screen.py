@@ -12,16 +12,13 @@ dropped-turn table of (item, room, i, reason). Stdout, the counts file and the t
 
   python3 link3_screen.py --mt-dir ~/eta-data/surgical-chain/p1/mt [--counts-out counts.json]
 
-Exit code (linker's pick, yoga-drain F5): 0 = OK; 1 = INCOMPLETE (score_input.json written for the items that have kept turns); 3 = BLOCKED_NO_DEID / BLOCKED_NO_AT (nothing written); 2 = bad arguments (argparse). A caller reads the report `status`, not the exit code alone.
-
 --mt-dir is required (no default: v7.15 and piece B use ~/eta-data/surgical-chain/p1/mt/, and a wrong default would screen the wrong tree).
 An item that failed MT is absent from translated.json and so absent from this report; the integration adapter must reconcile against A's per-item provenance so a failed item is reported, never silently absent.
 A stale score_input.json is removed before every run, and the new one is written under a temp name and renamed into place, and only when the run is not BLOCKED: a BLOCKED run never leaves a scoring input behind (an INCOMPLETE item just has no entry in it).
 """
-import argparse, collections, json, os, re, sys
+import argparse, collections, json, os, sys
 
 STRATUM = "translated"
-MT_DIR = re.compile(r"mt(-b[0-9]+)?")          # the translated stratum's directories: mt, mt-b2, mt-b3 (linker #1562); matched whole, never as a prefix
 REASONS = ("garbled", "untranslatable", "unflagged")
 OK_Q = "ok"
 
@@ -98,32 +95,23 @@ def assemble(screened, deid):
     return out, missing, missing_at
 
 
-def _write_private(path, obj, indent=None):
+def _write_private(path, obj):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=indent)
+        json.dump(obj, f, ensure_ascii=False)
     os.chmod(path, 0o600)
 
 
 def write_score_input(path, score_input):
-    """The translated input lives only in a directory named `mt` or `mt-b<N>` (mt-b2, mt-b3), never beside the pooled raw/ or deid/ inputs;
-    the name is matched whole, so mt2, mt-x, mt-b, mt-b2x and a path with mt only as a grandparent are refused.
+    """The translated input lives only in an `mt/` directory, never beside the pooled raw/ or deid/ inputs.
     Written under a temp name and renamed, so a failure part-way never leaves a half-written or stale file."""
-    if not MT_DIR.fullmatch(os.path.basename(os.path.dirname(os.path.abspath(path)))):
-        raise ValueError("score_input must be written inside an mt/ or mt-b<N>/ directory")
+    if os.path.basename(os.path.dirname(os.path.abspath(path))) != "mt":
+        raise ValueError("score_input must be written inside an mt/ directory")
     flat = [t for rooms in score_input.values() for room in rooms.values() for t in room["turns"]]
     check_stratum(flat)
     tmp = path + ".tmp"
     _write_private(tmp, score_input)
     os.replace(tmp, path)
-
-
-EXIT_CODES = {"OK": 0, "INCOMPLETE": 1, "BLOCKED_NO_DEID": 3, "BLOCKED_NO_AT": 3}
-
-
-def exit_code(status):
-    """Unknown statuses fail closed with 3."""
-    return EXIT_CODES.get(status, 3)
 
 
 def run(mt_dir, counts_out=None):
@@ -147,7 +135,8 @@ def run(mt_dir, counts_out=None):
         write_score_input(stale, score_input)                 # an INCOMPLETE item simply has no entry; a BLOCKED run wrote nothing
     text = json.dumps(report, indent=1)
     if counts_out:
-        _write_private(counts_out, report, indent=1)          # yoga-drain F4: every output file is 0600, the counts file included
+        with open(counts_out, "w") as f:
+            f.write(text)
     print(text)
     return report
 
@@ -157,4 +146,4 @@ if __name__ == "__main__":
     ap.add_argument("--mt-dir", required=True)
     ap.add_argument("--counts-out")
     a = ap.parse_args()
-    sys.exit(exit_code(run(a.mt_dir, a.counts_out)["status"]))
+    sys.exit(0 if run(a.mt_dir, a.counts_out)["status"] == "OK" else 1)

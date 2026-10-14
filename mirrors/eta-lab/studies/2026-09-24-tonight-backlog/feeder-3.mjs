@@ -10,7 +10,7 @@
 // across EVERY actor, so the join service's one-at-a-time mutex is never queued deeper than the drain-join-busy wait
 // can absorb.  Candidates come from SUBMIT-LIST-3.csv in rank order (likely-speech first); a window is submitted only
 // if production says it is STILL closed, its room switch is ON, its subject attempts < 3 and no job for it is live,
-// so the list can be stale and the feed stays correct.  It stops SUBMITTING at 07:00 IST (Fable ruling 236) (in-flight jobs finish on
+// so the list can be stale and the feed stays correct.  It stops SUBMITTING at 07:30 IST (in-flight jobs finish on
 // their own) and refuses to start submitting before 20:45 IST.
 //
 // SUBMIT PATH: scribe_job_submit kind=room_window via the Scribe MCP door (POST {APP_URL}/api/mcp) with a token that
@@ -36,12 +36,11 @@ const MAX_IN_FLIGHT = Math.min(3, Math.max(1, Number(process.env.MAX_IN_FLIGHT ?
 const POLL_MS = Math.max(5_000, Number(process.env.FEEDER_POLL_MS ?? 45_000));
 const STALE_MIN = 20;
 const IST_MIN = 330;
-const STOP_MIN = 7 * 60;
 
 // ---- pure helpers (unit-tested in feeder-3.test.mjs) ------------------------------------------------------------
 export const istMinutes = (d) => (((d.getUTCHours() * 60 + d.getUTCMinutes() + IST_MIN) % 1440) + 1440) % 1440;
-/** Inside the feed window [start, stop) IST, wrapping midnight.  Defaults 20:45 -> 07:00. */
-export function inFeedWindow(d, startMin = 20 * 60 + 45, stopMin = STOP_MIN) {
+/** Inside the feed window [start, stop) IST, wrapping midnight.  Defaults 20:45 -> 07:30. */
+export function inFeedWindow(d, startMin = 20 * 60 + 45, stopMin = 7 * 60 + 30) {
   const m = istMinutes(d);
   return startMin <= stopMin ? m >= startMin && m < stopMin : m >= startMin || m < stopMin;
 }
@@ -122,7 +121,7 @@ async function main() {
   const anytime = process.env.FEEDER_ALLOW_ANYTIME === "1";
   const ranked = parseCsv(fs.readFileSync(LIST, "utf8")).map((r) => r.window_id).filter(idOk);
   const tok = go ? token() : "";
-  log({ ev: "start", mode: go ? "go" : "dry_run", list: ranked.length, max_in_flight: MAX_IN_FLIGHT, window: "20:45-07:00 IST" });
+  log({ ev: "start", mode: go ? "go" : "dry_run", list: ranked.length, max_in_flight: MAX_IN_FLIGHT, window: "20:45-07:30 IST" });
 
   if (!go) {
     const f = flight();
@@ -140,7 +139,7 @@ async function main() {
   for (;;) {
     const now = new Date();
     if (!anytime && !inFeedWindow(now)) {
-      if (istMinutes(now) >= STOP_MIN && istMinutes(now) < 20 * 60 + 45 && submitted.size === 0) {
+      if (istMinutes(now) >= 7 * 60 + 30 && istMinutes(now) < 20 * 60 + 45 && submitted.size === 0) {
         if (!waitedOnce) { log({ ev: "waiting_for_20_45_ist" }); waitedOnce = true; }
         await sleep(POLL_MS); continue;
       }

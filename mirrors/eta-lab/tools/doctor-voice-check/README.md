@@ -28,10 +28,6 @@ db collection `links`, one doc per card, **doc id = the id**:
   or `~/vj/`, off the page. Ids are opaque and unrelated to the tier.
 - Clips are MP3 32 kbps mono served as page files at exactly the `src` path (small; the page fetches each card's
   clips into Blob URLs ahead of time, so no byte-range support is needed and it plays on iPhone).
-- Optional doc `config/settings` = `{"evidence":"after"}` (blind-first): the evidence lines appear only after the rater's first
-  verdict on a link card. Without it the evidence is shown from the start, as in the spec. Either way each link answer
-  records `a0` (the first verdict) and `blind` (true when the evidence was still hidden), so the analysis can use the
-  blind verdict; the Results tab shows "(first: X, blind)" when a rater changed their mind.
 - Optional doc `config/doctors` = `{"names":["Dr A", ...]}` for the "Who is it?" list (else the proposed doctors
   on the link cards).
 
