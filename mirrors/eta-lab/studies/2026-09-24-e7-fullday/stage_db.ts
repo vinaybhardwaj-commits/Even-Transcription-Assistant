@@ -21,9 +21,6 @@ import { FUSION_VERSION, START_P } from "@/lib/encounter-clock/fusion";
 import { JEV_INPUT_TOKEN_COST_USD } from "@/lib/jev/counters";
 
 const MIN_ATTRIBUTED = 30, MIN_SHARE = 0.8;
-// transcript_version from e7-rescore.sh --transcript (W28.2): recorded in every hyp-*.json as the
-// version the replays were scored under; null when the flag is absent (no behavior change).
-const TRANSCRIPT_VERSION: string | null = process.env.E7_TRANSCRIPT_VERSION ?? null;
 const [mode, date, outdir] = process.argv.slice(2);
 if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? "")) { console.log("STAGE_FAIL bad_date"); process.exit(2); }
 
@@ -132,7 +129,6 @@ async function replay() {
   for (const [arm, rds] of Object.entries(arms)) {
     writeFileSync(`${outdir}/hyp-${arm}.json`, JSON.stringify({
       source: arm === "acoustic" ? "acoustic" : "fused", arm, fusion_version: FUSION_VERSION, start_p: START_P,
-      transcript_version: TRANSCRIPT_VERSION,
       smoother_version: "encounter-clock-smooth-v1", shadow_version: "encounter-clock-shadow-v2",
       note: "One v2 replay per room-day; the three arms share one Jev sample. fused = the acoustic-origin intervals of the fused run (E-6); fused-e61 = all of them.",
       room_days: rds }, null, 1));
