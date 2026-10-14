@@ -974,7 +974,7 @@ describe("the door", () => {
 
   // --- CATALOG-5 -----------------------------------------------------------------------------------------------------------------------------------
 describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
-  const NAME_D = "Dr Synthetic Doc";
+  const NAME_D = "Synthetic Alpha Doc";
   const NAME_P = "Synthetic Patient";
   const IND = "IND-0001";
   const RX = "RX-0001";
@@ -1032,7 +1032,7 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
     expect((await layersOf()).rx).toMatchObject({ status: "ok", data: { has_prescription: true, prescription_uid: null } });
     H.identity = [idrow(UID, { prescription: null })];
     expect((await layersOf()).rx).toMatchObject({ status: "ok", data: { has_prescription: false } }); // a prescription_uid alone is enough
-    H.identity = [idrow(UID, { prescription_uid: null, prescription: null, presc_state: null, doctor_name: "Dr X" })];
+    H.identity = [idrow(UID, { prescription_uid: null, prescription: null, presc_state: null, doctor_name: NAME_D })];
     expect((await layersOf()).rx!.status).toBe("absent");
   });
   it("a failing encounter_catalog read is an error on identity and rx only; the rest of get answers; cdmss stays not_available", async () => {
