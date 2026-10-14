@@ -91,6 +91,25 @@ assert validate_manifest(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="ap
                           raise_on_error=False) == [], "a multi-chunk consult crop must validate with 2+ sources listed"
 print("5/8 dev_clip source_windows OK: non-empty list required, every entry complete, multi-source clips supported")
 
+# --- dev_clip source_windows: the CHUNK-level shape ({r2_key}), added for terms' set-(c) crops built
+# directly from ~/eta-data/hist/manifest.json's raw chunk inventory rather than hist-bulk window jsons
+# (#5225) -- r2_key alone fully qualifies one chunk, no run_id needed alongside it -------------------
+CHUNK_A = {"r2_key": "bench/opd-1-xqj7/2026-09-22/bs_2zyc66ef/chunk_00003.webm"}
+CHUNK_B = {"r2_key": "bench/opd-1-xqj7/2026-09-22/bs_2zyc66ef/chunk_00004.webm"}
+assert validate_manifest(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows=[CHUNK_A]),
+                          raise_on_error=False) == [], "a single chunk-level source must validate"
+assert validate_manifest(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows=[CHUNK_A, CHUNK_B]),
+                          raise_on_error=False) == [], "a multi-chunk consult crop (chunk-level) must validate"
+assert validate_manifest(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows=[SRC_WIN, CHUNK_A]),
+                          raise_on_error=False) == [], "mixing window-level and chunk-level entries in one list is allowed"
+expect_invalid(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows=[{"r2_key": ""}]),
+               "an empty r2_key must not count as a valid chunk source")
+expect_invalid(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows=[{"r2_key": 12345}]),
+               "a non-string r2_key must be rejected (eta-refuter-3 #5234 nit)")
+expect_invalid(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows=[{}]),
+               "an entry with neither shape (no run_id/window_id, no r2_key) must be rejected")
+print("5b/8 dev_clip chunk-level source_windows OK: {r2_key} alone validates, mixes with window-level entries")
+
 # --- write_track refuses a stub that disagrees with its own arguments (eta-refuter-3 #4799 B1) -------
 try:
     write_track(ROOT, DATE, REAL_ROOM, "w2", track("w2"), manifest_stub=stub("w2", "room_completely_different"))

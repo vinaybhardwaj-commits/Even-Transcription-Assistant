@@ -122,16 +122,35 @@ def validate_manifest(manifest, raise_on_error=True):
             # for instance) -- eta-refuter-2 #4853 (also independently flagged by eta-refuter-3 #4855):
             # a single {run_id, window_id} silently recorded only the first source and broke the
             # traceability this field exists for. Always a non-empty LIST, even for a one-source clip.
+            #
+            # Two valid entry shapes (terms #5225): {run_id, window_id} for a crop built from
+            # hist-bulk's own WINDOW jsons (DEV30's original case -- window_id isn't globally unique
+            # on its own, so run_id is required alongside it); {r2_key} for a crop built directly from
+            # the raw CHUNK inventory (set-(c)'s case, per reb #5192 -- an r2_key already fully
+            # qualifies one chunk on its own, e.g. "bench/<slug>/<date>/<session>/chunk_NNNNN.webm", so
+            # no second field is needed). Both are real, honest provenance of what tape data a crop
+            # actually drew from -- this field's own error message always said "tape chunk/hist-bulk
+            # window" (both), the validator just hadn't caught up to the chunk-level case yet.
             source_windows = manifest.get("source_windows")
+
+            def _valid_source_window(sw):
+                if not isinstance(sw, dict):
+                    return False
+                if sw.get("run_id") and sw.get("window_id"):
+                    return True
+                r2_key = sw.get("r2_key")
+                return isinstance(r2_key, str) and bool(r2_key)  # eta-refuter-3 #5234 nit
+
             valid = (
                 isinstance(source_windows, list) and len(source_windows) > 0
-                and all(isinstance(sw, dict) and sw.get("run_id") and sw.get("window_id") for sw in source_windows)
+                and all(_valid_source_window(sw) for sw in source_windows)
             )
             if not valid:
                 errors.append(
                     "manifest: source_kind='dev_clip' requires source_windows=[{'run_id':..., "
-                    "'window_id':...}, ...] (non-empty; EVERY tape chunk/hist-bulk window this "
-                    "sub-clip spans, not just the first — eta-refuter-2 #4805/#4853)"
+                    "'window_id':...}, ...] or [{'r2_key':...}, ...] (non-empty; EVERY tape chunk/"
+                    "hist-bulk window this sub-clip spans, not just the first — eta-refuter-2 "
+                    "#4805/#4853, chunk-level shape added for terms' set-(c) crops #5225)"
                 )
 
         if clock is not None and clock not in CLOCK_VALUES:
