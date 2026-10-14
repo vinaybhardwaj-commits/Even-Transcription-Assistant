@@ -1,6 +1,6 @@
-"""Gemini on Vertex AI, regional host only. Evaluation tooling: it is handed note_text and nothing else.
+"""Gemini on Vertex AI, regional host; "global" only under a ruling (VERTEX_LOCATION_OVERRIDE_RULING). Evaluation tooling: it is handed note_text and nothing else.
 
-Env: VERTEX_PROJECT, VERTEX_LOCATION (a region, never "global"), VERTEX_SA_KEY_FILE (path to a 0600 JSON key),
+Env: VERTEX_PROJECT, VERTEX_LOCATION (a region; "global" only with a real VERTEX_LOCATION_OVERRIDE_RULING), VERTEX_SA_KEY_FILE (path to a 0600 JSON key),
 PULSE_EXTRACT_MODEL (default gemini-3.1-pro-preview), PULSE_ADJ_MODEL (default gemini-3.5-flash).
 No fallback model and no other route. Prompt and response text are never logged; only model names and token counts.
 """
@@ -178,8 +178,8 @@ class VertexClient:
                  location_ruling: str | None = None):
         if not project or not re.match(r"^[a-z][a-z0-9-]{4,}$", project):
             raise ReplayUnavailable("VERTEX_PROJECT missing or malformed")
-        if location == "global" or not _REGION.fullmatch(location or ""):
-            raise ReplayUnavailable("VERTEX_LOCATION must be a region such as asia-northeast1; global is refused")
+        if location != "global" and not _REGION.fullmatch(location or ""):
+            raise ReplayUnavailable("VERTEX_LOCATION must be a region such as asia-northeast1, or global under a ruling")
         if location != DEFAULT_LOCATION and not _real_ruling(location_ruling):
             raise ReplayUnavailable(f"VERTEX_LOCATION other than {DEFAULT_LOCATION} needs VERTEX_LOCATION_OVERRIDE_RULING (a fable ruling id)")
         for m in (extract_model, adj_model):
@@ -222,7 +222,8 @@ class VertexClient:
             gen_cfg["thinkingConfig"] = {"thinkingLevel": reasoning_effort.upper()}
         body = {"systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": user}]}], "generationConfig": gen_cfg}
-        url = (f"https://{self.location}-aiplatform.googleapis.com/v1/projects/{self.project}/locations/"
+        host = "aiplatform.googleapis.com" if self.location == "global" else f"{self.location}-aiplatform.googleapis.com"
+        url = (f"https://{host}/v1/projects/{self.project}/locations/"
                f"{self.location}/publishers/google/models/{model}:generateContent")
         headers = {"Authorization": f"Bearer {self.token_provider()}", "Content-Type": "application/json"}
         resp = self.transport(url, headers, body)
