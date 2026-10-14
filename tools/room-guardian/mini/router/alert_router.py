@@ -5,11 +5,17 @@ hours / REPAGE_OFF_S outside, until a person acks ("ACK room-alert-<first_id>" o
 re-pages; the case stays open until recovery closes it. A duplicate row while open bumps suppressed_count; a late duplicate after
 close opens a new case.
 
-Crash rule: a page carries the marker "[page N]" in its subject and is posted on thread room-alert-<first_id>. Before posting page N
-the router asks the bus whether that marker exists; if so it only writes the state. So a crash between post and state write gives
-neither a duplicate page nor a lost alert.
+R2 (Phase 0 fix round): opening and closing a case NEVER touches the bus. on_row only writes the store; close_room writes the store and queues a
+note (store.add_note). All sending happens in tick(): ONE ubus send per tick carries every due page, V notice and queued note, on the day
+thread room-alert-batch-<YYYY-MM-DD> (IST). ubus caps sends per machine, so one send per tick is the budget. A failed send leaves every
+case state untouched, so the pages are simply due again on the next tick, and it never blocks the digest, the routed-id prune or the ack read.
 
-Store interface (see MemoryStore in the tests / SqliteStore): get_open(room, kind) -> case|None, list_open(), insert(case), update(first_id, **f).
+Crash rule: each page line carries "room-alert-<id> ... [page N]". Before posting, the router reads the day thread; a page whose marker is
+already there is only written to the store. So a crash between post and state write gives neither a duplicate page nor a lost alert.
+ACKs are read from the day threads (today and yesterday) and from each case's own thread room-alert-<first_id>.
+
+Store interface (see SqliteStore): get_open(room, kind) -> case|None, list_open(), insert(case), update(first_id, **f), add_note(text, now),
+list_notes(), drop_notes(ids).
 Bus interface: post(subject, body, priority, thread_id), thread_messages(thread_id) -> [{"from","subject","body"}].
 """
 import re
@@ -24,10 +30,18 @@ CLINIC_START_MIN, CLINIC_END_MIN, CLINIC_DAYS = 7 * 60 + 30, 21 * 60 + 30, (1, 2
 DIGEST_HOUR_IST = 21
 ROUTED_KEEP_S = 7 * 86400
 URGENT = {"offline", "degraded", "fleet_outage", "install_retired", "recorder_off", "mic_denied", "no_machine", "room_disabled",
-          "needs_enrol", "capture_stalled", "guardian_quiet", "heal_escalated"}
+          "needs_enrol", "capture_stalled", "guardian_quiet", "heal_escalated", "backup_failed"}
 OPEN_KINDS = URGENT          # kinds that open a case; 'recovered' and 'session_reaped' never do
 RECOVERY_KIND = "recovered"
 _ACK_RE = re.compile(r"^ACK\s+room-alert-(\d+)\b", re.I)
+_ID_RE = re.compile(r"room-alert-(\d+)\b", re.I)
+_MARK_RE = re.compile(r"room-alert-(\d+) .*\[page (\d+)\]")
+BATCH_PREFIX = "room-alert-batch-"
+BODY_CAP = 3800
+
+
+def batch_tid(now):
+    return BATCH_PREFIX + datetime.fromtimestamp(now, IST).strftime("%Y-%m-%d")
 
 
 def is_clinic(now):
@@ -97,7 +111,7 @@ class Router:
                 raise
             self.store.update(case["first_id"], suppressed_count=case["suppressed_count"] + 1)
             return
-        self._page(bus, self.store.get_open(room, kind), row.get("room_name") or room)
+        # R2: no page here. tick() pages any case with last_paged_at None within one tick.
 
     def _insert_case(self, rid, room, kind, now):
         self.store.insert({"first_id": rid, "room_id": room, "kind": kind, "opened_at": now, "last_paged_at": None, "page_count": 0,
@@ -108,59 +122,109 @@ class Router:
             if c["room_id"] == room and (kind is None or c["kind"] == kind):
                 self.store.update(c["first_id"], closed_at=self.clock(), close_reason=reason)
                 self.local["v_sent"].pop(str(c["first_id"]), None)
-                self._say(bus, c, f"ROOM ALERT {c['kind']} CLOSED ({reason}) after {self._age_min(c)} min", "normal",
-                          f"Case room-alert-{c['first_id']} closed: {reason}. Pages sent {c['page_count']}, duplicates folded {c['suppressed_count']}.")
+                self.store.add_note(f"room-alert-{c['first_id']} {c['kind']} in {room} CLOSED ({reason}) after {self._age_min(c)} min. "
+                                    f"Pages sent {c['page_count']}, duplicates folded {c['suppressed_count']}.", self.clock())
         self._save()
 
     # ---- paging
     def _age_min(self, c):
         return int((self.clock() - c["opened_at"]) // 60)
 
-    def _say(self, bus, c, subject, priority, body, marker=""):
-        bus.post(f"{subject}{marker}"[:120], body[:4000], priority, f"room-alert-{c['first_id']}")
-
-    def _page(self, bus, c, label, v=False):
-        n = c["page_count"] + 1
-        marker = f" [page {n}]"
-        tid = f"room-alert-{c['first_id']}"
-        already = any(marker in str(m.get("subject", "")) for m in bus.thread_messages(tid))
-        if not already:
-            vtag = " V" if v else ""
+    def _flush(self, bus, now, pages, vcases, notes, msgs, out):
+        """One send for everything due. State is written only after the send succeeded."""
+        tid = batch_tid(now)
+        done = set()
+        for m in msgs(tid):
+            for line in f"{m.get('subject', '')}\n{m.get('body', '')}".splitlines():
+                mt = _MARK_RE.search(line)
+                if mt:
+                    done.add((int(mt.group(1)), int(mt.group(2))))
+        lines, send, already = [], [], []
+        for c, v in pages:
+            n = c["page_count"] + 1
+            if (c["first_id"], n) in done:
+                already.append((c, n)); continue
             src = " source=mini." if c["first_id"] >= LOCAL_ID_BASE else ""
-            body = (f"{c['kind']} in {label}.{src} Case room-alert-{c['first_id']}, open {self._age_min(c)} min, page {n}, duplicates folded "
-                    f"{c['suppressed_count']}. Reply 'ACK room-alert-{c['first_id']}' to stop re-pages.")
+            line = (f"room-alert-{c['first_id']} {c['kind']} in {c['room_id']}.{src} open {self._age_min(c)} min, duplicates folded "
+                    f"{c['suppressed_count']}. [page {n}]" + (" V: patient-impacting, past the V threshold. gating-lead tells V." if v else ""))
+            lines.append(line); send.append((c, n, v))
+        vlines = [(c, f"V room-alert-{c['first_id']} {c['kind']} in {c['room_id']} open {self._age_min(c)} min, "
+                      f"{'acked but' if c['acked_at'] else 'unacked,'} not recovered. gating-lead tells V.") for c in vcases]
+        # trim to the body cap: what does not fit stays due for the next tick
+        head = "Reply 'ACK room-alert-<id>' (one line per case) in this thread to stop re-pages.\n"
+        budget = BODY_CAP - len(head)
+        keep_pages, keep_v, keep_notes, used = [], [], [], 0
+        for (c, n, v), line in zip(send, lines):
+            if used + len(line) + 1 <= budget: keep_pages.append((c, n, v, line)); used += len(line) + 1
+        for c, line in vlines:
+            if used + len(line) + 1 <= budget: keep_v.append((c, line)); used += len(line) + 1
+        for nid, text in notes:
+            if used + len(text) + 1 <= budget: keep_notes.append((nid, text)); used += len(text) + 1
+        if keep_pages or keep_v or keep_notes:
+            body = head + "\n".join([l for *_, l in keep_pages] + [l for _, l in keep_v] + [t for _, t in keep_notes])
+            anyv = any(v for *_, v, _l in keep_pages) or bool(keep_v)
+            subject = (f"ROOM ALERT{' V' if anyv else ''}: {len(keep_pages)} page(s), {len(keep_v)} V, {len(keep_notes)} note(s)")[:120]
+            urgent = any(c["kind"] in URGENT for c, *_ in keep_pages) or bool(keep_v)
+            bus.post(subject, body, "urgent" if urgent else "normal", tid)
+        t = self.clock()
+        for c, n, v, _l in keep_pages:
+            self.store.update(c["first_id"], last_paged_at=t, page_count=n)
             if v:
-                body = "V: patient-impacting and open past the V threshold. gating-lead tells V. " + body
-            pri = "urgent" if c["kind"] in URGENT else "normal"
-            bus.post(f"ROOM ALERT{vtag} {c['kind']}: {label}{marker}"[:120], body, pri, tid)
-        self.store.update(c["first_id"], last_paged_at=self.clock(), page_count=n)
+                self._v_due(c, now - c["opened_at"], now, mark=True)
+        for c, n in already:
+            self.store.update(c["first_id"], last_paged_at=t, page_count=n)
+        for c, _l in keep_v:
+            self._v_due(c, now - c["opened_at"], now, mark=True)
+        if keep_notes:
+            self.store.drop_notes([nid for nid, _ in keep_notes])
+        out["paged"] += len(keep_pages) + len(already); out["v"] += len(keep_v) + sum(1 for *_, v, _l in keep_pages if v)
+        out["notes"] += len(keep_notes)
 
     def tick(self, bus=None):
-        """One cycle: read acks, re-page, V notices, the 21:00 list. Returns a count dict (for logs and tests)."""
+        """One cycle: read acks, then ONE send for every due page / V notice / queued note, then the 21:00 list. Each stage is isolated:
+        a bus failure in one never stops the others. Returns a count dict (for logs and tests); out["errors"] counts failed stages."""
         own = bus is None
         bus = bus or self.bus_factory()
-        out = {"acked": 0, "paged": 0, "v": 0, "digest": 0}
+        out = {"acked": 0, "paged": 0, "v": 0, "digest": 0, "notes": 0, "errors": 0}
+        cache = {}
+
+        def msgs(tid):
+            if tid not in cache:
+                cache[tid] = list(bus.thread_messages(tid))
+            return cache[tid]
         try:
             now = self.clock()
-            for c in self.store.list_open():
-                if not c["acked_at"] and self._read_ack(bus, c):
-                    out["acked"] += 1
+            opens = self.store.list_open()
+            try:
+                for c in opens:
+                    if not c["acked_at"] and self._read_ack(c, now, msgs):
+                        out["acked"] += 1
+            except Exception as e:
+                out["errors"] += 1; out["error"] = f"ack read: {e.__class__.__name__}"
+            pages, vcases = [], []
             for c in self.store.list_open():
                 age = now - c["opened_at"]
                 if not c["acked_at"]:
                     gap = REPAGE_CLINIC_S if is_clinic(now) else REPAGE_OFF_S
                     if c["last_paged_at"] is None or now - c["last_paged_at"] >= gap:
-                        v = self._v_due(c, age, now, mark=True)
-                        self._page(bus, c, c["room_id"], v=v)
-                        out["paged"] += 1
-                        out["v"] += 1 if v else 0
+                        pages.append((c, self._v_due(c, age, now, mark=False)))
                         continue
-                if self._v_due(c, age, now, mark=True):
-                    self._say(bus, c, f"ROOM ALERT V {c['kind']}: {c['room_id']} open {int(age // 60)} min", "urgent",
-                              f"V: patient-impacting, {'acked but' if c['acked_at'] else 'unacked,'} not recovered. gating-lead tells V. Case room-alert-{c['first_id']}.")
-                    out["v"] += 1
-            self.store.prune_routed(now - ROUTED_KEEP_S)
-            out["digest"] = self._digest(bus, now)
+                if self._v_due(c, age, now, mark=False):
+                    vcases.append(c)
+            notes = self.store.list_notes()
+            if pages or vcases or notes:
+                try:
+                    self._flush(bus, now, pages, vcases, notes, msgs, out)
+                except Exception as e:
+                    out["errors"] += 1; out["error"] = f"send: {e.__class__.__name__}: {str(e)[:80]}"
+            try:
+                out["digest"] = self._digest(bus, now)
+            except Exception as e:
+                out["errors"] += 1; out["error"] = f"digest: {e.__class__.__name__}"
+            try:
+                self.store.prune_routed(now - ROUTED_KEEP_S)
+            except Exception as e:
+                out["errors"] += 1; out["error"] = f"prune: {e.__class__.__name__}"
             self._save()
         finally:
             if own and hasattr(bus, "close"):
@@ -180,14 +244,26 @@ class Router:
             sent.append(step)
         return True
 
-    def _read_ack(self, bus, c):
-        for m in bus.thread_messages(f"room-alert-{c['first_id']}"):
-            sender = str(m.get("from", ""))
-            text = f"{m.get('subject', '')} {m.get('body', '')}".strip()
-            mt = _ACK_RE.match(text)
-            if sender in ACKERS and mt and int(mt.group(1)) == c["first_id"]:
-                self.store.update(c["first_id"], acked_by=sender, acked_at=self.clock())
-                return True
+    @staticmethod
+    def ack_ids(m):
+        """Every case id acked by one message. Accepts: a single 'ACK room-alert-<id>' subject; several ACK lines in the body (the batch reply the
+        page asks for); a list on one ACK line; a ubus_reply, whose subject is 'Re: <batch subject>' and whose body holds the ACK lines. Lines are matched one by one."""
+        subj = re.sub(r"^\s*(re:\s*)+", "", str(m.get("subject", "")), flags=re.I)
+        ids = set()
+        for line in [subj] + str(m.get("body", "")).splitlines():
+            line = line.strip()
+            if _ACK_RE.match(line):                       # a line that starts with ACK acks EVERY room-alert-<id> on it (gate C1): "ACK room-alert-1, room-alert-2"
+                ids.update(int(x) for x in _ID_RE.findall(line))
+        return ids
+
+    def _read_ack(self, c, now, msgs):
+        tids = [f"room-alert-{c['first_id']}", batch_tid(now), batch_tid(now - 86400)]
+        for tid in tids:
+            for m in msgs(tid):
+                sender = str(m.get("from", ""))
+                if sender in ACKERS and c["first_id"] in self.ack_ids(m):
+                    self.store.update(c["first_id"], acked_by=sender, acked_at=self.clock())
+                    return True
         return False
 
     # ---- end-of-day list
@@ -228,6 +304,7 @@ class SqliteStore:
         self.db.execute("CREATE TABLE IF NOT EXISTS room_alert_case (first_id INTEGER PRIMARY KEY, room_id TEXT NOT NULL, kind TEXT NOT NULL, opened_at REAL NOT NULL, "
                         "last_paged_at REAL, page_count INTEGER NOT NULL DEFAULT 0, suppressed_count INTEGER NOT NULL DEFAULT 0, acked_by TEXT, acked_at REAL, closed_at REAL, close_reason TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS routed_ids (row_id INTEGER PRIMARY KEY, routed_at REAL NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS outbox_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, created_at REAL NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS local_seq (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL)")
         self.db.execute("INSERT OR IGNORE INTO local_seq (id, seq) VALUES (1, 0)")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS open_uq ON room_alert_case (room_id, kind) WHERE closed_at IS NULL")
@@ -248,6 +325,16 @@ class SqliteStore:
             raise ValueError(f"unknown columns {bad}")
         sets = ",".join(f"{k}=?" for k in f)
         self.db.execute(f"UPDATE room_alert_case SET {sets} WHERE first_id=?", [*f.values(), first_id])
+
+    def add_note(self, text, now):
+        self.db.execute("INSERT INTO outbox_notes (text, created_at) VALUES (?, ?)", (text, now))
+
+    def list_notes(self):
+        return [(r[0], r[1]) for r in self.db.execute("SELECT id, text FROM outbox_notes ORDER BY id")]
+
+    def drop_notes(self, ids):
+        for i in ids:
+            self.db.execute("DELETE FROM outbox_notes WHERE id=?", (i,))
 
     def is_routed(self, row_id):
         return self.db.execute("SELECT 1 FROM routed_ids WHERE row_id=?", (row_id,)).fetchone() is not None
