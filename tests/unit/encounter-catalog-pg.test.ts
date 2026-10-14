@@ -4,9 +4,10 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
 
-const H = vi.hoisted(() => ({ tag: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>) }));
+const H = vi.hoisted(() => ({ tag: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>), sqlText: null as null | ((t: string, p: unknown[]) => Promise<unknown[]>) }));
 vi.mock("@/lib/db", () => ({
   // The app calls sql(text, params); the harness speaks the tagged-template form. Every statement here uses each $n once and in order.
   sql: (text: string, params: unknown[]) => {
@@ -18,6 +19,7 @@ vi.mock("@/lib/db", () => ({
 
 import { makeFakeClinician } from "../support/fake-identity";
 import { ingestCatalogRows } from "@/lib/encounter-catalog/store";
+import { INGEST_SQL } from "@/lib/encounter-catalog/ingest-sql";
 import { parseSearch, searchCatalog } from "@/lib/encounter-catalog/search";
 
 const HAVE_DOCKER = dockerAvailable();
@@ -55,6 +57,7 @@ d("encounter_catalog on postgres:16", () => {
   beforeAll(() => {
     pg.start();
     H.tag = pg.sql;
+    H.sqlText = (t, p) => { const parts = t.split(/\$\d+/); return H.tag!(Object.assign(parts, { raw: parts }) as unknown as TemplateStringsArray, ...p); };
     pg.exec("CREATE TABLE schema_migrations (version integer PRIMARY KEY, name text NOT NULL);");
     pg.exec(UP);
   });
@@ -103,7 +106,7 @@ d("encounter_catalog on postgres:16", () => {
     await ingestCatalogRows([{ consult_uid: "synth-cat-a", doctor_uid: "DOC12345", prescription: { prescription_uid: "rx-1", presc_state: "final" } }]);
   });
 
-  it("the C3 join fills the identity columns by the same field-level upsert; the box row never blanks them; search shows them to admins only", async () => {
+  it("the C3 join fills the identity columns by the same field-level upsert; the box row never blanks them; the (admin-only) search returns them", async () => {
     const c3 = { consult_uid: "synth-cat-a", doctor_name: DOC_NAME, patient_name: PAT_NAME, individual_uid: "ind_fake0001", prescription_uid: "rx_fake0001", presc_state: "final" };
     expect(await ingestCatalogRows([c3])).toEqual({ updated: 1, inserted: 0 });
     const r = await rowOf("synth-cat-a");
@@ -112,14 +115,12 @@ d("encounter_catalog on postgres:16", () => {
     await ingestCatalogRows([mk("synth-cat-a")]);                                    // the box's next row carries none of them
     const again = await rowOf("synth-cat-a");
     expect([again.doctor_name, again.patient_name, again.individual_uid, again.prescription_uid, again.presc_state]).toEqual([DOC_NAME, PAT_NAME, "ind_fake0001", "rx_fake0001", "final"]);
-    const admin = (await searchCatalog({ limit: 10, prescription_uid: "rx_fake0001" }, true)).rows;
+    const admin = (await searchCatalog({ limit: 10, prescription_uid: "rx_fake0001" })).rows;
     expect(admin.map((x) => x.consult_uid)).toEqual(["synth-cat-a"]);
     expect([admin[0].patient_name, admin[0].doctor_name, admin[0].individual_uid, admin[0].presc_state]).toEqual([PAT_NAME, DOC_NAME, "ind_fake0001", "final"]);
-    const plain = (await searchCatalog({ limit: 10, doctor_uid: "DOC12345", from: "2026-10-12", to: "2026-10-12" })).rows;
-    expect(Object.keys(plain[0])).not.toContain("patient_name");
-    expect(JSON.stringify(plain)).not.toContain(PAT_NAME);
-    expect((await searchCatalog({ limit: 10, individual_uid: "ind_fake0001" }, true)).rows).toHaveLength(1);
-    expect((await searchCatalog({ limit: 10, individual_uid: "ind_nobody" }, true)).rows).toHaveLength(0);
+    expect(admin[0].prescription).toEqual({ prescription_uid: "rx-1", presc_state: "final" });   // an admin sees the prescription jsonb too
+    expect((await searchCatalog({ limit: 10, individual_uid: "ind_fake0001" })).rows).toHaveLength(1);
+    expect((await searchCatalog({ limit: 10, individual_uid: "ind_nobody" })).rows).toHaveLength(0);
     await ingestCatalogRows([{ consult_uid: "synth-cat-a", patient_name: null, doctor_name: null, individual_uid: null, prescription_uid: null, presc_state: null }]);
     expect((await rowOf("synth-cat-a")).patient_name).toBeNull();
     await ingestCatalogRows([{ consult_uid: "synth-cat-a", prescription: { prescription_uid: "rx-1", presc_state: "final" } }]);
@@ -163,7 +164,7 @@ d("encounter_catalog on postgres:16", () => {
     expect(uids(await run("doctor_uid=DOC12345&room=room_abc&has_prescription=true&from=2026-10-12"))).toEqual(["synth-cat-a"]);
     const r = (await run("doctor_uid=DOC99999")).rows[0];
     expect([r.ist_date, r.t_open, r.updated_at === null]).toEqual(["2026-10-13", new Date(T_OPEN).toISOString(), false]);
-    expect(Object.keys(r).sort()).toEqual(["allowance", "catalog_version", "clip", "consult_uid", "doctor_uid", "first_gap", "freescript", "generated_at", "ist_date", "layers", "prescription", "room_id", "source", "stages", "t_close", "t_open", "updated_at"]);
+    expect(Object.keys(r).sort()).toEqual(["allowance", "catalog_version", "clip", "consult_uid", "doctor_name", "doctor_uid", "first_gap", "freescript", "generated_at", "individual_uid", "ist_date", "layers", "patient_name", "presc_state", "prescription", "prescription_uid", "room_id", "source", "stages", "t_close", "t_open", "updated_at"]);
   });
 
   it("search pages with the cursor: every row exactly once, newest first, undated rows last, no row skipped at a page edge", async () => {
@@ -186,6 +187,34 @@ d("encounter_catalog on postgres:16", () => {
       }
       expect(seen).toEqual(expected);
     }
+  });
+
+  it("RACE: a post for a new consult_uid that overlaps another post's insert is not lost: the statement alone drops it (updated 0, inserted 0), the rerun updates it", async () => {
+    const SQL = readFileSync("lib/encounter-catalog/ingest-sql.ts", "utf8");
+    expect(SQL).toContain("ON CONFLICT (consult_uid) DO NOTHING");
+    // Session A inserts the NEW uid and commits after 3 s; the ingest statement (session B) starts inside that window: its UPDATE does not see A's row, its INSERT waits for A and then loses.
+    const a = spawn("docker", ["exec", "-i", pg.name, "psql", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"], { stdio: ["pipe", "pipe", "pipe"] });
+    a.stdin.write("BEGIN; INSERT INTO encounter_catalog (consult_uid, doctor_uid) VALUES ('synth-cat-race', 'DOC_FROM_A'); SELECT pg_sleep(3); COMMIT;\n");
+    a.stdin.end();
+    const done = new Promise<void>((res) => a.on("close", () => res()));
+    await new Promise((r) => setTimeout(r, 1000));
+    // one raw statement, exactly as the app sends it: no rerun, to show what the bare statement does
+    const rows = JSON.stringify([{ consult_uid: "synth-cat-race", room_id: "room_from_b" }]);
+    const bare = (await H.sqlText!(INGEST_SQL, [rows])) as Array<{ updated: number; inserted: number }>;
+    await done;
+    expect(bare[0]).toEqual({ updated: 0, inserted: 0 });                     // the lost write
+    expect((await rowOf("synth-cat-race")).room_id).toBeNull();
+    // the app: the same overlap again with a new uid, through ingestCatalogRows
+    const b = spawn("docker", ["exec", "-i", pg.name, "psql", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"], { stdio: ["pipe", "pipe", "pipe"] });
+    b.stdin.write("BEGIN; INSERT INTO encounter_catalog (consult_uid, doctor_uid) VALUES ('synth-cat-race2', 'DOC_FROM_A'); SELECT pg_sleep(3); COMMIT;\n");
+    b.stdin.end();
+    const done2 = new Promise<void>((res) => b.on("close", () => res()));
+    await new Promise((r) => setTimeout(r, 1000));
+    const res = await ingestCatalogRows([{ consult_uid: "synth-cat-race2", room_id: "room_from_b" }]);
+    await done2;
+    expect(res).toEqual({ updated: 1, inserted: 0, retried: true });
+    const r2 = await rowOf("synth-cat-race2");
+    expect([r2.doctor_uid, r2.room_id]).toEqual(["DOC_FROM_A", "room_from_b"]);   // A's column kept, B's write applied: nothing lost
   });
 
   it("the rollback drops the table and its schema_migrations row, and the migration can be applied again", async () => {

@@ -21,7 +21,7 @@ const IDENTITY_UIDS = ["individual_uid", "prescription_uid"] as const;
 const NAME_FIELDS = ["doctor_name", "patient_name"] as const;
 const STATE = /^[A-Za-z0-9_:.-]{1,40}$/;
 const KEYS = new Set<string>(["consult_uid", "ist_date", "doctor_uid", "room_id", "t_open", "t_close", "source", "first_gap", "catalog_version", "generated_at", "presc_state", ...IDENTITY_UIDS, ...NAME_FIELDS, ...JSON_FIELDS]);
-const TEXT_KEY = /^(text|transcript|note|content)$|^text_/i;
+const TEXT_KEY = /^(text|transcript|note|content)(_|s?$)/i;   // text, texts, text_en, transcript, transcript_en, note, notes, content, contents ...
 
 export type CatalogRow = Record<string, unknown>;
 export type Validation = { ok: true; rows: CatalogRow[] } | { ok: false; error: string };
@@ -35,6 +35,8 @@ export function hasTextKey(v: unknown): boolean {
   return Object.entries(v).some(([k, val]) => TEXT_KEY.test(k) || hasTextKey(val));
 }
 
+/** A real calendar date (YYYY-MM-DD): 2026-02-30 is not one. */
+export const realDate = (s: string) => DATE.test(s) && !Number.isNaN(Date.parse(s)) && new Date(s).toISOString().slice(0, 10) === s;
 const okMs = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v < 4e12;
 const okIso = (v: unknown) => typeof v === "string" && v.length <= 40 && !Number.isNaN(Date.parse(v));
 
@@ -51,7 +53,7 @@ export function validateBatch(body: unknown): Validation {
     if (typeof r.consult_uid !== "string" || !UID.test(r.consult_uid)) return { ok: false, error: "bad_consult_uid" };
     if (seen.has(r.consult_uid)) return { ok: false, error: "duplicate_consult_uid" };
     seen.add(r.consult_uid);
-    if ("ist_date" in r && r.ist_date !== null && (typeof r.ist_date !== "string" || !DATE.test(r.ist_date) || Number.isNaN(Date.parse(r.ist_date)))) return { ok: false, error: "bad_date" };
+    if ("ist_date" in r && r.ist_date !== null && (typeof r.ist_date !== "string" || !realDate(r.ist_date))) return { ok: false, error: "bad_date" };
     if ("doctor_uid" in r && r.doctor_uid !== null && (typeof r.doctor_uid !== "string" || !DOCTOR.test(r.doctor_uid))) return { ok: false, error: "bad_doctor_uid" };
     if ("room_id" in r && r.room_id !== null && (typeof r.room_id !== "string" || !ROOM.test(r.room_id))) return { ok: false, error: "bad_room" };
     for (const k of ["t_open", "t_close"]) if (k in r && r[k] !== null && !okMs(r[k]) && !okIso(r[k])) return { ok: false, error: "bad_time" };
@@ -75,11 +77,28 @@ export function validateBatch(body: unknown): Validation {
   return { ok: true, rows: rows as CatalogRow[] };
 }
 
-export type IngestResult = { updated: number; inserted: number };
+export type IngestResult = { updated: number; inserted: number; retried?: boolean };
+
+/** Thrown when, after one rerun, some rows were neither updated nor inserted (two posts raced on a new consult_uid). The route answers 409 so the sender retries. */
+export class ConcurrentIngestError extends Error {
+  constructor(public readonly missing: number) {
+    super("concurrent_insert");
+  }
+}
 
 export async function ingestCatalogRows(rows: CatalogRow[]): Promise<IngestResult> {
   const q = sql as unknown as (text: string, params: unknown[]) => Promise<Array<Record<string, unknown>>>;
-  const out = await q(INGEST_SQL, [JSON.stringify(rows)]);
-  const row = out[0] ?? {};
-  return { updated: Number(row.updated ?? 0), inserted: Number(row.inserted ?? 0) };
+  const body = JSON.stringify(rows);
+  const run = async (): Promise<IngestResult> => {
+    const out = await q(INGEST_SQL, [body]);
+    const row = out[0] ?? {};
+    return { updated: Number(row.updated ?? 0), inserted: Number(row.inserted ?? 0) };
+  };
+  // UPDATE then INSERT ... ON CONFLICT DO NOTHING in one statement: when another post inserts the same NEW consult_uid between the statement's snapshot and its insert, this statement does
+  // neither for that row (its UPDATE did not see it, its INSERT lost). A rerun sees the committed row and updates it. Still short after one rerun: refuse (409), never a silent 200.
+  let r = await run();
+  if (r.updated + r.inserted >= rows.length) return r;
+  r = { ...(await run()), retried: true };
+  if (r.updated + r.inserted >= rows.length) return r;
+  throw new ConcurrentIngestError(rows.length - r.updated - r.inserted);
 }

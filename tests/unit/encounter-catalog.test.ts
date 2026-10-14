@@ -6,17 +6,17 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { NextRequest } from "next/server";
 
-const H = vi.hoisted(() => ({ calls: [] as Array<[string, unknown[]]>, result: [] as Array<Record<string, unknown>>, fail: null as null | { code: string } }));
+const H = vi.hoisted(() => ({ calls: [] as Array<[string, unknown[]]>, result: [] as Array<Record<string, unknown>>, fail: null as null | { code: string }, script: null as null | (() => Array<Record<string, unknown>>) }));
 vi.mock("@/lib/db", () => ({
   sql: async (text: string, params: unknown[]) => {
     H.calls.push([text, params]);
     if (H.fail) throw Object.assign(new Error("db"), H.fail);
-    return H.result;
+    return H.script ? H.script() : H.result;
   },
 }));
 
 import { checkCatalogHmac, signCatalog, CATALOG_SIG_HEADER, CATALOG_TS_HEADER } from "@/lib/encounter-catalog/auth";
-import { hasTextKey, validateBatch, MAX_ROWS } from "@/lib/encounter-catalog/store";
+import { ConcurrentIngestError, hasTextKey, ingestCatalogRows, validateBatch, MAX_ROWS } from "@/lib/encounter-catalog/store";
 import { buildSearch, encodeCursor, parseSearch } from "@/lib/encounter-catalog/search";
 import { INGEST_SQL, COLUMNS } from "@/lib/encounter-catalog/ingest-sql";
 import { makeFakeClinician } from "../support/fake-identity";
@@ -42,7 +42,7 @@ const get = (qs: string, token?: string) =>
   new NextRequest("https://t.example/api/encounter-catalog/search" + qs, { headers: token ? { authorization: "Bearer " + token } : {} });
 
 beforeEach(() => {
-  H.calls.length = 0; H.result = []; H.fail = null;
+  H.calls.length = 0; H.result = []; H.fail = null; H.script = null;
   delete process.env.ENCOUNTER_CATALOG_INGEST_SECRET; delete process.env.ADMIN_TOKEN; delete process.env.REB_INDEX_READ_TOKEN;
 });
 
@@ -113,13 +113,14 @@ describe("validateBatch", () => {
     expect(validateBatch({ rows: [{ ...c3, patient_note: "x" }] })).toEqual({ ok: false, error: "unknown_field" });
   });
   it("refuses a text-like key at any depth, in any case, in any field", () => {
-    for (const bad of [{ text: "x" }, { transcript: "x" }, { note: "x" }, { content: "x" }, { Transcript: "x" }, { text_en: "x" }]) {
+    for (const bad of [{ text: "x" }, { transcript: "x" }, { note: "x" }, { content: "x" }, { Transcript: "x" }, { text_en: "x" }, { transcript_en: "x" }, { notes: "x" }, { Contents: "x" }, { texts: "x" }, { note_x: "x" }]) {
       expect(validateBatch({ rows: [row(bad)] })).toEqual({ ok: false, error: "text_key" });
     }
     expect(validateBatch({ rows: [row({ layers: { stt: { r2_key: "k", status: "ok", nested: [{ deep: { note: "x" } }] } } })] })).toEqual({ ok: false, error: "text_key" });
     expect(validateBatch({ rows: [{ consult_uid: "synth-cat-2", prescription: { items: [{ Content: "x" }] } }] })).toEqual({ ok: false, error: "text_key" });
     expect(hasTextKey({ a: [{ b: { TEXT_en: 1 } }] })).toBe(true);
-    expect(hasTextKey({ a: { context: 1, textual: 2, sha256: 3 } })).toBe(false);
+    expect(hasTextKey({ a: { context: 1, textual: 2, sha256: 3, notebook: 4, contention: 5 } })).toBe(false);
+    for (const k of ["transcript_en", "transcripts", "notes", "contents", "text_native", "Note_1"]) expect(hasTextKey({ x: { [k]: 1 } }), k).toBe(true);
   });
   it("refuses unknown fields, bad shapes, duplicates, an empty and an oversize batch", () => {
     const err = (r: unknown) => (validateBatch(r) as { error?: string }).error;
@@ -134,6 +135,8 @@ describe("validateBatch", () => {
     expect(err({ rows: [row({ consult_uid: "bad uid/../x" })] })).toBe("bad_consult_uid");
     expect(err({ rows: [row({ ist_date: "2026-13-45" })] })).toBe("bad_date");
     expect(err({ rows: [row({ ist_date: "12 Oct" })] })).toBe("bad_date");
+    expect(err({ rows: [row({ ist_date: "2026-02-30" })] })).toBe("bad_date");
+    expect(err({ rows: [row({ ist_date: "2026-02-28" })] })).toBeUndefined();
     expect(err({ rows: [row({ source: "other" })] })).toBe("bad_source");
     expect(err({ rows: [row({ t_open: -5 })] })).toBe("bad_time");
     expect(err({ rows: [row({ t_open: 1.5 })] })).toBe("bad_time");
@@ -184,11 +187,8 @@ describe("search parameters", () => {
     expect(p2).toEqual(["rx_fake0001", "ind_fake0001", 6]);
     expect(t2).toMatch(/prescription_uid = \$1 AND individual_uid = \$2/);
   });
-  it("selects the identity columns only for an admin caller", () => {
-    for (const c of ["doctor_name", "patient_name", "individual_uid", "prescription_uid", "presc_state"]) {
-      expect(buildSearch({ limit: 5 })[0]).not.toMatch(new RegExp(`\\b${c}\\b`));
-      expect(buildSearch({ limit: 5 }, true)[0]).toMatch(new RegExp(`\\b${c}\\b`));
-    }
+  it("selects the identity columns and the prescription for every row (the route is admin-only)", () => {
+    for (const c of ["doctor_name", "patient_name", "individual_uid", "prescription_uid", "presc_state", "prescription"]) expect(buildSearch({ limit: 5 })[0]).toMatch(new RegExp(`\\b${c}\\b`));
   });
 });
 
@@ -228,6 +228,23 @@ describe("POST /api/encounter-catalog/ingest", () => {
     const r2 = await ingest(post(b, signed(b, Math.floor(Date.now() / 1000))));
     expect([r2.status, await r2.json()]).toEqual([503, { ok: false, error: "db:23514" }]);
   });
+  it("a row that was neither updated nor inserted triggers ONE rerun; still short => 409 (never a silent 200); recovered on the rerun => 200 with the counts; complete first time => no rerun", async () => {
+    process.env.ENCOUNTER_CATALOG_INGEST_SECRET = SECRET;
+    const b = body();                                                     // 2 rows
+    const post2 = () => ingest(post(b, signed(b, Math.floor(Date.now() / 1000))));
+    const script = (...rs: Array<{ updated: number; inserted: number }>) => { let n = 0; H.script = () => [rs[Math.min(n++, rs.length - 1)]]; H.calls.length = 0; };
+    script({ updated: 0, inserted: 1 }, { updated: 1, inserted: 1 });
+    const res = await post2();
+    expect([res.status, await res.json(), H.calls.length]).toEqual([200, { ok: true, updated: 1, inserted: 1, retried: true }, 2]);
+    script({ updated: 0, inserted: 1 }, { updated: 0, inserted: 1 });
+    const res2 = await post2();
+    expect([res2.status, await res2.json(), H.calls.length]).toEqual([409, { ok: false, error: "concurrent_insert", missing: 1 }, 2]);
+    script({ updated: 1, inserted: 1 });
+    const res3 = await post2();
+    expect([res3.status, H.calls.length]).toEqual([200, 1]);
+    expect(await ingestCatalogRows([row(), row({ consult_uid: "synth-cat-2" })] as never)).toEqual({ updated: 1, inserted: 1 });
+    expect(new ConcurrentIngestError(1).message).toBe("concurrent_insert");
+  });
   it("413 over the body limit, 400 on bad json", async () => {
     process.env.ENCOUNTER_CATALOG_INGEST_SECRET = SECRET;
     expect((await ingest(post("x".repeat(4_000_001), {}))).status).toBe(413);
@@ -246,25 +263,25 @@ describe("GET /api/encounter-catalog/search", () => {
     expect((await search(get("", "adm"))).status).toBe(401);
     expect(H.calls).toEqual([]);
   });
-  it("accepts ADMIN_TOKEN or REB_INDEX_READ_TOKEN as a bearer; 400 on a bad parameter before any query", async () => {
-    process.env.ADMIN_TOKEN = "adm"; process.env.REB_INDEX_READ_TOKEN = "reader";
+  it("accepts ADMIN_TOKEN as a bearer; 400 on a bad parameter before any query", async () => {
+    process.env.ADMIN_TOKEN = "adm";
     expect((await search(get("?limit=0", "adm"))).status).toBe(400);
     expect(H.calls).toEqual([]);
     expect((await search(get("", "adm"))).status).toBe(200);
-    expect((await search(get("", "reader"))).status).toBe(200);
-    expect(H.calls).toHaveLength(2);
+    expect(H.calls).toHaveLength(1);
   });
-  it("identity (PHI): ADMIN_TOKEN gets the identity columns, the box read token does not and may not filter on them (403)", async () => {
+  it("ADMIN ONLY (PHI): the box read token and any other bearer are refused, with and without filters; an admin gets the identity columns and the prescription", async () => {
     process.env.ADMIN_TOKEN = "adm"; process.env.REB_INDEX_READ_TOKEN = "reader";
-    await search(get("", "adm"));
-    await search(get("", "reader"));
-    expect(H.calls[0][0]).toMatch(/patient_name/);
-    expect(H.calls[1][0]).not.toMatch(/patient_name|doctor_name|individual_uid|prescription_uid|presc_state/);
-    H.calls.length = 0;
-    const r = await search(get("?prescription_uid=rx_fake0001", "reader"));
-    expect([r.status, await r.json()]).toEqual([403, { ok: false, error: "admin_only_filter" }]);
+    for (const qs of ["", "?prescription_uid=rx_fake0001", "?doctor_uid=DOC12345"]) {
+      expect((await search(get(qs, "reader"))).status).toBe(401);
+      expect((await search(get(qs, "other"))).status).toBe(401);
+    }
     expect(H.calls).toEqual([]);
-    expect((await search(get("?prescription_uid=rx_fake0001&individual_uid=ind_fake0001", "adm"))).status).toBe(200);
+    H.result = [{ consult_uid: "synth-cat-1", prescription: { prescription_uid: "rx_fake0001", presc_state: "final" }, patient_name: PAT_NAME }];
+    const ok = await search(get("?prescription_uid=rx_fake0001&individual_uid=ind_fake0001", "adm"));
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).rows[0].prescription).toEqual({ prescription_uid: "rx_fake0001", presc_state: "final" });
+    expect(H.calls[0][0]).toMatch(/patient_name/);
     expect(H.calls[0][1]).toEqual(["rx_fake0001", "ind_fake0001", 101]);
   });
   it("returns the rows as stored with a next_cursor when there is more, null when there is not; a db error is 503", async () => {

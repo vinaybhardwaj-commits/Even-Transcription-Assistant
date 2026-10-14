@@ -1,11 +1,12 @@
 /**
  * lib/encounter-catalog/search.ts — parameters, SQL and cursor for GET /api/encounter-catalog/search (migration 0168).
  *
- * Identity (PHI): doctor_name, patient_name, individual_uid, prescription_uid, presc_state are SELECTED only for an admin caller (admin=true); the filters prescription_uid and individual_uid are admin-only too (the route enforces).
+ * Admin-only route (see the route): every row carries the identity columns (PHI: doctor_name, patient_name, individual_uid, prescription_uid, presc_state) and the prescription jsonb.
  * Filters: doctor_uid, from / to (ist_date, inclusive, YYYY-MM-DD), room (room_id), has_prescription (true|false), cursor, limit (1..500, default 100).
  * Newest first, keyset paged on (ist_date, consult_uid). Returns the rows as stored (ids, times, keys, states, counts: no text exists).
  */
 import { sql } from "@/lib/db";
+import { realDate } from "./store";
 
 export const DEFAULT_LIMIT = 100;
 export const MAX_LIMIT = 500;
@@ -28,7 +29,6 @@ function decodeCursor(c: string): [string, string] | null {
   return null;
 }
 
-const realDate = (s: string) => DATE.test(s) && !Number.isNaN(Date.parse(s)) && new Date(s).toISOString().slice(0, 10) === s;
 
 export function parseSearch(p: URLSearchParams): Parsed {
   const q: SearchQuery = { limit: DEFAULT_LIMIT };
@@ -65,7 +65,7 @@ const ISO = (c: string) => `to_char(${c} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:
 /** -> [sql text, params]; every value is a bound parameter, each $n used once and in order. */
 export const IDENTITY_COLUMNS = "doctor_name, patient_name, individual_uid, prescription_uid, presc_state";
 
-export function buildSearch(q: SearchQuery, admin = false): [string, unknown[]] {
+export function buildSearch(q: SearchQuery): [string, unknown[]] {
   const params: unknown[] = [];
   const where: string[] = [];
   const add = (v: unknown, cast = "") => { params.push(v); return `$${params.length}${cast}`; };
@@ -80,7 +80,7 @@ export function buildSearch(q: SearchQuery, admin = false): [string, unknown[]] 
   if (q.cursor) where.push(`(COALESCE(ist_date, DATE '${NO_DATE}'), consult_uid) < (${add(q.cursor[0], "::date")}, ${add(q.cursor[1])})`);
   const limit = add(q.limit + 1, "::integer");
   const text = `SELECT consult_uid, to_char(ist_date, 'YYYY-MM-DD') AS ist_date, doctor_uid, room_id, ${ISO("t_open")} AS t_open, ${ISO("t_close")} AS t_close, source, clip, layers, freescript,
-       stages, first_gap, allowance, prescription,${admin ? " " + IDENTITY_COLUMNS + "," : ""} catalog_version, ${ISO("generated_at")} AS generated_at, ${ISO("updated_at")} AS updated_at
+       stages, first_gap, allowance, prescription, ${IDENTITY_COLUMNS}, catalog_version, ${ISO("generated_at")} AS generated_at, ${ISO("updated_at")} AS updated_at
   FROM encounter_catalog${where.length ? "\n WHERE " + where.join(" AND ") : ""}
  ORDER BY COALESCE(ist_date, DATE '${NO_DATE}') DESC, consult_uid DESC
  LIMIT ${limit}`;
@@ -89,9 +89,9 @@ export function buildSearch(q: SearchQuery, admin = false): [string, unknown[]] 
 
 export type SearchResult = { rows: Array<Record<string, unknown>>; next_cursor: string | null };
 
-export async function searchCatalog(q: SearchQuery, admin = false): Promise<SearchResult> {
+export async function searchCatalog(q: SearchQuery): Promise<SearchResult> {
   const run = sql as unknown as (text: string, params: unknown[]) => Promise<Array<Record<string, unknown>>>;
-  const [text, params] = buildSearch(q, admin);
+  const [text, params] = buildSearch(q);
   const got = await run(text, params);
   const more = got.length > q.limit;
   const rows = more ? got.slice(0, q.limit) : got;
