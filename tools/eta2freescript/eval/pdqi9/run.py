@@ -230,7 +230,8 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
     floor_judged = [c for rows in fl.values() for x in rows for c in (x, x["completion"])]
     floor_rows_unparsed = sum(1 for c in floor_judged if c.get("parse_failure"))
     floor_rows_tolerated = sum(1 for c in floor_judged if c.get("tolerated"))
-    table = floors.aggregate(fl["Bn"], fl["B0"])
+    basis = floors.floor_basis()
+    table = floors.aggregate(fl["Bn"], fl["B0"], basis)
 
     jev_res = {u: jev_lines.check_lines((art_bn[u] or {}).get("note_text") or "", transcript[u], jev_client) for u in uids}
     ok = [v for v in jev_res.values() if v["status"] == "ok"]
@@ -239,10 +240,12 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
     reasons = sorted({v.get("reason", "?") for v in jev_res.values() if v["status"] != "ok"})
     jev = {"status": "ok" if len(ok) == len(jev_res) else "failed" if n_err == len(jev_res) else "not run" if n_not == len(jev_res) else "partial",
            "consults": len(ok), "consults_ok": len(ok), "consults_error": n_err, "consults_not_run": n_not, "lines": sum(v["lines"] for v in ok),
-           "low": sum(len(v["low"]) for v in ok), "errors": sum(v["errors"] for v in ok), "reasons": reasons}
+           "low": sum(len(v["low"]) for v in ok), "errors": sum(v["errors"] for v in ok), "reasons": reasons,
+           "jev_skipped_empty_headings": sum(v.get("jev_skipped_empty_headings", 0) for v in ok)}
     jev["models"] = sorted({v["model"] for v in ok if v.get("model")})
     counts = f"ok {len(ok)}, error {n_err}, not_run {n_not}"
-    detail = f"{jev['low']}/{jev['lines']} lines P(yes)<0.5 ({jev['errors']} errors; model {','.join(jev['models']) or '?'})"
+    detail = (f"{jev['low']}/{jev['lines']} lines P(yes)<0.5 ({jev['errors']} errors; {jev['jev_skipped_empty_headings']} empty headings skipped; "
+              f"model {','.join(jev['models']) or '?'})")
     jev["summary"] = (f"jev: failed ({n_err} consults; {', '.join(reasons)})" if jev["status"] == "failed" else
                       f"jev: not run ({', '.join(reasons)})" if jev["status"] == "not run" else
                       f"{detail}" if jev["status"] == "ok" else f"{detail}; consults {counts} ({', '.join(reasons)})")
@@ -271,7 +274,7 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
         "thorough_bn_minus_b0": thorough,
         "total_bn_minus_a": total_a, "total_bn_minus_b0": compare_family(scores, uids, combos, "Bn", "B0"),
         "total_family_primary": fam, "target_12_7": target_check(gt, fam, thorough, total_a),
-        "floors": table, "jev": jev, "replay_drops": sum(arms["Bn"][u]["drops"] for u in uids),
+        "floors": table, "floor_basis": basis, "jev": jev, "replay_drops": sum(arms["Bn"][u]["drops"] for u in uids),
         "rendered_chars_mean": {arm: statistics.fmean(len(texts[(u, arm)]) for u in uids) for arm in ARMS},
         "cost_usd": cost, "verdict": "PENDING (freescript-lead)",
     }
