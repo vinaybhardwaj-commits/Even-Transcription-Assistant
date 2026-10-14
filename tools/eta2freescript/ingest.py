@@ -75,6 +75,8 @@ class Consult:
     signed: dict | None = None
     # Bundle mode only: one {layer, track_path, sha256} per bundle slot that fed this consult. Nothing emits it yet.
     inputs: list[dict] = field(default_factory=list)
+    # Bundle mode only: counts-only segment clock tally over every shifted track (see _shift). No text.
+    clock_counts: dict = field(default_factory=dict)
 
     @property
     def speaker_source(self) -> str:
@@ -290,10 +292,35 @@ def bundle_window(bundle: dict) -> tuple[int, int, str | None]:
     return t0, t1, room_dir
 
 
-def _shift(segs: list, t0: int, dur: int) -> list[dict]:
-    """Track segments carry ms from clip start (contract section 3). Clamp the end to the clip (Sarvam can overrun by up to 0.56 s),
-    then move to the absolute UTC ms the folder reader's transcripts use, so boundary.py / format_transcript see the same axis."""
-    out = []
+EPOCH_MS_MIN = 10**12  # a t0_ms at or above this is epoch ms (2001-09 onwards); a clip-relative ms never gets near it
+CLOCK_COUNT_KEYS = ("segments_absolute", "segments_relative", "dropped_outside_clip", "clock_mismatch")
+
+
+def _manifest_window(bundle: dict) -> tuple[int, int] | None:
+    """manifest t0_ms/t1_ms (consult.flac audio start/end, epoch ms); None when absent or not a forward span."""
+    m = bundle.get("manifest") if isinstance(bundle.get("manifest"), dict) else {}
+    try:
+        a, b = int(m["t0_ms"]), int(m["t1_ms"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return (a, b) if b >= a else None
+
+
+def _shift(segs: list, t0: int, dur: int, stats: dict | None = None, window: tuple[int, int] | None = None) -> list[dict]:
+    """Move track segments to the absolute UTC ms the folder reader's transcripts use, so boundary.py / format_transcript see one axis.
+
+    Consult-scope tracks carry EPOCH ms on the manifest clock (palimpsest read contract v0.2); legacy fixtures carry ms from clip start.
+    The clock is decided once per track, by its first usable segment (t0_ms >= EPOCH_MS_MIN is epoch). Clocks are never mixed in a track:
+    a segment on the other clock is read on the track's clock and counted in clock_mismatch.
+    Epoch track: clamp to `window` (the manifest t0_ms/t1_ms = the consult.flac audio span; default [t0, t0 + dur]), NOT the cutter span, which
+    can start up to 60 s after the audio (pre-roll). A segment wholly outside the window is dropped and counted.
+    Relative track: clamp the end to the clip (Sarvam can overrun by up to 0.56 s), then add clip_t0.
+    `stats`, when given, is incremented in place (CLOCK_COUNT_KEYS); counts only."""
+    st = stats if stats is not None else {}
+    for k in CLOCK_COUNT_KEYS:
+        st.setdefault(k, 0)
+    w0, w1 = window if window else (t0, t0 + dur)
+    out, absolute = [], None
     for g in segs or []:
         if not isinstance(g, dict):
             continue
@@ -301,9 +328,24 @@ def _shift(segs: list, t0: int, dur: int) -> list[dict]:
             a, b = int(g["t0_ms"]), int(g["t1_ms"])
         except (KeyError, TypeError, ValueError):
             continue
-        b = min(b, dur)
-        a = min(a, b)
-        out.append({**g, "t0_ms": t0 + a, "t1_ms": t0 + b})
+        is_epoch = a >= EPOCH_MS_MIN
+        if absolute is None:
+            absolute = is_epoch
+        elif is_epoch != absolute:
+            st["clock_mismatch"] += 1
+        if absolute:
+            if b < w0 or a > w1:
+                st["dropped_outside_clip"] += 1
+                continue
+            b = min(max(b, w0), w1)
+            a = min(max(a, w0), b)
+            st["segments_absolute"] += 1
+            out.append({**g, "t0_ms": a, "t1_ms": b})
+        else:
+            b = min(b, dur)
+            a = min(a, b)
+            st["segments_relative"] += 1
+            out.append({**g, "t0_ms": t0 + a, "t1_ms": t0 + b})
     out.sort(key=lambda g: (g["t0_ms"], g["t1_ms"]))
     return out
 
@@ -328,8 +370,10 @@ def load_bundle(bundle: dict, english: str = "auto", use_role_track: bool = True
         raise ValueError(f"{uid}: bundle has no text layer")
     clip_t0, clip_t1, room = bundle_window(bundle)
     dur = max(0, clip_t1 - clip_t0)
-    native = _shift((st or {}).get("segments"), clip_t0, dur)
-    eng = _shift((tr or {}).get("segments"), clip_t0, dur)
+    clock = dict.fromkeys(CLOCK_COUNT_KEYS, 0)
+    win = _manifest_window(bundle)
+    native = _shift((st or {}).get("segments"), clip_t0, dur, clock, win)
+    eng = _shift((tr or {}).get("segments"), clip_t0, dur, clock, win)
     langs = Counter(str(g.get("lang")) for g in native if g.get("lang"))
     lang = langs.most_common(1)[0][0] if langs else "und"
     raw = {"consult_uid": uid, "language_code": lang, "english_segments": eng, "native_segments": native,
@@ -350,6 +394,7 @@ def load_bundle(bundle: dict, english: str = "auto", use_role_track: bool = True
         raise ValueError(f"{uid}: bundle has no non-empty segments")
     c = Consult(uid=uid, turns=turns, clip_t0_ms=clip_t0, clip_t1_ms=clip_t1, language_code=lang, english_source=english_source,
                 diarised=any(t.speaker != "?" for t in turns), room=room or "unknown", meta={"room": room} if room else {})
+    c.clock_counts = clock
     used = []
     for name, slot in (("translate", tracks.get("translate")), ("stt", tracks.get("stt"))):
         if _slot_track(slot) is not None:
@@ -362,7 +407,7 @@ def load_bundle(bundle: dict, english: str = "auto", use_role_track: bool = True
                 continue
             doc = {**doc, "engine": doc.get("engine") or slot.get("engine")}
             if isinstance(doc.get("segments"), list):
-                doc["segments"] = _shift(doc["segments"], clip_t0, dur)
+                doc["segments"] = _shift(doc["segments"], clip_t0, dur, clock, win)
             if valid_role_doc(doc):
                 join_roles(turns, doc)
                 c.role_track, c.role_flags = True, parse_role_flags(doc)
