@@ -18,8 +18,6 @@ def load_truth(excl):
 
 
 a1 = {r["turn_id"]: r for r in rj(f"{IN}/out/real/arm1.jsonl")}
-_nonprod = [t for t, r in a1.items() if r.get("production_row") is False or r.get("set") == "E3X"]   # r290: arm-1-less items never enter S2/F1-F4
-a1 = {t: r for t, r in a1.items() if t not in set(_nonprod)}; print(f"excluded arm-1-less (production_row False / E3X) rows: {len(_nonprod)}")
 cur = {r["turn_id"] for r in rj(f"{IN}/inputs/cards.jsonl")}
 
 

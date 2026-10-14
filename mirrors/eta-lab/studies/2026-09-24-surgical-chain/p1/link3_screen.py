@@ -18,10 +18,9 @@ Exit code (linker's pick, yoga-drain F5): 0 = OK; 1 = INCOMPLETE (score_input.js
 An item that failed MT is absent from translated.json and so absent from this report; the integration adapter must reconcile against A's per-item provenance so a failed item is reported, never silently absent.
 A stale score_input.json is removed before every run, and the new one is written under a temp name and renamed into place, and only when the run is not BLOCKED: a BLOCKED run never leaves a scoring input behind (an INCOMPLETE item just has no entry in it).
 """
-import argparse, collections, json, os, re, sys
+import argparse, collections, json, os, sys
 
 STRATUM = "translated"
-MT_DIR = re.compile(r"mt(-b[0-9]+)?")          # the translated stratum's directories: mt, mt-b2, mt-b3 (linker #1562); matched whole, never as a prefix
 REASONS = ("garbled", "untranslatable", "unflagged")
 OK_Q = "ok"
 
@@ -106,11 +105,10 @@ def _write_private(path, obj, indent=None):
 
 
 def write_score_input(path, score_input):
-    """The translated input lives only in a directory named `mt` or `mt-b<N>` (mt-b2, mt-b3), never beside the pooled raw/ or deid/ inputs;
-    the name is matched whole, so mt2, mt-x, mt-b, mt-b2x and a path with mt only as a grandparent are refused.
+    """The translated input lives only in an `mt/` directory, never beside the pooled raw/ or deid/ inputs.
     Written under a temp name and renamed, so a failure part-way never leaves a half-written or stale file."""
-    if not MT_DIR.fullmatch(os.path.basename(os.path.dirname(os.path.abspath(path)))):
-        raise ValueError("score_input must be written inside an mt/ or mt-b<N>/ directory")
+    if os.path.basename(os.path.dirname(os.path.abspath(path))) != "mt":
+        raise ValueError("score_input must be written inside an mt/ directory")
     flat = [t for rooms in score_input.values() for room in rooms.values() for t in room["turns"]]
     check_stratum(flat)
     tmp = path + ".tmp"

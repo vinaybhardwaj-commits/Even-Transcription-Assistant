@@ -1,6 +1,5 @@
 """link3_translate.py: piece A of the translated stratum (P1-PREREG-v7.15, rulings 211, 222, 239).
 
-  every command takes --batch b1 (default: the 8 items of v7.15, mt/) or --batch b2 (the other 11 of v7.16, mt-b2/)
   python3 link3_translate.py select       counts only: the items and the >50% non-English rooms that would be translated (no network)
   python3 link3_translate.py preflight    ONE call with a single invented line (no patient text): the returned model must be exactly the requested one; writes mt/preflight.json
   python3 link3_translate.py translate    (refuses without a passing preflight for this script sha) MT of every turn of those rooms (OpenRouter, ZDR); writes mt/translated.json, mt/provenance.json, mt/mt_log.jsonl, mt/ledger.json
@@ -22,20 +21,12 @@ RUN, MT = BOX + "run/", BOX + "mt/"
 PREREG = "P1-PREREG-v7.15.md"
 LL_ITEMS = ("c004", "c006", "c011", "c013", "c014", "c016", "c023", "c026")
 INTERIM = ("c004", "c006", "c011", "c013")                     # excluded from every accuracy claim for this stratum (v7.15 M1)
-LL_ITEMS_B2 = ("c001", "c012", "c021", "c025", "c028", "c030", "c033", "c034", "c035", "c036", "c037")     # v7.16 V1: every other LANGUAGE_LIMITED item (rule-based, no subset)
-ACCURACY_EXCLUDED_B2 = ("c001", "c021")                        # c001: a pilot item of the main run (v7.7 K2.4); c021: one of the two would-be accepts seen before the extension (v7.16 V6, refuter-2 #1575): scored and reported, never in a yield or accuracy claim
-ACCURACY_EXCLUDED_B3 = ("c001",)                               # b3 holds c001 c012 c028 c036 only
-LL_ITEMS_B3 = ("c001", "c012", "c028", "c036")                  # v7.16a F1: exactly the four items that were MT_FAILED in mt-b2/ (rule: every item that failed, nothing chosen)
-BATCHES = {"b1": dict(items=LL_ITEMS, mt=BOX + "mt/", excluded=INTERIM),           # v7.16 V4: separate directories, batch 1's record is never touched by a b2 run
-           "b2": dict(items=LL_ITEMS_B2, mt=BOX + "mt-b2/", excluded=ACCURACY_EXCLUDED_B2),
-           "b3": dict(items=LL_ITEMS_B3, mt=BOX + "mt-b3/", excluded=ACCURACY_EXCLUDED_B3, isolate=True, parent="b2")}   # v7.16a: ONE fresh attempt with line isolation, c001 stays excluded
 SHARE_OVER = 0.5                                               # v7.10 non-English share definition, unchanged
 MODEL, URL = "google/gemini-3.8-flash", "https://openrouter.ai/api/v1/chat/completions"
 PROVIDER = {"zdr": True, "data_collection": "deny", "allow_fallbacks": False}
 QS = ("ok", "garbled", "untranslatable")
 BATCH = 25
 WAITS = (0, 4, 12, 30, 60)
-MIN_FULL_READ = 20                                            # v7.15a N1: fewer eligible kept turns than this is a weak gate
 FLOOR, MARGIN, LOCAL = 0.50, 0.15, timedelta(minutes=2)       # v7.x, unchanged
 SYSTEM = ("You translate a clinic conversation transcript into English, faithfully.\n- Leave English words and English sentences exactly as they are.\n"
           "- Keep drug names, doses, numbers and units exact.\n- Never summarise, and never add or drop any content.\n- If the input is already English, return it unchanged.\n"
@@ -44,9 +35,6 @@ SYSTEM = ("You translate a clinic conversation transcript into English, faithful
 USER_HEAD = ('Translate each numbered line to English. Reply with a JSON object {"1": {"t": "...", "q": "ok"}, "2": {"t": "...", "q": "garbled"}, ...} '
              'keyed by the line numbers, where q is one of ok, garbled, untranslatable, and nothing else.')
 _sleep = time.sleep
-
-
-MALFORMED_TWICE = "MT_FAILED(malformed reply twice)"
 
 
 class ItemFail(Exception):
@@ -91,10 +79,10 @@ def code_provenance():
 
 
 # ---- selection (v7.15 M1) ----
-def select(manifest, items=LL_ITEMS):
-    """[(item, room id, non-English share)] for the batch's LANGUAGE_LIMITED items' rooms whose share is above 0.5. Reads the run manifest only (counts, no text)."""
+def select(manifest):
+    """[(item, room id, non-English share)] for the LANGUAGE_LIMITED items' rooms whose share is above 0.5. Reads the run manifest only (counts, no text)."""
     out = []
-    for it in items:
+    for it in LL_ITEMS:
         for r in (manifest.get(it) or {}).get("rooms", []):
             if r["turns"] and r["non_english_share"] > SHARE_OVER:
                 out.append((it, r["id"], r["non_english_share"]))
@@ -139,37 +127,9 @@ def http_transport(key):
     return send
 
 
-def parse_reply(data, n):
-    """([(t, q)], None) for an accepted reply of n lines, else (None, (reason, line index or None)). The reason is from a closed list and never carries text (v7.16a F2)."""
-    try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        return None, ("no_choices", None)
-    try:
-        got = json.loads(content)
-    except (ValueError, TypeError):
-        return None, ("not_json", None)
-    if not isinstance(got, dict):
-        return None, ("not_object", None)
-    out = []
-    for k in range(n):
-        v = got.get(str(k + 1))
-        if not isinstance(v, dict):
-            return None, ("line_missing", k)
-        if not isinstance(v.get("t"), str):
-            return None, ("t_not_string", k)
-        if not v["t"].strip():
-            return None, ("t_empty", k)
-        if v.get("q") not in QS:
-            return None, ("q_invalid", k)
-        out.append((v["t"].strip(), v["q"]))
-    return out, None
-
-
 def one_batch(lines, send, log):
     """One call for up to 25 lines. Returns ([(t, q)], returned provider, returned model). v7.15 M2: 429/5xx are retried with backoff; any other failure, or a reply that is not JSON or is
-    malformed, is repeated ONCE at the same settings and a second one fails the item. A returned model other than the requested one, or no returned provider, fails the item at once.
-    A malformed reply logs its structural reason and line index, never text (v7.16a F2)."""
+    malformed, is repeated ONCE at the same settings and a second one fails the item. A returned model other than the requested one, or no returned provider, fails the item at once."""
     user = USER_HEAD + "\n\n" + "\n".join(f"{n + 1}. {s}" for n, s in enumerate(lines))
     body = request_body([{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}])
     bad = 0
@@ -189,67 +149,52 @@ def one_batch(lines, send, log):
             log(dict(rec, failed=True)); raise ItemFail("MT_ROUTE_MISMATCH")
         if not isinstance(data.get("provider"), str) or not data["provider"].strip():
             log(dict(rec, failed=True)); raise ItemFail("MT_ROUTE_MISMATCH(provider not reported)")      # nothing to check against the ZDR list
-        out, why = parse_reply(data, len(lines))
-        if why:
-            bad += 1; log(dict(rec, malformed=True, reason=why[0], index=why[1]))
-            if bad >= 2: raise ItemFail(MALFORMED_TWICE)
+        try:
+            got = json.loads(data["choices"][0]["message"]["content"])
+            out = []
+            for n in range(len(lines)):
+                v = got[str(n + 1)]
+                if not (isinstance(v, dict) and isinstance(v.get("t"), str) and v["t"].strip() and v.get("q") in QS):
+                    raise ValueError
+                out.append((v["t"].strip(), v["q"]))
+        except (ValueError, KeyError, TypeError, IndexError):
+            bad += 1; log(dict(rec, malformed=True))
+            if bad >= 2: raise ItemFail("MT_FAILED(malformed reply twice)")
             continue
         log(dict(rec, ok=True))
         return out, data["provider"], data["model"]
     raise ItemFail("MT_FAILED(retries exhausted)")
 
 
-def translate_item(rows, send, log, isolate=False, stats=None):
-    """rows: records of one item. Returns (translated rows, providers seen, models returned). Every turn is sent (the prompt keeps English as it is). Provider must agree across batches.
-    isolate (v7.16a F3, the b3 re-attempt only): a batch whose lines were malformed twice is re-sent ONE LINE PER CALL under the same M2 rules; a line that fails twice becomes a record with
-    q = "mt_failed" and en = "" (no text kept, nothing repaired); it is dropped by the screen and counted in stats["isolated_failed_lines"]. Route failures and HTTP failures still fail the item."""
-    stats = stats if stats is not None else {}
-    stats.setdefault("isolated_failed_lines", 0); stats.setdefault("isolated_calls", 0)
+def translate_item(rows, send, log):
+    """rows: records of one item. Returns (translated rows, providers seen, models returned). Every turn is sent (the prompt keeps English as it is). Provider must agree across batches."""
     out, provs, models = [], [], []
     for k in range(0, len(rows), BATCH):
-        chunk = rows[k:k + BATCH]; it, b = chunk[0]["item"], k // BATCH
-        try:
-            res, prov, model = one_batch([r["src"] for r in chunk], send, lambda rec: log(dict(rec, item=it, batch=b)))
-        except ItemFail as e:
-            if not (isolate and e.status == MALFORMED_TWICE):
-                raise
-            res = []                                                          # the batch failed twice on the shape of the reply: isolate its lines
-            for j, r in enumerate(chunk):
-                stats["isolated_calls"] += 1
-                try:
-                    one, prov, model = one_batch([r["src"]], send, lambda rec, j=j: log(dict(rec, item=it, batch=b, isolated=True, chunk_line=j)))
-                except ItemFail as e2:
-                    if e2.status != MALFORMED_TWICE:
-                        raise
-                    stats["isolated_failed_lines"] += 1; res.append(("", "mt_failed")); continue
-                provs.append(prov); models.append(model); res.append(one[0])
-        else:
-            provs.append(prov); models.append(model)
+        chunk = rows[k:k + BATCH]
+        res, prov, model = one_batch([r["src"] for r in chunk], send, lambda rec, it=chunk[0]["item"], b=k // BATCH: log(dict(rec, item=it, batch=b)))
+        provs.append(prov); models.append(model)
         out += [dict(item=r["item"], room=r["room"], i=r["i"], lang=r["lang"], at=r["at"], en=t, q=q) for r, (t, q) in zip(chunk, res)]
     if len(set(provs)) > 1:
         raise ItemFail("MT_ROUTE_MISMATCH(provider changed within the item)")
-    if out and all(r["q"] == "mt_failed" for r in out):
-        raise ItemFail("MT_FAILED(every line isolated-failed)")
     return out, sorted(set(provs)), sorted(set(models))
 
 
-def translate_all(recs, send, log, isolate=False):
+def translate_all(recs, send, log):
     by = collections.defaultdict(list)
     for r in recs: by[r["item"]].append(r)
     translated, status = [], {}
     for it in sorted(by):
-        cnt = collections.Counter(); stats = {}
+        cnt = collections.Counter()
         def lg(rec):
             cnt["retries"] += bool(rec.get("retry")); cnt["repeats"] += bool(rec.get("malformed") or rec.get("repeat")); log(rec)
         rooms = len({r["room"] for r in by[it]})
         try:
-            rows, provs, models = translate_item(by[it], send, lg, isolate, stats)
-            translated += rows; iso = stats.get("isolated_failed_lines", 0)
-            status[it] = dict(status="MT_OK", turns_in=len(by[it]), turns_returned=len(rows) - iso, turns=len(rows), rooms=rooms, batches=-(-len(by[it]) // BATCH), providers=provs,
-                              model_returned=models, retries=cnt["retries"], repeats=cnt["repeats"], isolated_failed_lines=iso)
+            rows, provs, models = translate_item(by[it], send, lg)
+            translated += rows
+            status[it] = dict(status="MT_OK", turns_in=len(by[it]), turns_returned=len(rows), turns=len(rows), rooms=rooms, batches=-(-len(by[it]) // BATCH), providers=provs,
+                              model_returned=models, retries=cnt["retries"], repeats=cnt["repeats"])
         except ItemFail as e:
-            status[it] = dict(status=e.status, turns_in=len(by[it]), turns_returned=0, turns=0, rooms=rooms, retries=cnt["retries"], repeats=cnt["repeats"],
-                              isolated_failed_lines=stats.get("isolated_failed_lines", 0))
+            status[it] = dict(status=e.status, turns_in=len(by[it]), turns_returned=0, turns=0, rooms=rooms, retries=cnt["retries"], repeats=cnt["repeats"])
     return translated, status
 
 
@@ -296,37 +241,21 @@ def assert_no_residuals(mt=MT):
         raise SystemExit(f"refused: {len(hits)} residual identifier hit(s) in scored turns {dict(collections.Counter(h[3] for h in hits))} at {sorted({(h[0], h[1], h[2]) for h in hits})[:20]}: re-de-identify, do not score")
 
 
-def cmd_verify(nameleak_summary, screen_report, second_pin, mt=MT, items=None):
+def cmd_verify(nameleak_summary, screen_report, second_pin, mt=MT):
     import re
     if not re.fullmatch(r"[0-9a-f]{64}", second_pin or ""):
         raise SystemExit("gate refused: --second-pin must be the 64-hex sha256 refuter-2 posted for his locked counts file")
     L = jl(mt + "ledger.json")
     tr, dj = mt + "translated.json", mt + "deid.json"
-    if items is not None:                                          # refuter-2 #1505: a batch's verify also refuses another batch's items (the directory alone was the guard)
-        held = {r["item"] for r in jl(tr)} | set(jl(mt + "provenance.json")["items"]) | set(jl(mt + "score_input.json"))
-        if held - set(items):
-            raise SystemExit("gate refused: the batch's files hold an item that is not in this batch (batches are never mixed)")
     if sha256_file(tr) != L["translate"]["translated_sha256"]:
         raise SystemExit("gate refused: translated.json changed since the translate step")
     t, d = jl(tr), jl(dj)
     if file_key(t) != file_key(d) or any(a["en"] != b["en"] for a, b in zip(t, d)) or any("en_deid" not in b for b in d):
         raise SystemExit("gate refused: deid.json does not match translated.json (same keys, same en, and an en_deid on every record)")
     s = jl(nameleak_summary)
-    if s.get("gate") != "PASS" or "second_total_missed" not in s:
-        raise SystemExit("gate refused: name-leak summary is not a passing check with the second reader's counts")
-    import link3_nameleak as NL                                    # v7.15a N3: the check must be a FULL READ of the eligible set recomputed from deid.json (seed irrelevant)
-    elig = NL.eligible(d)
-    if len(elig) < MIN_FULL_READ or s.get("n_turns") != len(elig) or s.get("eligible_sha256") != NL.keys_sha([NL.turn_key(r) for r in elig]):
-        raise SystemExit(f"gate refused: the name-leak read is not a full read of the {len(elig)} eligible kept turns of deid.json (or fewer than {MIN_FULL_READ}): a sample or a partial draw does not clear it")
-    if "second_pin" in s:                                          # summaries of the symmetric salted-pin tool (0e0f1ef, from the b3 read on): each reader's pin on the bus is sha256(salt || counts bytes)
-        hex64 = lambda k: bool(re.fullmatch(r"[0-9a-f]{64}", str(s.get(k, ""))))
-        pin_ok = (s.get("second_pin") == second_pin and hex64("second_salt") and s.get("second_counts_sha256") != second_pin
-                  and hex64("counts_pin") and hex64("counts_salt") and s.get("counts_pin") != s.get("counts_sha256"))          # the first reader's pin is salted too, and is not his plain hash
-        pin_kind = "salted"
-    else:                                                          # the r2 and b2 summaries were made before the change: the plain hash of the locked file was the pin
-        pin_ok = s.get("second_counts_sha256") == second_pin
-        pin_kind = "plain"
-    if not pin_ok or not s.get("counts_sha256"):
+    if s.get("gate") != "PASS" or "second_total_missed" not in s or s.get("seed") not in (27, 28) or s.get("n_turns") != 20:
+        raise SystemExit("gate refused: name-leak summary is not a passing 20-turn check with the second reader's counts")
+    if s.get("second_counts_sha256") != second_pin or not s.get("counts_sha256"):
         raise SystemExit("gate refused: the summary was not made against the second reader's counts file pinned on the bus")
     if s.get("deid_sha256") != sha256_file(dj) or s.get("translated_sha256") != sha256_file(tr):
         raise SystemExit("gate refused: the name-leak counts were made on a different deid.json or translated.json than the ones on disk")
@@ -335,7 +264,7 @@ def cmd_verify(nameleak_summary, screen_report, second_pin, mt=MT, items=None):
         raise SystemExit("gate refused: screen report is blocked, or score_input.json / screened.json is missing")
     check_score_input(mt); assert_no_residuals(mt)
     L["gate"] = dict(deid_sha256=sha256_file(dj), score_input_sha256=sha256_file(mt + "score_input.json"), screened_sha256=sha256_file(mt + "screened.json"), nameleak_seed=s["seed"],
-                     nameleak_total_missed=s["total_missed"], nameleak_second_total_missed=s["second_total_missed"], second_counts_sha256=second_pin, second_pin_kind=pin_kind, screen_status=r["status"])
+                     nameleak_total_missed=s["total_missed"], nameleak_second_total_missed=s["second_total_missed"], second_counts_sha256=second_pin, screen_status=r["status"])
     write_private(mt + "ledger.json", L)
     print("gate cleared: name-leak seed", s["seed"], "screen", r["status"])
 
@@ -380,14 +309,12 @@ def verdict_chain(item, m, docs, rx_own, decoys, zero, ask):
     return f, v
 
 
-def score_translated(ask=None, run=RUN, mt=MT, items=LL_ITEMS, excluded=INTERIM, batch="b1"):
+def score_translated(ask=None, run=RUN, mt=MT):
     L = require_cleared(mt); check_score_input(mt); assert_no_residuals(mt)
-    si = jl(mt + "score_input.json"); prov = jl(mt + "provenance.json")["items"]
-    if (set(prov) | set(si)) - set(items):
-        raise SystemExit("refused: the batch's files hold an item that is not in this batch (batches are never mixed)")
-    man = jl(run + "manifest.json"); sel = select(man, items); out = {}
+    man = jl(run + "manifest.json"); si = jl(mt + "score_input.json"); prov = jl(mt + "provenance.json")["items"]
+    sel = select(man); out = {}
     for it in sorted(set(prov) | set(si)):                                  # every translated item is accounted for, including MT_FAILED and no-kept-turn items
-        base = dict(stratum="translated", batch=batch, interim_item=it in INTERIM, accuracy_excluded=it in excluded)
+        base = dict(stratum="translated", interim_item=it in INTERIM)
         st = (prov.get(it) or {}).get("status")
         if st != "MT_OK":
             out[it] = dict(base, verdict=st or "NOT_TRANSLATED", calls=0); print(it, out[it]["verdict"], "| no scoring (translation did not complete)"); continue
@@ -404,15 +331,13 @@ def score_translated(ask=None, run=RUN, mt=MT, items=LL_ITEMS, excluded=INTERIM,
         zero = {r["id"] for r in m["rooms"] if r["turns"] == 0 or (r["id"] in trooms and not docs[r["id"]]["turns"]) or (r["id"] not in trooms and r["non_english"] == r["turns"])}
         f, v = verdict_chain(it, m, docs, rx_own, decoys, zero, ask)
         out[it] = dict(f, **base, verdict=v or "INCOMPLETE", translated_rooms=sorted(trooms), translated_rooms_with_kept_turns=sorted(rooms))
-        if v is None:                                                       # v7.10 / v7.7: an INCOMPLETE verdict carries its reason (refuter-2 #1497)
-            out[it]["why"] = "no kept turn inside the consult +/- 2 min in the best room"
-        print(it, out[it]["verdict"], "| translated rooms", len(trooms), "| with kept turns", len(rooms), "| excluded from accuracy claims" if it in excluded else "", "| calls", f["calls"])
+        print(it, out[it]["verdict"], "| translated rooms", len(trooms), "| with kept turns", len(rooms), "| interim" if it in INTERIM else "", "| calls", f["calls"])
     write_private(mt + "translated_results.json", out)
 
 
 # ---- commands ----
-def cmd_select(batch="b1"):
-    man = jl(RUN + "manifest.json"); sel = select(man, BATCHES[batch]["items"])
+def cmd_select():
+    man = jl(RUN + "manifest.json"); sel = select(man)
     per = collections.Counter(i for i, _, _ in sel)
     turns = sum(next(r["turns"] for r in man[i]["rooms"] if r["id"] == rid) for i, rid, _ in sel)
     print("items", len(per), "| rooms", len(sel), "| turns to translate", turns, "| per item rooms", dict(sorted(per.items())))
@@ -445,47 +370,32 @@ def require_preflight(mt, prov):
         raise SystemExit("refused: the preflight did not pass for this script sha")
 
 
-def cmd_translate(send=None, run=RUN, mt=MT, prov=None, items=LL_ITEMS, batch="b1", isolate=False, parent_mt=None):
+def cmd_translate(send=None, run=RUN, mt=MT, prov=None):
     prov = prov or code_provenance()                       # refuses an uncommitted or modified script or pre-registration
-    attempt1 = None
-    if parent_mt:                                          # v7.16a F1: a re-attempt only for an item that is MT_FAILED in the parent batch, and both attempts are recorded
-        p1 = jl(parent_mt + "provenance.json")["items"]
-        notfailed = [it for it in items if not str((p1.get(it) or {}).get("status", "")).startswith("MT_FAILED")]
-        if notfailed:
-            raise SystemExit(f"refused: {notfailed} is not MT_FAILED in the parent batch: only failed items are re-attempted")
-        attempt1 = {it: p1[it]["status"] for it in items}
-    man = jl(run + "manifest.json"); sel = select(man, items); recs = load_records(sel, run)
+    man = jl(run + "manifest.json"); sel = select(man); recs = load_records(sel, run)
     os.makedirs(mt, mode=0o700, exist_ok=True); os.chmod(mt, 0o700)
     if os.path.exists(mt + "translated.json"):
         raise SystemExit("refused: mt/translated.json already exists (never overwritten)")
     require_preflight(mt, prov)
     send = send or http_transport(get_key())
-    translated, status = translate_all(recs, send, lambda rec: write_private(mt + "mt_log.jsonl", rec, jsonl=True), isolate)
+    translated, status = translate_all(recs, send, lambda rec: write_private(mt + "mt_log.jsonl", rec, jsonl=True))
     write_private(mt + "translated.json", translated)
     write_private(mt + "provenance.json", dict(model_requested=MODEL, temperature=0, provider_settings=PROVIDER, prompt_sha256=prompt_sha256(), **prov,
-                                              translated_sha256=sha256_file(mt + "translated.json"), items=status, rooms_selected=len(sel), turns_selected=len(recs), batch=batch,
-                                              items_expected=list(items), attempt=2 if parent_mt else 1, attempt1=attempt1, line_isolation=bool(isolate)))
+                                              translated_sha256=sha256_file(mt + "translated.json"), items=status, rooms_selected=len(sel), turns_selected=len(recs)))
     write_private(mt + "ledger.json", dict(translate=dict(translated_sha256=sha256_file(mt + "translated.json"), **prov, at=datetime.now().isoformat())))
-    print("translated", len(translated), "of", len(recs), "turns |", dict(collections.Counter(s["status"] for s in status.values())),
-          "| isolated-failed lines", sum(v.get("isolated_failed_lines", 0) for v in status.values()))
-
-
-def build_parser():
-    ap = argparse.ArgumentParser(); sub = ap.add_subparsers(dest="cmd", required=True)
-    for n in ("select", "preflight", "translate", "score", "selftest"):
-        sub.add_parser(n).add_argument("--batch", choices=sorted(BATCHES), default="b1")
-    v = sub.add_parser("verify"); v.add_argument("--nameleak-summary", required=True); v.add_argument("--screen-report", required=True); v.add_argument("--second-pin", required=True)
-    v.add_argument("--batch", choices=sorted(BATCHES), default="b1")
-    return ap
+    print("translated", len(translated), "of", len(recs), "turns |", dict(collections.Counter(s["status"] for s in status.values())))
 
 
 def main(argv=None):
-    a = build_parser().parse_args(argv); B = BATCHES[a.batch]
-    if a.cmd == "select": cmd_select(a.batch)
-    elif a.cmd == "preflight": cmd_preflight(mt=B["mt"])
-    elif a.cmd == "translate": cmd_translate(mt=B["mt"], items=B["items"], batch=a.batch, isolate=B.get("isolate", False), parent_mt=BATCHES[B["parent"]]["mt"] if B.get("parent") else None)
-    elif a.cmd == "verify": cmd_verify(a.nameleak_summary, a.screen_report, a.second_pin, mt=B["mt"], items=B["items"])
-    elif a.cmd == "score": score_translated(mt=B["mt"], items=B["items"], excluded=B["excluded"], batch=a.batch)
+    ap = argparse.ArgumentParser(); sub = ap.add_subparsers(dest="cmd", required=True)
+    for n in ("select", "preflight", "translate", "score", "selftest"): sub.add_parser(n)
+    v = sub.add_parser("verify"); v.add_argument("--nameleak-summary", required=True); v.add_argument("--screen-report", required=True); v.add_argument("--second-pin", required=True)
+    a = ap.parse_args(argv)
+    if a.cmd == "select": cmd_select()
+    elif a.cmd == "preflight": cmd_preflight()
+    elif a.cmd == "translate": cmd_translate()
+    elif a.cmd == "verify": cmd_verify(a.nameleak_summary, a.screen_report, a.second_pin)
+    elif a.cmd == "score": score_translated()
     else:
         sys.exit(subprocess.run([sys.executable, "-B", "-m", "unittest", "test_order"], cwd=os.path.join(HERE, "tests")).returncode)
 

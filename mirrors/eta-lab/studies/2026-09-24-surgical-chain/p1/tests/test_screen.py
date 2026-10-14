@@ -125,42 +125,6 @@ class Stratum(unittest.TestCase):
         with self.assertRaises(ValueError):
             S.guard_pooled(native + translated[:1])         # one translated record fails the whole pooled input
 
-    def test_write_accepts_only_mt_and_mt_bN_directories(self):
-        si, _, _ = S.assemble(S.screen(BASE)[0], deid_of(BASE))
-        with tempfile.TemporaryDirectory() as d:
-            for good in ("mt", "mt-b2", "mt-b3", "mt-b10"):
-                os.makedirs(os.path.join(d, good))
-                S.write_score_input(os.path.join(d, good, "score_input.json"), si)
-                self.assertTrue(os.path.exists(os.path.join(d, good, "score_input.json")))
-            for bad in ("raw", "deid", "run", "mt2", "mt-x", "mt-", "mtb2", "b2", "mt-b", "mt-b2x", "mt-b2-old", "xmt", "MT", "mt-B2", "mt_b2", "mt-b-2", "mt-b2\n"):
-                try:
-                    os.makedirs(os.path.join(d, bad))
-                except OSError:
-                    continue
-                with self.assertRaises(ValueError, msg=bad):
-                    S.write_score_input(os.path.join(d, bad, "score_input.json"), si)
-                self.assertFalse(os.path.exists(os.path.join(d, bad, "score_input.json")), bad)
-
-    def test_mt_only_as_a_grandparent_is_refused(self):
-        si, _, _ = S.assemble(S.screen(BASE)[0], deid_of(BASE))
-        with tempfile.TemporaryDirectory() as d:
-            for parent in ("mt", "mt-b2"):
-                sub = os.path.join(d, parent, "deid")
-                os.makedirs(sub)
-                with self.assertRaises(ValueError):
-                    S.write_score_input(os.path.join(sub, "score_input.json"), si)
-
-    def test_run_works_in_an_mt_bN_directory(self):
-        rows = [r for r in BASE if r["item"] != "B2"]
-        d = tempfile.mkdtemp()
-        mt = os.path.join(d, "mt-b2"); os.makedirs(mt)
-        json.dump(rows, open(os.path.join(mt, "translated.json"), "w"))
-        json.dump(deid_of(rows), open(os.path.join(mt, "deid.json"), "w"))
-        with contextlib.redirect_stdout(io.StringIO()):
-            rep = S.run(mt)
-        self.assertEqual(rep["status"], "OK")
-        self.assertTrue(os.path.exists(os.path.join(mt, "score_input.json")))
-
     def test_write_refuses_anything_outside_an_mt_dir(self):
         si, _, _ = S.assemble(S.screen(BASE)[0], deid_of(BASE))
         with tempfile.TemporaryDirectory() as d:

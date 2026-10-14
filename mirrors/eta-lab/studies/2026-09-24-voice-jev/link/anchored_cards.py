@@ -7,8 +7,7 @@ import base64, collections, csv, glob, json, os, random, re, secrets, subprocess
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tiering as T
-BOX = os.path.expanduser("~/eta-data/voice-linkage"); E = f"{BOX}/{os.environ.get('EXT', 'dtree_ext')}"; B = f"{BOX}/batch1b"; KEYF = f"{BOX}/batch1b-key/key.json"; ANCH_DIR = "/tmp/anch"; SEED = 24092026; TARGETS = tuple(os.environ.get("TARGETS", "g071,g008,g013").split(",")); DROP_GIDS = tuple(x for x in os.environ.get("DROP_GIDS", "g071,g008").split(",") if x)
-OUTNAME = os.environ.get("OUTNAME", "batch1b"); B = f"{BOX}/{OUTNAME}"; KEYF = f"{BOX}/{OUTNAME}-key/key.json"; SEEDBASE = int(os.environ.get("SEEDBASE", "5000")); BATCHNUM = int(os.environ.get("BATCHNUM", "1")); MARGIN = 0.15   # R1 (refute/28): per-member margin over the best OTHER stored print
+BOX = os.path.expanduser("~/eta-data/voice-linkage"); E = f"{BOX}/dtree_ext"; B = f"{BOX}/batch1b"; KEYF = f"{BOX}/batch1b-key/key.json"; ANCH_DIR = "/tmp/anch"; SEED = 24092026; TARGETS = ("g071", "g008", "g013"); DROP_GIDS = ("g071", "g008")
 norm = lambda n: " ".join((n or "").lower().replace("dr.", "").replace("dr ", "").replace(".", " ").split())
 name2uid, uid2name = {}, {}
 for f in glob.glob(f"{BOX}/pilot/pqm-2026-09-*.csv"):
@@ -57,18 +56,15 @@ def turns_of(rd, c, core_only, cv):
         out.append({"rd": rd, "i": i, "win": m["window_id"], "off": m["off_s"], "dur": m["dur_s"], "cos": cos})
     return out
 def cut(win, off, dur, dst): subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-ss", f"{off:.2f}", "-t", f"{dur:.2f}", "-i", f"{BOX}/pilot/audio/{win}.wav", "-ac", "1", "-ar", "22050", "-b:a", "32k", dst], check=True)
-ONLY = bool(os.environ.get("CLIPS_ONLY")); AB = B; AKEY = KEYF; import hashlib
-key = json.load(open(AKEY if ONLY else KEYF)); made, dropped, clips_out = [], [], []
+key = json.load(open(KEYF)); made, dropped = [], []
 # drop the timing-labelled duplicates of the anchored voices
-for k in ([] if ONLY else list(key)):
+for k in list(key):
     if k.get("card_id") and k.get("kind") != "pair" and k.get("gid") in DROP_GIDS:
         for p in glob.glob(f"{B}/audio/{k['card_id']}_*.mp3") + [f"{B}/links/{k['card_id']}.json"]: os.remove(p)
         key.remove(k); dropped.append((k["card_id"], k["gid"]))
 for n, gid in enumerate(TARGETS):
-    A = json.load(open(f"{E}/overnight/anchored-groups.json")); a = next(x for x in A if x["gid"] == gid); doc = a["anchor_doctor_uid"]; r = random.Random(SEED + SEEDBASE + n)
-    own = lambda rd, c: max(float(cent(rd, c) @ p) for p in anch[doc].values())
-    other = lambda rd, c: max((float(cent(rd, c) @ p) for d2, ps in anch.items() if d2 != doc for p in ps.values()), default=0.0)
-    mem = [(rd, c) for rd, c in glinks[gid]["members"] if not (sessions_of(rd) & ENROL[doc]) and own(rd, c) >= 0.60 and own(rd, c) - other(rd, c) >= MARGIN]
+    A = json.load(open(f"{E}/overnight/anchored-groups.json")); a = next(x for x in A if x["gid"] == gid); doc = a["anchor_doctor_uid"]; r = random.Random(SEED + 5000 + n)
+    mem = [(rd, c) for rd, c in glinks[gid]["members"] if not (sessions_of(rd) & ENROL[doc]) and max(float(cent(rd, c) @ p) for p in anch[doc].values()) >= 0.60]
     cosv = [max(float(cent(rd, c) @ p) for p in anch[doc].values()) for rd, c in mem]
     pool = {m: turns_of(m[0], m[1], True, cent(*m)) for m in mem}
     order = sorted(mem, key=lambda m: -len(pool[m])); chosen, used = [], set()
@@ -79,30 +75,17 @@ for n, gid in enumerate(TARGETS):
     while len(chosen) < 3 and allp: chosen.append(allp.pop())
     rep = order[0]; cont = turns_of(rep[0], None, False, cent(*rep)); r.shuffle(cont)
     if len(chosen) < 3 or not cont: print("NOT ENOUGH CLIPS", gid, len(chosen), len(cont)); continue
-    if ONLY:
-        cid = next(k["card_id"] for k in key if k.get("gid") == gid); os.makedirs("/tmp/verify_anchor", exist_ok=True)
-        for k, x in enumerate(chosen + cont[:1]):
-            tmp = f"/tmp/verify_anchor/{cid}_{k}.mp3"; cut(x["win"], x["off"], x["dur"], tmp)
-            same = hashlib.sha256(open(tmp, "rb").read()).hexdigest() == hashlib.sha256(open(f"{AB}/audio/{cid}_{k}.mp3", "rb").read()).hexdigest()
-            sess = "bs_" + x["win"].split("_")[1]
-            clips_out.append({"card_id": cid, "gid": gid, "k": k, "role": "doctor" if k < 3 else "contrast", "room_day": x["rd"], "session": sess, "window_id": x["win"], "offset_s": x["off"], "dur_s": x["dur"], "cos_to_voice_centroid": round(x["cos"], 3),
-                              "enrolment_session_of_this_doctor": sess in ENROL[doc], "identical_to_delivered_mp3": same})
-        continue
     cid = secrets.token_hex(3); cl = []
     for k, x in enumerate(chosen + cont[:1]):
         dst = f"{B}/audio/{cid}_{k}.mp3"; cut(x["win"], x["off"], x["dur"], dst); cl.append({"src": f"audio/{cid}_{k}.mp3", "duration_s": round(x["dur"], 1)})
     name = uid2name.get(doc); rooms = sorted({D[rd]["turns"]["room"]["room"] for rd, _ in glinks[gid]["members"]}); days = sorted({L[rd]["date"] for rd, _ in glinks[gid]["members"]})
     ev = [f"KNOWN-VOICE CHECK. This voice matches {name}'s stored voiceprint on {len(mem)} recording days (similarity {min(cosv):.2f} to {max(cosv):.2f} on a 0 to 1 scale; the doctor's own enrolment recordings are left out). Please listen: does it sound like this doctor?",
           f"The same voice is heard on {glinks[gid]['n_room_days']} room-days between {days[0]} and {days[-1]}, in {', '.join(rooms)}.",
-          "How to read the similarity: above 0.85 is a strong match; 0.60 to 0.85 is moderate (a stored voiceprint made in one room matches other rooms and microphones less well)."]
-    if any(k.startswith("dibyendu") for k in anch[doc]): ev.append("This doctor's stored voiceprint was made from a video-call recording, not a room microphone, so it matches room audio less predictably.")
-    card = {"id": cid, "kind": "link", "room": D[rep[0]]["turns"]["room"]["room"], "date": L[rep[0]]["date"], "doctor": name, "evidence": ev, "clips": cl[:3], "contrast": cl[3], "batch": BATCHNUM}
+          "How to read the similarity: above 0.85 is a strong match; 0.60 to 0.70 is moderate (a stored voiceprint made in one room matches other rooms and microphones less well)."]
+    card = {"id": cid, "kind": "link", "room": D[rep[0]]["turns"]["room"]["room"], "date": L[rep[0]]["date"], "doctor": name, "evidence": ev, "clips": cl[:3], "contrast": cl[3], "batch": 1}
     json.dump(card, open(f"{B}/links/{cid}.json", "w"), indent=1)
     key.append({"card_id": cid, "gid": gid, "tier": "ANCHORED", "kind_note": "known-voice check", "doctor_uid": doc, "anchor_cos_by_day": [round(c, 3) for c in cosv], "members_used": [list(m) for m in mem], "enrolment_sessions_excluded": sorted(ENROL[doc]),
-                "n_room_days_group": glinks[gid]["n_room_days"], "tree": os.environ.get("EXT", "dtree_ext"), "rep": list(rep), "clip_days": len({x["rd"] for x in chosen})})
+                "n_room_days_group": glinks[gid]["n_room_days"], "rep": list(rep), "clip_days": len({x["rd"] for x in chosen})})
     made.append((cid, gid, name is not None, len(mem), round(min(cosv), 2), round(max(cosv), 2), len({x["rd"] for x in chosen})))
-if ONLY:
-    json.dump(clips_out, open(f"{BOX}/{OUTNAME}-key/clips.json", "w"), indent=1)
-    print("clips:", len(clips_out), "| any enrolment-session clip:", sum(c["enrolment_session_of_this_doctor"] for c in clips_out), "| byte-identical to delivered mp3:", sum(c["identical_to_delivered_mp3"] for c in clips_out), "of", len(clips_out)); sys.exit(0)
 json.dump(key, open(KEYF, "w"), indent=1)
 print("dropped (timing-labelled duplicates):", dropped); print("made known-voice cards (id, group, name found, matching days, cos min, max, clip days):", made)

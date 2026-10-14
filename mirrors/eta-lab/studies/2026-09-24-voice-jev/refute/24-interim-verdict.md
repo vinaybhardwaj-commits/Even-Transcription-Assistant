@@ -30,4 +30,3 @@ WITHOUT vpilot_voice_verified (doubtful n = 66): arm 2 -65.2 pp; arm 3 -34.8 pp 
 - Interim: the truth is doctor-heavy (75 doctor / 25 not). The "Who is speaking" page adds 80 doubtful + 10 confident human labels.
 - Arm 1 is strong on clinician-role doubtful turns (0.85), because production's "clinician" is usually right when it fires.
 - The arm 2/3 results mostly measure Jev ABSTAINING at the 0.70 threshold, not answering wrongly. Arm 3 answers only 22 of 88 doubtful turns.
-- Rulings 251-252: the Who-is-speaking top-up (20) is published on my PASS; the VJ interim (arms 2/3/4 NOT_ADOPTED) is recorded; NO re-tuning of the frozen arms. The final verdict follows the page labels.

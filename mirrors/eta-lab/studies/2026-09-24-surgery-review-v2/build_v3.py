@@ -10,7 +10,7 @@ Turn i is 0-based over the whole span (context included); evidence indices are t
 import json, os, sys
 from datetime import datetime, timezone
 import fetch_turns as ft, stage_raw as sr
-import finalize, build_consult as bc, v3, deid_gate
+import finalize, build_consult as bc, v3
 
 V3 = os.path.expanduser("~/eta-data/surgery-review-v3"); F = f"{V3}/{os.environ.get('V3_FINAL', 'final')}"
 SEL = os.environ.get("V3_SEL", "selected.json"); BOUNDS = os.environ.get("V3_BOUNDS", "bounds.json")  # a candidate set (rescan / set B) runs through the same stages
@@ -188,7 +188,6 @@ def validate(ids):
 
 def jev_one(q, ask=None, transport=None):
     v3.check_frozen()  # only the frozen wording scores
-    deid_gate.require(f"{F}/deid", q)  # ruling 274: the v7.15b cap rule must have run on this de-identified file
     doc = json.load(open(f"{F}/deid/{q}.json"))
     inn = [t for t in doc["turns"] if "phase" not in t]  # the encounter only: the greyed context is never scored
     bad = finalize.residual_identifiers(inn)

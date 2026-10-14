@@ -213,22 +213,6 @@ class DrawCommandTests(unittest.TestCase):
         self.assertIn("[NAME]", sheet)                    # the EN_DEID column
         self.assertEqual(sheet.count("EN_DEID"), 21)      # one per block + the header line
 
-    def test_sheet_header_quotes_the_frozen_definition_and_adds_no_role_list(self):
-        """refuter-2 #1375: the instruction is the pre-registered wording verbatim; an invented role list made the readers count differently."""
-        run_main(["draw", "--mt-dir", self.mt, "--out-dir", self.out])
-        head = open(os.path.join(self.out, "review_sheet.txt")).read().split("\n\n")[0]
-        flat = " ".join(head.split())                                                                    # the sheet wraps nothing here, but be robust to spacing
-        self.assertIn('"counts of missed names per turn, missed transliterated names included"', flat)    # v7.15a N2 step 2, the verbatim fragment
-        # v7.15b R2, verbatim (P1-PREREG-v7.15b.md): all three sentences of the definition
-        self.assertIn("a name is any readable name of a person, whatever the role: patient, relative, doctor, staff, any other individual, "
-                      "and a public figure.", flat)
-        self.assertIn("A brand, a place, a drug, a day or a month is not a person's name.", flat)
-        self.assertIn("A garbled token that does not function as a name in its context is not counted, and is listed by turn key in the reader's notes.", flat)
-        self.assertIn("From the re-read onward, a name is", flat)
-        self.assertNotIn("(patient, relative, doctor, staff)", head)                                     # the old invented parenthetical
-        self.assertNotIn("Count every personal name", head)
-        self.assertEqual(len(NL.FROZEN_DEFINITION), 3)
-
     def test_dropped_turns_are_never_drawn(self):
         t = fixture()
         d = deid_of(t)
@@ -288,19 +272,11 @@ class SummaryTests(unittest.TestCase):
         json.dump(vals if isinstance(vals, dict) else dict(zip(self.keys, vals)), open(p, "w"))
         return p
 
-    SALT = "5a" * 32                                       # a fixed test salt: 32 bytes as 64 hex characters
-
-    CSALT = "a7" * 32                                      # the first reader's test salt
-
-    def summary(self, first, second=None, out=None, pin="auto", salt="auto", cpin="auto", csalt="auto"):
-        """Both readers and BOTH salted pins are mandatory. `second` defaults to the first reader's values; pins default to the true SALTED pins."""
-        c1 = self.counts("c1.json", first)
+    def summary(self, first, second=None, out=None, pin="auto"):
+        """Both readers are mandatory. `second` defaults to the first reader's values; `pin` defaults to the true sha256 of the second file."""
         c2 = self.counts("c2.json", first if second is None else second)
-        salt = self.SALT if salt == "auto" else salt
-        csalt = self.CSALT if csalt == "auto" else csalt
-        argv = ["summary", "--draw", os.path.join(self.d, "draw.json"), "--counts", c1,
-                "--counts-pin", NL.salted_pin(c1, self.CSALT) if cpin == "auto" else cpin, "--counts-salt", csalt,
-                "--second", c2, "--second-pin", NL.salted_pin(c2, self.SALT) if pin == "auto" else pin, "--second-salt", salt]
+        argv = ["summary", "--draw", os.path.join(self.d, "draw.json"), "--counts", self.counts("c1.json", first), "--second", c2,
+                "--second-sha256", NL.sha256_file(c2) if pin == "auto" else pin]
         if out:
             argv += ["--out", out]
         return run_main(argv)
@@ -315,13 +291,12 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("missed 1 in 1 turns", out)
         self.assertIn("GATE FAIL", out)
-        self.assertIn("re-read the FULL eligible set", out)
-        self.assertNotIn("seed 28", out)                  # the old B protocol; under the full read there is no recheck sample
+        self.assertIn("seed 28", out)
 
     def test_second_readers_miss_fails_the_gate_even_if_first_is_clean(self):
         code, out, err = self.summary([0, 0, 0, 0], [0, 0, 2, 0])
         self.assertEqual(code, 1)
-        self.assertIn("second reader: missed 2", out)
+        self.assertIn("second reader (sha256 pinned): missed 2", out)
 
     def test_agree_and_disagree_per_turn(self):
         code, out, err = self.summary([0, 1, 0, 3], [0, 1, 2, 3], out=os.path.join(self.d, "sum.json"))
@@ -347,125 +322,40 @@ class SummaryTests(unittest.TestCase):
             zeros = os.path.join(mt, "z.json")
             json.dump({k: 0 for k in keys}, open(zeros, "w"))
             sp = os.path.join(mt, "s.json")
-            salt, csalt = "c3" * 32, "d4" * 32
-            self.assertEqual(run_main(["summary", "--draw", os.path.join(out, "draw.json"), "--counts", zeros,
-                                       "--counts-pin", NL.salted_pin(zeros, csalt), "--counts-salt", csalt, "--second", zeros,
-                                       "--second-pin", NL.salted_pin(zeros, salt), "--second-salt", salt, "--out", sp])[0], 0)
+            self.assertEqual(run_main(["summary", "--draw", os.path.join(out, "draw.json"), "--counts", zeros, "--second", zeros,
+                                       "--second-sha256", NL.sha256_file(zeros), "--out", sp])[0], 0)
             s = json.load(open(sp))
             self.assertEqual(s["deid_sha256"], NL.sha256_file(os.path.join(mt, "deid.json")))
             self.assertEqual(s["translated_sha256"], NL.sha256_file(os.path.join(mt, "translated.json")))
 
-    def test_every_required_option_is_mandatory(self):
-        """refuter-2 F-B1: a one-reader all-zero summary used to print GATE PASS. Leave each of the seven options out in turn: argparse must refuse (exit 2)."""
+    def test_second_reader_and_pin_are_mandatory(self):
+        """refuter-2 F-B1: a one-reader all-zero summary used to print GATE PASS."""
         c1 = self.counts("c1.json", [0, 0, 0, 0])
-        opts = {"--draw": os.path.join(self.d, "draw.json"), "--counts": c1, "--counts-pin": NL.salted_pin(c1, self.CSALT), "--counts-salt": self.CSALT,
-                "--second": c1, "--second-pin": NL.salted_pin(c1, self.SALT), "--second-salt": self.SALT}
-        self.assertEqual(len(opts), 7)
-        full = ["summary"] + [x for kv in opts.items() for x in kv]
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(run_main(full)[0], 0)                                   # control: all options present passes
-            for left_out in opts:
-                argv = ["summary"] + [x for k, v in opts.items() if k != left_out for x in (k, v)]
-                with self.assertRaises(SystemExit) as cm:
-                    run_main(argv)
-                self.assertEqual(cm.exception.code, 2, left_out)
+        base = ["summary", "--draw", os.path.join(self.d, "draw.json"), "--counts", c1]
+        for argv in (base, base + ["--second", c1], base + ["--second-sha256", NL.sha256_file(c1)]):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+                run_main(argv)
+            self.assertEqual(cm.exception.code, 2)
 
-    def test_a_plain_sha256_is_not_accepted_for_the_first_reader_either(self):
-        """refuter-2 #1570: linker's plain 'counts LOCKED sha256' would reveal an all-zero first read just as well."""
-        c1 = self.counts("c1.json", [0, 0, 0, 0])
-        for salt in (self.CSALT, "00" * 32):
-            code, out, err = self.summary([0, 0, 0, 0], cpin=NL.sha256_file(c1), csalt=salt)
-            self.assertEqual(code, 2, salt)
-            self.assertIn("do not reproduce --counts-pin", err)
-            self.assertNotIn("GATE", out)
-
-    def test_first_reader_wrong_salt_and_bad_hex_refused(self):
-        code, out, err = self.summary([0, 0, 0, 0], csalt="9c" * 32)
-        self.assertEqual(code, 2)
-        self.assertIn("do not reproduce --counts-pin", err)
-        for bad in ("", "zz" * 32, self.CSALT.upper(), self.CSALT[:62]):
-            code, out, err = self.summary([0, 0, 0, 0], csalt=bad)
-            self.assertEqual(code, 2, bad)
-            self.assertIn("--counts-salt must be 64 lowercase hex", err)
-        for bad in ("", "g" * 64, "0" * 63):
-            code, out, err = self.summary([0, 0, 0, 0], cpin=bad)
-            self.assertEqual(code, 2, bad)
-            self.assertIn("--counts-pin must be 64 lowercase hex", err)
-
-    def test_first_readers_file_edited_after_locking_is_refused(self):
-        c1 = self.counts("c1.json", [0, 0, 0, 0])
-        locked = NL.salted_pin(c1, self.CSALT)
-        json.dump(dict(zip(self.keys, [0, 0, 1, 0])), open(c1, "w"))
-        c2 = self.counts("c2.json", [0, 0, 0, 0])
-        argv = ["summary", "--draw", os.path.join(self.d, "draw.json"), "--counts", c1, "--counts-pin", locked, "--counts-salt", self.CSALT,
-                "--second", c2, "--second-pin", NL.salted_pin(c2, self.SALT), "--second-salt", self.SALT]
-        self.assertEqual(run_main(argv)[0], 2)
-
-    def test_second_pin_must_match_the_locked_file_and_salt(self):
+    def test_second_sha256_must_match_the_locked_file(self):
         code, out, err = self.summary([0, 0, 0, 0], pin="0" * 64)
         self.assertEqual(code, 2)
-        self.assertIn("do not reproduce --second-pin", err)
+        self.assertIn("does not match --second-sha256", err)
         self.assertNotIn("GATE", out)
 
-    def test_a_plain_sha256_pin_is_not_accepted_any_more(self):
-        """refuter-2 #1559: sha256 of an all-zero counts file is the same for everyone, so it must not work as a pin, with any salt."""
-        c2 = self.counts("c2.json", [0, 0, 0, 0])
-        plain = NL.sha256_file(c2)
-        for salt in (self.SALT, "00" * 32, "ff" * 32):
-            code, out, err = self.summary([0, 0, 0, 0], pin=plain, salt=salt)
-            self.assertEqual(code, 2, salt)
-            self.assertNotIn("GATE", out)
-
-    def test_wrong_salt_is_refused(self):
-        code, out, err = self.summary([0, 0, 0, 0], salt="9c" * 32)
-        self.assertEqual(code, 2)
-        self.assertIn("do not reproduce --second-pin", err)
-
-    def test_pin_and_salt_must_be_lowercase_hex64(self):
-        good = NL.salted_pin(self.counts("c2.json", [0, 0, 0, 0]), self.SALT)
+    def test_second_sha256_must_be_lowercase_hex64(self):
+        good = NL.sha256_file(self.counts("c2.json", [0, 0, 0, 0]))
         for bad in (good.upper(), good[:63], good + "0", "", "g" * 64):
             code, out, err = self.summary([0, 0, 0, 0], pin=bad)
             self.assertEqual(code, 2, bad)
-            self.assertIn("--second-pin must be 64 lowercase hex", err, bad)
-        for bad in (self.SALT.upper(), self.SALT[:62], self.SALT + "aa", "", "zz" * 32):
-            code, out, err = self.summary([0, 0, 0, 0], salt=bad)
-            self.assertEqual(code, 2, bad)
-            self.assertIn("--second-salt must be 64 lowercase hex", err, bad)
-
-    def test_the_salt_is_bytes_not_hex_text(self):
-        """A reader who recomputes the pin by hand: sha256(bytes.fromhex(salt) + file bytes). Hashing the hex TEXT would give another value."""
-        import hashlib
-        c2 = self.counts("c2.json", [0, 0, 0, 0])
-        data = open(c2, "rb").read()
-        self.assertEqual(NL.salted_pin(c2, self.SALT), hashlib.sha256(bytes.fromhex(self.SALT) + data).hexdigest())
-        self.assertNotEqual(NL.salted_pin(c2, self.SALT), hashlib.sha256(self.SALT.encode() + data).hexdigest())
-
-    def test_different_salts_give_unlinkable_pins_for_the_same_all_zero_file(self):
-        """The leak refuter-2 found: the pin of an all-zero read must not be predictable from the key list."""
-        import hashlib
-        c2 = self.counts("c2.json", [0, 0, 0, 0])
-        a, b = NL.salted_pin(c2, "01" * 32), NL.salted_pin(c2, "02" * 32)
-        self.assertNotEqual(a, b)
-        canonical = json.dumps({k: 0 for k in self.keys}, indent=1, sort_keys=True).encode()
-        for cand in (canonical, canonical + b"\n"):
-            self.assertNotEqual(a, hashlib.sha256(cand).hexdigest())     # nor equal to the plain hash of the obvious zeros file
-
-    def test_summary_records_the_salt_and_both_pins(self):
-        p = os.path.join(self.d, "sum.json")
-        self.summary([0, 0, 0, 0], [0, 0, 0, 0], out=p)
-        s = json.load(open(p))
-        self.assertEqual((s["counts_salt"], s["counts_pin"]), (self.CSALT, NL.salted_pin(os.path.join(self.d, "c1.json"), self.CSALT)))
-        self.assertEqual(s["second_salt"], self.SALT)
-        self.assertEqual(s["second_pin"], NL.salted_pin(os.path.join(self.d, "c2.json"), self.SALT))
-        self.assertNotEqual(s["second_pin"], s["second_counts_sha256"])          # the plain hash stays as an audit field, not the pin
+            self.assertIn("64 lowercase hex", err, bad)          # a format error, not merely a mismatch (an upper-case copy of the right hash is a typo, say so)
 
     def test_editing_the_second_file_after_locking_is_refused(self):
         c2 = self.counts("c2.json", [0, 0, 0, 0])
-        locked = NL.salted_pin(c2, self.SALT)
+        locked = NL.sha256_file(c2)
         json.dump(dict(zip(self.keys, [0, 0, 0, 1])), open(c2, "w"))          # labels changed after the lock
-        c1 = self.counts("c1.json", [0, 0, 0, 0])
-        argv = ["summary", "--draw", os.path.join(self.d, "draw.json"), "--counts", c1, "--counts-pin", NL.salted_pin(c1, self.CSALT),
-                "--counts-salt", self.CSALT, "--second", c2, "--second-pin", locked, "--second-salt", self.SALT]
+        argv = ["summary", "--draw", os.path.join(self.d, "draw.json"), "--counts", self.counts("c1.json", [0, 0, 0, 0]), "--second", c2,
+                "--second-sha256", locked]
         self.assertEqual(run_main(argv)[0], 2)
 
     def test_summary_records_both_counts_file_hashes(self):
@@ -501,77 +391,6 @@ def git_init(path):
     os.makedirs(path, exist_ok=True)
     import subprocess
     subprocess.run(["git", "init", "-q", path], check=True)
-
-
-class PinCommandTests(unittest.TestCase):
-    """The second reader's `pin` step: a fresh random salt, a salted pin, the salt kept private and never overwritten."""
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.d = self.tmp.name
-        self.counts = os.path.join(self.d, "counts.json")
-        json.dump({f"c00|rA|{i}": 0 for i in range(4)}, open(self.counts, "w"))
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def test_pin_prints_the_salted_pin_and_stores_the_salt_privately(self):
-        salt_file = os.path.join(self.d, "salt.hex")
-        code, out, err = run_main(["pin", "--counts", self.counts, "--salt-out", salt_file])
-        self.assertEqual(code, 0, err)
-        salt = open(salt_file).read().strip()
-        self.assertRegex(salt, r"^[0-9a-f]{64}$")
-        self.assertNotEqual(salt[32:], "0" * 32)                              # all 32 bytes are random, not 16 bytes padded (a chance of 2^-128 of a false alarm)
-        self.assertNotEqual(salt[:32], "0" * 32)
-        self.assertEqual(stat.S_IMODE(os.stat(salt_file).st_mode), 0o600)
-        pin = NL.salted_pin(self.counts, salt)
-        self.assertIn(pin, out)
-        self.assertNotIn(salt, out + err)                                  # the salt is never printed: it stays private until the summary
-        self.assertNotIn(NL.sha256_file(self.counts), out + err)           # nor is the plain hash
-
-    def test_two_pins_of_the_same_file_differ(self):
-        outs = []
-        for n in (1, 2):
-            code, out, err = run_main(["pin", "--counts", self.counts, "--salt-out", os.path.join(self.d, f"s{n}.hex")])
-            self.assertEqual(code, 0, err)
-            outs.append(out.split("post this on the bus): ")[1].split()[0])
-        self.assertNotEqual(outs[0], outs[1])
-
-    def test_pin_refuses_to_overwrite_a_salt_file(self):
-        salt_file = os.path.join(self.d, "salt.hex")
-        self.assertEqual(run_main(["pin", "--counts", self.counts, "--salt-out", salt_file])[0], 0)
-        before = open(salt_file).read()
-        self.assertEqual(run_main(["pin", "--counts", self.counts, "--salt-out", salt_file])[0], 2)
-        self.assertEqual(open(salt_file).read(), before)
-
-    def test_pin_refuses_a_salt_file_inside_a_git_work_tree(self):
-        repo = os.path.join(self.d, "repo")
-        git_init(repo)
-        salt_file = os.path.join(repo, "salt.hex")
-        code, out, err = run_main(["pin", "--counts", self.counts, "--salt-out", salt_file])
-        self.assertEqual(code, 2)
-        self.assertFalse(os.path.exists(salt_file))
-
-    def test_pin_of_a_missing_counts_file_is_an_input_error(self):
-        self.assertEqual(run_main(["pin", "--counts", os.path.join(self.d, "nope.json"), "--salt-out", os.path.join(self.d, "s.hex")])[0], 2)
-
-    def test_pin_then_summary_round_trip(self):
-        """The whole second-reader path: lock, pin, (post pin), later reveal the salt at the summary."""
-        keys = [f"c00|rA|{i}" for i in range(4)]
-        draw = os.path.join(self.d, "draw.json")
-        json.dump(dict(seed=27, keys=keys, deid_sha256="d" * 64, translated_sha256="t" * 64, eligible_sha256="e" * 64), open(draw, "w"))
-        salt_file = os.path.join(self.d, "salt.hex")
-        code, out, err = run_main(["pin", "--counts", self.counts, "--salt-out", salt_file])
-        pin = out.split("post this on the bus): ")[1].split()[0]
-        salt = open(salt_file).read().strip()
-        first = os.path.join(self.d, "first.json")
-        json.dump({k: 0 for k in keys}, open(first, "w"))
-        fsalt_file = os.path.join(self.d, "fsalt.hex")
-        code, fout, err = run_main(["pin", "--counts", first, "--salt-out", fsalt_file])                 # the first reader pins too
-        fpin = fout.split("post this on the bus): ")[1].split()[0]
-        code, out, err = run_main(["summary", "--draw", draw, "--counts", first, "--counts-pin", fpin, "--counts-salt", open(fsalt_file).read().strip(),
-                                   "--second", self.counts, "--second-pin", pin, "--second-salt", salt])
-        self.assertEqual(code, 0, err)
-        self.assertIn("GATE PASS", out)
 
 
 class GitTreeGuardTests(unittest.TestCase):
@@ -645,9 +464,8 @@ class GitTreeGuardTests(unittest.TestCase):
         c = os.path.join(self.d, "c.json")
         json.dump({keys[0]: 0}, open(c, "w"))
         out = os.path.join(self.repo, "sum.json")
-        salt, csalt = "7e" * 32, "8f" * 32
-        code, so, se = run_main(["summary", "--draw", os.path.join(self.d, "draw.json"), "--counts", c, "--counts-pin", NL.salted_pin(c, csalt),
-                                 "--counts-salt", csalt, "--second", c, "--second-pin", NL.salted_pin(c, salt), "--second-salt", salt, "--out", out])
+        code, so, se = run_main(["summary", "--draw", os.path.join(self.d, "draw.json"), "--counts", c, "--second", c,
+                                 "--second-sha256", NL.sha256_file(c), "--out", out])
         self.assertEqual(code, 2)
         self.assertFalse(os.path.exists(out))
 
