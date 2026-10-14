@@ -6,7 +6,7 @@ import random
 
 import pytest
 from test_floor_scope import _consult
-from test_pdqi9_attribution import CAT, _syn
+from test_pdqi9_attribution import CAT, _syn, item
 from test_pdqi9_harness import floors_row
 
 from tools.eta2freescript.eval.pdqi9 import floors
@@ -102,7 +102,8 @@ def gen_case(rng):
     eu = fu if rng.random() < 0.5 else rng.choice(CANON)
     in_eta = rng.random() < 0.75
     distract = [f"{rng.randint(1, 9)}{rng.choice('0123456789')}{rng.choice('0123456789')}{rng.choice('0123456789')}7 mg" for _ in range(rng.randint(0, 2))]
-    parts = distract + ([render(run, eu, rng)] if in_eta else [])
+    eta_part = render(run, eu, rng)
+    parts = distract + ([eta_part] if in_eta else [])
     rng.shuffle(parts)
     # a separator keeps a bare number from taking the next part's word as its unit
     note = "Medication:\nParacetamol " + " ; ".join(parts) + " ;"
@@ -111,7 +112,9 @@ def gen_case(rng):
     if rng.random() < 0.5:
         m.update(CAT if rng.random() < 0.8 else {"uid": "u", "other": True, "name": "Paracetamol"})
     art = _syn(note, [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
-    expect_strict = len(run) >= 3 or fu == eu  # same canonical unit; none on both sides is the identical text
+    # same canonical unit; none on both sides is the identical text; a newline in ETA's text may be a piece boundary, which ends the unit
+    # search (FIX3), so a field with no unit matches it (the ambiguity is settled toward eta)
+    expect_strict = len(run) >= 3 or fu == eu or (fu is None and "\n" in floors._same_norm(eta_part))
     return m, field, run, art, in_eta, expect_strict
 
 
@@ -134,6 +137,8 @@ def test_run_source_legacy_equivalence_and_strict_property(scope):
 
 @pytest.mark.parametrize("scope", ["global", "medicine"])
 def test_field_source_legacy_equivalence(scope):
+    """Property (FIX3): old eta <=> new eta, or new eta_coincidence, or the hit carries the wrote_nothing flag; every flagged hit has an
+    empty field and source pulse_catalogue or check; every non-empty-field path is unflagged and keeps the old eta/not-eta split."""
     rng = random.Random(7)
     seen = set()
     for _ in range(3000):
@@ -141,14 +146,19 @@ def test_field_source_legacy_equivalence(scope):
         if rng.random() < 0.15:
             m[field] = rng.choice(["", "after food", "twice daily", "5 mg and 500 mg", "12", f"{run} mg, {run} days"])
         prov = floors._prov_for(m, art)
-        new, old = floors._field_source(m, field, art, prov, scope), old_field_source(m, field, art, prov, scope)
-        assert (old == "eta") == (new in ("eta", "eta_coincidence")), (m, art["note_text"], old, new)
-        if old != "eta":
-            assert new == old
+        new, moved = floors._field_hit1(m, field, art, prov, scope)
+        old = old_field_source(m, field, art, prov, scope)
+        assert (old == "eta") == (new in ("eta", "eta_coincidence") or moved), (m, art["note_text"], old, new, moved)
+        if moved:
+            assert new in ("pulse_catalogue", "check") and not _s(m.get(field)), (m, new)
+        if _s(m.get(field)):
+            assert not moved
+            if old != "eta":
+                assert new == old
         if not _s(m.get(field)) or not _DIGITS.findall(floors._numnorm(_s(m[field]))):
-            assert new == old
+            assert new == old or moved
         seen.add(new)
-    assert {"eta", "eta_coincidence"} <= seen
+    assert {"eta", "eta_coincidence", "pulse_catalogue", "check"} <= seen
 
 
 def test_worst_priority():
@@ -255,8 +265,9 @@ def test_same_unit_under_any_rendering_and_different_unit_is_coincidence():
     for _ in range(4000):
         run = str(rng.randint(1, 99))
         fu, eu = rng.choice(CANON), rng.choice(CANON)
-        f, e = floors._same_norm(render(run, fu, rng) + " ;"), floors._same_norm(render(run, eu, rng) + " ;")
-        assert floors._strict_run(run, f, e) == (fu == eu), (f, e, fu, eu)
+        e_raw = render(run, eu, rng)
+        f, e = floors._same_norm(render(run, fu, rng) + " ;"), floors._same_norm(e_raw + " ;")
+        assert floors._strict_run(run, f, e) == (fu == eu or (fu is None and "\n" in e)), (f, e, fu, eu)
 
 
 def test_normaliser_is_symmetric():
@@ -284,3 +295,71 @@ def test_fix2_verdict_cases(scope):
     assert _src(strength="5 mg", note=para("(5) mg"), scope=scope) == ["eta"]
     assert _src(duration="5 mg", note=para("5 ml"), scope=scope) == ["eta_coincidence"]
     assert _src(duration="5", note=para("5 mg"), scope=scope) == ["eta_coincidence"]  # a missing unit on one side only
+
+
+# ---- FIX3: a unit never crosses a piece boundary; eta_wrote_nothing -------------------------------------------------
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_bare_number_at_end_of_a_piece_is_eta_under_any_following_piece(scope):
+    rng = random.Random(5)
+    words = ["Paracetamol", "mg", "daily", "after", "food", "Metformin", "tablet", "ml", "x", "review", "%"]
+    for _ in range(3000):
+        n = str(rng.randint(1, 99))
+        after = " ".join(rng.choice(words) for _ in range(rng.randint(1, 3)))
+        mid = rng.choice(["\n", "\n\n", " \n ", "\n" + NB])
+        # the piece ends in the bare number; what follows is a note line or a provenance text
+        if rng.random() < 0.5:
+            note, prov_text = f"Medication:\nParacetamol {n}{mid}{after}", "Paracetamol"
+        else:
+            note, prov_text = f"Medication:\nParacetamol {n}", "Paracetamol" + mid.strip() + after
+        art = _syn(note, [{"kind": "medicine", "name": "Paracetamol", "text": prov_text}])
+        m = {"name": "Paracetamol", "duration": n}
+        assert floors._run_source(m, "duration", n, art, floors._prov_for(m, art), scope) == "eta", (note, prov_text)
+        assert floors._field_source(m, "duration", art, floors._prov_for(m, art), scope) == "eta", (note, prov_text)
+
+
+def _wn(strength=None, note="Medication:\nParacetamol", scope="global", med=None, field="strength"):
+    """(source, wrote_nothing flag) of a judged hit on an empty `field` of Paracetamol; `med` can make it a catalogue row."""
+    m = {"name": "Paracetamol", **(med or {})}
+    if strength:
+        m[field] = strength
+    art = _syn(note, [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
+    return floors._field_hit(m, [field], art, floors._prov_for(m, art), scope)
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix3_fixed_cases(scope):
+    cat200 = {**CAT, "name": "Paracetamol 200 mg tab", "brand_name": "", "generic": ""}
+    cat_plain = {**CAT, "name": "Paracetamol", "brand_name": "Dolo", "generic": ""}
+    assert _wn(note="Medication:\nParacetamol", scope=scope, med=cat200) == ("pulse_catalogue", True)  # ETA wrote no strength, name shows one
+    assert _wn(note="Medication:\nParacetamol", scope=scope, med=cat_plain) == ("check", True)  # no digits shown
+    assert _wn(note="Medication:\nParacetamol", scope=scope) == ("check", True)  # not a catalogue row: nothing to read a strength from
+    assert _wn(note="Medication:\nParacetamol 5 mg", scope=scope, med=cat200) == ("eta", False)  # ETA wrote a strength
+    assert _wn(note="Medication:\nParacetamol x 7 days", scope=scope, med=cat200) == ("pulse_catalogue", True)  # days is not a strength
+    assert _wn(note="Medication:\nParacetamol x 7 days", scope=scope, med=cat_plain) == ("check", True)
+    assert _wn(note="Medication:\nParacetamol twice a day", scope=scope, med=cat_plain) == ("check", True)  # frequency
+    assert _wn(note="Medication:\nParacetamol 2 tablets", scope=scope, med=cat_plain) == ("check", True)  # form word
+    assert _wn(note="Medication:\nParacetamol 5%", scope=scope) == ("eta", False)  # % is a strength unit
+    assert _wn(note="Medication:\nParacetamol 5 puffs", scope=scope, med=cat200) == ("pulse_catalogue", True)
+    assert _wn(note="Medication:\nParacetamol 5 zorgs", scope=scope) == ("eta", False)  # an unknown unit counts as a strength
+    assert _wn(note="Medication:\nParacetamol 5\nmg", scope=scope) == ("check", True)  # a unit does not cross a line
+    assert _wn(note="Medication:\nParacetamol\nMetformin 500 mg", scope=scope) == ("check", True)  # another drug's line is not ETA's strength
+    # a hit that also names a non-empty field: the old rule's eta stays eta where another field is eta
+    m = {"name": "Paracetamol", "frequency": "5 mg"}
+    art = _syn("Medication:\nParacetamol 5 mg", [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
+    assert floors._field_hit(m, ["strength", "frequency"], art, floors._prov_for(m, art), scope) == ("eta", False)
+
+
+def test_a_hit_with_an_empty_field_and_a_pulse_extraction_field():
+    # old rule: worst(eta, pulse_extraction) = eta (the empty field was ETA's). Now the empty field is no ETA invention, so the hit is
+    # pulse_extraction, and it is flagged because the old rule counted it as eta.
+    m = {"name": "Paracetamol", "frequency": "9 days"}
+    art = _syn("Medication:\nParacetamol", [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
+    assert floors._field_hit(m, ["strength", "frequency"], art, floors._prov_for(m, art), "global") == ("pulse_extraction", True)
+
+
+def test_flag_is_counted_alongside_the_source_and_rolls_up():
+    rx = {"medicines": [{**CAT, "name": "Dolo", "strength": ""}]}
+    out = floors._judge_attribution([item(1, invented=["strength"])], floors.numbered_items(rx), _syn("Medication: Dolo"))
+    assert out["invented_fields"]["check"] == 1 and out["invented_fields"]["eta_wrote_nothing"] == 1 and out["invented_fields"]["eta"] == 0
+    assert floors._tally(["eta", "check"]) ["eta_wrote_nothing"] == 0
+    assert "eta_wrote_nothing" not in floors.SOURCES and floors._worst(["check", "pulse_catalogue"]) == "pulse_catalogue"

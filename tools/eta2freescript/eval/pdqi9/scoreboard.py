@@ -14,12 +14,13 @@ def _f(v, nd=2):
 
 
 def split_cell(t: dict) -> str:
-    """The source split of a floor row or the header: every source, then `eta_legacy` (= eta + eta_coincidence, labelled old rule).
-    A stored row from before eta_coincidence has no such key and reads it as 0. Pass/fail is on eta, never on eta_legacy."""
+    """The source split of a floor row or the header: every source, then the `eta_wrote_nothing` flag (not a source) and `eta_legacy`
+    (= eta + eta_coincidence + eta_wrote_nothing, labelled old rule). A stored row from before either key has none and reads it as 0. Pass/fail is on eta, never on eta_legacy."""
     coin = t.get("eta_coincidence") or 0
-    legacy = None if t.get("eta") is None else t["eta"] + coin
+    wrote = t.get("eta_wrote_nothing") or 0
+    legacy = None if t.get("eta") is None else t["eta"] + coin + wrote
     return (f"[eta {_f(t['eta'])}, eta_coincidence {_f(None if t.get('eta') is None else coin)}, pulse_catalogue {_f(t['pulse_catalogue'])}, "
-            f"pulse_extraction {_f(t['pulse_extraction'])}, check {_f(t['check'])}; eta_legacy (old rule) {_f(legacy)}]")
+            f"pulse_extraction {_f(t['pulse_extraction'])}, check {_f(t['check'])}; eta_wrote_nothing {_f(None if t.get('eta') is None else wrote)} (flag, not a source); eta_legacy (old rule) {_f(legacy)}]")
 
 
 def _combo_cell(d: dict, key: str) -> str:

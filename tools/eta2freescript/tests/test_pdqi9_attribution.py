@@ -452,10 +452,12 @@ def test_r2_4_number_words_are_normalised(fever):
     assert not floors._in_text("4 days", "three days")
 
 
-def test_r2_5_empty_judge_invented_field_is_eta_and_provenance_leaves_are_read(fever):
+def test_r2_5_empty_judge_invented_field_is_not_eta_when_eta_wrote_no_strength_and_provenance_leaves_are_read(fever):
     rx = {"medicines": [{"uid": "c", "name": "Dolo", "other": False, "strength": "", "frequency": "twice a day"}]}
     out = floors._judge_attribution([item(1, invented=["strength"])], floors.numbered_items(rx), _syn("Medication: Dolo"))
-    assert out["invented_fields"] == floors._tally(["eta"])
+    assert out["invented_fields"] == floors._tally(["check"], 1)  # FIX3: ETA wrote no strength, so no ETA invention (flag, not a source)
+    out = floors._judge_attribution([item(1, invented=["strength"])], floors.numbered_items(rx), _syn("Medication: Dolo 500 mg"))
+    assert out["invented_fields"] == floors._tally(["eta"])  # ETA wrote one
     # (6) every string leaf of the structured provenance objects
     p = {"text": "x", "diagnosis": {"icd10": {"code": "A90"}}, "follow_up": {"when": "next Tuesday"}, "investigation": {"panel": "CBC"},
          "procedure": {"site": "left knee"}, "medicine": {"strength": {"text": "650 mg"}}}
@@ -571,13 +573,15 @@ def test_header_carries_basis_and_both_eta_and_pulse_counts_whichever_basis():
 def test_scoreboard_split_prints_coincidence_and_legacy():
     from tools.eta2freescript.eval.pdqi9 import scoreboard
     t = {"eta": 4, "eta_coincidence": 3, "pulse_catalogue": 2, "pulse_extraction": 1, "check": 0}
-    assert scoreboard.split_cell(t) == ("[eta 4, eta_coincidence 3, pulse_catalogue 2, pulse_extraction 1, check 0; eta_legacy (old rule) 7]")
+    assert scoreboard.split_cell(t) == ("[eta 4, eta_coincidence 3, pulse_catalogue 2, pulse_extraction 1, check 0; eta_wrote_nothing 0 (flag, not a source); eta_legacy (old rule) 7]")
+    t["eta_wrote_nothing"] = 2
+    assert scoreboard.split_cell(t) == ("[eta 4, eta_coincidence 3, pulse_catalogue 2, pulse_extraction 1, check 0; eta_wrote_nothing 2 (flag, not a source); eta_legacy (old rule) 9]")
 
 
 def test_scoreboard_old_row_without_coincidence_reads_zero():
     from tools.eta2freescript.eval.pdqi9 import scoreboard
     t = {"eta": 5, "pulse_catalogue": 0, "pulse_extraction": 1, "check": 0}
-    assert scoreboard.split_cell(t) == "[eta 5, eta_coincidence 0, pulse_catalogue 0, pulse_extraction 1, check 0; eta_legacy (old rule) 5]"
+    assert scoreboard.split_cell(t) == "[eta 5, eta_coincidence 0, pulse_catalogue 0, pulse_extraction 1, check 0; eta_wrote_nothing 0 (flag, not a source); eta_legacy (old rule) 5]"
     assert "eta_legacy (old rule) -" in scoreboard.split_cell({**t, "eta": None})
 
 
@@ -588,6 +592,8 @@ def test_scoreboard_eta_legacy_is_eta_plus_coincidence_for_random_counts():
     rng = random.Random(1510)
     for _ in range(2000):
         e, c = rng.randint(0, 500), rng.randint(0, 500)
-        out = scoreboard.split_cell({"eta": e, "eta_coincidence": c, "pulse_catalogue": 0, "pulse_extraction": 0, "check": 0})
-        assert int(re.search(r"eta_legacy \(old rule\) (\d+)", out).group(1)) == e + c
+        w = rng.randint(0, 50)
+        out = scoreboard.split_cell({"eta": e, "eta_coincidence": c, "eta_wrote_nothing": w, "pulse_catalogue": 0, "pulse_extraction": 0, "check": 0})
+        assert int(re.search(r"eta_legacy \(old rule\) (\d+)", out).group(1)) == e + c + w
+        assert f"eta_wrote_nothing {w} " in out
         assert f"eta {e}," in out and f"eta_coincidence {c}," in out
