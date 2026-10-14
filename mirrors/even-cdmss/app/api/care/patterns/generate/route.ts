@@ -21,6 +21,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { requireAdmin } from '@/lib/admin-gate';
+import { cronAuthorized } from '@/lib/cron-auth';
 import { runPatternOperator } from '@/lib/lvp-operator';
 
 export const runtime = 'nodejs';
@@ -31,14 +32,9 @@ function enabled(): boolean {
   return process.env.CCB_ENABLED === '1' && process.env.LVC_PATTERNS_ENABLED === '1';
 }
 
-/** The cron arm: Vercel's own header, or a bearer/query CRON_SECRET. No cookie of any kind. */
+/** The cron arm: Authorization Bearer CRON_SECRET only. No cookie, no x-vercel-cron. */
 function cronAuthed(req: NextRequest): boolean {
-  if (req.headers.get('x-vercel-cron') !== null) return true;
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return false;
-  const auth = req.headers.get('authorization') || '';
-  if (auth === `Bearer ${secret}`) return true;
-  return req.nextUrl.searchParams.get('secret') === secret;
+  return cronAuthorized(req);
 }
 
 export async function POST(req: NextRequest) {
@@ -48,9 +44,7 @@ export async function POST(req: NextRequest) {
   if (auto) {
     if (!cronAuthed(req)) return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 });
   } else if (!(await isAdminUnlocked().catch(() => false))) {
-    // ⚠️ ADMIN ONLY (O13). requireAdmin fails OPEN when ADMIN_TOKEN is unset, which is the dev
-    // posture the rest of the admin surface already has; the flag above is what keeps this route
-    // closed in every environment that has not deliberately opened the shelf.
+    // Admin session or ADMIN_TOKEN. requireAdmin denies when ADMIN_TOKEN is unset.
     const denied = requireAdmin(req);
     if (denied) return denied;
   }

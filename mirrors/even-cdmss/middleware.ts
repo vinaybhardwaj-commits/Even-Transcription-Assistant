@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import { auditGateResponse } from './lib/audit-gate';
 
 // Host-based routing + surface tagging.
 //   medaudit.evenos.app  → ONLY the Clinical Pharmacist audit surface, and the
@@ -7,7 +8,13 @@ import { NextResponse, type NextRequest } from 'next/server';
 // We tag the request with `x-surface: medaudit` so the (server) root layout can
 // decide chrome by HOST — robust even for the bare domain, which is rewritten to
 // /audit (a path-based check missed that and leaked the CAT sidebar through).
+//
+// The tag is chrome only. It does not grant access. /audit and /api/audit require
+// a pharmacist or admin principal on every host, including cat.evenos.app.
 export function middleware(req: NextRequest) {
+  const auditDenied = auditGateResponse(req);
+  if (auditDenied) return auditDenied;
+
   const host = (req.headers.get('host') || '').toLowerCase();
   if (!host.startsWith('medaudit.')) return NextResponse.next();
 

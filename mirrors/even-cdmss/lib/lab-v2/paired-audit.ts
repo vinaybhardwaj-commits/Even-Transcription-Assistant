@@ -31,8 +31,7 @@ import { retrieve as productionRetrieve, type RetrieveOptions } from '../retriev
 import { governedLabChat } from '../trace';
 import { costMicrousd, isSupportedModel } from './pricing';
 import {
-  PAIRED_AUDIT_CONCURRENCY_MAX, PAIRED_MAX_ATTEMPTS, applyStructuredOverride, assessOverrideText,
-  diffFlags, externalRefJoin, pairedAuditConcurrency,
+  PAIRED_MAX_ATTEMPTS, applyStructuredOverride, assessOverrideText, diffFlags, externalRefJoin,
   flagAgreement, flagKey, hasStructuredContent, opdAuditPromptHash, overrideContentHash,
   overrideUnparsed, pairKeyFor, pairedEngineVersion, pairedLogRecord, parsePairedModel,
   projectAudit, publicAgreement, publicFinding, publicFlag, resolveOverride, sameFlagSet,
@@ -472,27 +471,23 @@ async function readLedger(db: Db, run: RunRow): Promise<Ledger> {
   };
 }
 
-async function markItem(db: Db, id: string, status: string, reason: string | null, resultId: string | null): Promise<boolean> {
-  const rows = await db.query<{ id: string }>(
+async function markItem(db: Db, id: string, status: string, reason: string | null, resultId: string | null) {
+  await db.query(
     `UPDATE lab_v2.paired_audit_items
         SET status = $2, skip_reason = $3, result_id = COALESCE($4, result_id), finished_at = now()
-      WHERE id = $1 AND status = 'running'
-      RETURNING id`,
+      WHERE id = $1`,
     [id, status, reason, resultId],
   );
-  return rows.length > 0;
 }
 
-async function markUnparsed(db: Db, id: string, linesTotal: number | null, linesParsed: number | null): Promise<boolean> {
-  const rows = await db.query<{ id: string }>(
+async function markUnparsed(db: Db, id: string, linesTotal: number | null, linesParsed: number | null) {
+  await db.query(
     `UPDATE lab_v2.paired_audit_items
         SET status = 'skipped', skip_reason = 'override_unparsed',
             parse_lines_total = $2, parse_lines_parsed = $3, finished_at = now()
-      WHERE id = $1 AND status = 'running'
-      RETURNING id`,
+      WHERE id = $1`,
     [id, linesTotal, linesParsed],
   );
-  return rows.length > 0;
 }
 
 /** A claim that the deadline stopped before the model call is not an attempt. */
@@ -556,61 +551,28 @@ async function closeRunIfDrained(db: Db, runId: string) {
   );
 }
 
-const ITEM_RETURNING = `i.id, i.run_id, i.uid, i.external_ref, i.arm, i.repeat_idx, i.status,
-                i.skip_reason, i.override_text, i.override_struct, i.override_hash, i.input_path, i.result_id`;
-
-/**
- * Claim up to `want` queued items of one run.
- *
- * The active-run lock is taken in id order, so two ticks cannot both count `running`
- * as zero and then both win. `FOR UPDATE SKIP LOCKED` on the items means a row another
- * tick already holds is skipped rather than claimed twice. The limit is the smaller of
- * the caller's want, the global in-flight ceiling, and the calls still unreserved
- * (`max_llm_calls - calls_used - rows already running for this run`).
- */
-export async function claimItems(db: Db, runId: string, want: number, concurrency: number): Promise<ItemRow[]> {
-  if (want <= 0 || concurrency <= 0) return [];
+async function claimUidGroup(db: Db, runId: string, limit: number): Promise<ItemRow[]> {
   return db.query<ItemRow>(
-    `WITH locked AS (
-       SELECT id, max_llm_calls, calls_used
-         FROM lab_v2.paired_audit_runs
-        WHERE status IN ('queued', 'running')
-        ORDER BY id
-        FOR UPDATE
-     ),
-     budget AS (
-       SELECT GREATEST(0, LEAST(
-         $3::int - (SELECT count(*)::int FROM lab_v2.paired_audit_items WHERE status = 'running'),
-         COALESCE((SELECT max_llm_calls - calls_used FROM locked WHERE id = $1), 0)
-           - (SELECT count(*)::int FROM lab_v2.paired_audit_items WHERE run_id = $1 AND status = 'running')
-       ))::int AS n
-     ),
-     picked AS (
-       SELECT i.id
-         FROM lab_v2.paired_audit_items i
-        WHERE i.run_id = $1
-          AND i.status = 'queued'
-          AND EXISTS (SELECT 1 FROM locked WHERE locked.id = i.run_id)
-          AND (SELECT n FROM budget) > 0
-        ORDER BY i.uid, i.repeat_idx, i.arm
-        LIMIT (SELECT LEAST($2::int, n) FROM budget)
+    `WITH picked AS (
+       SELECT id FROM lab_v2.paired_audit_items
+        WHERE run_id = $1 AND status = 'queued' AND uid = (
+          SELECT uid FROM lab_v2.paired_audit_items
+           WHERE run_id = $1 AND status = 'queued'
+           ORDER BY uid
+           LIMIT 1
+        )
+        ORDER BY repeat_idx, arm
+        LIMIT $2
         FOR UPDATE SKIP LOCKED
      )
      UPDATE lab_v2.paired_audit_items i
         SET status = 'running', claimed_at = now(), attempts = attempts + 1
        FROM picked
       WHERE i.id = picked.id AND i.status = 'queued'
-      RETURNING ${ITEM_RETURNING}`,
-    [runId, want, concurrency],
+      RETURNING i.id, i.run_id, i.uid, i.external_ref, i.arm, i.repeat_idx, i.status,
+                i.skip_reason, i.override_text, i.override_struct, i.override_hash, i.input_path, i.result_id`,
+    [runId, limit],
   );
-}
-
-async function countStatus(db: Db, runId: string, status: string): Promise<number> {
-  const [row] = await db.query<{ n: string }>(
-    `SELECT count(*)::text AS n FROM lab_v2.paired_audit_items WHERE run_id = $1 AND status = $2`,
-    [runId, status],
-  );
-  return Number(row?.n ?? 0);
 }
 
 async function reclaimStaleClaims(db: Db, olderThan: string): Promise<void> {
@@ -660,17 +622,9 @@ function asStruct(value: StructuredOverride | string | null): StructuredOverride
   return value;
 }
 
-interface ReadyItem {
-  item: ItemRow;
-  row: Record<string, unknown>;
-  lab: OpdLabDependencies;
-  ctx: PairedHashContext;
-}
-
 /**
- * Drain queued paired-audit work until the deadline, the call budget, or `maxGroups` claims.
- * Items already claimed run together, up to `concurrency` (default 4, max 6). A run with
- * a spend cap stays one-at-a-time so the charge sees the previous call's spend.
+ * Drain a bounded amount of queued paired-audit work. Safe to call from the lab-v2
+ * cron: it stops on the call budget, the spend budget, the group cap, or `deadlineAt`.
  * `deadlineAt` is an absolute timestamp. When the caller omits it, the bound is
  * `maxElapsedMs` from this function's start, which tests use.
  */
@@ -682,55 +636,19 @@ export async function pairedAuditTick(
     maxElapsedMs?: number;
     deadlineAt?: number;
     now?: () => number;
-    concurrency?: number;
+    groupSize?: number;
     reclaimAfter?: string;
   } = {},
 ): Promise<TickReport> {
-  const maxGroups = opts.maxGroups ?? 1_000;
-  const concurrency = Math.min(
-    PAIRED_AUDIT_CONCURRENCY_MAX,
-    Math.max(1, Math.floor(opts.concurrency ?? pairedAuditConcurrency())),
-  );
+  const maxGroups = opts.maxGroups ?? 4;
   const now = opts.now ?? Date.now;
   const started = now();
   const deadline = opts.deadlineAt ?? (started + (opts.maxElapsedMs ?? 240_000));
   const report: TickReport = { runs: 0, groups: 0, audited: 0, deduped: 0, skipped: 0, failed: 0, stopped: 0 };
   const seen = new Set<string>();
-  const jobs: Promise<void>[] = [];
-  let halt: { run: RunRow; reason: string } | null = null;
-  let outOfTime = false;
   await reclaimStaleClaims(db, opts.reclaimAfter ?? '20 minutes');
 
-  function track(work: Promise<void>): void {
-    const tracked = work.finally(() => {
-      const at = jobs.indexOf(tracked);
-      if (at >= 0) jobs.splice(at, 1);
-    });
-    jobs.push(tracked);
-  }
-
-  async function drainJobs(): Promise<void> {
-    if (jobs.length === 0) return;
-    await Promise.all([...jobs]);
-  }
-
-  async function settleHalt(): Promise<void> {
-    if (!halt) return;
-    const stopped = halt;
-    halt = null;
-    await drainJobs();
-    const latest = await readLedger(db, stopped.run);
-    report.stopped += await stopRemaining(db, stopped.run.id, stopped.reason);
-    log(deps, 'paired_audit_stop', {
-      run_id: stopped.run.id, reason: stopped.reason, calls: latest.calls_used, path: 'paired_audit_tick',
-    });
-  }
-
-  while (report.groups < maxGroups && now() < deadline && !outOfTime) {
-    if (halt) {
-      await settleHalt();
-      continue;
-    }
+  while (report.groups < maxGroups && now() < deadline) {
     const [run] = await db.query<RunRow>(
       `SELECT id, owner, experiment_label, engine_version, prompt_hash, model, provider, status,
               stop_reason, max_llm_calls, max_spend_microusd, calls_used, spend_microusd, unpriced, signed_repeats
@@ -756,244 +674,185 @@ export async function pairedAuditTick(
       log(deps, 'paired_audit_stop', { run_id: run.id, reason: 'engine_drift', path: 'paired_audit_tick' });
       continue;
     }
-    const width = run.max_spend_microusd != null ? 1 : concurrency;
-    if (jobs.length >= width) {
-      await Promise.race(jobs);
-      continue;
-    }
-    const ledgerNow = await readLedger(db, run);
-    if (budgetBlocked(ledgerNow)) {
-      if (jobs.length > 0) {
-        await Promise.race(jobs);
-        continue;
-      }
-      halt = { run, reason: 'budget_exhausted' };
-      continue;
-    }
-    const callRoom = num(run.max_llm_calls) - ledgerNow.calls_used - jobs.length;
-    if (callRoom <= 0) {
-      if (jobs.length === 0) {
-        halt = { run, reason: 'budget_exhausted' };
-        continue;
-      }
-      await Promise.race(jobs);
-      continue;
-    }
-    const items = await claimItems(db, run.id, Math.min(width - jobs.length, callRoom), concurrency);
+    const items = await claimUidGroup(db, run.id, opts.groupSize ?? 8);
     if (items.length === 0) {
-      const queued = await countStatus(db, run.id, 'queued');
-      if (queued === 0) {
-        if (jobs.length === 0) {
-          await closeRunIfDrained(db, run.id);
-          if (await countStatus(db, run.id, 'running') > 0) break;
-          continue;
-        }
-        await Promise.race(jobs);
-        continue;
-      }
-      if (jobs.length === 0) break;
-      await Promise.race(jobs);
-      continue;
-    }
-    if (now() >= deadline) {
-      for (const item of items) await releaseUnstarted(db, item.id);
-      outOfTime = true;
+      await closeRunIfDrained(db, run.id);
       break;
     }
     report.groups += 1;
-
-    const ready: ReadyItem[] = [];
-    const byUid = new Map<string, ItemRow[]>();
-    for (const item of items) {
-      const list = byUid.get(item.uid);
-      if (list) list.push(item);
-      else byUid.set(item.uid, [item]);
+    const uid = items[0].uid;
+    let resolved: ResolveResult;
+    try {
+      resolved = await enterOpdLabWriteFence(() => deps.resolveNote(uid));
+    } catch (e) {
+      const reason = reasonCode(e);
+      for (const item of items) await markItem(db, item.id, 'failed', reason, null);
+      report.failed += items.length;
+      log(deps, 'paired_audit_uid', { run_id: run.id, uid, status: 'failed', reason, path: 'paired_audit_tick' });
+      await closeRunIfDrained(db, run.id);
+      continue;
     }
-    for (const [uid, group] of byUid) {
-      let resolved: ResolveResult;
-      try {
-        resolved = await enterOpdLabWriteFence(() => deps.resolveNote(uid));
-      } catch (e) {
-        const reason = reasonCode(e);
-        for (const item of group) await markItem(db, item.id, 'failed', reason, null);
-        report.failed += group.length;
-        log(deps, 'paired_audit_uid', { run_id: run.id, uid, status: 'failed', reason, path: 'paired_audit_tick' });
-        continue;
-      }
-      if (resolved.status !== 'ok') {
-        const reason = resolved.status === 'not_found' ? 'uid_not_found' : 'uid_ambiguous';
-        for (const item of group) await markItem(db, item.id, 'skipped', reason, null);
-        report.skipped += group.length;
-        log(deps, 'paired_audit_uid', { run_id: run.id, uid, status: 'skipped', reason, path: 'paired_audit_tick' });
-        continue;
-      }
-      const join = externalRefJoin(resolved.row, group[0].external_ref);
-      if (!join.matches || group.some((item) => !externalRefJoin(resolved.row, item.external_ref).matches)) {
-        for (const item of group) await markItem(db, item.id, 'skipped', 'external_ref_mismatch', null);
-        report.skipped += group.length;
-        log(deps, 'paired_audit_uid', { run_id: run.id, uid, status: 'skipped', reason: 'external_ref_mismatch', path: 'paired_audit_tick' });
-        continue;
-      }
-      if (join.neitherKey) {
-        await db.query(
-          `UPDATE lab_v2.paired_audit_runs
-              SET external_ref_unkeyed = external_ref_unkeyed + 1
-            WHERE id = $1
-              AND NOT EXISTS (
-                SELECT 1 FROM lab_v2.paired_audit_items
-                 WHERE run_id = $1 AND uid = $2 AND status NOT IN ('queued', 'running')
-              )`,
-          [run.id, uid],
-        );
-      }
-      let lab: OpdLabDependencies;
-      try {
-        lab = await enterOpdLabWriteFence(() => deps.loadContext(resolved.row));
-      } catch (e) {
-        const reason = reasonCode(e);
-        for (const item of group) await markItem(db, item.id, 'failed', reason, null);
-        report.failed += group.length;
-        log(deps, 'paired_audit_uid', { run_id: run.id, uid, status: 'failed', reason, path: 'paired_audit_tick' });
-        continue;
-      }
-      const ctx = hashContext(lab);
-      for (const item of group) ready.push({ item, row: resolved.row, lab, ctx });
+    if (resolved.status !== 'ok') {
+      const reason = resolved.status === 'not_found' ? 'uid_not_found' : 'uid_ambiguous';
+      for (const item of items) await markItem(db, item.id, 'skipped', reason, null);
+      report.skipped += items.length;
+      log(deps, 'paired_audit_uid', { run_id: run.id, uid, status: 'skipped', reason, path: 'paired_audit_tick' });
+      await closeRunIfDrained(db, run.id);
+      continue;
     }
-
-    for (const work of ready) {
-      if (now() >= deadline) {
-        await releaseUnstarted(db, work.item.id);
-        outOfTime = true;
-        continue;
-      }
-      track(auditClaimed(db, deps, run, model, work, report, (reason) => {
-        halt = { run, reason };
-      }));
+    const join = externalRefJoin(resolved.row, items[0].external_ref);
+    if (!join.matches || items.some((item) => !externalRefJoin(resolved.row, item.external_ref).matches)) {
+      for (const item of items) await markItem(db, item.id, 'skipped', 'external_ref_mismatch', null);
+      report.skipped += items.length;
+      log(deps, 'paired_audit_uid', { run_id: run.id, uid, status: 'skipped', reason: 'external_ref_mismatch', path: 'paired_audit_tick' });
+      await closeRunIfDrained(db, run.id);
+      continue;
     }
-  }
-  await drainJobs();
-  if (halt) await settleHalt();
-  return report;
-}
-
-type ClaimedModel = { provider: 'bedrock' | 'openrouter' | 'ollama' | 'vertex'; model: string };
-
-async function auditClaimed(
-  db: Db,
-  deps: PairedAuditDeps,
-  run: RunRow,
-  model: ClaimedModel,
-  work: ReadyItem,
-  report: TickReport,
-  onHalt: (reason: string) => void,
-): Promise<void> {
-  const item = work.item;
-  let ledger = await readLedger(db, run);
-  const blocked = budgetBlocked(ledger);
-  if (blocked) {
-    if (await markItem(db, item.id, 'stopped', blocked, null)) report.stopped += 1;
-    onHalt(blocked);
-    return;
-  }
-  if (item.arm !== 'signed') {
-    const structured = asStruct(item.override_struct);
-    const coverage = item.input_path === 'text' ? assessOverrideText(item.override_text ?? '') : null;
-    const bad = coverage ? !coverage.ok : overrideUnparsed(structured);
-    if (bad) {
-      if (await markUnparsed(db, item.id, coverage?.linesTotal ?? null, coverage?.linesParsed ?? null)) {
-        report.skipped += 1;
-      }
-      log(deps, 'paired_audit_item', {
-        run_id: run.id, uid: item.uid, arm: item.arm, repeat_idx: item.repeat_idx,
-        status: 'skipped', reason: 'override_unparsed', path: 'paired_audit_tick',
-      });
-      return;
-    }
-  }
-  const contentHash = item.arm === 'signed'
-    ? signedContentHash(work.row, work.ctx)
-    : overrideContentHash(
-      item.input_path === 'text' ? 'text' : 'structured',
-      asStruct(item.override_struct),
-      item.input_path === 'text' ? item.override_text : null,
-      work.row,
-      work.ctx,
-    );
-  const prior = await db.query<{ id: string }>(
-    `SELECT id FROM lab_v2.paired_audit_results
-      WHERE uid = $1 AND arm = $2 AND engine_version = $3 AND prompt_hash = $4
-        AND model = $5 AND override_hash = $6 AND repeat_idx = $7`,
-    [item.uid, item.arm, run.engine_version, run.prompt_hash, run.model, contentHash, item.repeat_idx],
-  );
-  if (prior[0]) {
-    if (await markItem(db, item.id, 'deduped', null, prior[0].id)) report.deduped += 1;
-    log(deps, 'paired_audit_item', { run_id: run.id, uid: item.uid, arm: item.arm, repeat_idx: item.repeat_idx, status: 'deduped', path: 'paired_audit_tick' });
-    return;
-  }
-  const row = item.arm === 'signed'
-    ? work.row
-    : applyStructuredOverride(work.row, asStruct(item.override_struct));
-  let chargedHere = 0;
-  try {
-    const outcome = await deps.audit(row, work.lab, async () => {
-      await chargeCall(db, run.id);
-      chargedHere += 1;
-    }, model);
-    await persistSpend(db, run.id, outcome.spend_microusd);
-    ledger = await readLedger(db, run);
-    const projected = projectAudit(outcome.audit, item.arm);
-    if (projected.llm_leg_failed) {
-      // A swallowed model error is not a result. Leaving it out of the dedupe table
-      // is what lets a later submit retry it. The calls already counted stay counted.
-      if (await markItem(db, item.id, 'failed', 'engine_error', null)) report.failed += 1;
-      log(deps, 'paired_audit_item', {
-        run_id: run.id, uid: item.uid, arm: item.arm, repeat_idx: item.repeat_idx,
-        status: 'failed', reason: 'engine_error', calls: ledger.calls_used, path: 'paired_audit_tick',
-      });
-    } else {
-      const clinician = item.arm === 'signed'
-        ? (rowToOpdCase(work.row).keys.doctorUid ?? null)
-        : null;
-      const resultId = randomUUID();
-      const inputPath = item.arm === 'signed' ? 'signed' : item.input_path;
-      const inserted = await db.query<{ id: string }>(
-        `INSERT INTO lab_v2.paired_audit_results
-          (id, uid, arm, engine_version, prompt_hash, model, override_hash, input_path,
-           repeat_idx, clinician_uid, result, calls, spend_microusd)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
-         ON CONFLICT (uid, arm, engine_version, prompt_hash, model, override_hash, repeat_idx) DO NOTHING
-         RETURNING id`,
-        [resultId, item.uid, item.arm, run.engine_version, run.prompt_hash, run.model, contentHash,
-          inputPath, item.repeat_idx, clinician, JSON.stringify(projected),
-          chargedHere, outcome.spend_microusd ?? 0],
+    if (join.neitherKey) {
+      await db.query(
+        `UPDATE lab_v2.paired_audit_runs SET external_ref_unkeyed = external_ref_unkeyed + 1 WHERE id = $1`,
+        [run.id],
       );
-      const storedId = inserted[0]?.id ?? (await db.query<{ id: string }>(
+    }
+
+    let lab: OpdLabDependencies;
+    try {
+      lab = await enterOpdLabWriteFence(() => deps.loadContext(resolved.row));
+    } catch (e) {
+      const reason = reasonCode(e);
+      for (const item of items) await markItem(db, item.id, 'failed', reason, null);
+      report.failed += items.length;
+      log(deps, 'paired_audit_uid', { run_id: run.id, uid, status: 'failed', reason, path: 'paired_audit_tick' });
+      await closeRunIfDrained(db, run.id);
+      continue;
+    }
+
+    let halt: string | null = null;
+    let outOfTime = false;
+    const ctx = hashContext(lab);
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index];
+      if (now() >= deadline) {
+        for (const pending of items.slice(index)) await releaseUnstarted(db, pending.id);
+        outOfTime = true;
+        break;
+      }
+      let ledger = await readLedger(db, run);
+      const blocked = budgetBlocked(ledger);
+      if (blocked) {
+        await markItem(db, item.id, 'stopped', blocked, null);
+        report.stopped += 1;
+        halt = blocked;
+        continue;
+      }
+      if (item.arm !== 'signed') {
+        const structured = asStruct(item.override_struct);
+        const coverage = item.input_path === 'text' ? assessOverrideText(item.override_text ?? '') : null;
+        const bad = coverage ? !coverage.ok : overrideUnparsed(structured);
+        if (bad) {
+          await markUnparsed(db, item.id, coverage?.linesTotal ?? null, coverage?.linesParsed ?? null);
+          report.skipped += 1;
+          log(deps, 'paired_audit_item', {
+            run_id: run.id, uid: item.uid, arm: item.arm, repeat_idx: item.repeat_idx,
+            status: 'skipped', reason: 'override_unparsed', path: 'paired_audit_tick',
+          });
+          continue;
+        }
+      }
+      const contentHash = item.arm === 'signed'
+        ? signedContentHash(resolved.row, ctx)
+        : overrideContentHash(
+          item.input_path === 'text' ? 'text' : 'structured',
+          asStruct(item.override_struct),
+          item.input_path === 'text' ? item.override_text : null,
+          resolved.row,
+          ctx,
+        );
+      const prior = await db.query<{ id: string }>(
         `SELECT id FROM lab_v2.paired_audit_results
           WHERE uid = $1 AND arm = $2 AND engine_version = $3 AND prompt_hash = $4
             AND model = $5 AND override_hash = $6 AND repeat_idx = $7`,
         [item.uid, item.arm, run.engine_version, run.prompt_hash, run.model, contentHash, item.repeat_idx],
-      ))[0]?.id;
-      const status = inserted[0] ? 'succeeded' : 'deduped';
-      if (await markItem(db, item.id, status, null, storedId ?? null)) {
-        if (inserted[0]) report.audited += 1;
-        else report.deduped += 1;
+      );
+      if (prior[0]) {
+        await markItem(db, item.id, 'deduped', null, prior[0].id);
+        report.deduped += 1;
+        log(deps, 'paired_audit_item', { run_id: run.id, uid: item.uid, arm: item.arm, repeat_idx: item.repeat_idx, status: 'deduped', path: 'paired_audit_tick' });
+        continue;
       }
-      log(deps, 'paired_audit_item', {
-        run_id: run.id, uid: item.uid, arm: item.arm, repeat_idx: item.repeat_idx,
-        status, calls: ledger.calls_used, path: 'paired_audit_tick',
-      });
+      const row = item.arm === 'signed'
+        ? resolved.row
+        : applyStructuredOverride(resolved.row, asStruct(item.override_struct));
+      const callsBefore = ledger.calls_used;
+      try {
+        const outcome = await deps.audit(row, lab, async () => {
+          ledger.calls_used = await chargeCall(db, run.id);
+        }, model);
+        await persistSpend(db, run.id, outcome.spend_microusd);
+        ledger = await readLedger(db, run);
+        const projected = projectAudit(outcome.audit, item.arm);
+        if (projected.llm_leg_failed) {
+          // A swallowed model error is not a result. Leaving it out of the dedupe table
+          // is what lets a later submit retry it. The calls already counted stay counted.
+          await markItem(db, item.id, 'failed', 'engine_error', null);
+          report.failed += 1;
+          log(deps, 'paired_audit_item', {
+            run_id: run.id, uid: item.uid, arm: item.arm, repeat_idx: item.repeat_idx,
+            status: 'failed', reason: 'engine_error', calls: ledger.calls_used, path: 'paired_audit_tick',
+          });
+        } else {
+          const clinician = item.arm === 'signed'
+            ? (rowToOpdCase(resolved.row).keys.doctorUid ?? null)
+            : null;
+          const resultId = randomUUID();
+          const inputPath = item.arm === 'signed' ? 'signed' : item.input_path;
+          const inserted = await db.query<{ id: string }>(
+            `INSERT INTO lab_v2.paired_audit_results
+              (id, uid, arm, engine_version, prompt_hash, model, override_hash, input_path,
+               repeat_idx, clinician_uid, result, calls, spend_microusd)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
+             ON CONFLICT (uid, arm, engine_version, prompt_hash, model, override_hash, repeat_idx) DO NOTHING
+             RETURNING id`,
+            [resultId, item.uid, item.arm, run.engine_version, run.prompt_hash, run.model, contentHash,
+              inputPath, item.repeat_idx, clinician, JSON.stringify(projected),
+              Math.max(0, ledger.calls_used - callsBefore), outcome.spend_microusd ?? 0],
+          );
+          const storedId = inserted[0]?.id ?? (await db.query<{ id: string }>(
+            `SELECT id FROM lab_v2.paired_audit_results
+              WHERE uid = $1 AND arm = $2 AND engine_version = $3 AND prompt_hash = $4
+                AND model = $5 AND override_hash = $6 AND repeat_idx = $7`,
+            [item.uid, item.arm, run.engine_version, run.prompt_hash, run.model, contentHash, item.repeat_idx],
+          ))[0]?.id;
+          await markItem(db, item.id, inserted[0] ? 'succeeded' : 'deduped', null, storedId ?? null);
+          if (inserted[0]) report.audited += 1;
+          else report.deduped += 1;
+          log(deps, 'paired_audit_item', {
+            run_id: run.id, uid: item.uid, arm: item.arm, repeat_idx: item.repeat_idx,
+            status: inserted[0] ? 'succeeded' : 'deduped', calls: ledger.calls_used, path: 'paired_audit_tick',
+          });
+        }
+        if (budgetBlocked(ledger)) halt = 'budget_exhausted';
+      } catch (e) {
+        const reason = reasonCode(e);
+        const status = reason === 'budget_exhausted' || reason === 'production_write_refused' ? 'stopped' : 'failed';
+        await markItem(db, item.id, status, reason, null);
+        if (status === 'stopped') report.stopped += 1;
+        else report.failed += 1;
+        log(deps, 'paired_audit_item', { run_id: run.id, uid: item.uid, arm: item.arm, repeat_idx: item.repeat_idx, status, reason, path: 'paired_audit_tick' });
+        if (reason === 'budget_exhausted' || reason === 'production_write_refused') halt = reason;
+      }
+      if (halt) break;
     }
-    if (budgetBlocked(ledger)) onHalt('budget_exhausted');
-  } catch (e) {
-    const reason = reasonCode(e);
-    const status = reason === 'budget_exhausted' || reason === 'production_write_refused' ? 'stopped' : 'failed';
-    if (await markItem(db, item.id, status, reason, null)) {
-      if (status === 'stopped') report.stopped += 1;
-      else report.failed += 1;
+    if (outOfTime) break;
+    if (halt) {
+      const latest = await readLedger(db, run);
+      report.stopped += await stopRemaining(db, run.id, halt);
+      log(deps, 'paired_audit_stop', { run_id: run.id, reason: halt, calls: latest.calls_used, path: 'paired_audit_tick' });
+    } else {
+      await closeRunIfDrained(db, run.id);
     }
-    log(deps, 'paired_audit_item', { run_id: run.id, uid: item.uid, arm: item.arm, repeat_idx: item.repeat_idx, status, reason, path: 'paired_audit_tick' });
-    if (reason === 'budget_exhausted' || reason === 'production_write_refused') onHalt(reason);
   }
+  return report;
 }
 
 export async function pairedAuditStatus(db: Db, runId: string): Promise<{

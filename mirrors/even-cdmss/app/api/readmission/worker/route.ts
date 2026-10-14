@@ -12,6 +12,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { runDetectionSweep, runReadmissionAudit, readmitAuditModel } from '@/lib/readmission/run';
 import { pendingFindings, findingCounts, READMIT_ENGINE_VERSION, AUDITABLE_LANES } from '@/lib/readmission/store';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 /**
  * Behaviour per tick:
@@ -37,15 +38,10 @@ import { pendingFindings, findingCounts, READMIT_ENGINE_VERSION, AUDITABLE_LANES
  * gives the day-scoped behaviour when wanted.
  */
 
-// Execution guard (spends LLM compute) — byte-for-byte the IPD worker's:
-// Vercel Cron (un-spoofable x-vercel-cron), Bearer CRON_SECRET / ?secret=, or admin session.
+// Execution guard (spends LLM compute) — same principals as the IPD worker:
+// Authorization Bearer CRON_SECRET, or an admin session.
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

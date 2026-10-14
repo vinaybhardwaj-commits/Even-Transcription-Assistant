@@ -31,6 +31,7 @@ import { OPD_ENGINE_VERSION } from '@/lib/opd-note-audit-core';
 import { opdCandidateProbeDone, opdSweepDays } from '@/lib/opd-audit-worker-core';
 import { MINI_MODEL } from '@/lib/llm';
 import { providerSwitchEnabled, resolveWorkerProvider, canServe, type LabProvider } from '@/lib/lab-provider-core';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 // Fix A (intake eligibility): house-account doctor_uids excluded from the audit corpus. Lives in
 // app_settings audit_intake_doctor_exclusions (JSON uid array); fail-safe → this seeded constant (so an
@@ -57,16 +58,11 @@ async function forwardCutoff(): Promise<string | null> {
   return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
 }
 
-// Execution guard (spends LLM compute): Vercel Cron (un-spoofable x-vercel-cron), a manual
-// trigger carrying Bearer CRON_SECRET / ?secret=CRON_SECRET, OR a logged-in admin session
-// (so the dashboard's one-click "Re-audit" button works without handling any secret).
+// Execution guard (spends LLM compute): Authorization Bearer CRON_SECRET (what Vercel Cron
+// sends when CRON_SECRET is set), OR a logged-in admin session (the dashboard re-audit
+// button). x-vercel-cron alone is not a credential.
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

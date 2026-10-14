@@ -19,7 +19,7 @@ export const maxDuration = 300;
  * the evidence the live row saw; template_coverage on each snapshot is what lets a reader
  * check before treating two verdicts as one stability pair.
  *
- * Auth: Vercel cron header / Bearer|?secret=CRON_SECRET / admin session — the refresh
+ * Auth: Authorization Bearer CRON_SECRET, or an admin session — the refresh
  * runner's block, copied.
  *   GET  ?dedup_key=X                                  → the per-case version list (fail-safe:
  *                                                        DB error = empty list + error line, never a 500)
@@ -41,17 +41,13 @@ import { costUsd } from '@/lib/llm-cost-core';
 import { assembleForRow, runReconSequence, type PassFn } from '@/lib/readmission/run';
 import { auditedRowForNarrative, READMIT_ENGINE_VERSION } from '@/lib/readmission/store';
 import { insertSnapshot, listVersionsForCase } from '@/lib/readmission/versions-store';
+import { cronAuthorized } from '@/lib/cron-auth';
 import {
   buildReplaySnapshot, isDedupKeyShape, parseReplayModel, validateRuns, REPLAY_EVIDENCE_NOTE,
 } from '@/lib/readmission-versions-core';
 
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

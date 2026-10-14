@@ -39,7 +39,7 @@ export const maxDuration = 300;
  * The yield-to-lab-batch check is GONE from this path: it existed to protect the one Mac-mini, which
  * a Bedrock run does not touch.
  *
- * Auth: Vercel cron header / Bearer|?secret=CRON_SECRET / admin session — unchanged.
+ * Auth: Authorization Bearer CRON_SECRET, or an admin session.
  *   GET  ?auto=1        → work the active run (the cron tick); with NO active OPD run, the tick
  *                          works the readmission-narrative worker's run instead (R4-8, 18 Aug)
  *   GET  (no args)      → status
@@ -67,16 +67,12 @@ import {
 } from '@/lib/backfill-runs';
 import { narrativeTick } from '@/lib/readmission/narrative-backfill';
 import { refreshTick } from '@/lib/readmission/refresh';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 const WORKER = 'opd' as const;
 
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

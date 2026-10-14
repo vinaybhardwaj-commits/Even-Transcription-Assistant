@@ -58,6 +58,7 @@ import {
   auditedEncounterIds, skipIsRetryable, skipRows, inProgressIsStale,
 } from '@/lib/ipd-episode/store';
 import { runEpisodeAudit, runEpisodeBatch, MAX_CANDIDATES_EXAMINED } from '@/lib/ipd-episode/run';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 /**
  * The soft lock. `app_settings` key `ipd_episode_lock`, written at the start of a tick and released
@@ -118,15 +119,10 @@ function lockHeld(lockTs: string | null, now: Date = new Date(), ttlMs: number =
   return Number.isFinite(t) && now.getTime() - t < ttlMs;
 }
 
-/** Execution guard (this route spends LLM compute): Vercel Cron, Bearer/query CRON_SECRET, or a
+/** Execution guard (this route spends LLM compute): Bearer CRON_SECRET, or a
  *  logged-in admin session. Byte-identical in shape to the IPD discharge worker's. */
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

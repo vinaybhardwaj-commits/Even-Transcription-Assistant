@@ -8,10 +8,11 @@ export const maxDuration = 300;
  *   · POST         → create/replace a job { experiment, uids[] | cohort_sql, n?, window?, kind? }
  *   · GET          → status + progress
  *   · GET ?auto=1  → the cron tick (drain up to n; yields to the prod mini-backfill)
- * Auth: Vercel cron header / CRON_SECRET for the tick; ADMIN_TOKEN / admin session for POST+status.
+ * Auth: Authorization Bearer CRON_SECRET for the tick; ADMIN_TOKEN / admin session for POST+status.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
+import { cronAuthorized } from '@/lib/cron-auth';
 import { requireAdmin } from '@/lib/admin-gate';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { guardReadOnlySql } from '@/lib/sql-guard-core';
@@ -23,13 +24,8 @@ import { readBatchState, batchProgress, batchTick } from '@/lib/lab-batch';
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  const tokenOk = requireAdmin(req) === null; // ADMIN_TOKEN (or dev-mode when unset)
-  if (isCron || bearerOk || secretOk || tokenOk) return true;
+  if (cronAuthorized(req)) return true;
+  if (requireAdmin(req) === null) return true; // Bearer or ?token= ADMIN_TOKEN
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

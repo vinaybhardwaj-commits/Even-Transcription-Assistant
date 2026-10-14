@@ -15,7 +15,7 @@ export const maxDuration = 300;
  * untouched. Carried S2 rules: n ≤ 2 (clamped), progress surface = the GET status payload
  * (pace / ETA / stall / backlog), stop → wait one tick → confirm.
  *
- * Auth: Vercel cron header / Bearer|?secret=CRON_SECRET / admin session — the OPD runner's.
+ * Auth: Authorization Bearer CRON_SECRET, or an admin session — the OPD runner's.
  *   GET  ?auto=1                       → work the active run (one tick)
  *   GET                                → status (the progress surface)
  *   POST {action:'start_run', model:'bedrock:global.anthropic.claude-opus-4-6-v1', dayFrom, dayTo, nPerTick}
@@ -26,14 +26,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { logTick } from '@/lib/mini-backfill';
 import { narrativeTick, narrativeStatus, startNarrativeRun, controlNarrativeRun, narrateOneByKey } from '@/lib/readmission/narrative-backfill';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

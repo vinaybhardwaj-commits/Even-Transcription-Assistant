@@ -3,6 +3,7 @@ export const runtime = 'nodejs';
 export const maxDuration = 300;
 
 import { NextRequest, NextResponse } from 'next/server';
+import { cronAuthorized } from '@/lib/cron-auth';
 import { sql } from '@/lib/db';
 import { fetchOpdNotesByUids } from '@/lib/metabase';
 import { rowToOpdCase } from '@/lib/opd-ingest-core';
@@ -12,12 +13,7 @@ const APP = process.env.APP_SOURCE || 'standalone';
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 
 function authed(req: NextRequest): boolean {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  return isCron || bearerOk || secretOk;
+  return cronAuthorized(req);
 }
 
 // No-LLM backfill of `missing_fields` (+ refreshed completeness) for already-audited rows.

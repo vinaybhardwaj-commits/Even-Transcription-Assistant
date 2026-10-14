@@ -83,6 +83,10 @@ export const MAP_MODULES: MapModule[] = [
     "plane": "unregistered"
   },
   {
+    "id": "audit-gate",
+    "plane": "unregistered"
+  },
+  {
     "id": "audit-suppression-core",
     "plane": "unregistered"
   },
@@ -285,6 +289,10 @@ export const MAP_MODULES: MapModule[] = [
   {
     "id": "corpus-eval",
     "plane": "advisory"
+  },
+  {
+    "id": "cron-auth",
+    "plane": "unregistered"
   },
   {
     "id": "curator",
@@ -895,6 +903,10 @@ export const MAP_MODULES: MapModule[] = [
     "plane": "unregistered"
   },
   {
+    "id": "public-routes",
+    "plane": "unregistered"
+  },
+  {
     "id": "pubmed",
     "plane": "unregistered"
   },
@@ -1015,6 +1027,10 @@ export const MAP_MODULES: MapModule[] = [
     "plane": "pure-core"
   },
   {
+    "id": "secret-equal",
+    "plane": "unregistered"
+  },
+  {
     "id": "severity-tier-core",
     "plane": "unregistered"
   },
@@ -1084,6 +1100,11 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "adjudication-ledger",
     "to": "db",
+    "kind": "value"
+  },
+  {
+    "from": "admin-gate",
+    "to": "admin-cookie",
     "kind": "value"
   },
   {
@@ -1684,6 +1705,11 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "app/api",
     "to": "concordance-store",
+    "kind": "value"
+  },
+  {
+    "from": "app/api",
+    "to": "cron-auth",
     "kind": "value"
   },
   {
@@ -2562,6 +2588,16 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
+    "from": "audit-gate",
+    "to": "public-routes",
+    "kind": "value"
+  },
+  {
+    "from": "audit-gate",
+    "to": "secret-equal",
+    "kind": "value"
+  },
+  {
     "from": "audit-suppression-store",
     "to": "audit-suppression-core",
     "kind": "value"
@@ -3124,6 +3160,11 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "corpus-eval",
     "to": "trace",
+    "kind": "value"
+  },
+  {
+    "from": "cron-auth",
+    "to": "secret-equal",
     "kind": "value"
   },
   {
@@ -5139,6 +5180,11 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "patient-summary",
     "to": "trace",
+    "kind": "value"
+  },
+  {
+    "from": "pharmacist-cookie",
+    "to": "admin-cookie",
     "kind": "value"
   },
   {

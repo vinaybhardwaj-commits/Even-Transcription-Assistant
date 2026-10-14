@@ -4,17 +4,13 @@ export const maxDuration = 300;
 
 import { NextRequest, NextResponse } from 'next/server';
 import { runHarvest } from '@/lib/harvest';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 // Daily literature harvest. Guarded operationally (this spends Ollama compute +
-// NCBI quota): runs only for Vercel Cron (un-spoofable x-vercel-cron header) or
-// a manual trigger carrying ?secret=CRON_SECRET. This is execution protection,
-// not a user gate — the admin VIEW stays open per spec.
+// NCBI quota): Authorization Bearer CRON_SECRET only. Vercel Cron sends that
+// header when CRON_SECRET is set. This is execution protection, not a user gate.
 export async function GET(req: NextRequest) {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const ok = isCron || bearerOk || (!!process.env.CRON_SECRET && secret === process.env.CRON_SECRET);
+  const ok = cronAuthorized(req);
   if (!ok) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   if (!process.env.NCBI_API_KEY) {
     // not fatal (anon 3 req/s still works) — just a heads-up in the response

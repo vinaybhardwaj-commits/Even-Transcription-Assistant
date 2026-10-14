@@ -4,13 +4,14 @@
  * findings, newest-first, epoch-aware. Additive + score-invariant + fail-safe. Always returns 200 with
  * {status, processed, citations_added, epoch}.
  *
- * FLAGGED OFF: needs CCB_ENABLED=1 AND LVC_GROUND_ENABLED=1. Auth: Vercel Cron (x-vercel-cron) / Bearer
- * CRON_SECRET / ?secret= / care-unlock / admin — identical shape to the generate route.
+ * FLAGGED OFF: needs CCB_ENABLED=1 AND LVC_GROUND_ENABLED=1. Auth: Authorization Bearer CRON_SECRET,
+ * a care-unlock cookie, or an admin session — identical shape to the generate route.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { isCareUnlocked } from '@/lib/care-cookie';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { runGroundTick } from '@/lib/even-ground';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -19,12 +20,7 @@ export const maxDuration = 300;
 function enabled(): boolean { return process.env.CCB_ENABLED === '1' && process.env.LVC_GROUND_ENABLED === '1'; }
 
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { if (await isCareUnlocked()) return true; } catch { /* fall through */ }
   try { return await isAdminUnlocked(); } catch { return false; }
 }

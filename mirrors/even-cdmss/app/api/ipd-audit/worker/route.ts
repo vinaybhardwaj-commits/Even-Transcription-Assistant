@@ -33,6 +33,7 @@ import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { getSettings, setSetting } from '@/lib/mini-backfill';
 import { MINI_MODEL } from '@/lib/llm';
 import { providerSwitchEnabled, resolveWorkerProvider, canServe } from '@/lib/lab-provider-core';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 /**
  * S5 — the daily IPD discharge-summary worker (Gemini, K=1). Mirrors /api/opd-audit/worker:
@@ -60,15 +61,10 @@ async function forwardCutoff(): Promise<string | null> {
   return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
 }
 
-// Execution guard (spends LLM compute): Vercel Cron (un-spoofable x-vercel-cron), a manual
-// trigger carrying Bearer CRON_SECRET / ?secret=CRON_SECRET, or a logged-in admin session.
+// Execution guard (spends LLM compute): Authorization Bearer CRON_SECRET, or a logged-in
+// admin session. x-vercel-cron alone is not a credential.
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

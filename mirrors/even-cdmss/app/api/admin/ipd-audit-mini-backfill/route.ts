@@ -10,6 +10,7 @@ import { auditedDocIdsAnyVersion, auditedCountAnyVersion, IPD_MINI_ENGINE_VERSIO
 import { runIpdAudit } from '@/lib/ipd-audit/run';
 import { readState, miniAuditedCount, windowOpen, lockHeld, setSetting, IB_KEYS, IB_LOCK_TTL_MS } from '@/lib/ipd-audit/backfill';
 import { MINI_MODEL } from '@/lib/llm';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 /**
  * ⚠️ RETIRED FOR QWEN/MINI (V, 17-Jul-2026) — default-off, NO cron drives it. The Mini premise
@@ -33,12 +34,7 @@ import { MINI_MODEL } from '@/lib/llm';
  */
 
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   const denied = requireAdmin(req);
   if (!denied) return true;
   try { return await isAdminUnlocked(); } catch { return false; }

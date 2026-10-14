@@ -1,4 +1,5 @@
 import { computeFunnel, type FunnelState } from '@/lib/ccb-funnel';
+import { isAdminUnlocked, adminTokenConfigured } from '@/lib/admin-cookie';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -23,6 +24,20 @@ function Metric({ label, value, sub, tone = 'neutral' }: { label: string; value:
 }
 
 export default async function CcbFunnel() {
+  if (!(await isAdminUnlocked())) {
+    return (
+      <div className="mx-auto max-w-3xl px-5 py-10 text-[13px] text-slate-600">
+        <h1 className="text-[20px] font-semibold text-slate-900">Care Brief — conversion funnel</h1>
+        <p className="mt-2">This page shows member-level conversion. It stays locked until an admin session is open.</p>
+        {adminTokenConfigured() ? (
+          <form method="POST" action="/api/admin/unlock" className="mt-4 flex max-w-sm gap-2">
+            <input type="password" name="token" autoFocus className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="Admin token" />
+            <button type="submit" className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white">Unlock</button>
+          </form>
+        ) : <p className="mt-3 text-red-700">Set ADMIN_TOKEN to enable admin access.</p>}
+      </div>
+    );
+  }
   if (process.env.CCB_ENABLED !== '1') {
     return <div className="mx-auto max-w-3xl px-5 py-10 text-[13px] text-slate-500">Care Conversation Brief is not enabled.</div>;
   }

@@ -6,16 +6,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { mineAndSaveProposals } from '@/lib/learning';
 import { DEFAULT_THRESHOLDS, DEFAULT_GAP_THRESHOLDS } from '@/lib/learning-core';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 // Run the learning miner (LL.2-v1): scan recent audits → upsert candidate rule proposals into
 // the review queue. Spends NO LLM (deterministic clustering) and writes ONLY to
-// learning_proposals — never to lvc_recommendations or the live engine. Auth: Vercel Cron
-// header, OR Bearer/?secret=CRON_SECRET, OR a logged-in admin session.
+// learning_proposals — never to lvc_recommendations or the live engine. Auth: Authorization
+// Bearer CRON_SECRET, or a logged-in admin session.
 async function authed(req: NextRequest): Promise<boolean> {
-  if (req.headers.get('x-vercel-cron') !== null) return true;
-  const auth = req.headers.get('authorization') || '';
-  const secret = req.nextUrl.searchParams.get('secret');
-  if (process.env.CRON_SECRET && (auth === `Bearer ${process.env.CRON_SECRET}` || secret === process.env.CRON_SECRET)) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

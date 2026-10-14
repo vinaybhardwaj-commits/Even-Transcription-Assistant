@@ -11,24 +11,20 @@ import { enrichOpdMeds } from '@/lib/formulary';
 import { buildLongitudinalInput } from '@/lib/opd-longitudinal-core';
 import { OPD_ENGINE_VERSION } from '@/lib/opd-note-audit-core';
 import { replayLongitudinal } from '@/lib/opd-longitudinal';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 // Stage 3 replay (PRD §6, D3 forward-only + paced): recompute + store ONLY the `longitudinal` column for
 // already-audited notes — the base audit is NEVER re-run or touched. Two modes:
 //   ?uid=<note uid>        → one note (the audited prescription uid).
 //   ?doctor_uid=<uid>      → a bounded batch (≤50) of that doctor's most-recent audited notes, run
 //                            SEQUENTIALLY with ~1s pacing (db13 contention rule).
-// Auth: Vercel Cron / Bearer CRON_SECRET / ?secret= / a logged-in admin session.
+// Auth: Authorization Bearer CRON_SECRET, or a logged-in admin session.
 //
 // SQL honesty: note content is re-fetched via the EXISTING db13 helpers (fetchOpdNoteByUid /
 // fetchOpdNotesByUids) — NO new db13 query. The only own-DB read here is the doctor→note-uid lookup
 // against opd_note_audits (own table). Member/lab reads stay inside getMemberSnapshotAsOf (frozen SQL).
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

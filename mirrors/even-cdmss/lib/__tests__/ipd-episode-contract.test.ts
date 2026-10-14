@@ -1536,7 +1536,8 @@ test('the worker mirrors the IPD discharge worker: 800 s box, the same auth, ?ma
   const src = code('app/api/ipd-episode/worker/route.ts');
   assert.ok(src.includes('export const maxDuration = 800'));
   assert.ok(src.includes("export const runtime = 'nodejs'") && src.includes("export const dynamic = 'force-dynamic'"));
-  assert.ok(src.includes("req.headers.get('x-vercel-cron')") && src.includes('CRON_SECRET') && src.includes('isAdminUnlocked()'));
+  assert.ok(src.includes('cronAuthorized(req)') && src.includes('isAdminUnlocked()'));
+  assert.ok(!src.includes("req.headers.get('x-vercel-cron')"), 'the worker must not treat x-vercel-cron as a credential');
   assert.ok(src.includes("Math.max(1, Math.min(5, Number(p.get('max') || 2)))"), '?max= defaults to 2 and caps at 5');
   assert.ok(src.includes("p.get('encounter')"), '?encounter= runs one named episode');
   // sequential by construction: no concurrency knob exists at all

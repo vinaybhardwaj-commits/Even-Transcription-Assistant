@@ -7,19 +7,17 @@ import type { NextRequest } from 'next/server';
 import { sql } from '@/lib/db';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { fetchDoctorSpecialities } from '@/lib/metabase';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 // Sync the doctor_uid → speciality directory from db13 (via the existing Metabase client) so the
 // stewardship view has a real department dimension (the source consult_type is blank). Creates the
 // table if missing — one-click, cookie-auth. Read-only against db13; writes only doctor_directory
-// in Neon (staff data, not PHI). Auth: Vercel Cron header, OR Bearer/?secret=CRON_SECRET, OR admin.
+// in Neon (staff data, not PHI). Auth: Authorization Bearer CRON_SECRET, or an admin session.
 const APP = process.env.APP_SOURCE || 'standalone';
 const sql2 = sql as unknown as (q: string, p: unknown[]) => Promise<Record<string, unknown>[]>;
 
 async function authed(req: NextRequest): Promise<boolean> {
-  if (req.headers.get('x-vercel-cron') !== null) return true;
-  const auth = req.headers.get('authorization') || '';
-  const secret = new URL(req.url).searchParams.get('secret');
-  if (process.env.CRON_SECRET && (auth === `Bearer ${process.env.CRON_SECRET}` || secret === process.env.CRON_SECRET)) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

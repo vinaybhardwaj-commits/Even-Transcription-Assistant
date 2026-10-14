@@ -20,11 +20,12 @@ export const runtime = 'nodejs';
  *   GET /api/admin/mark-mini-labelled-prod          → count what WOULD be marked
  *   GET /api/admin/mark-mini-labelled-prod?apply=1  → mark them, report the count
  *
- * Auth: Vercel cron header / Bearer|?secret=CRON_SECRET / admin session.
+ * Auth: Authorization Bearer CRON_SECRET, or an admin session.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 
@@ -34,12 +35,7 @@ const TARGET_WHERE =
   `model LIKE 'qwen%' AND engine_version NOT LIKE '%-mini' AND excluded_reason IS NULL`;
 
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

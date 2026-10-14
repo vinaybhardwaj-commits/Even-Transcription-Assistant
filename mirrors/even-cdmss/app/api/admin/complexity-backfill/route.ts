@@ -5,8 +5,8 @@
  *
  * GET            = status (banded / unbanded / distribution / cursor).
  * GET ?auto=1    = unattended cron tick (every 2 min via vercel.json) — runs ONE batch, or a no-op
- *                  when nothing is unbanded. Cron-auth mirrors opd-audit-mini-backfill (Vercel cron
- *                  header / CRON_SECRET / admin cookie).
+ *                  when nothing is unbanded. Cron-auth mirrors opd-audit-mini-backfill
+ *                  (Bearer CRON_SECRET, or an admin session).
  * POST = run one batch of ≤50 NULL-band notes, OLDEST-first, resuming from the app_settings cursor
  *        `complexity_backfill_cursor` (a note_date watermark). Rows that still fail (bad/absent db13
  *        history) stay NULL and are retried on a `?reset=1` re-sweep. Idempotent (UPDATE sets the
@@ -18,6 +18,7 @@ import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { sql } from '@/lib/db';
 import { fetchPatientHistoryBundle } from '@/lib/metabase';
 import { bandFor } from '@/lib/opd-complexity-core';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -53,16 +54,11 @@ function authed(req: NextRequest) {
   return denied ? isAdminUnlocked().catch(() => false).then((ok) => (ok ? null : denied)) : Promise.resolve(null);
 }
 
-// Cron-caller auth for ?auto=1 — IDENTICAL to the opd-audit-mini-backfill autopilot: the Vercel cron
-// header, a CRON_SECRET Bearer/?secret, or an admin session. Manual GET(status)/POST(run) keep the
+// Cron-caller auth for ?auto=1 — IDENTICAL to the opd-audit-mini-backfill autopilot: Authorization
+// Bearer CRON_SECRET, or an admin session. Manual GET(status)/POST(run) keep the
 // ADMIN_TOKEN-or-cookie `authed` above.
 async function cronAuthed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

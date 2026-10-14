@@ -50,13 +50,11 @@ export const maxDuration = 800;
 import { NextRequest, NextResponse } from 'next/server';
 import { buildPatientSummary, putJob, type SummaryRequest } from '@/lib/patient-summary';
 import { makeJobId } from '@/lib/patient-summary-core';
+import { pilotSharedSecretAuthorized } from '@/lib/cron-auth';
 
 function authed(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return false;
-  const auth = req.headers.get('authorization') || '';
-  if (auth === `Bearer ${secret}`) return true;
-  return req.nextUrl.searchParams.get('secret') === secret;
+  // V1/PILOT-SCOPED — shared CRON_SECRET. Split before live clinical traffic.
+  return pilotSharedSecretAuthorized(req);
 }
 
 export async function POST(req: NextRequest) {

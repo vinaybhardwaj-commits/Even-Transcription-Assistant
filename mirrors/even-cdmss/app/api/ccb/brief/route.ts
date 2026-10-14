@@ -33,17 +33,13 @@ import { isCareUnlocked } from '@/lib/care-cookie';
 import { ccbApiKeyValid } from '@/lib/ccb-apikey';
 import { resolveBriefUid } from '@/lib/ccb-resolve';
 import { GEMINI_MODEL } from '@/lib/llm';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 // Execution guard (spends LLM compute): a CCB_API_KEY (x-api-key / Bearer — the Pulse consumer
-// path), Vercel Cron, Bearer/secret CRON_SECRET, a care-manager session, OR an admin session.
+// path), Authorization Bearer CRON_SECRET, a care-manager session, OR an admin session.
 async function authed(req: NextRequest): Promise<boolean> {
   if (ccbApiKeyValid(req)) return true;
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { if (await isCareUnlocked()) return true; } catch { /* fall through */ }
   try { return await isAdminUnlocked(); } catch { return false; }
 }

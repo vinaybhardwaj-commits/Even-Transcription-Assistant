@@ -4,9 +4,10 @@ export const maxDuration = 60;
 
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 // One-time / idempotent topic seeding for the literature engine. Same execution
-// guard as the harvest cron (x-vercel-cron OR ?secret=CRON_SECRET) — this writes
+// guard as the harvest cron (Authorization Bearer CRON_SECRET) — this writes
 // to the CAT-only ingest_topics control table. ON CONFLICT (topic) DO NOTHING, so
 // re-running is harmless and only adds topics that don't already exist.
 // Weighted toward primary care, general surgery and orthopaedics.
@@ -95,9 +96,7 @@ const TOPICS: [string, string][] = [
 ];
 
 export async function GET(req: NextRequest) {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const ok = isCron || (process.env.CRON_SECRET && secret === process.env.CRON_SECRET);
+  const ok = cronAuthorized(req);
   if (!ok) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   try {
     const before = (await sql`SELECT count(*)::int AS n FROM ingest_topics`) as Array<{ n: number }>;

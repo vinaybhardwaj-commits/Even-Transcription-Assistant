@@ -22,13 +22,11 @@ export const runtime = 'nodejs';
 import { NextRequest, NextResponse } from 'next/server';
 import { getJob } from '@/lib/patient-summary';
 import { isJobId } from '@/lib/patient-summary-core';
+import { pilotSharedSecretAuthorized } from '@/lib/cron-auth';
 
 function authed(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return false;
-  const auth = req.headers.get('authorization') || '';
-  if (auth === `Bearer ${secret}`) return true;
-  return req.nextUrl.searchParams.get('secret') === secret;
+  // V1/PILOT-SCOPED — shared CRON_SECRET. Split before live clinical traffic.
+  return pilotSharedSecretAuthorized(req);
 }
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {

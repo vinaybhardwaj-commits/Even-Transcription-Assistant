@@ -3,9 +3,8 @@
  *
  * POST           = run one batch (≤200 events). Auth: ADMIN_TOKEN (Bearer / ?token=) or admin session.
  * GET  ?auto=1   = the unattended cron tick, every 6h via vercel.json. Cron-auth mirrors
- *                  complexity-backfill EXACTLY: the Vercel cron header, a CRON_SECRET Bearer/?secret,
- *                  or an admin session. That pattern already exists in this repo and is reused
- *                  verbatim rather than reinvented.
+ *                  complexity-backfill EXACTLY: Authorization Bearer CRON_SECRET, or an admin
+ *                  session. That pattern already exists in this repo and is reused verbatim.
  *
  *                  THE SCHEDULE WAS EARNED, NOT ASSUMED. WM1 first shipped with NO cron: the sweep
  *                  was run by hand and its burden numbers read off the Shadow page. Only once those
@@ -30,6 +29,7 @@ import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { runShadowSweep, SWEEP_BATCH, V0_TRIGGER_KIND } from '@/lib/cognition/shadow-sweep';
 import { BURDEN_PER_ELIGIBLE, PER_DOCTOR_DAILY_CAP } from '@/lib/cognition/burden-policy';
 import { BURDEN_POLICY_VERSION, COGNITION_SCHEMA_VERSION } from '@/lib/cognition/schema';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -53,12 +53,7 @@ async function authed(req: NextRequest) {
 
 /** Cron-caller auth for ?auto=1 — the repo's existing pattern, unchanged. */
 async function cronAuthed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { sql } from '@/lib/db';
+import { isAdminUnlocked, adminTokenConfigured } from '@/lib/admin-cookie';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Literature engine · Admin' };
@@ -40,6 +41,20 @@ function Empty({ text }: { text: string }) {
 }
 
 export default async function LiteratureAdmin({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
+  if (!(await isAdminUnlocked())) {
+    return (
+      <div>
+        <h1 className="text-2xl font-semibold text-slate-900 sm:text-3xl">Literature engine</h1>
+        <p className="mt-2 text-sm text-slate-600">Internal harvest status. Locked until an admin session is open.</p>
+        {adminTokenConfigured() ? (
+          <form method="POST" action="/api/admin/unlock" className="mt-4 flex max-w-sm gap-2">
+            <input type="password" name="token" autoFocus className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="Admin token" />
+            <button type="submit" className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white">Unlock</button>
+          </form>
+        ) : <p className="mt-3 text-sm text-red-700">Set ADMIN_TOKEN to enable admin access.</p>}
+      </div>
+    );
+  }
   const { tab = 'overview' } = await searchParams;
   return (
     <div>

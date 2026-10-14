@@ -4,7 +4,6 @@ export const runtime = 'nodejs';
  * 800 s, matching the IPD episode worker. The tick's own loop stops at 4 items or 500 s
  * elapsed (§5.3.6), so the box is comfortably larger than the work it authorises — the
  * reserve absorbs one long final item rather than being consumed by routine load.
- * The paired slice then uses whatever of that budget is left, several items at a time.
  */
 /** Kept in step with maxDuration. The paired slice is whatever this budget has left. */
 const ROUTE_BUDGET_MS = 800_000;
@@ -22,7 +21,7 @@ export const maxDuration = 800;
  *     A cron firing into a disabled engine must be free, must not look like a failure in
  *     the log, and must not block a manual run.
  *
- * The auth guard is likewise inherited: Vercel Cron header, Bearer/query CRON_SECRET, or
+ * The auth guard is likewise inherited: Authorization Bearer CRON_SECRET, or
  * a logged-in admin session. What is NOT inherited is the lock: the IPD worker holds a
  * single TTL lock in app_settings, while v2 uses per-item row leases (§5.3), so two ticks
  * overlapping is normal and safe rather than something to serialise.
@@ -33,16 +32,11 @@ import { labV2Configured, postgres } from '@/lib/lab-v2/db';
 import { liveTransport } from '@/lib/lab-v2/transport';
 import { tick } from '@/lib/lab-v2/worker';
 import { defaultPairedDeps, pairedAuditTick } from '@/lib/lab-v2/paired-audit';
-import { pairedAuditConcurrency } from '@/lib/lab-v2/paired-audit-core';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 /** Byte-identical in shape to the IPD episode worker's guard. */
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 
@@ -70,11 +64,9 @@ export async function GET(req: NextRequest) {
       if (remaining < 5_000) {
         paired = { skipped: 'no_time' };
       } else {
-        // The slice keeps the route's remaining time. Concurrency is capped inside
-        // the claim, so a cron that overlaps this invocation cannot stack past it.
         paired = await pairedAuditTick(db, defaultPairedDeps(), {
-          concurrency: pairedAuditConcurrency(),
-          deadlineAt: Date.now() + remaining,
+          maxGroups: 2,
+          deadlineAt: Date.now() + Math.min(180_000, remaining),
         });
       }
     } catch (err) {

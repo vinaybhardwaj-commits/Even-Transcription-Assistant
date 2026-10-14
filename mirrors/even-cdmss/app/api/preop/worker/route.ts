@@ -65,6 +65,7 @@ import {
 } from '@/lib/preop/run';
 import { parseExtractMode } from '@/lib/preop-suggest-core';
 import { boardCounts, PREOP_ENGINE_VERSION } from '@/lib/preop/store';
+import { cronAuthorized } from '@/lib/cron-auth';
 
 /**
  * Behaviour per tick: ONE deterministic sweep. Detect every upcoming, non-cancelled
@@ -95,15 +96,10 @@ import { boardCounts, PREOP_ENGINE_VERSION } from '@/lib/preop/store';
  *                    produced by the cron.
  */
 
-// Execution guard — byte-for-byte the readmission worker's: Vercel Cron (un-spoofable
-// x-vercel-cron), Bearer CRON_SECRET / ?secret=, or an admin session.
+// Execution guard — same principals as the readmission worker: Authorization Bearer
+// CRON_SECRET, or an admin session.
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 

@@ -33,16 +33,12 @@ import { CCB_ENGINE_VERSION } from '@/lib/ccb-brief-core';
 import { istYesterday } from '@/lib/metabase';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { GEMINI_MODEL } from '@/lib/llm';
+import { cronAuthorized } from '@/lib/cron-auth';
 
-// Execution guard (spends Vertex compute): Vercel Cron (x-vercel-cron), Bearer/secret CRON_SECRET,
-// OR a logged-in admin session (one-click run from a dashboard) — same contract as the OPD worker.
+// Execution guard (spends Vertex compute): Authorization Bearer CRON_SECRET, or a logged-in
+// admin session (one-click run from a dashboard) — same contract as the OPD worker.
 async function authed(req: NextRequest): Promise<boolean> {
-  const isCron = req.headers.get('x-vercel-cron') !== null;
-  const auth = req.headers.get('authorization') || '';
-  const bearerOk = !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
-  const secret = req.nextUrl.searchParams.get('secret');
-  const secretOk = !!process.env.CRON_SECRET && !!secret && secret === process.env.CRON_SECRET;
-  if (isCron || bearerOk || secretOk) return true;
+  if (cronAuthorized(req)) return true;
   try { return await isAdminUnlocked(); } catch { return false; }
 }
 
