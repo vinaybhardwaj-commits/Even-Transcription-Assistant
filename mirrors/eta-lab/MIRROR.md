@@ -17,3 +17,6 @@
   - policy-sqlite-sidecar: 2
 
 Scrub-withheld files: 130 (see WITHHELD.md).
+
+## Redacted in place (14 Oct 2026)
+Staff work email addresses in mirrored files replaced with `staff-redacted@even.in` (and one personal address with `user@example.com`). Sources are unchanged.

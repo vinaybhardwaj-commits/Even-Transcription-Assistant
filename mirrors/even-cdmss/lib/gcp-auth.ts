@@ -145,12 +145,12 @@ const ID_TOKEN_TTL_MS = 3600_000;
  * natural extension of the exchange above — same assertion, `target_audience` in place of `scope`,
  * `id_token` in place of `access_token` — and every reference for it says so. IT DOES NOT WORK FOR
  * THIS AUDIENCE. Reproduced live against the real SA key: the token endpoint answers
- * **HTTP 400 `invalid_scope`** for audience `588427270277`. A numeric AWS-style audience is not
+ * **HTTP 400 `invalid_scope`** for audience `<gcp-project-number>`. A numeric AWS-style audience is not
  * something that endpoint will mint for, full stop, and no amount of claim-shape tuning changes it.
  *
  * The IAM Credentials path is what the source artifact's Go version actually used
  * (`impersonate.IDTokenSource`), and it is proven end to end on this account: the minted token is
- * accepted by STS (trust policy bound to sub 104742817559128344276), and Converse answered from all
+ * accepted by STS (trust policy bound to sub <service-account-id>), and Converse answered from all
  * three models with usage reported. Everything downstream of this mint was already correct — the
  * mint was the only broken link.
  *

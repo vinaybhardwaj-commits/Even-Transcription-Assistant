@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import access_app as aa
 
 HOST = "lab.example-test.invalid"
-V, S = "a.person@even.in", "b.person@even.in"
+V, S = "staff-redacted@even.in", "staff-redacted@even.in"
 
 
 class FakeAPI:
@@ -134,7 +134,7 @@ class Flows(unittest.TestCase):
         self.assertEqual(api.mutations(), [])
 
     def test_non_even_in_refused(self):
-        for bad in ("someone@gmail.com", "a@b.even.in", "a@even.in.evil.com"):
+        for bad in ("user@example.com", "a@b.even.in", "staff-redacted@even.in.evil.com"):
             api = FakeAPI()
             code, _ = run(api, "--hostname", HOST, "--name", NAME, "--email", bad)
             self.assertNotEqual(code, 0, bad)
@@ -200,7 +200,7 @@ class Flows(unittest.TestCase):
 
     def test_F4_copy_flag_prints_count_and_expect_count_guards_widening(self):
         src = {"id": "s1", "name": "Src", "domain": "src.example.invalid", "type": "self_hosted"}
-        api = FakeAPI([src], {"s1": [policy("sp", [V, S, "c.person@even.in"])]})     # the source has grown to 3
+        api = FakeAPI([src], {"s1": [policy("sp", [V, S, "staff-redacted@even.in"])]})     # the source has grown to 3
         code, out = run(api, "--hostname", HOST, "--name", NAME, "--copy-emails-from", "src.example.invalid",
                         "--expect-count", "2", "--apply")
         self.assertNotEqual(code, 0)

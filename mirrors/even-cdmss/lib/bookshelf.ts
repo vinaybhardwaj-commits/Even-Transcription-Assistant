@@ -22,7 +22,7 @@ import {
 
 const LITARCH = 'https://ftp.ncbi.nlm.nih.gov/pub/litarch';
 const MANIFEST_URL = `${LITARCH}/file_list.csv`;
-const UA = 'Even-CDMSS/0.2 (+vinay.bhardwaj@even.in)';
+const UA = 'Even-CDMSS/0.2 (staff-redacted@even.in)';
 const MAX_CHUNKS_PER_NXML = 30;         // token-capped section chunks per chapter file
 const MAX_CHUNKS_PER_BOOK = 800;        // fair-share cap so a large book (Endotext) can't starve the rest
 

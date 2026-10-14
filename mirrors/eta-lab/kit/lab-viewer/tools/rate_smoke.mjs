@@ -26,7 +26,7 @@ const kp = await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusL
 const jwk = { ...(await crypto.subtle.exportKey("jwk", kp.publicKey)), kid: "k1" };
 const b64u = (b) => Buffer.from(b).toString("base64url");
 const token = async (email) => { const h = b64u(JSON.stringify({ alg: "RS256", kid: "k1" })), n = Math.floor(Date.now() / 1000), p = b64u(JSON.stringify({ iss: "https://team.test", aud: ["aud"], email, exp: n + 600, iat: n - 5 })); return `${h}.${p}.${b64u(Buffer.from(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", kp.privateKey, Buffer.from(`${h}.${p}`))))}`; };
-const env = { ACCESS_TEAM_DOMAIN: "team.test", ACCESS_AUD: "aud", ALLOWED_EMAILS: "v@even.in,s@even.in,ale@even.in", RATERS: "v@even.in,s@even.in", __fetch: async () => new Response(JSON.stringify({ keys: [jwk] })), RESULTS: bucket, RATINGS: bucket, AUDIO: bucket };
+const env = { ACCESS_TEAM_DOMAIN: "team.test", ACCESS_AUD: "aud", ALLOWED_EMAILS: "staff-redacted@even.in,staff-redacted@even.in,staff-redacted@even.in", RATERS: "staff-redacted@even.in,staff-redacted@even.in", __fetch: async () => new Response(JSON.stringify({ keys: [jwk] })), RESULTS: bucket, RATINGS: bucket, AUDIO: bucket };
 const mk = (email) => http.createServer(async (req, res) => {
   const headers = new Headers(); for (const [k, v] of Object.entries(req.headers)) if (v) headers.set(k, String(v));
   headers.set("cf-access-jwt-assertion", await token(email));
@@ -34,7 +34,7 @@ const mk = (email) => http.createServer(async (req, res) => {
   const r = await worker.fetch(new Request(`http://127.0.0.1${req.url}`, { method: req.method, headers, body }), env);
   res.writeHead(r.status, Object.fromEntries(r.headers)); res.end(Buffer.from(await r.arrayBuffer()));
 }).listen(0);
-const servers = { v: mk("v@even.in"), s: mk("s@even.in"), ale: mk("ale@even.in") };
+const servers = { v: mk("staff-redacted@even.in"), s: mk("staff-redacted@even.in"), ale: mk("staff-redacted@even.in") };
 const base = (w) => `http://127.0.0.1:${servers[w].address().port}`;
 const browser = await chromium.launch({ headless: true });
 const out = { console_errors: [], csp_violations: [], external_requests: [], bad_responses: [] };

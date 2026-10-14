@@ -10,7 +10,7 @@
  */
 
 const PLOS_API = 'https://api.plos.org/search';
-const USER_AGENT = 'EvenCDMSS/1.0 (https://evenstaffportal.vercel.app; contact: vinay.bhardwaj@even.in)';
+const USER_AGENT = 'EvenCDMSS/1.0 (https://evenstaffportal.vercel.app; contact: staff-redacted@even.in)';
 
 export type PlosHit = {
   doi: string;            // e.g. "10.1371/journal.pone.0311755"
