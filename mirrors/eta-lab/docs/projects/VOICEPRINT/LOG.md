@@ -2,11 +2,6 @@
 
 Build and event log, newest first. Owner panes: vj-data, vj-arms, vj-link (builders); vj-refuter (truth custodian).
 
-28 Sep ~19:5x-20:4x -- CENTROID-MINT design started; write-scope gap confirmed to block end_day too
-Session: vj-refuter, minibot.
-New design thread generalising W51/W52's voice-matching into a repeatable centroid-minting process for other doctors: same-room/same-time staff guards (e.g. OPD7 has different doctors AM vs PM), a minimum-sessions gate, schedule used as a prior only. Still in design, no centroid minted. Separately: minibot confirms the MCP write-scope gap (previously scoped to self_test, see RECORDER) also blocks end_day -- broader operational impact than first understood.
-Refs: #5576-5591, #5591.
-
 ## 28 Sep ~13:2x-15:2x -- W52 first cut FROZEN + VERIFIED; privacy catch resolved
 Session: reb, vj-refuter, lx, linker, eta-refuter-3, diar-lab.
 See projects/MANOJ-PACKAGE/LOG.md for full detail. Headline: D1-D3 correctness fixes (stale WEAK tier, tape-gap rule relaxed for routine rotation gaps); eta-refuter-3 caught a real scope problem (NOT-IN-OPD4-7 clips likely contain other patients' real consults) -- 11 confident-absent clips pulled from the package, 33 thin-audio held as NOT-SCANNED; cut1 frozen (381 files, e8ffafb7...) and vj-refuter-verified 26/26. Ready for Fable to pull.
@@ -64,7 +59,3 @@ Refs: r168, r182, r186, r206.
 
 ## Open
 Final scoring venue (item 137); Phase L doctor-centroid minting waits on V rating Batches 1b + 2.
-
-- 29 Sep 2026 (rev 25): auto-minting PASS for Manoj 0.844, Salanki 0.9266, Animesh 0.8316 (each reproduced by two checkers); Ankit and Poornima running; 65 doctors indexed, 569 consults with room audio; W51 v3.1 re-review pending.
-- 29 Sep ~19:27 IST (rev 26): 47 proposal jobs on HF L4 due ~21:30-22:00; old DVC retired (#7010); A4 v10 7d8bd212; ROLE v4 waits on V.
-- 29 Sep ~23:10 IST (rev 27): ROLE v4 rulings #7406: D = 29 Sep, INSUFFICIENT if fewer than 30 VERIFIED sessions; T-ROLE-5 (lx A4 Staff amendment) open.

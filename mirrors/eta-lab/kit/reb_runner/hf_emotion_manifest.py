@@ -60,20 +60,20 @@ def _has_ok_emotion_track(window):
     return False
 
 
-# Fable's ruling (29 Sep): pyannote-local-twin is the diar engine of record for every layer; pyannote.ai
-# prod is not on the approved patient-data vendor list. Any other engine's diar track is ignored.
-DIAR_ENGINE = "pyannote-local-twin"
-
-
 def _diar_segments(window):
-    chosen = next((t for t in window.tracks(layer="diar") if t.entry.get("engine") == DIAR_ENGINE), None)
-    if chosen is None or chosen.status != "ok":
+    diar_tracks = window.tracks(layer="diar")
+    if not diar_tracks:
+        return None
+    # REB-SPEC's layer of record for diar is pyannote.ai (RULINGS 13:22); prefer it explicitly if
+    # more than one diar engine has a track, rather than an arbitrary dict-ordering pick.
+    by_engine = {t.entry.get("engine"): t for t in diar_tracks}
+    chosen = by_engine.get("pyannote") or diar_tracks[0]
+    if chosen.status != "ok":
         return None
     return chosen.segments
 
 
-def build_manifest(root, ist_date, skipped=None):
-    """skipped, if a list, collects window_ids dropped for diar_out_of_range."""
+def build_manifest(root, ist_date):
     out = []
     for window_id, room_id in _windows_for_date(root, ist_date):
         window = load_window(window_id, ist_date=ist_date, room_id=room_id, root=root)
@@ -82,12 +82,7 @@ def build_manifest(root, ist_date, skipped=None):
         if _has_ok_emotion_track(window):
             continue
         diar_segments = _diar_segments(window)
-        try:
-            turns = emotion_wavlm.turns_from_diar_segments(diar_segments, window.t0_ms, window.t1_ms)
-        except ValueError:
-            if skipped is not None:
-                skipped.append(window.window_id)
-            continue
+        turns = emotion_wavlm.turns_from_diar_segments(diar_segments, window.t0_ms, window.t1_ms)
         stub = {
             "window_id": window.window_id, "room_id": window.room_id, "room_slug": window.room_slug,
             "ist_date": window.ist_date, "t0_ms": window.t0_ms, "t1_ms": window.t1_ms,
@@ -109,15 +104,12 @@ def main():
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     root = args.root or DEFAULT_ROOT
-    skipped = []
-    manifest = build_manifest(root, args.ist_date, skipped)
+    manifest = build_manifest(root, args.ist_date)
     with open(args.out, "w") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=1)
     with_diar = sum(1 for w in manifest if len(w["turns"]) > 1 or (w["turns"] and w["turns"][0][2] is not None))
     print(f"[hf_emotion_manifest] {args.ist_date}: {len(manifest)} windows to do "
           f"({with_diar} with diar turns, {len(manifest) - with_diar} whole-window fallback)")
-    if skipped:
-        print(f"[hf_emotion_manifest] diar_out_of_range, skipped {len(skipped)}: {skipped}")
 
 
 if __name__ == "__main__":

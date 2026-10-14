@@ -49,4 +49,3 @@ Refs: orders/RULING-MINI-NIGHT-LAB.md.
 
 ## Release process (to confirm)
 R3 self-update proven 10 Sep (**UNVERIFIED exact date**). Gates + rollout plan still to be written once scope + owner are confirmed.
-- 29 Sep ~23:10 IST (rev 27): T-RECORDER-2 done (two Macs dropped off Tailscale); T-RECORDER-3 on-site check 30 Sep (person UNVERIFIED); T-RECORDER-1 parked to morning.
