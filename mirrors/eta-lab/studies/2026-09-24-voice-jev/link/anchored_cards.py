@@ -7,7 +7,7 @@ import base64, collections, csv, glob, json, os, random, re, secrets, subprocess
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tiering as T
-BOX = os.path.expanduser("~/eta-data/voice-linkage"); E = f"{BOX}/{os.environ.get('EXT', 'dtree_ext')}"; B = f"{BOX}/batch1b"; KEYF = f"{BOX}/batch1b-key/key.json"; ANCH_DIR = "/tmp/anch"; SEED = 24092026; TARGETS = tuple(os.environ.get("TARGETS", "g071,g008,g013").split(",")); DROP_GIDS = tuple(x for x in os.environ.get("DROP_GIDS", "g071,g008").split(",") if x)
+BOX = os.path.expanduser("~/eta-data/voice-linkage"); E = f"{BOX}/dtree_ext"; B = f"{BOX}/batch1b"; KEYF = f"{BOX}/batch1b-key/key.json"; ANCH_DIR = "/tmp/anch"; SEED = 24092026; TARGETS = tuple(os.environ.get("TARGETS", "g071,g008,g013").split(",")); DROP_GIDS = tuple(x for x in os.environ.get("DROP_GIDS", "g071,g008").split(",") if x)
 OUTNAME = os.environ.get("OUTNAME", "batch1b"); B = f"{BOX}/{OUTNAME}"; KEYF = f"{BOX}/{OUTNAME}-key/key.json"; SEEDBASE = int(os.environ.get("SEEDBASE", "5000")); BATCHNUM = int(os.environ.get("BATCHNUM", "1")); MARGIN = 0.15   # R1 (refute/28): per-member margin over the best OTHER stored print
 norm = lambda n: " ".join((n or "").lower().replace("dr.", "").replace("dr ", "").replace(".", " ").split())
 name2uid, uid2name = {}, {}
@@ -99,7 +99,7 @@ for n, gid in enumerate(TARGETS):
     card = {"id": cid, "kind": "link", "room": D[rep[0]]["turns"]["room"]["room"], "date": L[rep[0]]["date"], "doctor": name, "evidence": ev, "clips": cl[:3], "contrast": cl[3], "batch": BATCHNUM}
     json.dump(card, open(f"{B}/links/{cid}.json", "w"), indent=1)
     key.append({"card_id": cid, "gid": gid, "tier": "ANCHORED", "kind_note": "known-voice check", "doctor_uid": doc, "anchor_cos_by_day": [round(c, 3) for c in cosv], "members_used": [list(m) for m in mem], "enrolment_sessions_excluded": sorted(ENROL[doc]),
-                "n_room_days_group": glinks[gid]["n_room_days"], "tree": os.environ.get("EXT", "dtree_ext"), "rep": list(rep), "clip_days": len({x["rd"] for x in chosen})})
+                "n_room_days_group": glinks[gid]["n_room_days"], "rep": list(rep), "clip_days": len({x["rd"] for x in chosen})})
     made.append((cid, gid, name is not None, len(mem), round(min(cosv), 2), round(max(cosv), 2), len({x["rd"] for x in chosen})))
 if ONLY:
     json.dump(clips_out, open(f"{BOX}/{OUTNAME}-key/clips.json", "w"), indent=1)

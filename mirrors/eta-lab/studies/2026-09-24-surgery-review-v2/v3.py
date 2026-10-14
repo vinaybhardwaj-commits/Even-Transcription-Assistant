@@ -14,10 +14,10 @@ Jev only ever sees de-identified text (finalize.residual_identifiers gates it). 
 """
 import copy
 import u9
-from jevconfig import RECALL_CUT  # W41 F4: moved, not changed (still 0.25; check_frozen()'s hash is unaffected by where the value lives)
 
 WORDING_VERSION = "u9-v3.0"
 FROZEN_SHA256 = "a29f22245670f8c7d78367492272d67bee0634c74a5bc7aea3ea8b0314f09f65"  # V3-WORDING-FROZEN.md; check_frozen() refuses a changed wording
+RECALL_CUT = 0.25
 
 A = {"recall": {"type": "noul", "instructions":
     "Does the doctor name a SPECIFIC surgical or interventional procedure AND describe what it involves or how it will affect the patient? Both are required. "
