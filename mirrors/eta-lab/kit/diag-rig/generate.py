@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 
-import clinical
 import phrases
 import tts
 import wavio
@@ -107,141 +106,37 @@ class Builder:
         return self._write(sid, x, "silence", ev)
 
     # ---- dialogues
-    @staticmethod
-    def resolve(name):
-        """-> ([(spk, lang, text)], items|None): a phrases.DIALOGUES name (index turns) or a clinical name clin_<lang>_<k>."""
-        if name.startswith("clin_"):
-            _, lang, k = name.split("_", 2)
-            n, turns, items = clinical.build(lang, int(k) - 1)
-            return turns, items
-        if name.startswith("conf_"):
-            _, lang, k = name.split("_", 2)
-            n, turns, items = clinical.build_confirm(lang, int(k) - 1)
-            return turns, items
-        if name.startswith("mix_"):
-            _, base, j = name.split("_", 2)
-            n, turns, items = clinical.build_mixed(base, int(j) - 1)
-            return turns, items
-        if name.startswith("cf3_"):
-            _, lang, k = name.split("_", 2)
-            n, turns, items = clinical.build_confirm3(lang, int(k) - 1)
-            return turns, items
-        if name.startswith("mx3_"):
-            _, base, j = name.split("_", 2)
-            n, turns, items = clinical.build_mixed3(base, int(j) - 1)
-            return turns, items
-        if name.startswith("cf4_"):
-            _, lang, k = name.split("_", 2)
-            n, turns, items = clinical.build_confirm4(lang, int(k) - 1)
-            return turns, items
-        if name.startswith("mx4_"):
-            _, base, j = name.split("_", 2)
-            n, turns, items = clinical.build_mixed4(base, int(j) - 1)
-            return turns, items
-        return [(s, l, phrases.phrase(l, i)) for s, l, i in phrases.DIALOGUES[name]], None
-
     def _assemble(self, turns):
         x, ev, metas = wavio.silence(LEAD_S), [], []
-        for spk, lang, text in turns:
+        for spk, lang, idx in turns:
+            text = phrases.phrase(lang, idx)
             clip, meta = self.router.clip(lang, spk, text)
             ev.append(dict(type="turn", speaker=spk, lang=lang, text=text, start_ms=_ms(len(x)), end_ms=_ms(len(x) + len(clip))))
             metas.append(meta)
             x = x + clip + wavio.silence(GAP_S)
         return x, ev, metas
 
-    @staticmethod
-    def language_truth(name, turns):
-        """the language label a language judge must give: 'mixed' for sentence-level switching (mix_*), else the single language code."""
-        if name.startswith(("mix_", "mx3_", "mx4_")):
-            return "mixed"
-        return tts.lang_base(turns[0][1]) if name.startswith(("conf_", "clin_", "cf3_", "cf4_")) and "-" not in turns[0][1] else turns[0][1]
-
     def dialogue(self, name):
-        turns, items = self.resolve(name)
-        x, ev, metas = self._assemble(turns)
-        extra = dict(clinical_items=items, clinical_sha=clinical.CLINICAL_SHA, text_review="Malayalam frames are unreviewed by a native reader") if items else {}
-        if name.startswith(("conf_", "mix_")):
-            extra.update(language_truth=self.language_truth(name, turns), confirm_sha=clinical.CONFIRM_SHA)
-        elif name.startswith(("cf3_", "mx3_")):
-            extra.update(language_truth=self.language_truth(name, turns), confirm3_sha=clinical.CONFIRM3_SHA)
-        elif name.startswith(("cf4_", "mx4_")):
-            extra.update(language_truth=self.language_truth(name, turns), confirm4_sha=clinical.CONFIRM4_SHA)
-        return self._write(name, x, "dialogue", ev, tts=metas, n_speakers=len({e["speaker"] for e in ev}), **extra)
+        x, ev, metas = self._assemble(phrases.DIALOGUES[name])
+        return self._write(name, x, "dialogue", ev, tts=metas, n_speakers=len({e["speaker"] for e in ev}))
 
     def noisy(self, dlg, bed, snr):
-        # obabble0 = the DIAGNOSTIC 0 dB cell (linker #4241): other-language crowd draw 1 at the given SNR, named <dlg>__babble_snr0 so a condition parser reads it as its own condition
-        if bed in ("obabble1", "obabble2"):
-            # both OTHER-language draws are ONE condition for a condition parser (the draw goes in the stem: <dlg>d1__obabble_snr5, <dlg>d2__obabble_snr5), refuter-2 #4254
-            sid = "%sd%s__obabble_snr%d" % (dlg, bed[-1], snr)
-        else:
-            sid = "%s__%s_snr%d" % (dlg, "babble" if bed == "obabble0" else bed, snr)
-        turns, items = self.resolve(dlg)
-        x, ev, metas = self._assemble(turns)
+        sid = "%s__%s_snr%d" % (dlg, bed, snr)
+        x, ev, metas = self._assemble(phrases.DIALOGUES[dlg])
         pool, src = None, None
         if bed == "babble":
             pool, src = self.babble_pool(dlg)
-        elif bed == "sbabble":                       # same-language crowd speech (R1: real rooms' background is often the room's own language)
-            pool, src = self.babble_pool_same(dlg)
-        elif bed in ("obabble1", "obabble2", "obabble0"):   # confirm3: two different OTHER-language crowd draws (different crowd languages); obabble0 reuses draw 1
-            pool, src = self.babble_pool_lang(dlg, self.crowd_for(dlg, "obabble1" if bed == "obabble0" else bed))
-            for s_ in src:
-                s_["crowd_draw"] = "obabble1" if bed == "obabble0" else bed
-        b = wavio.bed("babble" if bed in ("sbabble", "obabble1", "obabble2", "obabble0") else bed, _sec(len(x)), self.seed, speech_pool=pool)
+        b = wavio.bed(bed, _sec(len(x)), self.seed, speech_pool=pool)
         y = wavio.mix_at_snr(x, b, snr)
         extra = dict(bed_sources=src) if src else {}
-        if items:
-            extra.update(clinical_items=items, clinical_sha=clinical.CLINICAL_SHA)
-        if dlg.startswith(("conf_", "mix_")):
-            extra.update(language_truth=self.language_truth(dlg, turns), confirm_sha=clinical.CONFIRM_SHA)
-        elif dlg.startswith(("cf3_", "mx3_")):
-            extra.update(language_truth=self.language_truth(dlg, turns), confirm3_sha=clinical.CONFIRM3_SHA)
-        elif dlg.startswith(("cf4_", "mx4_")):
-            extra.update(language_truth=self.language_truth(dlg, turns), confirm4_sha=clinical.CONFIRM4_SHA)
-        if bed == "obabble0":
-            extra.update(diagnostic=True, crowd_kind="other-language, draw 1, diagnostic 0 dB cell (not part of the gate)")
-        return self._write(sid, y, "noisy_dialogue", ev, tts=metas, n_speakers=len({e["speaker"] for e in ev}), bed="babble" if bed == "obabble0" else ("obabble" if bed in ("obabble1", "obabble2") else bed), snr_db=snr, base=dlg, **extra)
-
-    def babble_pool_same(self, dlg):
-        """SAME-language babble: other patients/staff talking in the dialogue's own (Indic, else English) language, different voices (S4/S5) and different
-        sentences (turns from clinical1's cases, never the scored text). Provenance in truth, same_language = True."""
-        turns, _ = self.resolve(dlg)
-        langs = [l for l in dict.fromkeys(tts.lang_base(l) for _, l, _ in turns) if l != "en"] or ["en"]
-        return self.babble_pool_lang(dlg, langs[0], same=True)
-
-    def crowd_for(self, dlg, bed):
-        """crowd language of an OTHER-language draw (obabble1 / obabble2): never the dialogue's own language (mixed items: neither their base nor English)."""
-        turns, _ = self.resolve(dlg)
-        own = {tts.lang_base(l) for _, l, _ in turns}
-        return clinical.crowd_lang(own, int(dlg.rsplit("_", 1)[1]) - 1, 1 if bed == "obabble1" else 2)
-
-    def babble_pool_lang(self, dlg, lang, same=False):
-        """crowd speech in `lang` (same=True: the dialogue's own language): dx/inv/rx lines of clinical1 cases 0-2, voices S4/S5, never the scored text."""
-        turns, _ = self.resolve(dlg)
-        used_texts = {t for _, _, t in turns}
-        used_speakers = {s for s, _, _ in turns}
-        pool, src = [], []
-        n = 0
-        for k in (0, 1, 2):
-            for ti in (2, 3, 4):                     # diagnosis, investigation, prescription lines of other cases
-                text = clinical.build(lang, k)[1][ti][2]
-                if text in used_texts:
-                    continue
-                spk = ("S4", "S5")[n % 2]
-                assert spk not in used_speakers
-                c, m = self.router.clip(lang, spk, text)
-                pool.append(c)
-                src.append(dict(speaker=spk, lang=lang, voice=m["voice"], audio_sha256=m["audio_sha256"], same_language=same))
-                n += 1
-                if n == 6:
-                    return pool, src
-        return pool, src
+        return self._write(sid, y, "noisy_dialogue", ev, tts=metas, n_speakers=len({e["speaker"] for e in ev}), bed=bed, snr_db=snr, base=dlg, **extra)
 
     def babble_pool(self, dlg):
         """Crowd babble must not contain the scored dialogue's words or voices (else transcribed babble scores as hits and the diarizer hears
         target speakers in the noise): other speaker ids (S4/S5) and phrases from OTHER languages than the dialogue's. Provenance goes in truth."""
-        turns, _ = self.resolve(dlg)
+        turns = phrases.DIALOGUES[dlg]
         used_speakers = {s for s, _, _ in turns}
-        used_texts = {t for _, _, t in turns}
+        used_texts = {phrases.phrase(l, i) for _, l, i in turns}
         dlg_langs = {tts.lang_base(l) for _, l, _ in turns}
         pool, src = [], []
         for spk in ("S4", "S5"):
@@ -259,51 +154,6 @@ class Builder:
         return pool, src
 
 
-class _DryRouter:
-    """Records every (lang, speaker, text) a suite needs; no synthesis, no network."""
-
-    def __init__(self, real):
-        self.real, self.seen = real, {}
-
-    def clip(self, lang, speaker, text):
-        self.seen[(lang, speaker, text)] = 1
-        return [0.0] * 160, dict(backend="dry", voice="dry", model="dry", audio_sha256="0" * 64, lang=lang, text=text, cached=True, synthetic_fallback=False)
-
-    def chars_used(self):
-        return {}
-
-
-def project(name, mode, cache_dir, voices=None):
-    """Char projection for a suite without synthesising: unique clips, total chars, chars NOT yet in the cache (= what a run would spend)."""
-    real = Router(mode, cache_dir, voices)
-    dry = _DryRouter(real)
-    import tempfile
-    b = Builder(tempfile.mkdtemp(prefix="diagrig-dry-"), dry)
-    s = SUITES[name]
-    for d in list(dict.fromkeys(list(s["dialogues"]) + [n for n, _b, _s in s["noisy"]])):
-        turns, _ = b.resolve(d)
-        for spk, lang, text in turns:
-            dry.clip(lang, spk, text)
-    for d, bed, _snr in s["noisy"]:
-        if bed == "babble":
-            b.babble_pool(d)
-        elif bed == "sbabble":
-            b.babble_pool_same(d)
-        elif bed in ("obabble1", "obabble2", "obabble0"):
-            b.babble_pool_lang(d, b.crowd_for(d, "obabble1" if bed == "obabble0" else bed))
-    total = new = 0
-    for (lang, spk, text) in dry.seen:
-        total += len(text)
-        if mode == "fake":
-            continue
-        backend = "elevenlabs" if mode == "elevenlabs" and tts.lang_base(lang) in tts.el_langs() else "google"
-        t = real.tts[backend]
-        key = tts.clip_key(backend, t.voice_for(lang, spk), t.model(lang), t.seed, lang, text)
-        if not os.path.exists(os.path.join(cache_dir, key + ".wav")):
-            new += len(text)
-    return dict(suite=name, unique_clips=len(dry.seen), unique_chars=total, new_chars=new, ledger_now=real.chars_used().get("ledger_total"))
-
-
 def _sha_file(p):
     with open(p, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
@@ -317,25 +167,9 @@ def git_sha():
         return None
 
 
-CONFIRM4_NAMES = (["cf4_%s_%d" % (l, k) for l in ("en", "hi", "kn", "ta", "te", "ml") for k in range(1, 9)] + ["mx4_%s_%d" % (b, j + 1) for j, b in enumerate(clinical.MIX_BASES)])
-CONFIRM3_NAMES = (["cf3_%s_%d" % (l, k) for l in ("en", "hi", "kn", "ta", "te", "ml") for k in range(1, 9)] + ["mx3_%s_%d" % (b, j + 1) for j, b in enumerate(clinical.MIX_BASES)])
-CONFIRM_NAMES = (["conf_%s_%d" % (l, k) for l in ("en", "hi", "kn", "ta", "te", "ml") for k in range(1, 9)] + ["mix_%s_%d" % (b, j + 1) for j, b in enumerate(clinical.MIX_BASES)])
-
 SUITES = {
     "nightly": dict(dialogues=list(phrases.DIALOGUES), noisy=[("dlg_en_2", "fan", 10), ("dlg_en_2", "babble", 5), ("dlg_en_2", "ac_hum", 0), ("dlg_hi_2", "fan", 10)]),
     "full": dict(dialogues=list(phrases.DIALOGUES), noisy=[(d, b, s) for d in ("dlg_en_2",) for b in BEDS for s in SNRS]),
-    # W33.1: 8 cases x 8 modes, clean + fan10 + babble5 (variants reuse the cached clips). Only dialogues (no tones/canary/silence).
-    "clinical": dict(clinical=True, dialogues=[n for n, _t, _i in clinical.all_dialogues()], noisy=[(n, b, s) for n, _t, _i in clinical.all_dialogues() for b, s in (("fan", 10), ("babble", 5))]),
-    # confirm2 (agreed spec, linker #4199 / refuter-2 #4200): 8 fresh cases x en hi kn ta te ml (48) + 8 truly mixed dialogues (56 base) x 4 conditions
-    # (clean, fan10, babble5-OTHER = other-language crowd, babble5-SAME = same-language crowd) = 224 stimuli. Only dialogues.
-    "confirm": dict(clinical=True, dialogues=CONFIRM_NAMES, noisy=[(n, b, s) for n in CONFIRM_NAMES for b, s in (("fan", 10), ("babble", 5), ("sbabble", 5))]),
-    # confirm3 (linker #4236): 8 fresh cases x en hi kn ta te ml + 8 truly mixed = 56 base x (clean, fan10, babble5-SAME, babble5-OTHER draw 1, draw 2) = 280
-    # the gate suite: 280 stimuli only (the frozen v3 judge gates EVERY condition present in a suite dir). The two OTHER-language draws are one condition (ids <dlg>d1/d2__obabble_snr5).
-    "confirm3": dict(clinical=True, dialogues=CONFIRM3_NAMES, noisy=[(n, b, s) for n in CONFIRM3_NAMES for b, s in (("fan", 10), ("sbabble", 5), ("obabble1", 5), ("obabble2", 5))]),
-    # the DIAGNOSTIC 0 dB cell (linker #4241, #4265) in its OWN suite/dir so it can never enter the gate: 56 stimuli <dlg>__babble_snr0, no clean dialogues.
-    "confirm3diag": dict(clinical=True, dialogues=[], noisy=[(n, "obabble0", 0) for n in CONFIRM3_NAMES]),
-    # confirm4 (linker #4368, v4 judge, fresh suite): same shape as confirm3 = 280 gate stimuli (0 dB diagnostic omitted, not asked for)
-    "confirm4": dict(clinical=True, dialogues=CONFIRM4_NAMES, noisy=[(n, b, s) for n in CONFIRM4_NAMES for b, s in (("fan", 10), ("sbabble", 5), ("obabble1", 5), ("obabble2", 5))]),
     "smoke": dict(dialogues=["dlg_en_2", "dlg_hi_2"], noisy=[("dlg_en_2", "fan", 10)]),
 }
 
@@ -346,15 +180,14 @@ def build_suite(name, outdir, mode, cache_dir, voices=None):
     if not phrases.KANGLISH_APPROVED and any("knen" in d for d in SUITES[name]["dialogues"]) and mode != "fake":
         raise SystemExit("Kanglish list is not yet approved by V (phrases.KANGLISH_APPROVED): refusing a real-TTS run that includes it")
     b = Builder(outdir, Router(mode, cache_dir, voices))
-    if not SUITES[name].get("clinical"):
-        b.tones()
-        b.silence_pattern()
-        b.canary()
+    b.tones()
+    b.silence_pattern()
+    b.canary()
     for d in SUITES[name]["dialogues"]:
         b.dialogue(d)
     for d, bed, snr in SUITES[name]["noisy"]:
         b.noisy(d, bed, snr)
-    man = dict(suite=name, tts_mode=mode, phraseset_sha=phrases.PHRASESET_SHA, clinical_sha=clinical.CLINICAL_SHA if SUITES[name].get("clinical") else None, confirm_sha=clinical.CONFIRM_SHA if name == "confirm" else None, confirm3_sha=clinical.CONFIRM3_SHA if name in ("confirm3", "confirm3diag") else None, confirm4_sha=clinical.CONFIRM4_SHA if name == "confirm4" else None, rig_git=git_sha(), chars_used=b.router.chars_used(), items=b.items)
+    man = dict(suite=name, tts_mode=mode, phraseset_sha=phrases.PHRASESET_SHA, rig_git=git_sha(), chars_used=b.router.chars_used(), items=b.items)
     with open(os.path.join(outdir, "suite.json"), "w") as f:
         json.dump(man, f, indent=1)
     os.chmod(os.path.join(outdir, "suite.json"), 0o600)
