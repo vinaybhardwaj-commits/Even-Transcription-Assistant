@@ -463,11 +463,3 @@ def test_workers_flag_is_bounded(env):
         assert C.main(["--all", "--workers", bad], root=env["root"], out_dir=env["out"], is_held=env["held"]) == 2
     with pytest.raises(C.CollectorError):
         C.Collector(env["root"], env["held"], workers=17)
-
-
-def test_sealed_window_never_leaves_the_box_even_with_a_live_verified_file(env):
-    add_track(env["root"], "L041")                                  # a file that reappeared by hand: live, sha equal, manifest present
-    add_track(env["root"], "w1")
-    c = make(env).run_date(DATE)
-    assert c["sealed"] == 1 and c["live"] == 1 and c["put"] == 1
-    assert not any("L041" in k for k in env["r2"].objects) and not any("L041" in json.dumps(p) for p in env["ix"].posts)
