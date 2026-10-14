@@ -14,6 +14,12 @@ const H = vi.hoisted(() => ({
   identity: [] as Array<Record<string, unknown>>,
   identityThrows: null as string | null,
   identityQueries: [] as Array<{ uids: string[]; withRx: boolean }>,
+  clip: null as Uint8Array | null,
+  clipRangeHeader: true,
+  clipIgnoreRange: false,
+  clipReadThrows: false,
+  rangeCalls: [] as Array<{ key: string; start: number; end: number }>,
+  headCalls: [] as string[],
   matchQueries: [] as Array<{ individual: string | null; prescription: string | null; from: string; to: string; cap: number }>,
   freescriptThrows: false,
   signCalls: [] as Array<Record<string, unknown>>,
@@ -60,6 +66,18 @@ vi.mock("@/lib/db", () => {
   return { sql, db: {} };
 });
 vi.mock("@/lib/r2", () => ({
+  getObjectRange: vi.fn(async (key: string, start: number, end: number) => {
+    H.rangeCalls.push({ key, start, end });
+    if (H.clipReadThrows) throw new Error("r2 down");
+    if (!H.clip) return null;
+    if (start >= H.clip.length) return { outOfRange: true };
+    if (H.clipIgnoreRange) return { bytes: H.clip.slice(), totalBytes: null }; // a server that ignores Range: the whole object, no Content-Range
+    return { bytes: H.clip.slice(start, Math.min(end + 1, H.clip.length)), totalBytes: H.clipRangeHeader ? H.clip.length : null };
+  }),
+  headObject: vi.fn(async (key: string) => {
+    H.headCalls.push(key);
+    return { size: H.clip ? H.clip.length : null, content_type: null };
+  }),
   signGetUrl: vi.fn(async (o: Record<string, unknown>) => {
     H.signCalls.push(o);
     return "https://signed.example/clip?X-Amz-Signature=SECRETSIG";
@@ -158,6 +176,12 @@ beforeEach(() => {
   H.identityThrows = null;
   H.identityQueries = [];
   H.matchQueries = [];
+  H.clip = null;
+  H.clipRangeHeader = true;
+  H.clipIgnoreRange = false;
+  H.clipReadThrows = false;
+  H.rangeCalls = [];
+  H.headCalls = [];
   H.freescriptThrows = false;
   H.signCalls = [];
   H.jev = [];
@@ -1282,6 +1306,114 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
     expect(await rx("UID_ONLY_AAA")).toMatchObject({ status: "ok", data: { has_prescription: true } });
     expect((await rx("BOTH_NULL_BBB")).status).toBe("absent");
     expect(await rx("JSONB_ONLY_CC")).toMatchObject({ status: "ok", data: { has_prescription: true } });
+  });
+
+  // --- CATALOG-7: clip_audio_chunk ---
+  describe("CATALOG-7 clip_audio_chunk", () => {
+    const CLIPKEY = `consult-clips/2026-10-05/opd-a/${UID}/consult.flac`;
+    const bytes = (n: number) => Uint8Array.from({ length: n }, (_, i) => (i * 7 + 3) % 256);
+    const chunk = async (args: Row = {}) => run({ action: "clip_audio_chunk", consult_uid: UID, ...args });
+    const dec = (o: Row) => Buffer.from(o.base64 as string, "base64");
+    beforeEach(() => {
+      setCatalog([crow(UID)]);
+      H.clip = bytes(2500);
+    });
+    it("first chunk: offset 0, the exact Range, base64 of the stored bytes, done false; the shape", async () => {
+      const o = await chunk({ offset: 0, length: 1000 });
+      expect(o).toEqual({ ok: true, consult_uid: UID, offset: 0, length: 1000, total_bytes: 2500, content_type: "audio/flac", base64: Buffer.from(bytes(2500).slice(0, 1000)).toString("base64"), done: false, signature_sha256: "s".repeat(64) });
+      expect(H.rangeCalls).toEqual([{ key: CLIPKEY, start: 0, end: 999 }]);
+    });
+    it("a middle chunk and the last partial chunk (done:true); the bytes reassemble to the whole clip", async () => {
+      const a = await chunk({ offset: 0, length: 1000 });
+      const b = await chunk({ offset: 1000, length: 1000 });
+      expect(b).toMatchObject({ offset: 1000, length: 1000, done: false });
+      expect(H.rangeCalls.at(-1)).toEqual({ key: CLIPKEY, start: 1000, end: 1999 });
+      const c = await chunk({ offset: 2000, length: 1000 });
+      expect(c).toMatchObject({ offset: 2000, length: 500, total_bytes: 2500, done: true });
+      expect(H.rangeCalls.at(-1)).toEqual({ key: CLIPKEY, start: 2000, end: 2999 }); // exactly bytes=offset-(offset+length-1), as asked
+      expect(Buffer.concat([dec(a), dec(b), dec(c)]).equals(Buffer.from(bytes(2500)))).toBe(true);
+    });
+    it("the default length is 1,048,576 and offset 0; a clip shorter than that is one chunk with done:true", async () => {
+      const o = await chunk();
+      expect(H.rangeCalls).toEqual([{ key: CLIPKEY, start: 0, end: 1_048_575 }]);
+      expect(o).toMatchObject({ ok: true, offset: 0, length: 2500, done: true });
+      H.clip = bytes(1_048_576 + 10);
+      const big = await chunk();
+      expect(big).toMatchObject({ length: 1_048_576, done: false, total_bytes: 1_048_586 });
+    });
+    it("exactly reaching the end is done:true; length over the cap, 0, fractional or negative length is bad_args", async () => {
+      expect(await chunk({ offset: 1500, length: 1000 })).toMatchObject({ length: 1000, done: true });
+      for (const length of [1_048_577, 0, -1, 1.5, "x", 1e12]) expect(await chunk({ length }), String(length)).toMatchObject({ ok: false, error: "bad_args" });
+      expect(H.rangeCalls.length).toBe(1);
+    });
+    it("a negative or fractional offset is bad_args; nothing is read", async () => {
+      H.rangeCalls = [];
+      for (const offset of [-1, 0.5, "1.5", "-3", "abc", Number.NaN]) expect(await chunk({ offset }), String(offset)).toMatchObject({ ok: false, error: "bad_args" });
+      expect(H.rangeCalls).toEqual([]);
+    });
+    it("an offset at or past the end is bad_range with total_bytes (also when the Content-Range header is absent: total from a HEAD)", async () => {
+      expect(await chunk({ offset: 2500 })).toEqual({ ok: false, error: "bad_range", total_bytes: 2500 });
+      expect(await chunk({ offset: 99_999 })).toEqual({ ok: false, error: "bad_range", total_bytes: 2500 });
+      H.clipRangeHeader = false;
+      H.headCalls = [];
+      expect(await chunk({ offset: 1000, length: 500 })).toMatchObject({ ok: true, total_bytes: 2500, done: false });
+      expect(H.headCalls).toEqual([CLIPKEY]);
+    });
+    it("a clip key that does not bind to the row is never read (bad_clip_key); blind, not_found and bad uid are refused before any read", async () => {
+      setCatalog([crow(UID, { clip: { r2_key: `consult-clips/2026-10-04/opd-a/${UID}/consult.flac`, bytes: 1, minutes: 1 } }), crow("BLINDROW1", { ist_date: "2026-10-01", room_id: "room_blind" })]);
+      H.rangeCalls = [];
+      expect(await chunk()).toEqual({ ok: false, error: "bad_clip_key" });
+      expect(await run({ action: "clip_audio_chunk", consult_uid: "BLINDROW1" })).toEqual({ ok: false, error: "blind_room_day" });
+      expect(await run({ action: "clip_audio_chunk", consult_uid: "NOSUCHUID1" })).toEqual({ ok: false, error: "not_found" });
+      expect(await run({ action: "clip_audio_chunk", consult_uid: "x" })).toMatchObject({ error: "bad_args" });
+      expect(H.rangeCalls).toEqual([]);
+    });
+    it("F1: a Range-ignoring 200 (the whole body, no Content-Range) is read_failed with no base64; a short body without the header is read_failed; an over-long body with the header is read_failed", async () => {
+      H.clip = bytes(3000);
+      H.clipIgnoreRange = true;
+      const o = await chunk({ offset: 1000, length: 1000 });
+      expect(o).toEqual({ ok: false, error: "read_failed" });
+      expect(JSON.stringify(o)).not.toContain("base64");
+      // the default length on a clip longer than the cap: the whole body would exceed length
+      H.clip = bytes(1_048_576 + 50);
+      expect(await chunk()).toEqual({ ok: false, error: "read_failed" });
+      // the same clip honouring Range is fine (the slice exactly matches min(length, total - offset))
+      H.clipIgnoreRange = false;
+      H.clipRangeHeader = false;
+      H.clip = bytes(3000);
+      expect(await chunk({ offset: 2500, length: 1000 })).toMatchObject({ ok: true, length: 500, done: true });
+      expect(await chunk({ offset: 0, length: 1000 })).toMatchObject({ ok: true, length: 1000, done: false });
+    });
+    it("a missing object and a failing read are codes, not throws", async () => {
+      H.clip = null;
+      expect(await chunk()).toEqual({ ok: false, error: "clip_not_found" });
+      H.clip = bytes(10);
+      H.clipReadThrows = true;
+      expect(await chunk()).toEqual({ ok: false, error: "read_failed" });
+    });
+    it("door: a read token is allowed; a room-restricted token is refused before any read", async () => {
+      const ok = await rpc({ action: "clip_audio_chunk", consult_uid: UID, length: 100 });
+      expect(ok.error).toBeUndefined();
+      expect(ok.result!.structuredContent).toMatchObject({ ok: true, length: 100 });
+      H.rangeCalls = [];
+      const refused = await rpc({ action: "clip_audio_chunk", consult_uid: UID }, { rooms: new Set(["room_a"]), scopes: new Set<McpScope>(["read", "invoke", "write"]) });
+      expect(refused.error).toMatchObject({ code: -32001 });
+      expect(H.rangeCalls).toEqual([]);
+    });
+    it("A3: the audit row holds action, consult_uid, offset and length as numbers; no base64, key or bytes in any audit insert or console line; string offsets/lengths are dropped", async () => {
+      H.clip = bytes(3000);
+      const o = await rpc({ action: "clip_audio_chunk", consult_uid: UID, offset: 100, length: 200 });
+      const b64 = o.result!.structuredContent.base64 as string;
+      expect(b64.length).toBeGreaterThan(100);
+      expect(lastAudit().args).toEqual({ action: "clip_audio_chunk", consult_uid: UID, offset: 100, length: 200 });
+      const everything = JSON.stringify(auditRows()) + logs.join("\n");
+      expect(everything).not.toContain(b64);
+      expect(everything).not.toContain(b64.slice(0, 40));
+      for (const needle of ["consult-clips/", "base64", "audio/flac"]) expect(everything, needle).not.toContain(needle);
+      const { safeArgs } = await import("@/lib/mcp/audit");
+      expect(safeArgs({ offset: "5", length: "7" })).toEqual({});
+      expect(safeArgs({ offset: 5, length: 7 })).toEqual({ offset: 5, length: 7 });
+    });
   });
 });
 });

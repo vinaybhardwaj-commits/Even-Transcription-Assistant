@@ -23,11 +23,13 @@ const SAFE_ARG_KEYS = new Set([
   "bucket", "window", "surface", "note_type", "doctor_id", "topK", "top_k",
   "include_payload", "include_text", "include_prompts", "include_identity", "include_urls",
   "room", "override_pause", "kind", "command_id",
-  "start", "end", "source", "engine", "phase", "visit_id", "event_id", "cue_id", "action", "consult_uid", "has_prescription",
+  "start", "end", "source", "engine", "phase", "visit_id", "event_id", "cue_id", "action", "consult_uid", "has_prescription", "length",
 ]);
 const MAX_SAFE_STRING = 128;
 // CATALOG-5: a key that is allow-listed only as a flag; a string under it (a name, an id) is dropped.
 const BOOLEAN_ONLY: ReadonlySet<string> = new Set(["has_prescription"]);
+// CATALOG-7: byte-range arguments are recorded as numbers only.
+const NUMBER_ONLY: ReadonlySet<string> = new Set(["offset", "length"]);
 
 export function safeArgs(args: unknown): Record<string, unknown> {
   if (typeof args !== "object" || args === null || Array.isArray(args)) return {};
@@ -35,6 +37,7 @@ export function safeArgs(args: unknown): Record<string, unknown> {
   for (const [k, v] of Object.entries(args as Record<string, unknown>)) {
     if (!SAFE_ARG_KEYS.has(k)) continue;
     if (BOOLEAN_ONLY.has(k) && typeof v !== "boolean") continue;
+    if (NUMBER_ONLY.has(k) && (typeof v !== "number" || !Number.isFinite(v))) continue;
     if (typeof v === "string") out[k] = v.slice(0, MAX_SAFE_STRING);
     else if (typeof v === "number" || typeof v === "boolean" || v === null) out[k] = v;
   }

@@ -11,13 +11,13 @@ import { istDateOf } from "@/lib/sarvam-lab";
 import { listJevDecisions } from "@/lib/room-access/tool-reads";
 import { listResults } from "@/lib/rubrics/store";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
-import { fetchManifest, clipKeyOf, decodeCursor, encodeCursor, layerAbsent, layerError, layerNotAvailable, layerOk, loadCatalog, presignClip, readPartsLayer, readTranscriptLayer, searchView, CATALOG_MIN_DATE, type Layer, type Row } from "@/lib/room-access/readers/catalog-consult";
+import { fetchManifest, clipKeyOf, CLIP_CHUNK_MAX, readClipChunk, decodeCursor, encodeCursor, layerAbsent, layerError, layerNotAvailable, layerOk, loadCatalog, presignClip, readPartsLayer, readTranscriptLayer, searchView, CATALOG_MIN_DATE, type Layer, type Row } from "@/lib/room-access/readers/catalog-consult";
 import { consultsByIdentity, hasAnyIdentity, IDENTITY_CHUNK, IDENTITY_ID, identityFor, identityView, pulseUrl, type IdentityRow } from "@/lib/room-access/readers/catalog-identity";
 import { ADMIN_ACTOR_PREFIX } from "../auth";
 import { argBool, argInt, argStr, failSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 import { AmbiguousRoomError, resolveRoom } from "./brain";
 
-export const CATALOG_ACTIONS = ["search", "get", "clip_audio_url"] as const;
+export const CATALOG_ACTIONS = ["search", "get", "clip_audio_url", "clip_audio_chunk"] as const;
 export const CATALOG_LIMIT_DEFAULT = 50;
 export const CATALOG_LIMIT_MAX = 200;
 export const CATALOG_MAX_SPAN_DAYS = 92;
@@ -33,7 +33,8 @@ const HELP = [
   "action=search {doctor_uid?, room?, from?, to? (span <= 92 days, clamped to 2026-09-09), source? cutter|caa, limit<=200 (default 50), cursor?}: newest first, layers without keys plus layers_present, next_cursor, total_matched, n_bad_lines, n_blind_excluded. Filters has_prescription (alias has_rx), prescription_uid, individual_uid join encounter_catalog (identity_rows says how many consults had a row; an empty table returns no rows, never a false has_prescription=false). include_identity=true adds identity per row.",
   "action=get {consult_uid, include_text?, include_identity?}: the full row and layers {transcript, parts, freescript, rubric, jev, identity, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call.",
   "action=clip_audio_url {consult_uid}: presigned GET of the clip, 900 s, {url, expires_at, bytes, minutes, signature_sha256}. The URL is never audited or logged.",
-  "Held-out room-days are refused blind_room_day on get and clip_audio_url and left out of search.",
+  "action=clip_audio_chunk {consult_uid, offset?, length? <= 1 MiB}: the stored FLAC bytes as base64, {offset, length, total_bytes, content_type, base64, done, signature_sha256}; bad_range past the end.",
+  "Held-out room-days are refused blind_room_day on get, clip_audio_url and clip_audio_chunk and left out of search.",
 ].join(" ");
 
 const badArgs = (detail: string) => ({ ok: false, error: "bad_args", detail });
@@ -294,6 +295,37 @@ async function get(args: ToolArgs): Promise<Row> {
   };
 }
 
+/** An optional integer argument in [min, max]; a missing one is the default; anything else (fraction, string with junk, out of range) is null. */
+function intArg(args: ToolArgs, key: string, def: number, min: number, max: number): number | null {
+  const v = args[key];
+  if (v === undefined || v === null || v === "") return def;
+  const n = typeof v === "number" ? v : typeof v === "string" && /^\d{1,10}$/.test(v) ? Number(v) : NaN;
+  return Number.isInteger(n) && n >= min && n <= max ? n : null;
+}
+
+async function clipAudioChunk(args: ToolArgs): Promise<Row> {
+  const uid = argStr(args, "consult_uid", 64);
+  if (!uid || !UID.test(uid)) return badArgs("consult_uid must match [A-Za-z0-9_-]{6,64}");
+  const offset = intArg(args, "offset", 0, 0, Number.MAX_SAFE_INTEGER);
+  if (offset === null) return badArgs("offset is an integer >= 0");
+  const length = intArg(args, "length", CLIP_CHUNK_MAX, 1, CLIP_CHUNK_MAX);
+  if (length === null) return badArgs(`length is an integer 1..${CLIP_CHUNK_MAX}`);
+  const cat = await loadCatalog();
+  if (!cat) return { ok: false, error: "catalog_unavailable" };
+  const row = cat.rows.get(uid);
+  if (!row) return { ok: false, error: "not_found" };
+  if (blind(row)) return { ok: false, error: "blind_room_day" };
+  const key = clipKeyOf(row);
+  if (!key) return { ok: false, error: "bad_clip_key" };
+  const got = await readClipChunk(key, offset, length);
+  if (!got.ok) return got.error === "bad_range" ? { ok: false, error: "bad_range", total_bytes: got.total_bytes } : { ok: false, error: got.error };
+  const clip = (row.clip ?? {}) as Row;
+  return {
+    ok: true, consult_uid: uid, offset, length: got.bytes.length, total_bytes: got.total_bytes, content_type: "audio/flac",
+    base64: Buffer.from(got.bytes).toString("base64"), done: offset + got.bytes.length >= got.total_bytes, signature_sha256: clip.signature_sha256 ?? null,
+  };
+}
+
 async function clipAudioUrl(args: ToolArgs): Promise<Row> {
   const uid = argStr(args, "consult_uid", 64);
   if (!uid || !UID.test(uid)) return badArgs("consult_uid must match [A-Za-z0-9_-]{6,64}");
@@ -332,6 +364,8 @@ export const catalogTool: McpTool = {
       source: { type: "string", enum: ["cutter", "caa"] },
       limit: { type: "integer", minimum: 1, maximum: CATALOG_LIMIT_MAX, default: CATALOG_LIMIT_DEFAULT },
       cursor: { type: "string", description: "previous next_cursor" },
+      offset: { type: "integer", minimum: 0, description: "clip_audio_chunk byte offset" },
+      length: { type: "integer", minimum: 1, maximum: CLIP_CHUNK_MAX, description: "clip_audio_chunk bytes" },
       include_identity: { type: "boolean", description: "names, ids, Pulse link; default false" },
       has_prescription: { type: "boolean" },
       prescription_uid: { type: "string" },
@@ -348,7 +382,7 @@ export const catalogTool: McpTool = {
     if ((action === "get" || action === "search") && (argBool(args, "include_identity") || present("prescription_uid") || present("individual_uid"))) {
       if (!ctx.scopes.has("admin") || !ctx.actor.replace(/^mcp:/, "").startsWith(ADMIN_ACTOR_PREFIX)) throw new ToolScopeError("admin", { action });
     }
-    return failSafe({ ok: false, error: "catalog_unavailable" }, async () => (action === "search" ? search(args) : action === "get" ? get(args) : clipAudioUrl(args)));
+    return failSafe({ ok: false, error: "catalog_unavailable" }, async () => (action === "search" ? search(args) : action === "get" ? get(args) : action === "clip_audio_chunk" ? clipAudioChunk(args) : clipAudioUrl(args)));
   },
 };
 

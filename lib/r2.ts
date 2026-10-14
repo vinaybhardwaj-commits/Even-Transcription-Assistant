@@ -149,6 +149,34 @@ export async function headObject(key: string): Promise<{
 }
 
 /**
+ * CATALOG-7: a byte range of an object (S3 GetObject Range: bytes=start-endInclusive), key-agnostic. Returns the bytes and the object's total size from the Content-Range header
+ * (null when the header is absent), `null` for a missing object, and {outOfRange:true} when the start is at or past the end (416). Other errors throw. Called only from lib/room-access.
+ */
+export async function getObjectRange(key: string, start: number, endInclusive: number): Promise<
+  { bytes: Uint8Array; totalBytes: number | null } | { outOfRange: true } | null
+> {
+  try {
+    const res = await client().send(
+      new GetObjectCommand({ Bucket: bucket(), Key: key, Range: `bytes=${start}-${endInclusive}` }),
+      { abortSignal: AbortSignal.timeout(R2_OP_TIMEOUT_MS) },
+    );
+    if (!res.Body) return null;
+    const stream = res.Body as unknown as { transformToByteArray: () => Promise<Uint8Array> };
+    const bytes = await Promise.race([
+      stream.transformToByteArray(),
+      new Promise<Uint8Array>((_, rej) => setTimeout(() => rej(new Error("r2_body_read_timeout")), R2_OP_TIMEOUT_MS)),
+    ]);
+    const m = /\/(\d+)\s*$/.exec(res.ContentRange ?? "");
+    return { bytes, totalBytes: m ? Number(m[1]) : null };
+  } catch (e) {
+    const meta = (e as { $metadata?: { httpStatusCode?: number }; name?: string });
+    if (meta?.name === "NoSuchKey" || meta?.$metadata?.httpStatusCode === 404) return null;
+    if (meta?.name === "InvalidRange" || meta?.$metadata?.httpStatusCode === 416) return { outOfRange: true };
+    throw e;
+  }
+}
+
+/**
  * Fetch an object's bytes. Returns null if the object doesn't exist
  * (NoSuchKey / 404) so callers can distinguish "no buffer yet" from
  * a real error.
