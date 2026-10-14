@@ -8,9 +8,6 @@
  */
 
 import { windowStart, countDistinctChronicIcds, countAbnormalLabs, scalarCount, type ComplexityInputs } from './opd-complexity-core';
-// LAB-MCP-V2 §7 (decision 6): db13 carries identifying clinical text. Unreachable from
-// inside a lab execution context; a lab run reads its inputs from the frozen dataset.
-import { labExecution, LabError } from './lab-execution-context';
 
 const DB13 = 13;
 const SOURCE = '"individuals-prescriptions"';
@@ -109,10 +106,6 @@ function apiKey(): string {
 
 /** Run a native SQL query against db13 via Metabase /api/dataset. Returns rows as objects. */
 export async function metabaseQuery(query: string): Promise<Record<string, unknown>[]> {
-  // §7 — db13 is the identifying source. A lab run's note text was frozen into its
-  // dataset OUTSIDE any context (dataset_create); reaching db13 from inside one would
-  // both leak identifying data into a research object and make the run unreproducible.
-  if (labExecution()) throw new LabError('LAB_IO_FORBIDDEN', 'db13 read inside lab execution');
   const res = await fetch(`${base()}/api/dataset`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': apiKey() },

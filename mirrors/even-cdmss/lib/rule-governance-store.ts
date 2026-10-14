@@ -1,9 +1,15 @@
 /**
  * lib/rule-governance-store.ts — R3-A: the Even rule book, IO layer (Neon). DORMANT.
  *
- * NOTHING IMPORTS THIS except its own two admin routes (kickoff §4 proof 1). It is gated on
- * LVC_RULE_GOVERNANCE_ENABLED === '1' (S3), which ships UNSET. No cron, no build hook, no deploy
- * step, no worker reaches it. IT DOES NOT RUN ITSELF (the refusal sentence from
+ * NOTHING IMPORTS THIS except its own two admin routes (kickoff §4 proof 1). Every OPERATIONAL
+ * write — `proposePatternAsRule`, `bootstrapRuleVersions` — is gated on
+ * LVC_RULE_GOVERNANCE_ENABLED === '1' (S3), which ships UNSET.
+ *
+ * ⚠️ THE ONE EXCEPTION, AND IT IS DELIBERATE (D2, Saul Rep 48): `ensureRuleGovernanceTables` creates
+ * SCHEMA and is authenticated rather than flag-gated, because its caller now refuses an
+ * unconfigured deployment. Saying "the module is gated on the flag" without that exception would
+ * be the same class of stale claim D2 was called back to fix. No cron, no build hook, no deploy
+ * step, no worker reaches any of it. IT DOES NOT RUN ITSELF (the refusal sentence from
  * app/api/admin/migrate-lvc-wording/route.ts:15, copied deliberately).
  *
  * NO LLM. No prompt is issued or registered here (kickoff §6 trap 7).
@@ -93,7 +99,19 @@ export const VERSIONS_TABLE_DDL = `CREATE TABLE IF NOT EXISTS lvc_rule_versions 
   sample_seed           text NOT NULL,
   n_not_belonging       int,
   created_at            timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (rule_ref, version)
+  PRIMARY KEY (rule_ref, version),
+  CONSTRAINT lvc_rule_versions_version_positive CHECK (version > 0),
+  CONSTRAINT lvc_rule_versions_ref_nonblank     CHECK (btrim(rule_ref) <> ''),
+  CONSTRAINT lvc_rule_versions_statement_nonblank CHECK (btrim(statement) <> ''),
+  CONSTRAINT lvc_rule_versions_ratifier_named CHECK (
+    btrim(ratified_by) <> ''
+    AND lower(btrim(ratified_by)) NOT IN ('admin','system','cron','worker','care-manager')),
+  CONSTRAINT lvc_rule_versions_rationale_nonblank CHECK (btrim(rationale) <> ''),
+  CONSTRAINT lvc_rule_versions_seed_nonblank      CHECK (btrim(sample_seed) <> ''),
+  CONSTRAINT lvc_rule_versions_counts_nonneg      CHECK (sample_size >= 0 AND reviewed_n >= 0),
+  CONSTRAINT lvc_rule_versions_reviewed_le_sample CHECK (reviewed_n <= sample_size),
+  CONSTRAINT lvc_rule_versions_nnb_bounds         CHECK (n_not_belonging IS NULL
+                                           OR (n_not_belonging >= 0 AND n_not_belonging <= reviewed_n))
 )`;
 
 export const VERSIONS_INDEX_DDL =
@@ -103,6 +121,7 @@ export const VERSIONS_INDEX_DDL =
  *  module. Bootstrap and proposal creation write NO row here (S4). */
 export const ACTIVATION_EVENTS_TABLE_DDL = `CREATE TABLE IF NOT EXISTS lvc_rule_activation_events (
   id              bigserial PRIMARY KEY,
+  event_ref       uuid NOT NULL UNIQUE,
   rule_ref        text NOT NULL,
   version         int  NOT NULL,
   event           text NOT NULL CHECK (event IN ('activate','retire')),
@@ -113,7 +132,19 @@ export const ACTIVATION_EVENTS_TABLE_DDL = `CREATE TABLE IF NOT EXISTS lvc_rule_
   reviewed_n      int  NOT NULL,
   sample_seed     text NOT NULL,
   n_not_belonging int,
-  created_at      timestamptz NOT NULL DEFAULT now()
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT lvc_rule_activation_events_version_positive CHECK (version > 0),
+  CONSTRAINT lvc_rule_activation_events_version_fk
+    FOREIGN KEY (rule_ref, version) REFERENCES lvc_rule_versions (rule_ref, version),
+  CONSTRAINT lvc_rule_activation_events_ratifier_named CHECK (
+    btrim(ratified_by) <> ''
+    AND lower(btrim(ratified_by)) NOT IN ('admin','system','cron','worker','care-manager')),
+  CONSTRAINT lvc_rule_activation_events_rationale_nonblank CHECK (btrim(rationale) <> ''),
+  CONSTRAINT lvc_rule_activation_events_seed_nonblank      CHECK (btrim(sample_seed) <> ''),
+  CONSTRAINT lvc_rule_activation_events_counts_nonneg      CHECK (sample_size >= 0 AND reviewed_n >= 0),
+  CONSTRAINT lvc_rule_activation_events_reviewed_le_sample CHECK (reviewed_n <= sample_size),
+  CONSTRAINT lvc_rule_activation_events_nnb_bounds         CHECK (n_not_belonging IS NULL
+                                           OR (n_not_belonging >= 0 AND n_not_belonging <= reviewed_n))
 )`;
 
 export const ACTIVATION_EVENTS_INDEX_DDL =
@@ -123,6 +154,44 @@ export const ACTIVATION_EVENTS_INDEX_DDL =
  *  identity. The column is `lvp_pattern_id` (O1) and its value is exactly what
  *  lib/lvp-core.ts patternIdFor() returns. Hide remains cosmetic; an lvp_pattern_id NEVER
  *  becomes a rule_ref. `evidence_snapshot` is the frozen §3.7 shelf reading. */
+/**
+ * ── D2 §1.4 (Saul Rep 48): three constraints on the pattern↔rule bridge ─────────────────────────
+ *
+ * ⚠️ WRITTEN HERE AND NOT AS `--` COMMENTS INSIDE THE DDL STRING. `rule-governance-migration.test.ts`
+ * compares the reference `.sql` against these constants statement-for-statement, and it strips
+ * comment lines from the `.sql` side ONLY. A comment inside the template literal therefore appears
+ * on one side and not the other and breaks parity — which it did, first try. The executable string
+ * stays exactly what executes; the reasoning lives out here.
+ *
+ * `rule_pattern_map_pattern_unique` — ONE ROW PER PATTERN. Not merely hygiene: it is the conflict
+ * target §1.3's claim-first CTE uses. Without it `ON CONFLICT (lvp_pattern_id)` has nothing to
+ * name, and the atomic identity claim cannot serialise at all. The two are one mechanism.
+ *
+ * `rule_pattern_map_snapshot_identity` — the frozen snapshot must be a snapshot OF THIS PATTERN.
+ * Otherwise a row can carry the identity of one pattern and the evidence of another, and the
+ * evidence is the entire point of freezing: a snapshot describing a different pattern is not
+ * replayable, and nothing downstream could detect the substitution.
+ *
+ * ⚠️ THE PRESENCE CONJUNCT IS NOT DECORATION, AND ITS ABSENCE WAS A REAL DEFECT (D2 correction §1).
+ * As first written this constraint was the bare equality `evidence_snapshot ->> 'pattern_id' =
+ * lvp_pattern_id`. With the key ABSENT, `->>` yields SQL NULL, the comparison yields NULL, and a
+ * CHECK IS SATISFIED BY NULL — so a snapshot carrying no `pattern_id` at all was admitted, and the
+ * paragraph above was false in exactly the case it was written to prevent. The hazard was written
+ * out correctly for `concept_id` in the constraint below and not applied to this one, immediately
+ * above it. A DISAGREEING pattern_id was refused; a MISSING one was not.
+ *
+ * Nonblank needs no conjunct of its own here: the value is required to equal `lvp_pattern_id`,
+ * which `rule_pattern_map_pattern_nonblank` already forbids from being blank.
+ *
+ * `rule_pattern_map_pattern_id_form` — the identity is DERIVED from the concept, and the derivation
+ * is fixed: `patternIdFor()` in lib/lvp-core.ts returns `'pattern:' + concept_id`. Pinned so a row
+ * cannot claim an identity the shelf could never have produced.
+ *
+ * ⚠️ A BLANK OR ABSENT `concept_id` FAILS IT RATHER THAN DEFAULTING, and that is written out
+ * explicitly. `->>` yields SQL NULL for an absent key, and a CHECK is SATISFIED by NULL — so an
+ * absent concept_id would have passed a naive equality test. The presence and nonblank guards are
+ * separate conjuncts for exactly that reason.
+ */
 export const PATTERN_MAP_TABLE_DDL = `CREATE TABLE IF NOT EXISTS rule_pattern_map (
   id                bigserial PRIMARY KEY,
   lvp_pattern_id    text NOT NULL,
@@ -134,9 +203,46 @@ export const PATTERN_MAP_TABLE_DDL = `CREATE TABLE IF NOT EXISTS rule_pattern_ma
   reviewed_n        int  NOT NULL,
   sample_seed       text NOT NULL,
   n_not_belonging   int,
-  created_at        timestamptz NOT NULL DEFAULT now()
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT rule_pattern_map_pattern_nonblank CHECK (btrim(lvp_pattern_id) <> ''),
+  CONSTRAINT rule_pattern_map_ref_nonblank     CHECK (btrim(rule_ref) <> ''),
+  CONSTRAINT rule_pattern_map_pattern_unique UNIQUE (lvp_pattern_id),
+  CONSTRAINT rule_pattern_map_snapshot_identity CHECK (
+    evidence_snapshot ->> 'pattern_id' IS NOT NULL
+    AND evidence_snapshot ->> 'pattern_id' = lvp_pattern_id),
+  CONSTRAINT rule_pattern_map_pattern_id_form CHECK (
+    evidence_snapshot ->> 'concept_id' IS NOT NULL
+    AND btrim(evidence_snapshot ->> 'concept_id') <> ''
+    AND lvp_pattern_id = 'pattern:' || (evidence_snapshot ->> 'concept_id')),
+  CONSTRAINT rule_pattern_map_ratifier_named CHECK (
+    btrim(ratified_by) <> ''
+    AND lower(btrim(ratified_by)) NOT IN ('admin','system','cron','worker','care-manager')),
+  CONSTRAINT rule_pattern_map_rationale_nonblank CHECK (btrim(rationale) <> ''),
+  CONSTRAINT rule_pattern_map_seed_nonblank      CHECK (btrim(sample_seed) <> ''),
+  CONSTRAINT rule_pattern_map_counts_nonneg      CHECK (sample_size >= 0 AND reviewed_n >= 0),
+  CONSTRAINT rule_pattern_map_reviewed_le_sample CHECK (reviewed_n <= sample_size),
+  CONSTRAINT rule_pattern_map_nnb_bounds         CHECK (n_not_belonging IS NULL
+                                           OR (n_not_belonging >= 0 AND n_not_belonging <= reviewed_n))
 )`;
 
+/**
+ * ⚠️ RETAINED DELIBERATELY UNDER THE NEW UNIQUE CONSTRAINT (D2 §1.4, and the kickoff asks that this
+ * decision be reported rather than taken silently).
+ *
+ * The unique constraint on `lvp_pattern_id` creates its own single-column unique index, which makes
+ * THIS index redundant for equality lookups on `lvp_pattern_id` alone — that is now served better
+ * by the unique one. It is kept anyway, for one reason and not for inertia:
+ *
+ * `CREATE INDEX IF NOT EXISTS` is idempotent, and this migration has NOT been applied anywhere. If
+ * the file is later applied to a database that somehow already carries the index, dropping the
+ * statement here would leave that index in place with nothing in the repository describing it —
+ * the exact CREATE-versus-ALTER ordering hazard migration 0023 records against `promoted_id`,
+ * where whichever ran first silently decided the schema. Keeping the statement means the file
+ * continues to describe the whole shape of the table.
+ *
+ * The redundancy is real but cheap: one index on a table that gets one row per governed pattern.
+ * If it is to be removed, that is a deliberate DROP in a forward migration, not a deletion here.
+ */
 export const PATTERN_MAP_INDEX_DDL =
   `CREATE INDEX IF NOT EXISTS rule_pattern_map_pattern_idx ON rule_pattern_map (lvp_pattern_id, created_at DESC)`;
 
@@ -168,13 +274,23 @@ export const RULE_GOVERNANCE_DDL: readonly string[] = [
 /**
  * Idempotent DDL for migration 0039.
  *
- * CALLED FROM EXACTLY ONE PLACE: GET /api/admin/migrate-rule-governance, itself behind the flag
- * AND the admin gate. Deliberately NOT the ensureLvcProposalTables() idiom, which runs on every
+ * CALLED FROM EXACTLY ONE PLACE: GET /api/admin/migrate-rule-governance, which authenticates
+ * STRICTLY with `requireConfiguredAdmin` and — since D2 — does NOT gate on the feature flag.
+ * Creating schema and arming the feature are different decisions. Deliberately NOT the
+ * ensureLvcProposalTables() idiom, which runs on every
  * MCP propose or ratify call — that is how a runtime DDL and a migration file once disagreed on
  * a column with nobody noticing (kickoff §6 trap 3). The bridge route does not call this.
  */
 export async function ensureRuleGovernanceTables(): Promise<void> {
-  assertEnabled();
+  // ⚠️ NO `assertEnabled()` HERE ANY MORE (D2 §2, Saul Rep 48). Creating the SCHEMA and enabling
+  // the FEATURE are different decisions, and the flag gate THAT USED TO BE HERE forced an operator
+  // to arm the feature in order to create empty tables. Its ONE caller — the migrate route — now
+  // authenticates strictly with `requireConfiguredAdmin`, which refuses when ADMIN_TOKEN is absent,
+  // so this is authenticated schema DDL rather than an ungated one.
+  //
+  // ⚠️ THIS IS THE ONLY FLAG GATE REMOVED. `assertEnabled()` stays on every OPERATIONAL write —
+  // `proposePatternAsRule` and `bootstrapRuleVersions` — because those write governance ROWS, and
+  // a row written while the feature is off is a fact nobody decided to record.
   for (const ddl of RULE_GOVERNANCE_DDL) await run(ddl, []);
 }
 
@@ -217,23 +333,81 @@ export function definitionHashSql(exprs: readonly string[]): string {
  * §3.1 forbids a foreign key: R3-B is the unit that would create the registry row under exactly
  * this id. Nothing reads a rule_ref that names no row, because nothing reads these tables at all.
  *
- * IDEMPOTENCY / DEDUP: the proposal INSERT carries a NOT EXISTS guard on an identical pending
- * statement. When it fires, the CTE chain has no proposal row to feed, so the version and map
- * INSERTs select from an empty set and the whole statement writes nothing and returns no row —
- * a re-POST of the same pattern is a no-op rather than a duplicate rule book entry. NOTE: this is
- * an EXACT-statement guard, not F14's near-duplicate gate (lvc_propose's loadExistingStatements);
- * running that gate needs a second read and is therefore R3-B's, not this statement's.
+ * IDEMPOTENCY / DEDUP: THE IDENTITY CLAIM, NOT A STATEMENT COMPARISON (rewritten, D2 correction §2).
+ *
+ * ⚠️ WHAT THIS PARAGRAPH USED TO SAY, AND WHY IT WAS LEFT WRONG. It described a `NOT EXISTS` guard
+ * on an identical pending STATEMENT, and said the chain had "no proposal row to feed" when it
+ * fired. Both halves are now false: the guard was removed as the authoritative rule because it
+ * compared boilerplate against boilerplate, and the chain is fed by the CLAIM, not the proposal.
+ * The code moved and the comment did not. That has happened three times in this programme now, and
+ * a stale comment is worse than none — a reader trusts it exactly where they cannot see the code.
+ *
+ * What is true: the FIRST CTE claims `lvp_pattern_id` with `ON CONFLICT (lvp_pattern_id) DO
+ * NOTHING`, and every downstream CTE selects FROM the one above it. A request whose claim
+ * conflicts therefore feeds an EMPTY SET into the proposal, which feeds an empty set into the
+ * version, so the whole statement writes nothing and returns no row. A re-POST of the same pattern
+ * is a no-op, and a concurrent loser writes zero rows everywhere.
+ *
+ * ⚠️ THE CLAIM IS ON THE PATTERN AND IS PERMANENT. It is not "an identical pending proposal" —
+ * `rule_pattern_map` has no status column and the row is never deleted, so once a pattern is
+ * mapped it is mapped for good. That is Rep 48's intent, and its consequence is stated at the
+ * route's 409 rather than hidden here: a pattern whose proposal was REJECTED cannot be re-proposed
+ * through this path. See the note there.
+ *
+ * NOTE: this is an identity claim, not F14's near-duplicate gate (lvc_propose's
+ * loadExistingStatements); running that gate needs a second read and is therefore R3-B's, not this
+ * statement's.
  */
-export const PROPOSE_PATTERN_SQL = `WITH prop AS (
+/**
+ * THE BRIDGE WRITE — claim-first (D2 §1.3, Saul Rep 48).
+ *
+ * ⚠️ THE ORDER CHANGED, AND THE ORDER IS THE POINT. This statement used to run prop → ver → map,
+ * with the duplicate guard being exact wrapper-statement equality:
+ * `WHERE NOT EXISTS (… lower(p.statement) = lower($1))`. That rule compared BOILERPLATE AGAINST
+ * BOILERPLATE — the wrapper prose around two genuinely different patterns is nearly identical, so
+ * it could block a legitimate second pattern while doing nothing to stop two concurrent writes of
+ * the SAME pattern. It is removed as the authoritative rule.
+ *
+ * The identity is now claimed FIRST, atomically, on `lvp_pattern_id`:
+ *
+ *   claim → prop → ver
+ *
+ * Each downstream CTE selects FROM the one above it, so a request whose `claim` returns zero rows
+ * writes zero rows EVERYWHERE — no proposal, no version, no map row. That is the whole mechanism
+ * for "a concurrent losing request must write zero rows", and it needs no advisory lock and no
+ * second statement: it is still ONE data-modifying CTE, and one statement is one transaction on
+ * Neon's HTTP driver.
+ *
+ * ⚠️ WHY THE MAP CAN LEAD, VERIFIED RATHER THAN ASSUMED. `rule_pattern_map` has NO foreign key to
+ * `lvc_rule_versions` — checked directly in migration 0039, which declares no foreign keys on this
+ * table at all — and its `rule_ref` is CALLER-MINTED, arriving as a parameter rather than being
+ * produced by the version insert. So nothing about the map row depends on the version row existing
+ * first. Had a foreign key existed, this order would have been impossible and the instruction was
+ * to stop and report rather than reach for a second statement.
+ *
+ * ⚠️ `ON CONFLICT (lvp_pattern_id) DO NOTHING` REQUIRES THE UNIQUE CONSTRAINT added in §1.4. The
+ * two are one mechanism, not two independent hardenings: without the constraint there is no
+ * conflict target to name and this statement does not compile against the schema.
+ *
+ * ⚠️ THE PROPOSAL IS STILL WRITTEN, and still `proposed`. Containment of the legacy ratify path is
+ * §1.1's job in lib/mcp-tools.ts, not this statement's — a bridge proposal continues to exist and
+ * is simply no longer ratifiable through the legacy tool.
+ */
+export const PROPOSE_PATTERN_SQL = `WITH claim AS (
+  INSERT INTO rule_pattern_map
+    (lvp_pattern_id, rule_ref, evidence_snapshot,
+     ratified_by, rationale, sample_size, reviewed_n, sample_seed, n_not_belonging)
+  SELECT $16::text, $8::text, $17::jsonb,
+         $10::text, $11::text, $12::int, $13::int, $14::text, $15::int
+  ON CONFLICT (lvp_pattern_id) DO NOTHING
+  RETURNING id, rule_ref
+), prop AS (
   INSERT INTO lvc_recommendation_proposals
     (statement, rationale, evidence_note, source, category, action_type, keywords, provenance,
      status, proposed_by)
   SELECT $1::text, $2::text, $3::text, 'lvp-pattern', $4::text, $5::text, $6::jsonb, 'lvp-pattern',
          'proposed', $7::text
-   WHERE NOT EXISTS (
-     SELECT 1 FROM lvc_recommendation_proposals p
-      WHERE p.status = 'proposed' AND lower(p.statement) = lower($1::text)
-   )
+    FROM claim
   RETURNING id
 ), ver AS (
   INSERT INTO lvc_rule_versions
@@ -246,19 +420,11 @@ export const PROPOSE_PATTERN_SQL = `WITH prop AS (
          $10::text, $11::text, $12::int, $13::int, $14::text, $15::int
     FROM prop
   RETURNING rule_ref, version, definition_hash
-), map AS (
-  INSERT INTO rule_pattern_map
-    (lvp_pattern_id, rule_ref, evidence_snapshot,
-     ratified_by, rationale, sample_size, reviewed_n, sample_seed, n_not_belonging)
-  SELECT $16::text, ver.rule_ref, $17::jsonb,
-         $10::text, $11::text, $12::int, $13::int, $14::text, $15::int
-    FROM ver
-  RETURNING id
 )
 SELECT (SELECT id::text FROM prop)          AS proposal_id,
        (SELECT rule_ref FROM ver)           AS rule_ref,
        (SELECT definition_hash FROM ver)    AS definition_hash,
-       (SELECT id::text FROM map)           AS map_id`;
+       (SELECT id::text FROM claim)         AS map_id`;
 
 export interface ProposePatternInput {
   ruleRef: string;                       // minted by the caller (mintRuleRef)
@@ -283,10 +449,19 @@ export interface ProposePatternResult {
 }
 
 /** ONE await. ONE statement. No second write path exists in this function by construction. */
-export async function proposePatternAsRule(input: ProposePatternInput): Promise<ProposePatternResult> {
+/**
+ * ⚠️ THE SQL RUNNER IS INJECTABLE (D2 §3 item 8). The concurrent-loser property — a request whose
+ * identity claim conflicts writes ZERO rows everywhere — is a property of the STATEMENT, and the
+ * only honest way to exercise it without two live connections is to drive the function with a
+ * runner that returns what a losing claim returns. Production passes nothing and is unchanged.
+ */
+export async function proposePatternAsRule(
+  input: ProposePatternInput,
+  runner: typeof run = run,
+): Promise<ProposePatternResult> {
   assertEnabled();
   const ev = asEvidence(input.evidence);
-  const rows = await run(PROPOSE_PATTERN_SQL, [
+  const rows = await runner(PROPOSE_PATTERN_SQL, [
     input.statement,                       // $1
     input.rationale_text,                  // $2
     input.evidence_note,                   // $3

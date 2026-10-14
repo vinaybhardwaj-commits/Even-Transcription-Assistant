@@ -96,11 +96,6 @@ export interface SurfaceFinding {
    *  Marker only: no judgement is overridden, the situation line stays, queue and badge unchanged.
    *  Absent (pre-R7 caller / fixture) = no marker. */
   returnContext?: ReturnContext | null;
-  /** R9 (CDMSS-READMISSIONS-R9-DUAL-CONTRACT PRD, D14): the care manager's own stored verdict —
-   *  `readmission_findings.clinical_review_decision`, joined at read time by the list route from its
-   *  own fail-safe read. It sits BESIDE `avoidable`, which it never overwrites, and no rate reads it
-   *  (acceptance #6). Absent / null = nobody has stated anything about this case yet. */
-  clinicalReviewDecision?: string | null;
 }
 
 /** R7 — see lib/readmission-rates-core.ts (returnContext). Re-declared structurally here so the
@@ -544,11 +539,10 @@ export function situationLine(row: Pick<SurfaceFinding, 'planned' | 'sameConditi
 
 // ── coverage chips (§3 zone 3) ───────────────────────────────────────────────────
 
-/** R2 (constraints 13-16) + R10-A: six states. `unknown` = never looked OR the fetch faulted;
- *  `absent` = looked, no row; `empty` = looked, rows but no usable text; `document_text` = looked,
- *  no db13 row, and the discharge document prints the operative text (in the ledger as `DOT…`).
- *  Every state string is user-visible copy (see chipText). */
-export type ChipState = 'present' | 'empty' | 'absent' | 'document_text' | 'unknown' | 'n/a';
+/** R2 (constraints 13-16): five states. `unknown` = never looked OR the fetch faulted;
+ *  `absent` = looked, no row; `empty` = looked, rows but no usable text. Every state string
+ *  is user-visible copy (see chipText). */
+export type ChipState = 'present' | 'empty' | 'absent' | 'unknown' | 'n/a';
 export interface CoverageChip { key: string; label: string; state: ChipState }
 
 /** templateCoverage status → chip state. `fetch_failed` and an absent object are BOTH
@@ -558,10 +552,6 @@ export function templateChipState(entry: { status?: string | null } | null | und
     case 'present': return 'present';
     case 'empty': return 'empty';
     case 'absent': return 'absent';
-    // R10-A: the look completed, db13 had no OT row, the discharge document printed the operative
-    // text. A distinct state, never `present` (it is not a structured OT note) and never `absent`
-    // (the text exists and is cited) — R10-D10.
-    case 'absent_document_text': return 'document_text';
     default: return 'unknown';   // 'fetch_failed', missing, unrecognised
   }
 }
@@ -576,8 +566,6 @@ export function chipText(c: Pick<CoverageChip, 'label' | 'state'> & { key?: stri
     // absence, so the Bill chip's `absent` reads `Bill pending`. Every other chip is unchanged.
     case 'absent': return c.key === 'bill' ? `${c.label} pending` : `${c.label} none`;
     case 'n/a': return `${c.label} n/a`;
-    // R10-A — the chip says WHERE the text is, in three words a care manager reads at a glance.
-    case 'document_text': return `${c.label} in document`;
     default: return c.label;   // present, unknown — the style tells them apart
   }
 }
@@ -940,7 +928,6 @@ export function artefactStateWord(c: Pick<CoverageChip, 'key' | 'state'>): strin
     case 'present': return 'present';
     case 'empty': return 'empty — rows exist, no usable text';
     case 'absent': return c.key === 'bill' ? 'pending — bill not finalised' : 'none';
-    case 'document_text': return 'no structured OT row; operative text found in the discharge document';
     case 'unknown': return 'unknown — not looked for, or the look failed';
     case 'n/a': return 'n/a';
   }

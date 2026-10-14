@@ -224,6 +224,17 @@ export const LAB_TOOLS = [
     },
   },
   {
+    name: 'lab_query',
+    description: 'Inspect the experimental lab + POLL async clinical probes (lab_ddx/lab_ask/lab_appropriateness/lab_pathway/lab_case_audit): fetch one run by id (its output.status is pending → done → error; done rows carry the full result), list runs in one experiment (experiment=…), list experiments (no args), or storage stats (stats=true). args: experiment? | id? | stats? WRITE-CLASS: read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        experiment: { type: 'string' }, id: { type: 'string' },
+        stats: { type: 'boolean' }, limit: { type: 'number' },
+      },
+    },
+  },
+  {
     name: 'audit_query',
     description:
       'Run a READ-ONLY SQL query (SELECT/WITH only) against the CDMSS audit database (Neon) — for mining bug prevalence + building golden sets. Readable tables are DE-IDENTIFIED (no PHI): opd_note_audits (per-note audit: uid, doctor_uid, note_date, note_quality_index, band, score_documentation/note_quality/appropriateness/prescribing_safety/patient_centred, pdqi9 jsonb [{attr,value}], completeness_pct, n_missing_mandatory, n_findings, n_low_value, n_interaction_alerts, findings jsonb [{subject,verdict,domain,source,informational,signal_type,finding_ref,citation_ids,rule_ref,lvc_category}] (lvc_category on low-value findings ∈ antibiotic|imaging|supplement_polypharmacy|therapeutic_duplication|systemic_steroid|gi_ppi_prokinetic|antihistamine_allergy|nsaid_analgesic|cough_cold_fdc|cough_expectorant|unindicated_investigation|other — the 8 overuse sub-tags added in engine 0.81.8), suggestions jsonb, missing_fields jsonb, engine_version), plus opd_audit_triage, opd_gov_signal(_event), doctor_directory, doctor_roster, audit_suppression, doctor_operational_metrics, lvc_recommendations (reference), lab_analyses (your lab_ddx/lab_ask/mini_analyze runs — output jsonb), and the DE-IDENTIFIED pipeline views v_trace_summary (feature/status/severity/timings/model_summary — NO clinical text) + v_appropriateness_summary (mode/doc_type/counts). PHI-bearing raw tables (traces, trace_events, appropriateness_runs, ccb_briefs, care_track_assignments, opd_audit_feedback) are BLOCKED — use the views, and the feedback_* tools for opd_audit_feedback. Enforced: SELECT/WITH only, single statement, no writes/DDL/system-functions, blocked-relation guard, LIMIT ≤ 500 (auto-added), audit-logged. Source-NOTE fields (medications count, followUpType, patient age, specialty) live in db13 — take the uids this returns and join via the Metabase MCP. WRITE-CLASS: read-only.',
@@ -295,7 +306,7 @@ export const LAB_TOOLS = [
   },
   {
     name: 'lvc_propose',
-    description: "F14 — propose a low-value-care statement into the STAGING table (lvc_recommendation_proposals). lvc_recommendations is NEVER written by this tool. REFUSES an uncited proposal (needs citation_url OR citation_doi OR citation_pmid, AND source_release_year, AND license_status), and REFUSES a near-duplicate of any existing statement or pending proposal unless supersedes_id is supplied — the existing 60 house statements are ~15 concepts in machine-generated variants (11 diagnosis-mismatch, 5 vitamin D, 5 antibiotic-for-viral), and without this check the tool regenerates exactly that. SUPPLY KEYWORDS: a rule matches a finding through its keywords and nothing else, so a proposal with none is promoted into a rule that is active and never fires. WRITE-CLASS: lab-write (staging only).",
+    description: "F14 — propose a low-value-care statement into the STAGING table (lvc_recommendation_proposals). lvc_recommendations is NEVER written by this tool. REFUSES an uncited proposal (needs citation_url OR citation_doi OR citation_pmid, AND source_release_year, AND license_status), and REFUSES a near-duplicate of any existing statement or pending proposal unless supersedes_id is supplied — the existing 60 house statements are ~15 concepts in machine-generated variants (11 diagnosis-mismatch, 5 vitamin D, 5 antibiotic-for-viral), and without this check the tool regenerates exactly that. WRITE-CLASS: lab-write (staging only).",
     inputSchema: {
       type: 'object',
       properties: {
@@ -306,19 +317,6 @@ export const LAB_TOOLS = [
         citation_url: { type: 'string' }, citation_doi: { type: 'string' }, citation_pmid: { type: 'string' },
         source_release_year: { type: 'number' },
         license_status: { type: 'string', enum: ['open', 'permission-granted', 'proprietary-cited', 'unknown-blocked'] },
-        // DECISION 94. Declared here as well as parsed, because a field the parser accepts and the
-        // schema hides is a field no client will ever send.
-        keywords: {
-          type: 'array', items: { type: 'string' }, maxItems: 12,
-          description: 'Alternative trigger phrases, at most 12. A rule matches when ANY keyword matches as whole words in the finding\u2019s subject plus rationale; the longest matched phrase wins, and a tie yields no attribution. WITHOUT THESE THE PROMOTED RULE CAN NEVER FIRE.',
-        },
-        category: {
-          type: 'string',
-          enum: ['antibiotic', 'imaging', 'supplement_polypharmacy', 'therapeutic_duplication', 'systemic_steroid',
-            'gi_ppi_prokinetic', 'antihistamine_allergy', 'nsaid_analgesic', 'cough_cold_fdc', 'cough_expectorant',
-            'unindicated_investigation', 'other'],
-          description: 'The lvc_category stamped on a finding this rule matches. Omit to let the engine classify the finding from its text, which is what every rule does today.',
-        },
       },
       required: ['statement'],
     },
@@ -402,23 +400,6 @@ export const LAB_TOOLS = [
   },
 ] as const;
 
-/**
- * lab-v2 decision 143 (§17.11) + decision 149 — NAMES THIS SERVER ONCE SERVED AND NO LONGER DOES.
- *
- * A retirement has two halves that pull opposite ways: the name must be GONE from `LAB_TOOLS`, so
- * nobody discovers it, AND a client that already knows the name must get an ANSWER rather than
- * "unknown tool". This list is the second half. `dispatchMcp` consults it alongside `LAB_TOOLS` at
- * the name gate so a retired call reaches `callLabTool`; `tools/list` never reads it, which is what
- * keeps a retired tool undiscoverable.
- *
- * ⚠️ NOT the single source of the deprecation: `V1_DEPRECATIONS` in `lib/lab-v2/contracts.ts` is a
- * second copy, and decision 149 accepted that rather than making a pure schema module import this
- * one. The two are pinned equal by `c2-rules.test.ts` — if you change one, that test fails.
- */
-export const RETIRED_TOOLS = [
-  { name: 'lab_query', replaced_by: ['audit_search', 'corpus_search'], since: 'e5f53c55' },
-] as const;
-
 // ── dispatch ─────────────────────────────────────────────────────────────────────
 export async function callLabTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
   try {
@@ -438,14 +419,7 @@ export async function callLabTool(name: string, args: Record<string, unknown>): 
       case 'lvc_ratify': return await lvcRatify(args);
       case 'lvc_gaps': return await lvcGaps(args);
       case 'lab_retrieve': return await labRetrieve(args);
-      // lab-v2 decision 143 (§17.11): RETIRED. Removed from LAB_TOOLS above; this arm stays so a
-      // stale client gets a message naming its replacements instead of "unknown tool". Nothing in
-      // lab_analyses is deleted — audit_query still reads every row lab_query ever listed.
-      case 'lab_query': return ok({
-        error: 'RETIRED',
-        replaced_by: [...RETIRED_TOOLS[0].replaced_by],
-        since: RETIRED_TOOLS[0].since,
-      });
+      case 'lab_query': return await labQuery(args);
       case 'audit_query': return await auditQuery(args);
       case 'lab_batch_start': return await labBatchStart(args);
       case 'lab_batch_status': return await labBatchStatus();
@@ -1233,7 +1207,16 @@ async function loadExistingStatements(): Promise<ExistingStatement[] | null> {
     // correctly refuses when the comparison set cannot be read, so the fault failed closed.
     // lvc_recommendation_proposals is OUR table and genuinely has `source`.
     const live = await run(`SELECT id::text AS id, statement, society AS source, 'live' AS status FROM lvc_recommendations`, []);
-    const pending = await run(`SELECT id::text AS id, statement, source, status FROM lvc_recommendation_proposals WHERE status = 'proposed'`, []);
+    // ⚠️ D2 §1.2 LANE A — BRIDGE ROWS ARE EXCLUDED FROM THE ORDINARY DEDUP SET (Saul Rep 48).
+    // An ordinary MCP request carries no trustworthy pattern identity, so cross-channel semantic
+    // identity between an MCP statement and a bridge row CANNOT BE INFERRED and must not be
+    // guessed. Comparing them by Jaccard over wrapper prose is guessing: the bridge wraps every
+    // pattern in near-identical boilerplate, so an ordinary proposal would collide with whichever
+    // bridge row happened to exist rather than with anything it actually duplicates.
+    //
+    // Lane B — bridge to bridge — is exact `lvp_pattern_id`, enforced in the database by the
+    // unique claim in PROPOSE_PATTERN_SQL. The two lanes never compare across each other.
+    const pending = await run(`SELECT id::text AS id, statement, source, status FROM lvc_recommendation_proposals WHERE status = 'proposed' AND coalesce(source, '') <> 'lvp-pattern' AND coalesce(provenance, '') <> 'lvp-pattern'`, []);
     return [...live, ...pending].map((r) => ({
       id: String(r.id), statement: String(r.statement ?? ''),
       source: r.source == null ? null : String(r.source), status: r.status == null ? null : String(r.status),
@@ -1255,35 +1238,22 @@ async function lvcPropose(a: Record<string, unknown>): Promise<ToolResult> {
   }
   const v = parsed.value;
   try {
-    // DECISION 94 — `category` and `keywords` join the column list. The table has had both since
-    // ensureLvcProposalTables was written (`category text, ... keywords jsonb`); nothing named them,
-    // so every proposal staged a rule that could never fire. ⚠️ `keywords` here is JSONB and the
-    // corresponding column on `lvc_recommendations` is `text[]` — measured live, 06 Sep 2026 — so
-    // the promotion below converts rather than passing the value straight through.
     const rows = await run(
       `INSERT INTO lvc_recommendation_proposals
          (statement, rationale, evidence_note, citation_url, citation_doi, citation_pmid,
-          source_release_year, license_status, provenance, status, proposed_by, supersedes_id,
-          category, keywords)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'proposed',$10,$11,$12,$13::jsonb)
+          source_release_year, license_status, provenance, status, proposed_by, supersedes_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'proposed',$10,$11)
        RETURNING id::text AS id, status, proposed_at`,
       [v.statement, v.rationale, v.evidence_note, v.citation.citation_url, v.citation.citation_doi,
        v.citation.citation_pmid, v.citation.source_release_year, v.citation.license_status,
-       v.citation.provenance, v.proposed_by, v.supersedes_id,
-       v.category, JSON.stringify(v.keywords)]);
+       v.citation.provenance, v.proposed_by, v.supersedes_id]);
     const row = rows[0] ?? {};
     return ok({ proposal_id: row.id ?? null, status: 'proposed', statement: v.statement, supersedes_id: v.supersedes_id,
-      keywords: v.keywords, category: v.category,
-      // ⚠️ DECISION 94. Said on every proposal, because the failure it names is silent: the rule
-      // would be promoted, be active, and match nothing, and nothing would report that.
-      matching: v.keywords.length
-        ? `${v.keywords.length} keyword phrase(s) recorded; the promoted rule will match a finding whose subject or rationale contains any of them as whole words.`
-        : 'NO KEYWORDS — a rule matches through its keywords alone, so if this proposal is promoted as it stands the rule will be active and will never match anything. Re-propose with keywords.',
       note: 'STAGED only — lvc_recommendations is untouched. lvc_ratify (confirm:true + a named ratifier) is the only promotion path.' });
   } catch (e) { return err(`propose failed: ${String((e as Error).message).slice(0, 200)}`); }
 }
 
-export async function lvcRatify(a: Record<string, unknown>): Promise<ToolResult> {
+async function lvcRatify(a: Record<string, unknown>): Promise<ToolResult> {
   await ensureLvcProposalTables().catch(() => {});
   const parsed = parseRatifyArgs(a);
   if (!parsed.ok) return err(parsed.error);
@@ -1291,15 +1261,43 @@ export async function lvcRatify(a: Record<string, unknown>): Promise<ToolResult>
 
   let prop: Record<string, unknown> | undefined;
   try {
-    // DECISION 94 — `category` and `keywords` are read so the promotion can copy them. A promotion
-    // that did not read them could not write them, which is half of why the old path lost them.
     const rows = await run(
+      // D2 §1.1: `source` added to the EXISTING projection — no second query. `provenance` was
+      // already selected.
       `SELECT id::text AS id, statement, rationale, evidence_note, citation_url, citation_doi, citation_pmid,
-              source_release_year, license_status, provenance, status, proposed_by, supersedes_id,
-              category, keywords
+              source_release_year, license_status, provenance, source, status, proposed_by, supersedes_id
        FROM lvc_recommendation_proposals WHERE id = $1::uuid`, [v.proposal_id]);
     prop = rows[0];
   } catch (e) { return err(`cannot read proposal: ${String((e as Error).message).slice(0, 160)}`); }
+
+  // ══ D2 §1.1 — BRIDGE CONTAINMENT (Saul Rep 48). BEFORE promotion AND BEFORE rejection. ════════
+  //
+  // ⚠️ WHAT THIS PREVENTS, CONCRETELY. A bridge row written by the governed path carries
+  // `source='lvp-pattern'`, and until now this tool would happily promote it: it checks only the
+  // proposal id and `status='proposed'`. Promotion then MINTS A DIFFERENT rule_ref, inserts an
+  // `lvc_recommendations` row whose status column defaults to ACTIVE, omits the bridge's frozen
+  // executable-definition fields, does its follow-up updates as separate statements with swallowed
+  // failures — and BYPASSES THE GOVERNED WORKFLOW COMPLETELY. R3-A2 refusing to activate the
+  // governed version does not undo a separately created active registry row. The governed refusal
+  // and the legacy promotion are not connected, so the strictness of one buys nothing while the
+  // other stays open.
+  //
+  // ⚠️ EITHER FIELD, NOT BOTH. `source` and `provenance` are both stamped 'lvp-pattern' by the
+  // bridge, and a row carrying only one of them is still bridge-origin. Requiring both would let a
+  // single missing column reopen the path.
+  //
+  // ⚠️ BEFORE THE REJECT BRANCH TOO. A bridge row must not be REJECTABLE here either: rejection
+  // writes `status='rejected'` and a ledger row, which would let this tool retire a governed
+  // proposal outside the governed workflow — a different unauthorised state change, not a safe one.
+  //
+  // ⚠️ OUT OF SCOPE, AND REP 48 SAYS SO. The wider race and swallowed-write defects in ORDINARY
+  // legacy ratification are R3-B hardening. The `.catch(() => {})` calls below are deliberately
+  // left exactly as they are, and the ordinary promotion path is not restructured.
+  const bridgeOrigin = prop
+    && (String(prop.source ?? '') === 'lvp-pattern' || String(prop.provenance ?? '') === 'lvp-pattern');
+  if (bridgeOrigin) {
+    return err('bridge_origin_requires_governed_workflow');
+  }
 
   // PROMOTE-ONLY: without an existing 'proposed' row there is nothing to promote, and this tool has
   // no path that creates a statement de novo.
@@ -1333,39 +1331,19 @@ export async function lvcRatify(a: Record<string, unknown>): Promise<ToolResult>
     // The COMPLETE NOT NULL set on lvc_recommendations is exactly four columns — id, region,
     // society, statement — and all four are now supplied. `status` is deliberately NOT supplied
     // (defaults to 'active'); every other column is nullable or defaulted, measured.
-    // DECISION 94 — `category` and `keywords` are COPIED FROM THE PROPOSAL, never re-derived. The
-    // proposal is what a reviewer read and approved; deriving a category here from the statement
-    // text would promote something nobody reviewed.
-    //
-    // ⚠️ THE TWO COLUMNS ARE DIFFERENT TYPES AND THAT IS NOT A MISTAKE. Measured live 06 Sep 2026:
-    // `lvc_recommendation_proposals.keywords` is `jsonb`; `lvc_recommendations.keywords` is
-    // `text[]` (`udt_name` `_text`, `DEFAULT '{}'::text[]`, migration 0005) — and `text[]` is the
-    // type `getLvcRules` and the GIN index are built on. So the jsonb array is normalised in JS and
-    // bound as `$11::text[]`. `category` is `text` on both, nullable, no default.
-    const promotedKeywords: string[] = Array.isArray(prop!.keywords)
-      ? (prop!.keywords as unknown[]).map((k) => String(k)).filter((k) => k.trim().length > 0)
-      : [];
     const ins = await run(
       `INSERT INTO lvc_recommendations
          (id, region, society, statement, rationale, citation_url, citation_doi, citation_pmid,
-          source_release_year, license_status, provenance, proposed_by, ratified_by, ratified_at,
-          category, keywords)
-       VALUES ('ehrc-' || gen_random_uuid()::text, 'IN', 'EHRC', $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), $11,$12::text[])
+          source_release_year, license_status, provenance, proposed_by, ratified_by, ratified_at)
+       VALUES ('ehrc-' || gen_random_uuid()::text, 'IN', 'EHRC', $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
        RETURNING id`,
       [prop!.statement, prop!.rationale, prop!.citation_url, prop!.citation_doi, prop!.citation_pmid,
-       prop!.source_release_year, prop!.license_status, prop!.provenance, prop!.proposed_by, v.ratified_by,
-       prop!.category ?? null, promotedKeywords]);
+       prop!.source_release_year, prop!.license_status, prop!.provenance, prop!.proposed_by, v.ratified_by]);
     const promotedId = ins[0]?.id == null ? null : String(ins[0].id);
     await run(`UPDATE lvc_recommendation_proposals SET status = 'ratified', promoted_id = $2 WHERE id = $1::uuid`, [v.proposal_id, promotedId]).catch(() => {});
     await run(`INSERT INTO lvc_ratifications (proposal_id, decision, ratified_by, rationale, promoted_id) VALUES ($1::uuid,'ratified',$2,$3,$4)`,
       [v.proposal_id, v.ratified_by, v.rationale, promotedId]).catch(() => {});
-    return ok({ proposal_id: v.proposal_id, status: 'ratified', promoted_id: promotedId, ratified_by: v.ratified_by,
-      // DECISION 94 — what actually landed, so an inert promotion is visible at the moment it happens
-      // rather than the first time somebody wonders why the rule never fires.
-      keywords: promotedKeywords, category: prop!.category ?? null,
-      matching: promotedKeywords.length
-        ? `active with ${promotedKeywords.length} keyword phrase(s)`
-        : 'ACTIVE BUT INERT — this rule has no keywords, and a rule matches through its keywords alone, so it will never stamp a finding.' });
+    return ok({ proposal_id: v.proposal_id, status: 'ratified', promoted_id: promotedId, ratified_by: v.ratified_by });
   } catch (e) { return err(`ratify failed: ${String((e as Error).message).slice(0, 200)}`); }
 }
 

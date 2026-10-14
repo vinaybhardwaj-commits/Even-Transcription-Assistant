@@ -63,11 +63,7 @@ import type { TemplateCoverage } from './readmission-template-core';
  *  'pac_note' | 'progress_note'. Their weight is decided by SIDE (R2-2, evidenceWeight
  *  below), never by the source name alone. Adding a value here without a case in
  *  evidenceWeight is a compile error — the old silent fall-through is gone. */
-/** R10-A (PRD §3.2, R10-D10): `doc_operative_text` = an operative / procedure block printed inside
- *  a DISCHARGE DOCUMENT and copied verbatim by the extractor (`verbatim_sections`). Ids `DOT1…`.
- *  It is NOT a structured OT note and is never promoted to one — the label the model and the
- *  reviewer both read says "found in the discharge document". */
-export type EvidenceSource = 'index_summary' | 'readmit_summary' | 'lab' | 'adt' | 'cm_form' | 'ot_note' | 'pac_note' | 'progress_note' | 'doc_operative_text';
+export type EvidenceSource = 'index_summary' | 'readmit_summary' | 'lab' | 'adt' | 'cm_form' | 'ot_note' | 'pac_note' | 'progress_note';
 
 /**
  * Where a lab evidence item's number came from (Phase 1.5 §3).
@@ -123,13 +119,6 @@ export function evidenceWeight(item: Pick<EvidenceItem, 'source' | 'side'>): Evi
     case 'cm_form': return 'neither';
     case 'ot_note': case 'pac_note': case 'progress_note':
       return item.side === 'readmit' ? 'disinterested' : 'interested';
-    // R10-A (kickoff, normative): DOT is INTERESTED — it is an index-side document, the same weight
-    // index_summary carries, and for the same reason: it is the treating team's own printed account
-    // of what happened, merely printed in a different part of the same document. Deliberately NOT
-    // weighed by side: a readmit-side operative block is still a treating team writing about its own
-    // operation, and 'interested' is the fail-closed answer (interested evidence can never carry an
-    // avoidable verdict on its own). Flagged in the R10 build report.
-    case 'doc_operative_text': return 'interested';
     default: {
       const exhaustive: never = item.source;
       return exhaustive;
@@ -862,11 +851,6 @@ export function reconcileFinding(input: ReconcileInput): ReadmissionFinding {
  * usable text was found — with the note saying why; `present` writes found:true so the
  * record is complete; `fetch_failed` writes NOTHING (the look did not complete → chip
  * `unknown` ↔ unwritten line). Never-looked → coverage null → nothing written.
- *
- * R10-A adds `absent_document_text`: found:false (no structured OT row was found) with the note
- * "no structured OT row; operative text found in the discharge document". The PLAIN-absence line is
- * untouched and still fires for a case whose document prints nothing either — a legitimately
- * non-surgical stay reads exactly as it did before R10 (acceptance #2).
  */
 export function templateRefusalLines(cov: TemplateCoverage | null | undefined): ReadmissionFinding['refusalRecord'] {
   if (!cov) return [];
@@ -877,12 +861,6 @@ export function templateRefusalLines(cov: TemplateCoverage | null | undefined): 
       case 'present': out.push({ lookedFor, found: true, note: `${e.count} row(s) with usable text` }); break;
       case 'empty': out.push({ lookedFor, found: false, note: `${e.count} row(s) exist but none carries usable text` }); break;
       case 'absent': out.push({ lookedFor, found: false, note: 'no row in db13 for this stay/window' }); break;
-      // R10-A (PRD §3.2): the refusal that was a LIE becomes true. The look completed, db13 has no
-      // structured OT row — and the discharge document prints operative text, which is in the ledger
-      // as `DOT…`. `found` stays FALSE because what was looked for (a structured OT row) is still
-      // not there; the note says where the text actually came from, so the model can neither claim a
-      // theatre record nor deny the text exists.
-      case 'absent_document_text': out.push({ lookedFor, found: false, note: 'no structured OT row; operative text found in the discharge document' }); break;
       case 'fetch_failed': break;   // deliberately unwritten — the look did not complete
     }
   };

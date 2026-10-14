@@ -91,7 +91,7 @@ test('rubric inclusion: nabh/6e external-json + the five embedded-in-prompt rubr
   }
 });
 
-test('count invariant: counts match the committed artifact contents (34 prompts / 7 rubrics / 41 builders)', () => {
+test('count invariant: counts match the committed artifact contents (31 prompts / 7 rubrics / 38 builders)', () => {
   const gen = GENERATED as {
     counts: { prompts: number; rubrics: number; user_message_builders: number; features: number };
     prompts: Array<{ feature: string }>; rubrics: unknown[]; user_message_builders: unknown[];
@@ -122,35 +122,8 @@ test('count invariant: counts match the committed artifact contents (34 prompts 
   // operator (Opus 4.6 on Bedrock), a genuinely new reasoning surface (30→31 prompts, +1 feature).
   // Builders are UNCHANGED at 38: its user message is assembled by operatorUserMessage(), which the
   // generator does not count as a builder, and no existing builder moved.
-  // Pre-op Risk B5 + B6 (27 Aug 2026) add the module's two LLM rails, and they are the
-  // module's ONLY reasoning surfaces — everything else in it is arithmetic:
-  //   preop-extract-core/EXTRACT_SYSTEM         + buildExtractPrompt    (31→32, 38→39, +1 feature)
-  //   preop-narrative-core/PREOP_NARRATIVE_SYSTEM + buildNarrativePrompt (32→33, 39→40, +1 feature)
-  // Both ship behind flags that are OFF, and both are registered anyway: the registry
-  // records what the codebase CAN reason with, not what is currently switched on.
-  // CASE-AGENTS-SPINE P1 (27 Aug 2026) adds ONE builder, buildCaseAskPrompt in case-ask-core —
-  // the shared persisted Ask on the OPD note-audit and IPD discharge-audit cases (40→41). No new
-  // PROMPT const: like the readmission Ask it extracts from, its system text is assembled inside
-  // the builder rather than bound to a standing _SYSTEM const, so prompts stay 33. No new feature
-  // row either — case-ask-core is not in the generator's FEATURE_OF map, so it labels itself.
-  // STEWARDSHIP S4 (29 Aug 2026) adds physician-standing-core/STANDING_PROMPT_CLAUSE — the medical
-  // superintendent's standing overlay (33→34 prompts, +1 feature; physician-standing-core is not in
-  // the generator's FEATURE_OF map, so it labels itself). Builders stay 41: the clause is appended
-  // to the SHARED buildCaseAskPrompt as an optional material field, so no new builder exists and
-  // buildCaseAskPrompt itself is unchanged for OPD and IPD (pinned byte-for-byte in
-  // physician-standing.test.ts and case-ask-core.test.ts). It is a genuinely new reasoning surface
-  // and it is counted as one — but note what it asks for: the model REPORTS what a named reviewer
-  // asserted in his own words, and code discards anything it cannot find inside that turn.
-  // IPD EPISODE AUDIT 0.1 (2 Sep 2026) adds the four standing prompts of the second IPD engine —
-  // lib/ipd-episode/prompts.ts, all four registered in the manifest (34→38 prompts). Four new
-  // builders come with them, one per pass: buildCheckpointUser in checkpoint-core and
-  // buildDiffUser / buildFidelityUser / buildCommentaryUser in judge-core (41→45). Features go
-  // 23→24: ipd-episode/prompts.ts is not in the generator's FEATURE_OF map, so it labels itself.
-  // Rubrics are unchanged at 7 — the discipline in all four prompts is the BLINDING (what each
-  // pass may not see), which is embedded in the text and re-enforced in code, not a linkable
-  // rubric document.
-  assert.equal(gen.counts.prompts, 38);
+  assert.equal(gen.counts.prompts, 31);
   assert.equal(gen.counts.rubrics, 7);
-  assert.equal(gen.counts.user_message_builders, 45);
-  assert.equal(gen.counts.features, 24);
+  assert.equal(gen.counts.user_message_builders, 38);
+  assert.equal(gen.counts.features, 20);
 });

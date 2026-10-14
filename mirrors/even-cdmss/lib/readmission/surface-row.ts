@@ -12,7 +12,7 @@ import type { FindingBlob, IndexCaseSummary, ReturnBill, ReturnContext, SurfaceF
 import { toFindingClass } from '../readmission-surface-core';
 import type { ExtractedCase } from '../doc-audit-core';
 import type { CaseArtefacts } from '../readmission-narrative-core';
-import { canonicalFacility, returnContext } from '../readmission-rates-core';
+import { returnContext } from '../readmission-rates-core';
 
 /** Display-only identity from KX (decision 5 / decision 13). Never sent to a model. */
 export interface Identity {
@@ -75,17 +75,7 @@ export function returnContextOf(r: SurfaceRow, blob: FindingBlob | null, indexEx
   });
 }
 
-export function toFinding(
-  r: SurfaceRow,
-  id: Identity | undefined,
-  indexCase: IndexCaseSummary | null = null,
-  returnBill: ReturnBill | null = null,
-  returnCtx: ReturnContext | null = null,
-  /** R9 / D14 — the human overlay's decision, joined by the route from its own fail-safe read (the
-   *  surface SELECT is deliberately NOT widened: before the migration runs those columns do not exist,
-   *  and a missing column on that read would empty the whole board). */
-  clinicalReviewDecision: string | null = null,
-): SurfaceFinding {
+export function toFinding(r: SurfaceRow, id: Identity | undefined, indexCase: IndexCaseSummary | null = null, returnBill: ReturnBill | null = null, returnCtx: ReturnContext | null = null): SurfaceFinding {
   const blob = asJson<FindingBlob>(r.finding);
   return {
     dedupKey: String(r.dedup_key),
@@ -97,7 +87,7 @@ export function toFinding(
     patientName: id?.name ?? null,
     uhid: s(r.uhid) ?? id?.uhid ?? null,
     ageGender: id?.ageGender ?? null,
-    facility: canonicalFacility(id?.facility) ?? null,   // R6 — rides the name join; never stored; canonicalised (19-Aug EHRC relabel)
+    facility: id?.facility ?? null,   // R6 — rides the name join; never stored
 
     gapDays: r.gap_days == null ? null : Number(r.gap_days),
     indexDepartment: s(r.index_department),
@@ -129,7 +119,5 @@ export function toFinding(
     returnBill,
     // R7 — the return context (immediate / staged markers), derived by code at read time.
     returnContext: returnCtx,
-    // R9 — the human overlay's verdict, beside the agent's `avoidable` above and never merged into it.
-    clinicalReviewDecision,
   };
 }

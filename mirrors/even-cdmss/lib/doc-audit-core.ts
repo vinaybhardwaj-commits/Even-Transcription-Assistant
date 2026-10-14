@@ -91,35 +91,6 @@ export interface AftercarePlan {
   follow_up_detail: string | null; // follow-up line incl. any symptom triggers
 }
 
-/**
- * R10-A (CDMSS-READMISSIONS-R10-RECORD-REACH PRD §3.1, decision R10-D1/R10-D10) — the printed
- * clinical blocks the extractor COPIES rather than summarises.
- *
- * WHY THE CONTRACT NEEDED A NEW FIELD AT ALL. Every existing field on ExtractedCase is a
- * *summary* of something the document says (`procedure`, `courseSummary`, `treatments`). None of
- * them can carry an operative block as printed, so a discharge summary that prints the whole OT
- * note in its body reached the readmission agent as a one-line `procedure` string — and the agent,
- * finding no structured OT row in db13 either, told a care manager the operative text did not
- * exist. That is the defect Dr. Zaki reported on 26 Aug (UHID-26415) and it is a defect of
- * OMISSION, not of judgement.
- *
- * DE-IDENTIFIED LIKE EVERYTHING ELSE. `verbatim` means "the document's own clinical wording",
- * never "the document's own identifiers": the extractor's CRITICAL PRIVACY RULE applies to this
- * field exactly as it applies to `raw_notes`, and lib/readmission/assemble.ts puts every string
- * through `deidText` again afterwards, so the guarantee does not rest on the prompt behaving.
- */
-export interface VerbatimSection {
-  /** The heading as printed ("OPERATIVE NOTES", "Procedure Details", "Course in Hospital"). */
-  heading: string;
-  /** The block's text, copied not summarised, capped at VERBATIM_SECTION_MAX_CHARS. */
-  text: string;
-}
-
-/** At most this many verbatim sections survive a parse (PRD kickoff: 6 × 4,000). */
-export const VERBATIM_SECTION_MAX = 6;
-/** Per-section character cap, applied at PARSE time so no stored row can exceed it. */
-export const VERBATIM_SECTION_MAX_CHARS = 4_000;
-
 export interface ExtractedCase {
   docType: DocType;
   detectedDocType: DocType;
@@ -143,9 +114,6 @@ export interface ExtractedCase {
   // PX additions (PRD v1.0 §6.3) — BOTH OPTIONAL; absent on pre-PX extractions.
   riskFactors?: string[];        // stated comorbidities/allergies/risk-relevant facts (facts only, de-identified)
   aftercare?: AftercarePlan;
-  /** R10-A: clinically substantive printed blocks, COPIED. Absent on pre-R10 extractions —
-   *  every reader must treat `undefined` and `[]` as the same "the document showed none". */
-  verbatimSections?: VerbatimSection[];
 }
 
 export interface CompletenessItem {
@@ -286,10 +254,8 @@ ADMIN FACTS (non-identifying): set length_of_stay_days = whole days between admi
 
 RISK FACTORS & AFTERCARE (both may be empty; facts only, never inferred; same NO-IDENTIFIER rule): risk_factors = comorbidities, allergies (including any allergy noted or breached during the stay), and other risk-relevant facts the document states (e.g. "known allergy to Diclofenac Sodium", "diabetic", "smoker"). aftercare = the plan's ACTUAL text, verbatim or closely paraphrased: instructions = aftercare/wound-care/activity/diet instructions given; warning_signs = the "when to obtain urgent care"-type items exactly as listed; follow_up_detail = the follow-up line including any symptom triggers it names.
 
-VERBATIM SECTIONS (R10-A) — COPY, DO NOT SUMMARISE. Some documents print a whole clinical block inside the body: an operative / OT note, an intra-operative findings block, a procedure-details block, an anaesthesia record, a course-in-hospital block. For EACH such clinically substantive printed block, return one entry in "verbatim_sections" with the heading exactly as printed and the block's text REPRODUCED WORD FOR WORD from the document — do not paraphrase it, do not shorten it, do not tidy the wording. At most 6 sections; if a block runs longer than about 4,000 characters, copy its first 4,000 characters rather than summarising it. Return an empty list when the document prints no such block. The NO-IDENTIFIER rule above applies here unchanged: copy the clinical wording, never the patient's name, UHID, hospital number, address or phone — redact those as you copy.
-
 Return ONLY JSON, no prose:
-{"detected_doc_type":"discharge_summary|ot_note|opd_rx","confidence":0.0-1.0,"patient":{"age":<number or null>,"sex":"<m/f or null>"},"diagnosis":"… or null","indication":"… or null","procedure":"… or null (OT only)","investigations":["…"],"treatments":["…"],"medications":["…"],"course_summary":"<concise de-identified summary of the documented course>","disposition":"… or null","follow_up":"… or null","admin_facts":{"length_of_stay_days":<integer or null>,"admission_type":"… or null","care_setting":"… or null"},"risk_factors":["…"],"aftercare":{"instructions":["…"],"warning_signs":["…"],"follow_up_detail":"… or null"},"verbatim_sections":[{"heading":"<heading exactly as printed>","text":"<the block copied word for word, no identifiers>"}],"completeness":[{"key":"<field key>","status":"present|partial|missing|na","note":"<short, NO identifier values>"}],"raw_notes":"<short de-identified notes on legibility/structure, NO identifiers>"}`;
+{"detected_doc_type":"discharge_summary|ot_note|opd_rx","confidence":0.0-1.0,"patient":{"age":<number or null>,"sex":"<m/f or null>"},"diagnosis":"… or null","indication":"… or null","procedure":"… or null (OT only)","investigations":["…"],"treatments":["…"],"medications":["…"],"course_summary":"<concise de-identified summary of the documented course>","disposition":"… or null","follow_up":"… or null","admin_facts":{"length_of_stay_days":<integer or null>,"admission_type":"… or null","care_setting":"… or null"},"risk_factors":["…"],"aftercare":{"instructions":["…"],"warning_signs":["…"],"follow_up_detail":"… or null"},"completeness":[{"key":"<field key>","status":"present|partial|missing|na","note":"<short, NO identifier values>"}],"raw_notes":"<short de-identified notes on legibility/structure, NO identifiers>"}`;
 
 export function buildExtractUser(docTypeHint: DocType | 'auto', rubricFields: RubricField[], context?: string): string {
   const hint = docTypeHint === 'auto'
@@ -299,7 +265,7 @@ export function buildExtractUser(docTypeHint: DocType | 'auto', rubricFields: Ru
   const rubric = rubricFields.length
     ? `\n\nDOCUMENTATION FIELDS TO CHECK (status only — never echo a field's value):\n${rubricFields.map((f) => `- ${f.key} [${f.ref}${f.cond ? `, only if ${f.cond}` : ''}${f.na ? ', N/A allowed' : ''}] ${f.label}`).join('\n')}`
     : '';
-  return `${hint}${ctx}${rubric}\n\nRead the attached document and return the structured de-identified extraction, the admin facts, the verbatim sections (copied, not summarised), and the completeness check.`;
+  return `${hint}${ctx}${rubric}\n\nRead the attached document and return the structured de-identified extraction, the admin facts, and the completeness check.`;
 }
 
 export function parseExtraction(raw: string, docTypeHint: DocType | 'auto'): ExtractedCase | null {
@@ -334,35 +300,7 @@ export function parseExtraction(raw: string, docTypeHint: DocType | 'auto'): Ext
     adminFacts: normAdminFacts(o.admin_facts ?? o.adminFacts),
     riskFactors: asStrArray(o.risk_factors ?? o.riskFactors, 12),
     aftercare: parseAftercare(o.aftercare),
-    verbatimSections: parseVerbatimSections(o.verbatim_sections ?? o.verbatimSections),
   };
-}
-
-/**
- * R10-A §3.1: parse the optional verbatim-section list. Absent / malformed / all-empty →
- * `undefined`, which is exactly what a pre-R10 stored extraction reads as, so every consumer has
- * ONE absent shape to handle rather than two.
- *
- * A section survives only when it carries TEXT. A heading with no body is a heading the extractor
- * saw and could not copy — recording it would let a downstream reader count a section that carries
- * nothing, and "there is an operative section" is precisely the claim R10 exists to make truthful.
- * A missing heading is tolerated (the text is the evidence) and labelled.
- */
-export function parseVerbatimSections(v: unknown): VerbatimSection[] | undefined {
-  if (!Array.isArray(v)) return undefined;
-  const out: VerbatimSection[] = [];
-  for (const el of v) {
-    if (out.length >= VERBATIM_SECTION_MAX) break;
-    const o = (el && typeof el === 'object') ? el as Record<string, unknown> : {};
-    const text = asStr(o.text ?? o.body ?? o.content);
-    if (!text) continue;
-    const heading = asStr(o.heading ?? o.title ?? o.section) || 'section';
-    out.push({
-      heading: heading.slice(0, 200),
-      text: text.length > VERBATIM_SECTION_MAX_CHARS ? `${text.slice(0, VERBATIM_SECTION_MAX_CHARS)}…` : text,
-    });
-  }
-  return out.length ? out : undefined;
 }
 
 /** PX §6.3: parse the optional aftercare block. Absent/malformed → undefined (old-shape safe). */

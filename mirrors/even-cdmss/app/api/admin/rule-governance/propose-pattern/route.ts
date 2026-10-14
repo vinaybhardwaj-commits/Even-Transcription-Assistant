@@ -23,14 +23,19 @@
  * LVP_NON_OVERUSE_CAP, which changed on 20 Aug 2026 when Addendum B split one cap into a
  * per-block pair, so a snapshot omitting them cannot be replayed.
  *
- * FLAG BEFORE AUTH. requireAdmin() fails OPEN when ADMIN_TOKEN is unset (lib/admin-gate.ts:6), so
- * the flag is what genuinely fails closed (kickoff §6 trap 5, acceptance 6).
+ * FLAG BEFORE AUTH — STILL TRUE, BUT NO LONGER FOR THE OLD REASON (D2, Saul Rep 48). It used to
+ * be that requireAdmin() FAILS OPEN when ADMIN_TOKEN is unset, so the flag was the only thing that
+ * genuinely failed closed. This route now uses `requireConfiguredAdmin`, which REFUSES an
+ * unconfigured deployment, so auth fails closed on its own.
+ *
+ * The flag still runs first, and now for its own reason: it is the cheapest refusal and needs no
+ * credential to decide. This route performs an OPERATIONAL write, so it stays exact-flag gated —
+ * unlike the migration route, which creates schema and is authenticated only.
  */
 export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
-import { isAdminUnlocked } from '@/lib/admin-cookie';
-import { requireAdmin } from '@/lib/admin-gate';
+import { requireConfiguredAdmin } from '@/lib/admin-gate';
 import { LVP_CAP, LVP_FLOOR, LVP_NON_OVERUSE_CAP } from '@/lib/lvp-core';
 import { loadShelf } from '@/lib/lvp-store';
 import {
@@ -45,7 +50,10 @@ export const runtime = 'nodejs';
 
 export async function POST(req: NextRequest) {
   if (!ruleGovernanceEnabled()) return NextResponse.json({ ok: false, error: 'disabled' }, { status: 404 });
-  if (!(await isAdminUnlocked())) { const denied = requireAdmin(req); if (denied) return denied; }
+  // D2 §2: STRICT admin. The FLAG CHECK ABOVE STAYS — this route performs an operational write,
+  // and Rep 48 keeps the proposal route and every store write exact-flag gated.
+  const denied = requireConfiguredAdmin(req);
+  if (denied) return denied;
 
   const body = await req.json().catch(() => null) as Record<string, unknown> | null;
   if (!body || typeof body !== 'object') {
@@ -138,9 +146,21 @@ export async function POST(req: NextRequest) {
       evidence,
     });
     if (!result.written) {
+      // ⚠️ THIS MESSAGE WAS WRONG AFTER §1.3 CHANGED THE GUARD (D2 correction §3a). It said "an
+      // identical pending proposal already exists", which described the old exact-statement
+      // NOT EXISTS rule. The claim is now on `lvp_pattern_id` and fires whenever this pattern has
+      // EVER been mapped — including after its proposal was rejected. Neither "pending" nor
+      // "identical" is true of that condition.
+      //
+      // ⚠️ OPEN QUESTION, DELIBERATELY NOT SOLVED HERE (D2 correction §3b). The claim is PERMANENT
+      // by design: `rule_pattern_map` has no status column and the row is never deleted, so a
+      // pattern that was proposed, rejected, and later becomes worth proposing again with better
+      // wording CANNOT be re-proposed through this route. Rep 48 asked for exactly this permanence
+      // and nobody has ruled on the re-proposal case. NO release path, override or soft-delete is
+      // added here; the behaviour is reported for Saul to rule on.
       return NextResponse.json({
         ok: false,
-        error: 'an identical pending proposal already exists — nothing was written',
+        error: 'this pattern is already mapped to a rule — nothing was written',
         lvp_pattern_id: patternId,
       }, { status: 409 });
     }

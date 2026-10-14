@@ -166,23 +166,44 @@ test('proof 2: the flag is compared in EXACTLY ONE place in the whole module', (
     'no negated check — only the exact === "1" form, so no value but "1" can enable');
 });
 
-test('proof 2: both routes 404 on the flag BEFORE any auth work (kickoff §6 trap 5)', () => {
+test('proof 2: R3 routes authenticate STRICTLY, and only the OPERATIONAL one gates on the flag', () => {
+  // ⚠️ THIS PROOF WAS INVERTED BY D2 §2 (Saul Rep 48), AND ITS OLD FORM WAS RIGHT WHEN IT WAS
+  // WRITTEN. It required the FLAG to be checked BEFORE auth on BOTH routes, for a stated reason:
+  // `requireAdmin()` FAILS OPEN when ADMIN_TOKEN is unset, so auth could not be what made these
+  // routes dormant — the flag had to be. That premise is now false. Both routes use
+  // `requireConfiguredAdmin`, which REFUSES an unconfigured deployment, so authentication is what
+  // makes them safe and the flag is free to mean only "is the feature on".
+  //
+  // The consequence is asymmetric, and that asymmetry is the point:
+  //   · the MIGRATION route creates SCHEMA — authenticated, and NO LONGER flag-gated, because
+  //     creating empty tables and arming the feature are different decisions;
+  //   · the PROPOSE route performs an OPERATIONAL write — flag first, then strict auth.
+  const migrate = 'app/api/admin/migrate-rule-governance/route.ts';
+  const propose = 'app/api/admin/rule-governance/propose-pattern/route.ts';
+
   for (const r of MODULE_ROUTES) {
-    // From the handler declaration only: `isAdminUnlocked` also appears in the import list.
     const whole = stripComments(read(r));
     const handlerAt = whole.search(/export async function (GET|POST)\b/);
     assert.ok(handlerAt > 0, `${r} must export a handler`);
     const src = whole.slice(handlerAt);
+
+    // BOTH: strict auth, and never the fail-open helper or the browser cookie.
+    assert.match(src, /requireConfiguredAdmin\(req\)/, `${r} must authenticate strictly`);
+    assert.doesNotMatch(src, /requireAdmin\(/, `${r} must not use the fail-open helper`);
+    assert.doesNotMatch(src, /isAdminUnlocked\(/, `${r} must not admit the admin cookie`);
+
     const flagAt = src.indexOf('ruleGovernanceEnabled()');
-    const authAt = Math.min(
-      ...['isAdminUnlocked', 'requireAdmin'].map((s) => {
-        const i = src.indexOf(s + '(');
-        return i < 0 ? Number.MAX_SAFE_INTEGER : i;
-      }));
-    assert.ok(flagAt > 0, `${r} must check the flag`);
-    assert.ok(authAt < Number.MAX_SAFE_INTEGER, `${r} must also gate on auth`);
-    assert.ok(flagAt < authAt, `${r} must check the flag BEFORE auth — requireAdmin fails OPEN when ADMIN_TOKEN is unset`);
-    assert.match(src, /status:\s*404/, `${r} must 404 when the flag is unset`);
+    if (r === migrate) {
+      assert.equal(flagAt, -1, 'the schema route must NOT gate on the feature flag any more');
+      assert.doesNotMatch(src, /status:\s*404/, 'and therefore has no flag 404');
+    } else if (r === propose) {
+      assert.ok(flagAt > 0, 'the operational route must still gate on the flag');
+      assert.ok(flagAt < src.indexOf('requireConfiguredAdmin('),
+        'flag first on the operational route — it is the cheapest refusal and needs no credential');
+      assert.match(src, /status:\s*404/, 'flag unset ⇒ 404');
+    } else {
+      assert.fail(`unexpected R3 route ${r} — the asymmetry above must be decided for it`);
+    }
   }
 });
 
@@ -294,100 +315,6 @@ export function stringLiterals(src: string): string[] {
   return out;
 }
 
-/**
- * ⚠️ ADDED AFTER f800b45 — NOT part of the frozen baseline above, which stays byte-identical.
- *
- * The LVC RULEBOOK REPAIR PRD v1.1 Phase 1 (25 Aug 2026) adds an authorised writer to the registry:
- * the ratification surface at /admin/lvc-ratify, whose accept updates a surviving rule and retires
- * the variants it absorbs. That is a deliberate, reviewed change to the rulebook — the opposite of
- * the silent drift proof 3 exists to catch — so it is recorded HERE, in its own block, rather than
- * by editing the f800b45 fixture. The baseline's file and statement counts below are therefore
- * still asserted against the baseline alone and are unchanged.
- */
-const REGISTRY_SQL_ADDED_BY_LVC_RULE_MERGE: Record<string, string[]> = {
-  "lib/lvc-rule-merge.ts": [
-    "ALTER TABLE lvc_recommendations ADD COLUMN IF NOT EXISTS merged_into TEXT",
-    "CREATE INDEX IF NOT EXISTS lvc_merged_into_idx ON lvc_recommendations (merged_into)",
-    "SELECT 1 AS ok FROM information_schema.columns WHERE table_name = 'lvc_recommendations' AND column_name = 'merged_into'",
-    "SELECT id, statement, precondition, keywords, category, citation_url, status, merged_into, ratified_by, ratified_at FROM lvc_recommendations WHERE id = ANY($1)",
-    "UPDATE lvc_recommendations SET statement = $2, precondition = $3, keywords = $4::text[], category = $5, citation_url = $6, ratified_by = $7, ratified_at = now(), updated_at = now() WHERE id = $1 AND (statement IS DISTINCT FROM $2 OR precondition IS DISTINCT FROM $3 OR keywords IS DISTINCT FROM $4::text[] OR category IS DISTINCT FROM $5 OR citation_url IS DISTINCT FROM $6 OR ratified_by IS DISTINCT FROM $7) RETURNING id",
-    "UPDATE lvc_recommendations SET status = $2, merged_into = $3, ratified_by = $4, ratified_at = now(), updated_at = now() WHERE id = $1 AND (status IS DISTINCT FROM $2 OR merged_into IS DISTINCT FROM $3 OR ratified_by IS DISTINCT FROM $4) RETURNING id",
-  ],
-  "lib/lvc-ratify-surface-core.ts": [
-    "SELECT 1 AS ok FROM information_schema.columns WHERE table_name = 'lvc_recommendations' AND column_name = 'merged_into'",
-  ],
-  "app/api/admin/lvc-merge-compare/route.ts": [
-    "SELECT id, keywords, category FROM lvc_recommendations WHERE status = 'active'",
-  ],
-};
-
-/**
- * LAB-MCP-V2 §17.7 round C2, decisions 82/89/90 — the second authorised addition, same pattern as
- * the merge surface above.
- *
- * ⚠️ ALL THREE ARE SELECTs, AND THAT IS THE WHOLE POINT OF LISTING THEM. The Lab MCP v2 rules
- * release target writes `lvc_recommendations` through v1's own code and only v1's: `lvcRatify`
- * (decision 89) forward and `RETIREMENT_UPDATE_SQL` (decision 90) back, both reached by import, so
- * neither appears here — v2 contributes no write statement of its own in either direction.
- * `lib/lab-v2/__tests__/c2-rules.test.ts` asserts that these three are read-only and greps the whole
- * v2 release tree for a fourth.
- */
-const REGISTRY_SQL_ADDED_BY_LAB_V2_C2: Record<string, string[]> = {
-  "lib/lab-v2/releases/rules-target.ts": [
-    "SELECT id FROM lvc_recommendations WHERE status = 'active' ORDER BY id LIMIT 500",
-    "SELECT id, statement, society, category, keywords, status FROM lvc_recommendations WHERE status = 'active' ORDER BY id LIMIT 500",
-    "SELECT id, statement, society, category, keywords, status, ratified_by, ratified_at FROM lvc_recommendations WHERE id = ${recIdLit(id, 'recommendation_id')} LIMIT 1",
-  ],
-};
-
-/**
- * LAB-MCP-V2 §17.7 round C2.1, decision 94 — the first authorised CHANGE to a frozen statement, as
- * opposed to an addition. It is expressed as an explicit before → after pair rather than by
- * overwriting the file's entry, so proof 3 keeps naming the exact statement that moved and the
- * baseline constant above stays untouched and stays pinned by its own two tests.
- *
- * ⚠️ WHY IT MOVED. A rule matches through its keywords and nothing else, and `lvcRatify`'s promotion
- * INSERT named neither `keywords` nor `category`, so every rule promoted through F14 landed active
- * and inert. Decision 94 adds the two columns, copied from the proposal the reviewer approved and
- * never re-derived. The write is still v1's, still one statement, still guarded by the promote-only
- * check above it — so the Lab MCP v2 decision 79 grep, which forbids v2 from having any `lvc_`
- * write of its own, is unaffected and stays green.
- *
- * ⚠️ ONLY ONE OF DECISION 94's TWO CHANGED STATEMENTS IS VISIBLE HERE. The other is `lvcPropose`'s
- * INSERT into `lvc_recommendation_proposals`, which this scan does not see: it filters on the
- * substring `lvc_recommendations`, and `lvc_recommendation_proposals` does not contain it. The
- * staging table has never been in this registry, by construction — proof 3 freezes the LIVE RULEBOOK.
- */
-const REGISTRY_SQL_CHANGED_BY_DECISION_94: Record<string, [string, string][]> = {
-  'lib/mcp-tools.ts': [[
-    "INSERT INTO lvc_recommendations (id, region, society, statement, rationale, citation_url, citation_doi, citation_pmid, source_release_year, license_status, provenance, proposed_by, ratified_by, ratified_at) VALUES ('ehrc-' || gen_random_uuid()::text, 'IN', 'EHRC', $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now()) RETURNING id",
-    "INSERT INTO lvc_recommendations (id, region, society, statement, rationale, citation_url, citation_doi, citation_pmid, source_release_year, license_status, provenance, proposed_by, ratified_by, ratified_at, category, keywords) VALUES ('ehrc-' || gen_random_uuid()::text, 'IN', 'EHRC', $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), $11,$12::text[]) RETURNING id",
-  ]],
-};
-
-/** Apply decision 94's substitutions. A `before` that is no longer present is an error, not a no-op:
- *  a silently-skipped substitution would let the statement drift twice and be caught once. */
-function applyAuthorisedChanges(base: Record<string, string[]>): Record<string, string[]> {
-  const out: Record<string, string[]> = { ...base };
-  for (const [file, pairs] of Object.entries(REGISTRY_SQL_CHANGED_BY_DECISION_94)) {
-    const list = [...(out[file] ?? [])];
-    for (const [before, after] of pairs) {
-      const i = list.indexOf(before);
-      assert.notEqual(i, -1, `decision 94 names a statement that is not in the frozen baseline for ${file}`);
-      list[i] = after;
-    }
-    out[file] = list.sort();
-  }
-  return out;
-}
-
-/** What proof 3 compares against: the frozen baseline, every authorised addition, every authorised change. */
-const REGISTRY_SQL_EXPECTED: Record<string, string[]> = {
-  ...applyAuthorisedChanges(REGISTRY_SQL_AT_F800B45),
-  ...REGISTRY_SQL_ADDED_BY_LVC_RULE_MERGE,
-  ...REGISTRY_SQL_ADDED_BY_LAB_V2_C2,
-};
-
 function scanRegistrySql(): Record<string, string[]> {
   const result: Record<string, string[]> = {};
   for (const f of SOURCE_FILES) {
@@ -405,7 +332,7 @@ function scanRegistrySql(): Record<string, string[]> {
 }
 
 test('proof 3: every lvc_recommendations SQL string in the repo is unchanged from f800b45', () => {
-  assert.deepEqual(scanRegistrySql(), REGISTRY_SQL_EXPECTED);
+  assert.deepEqual(scanRegistrySql(), REGISTRY_SQL_AT_F800B45);
 });
 
 test('proof 3: the frozen fixture covers the §5 readers and writers, all sixteen sites', () => {
@@ -421,26 +348,6 @@ test('proof 3: the frozen fixture covers the §5 readers and writers, all sixtee
   ]) {
     assert.ok(f in REGISTRY_SQL_AT_F800B45, `§5 names ${f} — it must be in the fixture`);
   }
-});
-
-test('proof 3: the post-f800b45 additions are exactly the LVC merge surface, and nothing else', () => {
-  const added = Object.entries(REGISTRY_SQL_ADDED_BY_LVC_RULE_MERGE);
-  assert.equal(added.length, 3, 'three files added registry SQL since f800b45');
-  assert.equal(added.flatMap(([, v]) => v).length, 8, 'eight added statements');
-  // Every addition belongs to the LVC rulebook-repair build. A statement appearing here from any
-  // other module is drift wearing this block as cover, so the file names are pinned too.
-  assert.deepEqual(added.map(([f]) => f).sort(), [
-    'app/api/admin/lvc-merge-compare/route.ts',
-    'lib/lvc-ratify-surface-core.ts',
-    'lib/lvc-rule-merge.ts',
-  ]);
-  // The only writes are the two guarded UPDATEs of the merge, and the DDL is additive.
-  const writes = added.flatMap(([, v]) => v).filter((s) => /^(INSERT|UPDATE|DELETE|DROP)\b/i.test(s));
-  assert.equal(writes.length, 2, 'a survivor update and a retirement update — no INSERT, no DELETE');
-  for (const w of writes) assert.match(w, /IS DISTINCT FROM/, 'every registry write stays guarded');
-  const ddl = added.flatMap(([, v]) => v).filter((s) => /^(ALTER|CREATE|DROP)\b/i.test(s));
-  assert.equal(ddl.length, 2, 'ADD COLUMN IF NOT EXISTS and CREATE INDEX IF NOT EXISTS');
-  for (const d of ddl) assert.match(d, /IF NOT EXISTS/, 'DDL is additive and idempotent');
 });
 
 test('proof 3: the rule book NEVER writes lvc_recommendations — its one statement only SELECTs', () => {
@@ -523,7 +430,11 @@ test('acceptance 3: every governance write is ONE statement — no multi-stateme
     const start = store.indexOf(`export async function ${fn}`);
     assert.ok(start > 0, `${fn} must exist`);
     const body = store.slice(start, store.indexOf('\n}\n', start));
-    const awaits = [...body.matchAll(/await run\(/g)].length;
+    // ⚠️ `run` OR `runner`. D2 §3 item 8 makes the bridge write take an INJECTED sql runner so the
+    // concurrent-loser property can be exercised. The pin is about how many statements a write
+    // issues, not what the callee is spelled — counting only `await run(` would score the injected
+    // form as ZERO and pass for the wrong reason.
+    const awaits = [...body.matchAll(/await run(?:ner)?\(/g)].length;
     assert.equal(awaits, 1, `${fn} must issue exactly ONE statement (O2) — found ${awaits}`);
   }
   // Neither write SQL is two statements pretending to be one.
@@ -588,5 +499,9 @@ test('§3.5: the map column is lvp_pattern_id (O1) and never becomes a rule_ref'
   assert.match(store, /lvp_pattern_id\s+text NOT NULL/);
   const m = /export const PROPOSE_PATTERN_SQL = `([\s\S]*?)`;/.exec(store)!;
   assert.doesNotMatch(m[1], /rule_ref\s*=\s*\$16/, 'the pattern id must never be written as a rule_ref');
-  assert.match(m[1], /SELECT \$16::text, ver\.rule_ref/, 'the two identities sit side by side, not merged');
+  // D2 §1.3: the map now LEADS, so the rule_ref it stores is the caller-minted parameter rather
+  // than one selected from `ver`. The property being pinned is unchanged — the two identities sit
+  // side by side and are never merged — but it is now visible on two parameters, not on a join.
+  assert.match(m[1], /SELECT \$16::text, \$8::text/, 'the two identities sit side by side, not merged');
+  assert.doesNotMatch(m[1], /lvp_pattern_id\s*=\s*\$8/, 'a rule_ref must never be written as a pattern id');
 });
