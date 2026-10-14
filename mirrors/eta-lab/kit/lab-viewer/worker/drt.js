@@ -1,15 +1,14 @@
 // DRTPQMA: Doc / Room / Time / PQM / Audio. Read-only page over drt/<date>.json (eta-lab-ratings) + tape audio (tapes/ in eta-lab-results).
 // The Worker only ever reads: the doc via RATINGS.get, tape chunks via RESULTS.head/get (tapes/ prefix only) for keys LISTED IN THAT DAY'S DOC.
 import { parseRange } from "./index.js";
-import { isBlind } from "./blind.js";
 
 const HDRS = { "cache-control": "private, no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "cross-origin-resource-policy": "same-origin", "x-frame-options": "DENY" };
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { ...HDRS, "content-type": "application/json" } });
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_~-]{0,63}$/;   // PQM uids; a split encounter is "<uid>~<n>"
 const KEY = /^tapes\/[A-Za-z0-9][A-Za-z0-9._\/-]{0,300}$/;
-const SOURCES = new Set(["voice", "schedule", "schedule+voice", "held_out"]);
-const REASONS = new Set(["no_tape", "room_unknown", "held_out"]);
+const SOURCES = new Set(["voice", "schedule", "schedule+voice"]);
+const REASONS = new Set(["no_tape", "room_unknown"]);
 const IST_MS = 19800000, DAY_MS = 86400000;
 const str = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -40,45 +39,40 @@ export function drtOf(text, date) {
     seenRoom.add(r.room_id);
     rooms.push({ room_id: r.room_id, label: str(r.label, 40) || r.room_id });
   }
-  const encounters = [], heldIds = new Set(), heldAlias = new Map();   // held ids are re-issued opaque: a PQM uid would link a grey block to its other pieces
+  const encounters = [];
   for (const e of d.encounters.slice(0, 3000)) {
     if (!e || typeof e.id !== "string" || !ID.test(e.id) || !seenRoom.has(e.room_id)) continue;
     const s = istSeconds(e.start, date), t = istSeconds(e.end, date);
     if (s === null || t === null || t <= s) continue;
-    const held = e.room_source === "held_out" || isBlind(e.room_id, date);   // R3/W51 blind room-day: the block stays, the audio never reaches the page
-    if (held) { heldIds.add(e.id); heldAlias.set(e.id, "held-" + (heldAlias.size + 1)); }
     const audio = [];
-    for (const a of held ? [] : Array.isArray(e.audio) ? e.audio.slice(0, 24) : []) {
+    for (const a of Array.isArray(e.audio) ? e.audio.slice(0, 24) : []) {
       const off = num(a?.offset_s), dur = num(a?.dur_s);
       if (!okKey(a?.key) || off === null || dur === null || off < 0 || dur <= 0) continue;
       audio.push({ key: a.key, offset_s: off, dur_s: dur });
     }
     encounters.push({
-      id: held ? heldAlias.get(e.id) : e.id, room_id: e.room_id, doctor: held ? null : str(e.doctor, 80) || "Unknown", token_no: !held && Number.isInteger(e.token_no) ? e.token_no : null,   // held: doctor/token are the answer key for a blind placement study
+      id: e.id, room_id: e.room_id, doctor: str(e.doctor, 80) || "Unknown", token_no: Number.isInteger(e.token_no) ? e.token_no : null,
       s, e: t, start: str(e.start, 40), end: str(e.end, 40),
-      room_source: held ? "held_out" : SOURCES.has(e.room_source) ? e.room_source : "schedule", audio,
+      room_source: SOURCES.has(e.room_source) ? e.room_source : "schedule", audio,
     });
   }
-  const heldBase = new Set([...heldIds].map((i) => i.split("~")[0]));   // other pieces of a split PQM consult (uid~n) are the same consult
-  let nHeldGap = 0;
   const gaps = [], label = Object.fromEntries(rooms.map((r) => [r.room_id, r.label]));
   for (const g of Array.isArray(d.gaps) ? d.gaps.slice(0, 3000) : []) {
     if (!g || typeof g.id !== "string" || !ID.test(g.id)) continue;
-    const gHeld = heldIds.has(g.id) || heldBase.has(g.id.split("~")[0]);
     const cand = [];
     const cr = Array.isArray(g.candidate_rooms) ? g.candidate_rooms : g.candidate_rooms && typeof g.candidate_rooms === "object" ? Object.keys(g.candidate_rooms) : [];
-    for (const c of gHeld ? [] : cr.slice(0, 12)) {
+    for (const c of cr.slice(0, 12)) {
       const id = typeof c === "string" ? c : c && typeof c === "object" ? c.room_id : null;
       const t = (typeof c === "object" && c ? str(c.label, 40) : "") || (typeof id === "string" ? label[id] || str(id, 40) : "");
       if (t && !cand.includes(t)) cand.push(t);
     }
     gaps.push({
-      id: heldAlias.get(g.id) || (gHeld ? "held-g" + (++nHeldGap) : g.id), reason: gHeld ? "held_out" : REASONS.has(g.reason) ? g.reason : "room_unknown", doctor: gHeld ? null : str(g.doctor, 80) || null,
-      token_no: !gHeld && Number.isInteger(g.token_no) ? g.token_no : null, ...gapTimes(g, date), candidate_rooms: cand,
+      id: g.id, reason: REASONS.has(g.reason) ? g.reason : "room_unknown", doctor: str(g.doctor, 80) || null,
+      token_no: Number.isInteger(g.token_no) ? g.token_no : null, ...gapTimes(g, date), candidate_rooms: cand,
     });
   }
   const bf = d.built_from && typeof d.built_from === "object" ? d.built_from : {};
-  return { date, rooms, doctors: [...new Set(encounters.filter((e) => e.doctor).map((e) => e.doctor))].sort(), encounters, gaps,
+  return { date, rooms, doctors: [...new Set(encounters.map((e) => e.doctor))].sort(), encounters, gaps,
     built_from: { pqm: str(bf.pqm, 80), schedule_sha: str(bf.schedule_sha, 64), tapes_index_sha: str(bf.tapes_index_sha, 64) } };
 }
 
@@ -161,7 +155,6 @@ h2{font-size:14px;margin:16px 0 4px}ul{margin:4px 0;padding-left:20px}
 <div class="player" id="player" hidden><div id="ptitle"></div><div class="mut" id="pstat"></div><div class="scrub" id="scrubrow" hidden><button type="button" id="pp">Pause</button><span id="pclk" class="clk">--:--:--</span><input type="range" id="scrub" min="0" max="1" step="1" value="0" aria-label="Position in encounter"><span class="clk" id="pend">--:--:--</span></div><audio id="au" preload="none"></audio><audio id="au2" preload="none"></audio></div>
 <h2 id="gh" hidden>Not yet placed (room unknown)</h2><div id="gaps"></div>
 <h2 id="nh" hidden>Placed, but no tape covers the time</h2><div id="notape"></div>
-<h2 id="hh" hidden>Held out for a validation study</h2><div id="held"></div>
 <script nonce="__NONCE__">
 "use strict";
 const DATE="__DATE__",NS="http://www.w3.org/2000/svg",PAL=["#1f77b4","#d95f02","#1b9e77","#7570b3","#e7298a","#66a61e","#a6761d","#e6ab02","#17becf","#8c564b","#bcbd22","#393b79"];
@@ -196,7 +189,6 @@ function draw(){
   for(const e of doc.encounters){
     const x0=X(e.s),x1=X(e.e);if(x1<=x0&&(e.e<=T0||e.s>=T1))continue;
     const w=Math.max(4,x1-x0),y=rowY[e.room_id]+PAD+e.lane*LH,sched=e.room_source==="schedule";
-    if(e.room_source==="held_out"){const hb=sv("g",{class:"held","aria-label":"held out for a validation study"});hb.appendChild(sv("title",{},"Held out for a validation study"));hb.appendChild(sv("rect",{x:x0,y:y,width:w,height:LH-3,rx:3,fill:"#9a9a9a","fill-opacity":.6}));g.appendChild(hb);continue}
     const tip=(e.token_no!==null?"#"+e.token_no+" ":"")+e.doctor+" · "+hm(e.s)+"–"+hm(e.e)+" · room via "+e.room_source+(e.audio.length?"":" · no audio");
     const b=sv("g",{class:"blk",tabindex:0,role:"button","aria-label":tip});
     b.appendChild(sv("title",{},tip));
@@ -207,8 +199,8 @@ function draw(){
     g.appendChild(b);
   }
   const byId=Object.fromEntries(doc.encounters.map(e=>[e.id,e]));
-  const rows=(reason)=>doc.gaps.filter(x=>x.reason===reason).map(x=>{const e=byId[x.id]||{};return{doc:x.doctor||e.doctor||(x.reason==="held_out"?"Held out":"Unknown doctor"),tok:x.token_no!==null?x.token_no:(e.token_no!==undefined?e.token_no:null),s:x.s!==null?x.s:(e.s!==undefined?e.s:null),e:x.e!==null?x.e:(e.e!==undefined?e.e:null),cand:x.candidate_rooms}});
-  grouped($("gh"),$("gaps"),rows("room_unknown"));grouped($("nh"),$("notape"),rows("no_tape"));grouped($("hh"),$("held"),rows("held_out"));
+  const rows=(reason)=>doc.gaps.filter(x=>x.reason===reason).map(x=>{const e=byId[x.id]||{};return{doc:x.doctor||e.doctor||"Unknown doctor",tok:x.token_no!==null?x.token_no:(e.token_no!==undefined?e.token_no:null),s:x.s!==null?x.s:(e.s!==undefined?e.s:null),e:x.e!==null?x.e:(e.e!==undefined?e.e:null),cand:x.candidate_rooms}});
+  grouped($("gh"),$("gaps"),rows("room_unknown"));grouped($("nh"),$("notape"),rows("no_tape"));
   showDays();
 }
 function grouped(head,box,rs){

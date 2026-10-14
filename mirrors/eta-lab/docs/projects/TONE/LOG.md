@@ -31,4 +31,3 @@ Refs: orders/EMOTION-WS-I.md.
 Study CLOSED, steady state. PAUSED as a programme; service runs in background when enabled.
 
 - 29 Sep 2026 (rev 25): PARKED. Control run: noise 5/5 and speech 3/4 read as sadness; EMOTION-PARKED.md 3a05849a.
-- 29 Sep ~19:27 IST (rev 26): disclosure #6926 recorded; #7071 says control pool had no OPD4 windows.

@@ -38,4 +38,3 @@ lx: voice scan 22/39 OPD4+OPD7 room-days done -- 28 FOUND/2 WEAK/47 no-evidence,
 vj-refuter: independent spot-check exact-matched lx's numbers; flagged the 0.65 default threshold as miscalibrated (own precision estimate ~6/10 on a spot-check) and recommended NOT SCANNED (not "not him") for the 17 room-days (~163 tape-hours) still unscanned.
 [URGENT #5320]: diarization running ~0.37x realtime on 4 CPU workers, only ~1.5% of 14.06h done -- will NOT hit the 16:30-17:00 full-cut deadline without a GPU escalation (hf-fleet L4, within the approved $40 cap) or reordering FOUND/WEAK first. First cut still due ~15:00.
 Refs: W52-FACTS.txt, #5296-5322.
-- 29 Sep ~19:27 IST (rev 26): exposure disclosure recorded; scope counts disagree (54 heard clips vs 16 R3-day encounters), not resolved.

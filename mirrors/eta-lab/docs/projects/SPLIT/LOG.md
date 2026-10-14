@@ -34,4 +34,3 @@ Refs: #292, r94.
 
 ## Goal
 Own diarization model within 3 DER points of pyannote.ai on 2 weekly evals — not yet started (needs the ≥20-window benchmark first).
-- 29 Sep ~19:27 IST (rev 26): Phase 2 GO on HF, cap USD 25 (#7027); pre-reg 382db600 DESIGN PASS; 3 freeze inputs missing.

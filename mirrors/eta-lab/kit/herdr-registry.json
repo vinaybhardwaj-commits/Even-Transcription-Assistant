@@ -17,11 +17,11 @@
       "closed": "23-Sep-2026 (Fable) -- do not restore"
     },
     "minibot": {
-      "pane_id": "wT:p1",
+      "pane_id": "w0:p1",
       "cwd": "/Users/vinaybhardwaj/whisper.cpp",
       "session_id": "b015950d-b85b-4027-9cf6-127fb31c0e1a",
       "model": "sonnet",
-      "label": "minibot · Mini prod host ops · mini",
+      "label": "minibot · C sonnet · Mini room actions",
       "purpose": "Mini prod host ops",
       "machine": "mini",
       "note": "24 Sep 11:38 (MODEL-DOWNGRADE-1140): /model sonnet -> Sonnet 5 (was Opus 5.5). Relaunch command must now pass --model sonnet."
@@ -66,6 +66,31 @@
       "session_id": "a83477f0-ef02-4f60-aace-50b586d7fe51",
       "model": "sonnet",
       "task": ""
+    },
+    "warden": {
+      "pane_id": "w17:p1",
+      "cwd": "/Users/vinaybhardwaj/oc/warden",
+      "purpose": "fleet warden + dispatcher",
+      "machine": "mini",
+      "model": "sonnet",
+      "note": "29 Sep 2026: added by herdr-kit (display owner, Fable 6183); workspace w17 renamed \"C sonnet · fleet warden + dispatcher\" so the sidebar group is readable. No session id from herdr agent get; restart FRESH: herdr agent start warden --kind claude --pane w17:p1 --timeout 120000 -- -n \"warden · C sonnet · fleet warden + dispatcher\" --model sonnet --permission-mode auto",
+      "label": "warden · C sonnet · fleet warden + dispatcher"
+    },
+    "roadmap": {
+      "pane_id": "w12:p1",
+      "cwd": "/Users/vinaybhardwaj/dev/eta-lab",
+      "purpose": "roadmap + task board",
+      "machine": "mini",
+      "model": "sonnet",
+      "label": "roadmap · C sonnet · roadmap + task board"
+    },
+    "surg-jev": {
+      "pane_id": "w16:p1",
+      "cwd": "/Users/vinaybhardwaj/oc/surg-jev",
+      "purpose": "no-PHI helper",
+      "machine": "mini",
+      "model": "sonnet",
+      "label": "surg-jev · C sonnet · no-PHI helper"
     }
   },
   "machine:eta-lab-t4": {
@@ -82,12 +107,12 @@
       "note": "24 Sep 11:38 (MODEL-DOWNGRADE-1140): /model haiku -> Haiku 4.5 (was Sonnet 5); feeder watcher. Relaunch command must now pass --model haiku."
     },
     "diar-lab": {
-      "pane_id": "w4:p1",
+      "pane_id": "w1E:p1",
       "model": "sonnet",
       "permission_mode": "bypass",
       "cwd": "/home/eta/dev/eta-lab",
       "session_id": "0ecd451f-c4f6-4c3a-af94-dc080559f001",
-      "label": "diar-lab · diarizer training · box",
+      "label": "diar-lab · C sonnet · voiceprint mint + voicecheck clips",
       "purpose": "diarizer training",
       "machine": "box",
       "note": "24 Sep 13:30 (Fable 13:30, native-claude move): restarted after it reported its wait (eta-refuter-2, then Fable); same session 0ecd451f, standard label (the old process still carried the bare '-n diar-lab'), sonnet, bypass. It had been skipped earlier because of a background job.",
@@ -106,24 +131,24 @@
       "note": "24 Sep 11:56 (Fable ruling 81): restarted FRESH (not resumed) on Sonnet after its old context reached ~853k tokens. It wrote a 10-line handoff first: ~/dev/eta-lab/scratch/indic-mt-handoff-24sep.md (gitignored). Previous session 095ca91a-8b3d-4d6c-989a-efb6e2f2f17f is kept as an archive on the box, do not resume it. Relaunch (if it must be restarted): --resume 2660f746-7bed-41cb-b5ea-6e0301eb1e6e -n \"indic-mt · Indic translation + emotion · box\" --model sonnet --dangerously-skip-permissions"
     },
     "lab-mover": {
-      "pane_id": "w6:p1",
+      "pane_id": "w16:p1",
       "model": "sonnet",
       "permission_mode": "bypass",
       "cwd": "/home/eta/dev",
       "session_id": "0a4388cc-1a6a-4a1e-af2d-fc4b2fbd6eb3",
-      "label": "lab-mover · lab migration · box",
+      "label": "lab-mover · C sonnet · tape indexes",
       "purpose": "lab migration",
       "machine": "box",
       "binary": "native 2.1.281 (~/.local/share/claude/versions/2.1.281), pid 2041, restarted 24 Sep 17:00 IST",
       "note": "Native since 24 Sep 17:00 IST (Fable 13:30 native-move order, after its 'parity posted' and its own idle-for-restart message #523); resumed session 0a4388cc on --model sonnet --dangerously-skip-permissions. Its 2 MCP ssh sessions now use the lab sshd (box port 2224, ruling 129), which took 2 slots off the capped system sshd. Registered cleanly (no nameless-agent race)."
     },
     "scribe": {
-      "pane_id": "w7:p1",
+      "pane_id": "w1C:p1",
       "model": "sonnet",
       "permission_mode": "auto",
       "cwd": "/home/eta/dev/Even-Transcription-Assistant",
       "session_id": "decbfc3a-582a-43f0-9cce-c6d195def34e",
-      "label": "scribe · deploy train · box",
+      "label": "scribe · C sonnet · production (RECORDER/SHIP)",
       "purpose": "deploy train",
       "machine": "box",
       "binary": "native ~/.local/share/claude/versions/2.1.281 (verified 24 Sep 06:1x IST)",
@@ -142,12 +167,12 @@
       "binary": "native 2.1.281 (~/.local/share/claude/versions/2.1.281), pid 28134, restarted 24 Sep 19:17 IST onto the lab sshd (ruling 152)"
     },
     "lx": {
-      "pane_id": "w9:p1",
+      "pane_id": "w21:p1",
       "model": "sonnet",
       "permission_mode": "auto",
-      "cwd": "/home/eta/dev/Even-Transcription-Assistant-linux-bootstrap",
+      "cwd": "/home/eta/oc/lx",
       "session_id": "59f6f674-d26e-4e34-b26b-4f8b0afaf2a3",
-      "label": "lx · PQM truth / E-7 · box",
+      "label": "lx · C sonnet · voice study pre-regs",
       "purpose": "PQM truth / E-7",
       "machine": "box",
       "binary": "native ~/.local/share/claude/versions/2.1.281 (verified 24 Sep 06:1x IST)",
@@ -167,12 +192,12 @@
       "note": " | 24 Sep 18:16 IST (Fable ruling 152): restarted (done, no background command, no draft) so its 2 MCP ssh sessions use the lab sshd, port 2224; old pid 63575, same session."
     },
     "eta-refuter-2": {
-      "pane_id": "wD:p1",
+      "pane_id": "w18:p1",
       "model": "opus",
       "permission_mode": "auto",
       "cwd": "/home/eta/dev/Even-Transcription-Assistant",
       "session_id": "38fee64c-7cbd-499e-9f3e-7a43c7cd3a10",
-      "label": "eta-refuter-2 · code checker 2 (Opus) · box",
+      "label": "eta-refuter-2 · C opus · checker (lab viewer, CAP code)",
       "purpose": "code checker 2 (Opus)",
       "machine": "box",
       "task": "second Refuter, parallel with eta-refuter, never reviews a branch its own session built",
@@ -232,12 +257,12 @@
       "note": "Started 24 Sep by herdr-kit at Fable's order. The start call errored on registration ('no longer owns the terminal') though the session ran; agent renamed to hist-miner afterwards (pane was nameless). Restart: herdr --machine eta-lab-t4 agent start hist-miner --kind claude --pane wK:p1 --timeout 120000 -- --resume d589bcfd-01a8-4e50-bb64-470797173421 -n \"hist-miner · Stage-1 truth-anchored mining · eta-lab-t4\" --model sonnet --permission-mode auto"
     },
     "hist-bulk": {
-      "pane_id": "wM:p1",
+      "pane_id": "w1K:p1",
       "model": "sonnet",
       "permission_mode": "auto",
       "cwd": "/home/eta/dev/eta-lab",
       "session_id": "58184082-1a8c-4e4c-a1e1-39d9dd6e6a4a",
-      "label": "hist-bulk · Stage-2 Aug-Sep corpus · eta-lab-t4",
+      "label": "hist-bulk · B OpenCode glm-5.3-flash · historical backfill driver",
       "purpose": "Stage-2 Aug-Sep corpus",
       "machine": "eta-lab-t4",
       "binary": "native ~/.local/share/claude/versions/2.1.281",
@@ -258,12 +283,12 @@
       "task": "P0 inventory -> P1 twins (one tunnel at a time)"
     },
     "linker": {
-      "pane_id": "wP:p1",
+      "pane_id": "w23:p1",
       "model": "sonnet",
       "permission_mode": "auto",
-      "cwd": "/home/eta/dev/eta-lab",
+      "cwd": "/home/eta/oc/linker",
       "session_id": "c8227c47-502f-4c5f-ae1c-117a0583d599",
-      "label": "linker · encounter→Rx→OT→discharge chain · box",
+      "label": "linker · C sonnet · PQM links + DRTPQMA + voice candidates",
       "purpose": "Surgical chain linker (orders/SURGICAL-CHAIN-LINKER.md): consult -> Rx -> OT booking -> OT note -> discharge. Refuter: eta-refuter-2.",
       "machine": "eta-lab-t4",
       "binary": "native 2.1.281 (~/.local/share/claude/versions/2.1.281), pid 62336, restarted 24 Sep 18:36 IST onto the lab sshd (ruling 152)",
@@ -314,21 +339,136 @@
       "cwd": "/home/eta/dev/eta-lab",
       "session_id": "",
       "model": "sonnet",
-      "task": ""
+      "task": "",
+      "label": "vj-data · C sonnet · "
     },
     "vj-arms": {
       "pane_id": "wV:p1",
       "cwd": "/home/eta/dev/eta-lab",
       "session_id": "",
       "model": "sonnet",
-      "task": ""
+      "task": "",
+      "label": "vj-arms · C sonnet · "
     },
     "vj-refuter": {
-      "pane_id": "wW:p1",
-      "cwd": "/home/eta/dev/eta-lab",
+      "pane_id": "w10:p1",
+      "cwd": "/home/eta/oc/vj-refuter",
       "session_id": "",
       "model": "opus",
-      "task": ""
+      "task": "",
+      "label": "vj-refuter · C opus · checker (voice, CAP, ROLE)"
+    },
+    "lab-viewer": {
+      "pane_id": "w1D:p1",
+      "cwd": "/home/eta/dev/eta-lab",
+      "purpose": "lab viewer (DRT, voicecheck)",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "lab-viewer · C sonnet · lab viewer (DRT, voicecheck)"
+    },
+    "jev-audit": {
+      "pane_id": "w1V:p1",
+      "cwd": "/home/eta/oc/jev-audit",
+      "purpose": "ROLE-FROM-CONTENT study",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "jev-audit · C sonnet · ROLE-FROM-CONTENT study"
+    },
+    "jev-fix": {
+      "pane_id": "w22:p1",
+      "cwd": "/home/eta/oc/jev-audit",
+      "purpose": "Jev fixes + Jev calls",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "jev-fix · C sonnet · Jev fixes + Jev calls"
+    },
+    "reb": {
+      "pane_id": "w26:p1",
+      "cwd": "/home/eta/oc/reb",
+      "purpose": "REB ingest + collector",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "reb · C sonnet · REB ingest + collector"
+    },
+    "hf-fleet": {
+      "pane_id": "w27:p1",
+      "cwd": "/home/eta/oc/hf-fleet",
+      "purpose": "Hugging Face GPU fleet",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "hf-fleet · C sonnet · Hugging Face GPU fleet"
+    },
+    "terms": {
+      "pane_id": "w28:p1",
+      "cwd": "/home/eta/oc/terms",
+      "purpose": "STT bake-off set (c)",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "terms · C sonnet · STT bake-off set (c)"
+    },
+    "notesafe": {
+      "pane_id": "w1Z:p1",
+      "cwd": "/home/eta/oc/notesafe",
+      "purpose": "med-note bench",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "notesafe · C sonnet · med-note bench"
+    },
+    "tone": {
+      "pane_id": "w24:p1",
+      "cwd": "/home/eta/oc/tone",
+      "purpose": "TONE parked",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "tone · C sonnet · TONE parked"
+    },
+    "surg-link": {
+      "pane_id": "w25:p1",
+      "cwd": "/home/eta/oc/surg-link",
+      "purpose": "surgery tier nightly",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "surg-link · C sonnet · surgery tier nightly"
+    },
+    "split": {
+      "pane_id": "w1H:p1",
+      "cwd": "/home/eta/dev/eta-lab",
+      "purpose": "diarization backfill",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "split · C sonnet · diarization backfill"
+    },
+    "lid-debug": {
+      "pane_id": "w1N:p1",
+      "cwd": "/home/eta/dev/eta-lab",
+      "purpose": "FUSER RUN 3 design",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "lid-debug · C opus · FUSER RUN 3 design"
+    },
+    "sig-research": {
+      "pane_id": "w1X:p1",
+      "cwd": "/home/eta/oc/sig-bug",
+      "purpose": "room proofs (content)",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "sig-research · C sonnet · room proofs (content)"
+    },
+    "router-fix": {
+      "pane_id": "w1Q:p1",
+      "cwd": "/home/eta/dev",
+      "purpose": "FUSER RUN 3",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "router-fix · C sonnet · FUSER RUN 3"
+    },
+    "eta-refuter-3": {
+      "pane_id": "w29:p1",
+      "cwd": "/home/eta/dev/eta-lab",
+      "purpose": "checker (REB, voiceprint pre-regs)",
+      "machine": "box",
+      "model": "sonnet",
+      "label": "eta-refuter-3 · C opus · checker (REB, voiceprint pre-regs)"
     }
   },
   "ctl-test": {
@@ -352,6 +492,52 @@
       "session_id": "14701b50-d340-43e4-bf42-4c56f7353077",
       "model": "haiku",
       "task": ""
+    }
+  },
+  "machine:eta-ci-c3 · E2E 24-core": {
+    "cap": {
+      "pane": "w1:p1",
+      "cwd": "/home/eta",
+      "purpose": "CAP-3 prescribing agent",
+      "label": "cap · C sonnet · CAP-3 PRESCRIBE",
+      "note": "29 Sep 2026 (display owner, Fable order 6183): added to registry by herdr-kit; pane in workspace w1 (renamed \"C sonnet · CAP-3 PRESCRIBE\"). No session id from herdr agent get; restart via label FRESH: herdr --machine 85baa2e0f8428b0b03a3e8606f826e43 agent start cap --kind claude --pane w1:p1 --timeout 120000 ---n \"cap · C sonnet · CAP-3 PRESCRIBE\" --model sonnet --permission-mode auto",
+      "model": "sonnet"
+    },
+    "stt-bench": {
+      "pane": "w4:p1",
+      "cwd": "/home/eta",
+      "purpose": "CLARITY per-language STT bench",
+      "label": "stt-bench · C sonnet · CLARITY bench",
+      "note": "29 Sep 2026 (display owner, Fable order 6183): added by herdr-kit; workspace w4 renamed \"C sonnet · CLARITY bench\". No session id from herdr; restart FRESH: herdr --machine 85baa2e0f8428b0b03a3e8606f826e43 agent start stt-bench --kind claude --pane w4:p1 --timeout 120000 -- -n \"stt-bench · C sonnet · CLARITY bench\" --model sonnet --permission-mode auto",
+      "model": "sonnet"
+    }
+  },
+  "machine:asus-ubuntu · i7 16GB (no GPU)": {
+    "vp-asus": {
+      "pane": "w3:p1",
+      "cwd": "/home/vinay",
+      "purpose": "PARKED (CPU mint moved to HF per Fable 29 Sep; pane kept for later reuse)",
+      "label": "vp-asus · C sonnet · parked (ASUS)",
+      "note": "29 Sep 2026: added by herdr-kit (display owner); workspace w3 label per Fable 6183. No session id from herdr; restart FRESH: herdr --machine 6481ba9074c9fa50c5ebf1a2de931786 agent start vp-asus --kind claude --pane w3:p1 --timeout 120000 -- -n \"vp-asus · C sonnet · parked (ASUS)\" --model sonnet --permission-mode auto",
+      "model": "sonnet"
+    },
+    "chronicle": {
+      "pane": "w4:p1",
+      "cwd": "/home/vinay/lab/chronicle",
+      "purpose": "roadmap documentation (ASUS)",
+      "label": "chronicle · C sonnet · roadmap doc (ASUS)",
+      "note": "29 Sep 2026: added by herdr-kit (display owner, Fable 6183); cwd /home/vinay/lab/chronicle. Restart FRESH: herdr --machine 6481ba9074c9fa50c5ebf1a2de931786 agent start chronicle --kind claude --pane w4:p1 --timeout 120000 -- -n \"chronicle · C sonnet · roadmap doc (ASUS)\" --model sonnet --permission-mode auto",
+      "model": "sonnet"
+    }
+  },
+  "machine:UbuntuYoga": {
+    "yoga-free": {
+      "pane": "w1:p1",
+      "cwd": "/home/vinay",
+      "purpose": "free OpenCode no-PHI tools Y9-Y11 (Yoga)",
+      "label": "yoga-free · OpenCode big-pickle · no-PHI tools",
+      "kind": "opencode",
+      "note": "29 Sep 2026: added by herdr-kit (display owner, Fable 6183). OpenCode pane (kind opencode; its actual model is not reported by herdr agent get — do not copy the · OpenCode big-pickle label field into a model fact) — restart via the OpenCode/OpenRouter pane flow, NOT herdr agent start"
     }
   }
 }
