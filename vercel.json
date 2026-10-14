@@ -87,7 +87,7 @@
     },
     {
       "path": "/api/cron/ops-alerts",
-      "schedule": "*/5 * * * *"
+      "schedule": "*/2 * * * *"
     }
   ],
   "headers": [

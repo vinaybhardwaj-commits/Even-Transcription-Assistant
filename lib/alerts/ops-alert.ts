@@ -34,6 +34,8 @@ export type OpsAlert = {
   install_id?: string | null;
   /** retire only: manual | handover | forced */
   reason?: string | null;
+  /** recorder_off only: set when the room has an open consult window and no audio is arriving (rule FR1-A). Changes the dedupe key, subject and body; plain recorder_off is untouched. */
+  consult_open?: { window_open_min: number };
 };
 
 const SAFE = /[^A-Za-z0-9_.:-]/g;
@@ -46,13 +48,15 @@ const cleanName = (v: string): string => v.replace(/[^A-Za-z0-9 _.:()&/-]/g, "")
 export function composeOpsAlert(a: OpsAlert): { subject: string; body: string; dedupe_key: string } {
   const slug = clean(a.room_slug) || clean(a.room_id);
   const mins = a.minutes === null || !Number.isFinite(a.minutes) ? null : Math.max(0, Math.round(a.minutes));
-  const dedupeKey = a.kind === "install_retired" ? clean(a.install_id ?? "") || "unknown_install" : a.kind;
+  const consult = a.kind === "recorder_off" && a.consult_open ? a.consult_open : null;
+  const dedupeKey = a.kind === "install_retired" ? clean(a.install_id ?? "") || "unknown_install" : consult ? "recorder_off_consult" : a.kind;
   const name = a.room_name ? cleanName(a.room_name) : "";
   const parts = [`room=${slug}`, ...(name ? [`name="${name}"`] : []), `room_id=${clean(a.room_id)}`, `problem=${a.kind}`];
   if (a.install_id) parts.push(`install_id=${clean(a.install_id)}`);
   if (a.reason) parts.push(`reason=${clean(a.reason)}`);
   if (mins !== null) parts.push(a.kind === "install_retired" ? `last_seen_min_ago=${mins}` : `minutes=${mins}`);
-  return { subject: `[ops] ${a.kind} ${slug}`, body: parts.join(" "), dedupe_key: dedupeKey };
+  if (consult) parts.push(`consult_open=1 window_open_min=${Number.isFinite(consult.window_open_min) ? Math.max(0, Math.round(consult.window_open_min)) : 0}`);
+  return { subject: `[ops] ${a.kind}${consult ? " IN CONSULT" : ""} ${slug}`, body: parts.join(" "), dedupe_key: dedupeKey };
 }
 
 /** Queue one alert. Returns true when a row was inserted, false when it was deduped or could not be written. */

@@ -4,6 +4,8 @@
  *
  *   recorder_off   clinic hours (lib/alerts/clinic-hours.ts) and the room's newest chunk, of ANY session, is >= 15 min old (the clock starts at the window start). It reads the
  *                  room's audio, never the install: OPD 4 had no install and a stale machine binding, and every rule that began at the install was silent.
+ *   recorder_off   (consult variant, FR1-A) any hour: the room has an OPEN eta_encounter_windows row (t_close IS NULL, opened within CONSULT_WINDOW_MAX_AGE_MIN, open >= CONSULT_WINDOW_MIN_OPEN_MIN)
+ *                  and max(newest chunk, t_open) is >= CONSULT_RECORDER_OFF_MINUTES old. Own dedupe key, so it can stand beside the plain rule.
  *   mic_denied     the room's live install reports mic_state 'denied'; or, with no live install, the newest retired one did. Any hour.
  *   no_machine     clinic hours and the roster room has NO live (enrolled, un-retired) install. The steward's own rule (lib/steward/rules.ts) also reads a config machine override;
  *                  this one asks only whether a recorder is installed.
@@ -11,10 +13,15 @@
  * "We looked and found nothing" and "we never looked" are different: a source that cannot be read is named in `degraded` and its rule is skipped, never read as healthy or as dark.
  */
 import { sql } from "@/lib/db";
-import { lastChunkByRoom } from "@/lib/room-access/tool-reads";
+import { lastChunkByRoom, openEncounterWindowsByRoom } from "@/lib/room-access/tool-reads";
 import { ROOMS } from "@/lib/rooms-live/rooms";
-import { isClinicHours, recorderOffMinutes } from "./clinic-hours";
+import { CONSULT_RECORDER_OFF_MINUTES, isClinicHours, recorderOffMinutes } from "./clinic-hours";
 import { queueOpsAlert, type OpsAlert } from "./ops-alert";
+
+/** An open window older than this is a stuck/unclosed row, not a consult in progress. */
+export const CONSULT_WINDOW_MAX_AGE_MIN = 90;
+/** A window must have been open this long before it can page (a recorder needs a moment to start). */
+export const CONSULT_WINDOW_MIN_OPEN_MIN = 3;
 
 export type SweepInputs = {
   now_ms: number;
@@ -26,6 +33,8 @@ export type SweepInputs = {
   retired_installs?: ReadonlyMap<string, { mic_state: string | null }> | null;
   /** room_id -> slug, for the message; a room missing from it is named by its id */
   slugs?: ReadonlyMap<string, string>;
+  /** FR1-A: room_id -> t_open (ms) of each room's open consult window (the OLDEST open one when several). null/absent = the source was not read (consult rule skipped). */
+  open_windows?: ReadonlyMap<string, number> | null;
   /** room_id -> room.name, carried in the body beside the slug */
   names?: ReadonlyMap<string, string>;
 };
@@ -40,6 +49,19 @@ export function planOpsAlerts(inp: SweepInputs): OpsAlert[] {
     if (inp.last_chunk_ms !== null) {
       const mins = recorderOffMinutes(inp.now_ms, inp.last_chunk_ms.get(room.room_id) ?? null);
       if (mins !== null) out.push({ kind: "recorder_off", room_id: room.room_id, room_slug: slug, room_name, minutes: mins });
+    }
+    if (inp.last_chunk_ms !== null && inp.open_windows) {
+      const tOpen = inp.open_windows.get(room.room_id);
+      if (tOpen !== undefined && Number.isFinite(tOpen)) {
+        const openMin = Math.floor((inp.now_ms - tOpen) / 60_000);
+        if (openMin >= CONSULT_WINDOW_MIN_OPEN_MIN && openMin <= CONSULT_WINDOW_MAX_AGE_MIN) {
+          const since = Math.max(inp.last_chunk_ms.get(room.room_id) ?? -Infinity, tOpen);
+          const quiet = Math.floor((inp.now_ms - since) / 60_000);
+          if (quiet >= CONSULT_RECORDER_OFF_MINUTES) {
+            out.push({ kind: "recorder_off", room_id: room.room_id, room_slug: slug, room_name, minutes: quiet, consult_open: { window_open_min: openMin } });
+          }
+        }
+      }
     }
     if (inp.live_installs !== null) {
       const inst = inp.live_installs.get(room.room_id);
@@ -99,6 +121,20 @@ export async function runOpsSweep(nowMs: number = Date.now()): Promise<SweepResu
     console.error("[ops-sweep] could not read retired room_install:", e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200));
   }
 
+  // FR1-A: open consult windows (t_close IS NULL, opened within 90 min). Same table and shape as lib/steward/sense.ts "eta_encounter_windows". A failed read skips only the consult rule.
+  let openWindows: Map<string, number> | null = null;
+  try {
+    const rows = await openEncounterWindowsByRoom(ids);
+    openWindows = new Map();
+    for (const r of rows) {
+      const t = new Date(r.t_open as string).getTime();
+      if (Number.isFinite(t)) openWindows.set(r.room_id, t);
+    }
+  } catch (e) {
+    degraded.push("encounter_windows");
+    console.error("[ops-sweep] could not read eta_encounter_windows:", e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200));
+  }
+
   let slugs: Map<string, string> | undefined;
   let names: Map<string, string> | undefined;
   try {
@@ -109,7 +145,7 @@ export async function runOpsSweep(nowMs: number = Date.now()): Promise<SweepResu
     /* the id names the room */
   }
 
-  const plan = planOpsAlerts({ now_ms: nowMs, last_chunk_ms: lastChunk, live_installs: installs, retired_installs: retired, slugs, names });
+  const plan = planOpsAlerts({ now_ms: nowMs, last_chunk_ms: lastChunk, live_installs: installs, retired_installs: retired, open_windows: openWindows, slugs, names });
   let queued = 0;
   for (const a of plan) if (await queueOpsAlert(a)) queued++;
   return { ok: degraded.length === 0, planned: plan.length, queued, degraded };
