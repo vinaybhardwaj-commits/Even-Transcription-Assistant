@@ -10,10 +10,9 @@ import glob, hashlib, json, os, sys
 from datetime import datetime, timezone, timedelta
 HD = os.path.expanduser("~/eta-data/hist"); IST = timezone(timedelta(hours=5, minutes=30)); DRY = "--dry-run" in sys.argv
 RULE = "no_signal_v1: every chunk of the window has size_bytes/duration_s in [700,716] B/s (exact-zero recording; verified by energy on 12 chunks, hist-miner #1258/#1259)"
-TIER = sys.argv[sys.argv.index("--tier") + 1] if "--tier" in sys.argv else "A"
-LISTP = f"{HD}/exact_zero_windows_tier{TIER}.json"
+LISTP = f"{HD}/exact_zero_windows_tierA.json"
 ids = json.load(open(LISTP))["windows"]
-W = {w["win_id"]: w for w in json.load(open(f"{HD}/windows_tier{TIER}.json"))}
+W = {w["win_id"]: w for w in json.load(open(f"{HD}/windows_tierA.json"))}
 CH = {c["id"]: c for j in json.load(open(f"{HD}/manifest.json"))["jobs"] for c in j["chunks"]}
 last = {}
 for l in open(f"{HD}/state.jsonl"): r = json.loads(l); last[r["win"]] = r["state"]
@@ -54,7 +53,7 @@ for win in ids:
 print(f"listed {len(ids)} | to SKIP (claimed for no_signal): {len(skip)} | to ANNOTATE via per-run addenda (already done): {len(annot)} | left alone (in flight or claimed by a process): {len(left)}" + (" [dry run]" if DRY else ""))
 if DRY: sys.exit(0)
 start = {"schema": "eta-lab-result/1", "provenance": {"run_id": rid, "producer": "hist-bulk", "created_at": nowi, "provenance_complete": True, "not_run": ["stack", "guards", "diarizer"], "stack": None, "guards": None, "diarizer": None, "stack_versions_sha256": TWIN_SHA, "source_audio_keys": []},
-         "queue": {"kind": "no_signal", "rule": RULE, "list": f"exact_zero_windows_tier{TIER}.json", "listed": len(ids), "skip": len(skip), "annotate": len(annot), "left_alone": len(left)}}
+         "queue": {"kind": "no_signal", "rule": RULE, "list": "exact_zero_windows_tierA.json", "listed": len(ids), "skip": len(skip), "annotate": len(annot), "left_alone": len(left)}}
 wo(f"{HD}/manifests/{rid}.start.json", start)
 with open(f"{HD}/state.jsonl", "a") as sf:
     for w, cs in skip:
@@ -69,7 +68,7 @@ end_extra = {}
 for run_id, wins in sorted(by_run.items()):
     ap_ = f"{HD}/manifests/{run_id}.addendum.json"
     body = {"reason": f"no_signal_v1 (exact_zero_by_size_v1): the listed window ids of THIS run have every chunk at 700-716 B/s of tape (exact-zero recording). Their records say ok with empty text; read them as NO_SIGNAL (a recording fault), NOT as silence or 'no speech', and treat them as untested for any downstream use. The window files are unchanged (write-once).",
-            "rule": RULE, "no_signal": {"rule": "exact_zero_by_size_v1", "rule_sha": "eaf36bb4233bba76708553c25edd02779affec3b9b049a3e7ca8ec5bc8415f2e", "window_ids": sorted(set(wins))}, "count": len(set(wins)), "evidence_list": "studies/2026-09-24-hist-bulk/no_signal_windows_tierA.json (ids, rule, chunk sizes; eta-lab)", "applied_by_run": rid}
+            "rule": RULE, "no_signal_window_ids": sorted(set(wins)), "count": len(set(wins)), "evidence_list": "studies/2026-09-24-hist-bulk/no_signal_windows_tierA.json (ids, rule, chunk sizes; eta-lab)", "applied_by_run": rid}
     if run_id == "hist-bulk-backfill-20260924" or os.path.exists(ap_):   # one addendum per run key (write-once): an existing one cannot take a second; the ids go into this run's manifest instead
         end_extra[run_id] = sorted(set(wins)); continue
     wo(ap_, {"schema": "eta-lab-result/1", "provenance": {"run_id": run_id, "producer": "hist-bulk", "created_at": nowi}, "addendum": body})

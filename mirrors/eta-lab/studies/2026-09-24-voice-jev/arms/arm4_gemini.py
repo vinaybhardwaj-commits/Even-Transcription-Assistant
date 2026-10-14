@@ -112,7 +112,7 @@ def main():
     ap.add_argument("--backend", choices=["vertex", "mock"], default="vertex")
     ap.add_argument("--select", choices=["all", "doubtful", "doubtful+page"], default="doubtful+page",
                     help="L1 turns (needs --arm1): DOUBTFUL plus the page's 40 confident items (default; needs --confident-ids; ruling 169). L2 still runs on every window given.")
-    ap.add_argument("--arm1", help="out/arm1.jsonl"); ap.add_argument("--confident-ids", help="file, one turn_id per line: the page's confident items"); ap.add_argument("--extra-ids", help="file, one turn_id per line: turns with NO arm 1 row that must still run (E3X pseudo-turns, ruling 290); ids only"); ap.add_argument("--turn-ids", help="file, one turn_id per line: restrict L1 further")
+    ap.add_argument("--arm1", help="out/arm1.jsonl"); ap.add_argument("--confident-ids", help="file, one turn_id per line: the page's confident items"); ap.add_argument("--turn-ids", help="file, one turn_id per line: restrict L1 further")
     a = ap.parse_args(); C.freeze_text(); sec, psha = prompt_parts()
     rows = C.read_jsonl(a.inp); C.blind_check(a.inp, rows); os.makedirs(a.clip_dir, exist_ok=True)
     for r in rows:                                   # relative audio paths are relative to the clips file (vj-data's handoff writes clips/<turn_id>.mp3)
@@ -121,7 +121,7 @@ def main():
     jobs = []
     if "l1" in tasks:
         if a.select != "all" and not a.arm1: raise SystemExit("--select needs --arm1")
-        keep = C.select_turns(C.read_jsonl(a.arm1), a.select, open(a.turn_ids).read().split() if a.turn_ids else None, open(a.confident_ids).read().split() if a.confident_ids else None, open(a.extra_ids).read().split() if a.extra_ids else None) if a.select != "all" else None
+        keep = C.select_turns(C.read_jsonl(a.arm1), a.select, open(a.turn_ids).read().split() if a.turn_ids else None, open(a.confident_ids).read().split() if a.confident_ids else None) if a.select != "all" else None
         jobs += [("l1", r) for r in rows if r.get("turn_start_s") is not None and (keep is None or r["turn_id"] in keep)]
     if "l2" in tasks:
         seen = {}

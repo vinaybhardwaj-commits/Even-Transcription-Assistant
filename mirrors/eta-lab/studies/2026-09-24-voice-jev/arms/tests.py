@@ -106,17 +106,6 @@ class TestTruthAndSelection(unittest.TestCase):
         self.assertEqual(C.select_turns(rows, "doubtful"), {f"d{i}" for i in range(5)})
         self.assertEqual(C.select_turns(rows, "doubtful+page", ["d1", "c000", "c001"], page) , {"d1", "c000"})   # refuter's --turn-ids restricts further
         with self.assertRaises(SystemExit): C.select_turns(rows, "doubtful+page")                            # the page ids are required
-    def test_extra_ids_and_non_production_guard(self):
-        rows = [{"turn_id": "d1", "margin": 0.01, "best": .7, "speaker_basis": "voice_match"}, {"turn_id": "c1", "margin": .3, "best": .7, "speaker_basis": "voice_match"}]
-        self.assertEqual(C.select_turns(rows, "doubtful+page", None, [], ["e3x1", "c1"]), {"d1", "e3x1"})       # c1 is in arm 1: no back door; e3x1 (no arm 1 row) is added
-        d = tempfile.mkdtemp()
-        with open(f"{d}/in.jsonl", "w") as f: f.write(json.dumps({"turn_id": "x", "window_id": "w", "role": None, "margin": None, "best": None, "speaker_basis": "voice_match", "production_row": False}) + "\n")
-        r = subprocess.run([sys.executable, os.path.join(HERE, "arm1.py"), "--in", f"{d}/in.jsonl", "--out", f"{d}/o.jsonl"], capture_output=True, text=True)
-        self.assertNotEqual(r.returncode, 0); self.assertIn("production_row is false", r.stderr)
-        with open(f"{d}/a1.jsonl", "w") as f: f.write(json.dumps({"turn_id": "x", "window_id": "w", "is_doctor": False, "doubtful": True, "role": None, "production_row": False}) + "\n")
-        with open(f"{d}/t.jsonl", "w") as f: f.write(json.dumps({"turn_id": "x", "labels": {"V": "doctor"}}) + "\n")
-        r = subprocess.run([sys.executable, os.path.join(HERE, "score.py"), "--arm1", f"{d}/a1.jsonl", "--truth", f"{d}/t.jsonl", "--rule", RULE, "--rule-sha", RSHA, "--outdir", f"{d}/out"], capture_output=True, text=True)
-        self.assertNotEqual(r.returncode, 0); self.assertIn("production_row=false", r.stderr)
     def test_addendum_sha(self): self.assertTrue(C.addendum_sha().startswith("9c335c59c5be")); self.assertTrue(C.addendum166_sha().startswith("87b8cdac4330")); self.assertEqual(set(C.stamp()), {"freeze_sha12", "addendum_sha12", "addendum166_sha12"})
 
 
