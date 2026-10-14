@@ -60,10 +60,11 @@ describe("registration", () => {
   it("is appended after scribe_timbre, listed for every profile, read scope", () => {
     const names = PUBLISHED_TOOLS.map((t) => t.name);
     expect(names.filter((n) => n === "scribe_freescript")).toHaveLength(1);
-    expect(names.at(-2)).toBe("scribe_freescript"); // ADMIN-1 appended scribe_admin after it
-    expect(names.at(-1)).toBe("scribe_admin");
-    expect(names.at(-3)).toBe("scribe_encounter_timeline");
-    expect(names.indexOf("scribe_timbre")).toBe(names.length - 4);
+    expect(names.at(-3)).toBe("scribe_freescript"); // ADMIN-1 appended scribe_admin, CATALOG-1 scribe_catalog, after it
+    expect(names.at(-2)).toBe("scribe_admin");
+    expect(names.at(-1)).toBe("scribe_catalog");
+    expect(names.at(-4)).toBe("scribe_encounter_timeline");
+    expect(names.indexOf("scribe_timbre")).toBe(names.length - 5);
     expect(CALLABLE_TOOLS.get("scribe_freescript")!.scope).toBe("read");
     expect(LAB_TOOLS.some((t) => t.name === "scribe_freescript")).toBe(true);
     for (const p of ["operator", "lab"] as const) expect(toolsForProfile(p).map((t) => t.name)).toContain("scribe_freescript");

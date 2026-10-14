@@ -87,7 +87,7 @@ export async function readEvidence(key: string, pair?: { room_id: string | null;
 const BLIND_DAYS: string[] = BLIND_ROOM_DAYS.map(([d]) => d);
 const BLIND_ROOMS: string[] = BLIND_ROOM_DAYS.map(([, r]) => r);
 
-export type ResultFilter = { rubric_id?: string; unit_kind?: string; room_id?: string; from?: string; to?: string; run_id?: string; lab?: boolean; status?: string; limit: number };
+export type ResultFilter = { rubric_id?: string; unit_kind?: string; room_id?: string; from?: string; to?: string; run_id?: string; lab?: boolean; status?: string; /** CATALOG-1: one unit (a consult's uid for unit_kind consult) */ unit_key?: string; limit: number };
 
 export async function listResults(f: ResultFilter): Promise<Array<Record<string, unknown>>> {
   const rows = (await sql`
@@ -101,6 +101,7 @@ export async function listResults(f: ResultFilter): Promise<Array<Record<string,
        AND (${f.run_id ?? null}::text IS NULL OR run_id = ${f.run_id ?? null}::text)
        AND (${f.lab ?? null}::boolean IS NULL OR lab = ${f.lab ?? null}::boolean)
        AND (${f.status ?? null}::text IS NULL OR status = ${f.status ?? null}::text)
+       AND (${f.unit_key ?? null}::text IS NULL OR unit_key = ${f.unit_key ?? null}::text)
        AND ist_date IS NOT NULL AND (room_id IS NOT NULL OR unit_kind = 'stay') -- GATING-G65 (ours): a row whose room or date is unknown cannot be checked against the held-out set, so it is never served; E3-2: a STAY has no room and no room-day (the held-out set is by room-day), it is read by its admission date
        AND NOT EXISTS (
              SELECT 1 FROM unnest(${BLIND_DAYS}::date[], ${BLIND_ROOMS}::text[]) AS b(d, r)
