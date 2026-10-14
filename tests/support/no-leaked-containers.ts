@@ -7,11 +7,12 @@
  * run's business (they may be mid-run) and are only listed as a note.
  */
 import { execFileSync } from "node:child_process";
+import { dockerCli } from "./docker";
 import { worktreeTag } from "./container-name";
 
 const names = (): string[] | null => {
   try {
-    return execFileSync("docker", ["ps", "-a", "--format", "{{.Names}}"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 30_000 })
+    return (dockerCli(["ps", "-a", "--format", "{{.Names}}"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 30_000 }) as string)
       .split("\n").map((s) => s.trim()).filter(Boolean);
   } catch { return null; } // no docker: nothing could have been started
 };
@@ -25,7 +26,7 @@ export default function setup() {
     const foreign = all.filter((n) => /^eta-steward-history-/.test(n) && !n.endsWith(`-${tag}`));
     if (foreign.length) console.warn(`[no-leaked-containers] note: ${foreign.length} eta-steward-history-* container(s) from other worktrees exist (not this run's).`);
     if (mine.length) {
-      for (const n of mine) { try { execFileSync("docker", ["rm", "-fv", n], { stdio: "ignore", timeout: 60_000 }); } catch { /* best effort */ } }
+      for (const n of mine) { try { dockerCli(["rm", "-fv", n], { stdio: "ignore", timeout: 60_000 }); } catch { /* best effort */ } }
       throw new Error(`LEAKED TEST CONTAINERS (${mine.length}) survived the run, now removed: ${mine.join(", ")}`);
     }
   };

@@ -12,7 +12,7 @@
  * jsonb operators are the real ones.
  */
 import { execFileSync } from "node:child_process";
-import { isMiniHost, MINI_DOCKER_MSG } from "./s1-pg";
+import { dockerCli, isMiniHost, MINI_DOCKER_MSG } from "./docker";
 import { containerName } from "./container-name";
 import { removeOnExit, forgetOnExit } from "./reap-containers";
 
@@ -38,7 +38,7 @@ export function dockerAvailable(): boolean {
 }
 
 const sh = (args: string[], input?: string): string =>
-  execFileSync("docker", args, { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], maxBuffer: 32 * 1024 * 1024 });
+  dockerCli(args, { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], maxBuffer: 32 * 1024 * 1024 }) as string;
 
 export function startPg(): void {
   try { sh(["rm", "-fv", PG_NAME]); } catch { /* not running */ }

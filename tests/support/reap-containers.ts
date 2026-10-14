@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { dockerCli } from "./docker";
 
 /**
  * Containers this process started and has not yet removed. A test that fails, times out or is killed never
@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 const live = new Set<string>();
 let hooked = false;
 function reap(): void {
-  for (const n of live) { try { execFileSync("docker", ["rm", "-fv", n], { stdio: "ignore", timeout: 60_000 }); } catch { /* already gone */ } }
+  for (const n of live) { try { dockerCli(["rm", "-fv", n], { stdio: "ignore", timeout: 60_000 }); } catch { /* already gone */ } }
   live.clear();
 }
 export function removeOnExit(name: string): void {

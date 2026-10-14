@@ -25,7 +25,8 @@
  * wearing the shape of "no rows".
  */
 import { execFileSync } from "node:child_process";
-import os from "node:os";
+import { dockerCli, isMiniHost, MINI_DOCKER_MSG } from "./docker";
+export { isMiniHost, MINI_DOCKER_MSG };
 import { containerName } from "./container-name";
 import { removeOnExit, forgetOnExit } from "./reap-containers";
 
@@ -40,12 +41,6 @@ export class UnrecognisedStatementError extends Error {
 }
 
 const KNOWN_FIRST_WORDS = new Set(["select", "with", "insert", "update", "delete"]);
-
-/** V standing rule (14 Oct 2026): Docker suites never run on the Mac Mini (the pg harness drove its load to 53). No override. */
-export const MINI_DOCKER_MSG = "pg harness: Docker suites never run on the Mac Mini (V, 14 Oct); run on c3/Yoga/lab box";
-export function isMiniHost(): boolean {
-  return os.hostname().toLowerCase().replace(/\.local$/, "") === "vinays-mac-mini-3" || process.env.ETA_HOST_ROLE === "mini";
-}
 
 /** eta-refuter-2 D1 (23 Sep): no timeout meant a hung docker socket stalled the gate until the
  * 1800s hard-timeout watchdog killed the whole run. 15s is enough for a real daemon to answer;
@@ -111,7 +106,7 @@ function mainStatementAt(q: string): number {
 export function pgContainer(base: string) {
   const name = containerName(base);
   const docker = (args: string[], input?: string) =>
-    execFileSync("docker", args, { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 });
+    dockerCli(args, { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 }) as string;
   const psql = (text: string) =>
     docker(["exec", "-i", name, "psql", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"], text);
 
