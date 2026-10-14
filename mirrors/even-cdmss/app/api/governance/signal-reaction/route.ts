@@ -20,7 +20,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { govKeyValid } from '@/lib/gov-auth';
 import { getBySignalId } from '@/lib/opd-gov-signal-store';
-import { resolveInstancesLocal } from '@/lib/opd-gov-read';
+import { resolveInstances } from '@/lib/opd-gov-read';
 import { classifyReaction, isReactionVerb } from '@/lib/cognition/reactions';
 import { getReaction, insertReaction, listReactionsFor, type ReactionRow } from '@/lib/cognition/reactions-store';
 
@@ -74,12 +74,10 @@ export async function POST(req: NextRequest) {
   if (disposition === 'replay') return NextResponse.json(reactionBody(stored!, true));
 
   // The audit instance this card was showing, recorded so WM3 can join the reaction to what the
-  // doctor was actually looking at. NULL means "could not resolve", never "there was none". A
-  // discharge thread is not resolved here (it would need a Metabase call inside the doctor's
-  // request), so its reaction is stored with a NULL ref.
+  // doctor was actually looking at. NULL means "could not resolve", never "there was none".
   let clinicalStateRef: string | null = null;
   try {
-    const { representative } = await resolveInstancesLocal(signal);
+    const { representative } = await resolveInstances(signal.doctor_uid, signal.signal_type, signal.window_from, signal.window_to);
     clinicalStateRef = representative?.audit_id ?? null;
   } catch { clinicalStateRef = null; }
 

@@ -66,7 +66,7 @@ test('§8.1: only the tools that run an engine are metered', () => {
    * runs in `lab_v2` and touches no clinical row — the distinction `reaudit_execute` exists to make.
    */
   assert.deepEqual(REGISTRY.filter((t) => t.cost_class === 'metered').map((t) => String(t.name)).sort(),
-    ['experiment_run', 'failure_minimize', 'paired_audit_submit', 'reaudit_execute', 'run_retry']);
+    ['experiment_run', 'failure_minimize', 'reaudit_execute', 'run_retry']);
   const minimize = REGISTRY.find((t) => String(t.name) === 'failure_minimize')!;
   assert.deepEqual([...minimize.scopes], ['research_write']);
   assert.equal(minimize.effect, 'research_write');
