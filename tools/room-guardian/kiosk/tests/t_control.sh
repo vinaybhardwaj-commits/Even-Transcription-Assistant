@@ -1,15 +1,16 @@
 #!/bin/bash
+# shellcheck disable=SC2059
 # FR1-C1.1: control subscription, control.last, and "no message for 90 s = kill" (fable C4).
 # put_ctl <age_s> <payload>: control.last as the control loop would have written it, received <age_s> ago.
 put_ctl() {
   mkdir -p "$STATE_DIR"
-  { printf '%s\n' "$((GUARDIAN_FAKE_NOW - $1))"; printf '%s\n' "$2"; } >"$STATE_DIR/control.last"
+  { printf '%s\n' "$((GUARDIAN_FAKE_NOW - $1))"; printf '%s\n' "${2//@TS@/$((GUARDIAN_FAKE_NOW - $1))}"; } >"$STATE_DIR/control.last"
 }
 use_ctl() { load_libs; export GUARDIAN_CONTROL_SUB_CMD='true'; }
 # advance the clock by $1 s, then run the fetch the main loop would run
 tick_to() { GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + $1)); flag_fetch; }
-OFF='{"kill": false, "modes": {"opd9": "shadow", "opd2": "heal"}}'
-HEAL='{"kill": false, "modes": {"opd2": "shadow", "opd9": "heal"}}'
+OFF='{"kill": false, "modes": {"opd2": "heal", "opd9": "shadow"}, "ts": @TS@}'
+HEAL='{"kill": false, "modes": {"opd2": "shadow", "opd9": "heal"}, "ts": @TS@}'
 
 test_fresh_kill_false_not_engaged_mode_per_room() {
   use_ctl
@@ -124,7 +125,7 @@ test_control_store_is_atomic() {
 
 test_control_loop_writes_control_last() {
   load_libs
-  export GUARDIAN_CONTROL_SUB_CMD='printf "%s\n\n%s\n" "garbage" "{\"kill\": false, \"modes\": {\"$1\": \"heal\"}}"; sleep 30 & echo $! >>"$T/ctl.pid"; wait'
+  export GUARDIAN_CONTROL_SUB_CMD='printf "%s\n\n%s\n" "garbage" "{\"kill\": false, \"modes\": {\"$1\": \"heal\"}, \"ts\": $GUARDIAN_FAKE_NOW}"; sleep 30 & echo $! >>"$T/ctl.pid"; wait'
   start_loops control_loop
   local i=0
   while [ "$i" -lt 40 ] && ! grep -q '"kill": false' "$STATE_DIR/control.last" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
@@ -153,8 +154,8 @@ test_top_level_kill_only_fail_closed() {
   ctl_engaged 1 '{"kill": false, "modes": {}'; assert_rc $? 0 "missing closing brace"
   ctl_engaged 1 '{"modes": {"kill": false}}'; assert_rc $? 0 "kill only inside modes"
   ctl_engaged 1 '{"kill": false, "modes": {}, "modes": {}}'; assert_rc $? 0 "duplicate modes"
-  ctl_engaged 1 '{"modes": {"opd9": "heal"}, "kill": false}'; assert_rc $? 1 "order does not matter"
-  ctl_engaged 1 '{"kill":false,"modes":{"opd9":"heal"}}'; assert_rc $? 1 "compact spacing"
+  ctl_engaged 1 '{"modes": {"opd9": "heal"}, "kill": false}'; assert_rc $? 0 "top-level order is the Mini's order only"
+  ctl_engaged 1 '{"kill":false,"modes":{"opd9":"heal"}}'; assert_rc $? 0 "compact spacing is not the Mini's form"
 }
 
 test_heal_to_shadow_takes_effect_without_a_fetch() {
@@ -180,18 +181,18 @@ test_stale_latches_through_a_clock_step_back() {
 
 test_receive_epoch_in_the_future_is_killed() {
   use_ctl
-  printf '%s\n%s\n' "$((GUARDIAN_FAKE_NOW + 3))" "$HEAL" >"$STATE_DIR/control.last"; flag_fetch
+  printf '%s\n%s\n' "$((GUARDIAN_FAKE_NOW + 3))" "${HEAL//@TS@/$GUARDIAN_FAKE_NOW}" >"$STATE_DIR/control.last"; flag_fetch
   killswitch_engaged; assert_rc $? 0 "3 s ahead"
-  printf '%s\n%s\n' "$((GUARDIAN_FAKE_NOW + 2))" "$HEAL" >"$STATE_DIR/control.last"; flag_fetch
+  printf '%s\n%s\n' "$((GUARDIAN_FAKE_NOW + 2))" "${HEAL//@TS@/$GUARDIAN_FAKE_NOW}" >"$STATE_DIR/control.last"; flag_fetch
   killswitch_engaged; assert_rc $? 1 "2 s ahead is tolerated"
 }
 
 # ---- ts (publish epoch from the Mini) ----
 ts_payload() { printf '{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}' "$1"; }
 
-test_ts_absent_falls_back_to_receive_age() {
+test_ts_absent_is_killed_and_receive_age_still_applies() {
   use_ctl
-  ctl_engaged 1 "$HEAL"; assert_rc $? 1 "no ts, fresh"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}}'; assert_rc $? 0 "no ts at all is killed"
   ctl_engaged 91 "$HEAL"; assert_rc $? 0 "no ts, receive age 91"
 }
 
@@ -296,13 +297,13 @@ test_exact_live_payload_still_clear() {
   assert_eq "$(current_mode)" "heal" "live shape gives heal"
   ctl_engaged 1 "{\"kill\": false, \"modes\": {\"opd9\": \"shadow\"}, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 1 "live shape, shadow room"
   assert_eq "$(current_mode)" "shadow" "live shape gives shadow"
-  ctl_engaged 1 "{\"kill\":false,\"modes\":{\"opd9\":\"heal\"},\"ts\":$GUARDIAN_FAKE_NOW}"; assert_rc $? 1 "compact"
-  assert_eq "$(current_mode)" "heal" "compact gives heal"
+  ctl_engaged 1 "{\"kill\":false,\"modes\":{\"opd9\":\"heal\"},\"ts\":$GUARDIAN_FAKE_NOW}"; assert_rc $? 0 "compact is not the Mini's form"
+  assert_eq "$(current_mode)" "shadow" "compact gives no heal"
 }
 
 test_nested_modes_key_in_meta_is_not_read_as_modes() {
   use_ctl
-  ctl_engaged 1 '{"kill": false, "meta": {"modes": {"opd9": "heal"}}, "modes": {}}'; assert_rc $? 1 "clear"
+  ctl_engaged 1 '{"kill": false, "meta": {"modes": {"opd9": "heal"}}, "modes": {}}'; assert_rc $? 0 "clear"
   assert_eq "$(current_mode)" "shadow" "nested modes ignored"
 }
 
@@ -313,7 +314,7 @@ test_leading_zero_ts_does_not_crash_and_fails_closed() {
   ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": 09}' 2>"$err"; assert_rc $? 0 "ts 09 (a value of 9 is stale)"
   ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": 0123}' 2>>"$err"; assert_rc $? 0 "ts 0123 (stale)"
   ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": 08}' 2>>"$err"; assert_rc $? 0 "ts 08"
-  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"opd9\": \"heal\"}, \"ts\": 0$GUARDIAN_FAKE_NOW}" 2>>"$err"; assert_rc $? 1 "a zero-padded current epoch is read as base 10 and is fresh"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"opd9\": \"heal\"}, \"ts\": 0$GUARDIAN_FAKE_NOW}" 2>>"$err"; assert_rc $? 0 "a zero-padded ts is not canonical"
   ctl_engaged 1 '{"kill": false, "modes": {}, "ts": 0x10}' 2>>"$err"; assert_rc $? 0 "hex-looking ts"
   ctl_engaged 1 '{"kill": false, "modes": {}, "ts": 99999999999999999999}' 2>>"$err"; assert_rc $? 0 "too many digits"
   ctl_engaged 1 '{"kill": false, "modes": {}, "ts": 1 2}' 2>>"$err"; assert_rc $? 0 "two numbers"
@@ -321,7 +322,7 @@ test_leading_zero_ts_does_not_crash_and_fails_closed() {
   # receive epoch (line 1 of control.last) with a leading zero
   rm -f "$STATE_DIR/control_latch"
   { printf '0%s\n' "$((GUARDIAN_FAKE_NOW - 1))"; printf '%s\n' "$HEAL"; } >"$STATE_DIR/control.last"
-  flag_fetch 2>"$err"; killswitch_engaged 2>>"$err"; assert_rc $? 1 "zero-padded receive epoch is base 10"
+  flag_fetch 2>"$err"; killswitch_engaged 2>>"$err"; assert_rc $? 0 "zero-padded receive epoch is not canonical"
   { printf '09\n%s\n' "$HEAL"; } >"$STATE_DIR/control.last"
   flag_fetch 2>>"$err"; killswitch_engaged 2>>"$err"; assert_rc $? 0 "receive epoch 09 is ancient"
   assert_eq "$(cat "$err")" "" "no arithmetic error from the receive epoch"
@@ -448,16 +449,16 @@ test_missing_colon_is_killed() {
 
 test_modes_read_only_at_the_top_level_and_flat() {
   use_ctl
-  ctl_engaged 1 '{"kill": false, "meta": {"modes": {"opd9": "heal"}}}'; assert_rc $? 1 "no top-level modes: clear"
+  ctl_engaged 1 '{"kill": false, "meta": {"modes": {"opd9": "heal"}}}'; assert_rc $? 0 "no top-level modes: clear"
   assert_eq "$(current_mode)" "shadow" "modes nested in meta is not read"
-  ctl_engaged 1 '{"kill": false, "meta": {"modes": {"opd9": "heal"}}, "modes": {"opd9": "shadow"}}'; assert_rc $? 1 "clear"
+  ctl_engaged 1 '{"kill": false, "meta": {"modes": {"opd9": "heal"}}, "modes": {"opd9": "shadow"}}'; assert_rc $? 0 "clear"
   assert_eq "$(current_mode)" "shadow" "top-level modes wins over a nested one"
   ctl_engaged 1 '{"kill": false, "modes": {"x": {"opd9": "heal"}}}'; assert_rc $? 0 "room nested one level inside modes"
   assert_eq "$(current_mode)" "shadow" "nested room never gives heal"
   ctl_engaged 1 '{"kill": false, "modes": {"opd9": {"mode": "heal"}}}'; assert_rc $? 0 "object as a mode value"
   ctl_engaged 1 '{"kill": false, "modes": {"opd9": ["heal"]}}'; assert_rc $? 0 "array as a mode value"
   ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal", "opd9": "shadow"}}'; assert_rc $? 0 "room named twice"
-  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}}'; assert_rc $? 1 "flat modes still read"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": @TS@}'; assert_rc $? 1 "flat modes still read"
   assert_eq "$(current_mode)" "heal" "flat heal"
 }
 
@@ -471,7 +472,7 @@ test_payload_cap_4096_bytes_before_awk() {
   assert_eq "$(awk -v a="$t0" -v b="$t1" 'BEGIN{print (b - a < 1) ? "fast" : "slow"}')" "fast" "200 KB payload rejected in under 1 s"
   assert_eq "$CTRL_WHY" "unparseable" "reason"
   pad="$(head -c 3000 /dev/zero | tr '\0' x)"
-  ctl_engaged 1 "{\"kill\": false, \"modes\": {}, \"pad\": \"$pad\"}"; assert_rc $? 1 "3 KB payload is still read"
+  ctl_engaged 1 "$(gen_payload 40 60)"; assert_rc $? 1 "3 KB payload is still read"
   pad="$(head -c 4200 /dev/zero | tr '\0' x)"
   ctl_engaged 1 "{\"kill\": false, \"modes\": {}, \"pad\": \"$pad\"}"; assert_rc $? 0 "4.2 KB payload is over the cap"
 }
@@ -601,9 +602,193 @@ test_scanner_token_order_is_strict() {
   ctl_engaged 1 '{"kill": false, "modes": {}, "x": }'; assert_rc $? 0 "colon without a value before the closing brace"
   ctl_engaged 1 '{"kill": false, "x":, "modes": {}}'; assert_rc $? 0 "colon without a value before a comma"
   ctl_engaged 1 '{"kill":, "modes": {}}'; assert_rc $? 0 "kill with no value"
-  ctl_engaged 1 '{"kill": false, "modes": {}, "x": 1 }'; assert_rc $? 1 "spaces before the closing brace are fine"
-  ctl_engaged 1 '{ "kill" : false , "modes" : { "opd9" : "heal" } , "ts" : '"$GUARDIAN_FAKE_NOW"' }'; assert_rc $? 1 "generous whitespace is fine"
-  assert_eq "$(current_mode)" "heal" "heal for the generous-whitespace live shape"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "x": 1 }'; assert_rc $? 0 "spaces before the closing brace are not the Mini form"
+  ctl_engaged 1 '{ "kill" : false , "modes" : { "opd9" : "heal" } , "ts" : '"$GUARDIAN_FAKE_NOW"' }'; assert_rc $? 0 "generous whitespace is not the Mini form"
+  assert_eq "$(current_mode)" "shadow" "no heal from generous whitespace"
   ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": '"$GUARDIAN_FAKE_NOW"'}'; assert_rc $? 1 "live shape is clear"
   assert_eq "$(current_mode)" "heal" "live shape gives heal"
+}
+
+# ---- R7: one canonical form, everything else killed ----
+# gen_payload <rooms> <name length>: a canonical payload built by hand, ts = now. Room 1 is opd9 = heal.
+gen_payload() {
+  local n="$1" len="$2" i m="" name
+  for i in $(seq 1 "$n"); do
+    if [ "$i" = 1 ]; then name="opd9"; else name="$(printf 'r%s' "$i" | head -c "$len")"; name="$(printf '%s%s' "$name" "$(head -c $((len - ${#name})) /dev/zero | tr '\0' x)")"; fi
+    [ -n "$m" ] && m="$m, "
+    m="$m\"$name\": \"$([ "$i" = 1 ] && echo heal || echo shadow)\""
+  done
+  printf '{"kill": false, "modes": {%s}, "ts": %s}' "$m" "$GUARDIAN_FAKE_NOW"
+}
+
+# canon <kill> <rooms-json-pairs...> via python3 json.dumps(sort_keys=True), default separators (test-only use of python3)
+canon() { # kill ts room=mode ...
+  python3 -I -c '
+import json, sys
+kill = sys.argv[1] == "true"
+ts = int(sys.argv[2])
+modes = dict(a.split("=", 1) for a in sys.argv[3:])
+sys.stdout.write(json.dumps({"kill": kill, "modes": modes, "ts": ts}, sort_keys=True))
+' "$@"
+}
+
+test_python_canonical_payloads_are_accepted_and_read_exactly() {
+  use_ctl
+  local p i args
+  p="$(canon false "$GUARDIAN_FAKE_NOW")"; assert_eq "$p" "{\"kill\": false, \"modes\": {}, \"ts\": $GUARDIAN_FAKE_NOW}" "python form of 0 rooms"
+  ctl_engaged 1 "$p"; assert_rc $? 1 "0 rooms clear"; assert_eq "$(current_mode)" "shadow" "0 rooms = shadow"
+  p="$(canon false "$GUARDIAN_FAKE_NOW" opd9=heal)"; ctl_engaged 1 "$p"; assert_rc $? 1 "1 room heal clear"; assert_eq "$(current_mode)" "heal" "1 room heal"
+  p="$(canon false "$GUARDIAN_FAKE_NOW" opd9=shadow)"; ctl_engaged 1 "$p"; assert_rc $? 1 "1 room shadow clear"; assert_eq "$(current_mode)" "shadow" "1 room shadow"
+  p="$(canon true "$GUARDIAN_FAKE_NOW" opd9=heal)"; ctl_engaged 1 "$p"; assert_rc $? 0 "kill true with heal = killed"; assert_eq "$(current_mode)" "shadow" "kill true = shadow"
+  p="$(canon false "$GUARDIAN_FAKE_NOW" opd2=heal)"; ctl_engaged 1 "$p"; assert_rc $? 1 "room absent clear"; assert_eq "$(current_mode)" "shadow" "room absent = shadow"
+  args=(); for i in 1 2 3 4 5; do args+=("opd$((i + 10))=heal"); done; args+=(opd9=heal)
+  p="$(canon false "$GUARDIAN_FAKE_NOW" "${args[@]}")"; ctl_engaged 1 "$p"; assert_rc $? 1 "5+1 rooms clear"; assert_eq "$(current_mode)" "heal" "heal among 6 rooms"
+  args=(); for i in $(seq 1 63); do args+=("room-$i=shadow"); done; args+=(opd9=heal)
+  p="$(canon false "$GUARDIAN_FAKE_NOW" "${args[@]}")"; ctl_engaged 1 "$p"; assert_rc $? 1 "64 rooms clear"; assert_eq "$(current_mode)" "heal" "heal among 64 rooms"
+  args=(); for i in $(seq 1 64); do args+=("room-$i=shadow"); done; args+=(opd9=heal)
+  p="$(canon false "$GUARDIAN_FAKE_NOW" "${args[@]}")"; ctl_engaged 1 "$p"; assert_rc $? 0 "65 rooms killed"
+  assert_eq "$(current_mode)" "shadow" "65 rooms = shadow"
+  p="$(canon true "$GUARDIAN_FAKE_NOW" "${args[@]}")"; ctl_engaged 1 "$p"; assert_rc $? 0 "65 rooms with kill true killed"
+}
+
+test_4097_bytes_killed_and_cap_edge() {
+  use_ctl
+  local p
+  ctl_engaged 1 "$(gen_payload 40 60)"; assert_rc $? 1 "about 3 KB canonical is read"
+  assert_eq "$(current_mode)" "heal" "heal in a 40-room payload"
+  p="$(gen_payload 60 64)"; ctl_engaged 1 "$p"; assert_rc $? 0 "over 4096 bytes killed"
+  assert_eq "$([ "$(wc -c <"$STATE_DIR/control.last" | tr -d ' ')" -gt 4096 ] && echo over)" "over" "the file really is over 4096 bytes"
+}
+
+# special bytes are built with printf octal and proven present in the file
+has_byte() { # <file> <hex byte, two digits>
+  LC_ALL=C od -An -v -tx1 "$1" | tr -s ' ' '\n' | grep -qx "$2"
+}
+write_raw() { # <receive age> <printf format for the payload line> [args]: control.last from raw bytes
+  local age="$1" fmt="$2"; shift 2
+  { printf '%s\n' "$((GUARDIAN_FAKE_NOW - age))"; printf "$fmt" "$@"; printf '\n'; } >"$STATE_DIR/control.last"
+}
+raw_engaged() { rm -f "$STATE_DIR/control_latch"; flag_fetch; killswitch_engaged; }
+
+test_special_byte_payloads_are_killed() {
+  use_ctl
+  local ts="$GUARDIAN_FAKE_NOW" ok_p
+  ok_p='{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}'
+  write_raw 1 "$ok_p" "$ts"; raw_engaged; assert_rc $? 1 "control: the same bytes without a trick are clear"
+  write_raw 1 "\001$ok_p" "$ts"; has_byte "$STATE_DIR/control.last" 01 && ok || fail "no 0x01 in file"; raw_engaged; assert_rc $? 0 "0x01 prefix"
+  write_raw 1 "\001{\"kill\": true, \"modes\": {}, \"ts\": %s}\001$ok_p" "$ts" ; raw_engaged; assert_rc $? 0 "0x01 record separator splice"
+  write_raw 1 '{"kill": false, "mo\000des": {"opd9": "heal"}, "ts": %s}' "$ts"; has_byte "$STATE_DIR/control.last" 00 && ok || fail "no NUL in file"; raw_engaged; assert_rc $? 0 "NUL inside a key"
+  write_raw 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}\000' "$ts"; has_byte "$STATE_DIR/control.last" 00 && ok || fail "no trailing NUL"; raw_engaged; assert_rc $? 0 "NUL at the end of the line"
+  write_raw 1 '{"kill": false,\t"modes": {"opd9": "heal"}, "ts": %s}' "$ts"; has_byte "$STATE_DIR/control.last" 09 && ok || fail "no tab"; raw_engaged; assert_rc $? 0 "a tab"
+  write_raw 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}\r' "$ts"; has_byte "$STATE_DIR/control.last" 0d && ok || fail "no CR"; raw_engaged; assert_rc $? 0 "CRLF"
+  write_raw 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}\377' "$ts"; has_byte "$STATE_DIR/control.last" ff && ok || fail "no 0xFF"; raw_engaged; assert_rc $? 0 "a high byte"
+  write_raw 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}\177' "$ts"; has_byte "$STATE_DIR/control.last" 7f && ok || fail "no DEL"; raw_engaged; assert_rc $? 0 "DEL"
+  write_raw 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}\033' "$ts"; has_byte "$STATE_DIR/control.last" 1b && ok || fail "no ESC"; raw_engaged; assert_rc $? 0 "ESC"
+  # three lines, no final newline, a blank line
+  { printf '%s\n' "$((ts - 1))"; printf "$ok_p\n" "$ts"; printf 'x\n'; } >"$STATE_DIR/control.last"; raw_engaged; assert_rc $? 0 "a third line"
+  { printf '%s\n' "$((ts - 1))"; printf "$ok_p" "$ts"; } >"$STATE_DIR/control.last"; raw_engaged; assert_rc $? 0 "no final newline"
+  { printf '%s\n\n' "$((ts - 1))"; printf "$ok_p\n" "$ts"; } >"$STATE_DIR/control.last"; raw_engaged; assert_rc $? 0 "blank line between"
+  { printf '%s\n' "$((ts - 1))"; printf "$ok_p\n" "$ts"; } >"$STATE_DIR/control.last"; raw_engaged; assert_rc $? 1 "control: two clean lines are clear again"
+  { printf '%s\000\n' "$((ts - 1))"; printf "$ok_p\n" "$ts"; } >"$STATE_DIR/control.last"; raw_engaged; assert_rc $? 0 "NUL in the receive line"
+  assert_eq "$(current_mode)" "shadow" "shadow after a killed payload"
+}
+
+test_every_earlier_bypass_shape_is_killed() {
+  use_ctl
+  local n=0 p now="$GUARDIAN_FAKE_NOW" bs
+  bs="$(printf '\134')"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    p="${p//@TS@/$now}"; n=$((n + 1))
+    ctl_engaged 1 "$p"; assert_rc $? 0 "bypass shape $n: $p"
+  done <<'LIST'
+{"kill": false, "kill": false, "modes": {}, "ts": @TS@}
+{"kill": false, "modes": {}, "kill": true, "ts": @TS@}
+{"kill": false, "modes": {}, "ts": @TS@, "kill": true}
+{"kill": false, "modes": {"opd9": "heal"}, "ts": @TS@, "ts": 1}
+{"kill": false, "modes": {}, "modes": {"opd9": "heal"}, "ts": @TS@}
+{"kill": false, "modes": {}, "note": "unterminated, "ts": @TS@}
+{"kill": false, "modes": {}, "list": [1, 2}, "ts": @TS@}
+{"kill": false, "modes": {}, "list": [1, 2]], "ts": @TS@}
+{"kill": false, "modes": {}, "list": {1, 2], "ts": @TS@}
+{"kill" "junk": false, "modes": {"opd9": "heal"}, "ts": @TS@}
+{"kill" "kill": false, "modes": {}, "ts": @TS@}
+{"kill" false, "modes": {}, "ts": @TS@}
+{"kill": false, "modes" {"opd9": "heal"}, "ts": @TS@}
+{"kill": false, "modes": {"opd9" "heal"}, "ts": @TS@}
+{"kill": false, "modes": {"opd9": "heal" "opd2": "shadow"}, "ts": @TS@}
+{"kill": false, "modes": {"x": {"opd9": "heal"}}, "ts": @TS@}
+{"kill": false, "modes": {"opd9": {"mode": "heal"}}, "ts": @TS@}
+{"kill": false, "modes": {"opd9": ["heal"]}, "ts": @TS@}
+{"kill": false, "meta": {"kill": true}, "modes": {}, "ts": @TS@}
+{"kill": false, "meta": {"modes": {"opd9": "heal"}}, "modes": {}, "ts": @TS@}
+{"meta": {"kill": false}, "modes": {"opd9": "heal"}, "ts": @TS@}
+{"modes": {"opd9": "heal"}, "ts": @TS@}
+{"kill": false, "modes": {"opd9": "heal"}, "ts": @TS@,}
+{"kill": false, "modes": {"opd9": "heal"},, "ts": @TS@}
+{"kill": false, "modes": {},, "ts": @TS@}
+{"kill": false, "modes": {"opd9": "heal",}, "ts": @TS@}
+{"kill": false, "modes": {}, "x": , "ts": @TS@}
+{"kill": false, "modes": {"opd9": "heal"}, "ts": }
+{"kill": falsey, "modes": {}, "ts": @TS@}
+{"kill": false , "modes": {}, "ts": @TS@}
+{"kill": null, "modes": {}, "ts": @TS@}
+{"kill": [false], "modes": {}, "ts": @TS@}
+{"kill": "false", "modes": {}, "ts": @TS@}
+{"kill": False, "modes": {}, "ts": @TS@}
+{"kill": false, "modes": {"opd9": "heal"}, "ts": 0@TS@}
+{"kill": false, "modes": {"opd9": "heal"}, "ts": @TS@.0}
+{"kill": false, "modes": {"opd9": "heal"}, "ts": "@TS@"}
+{"kill": false, "modes": {"opd9": "heal"}, "ts": -@TS@}
+{"kill": false, "modes": {"opd9": "heal"}, "ts": 99999999999999999}
+{"kill": false, "modes": {"opd9": "heal"}, "ts": 1 2}
+{"kill": false, "modes": {"opd9": "heal", "opd9": "shadow"}, "ts": @TS@}
+{"kill": false, "modes": {"OPD9": "heal"}, "ts": @TS@}
+{"kill": false, "modes": {"": "heal"}, "ts": @TS@}
+{"kill": false, "modes": {"opd9": "HEAL"}, "ts": @TS@}
+{"kill": false, "modes": {"opd9": "heal "}, "ts": @TS@}
+{"kill": false, "modes": {"opd9": "off"}, "ts": @TS@}
+{ "kill": false, "modes": {"opd9": "heal"}, "ts": @TS@}
+ {"kill": false, "modes": {"opd9": "heal"}, "ts": @TS@}
+{"kill": false, "modes": {"opd9": "heal"}, "ts": @TS@} 
+{"kill": false, "modes": {"opd9": "heal"}, "ts": @TS@}{"kill": true}
+{"kill": false, "modes": {"opd9": "heal"}, "ts": @TS@}x
+x{"kill": false, "modes": {"opd9": "heal"}, "ts": @TS@}
+{"kill":false,"modes":{"opd9":"heal"},"ts":@TS@}
+{"modes": {"opd9": "heal"}, "kill": false, "ts": @TS@}
+{"kill": false, "ts": @TS@, "modes": {"opd9": "heal"}}
+{'kill': false, 'modes': {'opd9': 'heal'}, 'ts': @TS@}
+LIST
+  # escaped keys, built with a real backslash byte
+  for p in \
+    '{"kill": false, "modes": {}, "'"$bs"'u006bill": true, "ts": @TS@}' \
+    '{"kill": false, "modes": {}, "k'"$bs"'u0069ll": true, "ts": @TS@}' \
+    '{"kill": false, "modes": {"opd9": "heal"}, "x'"$bs"'"y": 1, "ts": @TS@}' \
+    '{"kill": false, "modes": {"opd'"$bs"'u0039": "heal"}, "ts": @TS@}' \
+    '{"kill": false, "modes": {"opd9": "he'"$bs"'u0061l"}, "ts": @TS@}'
+  do
+    p="${p//@TS@/$now}"; n=$((n + 1))
+    ctl_engaged 1 "$p"; assert_rc $? 0 "escaped bypass shape $n"
+    has_bs "$STATE_DIR/control.last" && ok || fail "escaped shape $n holds no backslash"
+  done
+  assert_eq "$([ "$n" -ge 58 ] && echo enough)" "enough" "bypass payload count ($n)"
+  echo "BYPASS_COUNT=$n" >"$T/bypass_count.txt"
+  assert_eq "$(current_mode)" "shadow" "shadow after the last bypass"
+}
+
+test_two_heal_keys_for_this_room_is_killed_and_bad_room_name_is_shadow() {
+  use_ctl
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal", "opd9": "heal"}, "ts": @TS@}'; assert_rc $? 0 "room twice, both heal"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "shadow", "opd9": "heal"}, "ts": @TS@}'; assert_rc $? 0 "room twice, shadow then heal"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal", "opd8": "heal"}, "ts": @TS@}'; assert_rc $? 1 "another room is not a duplicate"
+  assert_eq "$(current_mode)" "heal" "heal for the one room"
+  GUARDIAN_ROOM='OPD9'
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": @TS@}'; assert_rc $? 1 "clear"
+  assert_eq "$(current_mode)" "shadow" "a room name outside [a-z0-9_-] is never heal"
+}
+
+test_no_scanner_is_left() {
+  assert_eq "$(grep -c 'awk' "$KDIR/lib/killswitch.sh")" "0" "no awk in killswitch.sh"
+  assert_eq "$(grep -rl 'control_top_keys' "$KDIR/lib" "$KDIR/bin" | wc -l | tr -d ' ')" "0" "control_top_keys is gone"
+  assert_eq "$(grep -rn 'python' "$KDIR/lib" "$KDIR/bin" | grep -vc '^[^:]*:[0-9]*:#')" "0" "no python outside comments in kiosk code"
 }
