@@ -1,4 +1,4 @@
-# DIAG-RIG SPEC (draft for Fable's ruling — FABLE 428 item 3, NO BUILD YET; scope CONFIRMED by FABLE 434 item 4)
+# DIAG-RIG SPEC (draft for Fable's ruling — FABLE 428 item 3, NO BUILD YET)
 
 Owner: diar-lab (audio plumbing: lab-mover). Rig home: Home Office Mac (acoustic) + any non-Google machine (digital).
 Rules honoured: no sound in clinic rooms ever; Home Office recordings NEVER enter hist / label / VJ / voiceprint
@@ -105,15 +105,7 @@ DER/JER scoring = the bakeoff eval unchanged.
 - Every report carries: git shas of rig + target, stimulus manifest sha, machine id, UTC timestamps.
 
 ## d. Trigger + where results land
-- One driver per rig: `diagrig run <suite> --path digital|acoustic` plus a NIGHTLY CRON scored report
-  (confirmed IN SCOPE by FABLE 434 item 4, no longer an open question).
-- NIGHTLY SCORED REPORT: one run per night on a fixed suite (tones + canary + call-and-response + noise +
-  5 languages + diarizer multi-speaker), scored, posted to the bus as counts/scores only ([SELFTEST] tag).
-- FLEET DEAD-ROOM SELF-CHECK (434 item 4): ALREADY BUILT by fleet (his loop, fleet #3556) - the rig does not
-  rebuild it; the nightly report JOINs fleet-watch's EXISTING room-state loop (the 08:01-style
-  NOT_RECORDING/KIOSK_OFFLINE alerts) with the rig's own latest acoustic proof, so one report answers "is the
-  fleet's room-audio chain alive": per room, last rig proof + last fleet-watch state; the rig never runs IN a
-  clinic room - the acoustic proof it cites is Home Office's own chain plus fleet-watch's passive checks.
+- One driver per rig: `diagrig run <suite> --path digital|acoustic` (and a nightly cron variant if Fable wants).
 - Runs land in ~/eta-data/diag-rig/runs/<UTCstamp>-<machine>/ (0700) with audio + truth + report; the repo gets
   code + report SUMMARIES only (no audio, no text beyond the fixed phrase set). Outside hist/label/VJ/voiceprint
   dirs by construction; no patient data touched.
@@ -126,11 +118,9 @@ DER/JER scoring = the bakeoff eval unchanged.
 - Cost ~0: no new vendor, no cloud GPU (box T4 + existing machines), TTS via macOS `say`, noise beds synthesized.
   Only spend: none planned.
 
-## Open questions for Fable's ruling (residual after 428b/434)
-1. Phrase-set wording owner: draft + refuter-2 check (proposed), or V pins the wording?
-2. Kanglish: Google-TTS per Kannada turn + concatenate, or romanised-Kannada via EN/HI voice marked
-   APPROXIMATION in truth.json? (proposed: the former)
-3. Does the digital path also test the PRODUCTION service endpoints read-only (eta-diarize :8012, Mini STT),
-   or only offline pipelines? (proposed: offline + eta-diarize only; nothing writes to production state)
-RESOLVED by rulings (kept for the record): Indic TTS = ElevenLabs + Google-TTS fallback (428b); nightly cron
-= IN SCOPE (434); full SELFTEST list = confirmed in scope (434 item 4), incl. the fleet dead-room self-check.
+## Open questions for Fable's ruling
+1. Phrase-set owner: do we pin V's wording or draft + refuter-2 checks? (drafted, refuter-checked proposed)
+2. Indic TTS: accept `say`'s Indic voices if present, else is concatenative/recorded-by-V fallback acceptable later?
+3. Nightly cron (unattended) or manual runs only on the rig?
+4. Does the rig's digital path also test the PRODUCTION service endpoints (eta-diarize :8012, Mini STT) or only
+   offline pipelines? (offline + eta-diarize proposed; nothing writes to production state)
