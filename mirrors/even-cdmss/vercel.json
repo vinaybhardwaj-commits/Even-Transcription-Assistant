@@ -29,6 +29,6 @@
     { "path": "/api/ipd-episode/worker?auto=1", "schedule": "30-59/10 16 * * *" },
     { "path": "/api/ipd-episode/worker?auto=1", "schedule": "*/10 17-23 * * *" },
     { "path": "/api/ipd-episode/worker?auto=1", "schedule": "0-30/10 0 * * *" },
-    { "path": "/api/admin/lab-v2/tick?auto=1", "schedule": "*/2 * * * *" }
+    { "path": "/api/admin/lab-v2/tick?auto=1", "schedule": "*/5 * * * *" }
   ]
 }
