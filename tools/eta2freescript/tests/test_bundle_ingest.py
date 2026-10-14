@@ -282,7 +282,7 @@ def test_derived_outputs_only_persist(tmp_path, capsys, monkeypatch):
     rc = run(cfg, DAY, post=lambda b: {"ok": True, "inserted": 1}, sealed=["synth-all"], pending=False)
     assert rc == 0 and seen_dirs and not seen_dirs[0].exists()
     kept = sorted(p.relative_to(keep).as_posix() for p in keep.rglob("*") if p.is_file())
-    assert kept == ["runs.jsonl", "synth-all/artifact.json", "synth-all/artifact.validation.json", "usage.jsonl"]
+    assert kept == [".nightly.lock", "consult-state.jsonl", "runs.jsonl", "synth-all/artifact.json", "synth-all/artifact.validation.json", "usage.jsonl"]
     for p in keep.rglob("*"):
         assert (p.stat().st_mode & 0o777) == (0o700 if p.is_dir() else 0o600)
     assert json.loads((keep / "runs.jsonl").read_text().splitlines()[0])["uid"] == "synth-all"

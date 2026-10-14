@@ -50,6 +50,35 @@ A bad JSON value, a missing placeholder, or a missing or non-directory cwd is a 
 - A consult whose pipeline raises still flushes its usage lines to `<out>/usage.jsonl` and writes `{uid, final_valid: false, error_type}` (the exception class name, no message) to `runs.jsonl`. This holds for the last consult too.
 - "no ingest target" in bundle mode still prints the one JSON summary line (`mode: bundle`, `config_error: true`) before exiting 1.
 
+## Hourly, skip-existing and backfill (bundle mode only)
+
+- `run --skip-existing` needs `out` (config error without it): the ledger `<out>/consult-state.jsonl` is the source of truth. A uid is skipped when its LAST ledger line is `written` or `skipped_existing`, or `rejected` with the same `code_sha256` as this run (a rejected uid is retried only when the code changed; a skipped rejected uid keeps a `rejected` line so a later code change still retries it). The day read (`GET /api/freescript/day?ist_date=<day>`, same HMAC as the pending read) is secondary: every uid it lists with a state other than `rejected` is also skipped. A truncated read (50-row cap) or one that withholds blind room-days continues with the ledger plus the rows it got and adds `day_read_partial: true` to the summary line; a failed read (HTTP error, bad JSON) continues on the ledger alone with `day_read_failed: true`. The run aborts (exit 1, `day_read_failed` and `ledger_unreadable`) only when the ledger is unreadable AND the day read fails. A missing ledger file is an empty ledger. The cap applies after the skip. The summary line gains `skipped_existing`.
+- `run --max-consults N` overrides `max_consults`. `run --date today` is the current IST day; the sealed feed lists only sealed consults, so one sealed after a run is picked up by the next.
+- `hourly` runs `run --skip-existing` for today (IST) and, while the IST hour is < 2, for yesterday as well, in one process. One summary line per day; exit code is the worse of the two. Pending jobs are drained on the first day only.
+- `backfill --from YYYY-MM-DD --to YYYY-MM-DD [--max-consults N] [--uids-from-index PATH]` runs `run --skip-existing` for each day, newest first, one summary line per day plus a total line (`days, eligible, written(posted), skipped_existing, rejected, failed, missing_layers, bundle_failed, cost_usd`). It stops at the first day that exits 1 for a config or day-read failure; exit 2 continues. More than 120 days is refused. Pending jobs are not drained by backfill.
+- `--uids-from-index PATH` (days before the sealed feed existed): PATH is the cutter clip index, JSONL (on the box `~/eta-data/consult/clips/index.jsonl`). The last row per `consult_uid` wins; rows with `ist_date` in range and `minutes` >= 2 are grouped by day and replace the sealed feed. Only `consult_uid`, `ist_date` and `minutes` are read. Malformed lines are counted (`malformed`) and skipped. Bundle eligibility and skip-existing still apply.
+- Stage ledger (bundle mode, `out` set, not `--dry-run`): every consult that `run`, `hourly` or `backfill` considers appends one line to `<out>/consult-state.jsonl` (0600): `{"consult_uid", "ist_date", "state", "artifact_id", "run_ts", "code_sha256"}` (`code_sha256` is the generator code sha of this run). `state` is `written`, `rejected`, `post_failed`, `skipped_existing`, `not_eligible:<reason>` (`missing_layers`, `not_this_day`), `bundle_failed` or `failed:<ErrorClass>` (the class name only; `PostRejected` and `NoArtifact` for a refused post or a missing artifact). `artifact_id` is the stored run id from the ingest reply (or the day read for `skipped_existing`), else null. Ids and states only. Consults cut by `max_consults` before any fetch are not considered and get no line.
+- Lock: `run`, `hourly`, `backfill` (and `drain` in bundle mode) take one non-blocking `flock` on `<out>/.nightly.lock` before any work and release it on exit. If another process holds it, one line `{"locked": true, "cmd": ..., "date": ...}` is printed and the exit code is 0 with nothing run. `--dry-run` does not lock.
+- The ledger line is appended per consult, as soon as its state is known (after its post, or on its failure or skip), so a crash or kill keeps every line already earned. A line may also carry `job_id` (a pending job's consult). `ist_date` is the consult's own IST day (from its bundle clip start); sealed consults not read yet fall back to the run day.
+- Seeding: before go-live the lead seeds the ledger from the store's existing artifacts with lines `{"consult_uid", "state": "written", "code_sha256": "seed", ...}`. A `written` line skips whatever its code sha; extra or missing fields are ignored by the reader, as are non-object and malformed lines.
+- `post_failed`: the artifact was produced but the POST failed or was refused. The line keeps `code_sha256`. The next run at the SAME code sha re-POSTs the kept `<out>/<uid>/artifact.json` (with its validation file and cost) and makes no Bedrock call; with no kept artifact, or at a new code sha, it runs the consult again. The re-post spends nothing.
+- An explicit pending `scribe_freescript` job is a deliberate rerun request: it bypasses skip-existing and runs again, but NOT the attempt cap below. Its ledger line carries the `job_id`. A pending job whose post failed is re-posted from the kept artifact like any other uid, under its `job_id` (from the pending list, else from the ledger line).
+- Attempt cap: `MAX_ATTEMPTS_PER_SHA` (2). The attempt is counted BEFORE the spend: immediately before each Bedrock run the box appends and fsyncs a line `{"state": "started", code_sha256, consult_uid, ist_date, run_ts[, job_id]}`; if that append fails there is no Bedrock call, the summary carries `ledger_write_failed` and the run exits 1 fatal. One attempt = one `started` line; the terminal line written when the consult finishes (`written`, `rejected`, `post_failed`, `failed:<Class>`) closes it and adds nothing. A pre-fix terminal line with no `started` line before it still counts once. A `started` with no terminal line (a crash) stays one attempt. Seed lines (another code sha) and re-post lines (marked `"reposted": true`) never count. Before any Bedrock run for a uid the box counts its attempts; at 2 or more it makes no call, appends a line with state `attempts_exhausted` and counts it in the summary key `attempts_exhausted` (also in the backfill total). It applies to sealed uids, pending jobs, hourly and backfill alike, and exhausted uids do not use a `max_consults` slot. Re-post comes first and costs no attempt. A rejected result writes no `artifact.json`, so it is bounded at 2 runs per code sha; a `failed:<Class>` is retried until the cap. A new code sha resets the count. A consult that raises still adds what it spent (from its usage lines) to `cost_usd`; if that cannot be read the summary carries `cost_unknown: n`. `attempts_exhausted` does not change the exit code: look for the key in the log. An unreadable ledger is fatal (exit 1).
+- If a ledger line cannot be written, the summary line carries `ledger_write_failed: true` and the exit is 1 (fatal: `backfill` stops, and the run stops after that consult).
+- In folder mode `hourly` and `backfill` print `config error: hourly/backfill need bundle mode` and exit 1.
+
+Hourly cron (IST box clock; `TZ=Asia/Kolkata`), replacing the single nightly line once the first live night is signed off:
+
+```
+5 * * * * cd /opt/Even-Transcription-Assistant && set -a && . /etc/freescript-nightly.env && set +a && python -m tools.eta2freescript.nightly hourly >> /var/log/freescript-nightly.log 2>&1
+```
+
+Backfill (run by hand):
+
+```
+python -m tools.eta2freescript.nightly backfill --from 2026-09-01 --to 2026-09-30 --max-consults 40 --uids-from-index ~/eta-data/consult/clips/index.jsonl
+```
+
 ## First live night
 
 1. Until B2.1 is merged, the first live night runs with `--dry-run` only.
@@ -82,7 +111,9 @@ sudo -u freescript env $(grep -v '^#' /etc/freescript-nightly.env | xargs) \
   python -m tools.eta2freescript.nightly plan --data "$FREESCRIPT_DATA"
 ```
 
-Cron on the box, after that day's Sarvam transcripts and role tracks are on disk. The script selects the previous IST day, so 01:15 IST is enough. With `TZ=Asia/Kolkata` and the repo venv on `PATH`:
+**When hourly is installed, REMOVE the old `run` nightly cron line below. Hourly replaces it; running both double-handles the previous day.** (Both take the same lock, so the second would only find it held or re-walk the day.)
+
+Cron on the box (the old nightly line; remove it once hourly is installed), after that day's Sarvam transcripts and role tracks are on disk. The script selects the previous IST day, so 01:15 IST is enough. With `TZ=Asia/Kolkata` and the repo venv on `PATH`:
 
 ```
 15 1 * * * cd /opt/Even-Transcription-Assistant && set -a && . /etc/freescript-nightly.env && set +a && python -m tools.eta2freescript.nightly run >> /var/log/freescript-nightly.log 2>&1
@@ -94,3 +125,4 @@ Do not point it at a folder of real consults from a laptop that is not the box.
 
 Set `ETA_FREESCRIPT=0` (the door 404s and the job prints `disabled`). The down-migration is
 `db/rollbacks/0157_freescript.down.sql` (drops only `freescript_latest`, `freescript_artifact`, `freescript_run`).
+- Re-post rule: on every path (hourly, backfill, `run`, `drain`) and before the cap, a uid is re-posted with no Bedrock call when ANY `post_failed` line at this code sha has a kept `artifact.json` and no later `written` or `rejected` line at it; lines in between (`bundle_failed`, `attempts_exhausted`, ...) do not matter, and a kept artifact is delivered even after `attempts_exhausted`. An open `started` (no terminal line after it: a crash inside the POST) is treated like `post_failed`. In both cases the kept `artifact.json` must have an mtime at or after the run_ts of the attempt's last `started` line; an older one belongs to an earlier attempt, is not posted, and the uid falls through to the cap. The ledger append loops until the whole buffer is written; a write that returns 0 raises, which is `ledger_write_failed` (no call, exit 1). The first creation of the ledger also fsyncs its directory. The line written after a re-post (`written` or `rejected`) carries `"reposted": true`. The ledger append adds a newline first if the file does not end in one.
