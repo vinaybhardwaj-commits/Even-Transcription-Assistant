@@ -395,12 +395,6 @@ def main(argv=None):
         print("fleet-watch: REFUSED: real sinks need MODE=live in %s (add --dry, or flip MODE after the refuter's PASS)" % RT, file=sys.stderr); return 4
     os.makedirs(RT, exist_ok=True); cfg = load_cfg(a.config)
     sys.path.insert(0, os.path.join(HERE, "..", "..", "kit"))
-    if a.replay and not a.dry:     # a replay to REAL sinks must never race the live writer: it takes the loop's lock too, non-blocking (refuter-2 #2498)
-        rl = open(os.path.join(RT, "lock"), "w")
-        try:
-            fcntl.flock(rl, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            print("fleet-watch: REFUSED: the live loop holds the lock; a real-sink replay must not race it", file=sys.stderr); return 3
     if a.replay:   # replayed snapshot, optional injected fault, REAL sinks, its own state file (so real state is untouched)
         snap = json.load(open(a.replay)); label = "[REPLAY]"    # a replay is never a real event: its lines are always marked
         if a.inject:

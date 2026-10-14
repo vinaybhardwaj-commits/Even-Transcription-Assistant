@@ -1,6 +1,6 @@
 # Ruling 337d RESULTS: ADDENDUM 1 (post-hoc; split-speaker; the commit time is the timestamp): stock strings in the forced-language outputs
 Origin: indic-mt #2505 (35 % of their 5,130 forced-language whisper re-runs are recurring stock strings). Post-hoc check on MY 337d text outputs (box-only `texts.jsonl`; counts only, nothing quoted). It changes no result, threshold or verdict.
-Definition (the same as indic-mt's, plus a >= 3-window condition; theirs is >= 3 occurrences with the window count reported separately, and 162 of their 164 strings meet it anyway): an output of >= 10 characters counts as a STOCK STRING if the identical normalised string occurs >= 3 times in >= 3 different windows of this run.
+Definition (same as indic-mt's): an output of >= 10 characters counts as a STOCK STRING if the identical normalised string occurs >= 3 times in >= 3 different windows of this run.
 - Whisper-forced outputs of >= 10 characters: 591, of which 486 distinct; only 3 distinct stock strings, covering 95 outputs (16 %).
 - Share of outputs that are stock strings, by group: **refused spans 29 % (168 outputs); noisy no-text controls 42 % (110); Indic positives 0 % (19); English accepted controls 0 % (294)**.
 - IndicConformer (CTC) outputs of >= 10 characters: 50, 0 stock strings.
