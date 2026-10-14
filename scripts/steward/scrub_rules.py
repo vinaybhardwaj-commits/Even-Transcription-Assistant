@@ -306,6 +306,37 @@ def public_ipv4_hits(text):
     return out
 
 
+STAFF_DOMAINS = ("even.in", "evenhealthcare.com", "evenos.app", "evenscribe.app")
+EMAIL = re.compile(r"([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)")
+EMAIL_OK_LOCALS = ("staff-redacted",)
+
+
+def load_email_domains():
+    """Named staff domains plus an optional private list (git author domains), never committed."""
+    p = os.environ.get("STEWARD_EMAIL_DOMAINS_FILE") or os.path.expanduser("~/oc/git-steward/scrub/EMAIL-DOMAINS.local")
+    extra = []
+    try:
+        extra = [l.strip().lower() for l in open(p) if l.strip() and not l.lstrip().startswith("#")]
+    except OSError:
+        pass
+    return set(STAFF_DOMAINS) | set(d for d in extra if "." in d)
+
+
+def staff_email_hits(text, domains):
+    out = []
+    for i, ln in enumerate(text.splitlines(), 1):
+        for m in EMAIL.finditer(ln):
+            local, d = m.group(1).lower(), m.group(2).lower().rstrip(".")
+            if d in ("example.com", "example.test", "example.org", "example.net"):
+                continue
+            if local in EMAIL_OK_LOCALS or set(local) <= {"%"}:
+                continue  # redaction placeholder, or a SQL LIKE pattern such as %@even.in
+            if d in domains or any(d.endswith("." + x) for x in domains):
+                out.append(i)
+                break
+    return out
+
+
 def check(path, data, commit, hosts, report):
     size = len(data)
     low = path.replace("\\", "/")
@@ -339,10 +370,15 @@ def check(path, data, commit, hosts, report):
     if "/mirrors/" in "/" + low or os.environ.get("STEWARD_PUBLIC_IPV4") == "1":
         for n in public_ipv4_hits(text):
             report("public-ipv4", path, n, commit)
+        for n in staff_email_hits(text, EMAIL_DOMAINS):
+            report("staff-email", path, n, commit)
 
 
 def git(*a):
     return subprocess.run(["git"] + list(a), capture_output=True).stdout
+
+
+EMAIL_DOMAINS = load_email_domains()
 
 
 def main():
