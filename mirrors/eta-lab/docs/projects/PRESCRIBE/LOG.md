@@ -2,31 +2,6 @@
 
 Build and event log, newest first. Owner panes: linker (bundle), cap (c3 evaluator), eta-refuter-2 (checker).
 
-## 28 Sep ~13:3x-15:1x -- CAP-2 CLOSED (clean null); W53 CAP-3 ordered
-Session: cap, vj-refuter, linker, Fable.
-CAP-2 FINAL PASS 03b8777afc6bfe36: HELPED=FALSE (captured/169 base1 55/base2 53/real 53/placebo 52, net +1 item/+1 drug, below the 9-item/3-drug bar). Fable ruled: SECONDARY arm not run. W53 CAP-3 ordered same day (Rx-informed post-consult cleanup, OWN/SWAP/PRIOR arms); pre-reg PASS 15cebdc358384250 after 2 fix rounds; OWN+SWAP code PASS e95d502 after 4 blocking fixes; runs starting.
-Refs: #5339-5386, #5388-5422.
-
-## 27-28 Sep -- CAP-2 running; 26 Sep stratum ruling; feeds W50/FUSER S2
-Session: cap, linker, eta-refuter-2.
-Fable ruled (12:50) the 26 Sep CAP bundle is its own never-pooled stratum. CAP-2's 24-consult and 22-24 Sep sets now double as truth for CLARITY's S2 router arm and W50's bake-off sets (b)/(c), kept strictly separate from each other and from FUSER's own 24-consult TEST set.
-Refs: #4420-4457 (26 Sep stratum), W33 ruling.
-
-## 27 Sep ~00:0x-06:3x IST — CAP-2 pre-registered, Step 0 done, real/placebo running
-Session: cap, linker, vj-refuter, eta-refuter-2.
-Pre-registration v4 frozen sha256 cc0484c77c8f319d (#4009/#4010) after 4 draft rounds and vj-refuter's 6-fix review. Step 0 (whisper baselines) done both arms; ceiling checks Nflip 2/A 9/B 3/LOSTMAX 2 vj-refuter VERIFIED (#4154). GLOSS GO real+placebo launched on c3 (#4155). New router arm (W33.3): score router-fix's old vs new router on the same 24 consults for CLARITY's S2.
-Refs: #4009, #4071, #4150, #4154, #4155.
-
-## 26 Sep ~21:2x IST — Pulse Rx extract built
-Session: linker, eta-refuter-2, cap.
-Script 08cd6a18 PASS (#3908); run: rx_history.jsonl 200,098 lines, sha256 cd012fae, 26 Jun-24 Sep, 0 rows on 25/26 Sep, 121 doctors, 30 specialties (#3914); independently verified (#3915). cap will pull via the read-only jail after Fable's permission OK, and post the pre-registration sha before any hinted run (#3926/#3927).
-Refs: #3908, #3914, #3915, #3927.
-
-## 26 Sep ~18:1x-20:1x IST — CAP-1 FINAL (957f93c4); CAP-2 opened
-Session: cap, linker, eta-refuter-2, roadmap.
-Ceiling chain: linker committed C before the draw (#3789); cap's first ABSENT-id list was a from-memory copy and the sha check rejected it (#3803/#3806/#3810), correct list placed and sha-verified (#3813/#3819/#3821); draw done (#3823), refuter-2 draw gate PASS (#3825/#3843). Ceiling score PASS (#3849): target 6/60 = 10.0%, decoys 1/60 = 1.7%, McNemar p=0.125. cap's final report 957f93c4 (#3855). W27.1/W27.2: CAP-2 vocabularies opened; linker extracts Pulse Rx history since 26 Jun (excl. 25+26 Sep); vocab 28 Sep, before/after 29 Sep (#3880/#3886).
-Refs: #3843, #3849, #3855, #3880.
-
 ## 26 Sep ~17:4x IST — CAP-1 SCORE COMPLETE (scorer efcc9c9)
 Session: cap (evaluator).
 v3 scored 17:20-17:40 IST after gates: scorer+runner efcc9c9 (sha 77ea0eee), 38/38 fixture tests, thresholds frozen pre-data (TAU_CAPTURED 0.88 / TAU_MISHEARD 0.72), two reruns byte-identical, MANIFEST 7/7 re-verified. 169 SCORED items (24 linked consults): CAPTURED 50 (29.6%), LOST-IN-TRANSLATION 0, MISHEARD 5, ABSENT 94 (55.6%), ABSENT-SPEECH-GAP 20. By class: drug 9.4% (3/32) — the weak class; dose 38.7%, diagnosis 26.3%, investigation 30.3%, advice 34.8%, followup 36.0%. Report carries refuter-2's held-out envelope verbatim (+120 any-link 7.4% above the 5% target; confirmed ≤3.3%; in-sample not used). Ceiling chain: ABSENT sha d5dbd361 → linker commit → draw 15 confirmed → refuter-2 gate → V. Report file by 20:00 IST.
@@ -64,4 +39,3 @@ Refs: r429, r430, r430b.
 
 ## Standing leak rule
 A prescription or note never feeds the transcript of the same encounter or day. CAP-2 (vocabularies to steer STT/translation) is the second half, not yet started.
-- 29 Sep ~19:27 IST (rev 26): CAP-3 OWN/SWAP no help; PRIOR arm launched (pid 55701, bundle c979b5d, #7093).
