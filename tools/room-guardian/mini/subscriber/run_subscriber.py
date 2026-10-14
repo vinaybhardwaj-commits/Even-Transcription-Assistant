@@ -72,10 +72,9 @@ def main():
             log(f"check_quiet failed: {e.__class__.__name__}: {str(e)[:120]}")
         now = time.time()
         if now - last_ctl >= cfg.get("control_publish_s", 30):
-            snap = s.control_snapshot()
             for r in rooms:
                 try:
-                    publish(r, json.dumps(snap, sort_keys=True))
+                    publish(r, json.dumps(s.control_payload(), sort_keys=True))     # ts is taken per room, at the moment of this publish
                 except Exception as e:
                     log(f"control publish {r} failed: {e.__class__.__name__}")
             last_ctl = now

@@ -68,6 +68,27 @@ class SubscriberTests(unittest.TestCase):
         self.assertEqual(sent[0][0], "guardian/control"); self.assertFalse(sent[0][1]["kill"])
 
 
+    def test_control_payload_carries_ts_and_keeps_existing_fields(self):
+        import time
+        self.t = tempfile.TemporaryDirectory(); self.addCleanup(self.t.cleanup)
+        s = sb.Subscriber(os.path.join(self.t.name, "data"), self.t.name, ["r1"], Sink(), time.time)
+        open(os.path.join(s.ctl, "kill-switch"), "w").write("off\n")
+        before = int(time.time()); p = s.control_payload(); after = int(time.time())
+        self.assertIsInstance(p["ts"], int); self.assertNotIsInstance(p["ts"], bool)
+        self.assertTrue(before - 2 <= p["ts"] <= after + 2)
+        self.assertEqual({k: v for k, v in p.items() if k != "ts"}, s.control_snapshot())       # every existing field unchanged
+        self.assertEqual(sorted(p), ["kill", "modes", "ts"])
+        sent = []; s.publish_control(lambda t, m: sent.append((t, json.loads(m))))
+        self.assertEqual(sent[0][0], "guardian/control"); self.assertTrue(abs(sent[0][1]["ts"] - time.time()) <= 2)
+        self.assertFalse(sent[0][1]["kill"]); self.assertEqual(sent[0][1]["modes"], {"r1": "shadow"})
+
+    def test_ts_is_taken_at_each_call_not_cached(self):
+        self.t = tempfile.TemporaryDirectory(); self.addCleanup(self.t.cleanup)
+        c = Clock(T0); s = sb.Subscriber(os.path.join(self.t.name, "data"), self.t.name, ["r1"], Sink(), c)
+        a = s.control_payload()["ts"]; c.adv(40); b = s.control_payload()["ts"]
+        self.assertEqual(b - a, 40)
+
+
 class RecSink(Sink):
     def __init__(self): super().__init__(); self.esc, self.res = [], []
     def heal_escalated(self, room, now): self.esc.append(room)
