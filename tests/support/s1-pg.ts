@@ -25,6 +25,7 @@
  * wearing the shape of "no rows".
  */
 import { execFileSync } from "node:child_process";
+import os from "node:os";
 import { containerName } from "./container-name";
 import { removeOnExit, forgetOnExit } from "./reap-containers";
 
@@ -40,10 +41,17 @@ export class UnrecognisedStatementError extends Error {
 
 const KNOWN_FIRST_WORDS = new Set(["select", "with", "insert", "update", "delete"]);
 
+/** V standing rule (14 Oct 2026): Docker suites never run on the Mac Mini (the pg harness drove its load to 53). No override. */
+export const MINI_DOCKER_MSG = "pg harness: Docker suites never run on the Mac Mini (V, 14 Oct); run on c3/Yoga/lab box";
+export function isMiniHost(): boolean {
+  return os.hostname().toLowerCase().replace(/\.local$/, "") === "vinays-mac-mini-3" || process.env.ETA_HOST_ROLE === "mini";
+}
+
 /** eta-refuter-2 D1 (23 Sep): no timeout meant a hung docker socket stalled the gate until the
  * 1800s hard-timeout watchdog killed the whole run. 15s is enough for a real daemon to answer;
  * a genuinely down/hung one now fails fast and loud instead. */
 export function dockerAvailable(): boolean {
+  if (isMiniHost()) { console.error(MINI_DOCKER_MSG); return false; }
   try {
     execFileSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "pipe", timeout: 15_000 });
     return true;

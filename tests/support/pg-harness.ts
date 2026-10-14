@@ -12,6 +12,7 @@
  * jsonb operators are the real ones.
  */
 import { execFileSync } from "node:child_process";
+import { isMiniHost, MINI_DOCKER_MSG } from "./s1-pg";
 import { containerName } from "./container-name";
 import { removeOnExit, forgetOnExit } from "./reap-containers";
 
@@ -23,6 +24,7 @@ export const PG_NAME = containerName("eta-c2-e2e");
  * 1800s hard-timeout watchdog killed the whole run. 15s is enough for a real daemon to answer;
  * a genuinely down/hung one now fails fast and loud instead. */
 export function dockerAvailable(): boolean {
+  if (isMiniHost()) { console.error(MINI_DOCKER_MSG); return false; }
   try {
     execFileSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "pipe", timeout: 15_000 });
     return true;
