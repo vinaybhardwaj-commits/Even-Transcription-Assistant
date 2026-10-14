@@ -92,10 +92,7 @@ export function classIsRepresented(
       return events.some((e) => e.event_type === 'note' || e.event_type === 'initial_assessment'
         || e.event_type === 'handover');
     case 'imaging':
-      // ITEM 4: radiology IS in this mirror — as billing lines, not as a radiology table.
-      return events.some(isRadiologyOrder);
     case 'vitals':
-      // Still absent by construction: no vitals table joins on encounter_id (§2 of the reference).
       return false;
     case 'other':
     default:
@@ -231,7 +228,7 @@ export function confoundFor(
 export function panelContaining(
   terms: readonly string[], events: readonly EpisodeEvent[], fromDay: number | null,
 ): { event: EpisodeEvent; panel: string; term: string } | null {
-  const wanted = expandTermsWithCatalogue(terms);
+  const wanted = terms.map((t) => t.trim().toLowerCase()).filter(Boolean);
   if (!wanted.length) return null;
   for (const e of events) {
     if (e.event_type !== 'lab_order') continue;
@@ -248,155 +245,6 @@ export function panelContaining(
     }
   }
   return null;
-}
-
-/**
- * ROUND 21 ITEM 2 — THE HOSPITAL'S OWN CATALOGUE, BECAUSE MATCHER TERMS ARE NOT A RESOLUTION KEY.
- *
- * Two failures on IPNO-486 alone, both structural rather than unlucky:
- *
- *   · a matcher of "iv line / intravenous access / peripheral line" matches NOTHING in a catalogue
- *     whose actual entries are `VASOFIX 20G` (741 rows), `CANNULAE-.-20G-…BD-1's` (996), `IV SET`
- *     (853), `VENFLON`, `INFUSION SET`. The clinical concept and the billing string share no word.
- *   · the day-1 antiepileptic matcher listed "brevipil" and the day-2 matcher did not, so the SAME
- *     drug resolved present on one day and divergent on the next. The model's term list is a
- *     guess at what the catalogue calls a thing, and it varies between checkpoints of one episode.
- *
- * So terms are expanded against a table derived from db13's own item and service names before any
- * match is attempted. Every entry below was READ OUT OF THE CATALOGUE, with its row count, not
- * recalled: the antiepileptic block exists because the catalogue carries both
- * `LEVETIRACETAM-INJECTION-100MG-LEVIPIL 5ML INJ` and a bare `BREVIPIL 10MG INJ`, so brand and
- * generic each have to reach the other.
- *
- * Expansion is BIDIRECTIONAL and additive: a matcher naming the generic finds the brand, a matcher
- * naming the brand finds the generic, and nothing that matched before stops matching.
- */
-export const CATALOGUE_SYNONYMS: readonly (readonly string[])[] = [
-  // vascular access — the failing case, all counts from kx_billing_records
-  ['iv line', 'iv access', 'intravenous access', 'peripheral line', 'peripheral cannula',
-   'venous access', 'vasofix', 'cannula', 'cannulae', 'venflon', 'iv set', 'infusion set',
-   'scalp vein', 'iv cannulazation', 'iv cannulation'],
-  // antiepileptics — brand and generic both appear as bare strings in the catalogue
-  ['brivaracetam', 'brevipil', 'brivasure'],
-  ['levetiracetam', 'levipil'],
-  ['valproate', 'sodium valproate', 'divalproex', 'encorate'],
-  ['lacosamide', 'lacosam'],
-  ['phenytoin', 'eptoin'],
-  // imaging modalities — names live in `service_item_name` under service_type 'Radiology'
-  ['x-ray', 'xray', 'x ray', 'radiograph', 'chest film'],
-  ['ultrasound', 'usg', 'sonography', 'ultrasonography'],
-  ['ct', 'cect', 'computed tomography', 'ct scan'],
-  ['mri', 'magnetic resonance', 'mr imaging'],
-  ['doppler', 'colour doppler', 'color doppler'],
-  ['venogram', 'venography', 'mr venogram'],
-  // neurophysiology — `EEG - Bedside` (27), `EEG` (3), `EEG - Routine` (1), all service_type Procedure
-  ['eeg', 'electroencephalogram', 'electroencephalography'],
-  ['ecg', 'ekg', 'electrocardiogram'],
-  // common ward procedures whose billing string differs from the clinical phrase
-  ['urinary catheter', 'foley', 'catheterisation', 'catheterization', 'foleys'],
-  ['ryles tube', 'nasogastric', 'ng tube', 'rt insertion'],
-  ['central line', 'cvc', 'central venous catheter', 'triple lumen'],
-  ['blood transfusion', 'prbc', 'packed cell', 'packed red'],
-  ['dialysis', 'haemodialysis', 'hemodialysis', 'hd', 'sledd'],
-];
-
-const SYNONYM_INDEX: Map<string, string[]> = (() => {
-  const m = new Map<string, string[]>();
-  for (const group of CATALOGUE_SYNONYMS) {
-    for (const term of group) {
-      const key = term.toLowerCase();
-      m.set(key, [...(m.get(key) ?? []), ...group.map((g) => g.toLowerCase()).filter((g) => g !== key)]);
-    }
-  }
-  return m;
-})();
-
-/** A matcher's terms, plus every catalogue synonym of each. Deduplicated, order-stable. */
-export function expandTermsWithCatalogue(terms: readonly string[]): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  const add = (t: string) => { const k = t.toLowerCase().trim(); if (k && !seen.has(k)) { seen.add(k); out.push(k); } };
-  for (const t of terms) {
-    add(t);
-    for (const syn of SYNONYM_INDEX.get(t.toLowerCase().trim()) ?? []) add(syn);
-  }
-  return out;
-}
-
-/**
- * The catalogue concepts a piece of item text mentions — the canonical (first) term of every
- * synonym group it hits. Used by the day-0 query builder (item 6) to turn a pharmacy line into a
- * clinical word: `BREVIPIL 10MG INJ` becomes `brivaracetam`, and a surgical stapler becomes
- * nothing at all, which is what keeps round 7 item 7's lesson intact.
- */
-export function catalogueConceptsIn(text: string): string[] {
-  const hay = String(text ?? '').toLowerCase();
-  const out: string[] = [];
-  for (const group of CATALOGUE_SYNONYMS) {
-    if (group.some((t) => termMatches(t, hay))) {
-      const canonical = group[0];
-      if (!out.includes(canonical)) out.push(canonical);
-    }
-  }
-  return out;
-}
-
-/**
- * ROUND 21 ITEM 3 — NEVER SCORE DIVERGENT OFF A PREMISE THIS PIPELINE CANNOT OBSERVE.
- *
- * `results_available` is false on EVERY lab order in this database and there is no vitals class at
- * all, so an expectation whose action is CONDITIONAL on a value — "correct the abnormality if low",
- * "titrate to a target", "repeat if deranged" — has an antecedent nothing here can evaluate. Scoring
- * its absence as a major omission asserts that a correction was needed, which is precisely the fact
- * the substrate withholds.
- *
- * This is the same argument as the escalation gate (round 17/18); it applies wherever the premise
- * is a number nobody recorded, not only in the escalation section.
- */
-const VALUE_CONDITIONAL = /\b(if (it is |the |they are |there is |values? |levels? )?(low|high|abnormal|elevated|raised|deranged|reduced|persistent|worsening|positive|negative|below|above|<|>)|if (hypo|hyper)[a-z]+|as (clinically )?indicated by|based on (the )?(result|value|level)|titrat\w+ to|target (of )?[<>]?\s*\d|maintain\w* (\w+ )*(above|below|between)|correct(ion)? (of )?\w* ?if|(replace|supplement)\w* if|when (values?|levels?) )/i;
-
-/**
- * ROUND 23 ITEM 7 — PAPER ARTEFACTS THIS ENGINE CANNOT SEE AT ALL.
- *
- * Informed consent, preoperative anaesthetic clearance, a signed checklist: real and important, and
- * outside every data class this pipeline reads. There is no table in which their presence or
- * absence is recorded, so calling one missing is not a finding, it is a guess about paperwork.
- *
- * ⚠️ AND A CONDITIONAL WHOSE ANTECEDENT WAS NEVER ESTABLISHED. IPNO-495 was penalised for the
- * absence of a treponemal confirmatory test with no evidence anywhere that the VDRL was ever
- * positive. "Confirm X if the screen is positive" is unscoreable when nothing says the screen was
- * positive — and results_available is false on every lab row, so nothing ever can.
- */
-const PAPER_ARTEFACT = /\b(informed consent|consent form|written consent|pre[- ]?operative clearance|preop clearance|anaesthe(tic|sia) clearance|fitness (for|certificate)|surgical safety checklist|sign[- ]?off|counsell?ing documented)\b/i;
-
-const UNESTABLISHED_ANTECEDENT = /\b(confirmator\w+|confirm\w* (test|assay)|if (the )?(screen|test|result)\w* (is |was )?(positive|reactive|abnormal)|follow[- ]?up (test|assay) if)\b/i;
-
-export function premiseIsUnobservable(item: string): boolean {
-  const t = String(item ?? '');
-  return VALUE_CONDITIONAL.test(t) || PAPER_ARTEFACT.test(t) || UNESTABLISHED_ANTECEDENT.test(t);
-}
-
-/**
- * ROUND 21 ITEM 4 — IMAGING IS AUDITABLE NOW.
- *
- * `classIsRepresented('imaging')` returned false unconditionally, so nine imaging expectations on
- * IPNO-486 resolved `absent_class_missing` on an episode carrying four MRIs, a brain venogram, a
- * whole-spine survey and a chest X-ray on day 0. It protected the score by accident and made the
- * whole class unauditable.
- *
- * Radiology IS in this mirror, in the billing table: `service_type = 'Radiology'` (3,180 rows,
- * `department = 'Diagnostic- Radiology'` 3,191). ⚠️ Its `ordered_item_name` is EMPTY — the modality
- * lives in `service_item_name` ("X-Ray Chest Pa", "CT BRAIN PLAIN", "MRI Brain Plain With
- * Contrast", "Ultrasound Abdomen & Pelvis"), which `haystackFor` already reads.
- *
- * Matching an imaging expectation therefore looks at RADIOLOGY ORDERS ONLY, never at every order —
- * otherwise "chest x-ray" could be satisfied by a pharmacy line mentioning a chest drain.
- */
-const RADIOLOGY_SERVICE = /radiolog|imaging/i;
-
-export function isRadiologyOrder(e: EpisodeEvent): boolean {
-  if (e.event_type !== 'order') return false;
-  return RADIOLOGY_SERVICE.test(`${detail(e, 'service_type')} ${detail(e, 'department')}`);
 }
 
 // ── matching ────────────────────────────────────────────────────────────────────────────────
@@ -430,13 +278,9 @@ export function haystackFor(e: EpisodeEvent): string {
  *  satisfied by the word appearing in a progress note. */
 export function eventTypesFor(kind: MatcherKind): readonly EpisodeEvent['event_type'][] {
   switch (kind) {
-    // ITEM 4: GRBS was ordered on nine days of IPNO-495 as Procedure and Pathology BILLING lines
-    // while "grbs" sat in the matcher terms, and glucose monitoring was called absent three times.
-    // A lab is ordered before it is resulted, and in this mirror the order is often a billing row.
-    case 'lab': return ['lab_order', 'order'];
+    case 'lab': return ['lab_order'];
     case 'drug': return ['order'];
     case 'procedure': return ['ot_note', 'order'];
-    case 'imaging': return ['order'];
     case 'note': return ['note', 'initial_assessment', 'handover'];
     default: return [];
   }
@@ -643,91 +487,16 @@ export function subjectWords(text: string): string[] {
 
 const norm = (s: string) => s.toLowerCase();
 
-/**
- * ROUND 23 ITEM 3 — TOKEN-SET MATCHING, BECAUSE A SUBSTRING TEST IS NOT A CLINICAL ONE.
- *
- * `h.includes(t)` required the haystack to contain the term's exact words in the term's exact
- * order. Real catalogue strings do not oblige: "chest x-ray" never matched `X-RAY CHEST PA VIEW`,
- * and "ct angiogram" never matched `CT Peripheral angiogram`, because the words are the same and
- * the order is not.
- *
- * A multi-word term now matches when EVERY one of its tokens appears somewhere in the haystack,
- * each on a word boundary and each after synonym folding. Order is irrelevant; extra words in the
- * haystack are irrelevant; a missing token still fails, so "chest x-ray" does not match a plain
- * "x-ray knee".
- *
- * Single-word terms keep the strict whole-word rule they had — that half was never the problem —
- * and the 3-character floor stays, because "iv" would match everything.
- */
-const TOKEN_SYNONYMS: Record<string, string> = (() => {
-  const groups: readonly (readonly string[])[] = [
-    ['angiogram', 'angiography', 'angio', 'cta', 'angiographic'],
-    ['doppler', 'duplex'],
-    ['ultrasound', 'usg', 'sonography', 'ultrasonography', 'sonogram'],
-    ['xray', 'x-ray', 'radiograph', 'radiography'],
-    ['ct', 'cect', 'tomography'],
-    ['mri', 'mr'],
-    ['echo', 'echocardiogram', 'echocardiography'],
-    ['ecg', 'ekg', 'electrocardiogram'],
-    ['eeg', 'electroencephalogram', 'electroencephalography'],
-    ['culture', 'c/s', 'sensitivity'],
-    ['glucose', 'grbs', 'rbs', 'sugar', 'glycaemia', 'glycemia'],
-    ['creatinine', 'creat'],
-    ['haemoglobin', 'hemoglobin', 'hb'],
-    ['electrolytes', 'electrolyte'],
-    ['abdomen', 'abdominal'],
-    ['chest', 'thorax', 'thoracic'],
-    ['brain', 'head', 'cranial'],
-    ['spine', 'spinal', 'vertebral'],
-    ['renal', 'kidney'],
-  ];
-  const m: Record<string, string> = {};
-  for (const g of groups) for (const t of g) m[t] = g[0];
-  return m;
-})();
-
-/**
- * ⚠️ LIGHT STEMMING, ADDED AFTER MEASURING. Token-set matching lost "dj stent" against
- * `Cystoscopy Urs With Dj Stenting Unilateral` — the words are the same and the inflection is not.
- * Only `-ing`, `-es` and `-s` are folded, and only when at least four characters remain, so
- * "stenting" reaches "stent" while short clinical tokens are left alone.
- *
- * Both the term and the haystack are folded, so the rule is symmetric and neither side has to
- * guess which form the other used.
- */
-const stem = (w: string): string => {
-  if (w.length > 6 && w.endsWith('ing')) return w.slice(0, -3);
-  if (w.length > 5 && w.endsWith('es')) return w.slice(0, -2);
-  if (w.length > 4 && w.endsWith('s') && !w.endsWith('ss')) return w.slice(0, -1);
-  return w;
-};
-
-const tokensOf = (text: string): Set<string> => {
-  const out = new Set<string>();
-  for (const raw of norm(text).split(/[^a-z0-9]+/)) {
-    if (!raw) continue;
-    const folded = TOKEN_SYNONYMS[raw] ?? TOKEN_SYNONYMS[stem(raw)] ?? stem(raw);
-    out.add(folded);
-  }
-  return out;
-};
-
+/** A term matches when it appears in the haystack, whole-word where the term is a single word.
+ *  Terms shorter than 3 characters are ignored — "iv" would match everything. */
 export function termMatches(term: string, haystack: string): boolean {
   const t = norm(term).trim();
   if (t.length < 3) return false;
   const h = norm(haystack);
   if (!/\s/.test(t)) {
-    const folded = TOKEN_SYNONYMS[t];
-    const hay = tokensOf(h);
-    if (folded && hay.has(folded)) return true;
     return new RegExp(`(^|[^a-z0-9])${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`).test(h);
   }
-  // multi-word: every token must be present, in any order
-  const want = tokensOf(t);
-  if (!want.size) return false;
-  const have = tokensOf(h);
-  for (const w of want) if (!have.has(w)) return false;
-  return true;
+  return h.includes(t);
 }
 
 export interface MatchHit { event: EpisodeEvent; term: string }
@@ -755,15 +524,12 @@ export function findMatch(
 ): MatchHit | null {
   const types = eventTypesFor(matcher.kind);
   if (!types.length) return null;
-  // ITEM 2: the model's term list is a guess at what the catalogue calls a thing. Expand it.
-  const terms = expandTermsWithCatalogue(matcher.terms);
   for (const e of events) {
     if (!types.includes(e.event_type)) continue;
-    // ITEM 4: an imaging expectation is answered by RADIOLOGY orders, never by any order at all.
-    if (matcher.kind === 'imaging' && !isRadiologyOrder(e)) continue;
+    // THE FILTER THE OLD COMMENT ONLY DESCRIBED.
     if (fromDay != null && e.day_index < fromDay) continue;
     const hay = haystackFor(e);
-    for (const term of terms) {
+    for (const term of matcher.terms) {
       if (termMatches(term, hay)) return { event: e, term };
     }
   }
@@ -784,8 +550,6 @@ export interface ResolvableEntry {
   citationIds: number[];
   matcher: ExpectationMatcher | null;
   proposedSeverity: 'minor' | 'moderate' | 'major';
-  /** DECISION 42: 'once' resolves across the whole episode, 'repeat' from this entry's day. */
-  recurrence?: 'once' | 'repeat';
 }
 
 export interface ResolvedOutcome {
@@ -806,40 +570,7 @@ export interface ResolvedOutcome {
  * count as satisfying it, so code cannot check it and will not guess. That is a defect in the
  * generation, and it is recorded as one rather than scored as an omission.
  */
-export function resolveEntry(
-  entry: ResolvableEntry, events: readonly EpisodeEvent[], terminalDay: number | null = null,
-): ResolvedOutcome {
-  // ⚠️ ROUND 20 ITEM 1 / DECISION 41 — THE TERMINAL DAY IS UNASSESSABLE.
-  //
-  // Round 14 scoped class presence to the expectation's own window, which correctly turned the days
-  // AFTER a death into `unassessable`. It missed the day OF the death, because the class is still
-  // represented in that window: the patient was alive for part of it, notes and orders exist, so a
-  // day-5 expectation on a patient who died on day 5 resolved `absent_class_present` — divergent.
-  //
-  // IPNO-573 is the measured case: three MAJOR findings on day 5, the day the patient died,
-  // including "hourly neurological assessment (GCS, pupil reactivity, motor response)". Twenty-four
-  // of its sixty-eight penalty points came from care a dead patient did not receive. IPNO-560,
-  // recorded `Admitted Dead`, carried six majors of the same kind — empiric antibiotics, IV fluids,
-  // glycaemic control — and banded `moderate` because of them.
-  //
-  // An expectation formed ON the day of death cannot be judged: nothing in this pipeline knows what
-  // hour the patient died, so "it was not done" and "there was no longer a patient to do it to" are
-  // indistinguishable. That is what `unassessable` means, and `absent_class_missing` is the
-  // resolution that carries it — the same one §4.2a exempts from the postcondition.
-  //
-  // `terminalDay` is null on every episode whose discharge_type this engine does not recognise as
-  // death, so an unknown value audits normally (see `dischargeIndicatesDeath`).
-  if (terminalDay != null && entry.dayIndex >= terminalDay) {
-    return {
-      resolution: 'absent_class_missing',
-      verdict: 'unassessable',
-      severity: entry.proposedSeverity,
-      statement: `Expected: ${entry.item}. This expectation was formed on or after the day the patient died (day ${terminalDay}), so this engine cannot judge it: nothing here records the hour of death, and "not done" cannot be told apart from "there was no longer a patient to do it to".`,
-      matchedEvent: null, matchedTerm: null,
-      confound: `the expectation's window opens on or after the day of death (day ${terminalDay})`,
-    };
-  }
-
+export function resolveEntry(entry: ResolvableEntry, events: readonly EpisodeEvent[]): ResolvedOutcome {
   // ⚠️ ROUND 17 ITEM 1 — AN ESCALATION TRIGGER IS A CONDITIONAL, AND CODE CANNOT EVALUATE ITS
   // ANTECEDENT. THIS GATE WAS PROMPT-ONLY UNTIL NOW.
   //
@@ -872,24 +603,6 @@ export function resolveEntry(
     };
   }
 
-  // ⚠️ ROUND 21 ITEM 3 — AN EXPECTATION CONDITIONAL ON A VALUE NOBODY RECORDED.
-  //
-  // `results_available` is false on every lab order in this database and there is no vitals class,
-  // so "correct the abnormality if low" has an antecedent this pipeline cannot evaluate. Calling
-  // its absence a major omission asserts that a correction was needed — the exact fact the
-  // substrate withholds. Same argument as the escalation gate, applied wherever the premise is a
-  // number nobody wrote down.
-  if (premiseIsUnobservable(entry.item)) {
-    return {
-      resolution: 'absent_class_missing',
-      verdict: 'unassessable',
-      severity: entry.proposedSeverity,
-      statement: `Expected: ${entry.item}. This engine cannot judge it: the action is conditional on a value — a lab result or a vital sign — and this pipeline carries neither (every lab order here has results_available = false, and there is no vitals class at all). Whether the condition was met is unknown, so whether the action was owed is unknown.`,
-      matchedEvent: null, matchedTerm: null,
-      confound: 'the expectation is conditional on a lab value or vital sign, which this mirror does not carry',
-    };
-  }
-
   const m = entry.matcher;
   if (!m || !m.terms.length) {
     return {
@@ -902,26 +615,9 @@ export function resolveEntry(
     };
   }
 
-  // ⚠️ DECISION 42 — THE WINDOW IS THE EXPECTATION'S OWN DECLARATION, NOT THE RESOLVER'S GUESS.
-  //
-  // Round 14 item 3 floored every search at the entry's own day, so "repeat CBC on day 2" could not
-  // be answered by the day-0 order — right, and it broke the EEG. Round 21 item 1 removed the floor
-  // so "EEG if not yet completed" found the day-0 EEG — right, and it re-opened the CBC. Two rounds
-  // arguing over one window because the resolver was guessing at something only the expectation
-  // knows: is an EARLIER occurrence enough, or is a NEW one required?
-  //
-  // The checkpoint now says, while still blinded. `once` searches the whole episode to date;
-  // `repeat` searches from its own day. An absent or unrecognised value defaults to `repeat`, the
-  // conservative direction — a wrong finding is visible and arguable, a silently satisfied
-  // expectation is neither.
-  const fromDay = (entry.recurrence ?? 'repeat') === 'once' ? null : entry.dayIndex;
-
-  // ⚠️ CLASS PRESENCE STAYS DAY-SCOPED (round 14 item 2), and the two are NOT the same question.
-  // MATCHING asks "did this ever happen in this admission" — the whole episode is the right search.
-  // CLASS PRESENCE asks "could this even have been observed in the window the expectation was
-  // about" — and there the day still matters: four day-3 findings once fired on a day with zero
-  // notes because notes existed on days 0-2. Widening this one too would put those back.
-  const classFromDay = entry.dayIndex;
+  // ITEM 3. The window opens on the day the expectation was FORMED. An event the checkpoint had
+  // already seen cannot be what satisfies what it went on to expect.
+  const fromDay = entry.dayIndex;
 
   const hit = findMatch(m, fromDay, events);
   if (hit) {
@@ -951,18 +647,18 @@ export function resolveEntry(
 
   // ITEM 2. Day-scoped, not admission-scoped: was this class recorded AT ALL in the window the
   // expectation could have been met in?
-  if (!classIsRepresented(m.kind, events, classFromDay)) {
+  if (!classIsRepresented(m.kind, events, fromDay)) {
     return {
       resolution: 'absent_class_missing',
       verdict: 'unassessable',
       severity: entry.proposedSeverity,
       statement: m.kind === 'vitals' || m.kind === 'imaging'
         ? `Expected: ${entry.item}. This pipeline cannot answer whether it happened: ${m.kind} data is absent from the mirror entirely.`
-        : `Expected: ${entry.item}. This pipeline cannot answer whether it happened: no ${m.kind} record of any kind exists from day ${classFromDay} onward, so "not done" and "not recorded that day" cannot be told apart.`,
+        : `Expected: ${entry.item}. This pipeline cannot answer whether it happened: no ${m.kind} record of any kind exists from day ${fromDay} onward, so "not done" and "not recorded that day" cannot be told apart.`,
       matchedEvent: null, matchedTerm: null,
       confound: m.kind === 'vitals' || m.kind === 'imaging'
         ? `no ${m.kind} data in this mirror`
-        : `no ${m.kind} data recorded from day ${classFromDay} onward`,
+        : `no ${m.kind} data recorded from day ${fromDay} onward`,
     };
   }
 
@@ -978,33 +674,20 @@ export function resolveEntry(
     };
   }
 
-  // ⚠️ DECISION 44 (V, 2026-09-04) — THE ENGINE MAY NOT ASSERT A NEGATIVE IT HAS NOT VERIFIED.
-  //
-  // On IPNO-495, 22 of 29 divergent findings had an EMPTY evidence_basis and a null matched_term,
-  // and between them they carried 141 of the episode's 167 penalty points — 84% of the score
-  // resting on assertions the engine had not checked, most of them contradicted by the episode's
-  // own event list. The statement said "no matching record exists anywhere in this admission",
-  // which is a claim about the record; what the resolver actually knows is narrower and duller:
-  // its matcher did not fire.
-  //
-  // So an unmatched expectation with nothing to point at is `context_dependent`, and it says what
-  // it did rather than what it concluded. The finding survives — a reader can still act on it —
-  // but it no longer carries a divergent verdict's weight or its certainty.
   return {
     resolution: 'absent_class_present',
-    verdict: 'context_dependent',
+    verdict: 'divergent',
     severity: entry.proposedSeverity,
-    statement: `Expected: ${entry.item}. Not detected by matcher: no ${m.kind} record matched the terms this expectation was given, though ${m.kind} data IS recorded from day ${classFromDay} onward. The matcher may be wrong about what the record calls this, so the absence is not asserted.`,
-    matchedEvent: null, matchedTerm: null, confound: 'unmatched by the expectation’s own terms; the absence is not verified',
+    statement: `Expected: ${entry.item}. No matching ${m.kind} record exists from day ${fromDay} onward, and ${m.kind} data IS recorded in that window — so the absence is real.`,
+    matchedEvent: null, matchedTerm: null, confound: null,
   };
 }
 
 /** Resolve every entry. Order is stable (the order the entries were generated in). */
 export function resolveAll(
   entries: readonly ResolvableEntry[], events: readonly EpisodeEvent[],
-  terminalDay: number | null = null,
 ): { entry: ResolvableEntry; outcome: ResolvedOutcome }[] {
-  return entries.map((entry) => ({ entry, outcome: resolveEntry(entry, events, terminalDay) }));
+  return entries.map((entry) => ({ entry, outcome: resolveEntry(entry, events) }));
 }
 
 /** Counts by resolution, for the audit row and for the report. */

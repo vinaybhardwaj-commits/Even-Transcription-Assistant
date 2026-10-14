@@ -77,17 +77,6 @@ export const MODULE_MANIFESTS: ModuleManifest[] = [
     versionConst: 'COGNITION_SCHEMA_VERSION',
   },
   {
-    id: 'review',
-    title: 'Walking a case forward, one day at a time',
-    blurb: 'Lets a reviewer read one patient’s record the way it arrived — a day at a time, with no way to peek ahead — and write down what they thought at each point. Nobody is scored.',
-    plane: 'spine',
-    paths: ['lib/review/**'],
-    lifecycle: 'implemented', // WM6 B4 — admin-only measurement surface, no doctor-facing reader, no live validation yet
-    // Declared with the rest of the cognition vocabulary in lib/cognition/schema.ts, beside
-    // REACTION_SCHEMA_VERSION — one place names the programme's versions.
-    versionConst: 'REVIEW_SCHEMA_VERSION',
-  },
-  {
     id: 'opd-note-score-core',
     title: 'The scoring engine',
     blurb: 'Turns the quality findings on a note into the 0–100 grade. This is the one and only place the score is worked out.',
@@ -272,16 +261,6 @@ export const UNREGISTERED: string[] = [
                             // file beyond what the coverage rule forces: a new lib/ directory is a
                             // subsystem by construction, so architecture:check fails without a
                             // line here. Registering it properly is a one-entry follow-up.
-  'lab-v2',                 // the Lab MCP v2 research/production platform (LAB-MCP-V2-PRD-v1.0
-                            // §14.1): datasets, experiments, runs, items, leases, budgets and
-                            // the engine adapters. Listed here rather than given a ModuleManifest
-                            // for the same reason 'ipd-episode' above is: a new lib/ directory is
-                            // a subsystem by construction, so architecture:check fails without a
-                            // line here, and that PRD's file contract (§14) does not authorise
-                            // editing this file beyond what the coverage rule forces.
-                            // Registering it properly is a one-entry follow-up.
-  'mcp-v2',                 // the v2 MCP endpoint surface: scope-filtered SDK server, the four-key
-                            // auth, and the Zod-3→Standard-Schema bridge. Same reason as 'lab-v2'.
   'mcp-server',             // MCP protocol surface
   'ml-label-trial',         // ML Phase 1 retrospective validation (ml-label-trial/1.0 — measures only, writes lab_analyses)
   'opd-audit',              // OPD read-side db13 joins (investigations-ordered lookup, Phase C §7.1)
@@ -325,10 +304,6 @@ export const UNREGISTERED: string[] = [
                             // discharge / OT / PAC / progress document, with not_auditable rows recording
                             // an ABSENCE as a fact. Reads db13 through the readmission fetchers; writes
                             // clinical_states and nothing else
-  'triage',                 // CAT Managed Care Audit Triage shadow door (queue-read + shadow proposals).
-                            // Listed here rather than given a ModuleManifest because the ship file
-                            // contract does not authorise editing this file beyond what the coverage
-                            // rule forces: a new lib/ directory is a subsystem by construction.
   'readmission',            // readmission analysis agent Phase 1 (readmission/0.1 — detect + reconcile + Vertex worker)
   'readmission-reconcile-core', // pure Stage-2 reconciliation + R1 advisory judgements (readmit-judgement/1) —
                             // surfaced as its own versioned subsystem the day JUDGEMENT_RULE_VERSION was exported

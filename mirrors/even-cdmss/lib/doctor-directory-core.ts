@@ -42,18 +42,11 @@ export interface RosterInput {
   email?: string | null; mobile?: string | null;
   specialty?: string | null; channel?: string | null;
   audit_active: boolean; operational_active: boolean;
-  /** db13 doctors.disabled. Absent means enabled. */
-  disabled?: boolean;
 }
 export interface RosterRow {
   doctor_uid: string; name: string; name_normalized: string;
   specialty: string | null; channel: string | null; mobile_last4: string | null;
   has_email: boolean; audit_active: boolean; operational_active: boolean;
-  /** Other doctors.uid values collapsed into this row because they share its mobile. A finding keyed
-   *  on any of them belongs to this person. Empty when nothing was collapsed. */
-  alias_uids: string[];
-  /** True when the canonical doctors.uid is disabled in db13. The consumer decides what that means. */
-  disabled: boolean;
 }
 
 /**
@@ -84,24 +77,17 @@ export function buildRoster(inputs: RosterInput[]): RosterRow[] {
       has_email: !!canonical.email,
       audit_active: cluster.some((c) => c.audit_active),
       operational_active: cluster.some((c) => c.operational_active),
-      alias_uids: cluster.map((c) => c.doctor_uid).filter((uid) => uid !== canonical.doctor_uid).sort(),
-      disabled: canonical.disabled === true,
     });
   };
   const activeScore = (r: RosterInput) => Number(r.audit_active) + Number(r.operational_active);
   for (const cluster of byMobile.values()) {
-    // An enabled uid is canonical over a disabled twin; then the active one; then lexicographic.
-    const canonical = [...cluster].sort((a, b) =>
-      (Number(a.disabled === true) - Number(b.disabled === true)) ||
-      (activeScore(b) - activeScore(a)) ||
-      (a.doctor_uid < b.doctor_uid ? -1 : 1))[0];
+    const canonical = [...cluster].sort((a, b) => (activeScore(b) - activeScore(a)) || (a.doctor_uid < b.doctor_uid ? -1 : 1))[0];
     emit(canonical, cluster);
   }
   for (const r of noMobile) emit(r, [r]);
 
-  // stable order: enabled first, then active, then name
+  // stable order: active first, then name
   out.sort((a, b) =>
-    (Number(a.disabled) - Number(b.disabled)) ||
     (Number(b.audit_active || b.operational_active) - Number(a.audit_active || a.operational_active)) ||
     a.name_normalized.localeCompare(b.name_normalized));
   return out;

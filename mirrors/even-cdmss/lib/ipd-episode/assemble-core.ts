@@ -70,38 +70,6 @@ export const TIER_B_TABLES = [
   'kx_ip_transfers',
 ] as const;
 
-/**
- * ROUND 20 ITEM 1 / DECISION 41 — WHICH `discharge_type` VALUES MEAN THE PATIENT DIED.
- *
- * ⚠️ DERIVED FROM THE DATA, NOT RECALLED. Queried on 2026-09-04 against db13
- * `kx_discharge_summary_records`, all 2,496 rows, 14 distinct values:
- *
- *     Normal Discharge 2236 · None 155 · LAMA 33 · DAMA 28 · Discharge On Request 18 ·
- *     Expired 8 · Admitted Dead 3 · Refer External Hospital 3 · (empty) 3 · Mortuary 3 ·
- *     Referral 2 · mortuary 2 · Early Neonatal 1 · Absconded 1
- *
- * THREE MEAN DEATH: `Expired`, `Admitted Dead`, `Mortuary` — 16 records between them. The match is
- * CASE-INSENSITIVE because the mirror carries both `Mortuary` (3) and `mortuary` (2); a
- * case-sensitive list would have exempted three episodes and audited two of the same kind normally.
- *
- * ⚠️ `Early Neonatal` IS DELIBERATELY NOT MATCHED. It may well be a neonatal death category, but it
- * may equally be a discharge category, and one row cannot settle it. An unrecognised value AUDITS
- * NORMALLY — which is the direction this must fail in. Exempting an episode from the terminal-day
- * rule on a guess would silently stop auditing a real admission; auditing a death as if it were a
- * discharge produces findings a human will notice and can correct. The loud failure is the safer
- * one, and it is the one a wrong guess here produces.
- *
- * EXACT match on the trimmed, lower-cased value, never a substring: `Refer External Hospital`
- * contains no death word today, but a substring rule is a standing invitation for one to appear.
- */
-export const DEATH_DISCHARGE_TYPES: readonly string[] = ['expired', 'admitted dead', 'mortuary'];
-
-export function dischargeIndicatesDeath(dischargeType: string | null | undefined): boolean {
-  const t = String(dischargeType ?? '').trim().toLowerCase();
-  if (!t) return false;
-  return DEATH_DISCHARGE_TYPES.includes(t);
-}
-
 export function tierForTable(table: string | null | undefined): EvidenceTier {
   const t = String(table ?? '');
   if ((TIER_A_TABLES as readonly string[]).includes(t)) return 'A';
@@ -242,216 +210,28 @@ export function fidelityPassEvents(events: EpisodeEvent[]): EpisodeEvent[] {
 
 // ── checkpoint budget (decision 24) ──────────────────────────────────────────────────────────
 
-export const EPISODE_CHECKPOINT_ID = 'cp-episode';
-export const MAX_DAILY_CHECKPOINT_DAY = 6;
-/** DECISION 43: the hard ceiling on checkpoints per episode, anchors and episode-level together. */
-export const MAX_CHECKPOINTS = 8;
-
-/** What a checkpoint is anchored to. Recorded on the row so a reader knows why it exists. */
-/**
- * DECISION 52 (V, 2026-09-05) — AFTER A PROCEDURE, EVERY DAY IS CHECKPOINTED UNTIL DISCHARGE.
- * `procedure_plus_2` and `procedure_plus_4` are RETIRED: sampling day 2 and day 4 was an arbitrary
- * grid laid over a post-operative course, and it left the days between them unexamined. The run is
- * `procedure_day_1`, `procedure_day_2`, … one per day, and it stops at the pre-discharge day.
- *
- * The list is finite because the plan is: at most MAX_CHECKPOINTS − 1 daily checkpoints exist, and
- * `first_24h` and `pre_discharge` take two of them, so a post-procedure run can never be longer
- * than five days before the cap bites.
- */
-export const ANCHOR_KINDS = ['first_24h', 'procedure',
-  'procedure_day_1', 'procedure_day_2', 'procedure_day_3', 'procedure_day_4', 'procedure_day_5',
-  'pre_discharge', 'episode'] as const;
-export type AnchorKind = (typeof ANCHOR_KINDS)[number];
-
-/** How many days a post-procedure run can cover before the cap must bite. */
-export const MAX_PROCEDURE_RUN_DAYS = 5;
-
-/** Is this anchor part of the procedure family — the procedure day or its daily run? */
-export function isProcedureAnchor(k: AnchorKind): boolean {
-  return k === 'procedure' || k.startsWith('procedure_day_');
-}
-
-/** Hours after admission at which the first-24h checkpoint cuts off. */
-/** Which anchors survive a same-day collision and a full budget. The first window and the
- *  pre-discharge window rank above procedure follow-ups: they are the two moments an audit most
- *  wants a view of, and IPNO-495 lost pre_discharge to a follow-up before this existed. */
-export const ANCHOR_PRIORITY: Record<AnchorKind, number> = {
-  first_24h: 0, pre_discharge: 1, procedure: 2,
-  procedure_day_1: 3, procedure_day_2: 4, procedure_day_3: 5, procedure_day_4: 6, procedure_day_5: 7,
-  episode: 8,
-};
-
-export const FIRST_WINDOW_HOURS = 24;
-/** Hours before discharge at which the pre-discharge checkpoint cuts off. */
-export const PRE_DISCHARGE_HOURS = 24;
-
-const HOUR_MS = 3_600_000;
-const shiftIso = (iso: string, ms: number): string => new Date(Date.parse(iso) + ms).toISOString();
-
-/**
- * DECISION 46 (V, 2026-09-05) — A PROCEDURE ANCHOR COMES ONLY FROM AN OT NOTE OR A `Surgery` ORDER.
- *
- * ⚠️ WHAT THE LOOSE TEST COST, MEASURED ON THE TWELVE. The first version matched
- * `/procedure|surgery|ot charge/` against `service_type`, and `Procedure` is the billing category
- * this mirror puts GRBS, nebulisation, IV cannulation, dressings, crossmatch and dialysis in.
- * SIXTEEN OF THE TWENTY procedure anchors on the cohort were set by lines like those — six by GRBS
- * alone. A finger-prick glucose is not a moment an admission turns on.
- *
- * It also silently truncated the plan. Anchors are capped at MAX_CHECKPOINTS, so the spurious
- * procedure days consumed the budget and NO `procedure_plus_4` CHECKPOINT EXISTED ANYWHERE in the
- * cohort — the follow-up window decision 43 was written to add was crowded out by nebulisations
- * before it could ever be scheduled.
- *
- * `Surgery` is matched EXACTLY (trimmed, case-insensitively), not as a substring, for the same
- * reason decision 41 matches discharge types exactly: a substring test is how `Procedure` got in.
- */
-const SURGERY_SERVICE_TYPE = 'surgery';
-
-export function isProcedureEvent(e: EpisodeEvent): boolean {
-  if (e.event_type === 'ot_note') return true;
-  if (e.event_type !== 'order') return false;
-  const d = e.detail as Record<string, unknown>;
-  return String(d?.service_type ?? '').trim().toLowerCase() === SURGERY_SERVICE_TYPE;
-}
-
-/**
- * DECISION 43 (V, 2026-09-04) — CHECKPOINTS ARE ANCHORED TO EVENTS, NOT CALENDAR DAYS.
- *
- * ⚠️ WHAT THE CALENDAR PLAN COST, AT BOTH ENDS.
- *
- *   · `cp-d0`'s cutoff was `dayStartIso(admission, 0)` — the ADMISSION INSTANT. Nothing precedes an
- *     admission, so day 0 saw the admission event and nothing else: retrieval was skipped on 10 of
- *     12 episodes and every expectation it produced was uncited. A checkpoint that cannot see the
- *     first day of an admission cannot say anything about it.
- *   · Days beyond 6 were never checkpointed at all. On IPNO-495 days 7–11 held 115 of 414 events —
- *     28% of the admission — and produced ZERO expectations; days 7, 8 and 9 generated no findings
- *     of any kind. The longest stays were the least audited.
- *
- * The anchors are the moments an admission actually turns on:
- *
- *   first_24h          admission + 24h — the first day as a WINDOW, not an instant
- *   procedure          the day of each procedure (an OT note, or a `Surgery` order — decision 46)
- *   procedure_day_N    every day after a procedure, up to the pre-discharge day (decision 52)
- *   pre_discharge      24h before discharge — the decision to send the patient home
- *   episode            unchanged: the whole admission, discharge event excluded
- *
- * Anchors falling on the same DAY collapse to one, and ANCHOR_PRIORITY decides which survives — not
- * the earlier cutoff, which is what the first version did and how IPNO-495 lost its pre-discharge
- * view of day 10 to a procedure follow-up. The total is capped at MAX_CHECKPOINTS by the same
- * priority, with the episode-level checkpoint always kept.
- *
- * ⚠️ BLINDING IS UNCHANGED IN PRINCIPLE AND RE-DERIVED PER ANCHOR: each checkpoint sees only events
- * strictly BEFORE its own cutoff, always the admission event, never the discharge event. The
- * cutoff is now a timestamp rather than a day boundary, which makes the rule easier to hold, not
- * harder: `eventsBeforeCutoff` takes the instant directly.
- */
 export interface CheckpointPlanEntry {
   /** `cp-d<N>` for a daily checkpoint, `cp-episode` for the episode-level one. */
   checkpoint_id: string;
   day_index: number;
   checkpoint_type: 'daily' | 'episode';
-  /** DECISION 43: what this checkpoint is anchored to. */
-  anchor_kind: AnchorKind;
-  /** The exact instant this checkpoint may see events before. */
-  cutoff_at: string;
 }
 
-export function checkpointPlanFromEvents(a: {
-  admittedAt: string;
-  dischargedAt: string | null;
-  losDays: number | null;
-  events: EpisodeEvent[];
-}): CheckpointPlanEntry[] {
-  const { admittedAt, dischargedAt, events } = a;
-  const los = Number.isFinite(a.losDays as number) && (a.losDays as number) > 0 ? Math.floor(a.losDays as number) : 0;
-  const candidates: { cutoff: string; kind: AnchorKind }[] = [];
+export const EPISODE_CHECKPOINT_ID = 'cp-episode';
+export const MAX_DAILY_CHECKPOINT_DAY = 6;
 
-  // 1. the first 24 hours, as a window
-  candidates.push({ cutoff: shiftIso(admittedAt, FIRST_WINDOW_HOURS * HOUR_MS), kind: 'first_24h' });
-
-  // 5. pre-discharge — built BEFORE the procedure run, because the run stops at its day.
-  const preCutoff = dischargedAt ? shiftIso(dischargedAt, -PRE_DISCHARGE_HOURS * HOUR_MS) : null;
-  if (preCutoff && preCutoff > admittedAt) candidates.push({ cutoff: preCutoff, kind: 'pre_discharge' });
-  const preDay = preCutoff ? dayIndexFor(admittedAt, preCutoff) : null;
-
-  // 2-4. DECISION 52: the procedure day, then EVERY day after it until pre-discharge.
-  const procedureDays = [...new Set(events.filter(isProcedureEvent)
-    .map((e) => e.occurred_at).filter((t): t is string => !!t))].sort();
-  for (const t of procedureDays) {
-    // the END of the procedure day, so the checkpoint sees the procedure itself
-    const procCutoff = shiftIso(dayStartIso(t, 0), 24 * HOUR_MS);
-    candidates.push({ cutoff: procCutoff, kind: 'procedure' });
-    const procDay = dayIndexFor(admittedAt, procCutoff);
-    for (let n = 1; n <= MAX_PROCEDURE_RUN_DAYS; n++) {
-      const cutoff = shiftIso(dayStartIso(t, 0), (n + 1) * 24 * HOUR_MS);
-      const day = dayIndexFor(admittedAt, cutoff);
-      if (day == null) break;
-      // the run stops AT the pre-discharge day: that day is pre_discharge's, and a post-operative
-      // run has nothing left to say about a patient already being sent home.
-      if (preDay != null && day >= preDay) break;
-      if (procDay != null && day <= procDay) continue;
-      candidates.push({ cutoff, kind: `procedure_day_${n}` as AnchorKind });
-    }
-  }
-
-  // ⚠️ DECISION 52 — ON A SAME-DAY COLLISION THE PROCEDURE FAMILY WINS THE LABEL. This inverts what
-  // round 23 did, and deliberately: a day that is both "24 hours after admission" and "the day of
-  // the operation" is, clinically, the day of the operation, and the label is what tells a reader
-  // why the checkpoint exists. The cutoff instant is unchanged either way — the earliest for the
-  // day — so the BLINDING does not move, only the name.
-  //
-  // ⚠️ ONLY THE PROCEDURE FAMILY'S PRECEDENCE CHANGES. Every other collision is decided by
-  // ANCHOR_PRIORITY exactly as before, so a day that is both the first 24 hours and the
-  // pre-discharge window is still labelled `first_24h` — decision 52 did not touch that pair, and
-  // silently reordering it would have relabelled five of the twelve episodes' day 1.
-  const dedupRank = (k: AnchorKind): number =>
-    isProcedureAnchor(k) ? -1 : ANCHOR_PRIORITY[k];
-  const lastMoment = dischargedAt ?? shiftIso(admittedAt, (los + 1) * 24 * HOUR_MS);
-  const byDay = new Map<number, { cutoff: string; kind: AnchorKind }>();
-  for (const c of candidates.sort((x, y) =>
-    (dedupRank(x.kind) - dedupRank(y.kind)) || x.cutoff.localeCompare(y.cutoff))) {
-    if (c.cutoff <= admittedAt || c.cutoff > lastMoment) continue;
-    const day = dayIndexFor(admittedAt, c.cutoff);
-    if (day == null) continue;
-    const held = byDay.get(day);
-    if (!held) { byDay.set(day, c); continue; }
-    // the label may be upgraded to the procedure family, but the CUTOFF stays the earliest seen
-    if (dedupRank(c.kind) < dedupRank(held.kind)) byDay.set(day, { cutoff: held.cutoff, kind: c.kind });
-  }
-
-  // ⚠️ THE CAP DROPS FROM THE END OF THE POST-PROCEDURE RUN, AND KEEPS pre_discharge (decision 52).
-  // ANCHOR_PRIORITY orders the tiers — first window, discharge decision, procedure day, then the
-  // run in order — so slicing at the cap removes the LATEST days of the run first. That is the
-  // right end to lose: day 5 after an operation is further from the decision that produced it than
-  // day 1, and the decision to send the patient home is never the thing dropped.
-  const daily = [...byDay.entries()]
-    .sort((x, y) => (ANCHOR_PRIORITY[x[1].kind] - ANCHOR_PRIORITY[y[1].kind]) || (x[0] - y[0]))
-    .slice(0, MAX_CHECKPOINTS - 1)
-    .sort((x, y) => x[0] - y[0])
-    .map(([day, c]) => ({
-      checkpoint_id: `cp-d${day}`, day_index: day, checkpoint_type: 'daily' as const,
-      anchor_kind: c.kind, cutoff_at: c.cutoff,
-    }));
-
-  // The episode-level checkpoint is always kept, and always last.
-  return [...daily, {
-    checkpoint_id: EPISODE_CHECKPOINT_ID,
-    day_index: daily.length ? daily[daily.length - 1].day_index : los,
-    checkpoint_type: 'episode' as const,
-    anchor_kind: 'episode' as const,
-    cutoff_at: lastMoment,
-  }];
-}
-
-/** Events strictly before an arbitrary cutoff INSTANT. The blinding rule, unchanged in principle:
- *  the admission event always, the discharge event never, untimestamped events excluded. */
-export function eventsBeforeCutoff(events: EpisodeEvent[], cutoffIso: string): EpisodeEvent[] {
-  return sortEvents(events).filter((e) => {
-    if (isDischargeEvent(e)) return false;
-    if (isAdmissionEvent(e)) return true;
-    if (!e.occurred_at) return false;
-    return e.occurred_at < cutoffIso;
-  });
+/**
+ * Daily checkpoints for day_index 0 … min(los_days, 6) INCLUSIVE, plus exactly one episode-level
+ * checkpoint. LOS 0 → 1 daily. LOS 1 → 2. LOS 6 or more → 7. A null or negative LOS still gets
+ * day 0, because an admission always has a moment at the door.
+ */
+export function checkpointPlan(losDays: number | null): CheckpointPlanEntry[] {
+  const los = Number.isFinite(losDays as number) && (losDays as number) > 0 ? Math.floor(losDays as number) : 0;
+  const last = Math.min(los, MAX_DAILY_CHECKPOINT_DAY);
+  const plan: CheckpointPlanEntry[] = [];
+  for (let d = 0; d <= last; d++) plan.push({ checkpoint_id: `cp-d${d}`, day_index: d, checkpoint_type: 'daily' });
+  plan.push({ checkpoint_id: EPISODE_CHECKPOINT_ID, day_index: last, checkpoint_type: 'episode' });
+  return plan;
 }
 
 // ── component_json ({name, valueString}) ─────────────────────────────────────────────────────
@@ -495,9 +275,6 @@ export function componentValue(entries: ComponentEntry[], name: string): string 
  */
 export const NOTE_SUMMARY_EXCLUDED_NAMES = [
   'esfewqf', 'Inver43', 'fycjtkuvyj', 'liubf', 'observationId', 'doctor_id', 'tag_data',
-  // ROUND 20: `signnur` is a 15 kB base64 PNG of a signature. It was reaching note summaries and
-  // only the 4,000-character cap was keeping it out of the prompts — by luck, not by design.
-  'signnur',
 ] as const;
 
 /**
@@ -539,28 +316,6 @@ export function isPersonFieldName(name: string): boolean {
  *
  * The opaque template ids are here because the reference measured them as where the narrative
  * actually lives (§1.2: "Clinical narrative sits in fields named T-3, T-35, and T-2").
- *
- * ⚠️ ROUND 20 ITEM 3 — THE WHITELIST WAS ALSO EMPTYING THE QUERY, and the fields below were added
- * by SAMPLING db13 rather than by guessing at names.
- *
- * Five checkpoints across three Group-1 episodes ran with zero excerpts and every entry uncited;
- * IPNO-573 formed 40 expectations on no evidence at all. Its day-0 initial assessment contributed
- * nothing, because none of that template's field names was on this list.
- *
- * WHAT THE SAMPLING FOUND (kx_clinical_template_initial_assessment_adults, 188 rows):
- *   histoyerjfj (1,070 chars) · risky (1,156) · vulnerass (1,929)   — narrative, wrapped in HTML
- *                                                                     TABLES, hence stripMarkup
- *   pamgjdk (2,042)   — pain assessment, HTML fragments
- *   loc (32)          — level of consciousness, a JSON array: ["Alert"]
- *   signnur (14,970)  — ⚠️ A BASE64 PNG SIGNATURE IMAGE. Never whitelisted, and now excluded from
- *                        note summaries too: it is 15 kB of `data:image/png;base64,...` that only
- *                        the 4,000-character summary cap was keeping out of the prompts, by luck.
- *
- * AND (kx_clinical_template_shift_handovers, 1,573 rows):
- *   nhc16 (1,100 non-empty) — the standing problem list: "K/C/O DM,HTN,CKD ON MM & MHD"
- *   nhc13 (1,306)           — consciousness: "conscious AND ORIENTED"
- *   nhc05 (8,800)           — NOT included: a care-checklist JSON table of GIVEN / N/A rows
- *   nursing_handover, nursing_receiving — ⚠️ NOT included: they hold STAFF NAMES.
  */
 export const QUERY_NARRATIVE_FIELDS: readonly string[] = [
   'T-2', 'T-3', 'T-35',
@@ -568,86 +323,23 @@ export const QUERY_NARRATIVE_FIELDS: readonly string[] = [
   'history_of_present_illness', 'hopi', 'diagnosis', 'provisional_diagnosis',
   'final_diagnosis', 'impression', 'indication', 'examination', 'findings',
   'procedure', 'procedure_details', 'plan_of_management', 'treatment_plan',
-  // initial assessment (round 20 item 3a) — sampled, then MEASURED and cut back.
-  //
-  // ⚠️ `histoyerjfj`, `risky`, `vulnerass` and `pamgjdk` were on this list for one run and are off
-  // it again. Sampling showed they hold narrative wrapped in HTML tables; stripping the tags showed
-  // what the tables actually contain, which is FORM SCAFFOLDING — "Sr. No. Categories Yes No 1 Age
-  // more than 65 years NO 2 Physically Challanged NO". On IPNO-573 that filled 641-1,200 characters
-  // of every query from day 1 on, and off-topic excerpts went from 11 to 37 across the episode.
-  // An empty query was replaced by a worse one: retrieval matching on checklist labels.
-  //
-  // `loc` stays. It is a JSON array of one clinical word (["Alert"]) — small, clean, and enough to
-  // keep the whitelist non-empty for this template so the fallback does not fire on it either.
-  // The clinical signal for the early days comes from the handover fields below instead, which is
-  // what item 3b was for.
-  'loc',
-  // shift handover (round 20 item 3b) — the problem list and the consciousness line only
-  'nhc16', 'nhc13',
 ];
-
-/**
- * ROUND 20 ITEM 3c — HOW THE TENSION IS RESOLVED: A BOUNDED FALLBACK, NOT A BROADER WHITELIST.
- *
- * The whitelist exists because three strip-based attempts failed to keep inventory noise out of
- * retrieval (round 7 item 7). Widening it to "anything that looks like prose" would walk straight
- * back into that. But a deny-by-default list has a second failure mode the first three attempts did
- * not have: when a template's fields are ALL unknown, the query is not noisy — it is EMPTY, and an
- * empty query is not a safe default. It produced 40 expectations with no evidence behind them.
- *
- * So the whitelist stays authoritative, and a fallback runs only when it yields NOTHING for a
- * component block. The fallback is deliberately more suspicious than the whitelist:
- *   · person-named fields are dropped by the same `isPersonFieldName` rule that guards summaries;
- *   · markup, JSON and data URIs are stripped;
- *   · anything still containing a `data:` URI or base64 run is dropped whole;
- *   · the result is capped hard, because a fallback should contribute a hint, not a document.
- *
- * A known template is therefore as tightly controlled as before. An unknown one contributes
- * something cleaned rather than nothing at all, and the next unknown template after this one does
- * not need a code change to be audited with evidence.
- */
-const DATA_URI_OR_BASE64 = /data:[a-z/+.-]+;base64,|[A-Za-z0-9+/]{120,}={0,2}/i;
-
-/** Strip HTML tags, entities and JSON punctuation down to readable words. */
-export function stripMarkup(text: string): string {
-  const noTags = String(text ?? '').split(/<[^>]*>/).join(' ');
-  const noEntities = noTags.split(/&[a-z]+;|&#\d+;/i).join(' ');
-  // NOT the comma: it is prose punctuation ("K/C/O DM,HTN,CKD"), and removing it made the query
-  // less readable without making it match differently — retrieval tokenises on non-alphanumerics.
-  const noJson = Array.from(noEntities, (c) => ('{}[]":\\'.includes(c) ? ' ' : c)).join('');
-  return collapseSpaces(noJson);
-}
 
 /**
  * The retrieval-safe narrative of one component block: whitelisted fields only, values only, no
  * field names, no identifiers, no person fields. Bounded and boring by construction.
  */
-export const QUERY_FALLBACK_CAP = 240;
-
 export function queryNarrativeFrom(entries: ComponentEntry[], cap = 400): string {
   const allow = new Set(QUERY_NARRATIVE_FIELDS.map((f) => f.toLowerCase()));
-  const usable = (v: string) => !!v && !/^(true|false|null|\d+(\.\d+)?)$/i.test(v);
   const parts: string[] = [];
   for (const e of entries) {
     if (!allow.has(e.name.toLowerCase())) continue;
-    const v = stripMarkup(e.valueString.trim());
-    if (!usable(v)) continue;
-    if (DATA_URI_OR_BASE64.test(v)) continue;
+    const v = e.valueString.trim();
+    // a bare boolean or number is a flag, not narrative
+    if (!v || /^(true|false|null|\d+(\.\d+)?)$/i.test(v)) continue;
     parts.push(v);
   }
-  if (parts.length) return collapseSpaces(parts.join(' ')).slice(0, cap);
-
-  // ── the bounded fallback (item 3c). Only when the whitelist matched NOTHING at all. ──
-  const fallback: string[] = [];
-  for (const e of entries) {
-    if (isPersonFieldName(e.name)) continue;
-    const raw = e.valueString.trim();
-    if (DATA_URI_OR_BASE64.test(raw)) continue;
-    const v = stripMarkup(raw);
-    if (!usable(v) || v.length < 8) continue;
-    fallback.push(v);
-  }
-  return collapseSpaces(fallback.join(' ')).slice(0, QUERY_FALLBACK_CAP);
+  return collapseSpaces(parts.join(' ')).slice(0, cap);
 }
 
 /**

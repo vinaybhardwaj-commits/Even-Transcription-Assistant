@@ -12,7 +12,7 @@ import Link from 'next/link';
 import { isAdminUnlocked, adminTokenConfigured } from '@/lib/admin-cookie';
 import { namesForIpUids } from '@/lib/ipd-audit/db13';
 import { checkpointsForAudit, dischargeEngineScores, episodeAuditById } from '@/lib/ipd-episode/store';
-import { DischargeEngineScore, DivergenceCounts, EpisodeTabs, InsufficientRecord, InternalIndex, ScoringNote, Locked, fmtDay } from '../ui';
+import { DischargeEngineScore, DivergenceChip, DivergenceCounts, EpisodeTabs, InternalIndex, Locked, fmtDay } from '../ui';
 import { CheckpointPanels, CommentaryPanel, FindingsPanel, TimelinePanel, UnassessablePanel } from './panels';
 
 export const dynamic = 'force-dynamic';
@@ -56,10 +56,7 @@ export default async function EpisodeAuditDetail({ params, searchParams }: {
       <EpisodeTabs active="episodes" />
 
       <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-slate-200 bg-white px-4 py-3">
-        {/* DECISION 50: no band here either. DECISION 51: below 30 evaluated expectations the
-            header says "insufficient record" instead of implying a comparable measurement. */}
-        <ScoringNote status={audit.scoring_status as string | null} />
-        <InsufficientRecord evaluated={audit.expectations_evaluated == null ? null : Number(audit.expectations_evaluated)} />
+        <DivergenceChip band={audit.divergence_band as string | null} uncertain={!!audit.band_uncertain} status={audit.scoring_status as string | null} />
         <DivergenceCounts
           penalty={audit.penalty_total == null ? null : Number(audit.penalty_total)}
           evaluated={audit.expectations_evaluated == null ? null : Number(audit.expectations_evaluated)}

@@ -83,11 +83,6 @@ EVERY EXPECTATION MUST BE MACHINE-CHECKABLE. Code, not a model, decides whether 
   The terms are what a matching record would be CALLED. Give the generic drug name and the common brand, the test as a lab would name it, the procedure as an operation note would name it. Two or three terms is usually right. Do not put a sentence in a term.
   Choose the kind by where the evidence would live: a drug order is "drug", a blood test is "lab", an X-ray or scan is "imaging", an operation or bedside procedure is "procedure", something documented in a note is "note", a pulse or blood pressure is "vitals". Use "other" only when none of those fit — an entry with "other" cannot be checked and will be reported as uncheckable.
 
-- recurrence: "once" or "repeat" — CAN AN EARLIER OCCURRENCE SATISFY THIS, OR IS A NEW ONE REQUIRED?
-  "once" means the thing needs to exist at all: an EEG, a CT head, a surgical consult, a VTE risk assessment. If it was already done on an earlier day of this admission, the expectation is met and nothing further is owed. Write "once" whenever you would accept "it was done on admission" as an answer — including when your own wording says "if not already done" or "if not yet completed".
-  "repeat" means a NEW occurrence is required in this window, because the point is the interval: a repeat CBC after transfusion, daily electrolytes on a patient on diuretics, a fresh blood gas after a ventilator change. An identical test done two days ago does NOT satisfy it.
-  If you are unsure, write "repeat" — a new one being asked for unnecessarily is a smaller error than an omission being silently excused.
-
 - proposed_severity: minor | moderate | major — HOW SERIOUS IT WOULD BE IF THIS DID NOT HAPPEN. Decide it NOW, while you still do not know how the admission ended. That is the point: a severity chosen here cannot be coloured by hindsight, because you do not have any.
   major: plausible serious harm, or a missed escalation. moderate: a real departure with limited consequence. minor: small or arguable.
 
@@ -98,15 +93,14 @@ Worked example of a complete therapeutic entry:
    "rationale": "Abdominal surgery in a diabetic hypertensive patient; moderate-to-high VTE risk.",
    "citation_ids": [3],
    "matcher": {"kind": "drug", "terms": ["enoxaparin", "heparin", "clexane", "dalteparin"]},
-   "recurrence": "once",
    "proposed_severity": "major"}
 
 Return ONE JSON object and nothing else:
 {
-  "expected_diagnostics": [{"item": "string", "by_day": 0, "rationale": "string", "citation_ids": [], "matcher": {"kind": "lab", "terms": []}, "recurrence": "once|repeat", "proposed_severity": "moderate"}],
-  "expected_therapeutics": [{"item": "string", "by_day": 0, "rationale": "string", "citation_ids": [], "matcher": {"kind": "drug", "terms": []}, "recurrence": "once|repeat", "proposed_severity": "moderate"}],
-  "expected_monitoring": [{"item": "string", "frequency": "string", "rationale": "string", "citation_ids": [], "matcher": {"kind": "note", "terms": []}, "recurrence": "repeat", "proposed_severity": "minor"}],
-  "escalation_triggers": [{"trigger": "string", "action": "string", "citation_ids": [], "matcher": {"kind": "other", "terms": []}, "recurrence": "repeat", "proposed_severity": "moderate"}],
+  "expected_diagnostics": [{"item": "string", "by_day": 0, "rationale": "string", "citation_ids": [], "matcher": {"kind": "lab", "terms": []}, "proposed_severity": "moderate"}],
+  "expected_therapeutics": [{"item": "string", "by_day": 0, "rationale": "string", "citation_ids": [], "matcher": {"kind": "drug", "terms": []}, "proposed_severity": "moderate"}],
+  "expected_monitoring": [{"item": "string", "frequency": "string", "rationale": "string", "citation_ids": [], "matcher": {"kind": "note", "terms": []}, "proposed_severity": "minor"}],
+  "escalation_triggers": [{"trigger": "string", "action": "string", "citation_ids": [], "matcher": {"kind": "other", "terms": []}, "proposed_severity": "moderate"}],
   "expected_los_days": 0,
   "expected_disposition": "string",
   "uncertainty": ["string"]

@@ -13,7 +13,6 @@
  */
 
 import { sql } from './db';
-import { assertOpdProductionWrite } from './opd-lab-write-guard';
 
 const run = sql as unknown as (q: string, p: unknown[]) => Promise<Record<string, unknown>[]>;
 
@@ -46,7 +45,6 @@ export function parseMemberLink(x: unknown): MemberLink | null {
 /** Persist the linkage key for a saved audit run. resolved_individual_uid deliberately NULL —
  *  resolution is the downstream identity bridge's job. Soft-fails to false. */
 export async function saveMemberLink(runId: string, link: MemberLink): Promise<boolean> {
-  assertOpdProductionWrite('record_audit_member_links.saveMemberLink');
   if (!runId) return false;
   try {
     await run(

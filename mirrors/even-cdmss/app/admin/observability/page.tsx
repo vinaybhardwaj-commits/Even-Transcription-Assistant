@@ -80,8 +80,6 @@ export default async function ObservabilityAdmin({ searchParams }: { searchParam
           <Link href="/admin/observability/reconstruction-fidelity" className="whitespace-nowrap text-xs font-medium text-brand hover:underline">Reconstruction Fidelity →</Link>
           {/* WM0 W0.2 — the MemberState spine walk (one cut per evidence day). */}
           <Link href="/admin/observability/world-model" className="whitespace-nowrap text-xs font-medium text-brand hover:underline">World Model →</Link>
-          {/* WM6 — the sequential review. Belief records only; nobody is scored. */}
-          <Link href="/admin/observability/review" className="whitespace-nowrap text-xs font-medium text-brand hover:underline">Sequential review →</Link>
           <a href="/api/admin/reasoning-registry?format=json" className="whitespace-nowrap text-xs text-slate-400 hover:text-brand">Download reasoning registry</a>
           <form method="POST" action="/api/admin/unlock?action=logout"><button className="whitespace-nowrap text-xs text-slate-400 hover:text-brand">Lock</button></form>
         </div>

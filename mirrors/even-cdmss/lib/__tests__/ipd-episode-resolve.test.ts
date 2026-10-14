@@ -16,8 +16,6 @@ import {
   CLINICAL_SHORTHAND, expandClinicalShorthand,
   type ExpectationMatcher, type ResolvableEntry,
 } from '../ipd-episode/resolve-core';
-import { DEATH_DISCHARGE_TYPES, dischargeIndicatesDeath } from '../ipd-episode/assemble-core';
-import { asRecurrence } from '../ipd-episode/checkpoint-core';
 import { findingsFromResolved, domainForSection, countFindings, resolverGroupKey } from '../ipd-episode/judge-core';
 import type { EpisodeEvent } from '../ipd-episode/assemble-core';
 
@@ -76,19 +74,13 @@ test('a matcher only searches its own event types — a drug is not satisfied by
 
 // ── ABSENT, class present → divergent ───────────────────────────────────────────────────────
 
-test('DECISION 44: ABSENT with the class represented is CONTEXT_DEPENDENT, not divergent', () => {
+test('ABSENT with the class represented resolves divergent at the PROPOSED severity', () => {
   const events = [drugOrder('PARACETAMOL 1G'), drugOrder('CEFAZOLIN 1G')];
   const r = resolveEntry(entry({ proposedSeverity: 'major', matcher: { kind: 'drug', terms: ['enoxaparin', 'heparin'] } }), events);
   assert.equal(r.resolution, 'absent_class_present');
-  assert.equal(r.verdict, 'context_dependent', 'decision 44: an unverified absence is not asserted');
+  assert.equal(r.verdict, 'divergent');
   assert.equal(r.severity, 'major', 'severity was chosen while the model was blinded, and code does not revisit it');
-  // ⚠️ IT NO LONGER SAYS "the absence is real". On IPNO-495, 22 of 29 divergent findings had an
-  // empty evidence_basis and carried 141 of 167 penalty points — 84% of the score asserting a
-  // negative the engine had never verified, most of them contradicted by the event list. What the
-  // resolver actually knows is narrower and duller: its matcher did not fire.
-  assert.match(r.statement, /Not detected by matcher/);
-  assert.ok(!/the absence is real/.test(r.statement));
-  assert.match(r.confound ?? '', /not verified/);
+  assert.match(r.statement, /the absence is real/);
 });
 
 // ── ABSENT, class missing → unassessable (the ONLY path) ────────────────────────────────────
@@ -165,7 +157,7 @@ test('ITEM 6: a panel that CANNOT contain the analyte is not a confound — the 
   const events = [labOrder('CBC')];
   const r = resolveEntry(entry({ matcher: { kind: 'lab', terms: ['creatinine'] } }), events);
   assert.equal(r.resolution, 'absent_class_present');
-  assert.equal(r.verdict, 'context_dependent', 'decision 44: an unverified absence is not asserted');
+  assert.equal(r.verdict, 'divergent');
   assert.equal(confoundFor('lab', events, ['creatinine']), null);
 });
 
@@ -279,66 +271,19 @@ test('GROUPING: term order and case do not split a class, but a different drug d
 });
 
 test('GROUPING NEVER MERGES A DONE DAY INTO A MISSED ONE — that is concordant-erasure', () => {
-  // ⚠️ RESTORED BY DECISION 45, AFTER ROUND 23 REMOVED IT AND THE DEFECT CAME STRAIGHT BACK.
-  // Round 23 took `resolution` out of the key so that a standing expectation raised on six days
-  // would be one finding rather than six. It was — and IPNO-495 r-29 then let a single day-5 note
-  // ("peripheral pulses present") speak for days 5, 6, 7, 8 and 10, four of which nothing was
-  // checked on. One finding, five days, one observation, and a statement that read as though the
-  // whole group had been verified.
-  //
-  // Deduplication across checkpoints survives; it is keyed on section and SUBJECT. What may never
-  // merge is two different ANSWERS to the same question.
+  // The resolver asks its question of the WHOLE episode, so today two entries with the same
+  // matcher always resolve alike and this case cannot arise through resolveAll. Resolution and
+  // verdict are in the grouping key anyway, and this test pins the key directly — because the
+  // day the resolver becomes day-aware (an expectation "by day 2" that was met on day 4 is a
+  // timing finding waiting to be written) is the day a matcher-only key would silently merge a
+  // day it happened into a group that says it did not. That is concordant-erasure, which this
+  // engine has already had to fix once.
   const e = dayEntry(0, ['enoxaparin']);
   const done = { resolution: 'present' as const, verdict: 'concordant' as const };
-  const missed = { resolution: 'absent_class_present' as const, verdict: 'context_dependent' as const };
-  const key = (o: { resolution: 'present' | 'absent_class_present'; verdict: 'concordant' | 'context_dependent' }) =>
+  const missed = { resolution: 'absent_class_present' as const, verdict: 'divergent' as const };
+  const key = (o: { resolution: 'present' | 'absent_class_present'; verdict: 'concordant' | 'divergent' }) =>
     resolverGroupKey(e, { ...o, severity: 'major', statement: 's', matchedEvent: null, matchedTerm: null, confound: null });
   assert.notEqual(key(done), key(missed), 'the same expectation with two different answers is two findings');
-
-  const ev0 = drugOrder('ENOXAPARIN 40MG', 0);
-  const found = { entry: dayEntry(0, ['enoxaparin']), outcome: {
-    resolution: 'present' as const, verdict: 'concordant' as const, severity: 'major' as const,
-    statement: 'found', matchedEvent: ev0, matchedTerm: 'enoxaparin', confound: null } };
-  const notFound = { entry: dayEntry(2, ['enoxaparin']), outcome: {
-    resolution: 'absent_class_present' as const, verdict: 'context_dependent' as const, severity: 'major' as const,
-    statement: 'not detected', matchedEvent: null, matchedTerm: null, confound: null } };
-  for (const order of [[found, notFound], [notFound, found]]) {
-    const out = findingsFromResolved(order, domainForSection);
-    assert.equal(out.length, 2, 'the found day and the unfound day are separate findings');
-    assert.ok(out.every((f) => f.group_size === 1), 'and neither absorbed the other');
-    const concordant = out.find((f) => f.verdict === 'concordant')!;
-    assert.ok(concordant.evidence_basis.length > 0, 'the found day carries its event');
-    assert.equal(out.find((f) => f.verdict === 'context_dependent')!.evidence_basis.length, 0,
-      'and the unfound day claims no evidence it does not have');
-  }
-});
-
-test('DECISION 45: two expectations are one class by SUBJECT, never by term resemblance', () => {
-  // ⚠️ IPNO-495 r-16, `group_size` 8, said: "The record shows it: lab_order on day 5 matching cbc"
-  // — and two of its eight members were BLOOD CULTURE expectations. Round 23's second pass merged
-  // any two classes sharing half the smaller term set, so "blood cultures" and "repeat CBC" became
-  // one class and the CBC's match was then reported as the evidence that the cultures were drawn.
-  // A culture that was never sent was recorded as done, in a finding a reader would have believed.
-  const cultures = entry({ ref: 'cp-d1/diagnostics/1', checkpointId: 'cp-d1', dayIndex: 1, section: 'diagnostics',
-    item: 'Blood cultures drawn before the first antibiotic dose',
-    matcher: { kind: 'lab', terms: ['blood culture', 'culture', 'cbc differential'] } });
-  const cbc = entry({ ref: 'cp-d1/diagnostics/2', checkpointId: 'cp-d1', dayIndex: 1, section: 'diagnostics',
-    item: 'Repeat CBC to follow the white cell count',
-    matcher: { kind: 'lab', terms: ['cbc', 'complete blood count'] } });
-  assert.notEqual(resolverGroupKey(cultures, {
-    resolution: 'present', verdict: 'concordant', severity: 'moderate', statement: 's',
-    matchedEvent: null, matchedTerm: null, confound: null }),
-    resolverGroupKey(cbc, {
-      resolution: 'present', verdict: 'concordant', severity: 'moderate', statement: 's',
-      matchedEvent: null, matchedTerm: null, confound: null }),
-    'blood cultures and a repeat CBC are two clinical questions, however their term lists overlap');
-
-  // and end to end: a CBC on the record answers the CBC, never the cultures
-  const out = resolvedFor([cultures, cbc], [labOrder('CBC', 1)]);
-  assert.equal(out.length, 2, 'two findings');
-  const culturesFinding = out.find((f) => /culture/i.test(f.statement))!;
-  assert.ok(!/cbc/i.test(culturesFinding.statement.replace(/cbc differential/ig, '')),
-    'the cultures finding does not cite a CBC as its evidence');
 });
 
 test('GROUPING: sections never merge, and severity takes the WORST member', () => {
@@ -377,69 +322,34 @@ test('GROUPING: the two counts describe the same list, and neither can be read a
 // ROUND 14 ITEMS 2, 3 AND 5 — THE DAY WINDOW, AND THE SHORTHAND
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-test('DECISION 42: a `once` expectation resolves across the WHOLE EPISODE', () => {
-  // ⚠️ THIS REVERSES ROUND 14 ITEM 3, DELIBERATELY (V, round 21 item 1). That rule floored the
-  // search at the expectation's own day so a "repeat CBC" could not be satisfied by the order that
-  // prompted it. Right about repeats, wrong about everything else: most expectations are a
-  // checkpoint noticing on day N that something ought to have happened, and the floor turned
-  // "already done on day 0" into "never done".
-  //
-  // IPNO-486 measured it: an EEG billed on DAY 0, expected again at cp-d1 and cp-d2, each searching
-  // only from its own day forward — two MAJOR omissions, 16 of that episode's 106 penalty points,
-  // for a test the event list shows was performed. The day-2 entry even read "(if not yet
-  // completed)": the model was asking whether it had already happened and the resolver could not look.
+test('ITEM 3: a repeat expectation is NOT satisfied by the order that prompted it', () => {
+  // r-32 on IPNO-416: "repeat CBC" expected at the day-2 checkpoint, marked present by the DAY 0
+  // order. The audit reported a thing was done using as proof the very order whose repetition was
+  // being asked for — a silent false negative, and the exact failure the engine exists to catch.
   const events = [labOrder('COMPLETE BLOOD COUNT', 0)];
-  const r = resolveEntry(entry({ dayIndex: 2, byDay: 2, recurrence: 'once',
-    matcher: { kind: 'lab', terms: ['complete blood count'] } }), events);
-  assert.equal(r.resolution, 'present', 'a day-0 order answers a day-2 `once` expectation');
-  assert.match(r.statement, /day 0/, 'and the statement names the day it actually happened');
-});
-
-test('DECISION 42: a `repeat` expectation is NOT satisfied by the order that prompted it', () => {
-  // r-32 on IPNO-416, and the defect round 21 item 1 re-opened by widening the window for
-  // everything. "Repeat CBC on day 2" answered by the DAY 0 order is the audit reporting a thing
-  // was done, using as proof the very order whose repetition was being asked for.
-  const events = [labOrder('COMPLETE BLOOD COUNT', 0)];
-  const r = resolveEntry(entry({ dayIndex: 2, byDay: 2, recurrence: 'repeat',
-    matcher: { kind: 'lab', terms: ['complete blood count'] } }), events);
+  const r = resolveEntry(entry({ dayIndex: 2, byDay: 2, matcher: { kind: 'lab', terms: ['complete blood count'] } }), events);
   assert.notEqual(r.resolution, 'present', 'the day-0 order is not a day-2 repeat');
 });
 
-test('DECISION 42: the DEFAULT is `repeat` — a missing field must not silently satisfy', () => {
-  // An omitted or unrecognised value takes the conservative direction: a wrong finding is visible
-  // and arguable, a silently satisfied expectation is neither.
-  const events = [labOrder('COMPLETE BLOOD COUNT', 0)];
-  for (const rec of [undefined, 'sometimes' as never, '' as never, null as never]) {
-    const r = resolveEntry(entry({ dayIndex: 2, recurrence: rec,
-      matcher: { kind: 'lab', terms: ['complete blood count'] } }), events);
-    assert.notEqual(r.resolution, 'present', `recurrence=${String(rec)} must default to repeat`);
-  }
-  assert.equal(asRecurrence(undefined), 'repeat');
-  assert.equal(asRecurrence('nonsense'), 'repeat');
-  assert.equal(asRecurrence('REPEAT'), 'repeat');
-  assert.equal(asRecurrence('Once'), 'once', 'and `once` is honoured whatever its case');
-});
-
-test('DECISION 42: a `once` order on ANY day satisfies, and the day is reported honestly', () => {
-  for (const day of [0, 2, 3]) {
+test('ITEM 3: an order ON or AFTER the expectation’s day does satisfy it', () => {
+  for (const day of [2, 3]) {
     const r = resolveEntry(
-      entry({ dayIndex: 2, recurrence: 'once', matcher: { kind: 'lab', terms: ['complete blood count'] } }),
+      entry({ dayIndex: 2, matcher: { kind: 'lab', terms: ['complete blood count'] } }),
       [labOrder('COMPLETE BLOOD COUNT', day)],
     );
     assert.equal(r.resolution, 'present', `a day-${day} order satisfies a day-2 expectation`);
-    assert.match(r.statement, new RegExp(`day ${day}`));
+    assert.match(r.statement, new RegExp(`day ${day}`), 'and the statement names the day it actually happened');
   }
 });
 
-test('ROUND 21 ITEM 1: class presence is STILL day-scoped — the two are different questions', () => {
-  // Matching asks "did this ever happen"; class presence asks "could it have been observed in the
-  // window this expectation was about". Widening both would put back the four day-3 findings that
-  // fired on a day with zero notes.
-  const notesEarly = [noteEvent(0), noteEvent(1), noteEvent(2)];
-  const r = resolveEntry(entry({ dayIndex: 3, matcher: { kind: 'note', terms: ['stent assessment'] } }), notesEarly);
-  assert.equal(r.resolution, 'absent_class_missing');
-  assert.equal(r.verdict, 'unassessable');
-  assert.match(r.confound ?? '', /from day 3 onward/);
+test('ITEM 3: the window is the day the expectation was FORMED, not its by_day deadline', () => {
+  // formed at day 2, wanted by day 4: an order on day 3 counts (it is after the checkpoint), and
+  // lateness against by_day is a timing question, not an eligibility one.
+  const r = resolveEntry(
+    entry({ dayIndex: 2, byDay: 4, matcher: { kind: 'lab', terms: ['complete blood count'] } }),
+    [labOrder('COMPLETE BLOOD COUNT', 3)],
+  );
+  assert.equal(r.resolution, 'present');
 });
 
 test('ITEM 2: a class empty in the expectation’s OWN window is unassessable, not divergent', () => {
@@ -459,7 +369,7 @@ test('ITEM 2: a class present IN the window still yields a real divergence', () 
   const events = [noteEvent(0), noteEvent(3)];
   const r = resolveEntry(entry({ dayIndex: 3, matcher: { kind: 'note', terms: ['stent assessment'] } }), events);
   assert.equal(r.resolution, 'absent_class_present');
-  assert.equal(r.verdict, 'context_dependent', 'a note was written that day, but the matcher not firing is not proof');
+  assert.equal(r.verdict, 'divergent', 'a note WAS written that day and it does not mention the thing');
 });
 
 test('ITEM 5: clinical shorthand is expanded before a negative may be asserted', () => {
@@ -534,83 +444,9 @@ test('ITEM 1: the gate is keyed on the section, and NON-escalation sections are 
     section: 'therapeutics', item: 'VTE prophylaxis',
     matcher: { kind: 'drug', terms: ['enoxaparin'] },
   }), events);
-  assert.equal(therapeutic.verdict, 'context_dependent', 'a plain expectation still resolves, now unasserted (decision 44)');
+  assert.equal(therapeutic.verdict, 'divergent', 'a plain expectation still resolves normally');
   // and run.ts pushes escalation entries under the exact constant the gate reads
   assert.equal(ESCALATION_SECTION, 'escalation');
-  const run = readFileSync('lib/ipd-episode/compute.ts', 'utf8');  // lab-v2 decision 55
+  const run = readFileSync('lib/ipd-episode/run.ts', 'utf8');
   assert.match(run, /push\(ESCALATION_SECTION,/, 'no repeated literal to drift from the gate');
-});
-
-
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// ROUND 20 ITEM 1 / DECISION 41 — THE TERMINAL DAY IS UNASSESSABLE
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-test('ITEM 1: the death values are exactly the three the mirror uses, case-insensitively', () => {
-  // Derived from db13 kx_discharge_summary_records, all 2,496 rows, 14 distinct values.
-  for (const v of ['Expired', 'expired', 'Admitted Dead', 'ADMITTED DEAD', 'Mortuary', 'mortuary']) {
-    assert.equal(dischargeIndicatesDeath(v), true, v);
-  }
-  // BOTH capitalisations of mortuary exist in the data (3 + 2); a case-sensitive list would have
-  // exempted three episodes and audited two of the same kind normally.
-  assert.deepEqual([...DEATH_DISCHARGE_TYPES], ['expired', 'admitted dead', 'mortuary']);
-});
-
-test('ITEM 1: everything else audits NORMALLY — the failure direction V asked for', () => {
-  for (const v of ['Normal Discharge', 'LAMA', 'DAMA', 'Discharge On Request', 'Referral',
-                   'Refer External Hospital', 'Absconded', 'None', '', '   ', null, undefined]) {
-    assert.equal(dischargeIndicatesDeath(v as string), false, String(v));
-  }
-  // ⚠️ `Early Neonatal` (n=1) is DELIBERATELY not matched. It may be a neonatal death category or a
-  // discharge category and one row cannot settle it. Exempting on a guess silently stops auditing a
-  // real admission; auditing a death as a discharge produces findings a human notices.
-  assert.equal(dischargeIndicatesDeath('Early Neonatal'), false);
-  // and no substring rule: a value merely CONTAINING a death word is not a death
-  assert.equal(dischargeIndicatesDeath('Transferred to mortuary annexe'), false);
-});
-
-test('ITEM 1: an expectation formed ON the day of death is unassessable, not divergent', () => {
-  // THE IPNO-573 CASE: three majors on day 5, the day the patient died, including hourly neuro obs.
-  const events = [noteEvent(5, 'ward round'), drugOrder('NORADRENALINE', 5)];
-  const onTheDay = resolveEntry(
-    entry({ dayIndex: 5, section: 'monitoring', item: 'Hourly neurological assessment (GCS, pupil reactivity)',
-            matcher: { kind: 'note', terms: ['neurological assessment', 'GCS'] } }),
-    events, 5);
-  assert.equal(onTheDay.verdict, 'unassessable');
-  assert.equal(onTheDay.resolution, 'absent_class_missing');
-  assert.match(onTheDay.statement, /on or after the day the patient died/);
-  assert.match(onTheDay.confound ?? '', /day of death/);
-});
-
-test('ITEM 1: an expectation formed BEFORE the day of death is still judged', () => {
-  const events = [noteEvent(3, 'ward round'), noteEvent(4, 'ward round')];
-  const earlier = resolveEntry(
-    entry({ dayIndex: 3, section: 'monitoring', item: 'Neurological assessment',
-            matcher: { kind: 'note', terms: ['neurological assessment'] } }),
-    events, 5);
-  assert.notEqual(earlier.verdict, 'unassessable',
-    'day 3 had a living patient and two days to act — that is assessable');
-  assert.equal(earlier.resolution, 'absent_class_present');
-});
-
-test('ITEM 1: terminalDay null (an unrecognised discharge_type) changes nothing', () => {
-  const events = [noteEvent(5, 'ward round')];
-  const withGate = resolveEntry(entry({ dayIndex: 5, section: 'monitoring', item: 'X',
-    matcher: { kind: 'note', terms: ['neuro'] } }), events, 5);
-  const without = resolveEntry(entry({ dayIndex: 5, section: 'monitoring', item: 'X',
-    matcher: { kind: 'note', terms: ['neuro'] } }), events, null);
-  assert.equal(withGate.verdict, 'unassessable');
-  assert.equal(without.verdict, 'context_dependent', 'an unknown discharge_type audits normally');
-});
-
-test('ITEM 1: resolveAll threads the terminal day, and the episode checkpoint is covered too', () => {
-  // cp-episode carries day_index = losDays (assemble-core checkpointPlan), so on a death episode
-  // its expectations open on the day of death and are covered by the same rule.
-  const events = [noteEvent(2, 'ward round')];
-  const entries = [
-    entry({ ref: 'cp-d1/monitoring/1', dayIndex: 1, section: 'monitoring', matcher: { kind: 'note', terms: ['zzz'] } }),
-    entry({ ref: 'cp-episode/monitoring/1', dayIndex: 2, section: 'monitoring', matcher: { kind: 'note', terms: ['zzz'] } }),
-  ];
-  const out = resolveAll(entries, events, 2).map((r) => r.outcome.verdict);
-  assert.deepEqual(out, ['context_dependent', 'unassessable']);
 });

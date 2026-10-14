@@ -49,23 +49,8 @@ function warn(label: string, e: unknown): void {
 /** Which deployment wrote a row. Preview and production share a database (decision 31). */
 const APP_SOURCE = process.env.APP_SOURCE || 'standalone';
 
-/**
- * Engine version (decision 27). A bump audits an admission again BESIDE its old row, never over it.
- *
- * ⚠️ DECISION 56 (V, 2026-09-05) — 0.1 → 0.2 AT THE CRON COMMIT, BECAUSE 0.1 ROWS ARE NOT
- * COMPARABLE WITH 0.2 ROWS. Decisions 44 to 52 changed WHAT THIS ENGINE MEASURES, not how well it
- * measures it: the resolver can no longer return a divergent verdict (44), grouping splits on
- * resolution (45), anchors follow procedures rather than the calendar (46, 52), the discharge-note
- * finding is withdrawn (49) and the per-pass cap no longer binds (47). An index from before that
- * sequence and an index from after it are different quantities wearing the same name, and putting
- * them in one column would invite exactly the comparison the numbers cannot support.
- *
- * The 0.1 rows stay as history under `run_seq` / `is_current`. Nothing is deleted or rewritten.
- */
-export const IPD_EPISODE_ENGINE_VERSION = 'ipd-episode-audit/0.2';
-
-/** The version whose rows are history, and whose audit order the cron replays first (decision 56). */
-export const IPD_EPISODE_ENGINE_VERSION_PRIOR = 'ipd-episode-audit/0.1';
+/** Engine version (decision 27). A bump audits an admission again BESIDE its old row, never over it. */
+export const IPD_EPISODE_ENGINE_VERSION = 'ipd-episode-audit/0.1';
 
 /** The sibling engine whose score the UI shows beside this one, labelled as its own (decision 14). */
 export const IPD_DISCHARGE_ENGINE_VERSION_FOR_JOIN = 'ipd-discharge-audit/0.2';
@@ -107,26 +92,6 @@ export async function auditedEncounterIds(engineVersion = IPD_EPISODE_ENGINE_VER
     `SELECT DISTINCT encounter_id FROM ipd_episode_audits WHERE engine_version = $1 AND is_current = TRUE`, [engineVersion],
   ).catch((e: unknown) => { warn('auditedEncounterIds', e); return [] as Record<string, unknown>[]; });
   return rows.map((r) => String(r.encounter_id));
-}
-
-/**
- * When each encounter was last audited at a GIVEN engine version — the replay order for decision 56.
- *
- * The cron re-audits the cohort already read at 0.1 before it touches anything new, oldest reading
- * first, so the twenty-eight episodes V has read come back at 0.2 in the order they were read. A
- * null here simply means the encounter was never audited at that version, and it sorts after all of
- * them.
- */
-export async function auditedAtByEncounter(engineVersion: string): Promise<Record<string, string>> {
-  const rows = await run(
-    `SELECT encounter_id, MAX(audited_at) AS audited_at
-       FROM ipd_episode_audits
-      WHERE engine_version = $1
-      GROUP BY encounter_id`, [engineVersion],
-  ).catch((e: unknown) => { warn('auditedAtByEncounter', e); return [] as Record<string, unknown>[]; });
-  const out: Record<string, string> = {};
-  for (const r of rows) if (r.audited_at != null) out[String(r.encounter_id)] = String(r.audited_at);
-  return out;
 }
 
 export interface SkipRow { encounter_id: string; reason: string; attempts: number; discharged_at: string | null; last_seen: string | null }
@@ -367,11 +332,6 @@ export interface CheckpointWriteRow {
   finishReason: string | null;
   attempts: number;
   entriesTruncated: number;
-  /** ROUND 21 ITEM 5: the query was too short to search with — a construction failure,
-   *  reported separately from an off-topic RESULT because they need different fixes. */
-  queryUnderspecified?: boolean | null;
-  /** DECISION 43: the anchor this checkpoint sits on. */
-  anchorKind?: string | null;
 }
 
 /**
@@ -505,9 +465,9 @@ export async function saveEpisodeAudit(row: EpisodeAuditRow, checkpoints: Checkp
            model, trace_id, uncited_entry_count, entry_count, citation_sources,
            retrieved_titles, retrieval_offtopic, offtopic_excerpt_count, day0_query_from_ot,
            temperature, seed, retrieval_skipped, max_tokens, finish_reason, attempts,
-           entries_truncated, query_underspecified, anchor_kind)
+           entries_truncated)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::int[],$9::jsonb,$10,$11,$12,$13,$14,$15,$16::jsonb,
-                 $17::text[],$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)`,
+                 $17::text[],$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)`,
         [
           auditId, cp.dayIndex, cp.checkpointType, cp.inputCutoffAt, cp.inputEventCount,
           cp.retrievalQuery, cp.retrievalFailed, cp.citationIds,
@@ -518,8 +478,6 @@ export async function saveEpisodeAudit(row: EpisodeAuditRow, checkpoints: Checkp
           num(cp.offTopicExcerptCount), cp.day0QueryFromOt ?? false,
           cp.temperature, cp.seed, cp.retrievalSkipped ?? false,
           num(cp.maxTokens), cp.finishReason ?? null, num(cp.attempts), num(cp.entriesTruncated),
-          cp.queryUnderspecified ?? false,
-          cp.anchorKind ?? null,
         ],
       ).catch((e: unknown) => {
         warn(`saveEpisodeAudit checkpoint day ${cp.dayIndex} (${cp.checkpointType})`, e);
@@ -552,7 +510,7 @@ export async function episodeWorklist(a: { limit?: number; sort?: 'divergence' |
             los_days, discharge_type, divergence_index, divergence_band, band_uncertain,
             scoring_status, completeness_pct,
             n_findings, n_divergent, n_unassessable, n_low_value, n_divergence_pass, n_fidelity_pass,
-            n_concordant, n_context_dependent, capped_count, run_seq,
+            n_concordant, capped_count, run_seq,
             penalty_total, expectations_evaluated,
             checkpoint_count, audited_at
      FROM ipd_episode_audits

@@ -52,15 +52,11 @@ export const JUDGE_TEMPERATURE = 0;
  * DIFF (A1) and FIDELITY (A2), 16000:
  *   one finding ≈ finding_id + 6 enum fields + statement (~40 words) + evidence_basis (1-3 rows)
  *              + citation_ids                                        ≈ 200-260 output tokens
- *   cap        = MAX_FINDINGS_PER_PASS (80 since decision 47; was 30)
- *   ⚠️ THE CAP NO LONGER SITS UNDER THIS CEILING, AND THAT IS THE POINT OF DECISION 47. 80 × 260
- *              ≈ 20,800 tokens, which is ABOVE 16000. The cap trims the PARSED list and cannot
- *              bound generation, so this is not an overrun — it means the ceiling, not the cap, is
- *              now what limits how many findings a pass can return: 16000 / 260 ≈ 61.
- *   measured   round 24 A1 dropped 18 findings on IP-1483, 10 on IPNO-486, 6 on IPNO-495 at a cap
- *              of 30 — the cap had begun deciding how much of an admission could be charged for.
- *              If a pass now comes back with finish_reason `length`, the ceiling is the binding
- *              constraint and THIS arithmetic is what needs redoing.
+ *   cap        = MAX_FINDINGS_PER_PASS (30, item 3)
+ *   worst case = 30 × 260                                            ≈ 7,800 tokens
+ *   ceiling    = 16000                                               ≈ 2.0× headroom
+ *   measured   IP-1286 diff 11-15 findings, IP-1313 diff 10, fidelity 3-6 — the cap is well above
+ *              anything observed, and the ceiling is well above the cap.
  *
  * COMMENTARY (B), 10000 — raised from 6000, which was the tightest of the four:
  *   narrative ~600 + outcome_context ~300                            ≈ 900 tokens

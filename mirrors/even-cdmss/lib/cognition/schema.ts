@@ -70,9 +70,9 @@ export type ProvenanceClass =
 /**
  * A clinician's reaction to a CDMSS output, as the programme would eventually record it.
  *
- * Written by two paths: the signal-reaction route (reaction/0.1, cognition_reactions, after_cdmss
- * true) and the sequential review route (review/0.1, cognition_belief_updates, after_cdmss false).
- * The BeliefItem warning below still holds.
+ * ⚠️ TYPE ONLY. There is NO table, NO migration, NO writer, and NO reader for this in v0, and this
+ * ship adds none. It is declared so the shape is settled before anything can write it — and so that
+ * the note below has somewhere to live.
  *
  * ⚠️ THIS IS NOT concordance's `BeliefItem`. That type (lib/concordance-core.ts) is
  * `{ cause, branch, weight }` — an LLM-generated PRIOR over candidate causes inside the adaptive
@@ -90,50 +90,12 @@ export interface BeliefUpdate {
   physicianId: string;
   /** Fixed by construction: a person's stated reaction is a reported belief and nothing else. */
   provenance: 'CLINICIAN_REPORTED_BELIEF';
-  /** The programme's controlled vocabulary: ReactionVerb. Written by the signal-reaction route from reaction/0.1. */
+  /** What they said back, in the programme's controlled vocabulary (not yet defined — v0 writes none). */
   reaction: string;
   /** Whether the reaction was recorded AFTER the clinician saw the CDMSS output. */
   afterCdmss: boolean;
   /** ISO timestamp of the reaction. */
   at: string;
-}
-
-/** The three non-escalating things a doctor can press on a Findings card. Controlled vocabulary:
- *  a reaction is one of exactly these, and nothing widens it but a version bump. */
-export const REACTION_VERBS = ['already_knew', 'surprised', 'dismiss'] as const;
-export type ReactionVerb = typeof REACTION_VERBS[number];
-
-/** The reaction vocabulary's version, stamped on every cognition_reactions row. Separate from
- *  COGNITION_SCHEMA_VERSION on purpose: the two move independently. */
-export const REACTION_SCHEMA_VERSION = 'reaction/0.1' as const;
-
-// ── WM6 sequential review (review/0.1) ────────────────────────────────────────
-/** The review vocabulary's version, stamped on every session and every belief row. */
-export const REVIEW_SCHEMA_VERSION = 'review/0.1' as const;
-
-/** The join's version, stamped on every snapshot and every triple. It is part of the triple's
- *  identity key, so bumping it re-opens the backlog under the new shape rather than leaving rows
- *  built by an older rule to be read as current ones. */
-export const JOIN_SCHEMA_VERSION = 'cognition-join/0.1' as const;
-
-/** The perturbation catalogue's ids, in the order they are offered and recorded. The overlay text
- *  for each lives in lib/review/perturbations.ts — one id, one sentence, nothing generated. */
-export const REVIEW_VARIANT_IDS = ['fever_39_5', 'ct_done_normal', 'age_plus_30'] as const;
-export type ReviewVariantId = typeof REVIEW_VARIANT_IDS[number];
-
-/** The controlled answer set for "what would you do next". `other` carries free text. */
-export const NEXT_INVESTIGATIONS = ['ct_head', 'mri_brain', 'lumbar_puncture', 'blood_tests', 'esr_crp', 'none', 'other'] as const;
-
-/**
- * The four fields a reviewer records at each step. This is a BELIEF, not an answer: nothing grades
- * it, nothing compares it to an outcome in this ship, and no correctness column exists to hold one.
- */
-export interface ReviewBeliefPayload {
-  leading_diagnosis: string;
-  confidence: number;
-  next_investigation: typeof NEXT_INVESTIGATIONS[number];
-  other_text: string | null;
-  unsafe_to_wait: boolean;
 }
 
 /** The cognition vocabulary's version. Bump when any type above changes shape. */

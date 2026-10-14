@@ -31,7 +31,6 @@
  * pass, the same posture the incidence numerator takes.
  */
 import { LANE_ORDER, laneMeta, type SurfaceFinding } from './readmission-surface-core';
-import { canonicalFacility } from './readmission-rates-core';
 
 // ── the filter state ──────────────────────────────────────────────────────────────────────
 
@@ -198,15 +197,11 @@ export function matchesDepartment(row: Row, dept: string | null): boolean {
 }
 
 /** R6 — the hospital filter narrows only what it can judge (R6-3, the R5-6 precedent): a case whose
- *  facility is unknown (null) ALWAYS passes; otherwise exact match on the verbatim db13 name.
- *  Both sides canonicalised (19-Aug EHRC relabel — see canonicalFacility) so `Even` matches a row
- *  whose raw facility is `Even-EHRC`. */
+ *  facility is unknown (null) ALWAYS passes; otherwise exact match on the verbatim db13 name. */
 export function matchesFacility(row: Row, fac: string | null): boolean {
-  const wanted = canonicalFacility(fac);
-  if (!wanted) return true;
-  const have = canonicalFacility(row.facility);
-  if (have == null) return true;
-  return have === wanted;
+  if (!fac) return true;
+  if (row.facility == null || row.facility === '') return true;
+  return row.facility === fac;
 }
 
 /** R5-7 — `gapDays <= n`; a null gap passes only "Any". */
@@ -296,11 +291,10 @@ export function departmentOptions(rows: ReadonlyArray<Pick<SurfaceFinding, 'inde
 }
 
 /** R6 — the hospital options: sorted distinct non-null facilities from the loaded list. Never
- *  hardcoded, so a third hospital appears by itself; zero when the name join failed. Canonicalised
- *  (19-Aug EHRC relabel) so `Even-EHRC` never shows as a separate option from `Even`. */
+ *  hardcoded, so a third hospital appears by itself; zero when the name join failed. */
 export function facilityOptions(rows: ReadonlyArray<Pick<SurfaceFinding, 'facility'>>): string[] {
   const seen = new Set<string>();
-  for (const r of rows) { const v = canonicalFacility(r.facility); if (v) seen.add(v); }
+  for (const r of rows) { const v = typeof r.facility === 'string' ? r.facility.trim() : ''; if (v) seen.add(v); }
   return [...seen].sort((a, b) => a.localeCompare(b));
 }
 

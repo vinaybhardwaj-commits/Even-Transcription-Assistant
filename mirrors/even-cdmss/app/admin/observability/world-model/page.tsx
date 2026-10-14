@@ -39,8 +39,6 @@ import {
   type WalkO, type WalkCut, type WalkCutStatus, type WalkFlags,
 } from '@/lib/world-model/walk-o';
 import type { MemberStateSnapshot } from '@/lib/member-state/schema';
-import { REACTION_VERBS, REACTION_SCHEMA_VERSION } from '@/lib/cognition/schema';
-import { reactionCounts, type ReactionCounts } from '@/lib/cognition/reactions-store';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'World Model · Spine Walk · Observability' };
@@ -230,56 +228,6 @@ function FlagStrip({ flags }: { flags: WalkFlags }) {
   );
 }
 
-/**
- * WM2 v1 — the reaction store's readout. Additive; it describes a different table from everything
- * else on this page and computes nothing about the spine.
- *
- * ⚠️ THESE NOTIFIED NOBODY. A reaction is a belief record (CLINICIAN_REPORTED_BELIEF) written when
- * a doctor pressed one of three non-escalating buttons on a Findings card. Nothing escalated, no
- * thread opened, no CM saw one.
- *
- * `counts === null` is a read failure and says so — never a zero. Before the migration has been run
- * the table does not exist, which lands here, so the line names the migrate route.
- */
-function ReactionsBlock({ counts }: { counts: ReactionCounts | null }) {
-  const nOf = (verb: string) => counts?.byVerb.find((r) => r.reaction === verb)?.n ?? 0;
-  const unknown = (counts?.byVerb ?? []).filter((r) => !(REACTION_VERBS as readonly string[]).includes(r.reaction));
-  return (
-    <div className="mt-8 rounded-xl border border-slate-200 bg-white p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-[10.5px] font-medium uppercase tracking-wide text-slate-400">Reactions</div>
-        <Chip>{REACTION_SCHEMA_VERSION}</Chip>
-      </div>
-      <p className="mt-0.5 text-[11px] text-slate-400">
-        What doctors pressed on a Findings card. Belief records — CLINICIAN_REPORTED_BELIEF. They notified nobody.
-      </p>
-      {counts === null ? (
-        <div className="mt-2 text-[12px] text-red-700">
-          Could not read — this is <b>not</b> zero. If the table has not been created yet, run
-          {' '}<code className="rounded bg-slate-100 px-1">POST /api/admin/migrate-cognition-reactions</code>.
-        </div>
-      ) : (
-        <div>
-          {/* Every verb is listed whether or not it has been pressed — a zero is a fact, a missing
-              row would read as no data. */}
-          <div className="mt-2 flex flex-wrap items-center gap-1.5">
-            {REACTION_VERBS.map((v) => (
-              <Chip key={v}>{v} <span className="font-medium text-slate-900">{nOf(v)}</span></Chip>
-            ))}
-            {unknown.map((r) => (
-              <Chip key={r.reaction} tone="amber">outside the vocabulary: {r.reaction} <span className="font-medium">{r.n}</span></Chip>
-            ))}
-          </div>
-          <p className="mt-1.5 text-[11.5px] text-slate-500">
-            {counts.physicians} physician{counts.physicians === 1 ? '' : 's'} ·{' '}
-            {counts.last7d} row{counts.last7d === 1 ? '' : 's'} in the last 7 days
-          </p>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── page ──────────────────────────────────────────────────────────────────────────────────────
 
 export default async function WorldModelWalkPage({ searchParams }: { searchParams: Promise<SP> }) {
@@ -290,10 +238,6 @@ export default async function WorldModelWalkPage({ searchParams }: { searchParam
       </div>
     );
   }
-
-  // WM2 v1 — read-only, and deliberately fail-safe: a reaction read must never be able to stop the
-  // spine walk from rendering.
-  const reactions = await reactionCounts().catch(() => null);
 
   const sp = await searchParams;
   const individualUidIn = (sp.individual_uid ?? '').trim();
@@ -325,10 +269,6 @@ export default async function WorldModelWalkPage({ searchParams }: { searchParam
         <div className="flex items-center gap-3">
           {/* WM1 — the shadow agent's readout. Shadow only; nothing there is doctor-facing. */}
           <Link href="/admin/observability/world-model/shadow" className="whitespace-nowrap text-xs font-medium text-brand hover:underline">Shadow Agent →</Link>
-          {/* WM6 — the sequential review over this walk. Belief records only; nobody is scored. */}
-          <Link href="/admin/observability/review" className="whitespace-nowrap text-xs font-medium text-brand hover:underline">Sequential review →</Link>
-          {/* WM3 — the join: O_before, the first visible result, O_after. */}
-          <Link href="/admin/observability/world-model/join" className="whitespace-nowrap text-xs font-medium text-brand hover:underline">Join →</Link>
           <Link href="/admin/observability" className="whitespace-nowrap text-xs font-medium text-brand hover:underline">← Observability</Link>
         </div>
       </div>
@@ -425,8 +365,6 @@ export default async function WorldModelWalkPage({ searchParams }: { searchParam
           )}
         </>
       )}
-
-      <ReactionsBlock counts={reactions} />
     </div>
   );
 }

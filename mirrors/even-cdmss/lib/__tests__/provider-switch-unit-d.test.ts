@@ -274,15 +274,7 @@ test('exactly one cron entry moved, and it is the OPD worker path', () => {
   // against a ceiling of one per 10, with every silence named. The sweep ran manually first and
   // was scheduled second, which is the order this programme requires.
   // The point of this test — the OPD entry and the original fourteen — is unchanged.
-  // 18 → 21 on 5 Sep 2026: the IPD EPISODE worker's nightly window (decision 53), three entries for
-  // one 22:00–06:00 IST window. Additive, and the OPD entry below is what this test is about.
-  // 21 → 22 on 5 Sep 2026: the Lab MCP v2 tick (lab-v2 decision 25). It lands DARK — LAB_V2_ENABLED
-  // is unset, so ?auto=1 returns 200 skipped before any database read — and V flips the flag after
-  // the deploy, which is this programme's manual-first-then-scheduled order.
-  // 22 → 23 on 8 Sep 2026: WM3's join sweep, scheduled one hour after the shadow sweep it reads
-  // behind. Additive, and the OPD entry this test is about is untouched.
-  // 23 → 24 on 22 Sep 2026: one additive OPD midday retry; the overnight entry remains unchanged.
-  assert.equal(cfg.crons.length, 24);
+  assert.equal(cfg.crons.length, 18);
   assert.ok(cfg.crons.some((c) => c.path === '/api/admin/shadow-sweep?auto=1' && c.schedule === '0 */6 * * *'),
     'the shadow sweep is scheduled 6-hourly, on the ?auto=1 form its cron-auth expects');
   // The OPD entry drops ?conc=4 so the route's new defaults (max=8, conc=8) apply. Production was

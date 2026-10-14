@@ -32,7 +32,7 @@
 import { extractJsonObject } from '../lvc-value-core';
 import { LVC_CATEGORIES } from '../opd-lvc-classify-core';
 import {
-  COMPLETENESS_SOURCES, collapseSpaces, tierForTable, isDischargeEvent, dischargeIndicatesDeath,
+  COMPLETENESS_SOURCES, collapseSpaces, tierForTable, isDischargeEvent,
   type EpisodeEvent, type EvidenceTier,
 } from './assemble-core';
 import { CHECKPOINT_ENTRY_SECTIONS, renderEvent, type CheckpointEntryRef, type ExpectedCourse } from './checkpoint-core';
@@ -502,26 +502,15 @@ export function enforceUnassessable(f: EpisodeFinding): { finding: EpisodeFindin
  * reading and not the next. The judge side had no such bound, and IPNO-416's diff pass ran to
  * 22,677 characters and was cut off mid-answer, losing the whole pass.
  *
- * ⚠️ DECISION 47 (V, 2026-09-05) — 30 BECAME 80, BECAUSE THE CAP HAD STARTED BITING ON REAL
- * EPISODES AND WAS DISCARDING THE ONLY REMAINING SOURCE OF DIVERGENT FINDINGS. 30 was chosen
- * against a measured 10–15 diff findings on IP-1286 and 10 on IP-1313, "comfortably above anything
- * observed". Two rounds later that was no longer true: on round 24 the A1 pass lost 18 findings on
- * IP-1483, 10 on IPNO-486 and 6 on IPNO-495. Decision 44 had meanwhile made A1 the ONLY pass that
- * can produce a divergent verdict — the resolver cannot — so a cap biting A1 was silently deciding
- * how much of an admission the audit was allowed to charge for.
- *
- * ⚠️ THIS CAP DOES NOT BOUND GENERATION, AND RAISING IT COSTS NO TOKENS. `capFindings` runs on the
- * PARSED list, after the model has already written its answer; `JUDGE_MAX_TOKENS` is what bounds
- * the call. At ~260 output tokens per finding, 16000 tokens can carry roughly 61 findings — so at
- * 80 this cap sits ABOVE what the ceiling can emit and should stop binding altogether. The
- * consequence is that the observable moves: `n_findings_truncated` will read 0, and the limiter to
- * watch becomes the pass's own `finish_reason`. A pass cut off at the ceiling is a truncation
- * failure, not a cap, and it is handled elsewhere.
+ * 30 per pass, against a measured 10–15 diff findings on IP-1286 and 10 on IP-1313: comfortably
+ * above anything observed, so the cap should never bite on a normal episode, and firmly below the
+ * runaway that cost IPNO-416 its audit. `findings_truncated` records when it does bite, so a cap
+ * that is too tight shows up in the data instead of quietly removing findings.
  *
  * The prompt asks for most-consequential-first, so truncation drops the least consequential — the
  * same ordering contract the expected-course cap relies on.
  */
-export const MAX_FINDINGS_PER_PASS = 80;
+export const MAX_FINDINGS_PER_PASS = 30;
 
 export function capFindings(findings: EpisodeFinding[]): { kept: EpisodeFinding[]; dropped: number } {
   if (findings.length <= MAX_FINDINGS_PER_PASS) return { kept: findings, dropped: 0 };
@@ -809,86 +798,78 @@ export function applyBillingOnlyCap(
 }
 
 /**
- * DECISION 49 (V, 2026-09-05) — THE DISCHARGE-NOTE GAP FINDING IS WITHDRAWN.
+ * ROUND 14 ITEM 2, SECOND HALF — THE FINDING THE ENGINE MISSED.
  *
- * ⚠️ IT WAS ASKING FOR THE WRONG DOCUMENT. Round 14 raised `d-1` whenever the discharge day carried
- * no PROGRESS NOTE, at `major`, on the reasoning that "the decision to send the patient home was
- * taken without a same-day clinical entry". The document that must exist at discharge is the
- * DISCHARGE SUMMARY, and it existed on every episode this ever fired on — selection requires one
- * (§3.1). On Step C it fired on three of thirteen episodes (IP-1362, IP-1497, IPNO-629), identically
- * worded, at major severity, against admissions whose discharge documentation was present. A
- * finding that reliably reports a gap that is not there is worse than no finding at all.
+ * Day-scoping class presence (resolve-core) is right, but on its own it LOSES something: the day a
+ * class went silent stops producing a divergence and starts producing an `unassessable`. On
+ * IPNO-416 the most consequential documentation gap in the episode — no progress note at all on
+ * the discharge day — was never reported by anything, because no expectation happened to name it
+ * and the resolver had no way to raise a finding nobody expected.
  *
- * ⚠️ WHAT DECISION 49 PUTS IN ITS PLACE NEEDS A TIMESTAMP THIS ENGINE CANNOT SEE. The replacement
- * is "discharge summary finalised N hours after discharge" — context_dependent, minor, zero
- * penalty, report only. No finalisation time exists in anything the engine reads:
+ * So code raises it directly. This is not a judgement and needs no model: either a progress note
+ * exists on the discharge day or it does not, and a discharge day with none means the decision to
+ * send the patient home was taken without a same-day clinical entry.
  *
- *   · `kx_discharge_summary_records` yields `discharge_date_time` and `_create_time`, and
- *     `_create_time` is the MIRROR'S INGEST TIME. The contract test "`_create_time` appears ONLY in
- *     the discharge-summary tiebreak" exists precisely because it is not a clinical time.
- *   · `discharge_extracted_cases.extracted_json` carries no signing, finalisation or document date
- *     at any nesting level — 954 rows, zero occurrences of any such key.
- *
- * Ingest time as a proxy would measure the mirror's pipeline and read as a statement about the
- * ward, so only the WITHDRAWAL is implemented. The id is kept reserved so a future replacement does
- * not silently reuse `d-1` for a different claim, and so this note stays where the next reader of
- * that id will look.
+ * It is a `documentation` finding, so §5 attributes it to the AUTHOR — and there being no author
+ * is precisely the point, so it stays unattributed. Tier A, because the absence is established
+ * against the progress-note table itself, which is what lets it reach `major` under item 10.
  */
 export const MISSING_DISCHARGE_NOTE_ID = 'd-1';
 
-/**
- * ROUND 23 ITEM 6 — TWO FINDINGS THAT CONTRADICT EACH OTHER ON ONE FACT MUST NOT BOTH SHIP.
- *
- * IPNO-495's report contained, in the same list, "chest X-ray does not exist anywhere in this
- * admission" and "chest X-ray was ordered on day 3". Both were produced by this engine, from the
- * same event list, and both went to the same reader. Whichever is right, shipping the pair costs
- * more than shipping neither: it tells a clinician the audit does not know what is in the record.
- *
- * The check is deliberately narrow, because a broad one would start adjudicating clinical
- * disagreement. It fires only on the case above: one finding SAYS SOMETHING WAS FOUND (it carries a
- * matched event or a non-empty evidence_basis) while another ASSERTS THE SAME SUBJECT IS ABSENT.
- * The subject comparison reuses the item-4 vocabulary, so it is the same notion of "same thing"
- * that grouping uses.
- *
- * ⚠️ THE EVIDENCED FINDING WINS AND THE ASSERTION IS DOWNGRADED, never the reverse, and never
- * dropped. A finding standing on a real event outranks one standing on a matcher that did not fire
- * — that is decision 44's principle applied between passes rather than within one. The downgraded
- * finding stays in the report, marked, because a reader who disagrees needs to see it.
- */
-export function findingSubject(f: EpisodeFinding): string {
-  const words = subjectWords(f.statement.split('.')[0] ?? f.statement);
-  return words.join('+');
-}
-
-export interface ContradictionResult { findings: EpisodeFinding[]; downgraded: number }
-
-export function resolveContradictions(findings: EpisodeFinding[]): ContradictionResult {
-  const evidenced = new Map<string, EpisodeFinding>();
-  for (const f of findings) {
-    const hasEvidence = f.evidence_basis.length > 0 || !!f.matched_term;
-    if (!hasEvidence) continue;
-    const subj = findingSubject(f);
-    if (subj && !evidenced.has(subj)) evidenced.set(subj, f);
-  }
-
-  let downgraded = 0;
-  const out = findings.map((f) => {
-    // only an ASSERTED absence can be contradicted: it claims something is not there
-    const assertsAbsence = f.resolution === 'absent_class_present'
-      || /\b(no matching|not detected|does not exist|was not (ordered|done|performed)|never (ordered|done))\b/i.test(f.statement);
-    if (!assertsAbsence) return f;
-    if (f.evidence_basis.length > 0 || f.matched_term) return f;
-    const subj = findingSubject(f);
-    const other = subj ? evidenced.get(subj) : undefined;
-    if (!other || other.finding_id === f.finding_id) return f;
-    downgraded++;
-    return {
-      ...f,
-      verdict: 'context_dependent' as Verdict,
-      statement: `${f.statement} ⚠️ Another finding in this same audit (${other.finding_id}) reports this on the record, so this absence is contradicted by the engine's own evidence and is not asserted.`,
-    };
-  });
-  return { findings: out, downgraded };
+export function missingDischargeDayNote(
+  events: readonly EpisodeEvent[], losDays: number | null,
+): EpisodeFinding | null {
+  const dischargeDay = events.find(isDischargeEvent)?.day_index
+    ?? (typeof losDays === 'number' ? losDays : null);
+  if (dischargeDay == null) return null;
+  // Only PROGRESS NOTES count here. A handover is a nursing record and an OT note is a procedure
+  // record; neither is the clinical entry a discharge decision should rest on.
+  const hasNote = events.some((e) => e.event_type === 'note' && e.day_index === dischargeDay);
+  if (hasNote) return null;
+  // A same-day admission and discharge has no "discharge day" gap worth reporting: day 0 carries
+  // the admission record itself, and a LOS-0 stay is a different kind of episode.
+  if (dischargeDay === 0) return null;
+  const anyNote = events.find((e) => e.event_type === 'note');
+  return {
+    finding_id: MISSING_DISCHARGE_NOTE_ID,
+    pass: 'divergence',
+    finding_type: 'omission',
+    verdict: 'divergent',
+    domain: 'documentation',
+    day_index: dischargeDay,
+    checkpoint_ref: null,
+    statement: `No progress note was written on the discharge day (day ${dischargeDay}). `
+      + 'The decision to discharge was recorded without a same-day clinical entry to support it.',
+    severity: 'major',
+    evidence_tier: 'A',
+    // The absence is established AGAINST the progress-note table. Citing a real note from another
+    // day is what makes the claim checkable: this table was in use, and it has nothing that day.
+    evidence_basis: anyNote
+      ? [{
+          source_table: anyNote.provenance.source_table,
+          source_record_id: anyNote.provenance.source_record_id,
+          source_timestamp: anyNote.provenance.source_timestamp,
+        }]
+      : [],
+    author_name: null, author_role: null, responsible_clinician_id: null,
+    lvc_category: null,
+    citation_ids: [], citation_provenance: null,
+    verdict_before_cap: 'divergent', severity_before_cap: 'major', capped: false,
+    // ⚠️ `absent_class_present`, NOT null, AND THE FIRST VERSION OF THIS WAS DELETED FOR WANT OF
+    // IT. `dropJudgedOmissions` identifies a code-owned omission by its `resolution` and drops
+    // every other divergence-pass omission as a judgement the model had no business making. With
+    // `resolution: null` this finding matched that description exactly: IP-1483, IPNO-495 and
+    // IPNO-416 all have no note on their discharge day, and all three runs reported "1 omission
+    // finding dropped" — which was this one, deleted on the way out and counted against the diff
+    // pass. The unit test passed throughout, because it tested the constructor and not the chain.
+    //
+    // The value is also the honest one: progress notes ARE represented in the episode, and there
+    // is none on this day. That is `absent_class_present` in the resolver's own vocabulary.
+    resolution: 'absent_class_present', matcher_kind: 'note', matcher_terms: null,
+    matched_term: null,
+    confound: null,
+    group_size: 1, grouped_refs: [], grouped_days: [],
+  };
 }
 
 // ── attribution (PRD §5) ─────────────────────────────────────────────────────────────────────
@@ -1121,8 +1102,6 @@ export interface FinalizeResult {
   n_billing_only_capped: number;
   /** Judged findings rewritten to `unassessable` for naming an escalation entry (round 18 item 2). */
   n_escalation_unassessable: number;
-  /** Asserted absences another finding in the same audit contradicted (round 23 item 6). */
-  n_contradictions_downgraded: number;
   n_fidelity_normalized: number;
   /** Findings whose severity was cut from major because only literature backed them. */
   n_literature_capped: number;
@@ -1198,23 +1177,16 @@ export function finalizeFindings(
     };
     return attachAttribution(stamped, events);
   });
-
-  // ITEM 6: the last gate before emission, and the only one that reads findings against EACH OTHER.
-  const contradiction = resolveContradictions(findings);
-  const emitted = contradiction.findings;
-  // ⚠️ EVERY NUMBER BELOW READS `emitted`, NOT `findings`. A contradiction that is downgraded in the
-  // report but still counted as divergent in the score would make item 6 cosmetic — the reader
-  // would see the caveat and the arithmetic would ignore it.
   return {
-    findings: emitted,
+    findings,
     counters: {
-      ...countFindings(emitted, dropped, parseFailed),
+      ...countFindings(findings, dropped, parseFailed),
       n_unassessable_rejected: unassessableRejected,
       n_judged_omissions_dropped: omissionDrop.dropped,
     },
-    divergence_index: divergenceIndex(emitted),
-    penalty_total: penaltyTotal(emitted),
-    expectations_evaluated: expectationsEvaluated(emitted),
+    divergence_index: divergenceIndex(findings),
+    penalty_total: penaltyTotal(findings),
+    expectations_evaluated: expectationsEvaluated(findings),
     n_tier_c_rewritten: rewritten,
     n_uncited_capped: capped,
     n_fidelity_normalized: normalized,
@@ -1225,8 +1197,6 @@ export function finalizeFindings(
     n_uncited_entries: uncitedEntries,
     n_billing_only_capped: billingCapped,
     n_escalation_unassessable: escalationRewritten,
-    /** ROUND 23 ITEM 6: absences the engine's own evidence contradicted. */
-    n_contradictions_downgraded: contradiction.downgraded,
     n_unassessable_rejected: unassessableRejected,
     n_judged_omissions_dropped: omissionDrop.dropped,
     capped_finding_ids,
@@ -1362,7 +1332,7 @@ export function bandIsUncertain(
 
 // ── scoring status (item 5) ──────────────────────────────────────────────────────────────────
 
-export const SCORING_STATUSES = ['ok', 'no_expectations', 'nothing_evaluable', 'all_capped', 'incomplete_checkpoints'] as const;
+export const SCORING_STATUSES = ['ok', 'no_expectations', 'all_capped', 'incomplete_checkpoints'] as const;
 export type ScoringStatus = (typeof SCORING_STATUSES)[number];
 
 /**
@@ -1398,16 +1368,6 @@ export function scoringStatusFor(a: {
   // is missing a whole day is not a low score or a high score, it is not a score, and presenting
   // one is the most dangerous thing this engine has done.
   if ((a.incompleteCheckpoints ?? 0) > 0) return 'incomplete_checkpoints';
-  // ⚠️ ROUND 23 ITEM 8 — NOTHING EVALUABLE IS A FAILURE, NOT A ZERO.
-  //
-  // IPNO-495's first run stored `divergence_index 0` with `scoring_status ok` on
-  // `expectations_evaluated = 0`. A rate with an empty denominator is not a score of zero; it is
-  // the absence of a score, and zero is the WORST value on this scale — the arithmetic silently
-  // reported the most alarming possible reading of an episode nothing had been measured on.
-  //
-  // Every finding unassessable means the denominator is empty. `divergenceIndex` already returns
-  // null there; this makes the row SAY so rather than leaving a null beside an `ok`.
-  if (a.findings.length > 0 && a.findings.every((f) => f.verdict === 'unassessable')) return 'nothing_evaluable';
   if (a.totalExpectedEntries === 0) return 'no_expectations';
   if (a.findings.length > 0 && a.findings.every((f) => a.cappedFindingIds.has(f.finding_id))) return 'all_capped';
   return 'ok';
@@ -1419,7 +1379,7 @@ export function storedDivergenceIndex(index: number | null, status: ScoringStatu
   // Both of these mean "there is no number here": no expectation was formed at all, or part of the
   // expected course is missing. `all_capped` keeps its number — that arithmetic is real, it is just
   // weakly evidenced, and the status says so.
-  if (status === 'no_expectations' || status === 'incomplete_checkpoints' || status === 'nothing_evaluable') return null;
+  if (status === 'no_expectations' || status === 'incomplete_checkpoints') return null;
   // Round 15: the rate is itself null when nothing assessable was measured, and that null means
   // the same thing — there is no number here — so it passes straight through.
   return index;
@@ -1470,10 +1430,8 @@ const TIER_RANK: Record<EvidenceTier, number> = { A: 0, B: 1, C: 2 };
  * The matcher's terms are folded in as canonical words too, which is what pulls the six stent
  * findings together: whatever each day's phrasing, they all reduce to {stent}.
  *
- * `resolution` STAYS IN THE KEY (decision 45), for round 12's reason: a day the thing happened must
- * never merge into a group saying it did not. `verdict` does not — it is a function of the
- * resolution and the evidence, so keying on both split classes that resolved identically without
- * ever preventing a merge that `resolution` alone would have allowed.
+ * `resolution` and `verdict` STAY IN THE KEY, unchanged from round 12 and for the same reason: a
+ * day the thing happened must never merge into a group saying it did not.
  */
 export function expectationSubject(entry: ResolvableEntry): string {
   // The matcher terms are folded in ONLY when the item text yielded no concept of its own —
@@ -1492,36 +1450,8 @@ export function expectationSubject(entry: ResolvableEntry): string {
   return sorted.length ? sorted.join('+') : `text:${entry.item.trim().toLowerCase()}`;
 }
 
-/**
- * ROUND 23 ITEM 5, AS CORRECTED BY DECISION 45 — STANDING EXPECTATIONS DEDUPLICATE ACROSS
- * CHECKPOINTS, BUT NEVER ACROSS RESOLUTIONS.
- *
- * The half of round 23 that was right: on IPNO-495, 27 of 29 divergent findings were `group_size`
- * 1, and one standing concern raised at six checkpoints was charged six times. THE DAY LEAVES THE
- * KEY, so an expectation restated every day is one finding.
- *
- * ⚠️ DECISION 45 (V, 2026-09-05) — RESOLUTION COMES BACK INTO THE KEY, AND THE TERM-OVERLAP MERGE
- * IS GONE. Round 23 took both out together and the result was findings that said something false:
- *
- *   · IPNO-495 r-16, `group_size` 8, read "The record shows it: lab_order on day 5 matching cbc" —
- *     TWO BLOOD-CULTURE DIVERGENCES merged into a CBC match, because their matcher terms overlapped
- *     enough for the second pass to call them one class. The finding then reported the CBC as the
- *     evidence for the cultures.
- *   · IPNO-495 r-29, `group_size` 5, let ONE day-5 note ("peripheral pulses present") speak for
- *     days 5, 6, 7, 8 and 10 — four days on which nothing was checked at all.
- *
- * Both are the round-12 defect returning by a new route: a day the thing happened absorbing days it
- * did not. Round 12 called that concordant-erasure and fixed it by putting `resolution` in the key.
- * The key is `section | subject | resolution` again, and there is no second pass: two expectations
- * are one class when their SUBJECTS canonicalise alike, never because their term lists resemble
- * each other. Wording similarity is not identity, and this engine does not infer from resemblance.
- *
- * The best-evidenced-member rank stays. It is no longer load-bearing for correctness — every member
- * of a group now shares a resolution — but it still picks the member carrying an actual matched
- * event to speak for the group, which is the one whose statement can be checked.
- */
 export function resolverGroupKey(entry: ResolvableEntry, outcome: ResolvedOutcome): string {
-  return `${entry.section}|${expectationSubject(entry)}|${outcome.resolution}`;
+  return `${entry.section}|${expectationSubject(entry)}|${outcome.resolution}|${outcome.verdict}`;
 }
 
 /**
@@ -1540,13 +1470,9 @@ export function findingsFromResolved(
   }
 
   return [...groups.values()].map((members, i) => {
-    // THE BEST-EVIDENCED MEMBER SPEAKS FOR THE GROUP. Under decision 45 every member shares a
-    // resolution, so this can no longer let a found day absorb a missed one — it picks, among days
-    // that resolved alike, the one carrying a matched event, whose statement a reader can check.
-    const rank = (m: { outcome: ResolvedOutcome }) =>
-      (m.outcome.matchedEvent ? 4 : 0) + (m.outcome.resolution === 'present' ? 2 : 0)
-      + (m.outcome.verdict === 'concordant' ? 1 : 0);
-    const withEvent = [...members].sort((a, b) => rank(b) - rank(a))[0];
+    // The member that carries the evidence: the first one that actually matched an event. A group
+    // of absences has none, and its basis is empty — the same as before grouping.
+    const withEvent = members.find((m) => m.outcome.matchedEvent) ?? members[0];
     const { entry, outcome } = withEvent;
     const days = [...new Set(members.map((m) => m.entry.dayIndex))].sort((a, b) => a - b);
     const refs = members.map((m) => m.entry.ref);

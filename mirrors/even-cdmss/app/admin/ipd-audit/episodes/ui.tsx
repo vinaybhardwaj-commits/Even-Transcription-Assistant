@@ -59,57 +59,37 @@ export function DivergenceCounts({ penalty, evaluated, divergent }: {
   );
 }
 
-/**
- * DECISION 50 (V, 2026-09-05) — NO BAND IS RENDERED ANYWHERE. `DivergenceChip` is removed.
- *
- * The band was a rate wearing a steadier-looking label. It is a function of the index, so it moves
- * with it, and once decision 44 removed every unverified absence from the score, 11 of 16 episodes
- * banded identically — a column that separated nothing while reading as a judgement. Round 24 took
- * it off the list; this takes it off the detail page too.
- *
- * `divergence_band` is still computed and still stored, so history stays comparable, and
- * `divergenceBandFor` and its tests are untouched. What ends is the RENDERING.
- */
-
-/** DECISION 51 — the threshold below which no rate is worth comparing. */
-export const INSUFFICIENT_RECORD_BELOW = 30;
-
-/**
- * ⚠️ THIS IS NOT A SCORE, AND IT SITS BESIDE ONE THAT CANNOT CARRY WEIGHT. An episode with fewer
- * than 30 evaluated expectations divides a small penalty by a small denominator, so the rate swings
- * on a single finding. Three Step C episodes scored exactly 100 on admissions the engine could
- * barely see — a perfect number that reads as an endorsement rather than an absence of evidence.
- * Below the threshold both surfaces say so in words, and show the count it rests on.
- */
-export function InsufficientRecord({ evaluated }: { evaluated: number | null }) {
-  if (evaluated == null || evaluated >= INSUFFICIENT_RECORD_BELOW) return null;
-  return (
-    <span className="inline-flex items-baseline gap-1.5 rounded-md bg-amber-50 px-2 py-0.5"
-      title={`Fewer than ${INSUFFICIENT_RECORD_BELOW} expectations could be evaluated on this admission. The index is computed but rests on too little to compare against other episodes.`}>
-      <span className="text-[12px] font-semibold text-amber-800">insufficient record</span>
-      <span className="tabular-nums text-[11px] text-amber-700">{evaluated} evaluated</span>
-    </span>
-  );
-}
-
-/**
- * ⚠️ THE BAND IS GONE BUT THE REFUSAL IS NOT. `DivergenceChip` carried two jobs: it rendered a band,
- * and it refused to render one when `scoring_status` said the episode could not be scored. Decision
- * 50 ends the first. The second must survive it — an episode whose expected course has a hole in it
- * still has to say so in words, or a reader sees only counts and assumes they are complete.
- */
-export function ScoringNote({ status }: { status?: string | null }) {
+export function DivergenceChip({ band, uncertain, status }: {
+  band: string | null; uncertain?: boolean; status?: string | null;
+}) {
   const st = status ?? 'ok';
-  if (st === 'ok') return null;
-  const why = st === 'no_expectations' ? 'no checkpoint produced an expected course, so nothing could be measured'
-    : st === 'incomplete_checkpoints' ? 'a checkpoint failed or produced no entries — part of the expected course is missing, so there is nothing to score against'
-    : st === 'nothing_evaluable' ? 'every finding was unassessable — nothing in this episode could be measured, so there is no rate to report'
-    : st === 'all_capped' ? 'every finding was capped — nothing survived at full weight'
-    : 'this episode was not scored';
+  if (st !== 'ok' || !band) {
+    const why = st === 'no_expectations' ? 'no checkpoint produced an expected course, so nothing could be measured'
+      : st === 'incomplete_checkpoints' ? 'a checkpoint failed or produced no entries — part of the expected course is missing, so there is nothing to score against'
+      : st === 'all_capped' ? 'every finding was capped — nothing survived at full weight'
+      : 'no band was stored for this episode';
+    return (
+      <span className="inline-flex items-baseline gap-1" title={why}>
+        <span className="text-[13px] font-semibold text-amber-700">not scorable</span>
+        <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">
+          {st === 'ok' ? 'no band' : st.replace(/_/g, ' ')}
+        </span>
+      </span>
+    );
+  }
+  const tone = band === 'substantial divergence' ? 'text-red-800'
+    : band === 'moderate divergence' ? 'text-amber-800'
+    : band === 'minor divergence' ? 'text-slate-700' : 'text-emerald-800';
   return (
-    <span className="inline-flex items-baseline gap-1" title={why}>
-      <span className="text-[13px] font-semibold text-amber-700">not scorable</span>
-      <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{st.replace(/_/g, ' ')}</span>
+    <span className="inline-flex flex-wrap items-baseline gap-x-1.5"
+      title="Reported as a band because the underlying index moves between runs on identical input — by a measured amount, which the band is wider than">
+      <span className={`text-[13.5px] font-semibold ${tone}`}>{band}</span>
+      {uncertain ? (
+        <span className="text-[10.5px] font-medium text-amber-700"
+          title="This episode's own penalty, moved by the repeat-run spread measured on identical input, would put it in a different band — so a re-run could land it either side of this line. Computed from this episode's figures, not from a fixed window: the same wobble matters less on an admission with more expectations to divide it across.">
+          (near boundary)
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -137,9 +117,9 @@ export function InternalIndex({ index, uncertain, penalty, evaluated }: {
           about one on a 51-expectation admission, less on a longer one. Quoting "±5" against the
           rate would overstate the noise fourfold; quoting any single figure would be wrong for
           every episode but one. What is true on all of them is the SHAPE of the claim. */}
-      <span title="This episode's own penalty, moved by the repeat-run spread measured on identical input, would put it in a different band — so a re-run could land it either side of that line. Computed from this episode's figures, not from a fixed window: the same wobble matters less on an admission with more expectations to divide it across.">
+      <span>
         moves between runs on identical input — not a per-case ranking
-        {uncertain ? ', and the repeat-run spread on this episode is wide enough to cross a threshold' : ''}
+        {uncertain ? ', and this episode sits close enough to a band threshold that a re-run could cross it' : ''}
       </span>
     </span>
   );
