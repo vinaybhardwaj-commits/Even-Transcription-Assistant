@@ -7,7 +7,6 @@
 // so the labels stay blind to each other. Keys are built only from a whitelisted set name + the hash, so no request can name another key.
 import { PAGES } from "./rate_pages.js";
 import { hubPage } from "./hub.js";
-import { isBlindKey, BLIND_MSG } from "./blind.js";
 
 const LABELS = ["readable", "romanised_readable", "garbled", "wrong_language", "unsure"];
 const TAGS_L = ["diff_lang_speakers", "code_mixed", "crosstalk", "non_clinical", "partly_readable", "med_terms_wrong", "audio_poor", "words_missing"];   // 421c(A): optional descriptive tags on label200, stable keys, never scored, never gate a save
@@ -56,34 +55,6 @@ export const SETS = {
       return allowed.includes(o.a) && (o.mode === "audio" || o.mode === "text") && (o.g === undefined || typeof o.g === "boolean") && optStr(o.ts, 40) ? o : null;
     },
   },
-  pitch25: {   // W46/W49 (Fable 15:18, surg-link's PITCH-SCHEMA-SPEC.md): a keyword hit Jev judged "no pitch" - did Jev miss a real pitch?
-    rows: "rows", answers: "labels", maxIds: 60,
-    row: (x) => ({
-      id: str(x.id, 40), day: str(x.day, 12), reason: str(x.reason, 240), link_status: ["confirmed", "probable"].includes(x.link_status) ? x.link_status : "",
-      turns: (Array.isArray(x.turns) ? x.turns : []).slice(0, 400).map((t) => ({ i: num(t?.i), lang: str(t?.lang, 12) || "und", text: str(t?.text, 3000) })),
-      jev: Object.fromEntries(Object.keys(PITCH_FIELDS).map((k) => {
-        const f = x.jev && typeof x.jev === "object" ? x.jev[k] : null;
-        return [k, { value: f && PITCH_FIELDS[k].includes(f.value) ? f.value : "", p_yes: f && typeof f.p_yes === "number" && Number.isFinite(f.p_yes) && f.p_yes >= 0 && f.p_yes <= 1 ? Math.round(f.p_yes * 100) / 100 : null }];
-      })),
-    }),
-    value: (v) => {
-      const o = only(v, ["action", "fields", "note", "ts"]);
-      if (!o || !["confirm_none", "missed_pitch", "unsure"].includes(o.action)) return null;
-      if (o.action === "missed_pitch") {
-        const f = o.fields;
-        const keys = Object.keys(PITCH_FIELDS);
-        if (!f || typeof f !== "object" || Object.keys(f).length !== keys.length) return null;
-        if (!keys.every((k) => f[k] === "agree" || PITCH_FIELDS[k].includes(f[k]))) return null;
-      } else if (o.fields !== undefined) return null;   // fields only make sense when correcting a missed pitch
-      return optStr(o.note, 1000) && optStr(o.ts, 40) ? o : null;
-    },
-  },
-};
-// the six fields' allowed override values (surg-link's PITCH-SCHEMA-SPEC.md); "agree" (accept Jev's own proposal) is always additionally allowed
-const PITCH_FIELDS = {
-  pitched_surgery: ["yes", "no"], pitched_intervention: ["yes", "no"],
-  procedure_family: ["surgery_general", "surgery_ortho", "cath_angio", "endoscopy", "injection", "biopsy", "physio_procedural", "other", "none"],
-  doctor_recommended: ["yes", "no"], patient_agreed: ["yes", "no"], patient_deferred: ["yes", "no"],
 };
 const str = (s, max) => (typeof s === "string" ? s.slice(0, max) : "");
 const num = (v) => (Number.isFinite(+v) ? +v : 0);
@@ -105,7 +76,7 @@ async function seedRows(env, set) {
   let d; try { d = JSON.parse(await o.text()); } catch { return null; }
   const s = SETS[set], list = Array.isArray(d) ? d : d?.[s.rows];
   if (!Array.isArray(list)) return null;
-  const rows = list.filter((x) => x && typeof x === "object").map(s.row).filter((r) => r.id && (set === "label200" || set === "calib30" ? (r.kind === "B" ? r.text_A.trim() && r.text_B.trim() : r.text.trim()) : set === "ba106" ? r.text_A.trim() && r.text_B.trim() : set === "pitch25" ? r.turns.length : r.lines.length));
+  const rows = list.filter((x) => x && typeof x === "object").map(s.row).filter((r) => r.id && (set === "label200" || set === "calib30" ? (r.kind === "B" ? r.text_A.trim() && r.text_B.trim() : r.text.trim()) : set === "ba106" ? r.text_A.trim() && r.text_B.trim() : r.lines.length));
   return new Set(rows.map((r) => r.id)).size === rows.length ? rows : null;   // ids unique, or the seed is unusable
 }
 
@@ -156,7 +127,6 @@ export async function rateRoute(request, env, url, who, pageShell) {
     if (!c || typeof c.k !== "string" || !Number.isInteger(c.i) || c.i < 0 || c.i > 5000) return json(404, { error: "no clip for this id" });
     const parts = c.k.split("/");
     if (parts.length !== 4 || parts.some((p) => !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(p))) return json(500, { error: "clip map invalid" });   // ONE alphabet with make_calib30 (no dots anywhere: window ids never carry them; ".." is unreachable by construction); /api/window re-validates via windowKey->parseKey
-    if (isBlindKey(c.k)) return json(403, { error: BLIND_MSG });   // R3/W51 room-day: no clip, no audio
     const t0 = Number(c.t0), t1 = Number(c.t1);
     if (!Number.isFinite(t0) || !Number.isFinite(t1) || t0 < 0 || t1 <= t0 || t1 > 4 * 3600) return json(500, { error: "clip map times invalid" });
     let gloss = null;
@@ -213,14 +183,4 @@ export async function rateRoute(request, env, url, who, pageShell) {
   await env.RATINGS.put(`rate-history/${set}/${h}/${now.getTime()}.json`, doc, { httpMetadata: { contentType: "application/json" } });   // every version kept
   await env.RATINGS.put(key, doc, { httpMetadata: { contentType: "application/json" } });
   return json(200, { ok: true, saved: ids.length });
-}
-
-// W49 P2's view log (Fable 14:50): a trail, not a gate - who opened which recording, when. This is the ONLY other place this
-// Worker writes (the guard test in viewer.test.js names exactly three prefixes: rate/, rate-history/, viewlog/). One small
-// object per view, keyed so concurrent viewers never race; a write failure never blocks the view (best-effort, per Fable's order).
-export async function logView(env, who, room, date, key) {
-  if (!env.RATINGS || typeof who?.email !== "string") return;
-  const at = new Date();
-  const doc = JSON.stringify({ who: who.email, at: at.toISOString(), room, date, key });
-  try { await env.RATINGS.put(`viewlog/${date}/${at.getTime()}-${Math.random().toString(36).slice(2, 8)}.json`, doc, { httpMetadata: { contentType: "application/json" } }); } catch { /* a trail, not a gate */ }
 }
