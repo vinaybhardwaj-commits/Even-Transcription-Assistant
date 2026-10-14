@@ -329,12 +329,22 @@ test('§5.6 rerankBackend:cohere reaches retrieve() — carried in the opts and 
     { topK: 8, useReranker: true, useSourceWeights: true, hybrid: true, useNormativeLeg: true, rerankBackend: 'cohere' });
   // thread integrity, enforced at the source so a refactor cannot silently drop the parameter:
   const audit = readFileSync('lib/opd-note-audit.ts', 'utf8');
-  assert.ok(audit.includes('defaultRetrieve(query, mini, opts.evalNormativeLeg, opts.rerankBackend)'),
-    'auditOpdNote must pass opts.rerankBackend into its retrieve');
+  // RE-PINNED (rerank telemetry on-path, D4). The old assertion matched the whole call
+  // `defaultRetrieve(query, mini, opts.evalNormativeLeg, opts.rerankBackend)`; the telemetry
+  // capture is a TRAILING fifth argument, so that exact string no longer appears. The invariant is
+  // unchanged and is asserted more precisely: `opts.rerankBackend` is still the FOURTH positional
+  // argument of that call, which is the thing a refactor could silently drop.
+  assert.ok(/defaultRetrieve\(query, mini, opts\.evalNormativeLeg, opts\.rerankBackend[,)]/.test(audit),
+    'auditOpdNote must pass opts.rerankBackend into its retrieve, in position 4');
+  assert.ok(/defaultRetrieve\(query, mini, opts\.evalNormativeLeg, opts\.rerankBackend, primaryCapture\)/.test(audit),
+    'and the capture is TRAILING — it may never displace the backend');
   assert.ok(audit.includes('opdRetrieveOpts(mini, process.env, evalNormativeLeg, rerankBackend)'),
     'defaultRetrieve must forward the backend into the opts builder');
   const retrieveSrc = readFileSync('lib/retrieve.ts', 'utf8');
   assert.ok(retrieveSrc.includes('opts.rerankBackend'), 'retrieve() must still forward the backend to rerank()');
+  // and it reaches rerank() in position 3, ahead of both deps and the capture
+  assert.ok(/rerank\(query, hits\.map\([\s\S]{0,200}?\)\), opts\.rerankBackend, undefined, capture\)/.test(retrieveSrc),
+    'the backend stays third; deps and capture follow it');
   const lab = readFileSync('lib/lab-batch.ts', 'utf8');
   assert.ok(lab.includes('rerankBackend: evalCfg.rerankBackend'),
     'the lab entry point that accepts evalModel must expose rerankBackend beside it');

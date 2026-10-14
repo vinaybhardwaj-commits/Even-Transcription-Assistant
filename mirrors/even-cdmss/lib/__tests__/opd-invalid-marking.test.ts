@@ -186,11 +186,8 @@ test('EVERY enumerated aggregate/display reader excludes marked rows', () => {
     'lib/opd-gov-read.ts',                     // per-doctor governance read
     'app/care/page.tsx',                       // care landing counts
     'app/api/care/review-queue/route.ts',      // review queue
-    'lib/triage/queue-read.ts',                // triage Action queue (UI + admin share this read)
-    // ⚠️ RE-POINTED (stewardship MS ship, S2, 29 Aug 2026): the rollup's SQL moved off the page
-    // into the shared 90-day fragment, which is where the exclusion now lives for the board, the
-    // department roll-up, the danger queue and the room's Ask box alike.
-    'lib/stewardship-canonical.ts',            // stewardship rollup (board + danger queue + Ask)
+    'app/api/opd-triage/queue/route.ts',       // triage queue
+    'app/admin/stewardship/page.tsx',          // stewardship rollup
     'lib/even-concept.ts', 'lib/even-ground.ts', 'lib/even-lvc.ts',  // Even app surfaces
     'lib/learning.ts',                         // learning digests
   ]) {

@@ -10,10 +10,8 @@
     { "path": "/api/cron/harvest-epmc", "schedule": "0 3 * * *" },
     { "path": "/api/cron/curator", "schedule": "0 5 * * 1" },
     { "path": "/api/opd-audit/worker", "schedule": "*/4 18-23,0-2 * * *" },
-    { "path": "/api/opd-audit/worker", "schedule": "30 8 * * *" },
     { "path": "/api/ipd-audit/worker", "schedule": "*/15 1-5 * * *" },
-    { "path": "/api/readmission/worker", "schedule": "*/30 * * * *" },
-    { "path": "/api/preop/worker", "schedule": "30 0-16 * * *" },
+    { "path": "/api/readmission/worker", "schedule": "*/15 1-5 * * *" },
     { "path": "/api/learning/mine", "schedule": "0 1 * * *" },
     { "path": "/api/admin/sync-doctor-directory", "schedule": "30 4 * * *" },
     { "path": "/api/admin/refresh-doctor-metrics", "schedule": "0 4 * * *" },
@@ -21,14 +19,9 @@
     { "path": "/api/admin/lab-batch?auto=1", "schedule": "*/2 * * * *" },
     { "path": "/api/admin/complexity-backfill?auto=1", "schedule": "*/2 * * * *" },
     { "path": "/api/admin/opd-audit/longitudinal-replay?auto=1", "schedule": "*/10 * * * *" },
-    { "path": "/api/care/patterns/generate?auto=1", "schedule": "30 0 * * *" },
+    { "path": "/api/care/lvc/generate?auto=1", "schedule": "0 6 * * *" },
     { "path": "/api/care/lvc/ground?auto=1", "schedule": "*/10 * * * *" },
     { "path": "/api/care/concept/code?auto=1", "schedule": "*/2 * * * *" },
-    { "path": "/api/admin/shadow-sweep?auto=1", "schedule": "0 */6 * * *" },
-    { "path": "/api/admin/wm3-join?auto=1", "schedule": "0 1,7,13,19 * * *" },
-    { "path": "/api/ipd-episode/worker?auto=1", "schedule": "30-59/10 16 * * *" },
-    { "path": "/api/ipd-episode/worker?auto=1", "schedule": "*/10 17-23 * * *" },
-    { "path": "/api/ipd-episode/worker?auto=1", "schedule": "0-30/10 0 * * *" },
-    { "path": "/api/admin/lab-v2/tick?auto=1", "schedule": "*/2 * * * *" }
+    { "path": "/api/admin/retrieval-telemetry-reconcile", "schedule": "1 10 * * *" }
   ]
 }
