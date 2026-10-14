@@ -34,7 +34,7 @@ subscriber_loop() {
   local topic payload backoff=2
   [ -n "$GUARDIAN_SUBSCRIBE_CMD" ] || return 0
   while :; do
-    bash -c "$GUARDIAN_SUBSCRIBE_CMD" _ "$GUARDIAN_ROOM" 2>/dev/null | while IFS="$(printf '\t')" read -r topic payload; do
+    bash -c "$GUARDIAN_SUBSCRIBE_CMD" _ "$GUARDIAN_ROOM" </dev/null 2>/dev/null | while IFS="$(printf '\t')" read -r topic payload; do
       handle_message "$topic" "$payload"
     done
     audit "subscriber exited; retry in ${backoff}s"
@@ -55,7 +55,7 @@ control_loop() {
   local line backoff=2
   [ -n "$GUARDIAN_CONTROL_SUB_CMD" ] || return 0
   while :; do
-    bash -c "$GUARDIAN_CONTROL_SUB_CMD" _ "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" 2>/dev/null | while IFS= read -r line; do
+    bash -c "$GUARDIAN_CONTROL_SUB_CMD" _ "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | while IFS= read -r line; do
       [ -n "$line" ] && control_store "$line"
     done
     audit "control subscriber exited; retry in ${backoff}s"
@@ -64,16 +64,32 @@ control_loop() {
   done
 }
 
+# Kill the loops' process groups. Idempotent; runs on TERM/INT/HUP and on every exit of main.
+LOOP_PIDS=""
+WATCHDOG_PID=""
+stop_loops() {
+  local p
+  [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null
+  for p in $LOOP_PIDS; do kill -TERM -- "-$p" 2>/dev/null; kill "$p" 2>/dev/null; done
+  LOOP_PIDS=""
+}
+
 run() {
-  local t0 t1 sub ctl
+  local t0 t1 sub ctl main=$$
   [ -n "$GUARDIAN_ROOM" ] || { echo "GUARDIAN_ROOM not set" >&2; exit 2; }
   audit "guardian start version=$GUARDIAN_VERSION"
+  trap stop_loops EXIT
+  trap 'exit 0' TERM INT HUP
   # Job control gives each loop its own process group, so TERM reaches the pipeline children (bash -c, ssh) too.
   set -m
   subscriber_loop & sub=$!
   control_loop & ctl=$!
   set +m
-  trap 'kill -TERM -- -$sub -$ctl 2>/dev/null; kill $sub $ctl 2>/dev/null; exit 0' TERM INT
+  LOOP_PIDS="$sub $ctl"
+  # SIGKILL of main cannot run a trap, and the loops are outside the launchd job's group: a watchdog kills them when main is gone.
+  ( while kill -0 "$main" 2>/dev/null; do sleep 1; done
+    kill -TERM -- "-$sub" "-$ctl" 2>/dev/null; kill "$sub" "$ctl" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+  WATCHDOG_PID=$!
   while :; do
     t0="$(now_epoch)"
     flag_poll

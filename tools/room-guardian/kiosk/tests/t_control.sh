@@ -251,3 +251,127 @@ test_term_kills_the_subscriber_pipelines() {
   assert_eq "$left" "0" "no orphan subscriber process after TERM"
   kill -0 "$gp" 2>/dev/null && { kill -9 "$gp"; fail "guardian did not exit on TERM"; } || ok
 }
+
+# ---- R3 ----
+test_missing_top_level_kill_is_killed_wherever_a_nested_kill_sits() {
+  use_ctl
+  ctl_engaged 1 '{"meta": {"kill": false}, "modes": {"opd9": "heal"}}'; assert_rc $? 0 "nested in meta object"
+  ctl_engaged 1 '{"modes": {"opd9": "heal"}, "meta": {"kill": false}}'; assert_rc $? 0 "nested in meta after modes"
+  ctl_engaged 1 '{"list": [{"kill": false}], "modes": {"opd9": "heal"}}'; assert_rc $? 0 "inside an array of objects"
+  ctl_engaged 1 '{"list": ["kill", false], "modes": {"opd9": "heal"}}'; assert_rc $? 0 "kill word inside an array"
+  ctl_engaged 1 '{"modes": {"opd9": "heal", "kill": false}}'; assert_rc $? 0 "inside modes"
+  ctl_engaged 1 '{"modes": {"opd9": {"kill": false}}}'; assert_rc $? 0 "deep inside modes"
+  ctl_engaged 1 '{"modes": {"opd9": "heal"}, "after": {"kill": false}}'; assert_rc $? 0 "in an object after modes"
+  ctl_engaged 1 '{"note": "{\"kill\": false}", "modes": {"opd9": "heal"}}'; assert_rc $? 0 "inside a string"
+  ctl_engaged 1 '{"note": "x", "kill_switch": false, "modes": {"opd9": "heal"}}'; assert_rc $? 0 "other key that starts with kill"
+  ctl_engaged 1 '{"meta": {"kill": false}, "modes": {"opd9": "heal"}, "ts": '"$GUARDIAN_FAKE_NOW"'}'; assert_rc $? 0 "nested kill with a valid ts"
+  assert_eq "$(current_mode)" "shadow" "shadow in every missing-kill case"
+  ctl_engaged 1 '{"k\u0069ll": false, "modes": {"opd9": "heal"}}'; assert_rc $? 0 "escaped key name"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}} trailing'; assert_rc $? 0 "junk after the object"
+  ctl_engaged 1 '{"kill": [false], "modes": {}}'; assert_rc $? 0 "kill as an array"
+  ctl_engaged 1 '{"kill": {"x": false}, "modes": {}}'; assert_rc $? 0 "kill as an object"
+  ctl_engaged 1 '{"kill": null, "modes": {}}'; assert_rc $? 0 "kill null"
+}
+
+test_exact_live_payload_still_clear() {
+  use_ctl
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"opd2\": \"shadow\", \"opd9\": \"heal\"}, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 1 "live shape, heal room"
+  assert_eq "$(current_mode)" "heal" "live shape gives heal"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"opd9\": \"shadow\"}, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 1 "live shape, shadow room"
+  assert_eq "$(current_mode)" "shadow" "live shape gives shadow"
+  ctl_engaged 1 "{\"kill\":false,\"modes\":{\"opd9\":\"heal\"},\"ts\":$GUARDIAN_FAKE_NOW}"; assert_rc $? 1 "compact"
+  assert_eq "$(current_mode)" "heal" "compact gives heal"
+}
+
+test_nested_modes_key_in_meta_is_not_read_as_modes() {
+  use_ctl
+  ctl_engaged 1 '{"kill": false, "meta": {"modes": {"opd9": "heal"}}, "modes": {}}'; assert_rc $? 1 "clear"
+  assert_eq "$(current_mode)" "shadow" "nested modes ignored"
+}
+
+test_leading_zero_ts_does_not_crash_and_fails_closed() {
+  use_ctl
+  local err
+  err="$T/err.txt"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": 09}' 2>"$err"; assert_rc $? 0 "ts 09 (a value of 9 is stale)"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": 0123}' 2>>"$err"; assert_rc $? 0 "ts 0123 (stale)"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": 08}' 2>>"$err"; assert_rc $? 0 "ts 08"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"opd9\": \"heal\"}, \"ts\": 0$GUARDIAN_FAKE_NOW}" 2>>"$err"; assert_rc $? 1 "a zero-padded current epoch is read as base 10 and is fresh"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "ts": 0x10}' 2>>"$err"; assert_rc $? 0 "hex-looking ts"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "ts": 99999999999999999999}' 2>>"$err"; assert_rc $? 0 "too many digits"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "ts": 1 2}' 2>>"$err"; assert_rc $? 0 "two numbers"
+  assert_eq "$(cat "$err")" "" "no bash arithmetic error text"
+  # receive epoch (line 1 of control.last) with a leading zero
+  rm -f "$STATE_DIR/control_latch"
+  { printf '0%s\n' "$((GUARDIAN_FAKE_NOW - 1))"; printf '%s\n' "$HEAL"; } >"$STATE_DIR/control.last"
+  flag_fetch 2>"$err"; killswitch_engaged 2>>"$err"; assert_rc $? 1 "zero-padded receive epoch is base 10"
+  { printf '09\n%s\n' "$HEAL"; } >"$STATE_DIR/control.last"
+  flag_fetch 2>>"$err"; killswitch_engaged 2>>"$err"; assert_rc $? 0 "receive epoch 09 is ancient"
+  assert_eq "$(cat "$err")" "" "no arithmetic error from the receive epoch"
+}
+
+# ---- orphans ----
+# count of processes whose command is exactly "sleep <n>"
+sleepers() { /bin/ps -axo command | grep -c "^sleep $1\$"; }
+
+test_main_error_exit_leaves_no_subscriber() {
+  load_libs
+  export GUARDIAN_CONTROL_SUB_CMD='sleep 4511 | cat' GUARDIAN_SUBSCRIBE_CMD='sleep 4512 | cat'
+  (
+    eval "$(sed -n '/^subscriber_loop()/,/^}/p;/^control_store()/,/^}/p;/^control_loop()/,/^}/p;/^LOOP_PIDS=/,/^}/p;/^run()/,/^}/p' "$KDIR/bin/guardian.sh")"
+    flag_poll() { :; }
+    tick() { sleep 1.5; exit 3; }   # main dies of an error after the loops are up
+    run
+  ) >/dev/null 2>&1 &
+  local mp=$! i=0
+  while [ "$i" -lt 30 ] && [ "$(sleepers 4511)$(sleepers 4512)" != "11" ]; do sleep 0.2; i=$((i + 1)); done
+  assert_eq "$(sleepers 4511)$(sleepers 4512)" "11" "both fake subscribers are up"
+  wait "$mp"; assert_rc $? 3 "main exited through its error path"
+  sleep 0.5
+  assert_eq "$(sleepers 4511)$(sleepers 4512)" "00" "no subscriber left after main's error exit"
+  /usr/bin/pkill -f 'sleep 451[12]' 2>/dev/null
+}
+
+test_sigkill_of_main_leaves_no_subscriber() {
+  load_libs
+  local gp i=0 left
+  export GUARDIAN_CONTROL_SUB_CMD='sleep 4521 | cat' GUARDIAN_SUBSCRIBE_CMD='sleep 4522 | cat'
+  bash "$KDIR/bin/guardian.sh" run >/dev/null 2>&1 &
+  gp=$!
+  while [ "$i" -lt 30 ] && [ "$(sleepers 4521)$(sleepers 4522)" != "11" ]; do sleep 0.2; i=$((i + 1)); done
+  assert_eq "$(sleepers 4521)$(sleepers 4522)" "11" "both fake subscribers are up"
+  kill -9 "$gp"; wait "$gp" 2>/dev/null
+  i=0
+  while [ "$i" -lt 40 ] && [ "$(sleepers 4521)$(sleepers 4522)" != "00" ]; do sleep 0.25; i=$((i + 1)); done
+  left="$(sleepers 4521)$(sleepers 4522)"
+  /usr/bin/pkill -f 'sleep 452[12]' 2>/dev/null
+  assert_eq "$left" "00" "no subscriber left within 10 s of SIGKILL of main"
+}
+
+test_hup_of_main_leaves_no_subscriber() {
+  load_libs
+  local gp i=0
+  export GUARDIAN_CONTROL_SUB_CMD='sleep 4531 | cat' GUARDIAN_SUBSCRIBE_CMD='sleep 4532 | cat'
+  bash "$KDIR/bin/guardian.sh" run >/dev/null 2>&1 &
+  gp=$!
+  while [ "$i" -lt 30 ] && [ "$(sleepers 4531)$(sleepers 4532)" != "11" ]; do sleep 0.2; i=$((i + 1)); done
+  kill -HUP "$gp"; wait "$gp" 2>/dev/null; sleep 0.5
+  assert_eq "$(sleepers 4531)$(sleepers 4532)" "00" "no subscriber left after HUP"
+  /usr/bin/pkill -f 'sleep 453[12]' 2>/dev/null
+}
+
+# ---- stdin ----
+test_subscribers_read_eof_not_the_terminal() {
+  load_libs
+  eval "$(sed -n '/^subscriber_loop()/,/^}/p;/^control_store()/,/^}/p;/^control_loop()/,/^}/p' "$KDIR/bin/guardian.sh")"
+  export GUARDIAN_CONTROL_SUB_CMD='x=unset; read -r x; echo "rc=$? val=[$x]" >"$T/stdin_ctl"; sleep 30'
+  export GUARDIAN_SUBSCRIBE_CMD='x=unset; read -r x; echo "rc=$? val=[$x]" >"$T/stdin_sub"; sleep 30'
+  # a stdin that would block for 20 s and then deliver data, as a terminal would
+  { control_loop & subscriber_loop & wait; } < <(sleep 20; echo typed) >/dev/null 2>&1 &
+  local bg=$! i=0
+  while [ "$i" -lt 30 ] && { [ ! -s "$T/stdin_ctl" ] || [ ! -s "$T/stdin_sub" ]; }; do sleep 0.2; i=$((i + 1)); done
+  assert_eq "$(cat "$T/stdin_ctl" 2>/dev/null)" "rc=1 val=[]" "control subscriber: EOF at once"
+  assert_eq "$(cat "$T/stdin_sub" 2>/dev/null)" "rc=1 val=[]" "message subscriber: EOF at once"
+  kill "$bg" 2>/dev/null; /usr/bin/pkill -f 'sleep 30$' 2>/dev/null; /usr/bin/pkill -f 'sleep 20$' 2>/dev/null
+  return 0
+}
