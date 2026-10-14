@@ -15,13 +15,13 @@ import { runAgent } from '../../../platform/agent/run.js'
 import { jevJudge } from '../../../platform/jev/judge.js'
 import type { SecondJudge } from '../../../platform/judge/second.js'
 import { buildJev, buildModelClient } from '../../../runtime.js'
-import { surgicalConsult } from '../definition.js'
+import { ABSENCE_QUESTION_SET, CONSULT_AGENT_ID, surgicalConsult } from '../definition.js'
 import { findingTypeOf } from '../governance/f7.js'
 import { prepass } from '../prepass.js'
-import { MAX_CANDIDATES } from '../rules/index.js'
+import { MAX_CANDIDATES, RULE_SPECS } from '../rules/index.js'
 import { loadConsults, type LoadedConsult, type LoadResult } from './input.js'
 import { geminiConfigOf, missingGeminiEnv, secondFactory, type SecondFactory } from './second.js'
-import { buildReport, busSafeSummary, renderMarkdown, type Entry, type HeldDetail, type RunRecord } from './report.js'
+import { buildReport, busSafeSummary, emptyExtraction, renderMarkdown, type Entry, type ExtractionRecord, type HeldDetail, type JudgePairRecord, type RunRecord } from './report.js'
 
 /**
  * S6 offline runner: the platform's agent run path over a JSONL of consults, on an in-process pglite (never a DB URL),
@@ -84,11 +84,19 @@ class MeteredModels implements ModelClient {
   }
 }
 
+/** The platform's cut for a rule: safety rules use the safety bar (run.ts: def.judge.thresholds). */
+function thresholdFor(ruleId: string): number {
+  const safety = RULE_SPECS.find((spec) => spec.id === ruleId)?.safety_class === true
+  return safety ? surgicalConsult.judge.thresholds.safety : surgicalConsult.judge.thresholds.nonSafety
+}
+
 /** Counts the primary judge's asks, enforces the cap and records p per (state) for the Jev-Gemini pairs. */
 export class MeteredJudge {
   readonly primary = new Map<string, number>()
   readonly secondary = new Map<string, number>()
   readonly rules = new Map<string, string>()
+  /** One entry per judged candidate, in ask order (a consult's judge asks run one after another). */
+  readonly judged: JudgePairRecord[] = []
   constructor(private readonly inner: JudgePort, private readonly second: SecondJudge | null, private readonly meter: Meter) {}
 
   port(): JudgePort {
@@ -99,10 +107,15 @@ export class MeteredJudge {
           throw new JudgeUnavailable('budget_exhausted')
         }
         this.meter.jev += 1
+        const rule = String((state as { rule?: unknown }).rule ?? '')
+        const entry: JudgePairRecord = { rule_id: rule, question_set: set.id, polarity: set.id === ABSENCE_QUESTION_SET.id ? 'absence' : 'presence', primary_p: null, second_p: null, primary_yes: null, second_yes: null, outcome: 'unavailable' }
+        this.judged.push(entry)
         const answer = await this.inner.askValidity(state, question, set)
         const key = JSON.stringify(state)
         this.primary.set(key, answer.p_yes)
-        this.rules.set(key, String((state as { rule?: unknown }).rule ?? ''))
+        this.rules.set(key, rule)
+        entry.primary_p = answer.p_yes
+        entry.primary_yes = answer.p_yes >= thresholdFor(rule)
         return answer
       },
     }
@@ -121,6 +134,12 @@ export class MeteredJudge {
         this.meter.second += 1
         const answer = await second.askValidity(state, question, set)
         this.secondary.set(JSON.stringify(state), answer.p_yes)
+        const entry = this.judged[this.judged.length - 1]
+        if (entry && entry.primary_p !== null && entry.second_p === null) {
+          entry.second_p = answer.p_yes
+          entry.second_yes = answer.p_yes >= thresholdFor(entry.rule_id)
+          entry.outcome = entry.primary_yes && entry.second_yes ? 'agree' : !entry.primary_yes && !entry.second_yes ? 'dropped' : 'disagree'
+        }
         return answer
       },
     }
@@ -149,7 +168,7 @@ async function runOne(sql: Sql, wiring: BatchWiring, models: ModelClient, meter:
   const traceId = traceIdFor(n)
   const input = consult.input
   const metered = new MeteredJudge(wiring.judge(traceId, sql), wiring.second(traceId, sql), meter)
-  const base: Omit<RunRecord, 'status' | 'reason' | 'findings_kept' | 'held' | 'abstentions' | 'counts' | 'versions' | 'pairs' | 'error'> = {
+  const base: Omit<RunRecord, 'status' | 'reason' | 'findings_kept' | 'held' | 'abstentions' | 'counts' | 'versions' | 'extraction' | 'judge_pairs' | 'pairs' | 'error'> = {
     n,
     encounter_id: input.encounter_id,
     doctor_uid: input.doctor_uid,
@@ -160,7 +179,7 @@ async function runOne(sql: Sql, wiring: BatchWiring, models: ModelClient, meter:
   }
   const failed = (error: RunRecord['error']): Done => ({
     entry: {
-      record: { ...base, status: 'failed', reason: error, findings_kept: 0, held: [], abstentions: {}, counts: emptyCounts(), versions: {}, pairs: [], error },
+      record: { ...base, status: 'failed', reason: error, findings_kept: 0, held: [], abstentions: {}, counts: emptyCounts(), versions: {}, extraction: emptyExtraction(), judge_pairs: [], pairs: [], error },
       body: null,
       held: [],
     },
@@ -210,10 +229,31 @@ async function runOne(sql: Sql, wiring: BatchWiring, models: ModelClient, meter:
     abstentions: (body.abstentions ?? {}) as Record<string, number>,
     counts,
     versions: stringVersions(body.versions),
+    extraction: await extractionFor(sql, traceId),
+    judge_pairs: metered.judged.map((p) => ({ ...p })),
     pairs: metered.pairs(),
     error: null,
   }
   return { entry: { record, body: body as unknown as Entry['body'], held } }
+}
+
+/**
+ * The run's extraction calls from the model_calls ledger (by trace id and the agent's extract purposes, so Gemini rows are out):
+ * ids and codes only. served_verified is false when any call has no served id (the global inference profile does not resolve one).
+ */
+export async function extractionFor(sql: Sql, traceId: string): Promise<ExtractionRecord> {
+  const rows = await sql.query<{ intended_model_id: string; served_model_id: string | null; status: string; error_type: string | null }>(
+    `select intended_model_id, served_model_id, status, error_type from model_calls
+     where trace_id = $1 and purpose like $2 and provider <> 'vertex' order by created_at, id`,
+    [traceId, `${CONSULT_AGENT_ID}:extract%`],
+  )
+  if (rows.rows.length === 0) return emptyExtraction()
+  const intended = [...new Set(rows.rows.map((r) => r.intended_model_id))]
+  const served = [...new Set(rows.rows.flatMap((r) => (r.served_model_id === null ? [] : [r.served_model_id])))]
+  const errors: Record<string, number> = {}
+  for (const r of rows.rows) if (r.status !== 'ok') errors[r.error_type ?? r.status] = (errors[r.error_type ?? r.status] ?? 0) + 1
+  const verified = rows.rows.every((r) => r.served_model_id !== null)
+  return { intended: intended.join(','), served: verified ? served.join(',') : null, served_verified: verified, calls: rows.rows.length, errors_by_type: errors }
 }
 
 function emptyCounts(): RunRecord['counts'] {

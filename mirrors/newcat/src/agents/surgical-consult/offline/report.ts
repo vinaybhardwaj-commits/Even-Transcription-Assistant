@@ -17,6 +17,45 @@ export interface HeldDetail {
   evidence: Array<{ segment_id: string; role: string; t0: number; t1: number; quote: string }>
 }
 
+export interface ExtractionRecord {
+  /** Intended model id(s), comma-joined when a run escalated to a different one; null when no extraction call ran. */
+  intended: string | null
+  /** Served model id(s) from the response; null when any call had none (the global profile is not resolved by readServedModel). */
+  served: string | null
+  served_verified: boolean
+  calls: number
+  errors_by_type: Record<string, number>
+}
+
+export const emptyExtraction = (): ExtractionRecord => ({ intended: null, served: null, served_verified: false, calls: 0, errors_by_type: {} })
+
+/**
+ * A model id safe for the bus: provider prefix, date and version suffix removed (`eu.anthropic.claude-sonnet-4-5-20250929-v1:0`
+ * -> `claude-sonnet-4-5`), an ARN reduced to its last path part, and any digit run of 8 or more masked.
+ */
+export function shortModelId(id: string): string {
+  let out = id.slice(id.lastIndexOf('/') + 1)
+  out = out.replace(/^(?:[a-z0-9-]+\.)*anthropic\./i, '')
+  out = out.replace(/-\d{8}(?:-v\d+(?::\d+)?)?$/, '')
+  return out.replace(/\d{8,}/g, '#')
+}
+
+/**
+ * One judged candidate: the two judges' answers and the platform's outcome. Numbers, booleans and ids only: no claim, quote or
+ * segment id. `*_yes` is p at or above the platform threshold for the rule (safety 0.9, other 0.75). Absent in older runs.jsonl.
+ * agree = both yes (valid); dropped = both no; disagree = one yes; unavailable = a judge did not answer.
+ */
+export interface JudgePairRecord {
+  rule_id: string
+  question_set: string
+  polarity: 'presence' | 'absence'
+  primary_p: number | null
+  second_p: number | null
+  primary_yes: boolean | null
+  second_yes: boolean | null
+  outcome: 'agree' | 'disagree' | 'dropped' | 'unavailable'
+}
+
 export interface RunRecord {
   n: number
   encounter_id: string
@@ -46,6 +85,9 @@ export interface RunRecord {
     persist_failed?: number
   }
   versions: Record<string, string>
+  /** The extraction model calls from the run's model_calls ledger rows: ids and codes only. Absent in older runs.jsonl files. */
+  extraction?: ExtractionRecord
+  judge_pairs?: JudgePairRecord[]
   /** Every finding both judges answered: probabilities and the rule id only. */
   pairs: Array<{ rule_id: string; jev_p: number; gemini_p: number }>
   error: 'run_threw' | 'governance_refused' | 'serialize_threw' | null
@@ -132,6 +174,30 @@ function summaryOf(entry: Entry): AgentRunSummary {
   }
 }
 
+export interface ExtractionRow {
+  intended: string
+  served: string | null
+  served_verified: boolean
+  consults: number
+  calls: number
+  errors_by_type: Record<string, number>
+}
+
+/** The 2x2 of Jev (rows) against the second judge (columns) over the candidates both answered. */
+export interface AgreementCell {
+  pairs: number
+  both_yes: number
+  jev_yes_second_no: number
+  jev_no_second_yes: number
+  both_no: number
+  agreement: number | null
+  kappa: number | null
+  jev_yes_rate: number | null
+  second_yes_rate: number | null
+  /** Candidates a judge did not answer (not in the 2x2). */
+  unavailable: number
+}
+
 export interface Report {
   meta: ReportMeta
   consults: { read_lines: number; rejected: Record<string, number>; run: number; skipped_for_cap: number; by_source: Record<string, number>; by_match_confidence: Record<string, number>; by_window_complete: Record<string, number> }
@@ -145,13 +211,66 @@ export interface Report {
     by_doctor_type: Array<{ doctor_uid: string; finding_type: string; n: number; small_n: boolean }>
   }
   judge_agreement: { n_both: number; n_agree: number; agreement: number | null; kappa: number | null; threshold: number; label: string }
+  judge_by_rule: Array<{ rule_id: string; polarity: string } & AgreementCell>
+  judge_by_polarity: Record<'presence' | 'absence', AgreementCell>
   drops: { duplicate_span_different_fields: number; by_reason: Record<string, number> }
   extraction: { facts_total: number; facts_dropped: number; drop_rate: number }
-  models: { served_by_consults: Record<string, number>; llm_calls: number; judge_asks: number; metered: ReportMeta['metered']; caps: ReportMeta['caps'] }
+  models: { extraction: ExtractionRow[]; served_by_consults: Record<string, number>; llm_calls: number; judge_asks: number; metered: ReportMeta['metered']; caps: ReportMeta['caps'] }
   empty_reasons: Record<string, number>
   examples: {
     kept: Record<string, Array<{ encounter_id: string; doctor_uid: string | null; procedure_group: string; rule_id: string; judge: { primary_p: number; second_p: number | null }; evidence: Array<{ segment_id: string; role: string; t0: number; t1: number; quote: string }> }>>
     held: Record<string, Array<{ encounter_id: string; procedure_group: string; rule_id: string; primary_p: number | null; evidence: HeldDetail['evidence'] }>>
+  }
+}
+
+function extractionRows(runs: RunRecord[]): ExtractionRow[] {
+  const rows = new Map<string, ExtractionRow>()
+  for (const r of runs) {
+    const x = r.extraction ?? emptyExtraction()
+    if (x.calls === 0 || x.intended === null) continue
+    const key = `${x.intended}|${x.served ?? ''}|${x.served_verified}`
+    const row = rows.get(key) ?? { intended: x.intended, served: x.served, served_verified: x.served_verified, consults: 0, calls: 0, errors_by_type: {} }
+    row.consults += 1
+    row.calls += x.calls
+    sumInto(row.errors_by_type, x.errors_by_type)
+    rows.set(key, row)
+  }
+  return [...rows.values()].map((row) => ({ ...row, errors_by_type: sorted(row.errors_by_type) })).sort((a, b) => cmp(a.intended, b.intended) || cmp(a.served ?? '', b.served ?? ''))
+}
+
+function agreementCell(list: JudgePairRecord[]): AgreementCell {
+  const both = list.filter((p) => p.primary_yes !== null && p.second_yes !== null)
+  const count = (a: boolean, b: boolean): number => both.filter((p) => p.primary_yes === a && p.second_yes === b).length
+  const n = both.length
+  const agree = count(true, true) + count(false, false)
+  const jevYes = count(true, true) + count(true, false)
+  const secondYes = count(true, true) + count(false, true)
+  return {
+    pairs: n,
+    both_yes: count(true, true),
+    jev_yes_second_no: count(true, false),
+    jev_no_second_yes: count(false, true),
+    both_no: count(false, false),
+    agreement: n === 0 ? null : rate(agree, n),
+    kappa: (() => {
+      const k = cohenKappa(both.map((p): [boolean, boolean] => [p.primary_yes as boolean, p.second_yes as boolean]))
+      return k === null ? null : Math.round(k * 1000) / 1000
+    })(),
+    jev_yes_rate: n === 0 ? null : rate(jevYes, n),
+    second_yes_rate: n === 0 ? null : rate(secondYes, n),
+    unavailable: list.filter((p) => p.outcome === 'unavailable').length,
+  }
+}
+
+function judgeBreakdown(runs: RunRecord[]): Pick<Report, 'judge_by_rule' | 'judge_by_polarity'> {
+  const all = runs.flatMap((r) => r.judge_pairs ?? [])
+  const rules = [...new Set(all.map((p) => p.rule_id))].sort()
+  return {
+    judge_by_rule: rules.map((rule_id) => {
+      const list = all.filter((p) => p.rule_id === rule_id)
+      return { rule_id, polarity: list[0]!.polarity, ...agreementCell(list) }
+    }),
+    judge_by_polarity: { presence: agreementCell(all.filter((p) => p.polarity === 'presence')), absence: agreementCell(all.filter((p) => p.polarity === 'absence')) },
   }
 }
 
@@ -276,9 +395,10 @@ export function buildReport(entries: Entry[], meta: ReportMeta): Report {
         .map((d) => ({ ...d, small_n: d.n < SMALL_N })),
     },
     judge_agreement,
+    ...judgeBreakdown(runs),
     drops: { duplicate_span_different_fields: dropsBy.duplicate_span_different_fields ?? 0, by_reason: sorted(dropsBy) },
     extraction: { facts_total: factsTotal, facts_dropped: factsDropped, drop_rate: rate(factsDropped, factsTotal) },
-    models: { served_by_consults: sorted(served), llm_calls: llm, judge_asks: jev, metered: meta.metered, caps: meta.caps },
+    models: { extraction: extractionRows(runs), served_by_consults: sorted(served), llm_calls: llm, judge_asks: jev, metered: meta.metered, caps: meta.caps },
     empty_reasons: sorted(empties),
     examples: { kept, held: heldEx },
   }
@@ -288,7 +408,21 @@ export function buildReport(entries: Entry[], meta: ReportMeta): Report {
 
 const pairs = (o: Record<string, number>): string => (Object.keys(o).length === 0 ? 'none' : Object.entries(o).map(([k, v]) => `${k}=${v}`).join(' '))
 
-/** Counts only. Model ids are left out (they can carry date digits); ids and quotes never appear. */
+const cellNum = (n: number | null): string => (n === null ? 'n/a' : fmt(n))
+/** `<polarity>: pairs agree kappa jev_yes_rate second_yes_rate`, counts and rates only. */
+function polarityLine(polarity: string, c: AgreementCell): string {
+  return `judge_${polarity}: pairs=${c.pairs} agree=${cellNum(c.agreement)} kappa=${cellNum(c.kappa)} jev_yes_rate=${cellNum(c.jev_yes_rate)} second_yes_rate=${cellNum(c.second_yes_rate)}`
+}
+
+/** `extraction_model=<short intended id(s)> served_verified=yes|no`. Dated ids are shortened; `yes` needs every extraction call's served id present. */
+function extractionLine(r: Report): string {
+  const rows = r.models.extraction
+  const ids = [...new Set(rows.flatMap((x) => x.intended.split(',')).map(shortModelId))].sort()
+  const verified = rows.length > 0 && rows.every((x) => x.served_verified)
+  return `extraction_model=${ids.length === 0 ? 'none' : ids.join(',')} served_verified=${verified ? 'yes' : 'no'}`
+}
+
+/** Counts and short model ids only; consult ids, doctor ids and quotes never appear. */
 export function busSafeText(r: Report): string {
   const s = r.status_mix
   return [
@@ -299,7 +433,9 @@ export function busSafeText(r: Report): string {
     `abstention_rate=${fmt(r.abstentions.rate)} (${r.abstentions.abstained_runs}/${r.abstentions.runs}); by_reason: ${pairs(r.abstentions.finding_level_by_reason)}`,
     `empty_reasons: ${pairs(r.empty_reasons)}`,
     `judge_kappa=${r.judge_agreement.label} n_both=${r.judge_agreement.n_both}`,
+    ...(['presence', 'absence'] as const).map((k) => polarityLine(k, r.judge_by_polarity[k])),
     `drops_duplicate_span_different_fields=${r.drops.duplicate_span_different_fields}; extraction_drop_rate=${fmt(r.extraction.drop_rate)}`,
+    extractionLine(r),
     `llm_calls=${r.models.llm_calls}; jev_asks=${r.models.metered.jev}; second_judge_asks=${r.models.metered.second}; judge_asks_platform_sum=${r.models.judge_asks}; stopped_by_cap=${r.meta.stopped_by_cap ?? 'no'}`,
   ].join('\n')
 }
@@ -334,9 +470,13 @@ export function renderMarkdown(r: Report, entries: Entry[]): string {
   out.push('## Abstentions', '', `Abstention rate: ${fmt(r.abstentions.rate)} (${r.abstentions.abstained_runs} of ${r.abstentions.runs} consults).`, '', 'Run-level reasons:', '', table(['reason', 'n'], Object.entries(r.abstentions.run_level_by_reason)), 'Finding- and run-level reasons (queue):', '', table(['reason', 'n'], Object.entries(r.abstentions.finding_level_by_reason)))
   out.push('## Held (no second judge)', '', r.held.note, '', `Held findings: ${r.held.findings} in ${r.held.consults} consults.`, '', table(['procedure_group', 'finding_type', 'n'], r.held.by_group_type.map((x) => [x.procedure_group, x.finding_type, x.n])))
   out.push('## Judge agreement (Jev vs second judge)', '', `Kappa: ${r.judge_agreement.label}. Pairs: ${r.judge_agreement.n_both}, agree: ${r.judge_agreement.n_agree}, threshold ${r.judge_agreement.threshold}.`, r.judge_agreement.agreement === null ? `Agreement: ${NO_SECOND}` : `Agreement: ${fmt(r.judge_agreement.agreement)}`, '')
+  const cellRow = (label: string, c: AgreementCell): Array<string | number> => [label, c.pairs, c.both_yes, c.jev_yes_second_no, c.jev_no_second_yes, c.both_no, cellNum(c.agreement), cellNum(c.kappa), cellNum(c.jev_yes_rate), cellNum(c.second_yes_rate), c.unavailable]
+  const cellHead = ['pairs', 'both yes', 'Jev yes / 2nd no', 'Jev no / 2nd yes', 'both no', 'agreement', 'kappa', 'Jev yes rate', '2nd yes rate', 'unavailable']
+  out.push('## Judge agreement by polarity', '', 'Yes means p at or above the platform threshold (safety 0.9, other 0.75). Absence rules are asked "is the claim true given the whole consult"; presence rules "do the quoted words support the claim".', '', table(['polarity', ...cellHead], [cellRow('presence', r.judge_by_polarity.presence), cellRow('absence', r.judge_by_polarity.absence)]))
+  out.push('## Judge agreement by rule', '', table(['rule_id', 'polarity', ...cellHead], r.judge_by_rule.map((x) => [x.rule_id, x.polarity, ...cellRow('', x).slice(1)])))
   out.push('## Extraction', '', `Facts total ${r.extraction.facts_total}, dropped ${r.extraction.facts_dropped}, drop rate ${fmt(r.extraction.drop_rate)}.`, '', `drops.duplicate_span_different_fields: ${r.drops.duplicate_span_different_fields}`, '', table(['drop reason', 'n'], Object.entries(r.drops.by_reason)))
   out.push('## Empty reasons', '', table(['reason', 'consults'], Object.entries(r.empty_reasons)))
-  out.push('## Models and calls', '', table(['served model id', 'consults'], Object.entries(r.models.served_by_consults)), `Extraction calls: ${r.models.llm_calls}. Judge asks, primary + second (platform sum): ${r.models.judge_asks}. Metered: extraction ${r.models.metered.llm}, Jev (primary) asks ${r.models.metered.jev}, second-judge asks ${r.models.metered.second}. Caps: llm ${r.models.caps.llm}, jev ${r.models.caps.jev}.`, '')
+  out.push('## Models and calls', '', '### Extraction model', '', table(['intended model id', 'served model id', 'consults', 'calls', 'errors by type'], r.models.extraction.map((x) => [x.intended, x.served ?? 'unverified: profile not resolved', x.consults, x.calls, pairs(x.errors_by_type)])), '### Judge served model ids', '', table(['served model id', 'consults'], Object.entries(r.models.served_by_consults)), `Extraction calls: ${r.models.llm_calls}. Judge asks, primary + second (platform sum): ${r.models.judge_asks}. Metered: extraction ${r.models.metered.llm}, Jev (primary) asks ${r.models.metered.jev}, second-judge asks ${r.models.metered.second}. Caps: llm ${r.models.caps.llm}, jev ${r.models.caps.jev}.`, '')
   out.push('## Example findings for review (up to 3 per type)', '')
   const ev = (e: { segment_id: string; t0: number; t1: number; quote: string }): string => `  - ${e.segment_id} [${e.t0}-${e.t1}s]: "${e.quote}"`
   for (const [type, list] of Object.entries(r.examples.kept)) {
