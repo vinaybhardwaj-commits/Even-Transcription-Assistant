@@ -98,6 +98,3 @@ Last revision: **29 Sep 2026, ~23:10 IST** (rev 10).
 - **r409 (25 Sep):** OpenCode migration waves 1-3 executed (18 panes).
 - **r308 → r406 (25 Sep):** Link-3 interim class join → reopened by V to widen the translated stratum.
 - **Fable #7918 (30 Sep 06:25):** FUSER stops after the v2-E fresh-set FAIL; router LID fix BUILD GO in the lab only; ROLE v4 runs doctor-rank only (staff stratum UNSUPPORTED); KOYAL 25 concurrent HF jobs OK (#7858).
-- **Fable #8153 (30 Sep 08:20, V go 08:15):** FUSER restarts as v3 with fixed rules R1-R5 (doses never touched; drug needs 2 engines plus lexicon; bars as v2-E; size for G4; new fresh set). **#8196:** tonight 21:00-21:30 fleet update, only on a Fable GO. **#8245:** orchestrator thread handoff at 10:00.
-- **Fable #8315 (30 Sep, new thread):** all 29 WAITS answered; fleet update conditional GO; FUSER v3 seed commitment 0453361fcac11be7; T-ROLE-2/-3/-40 cancelled; Koyal 11/13 Sep re-id jobs launched.
-- **Fable #8369/#8412/#8483 (30 Sep):** room control is the Kiosk Bot's, not the bus's; BAKEOFF Sarvam-only; T-BACKFILL-HF cap USD 250; fleet update needs Fable GO by 20:40 or moves to 1 Oct 21:00.

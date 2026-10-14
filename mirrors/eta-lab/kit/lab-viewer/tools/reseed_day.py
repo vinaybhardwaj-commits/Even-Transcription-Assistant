@@ -26,7 +26,7 @@ if not a.apply:
     for room in rooms:
         lanes, nw, nt, nh = S.build_reb_lanes(a.reb_root, a.date, room, is_held)
         blind = "BLIND room-day" if is_held(a.date, room) else ""
-        print(f"{a.date} {room}: {nw} windows, {nt} tracks, {nh} held {blind} | " + " ".join(f"{k}={len(v)}" + (f"(of {lanes.capped[k]['n_total']})" if k in lanes.capped else "") for k, v in lanes.items()))
+        print(f"{a.date} {room}: {nw} windows, {nt} tracks, {nh} held {blind} | " + " ".join(f"{k}={len(v)}" for k, v in lanes.items()))
     print("dry run: nothing written, no token used")
     sys.exit(0)
 out = tempfile.mkdtemp(prefix=f"reseed-{a.date}-")

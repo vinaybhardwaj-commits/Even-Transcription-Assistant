@@ -150,29 +150,6 @@ def exists(key):
     sys.exit(f"cannot tell whether {key} exists (wrangler error, not a clean not-found - refusing to guess): {(r.stderr or '')[:300]}")
 
 
-LANE_NAME_RE = re.compile(r"^[a-z][a-z_]{0,30}$")
-
-
-def put_lane_objects(root, room, date):
-    """Uncapped lane objects (timeline-lanes/<room>/<date>/<lane>.json) go up BEFORE the main doc that marks them full, each read back
-    and compared. They are derived data (rebuilt by every merge) so an existing object is simply replaced."""
-    d = Path(root) / "timeline-lanes" / room / date
-    if not d.is_dir():
-        return 0
-    n = 0
-    for f in sorted(d.glob("*.json")):
-        if not LANE_NAME_RE.match(f.stem):
-            sys.exit(f"unexpected lane object name {f.name}: refusing")
-        key = f"timeline-lanes/{room}/{date}/{f.name}"
-        want = hashlib.sha256(f.read_bytes()).hexdigest()
-        put(key, f)
-        back = subprocess.run(["npx", "wrangler", "r2", "object", "get", f"{BUCKET}/{key}", "--pipe", "--remote"], capture_output=True, cwd=CWD)
-        if back.returncode != 0 or hashlib.sha256(back.stdout).hexdigest() != want:
-            sys.exit(f"lane object {key} did not read back identical; the main doc for {room}/{date} is NOT written")
-        n += 1
-    return n
-
-
 def load(args):
     root = Path(args.dir) / "timeline"
     files = [(room, date, f) for room, date, f in each_room_date_file(root)]
@@ -202,12 +179,10 @@ def load(args):
                 back = subprocess.run(["npx", "wrangler", "r2", "object", "get", f"{BUCKET}/{hk}", "--pipe", "--remote"], capture_output=True, cwd=CWD)
                 if back.returncode != 0 or hashlib.sha256(back.stdout).hexdigest() != old_sha:
                     sys.exit(f"archive {hk} did not read back identical; live {key} untouched")
-                put_lane_objects(args.dir, room, date)
                 put(key, f)
                 replaced += 1
                 continue
             sys.exit(f"{key} already exists: refusing to replace it (--resume to skip, or --replace to archive the old copy under timeline-history/ and overwrite - a real data correction, not a routine reload)")
-        put_lane_objects(args.dir, room, date)
         put(key, f)
         n += 1
     print(f"put {n} new, {replaced} replaced (old archived under timeline-history/), skipped {skipped} already present")

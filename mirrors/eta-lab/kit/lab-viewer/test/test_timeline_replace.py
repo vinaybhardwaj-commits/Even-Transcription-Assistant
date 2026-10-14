@@ -39,12 +39,4 @@ class T(unittest.TestCase):
         r = self.run_load(get_ok=2); self.assertNotEqual(r.returncode, 0); self.assertEqual(self.live_now(), self.live)
     def test_live_changed_since_merge_refuses(self):           # F1
         r = self.run_load(sidecar="0" * 64); self.assertNotEqual(r.returncode, 0); self.assertIn("changed in R2", r.stderr); self.assertEqual(self.live_now(), self.live); self.assertEqual(self.archives(), [])
-    def test_lane_objects_go_up_before_the_main_doc_and_read_back(self):
-        d = self.t / "d/timeline-lanes/room_x/2026-09-25"; d.mkdir(parents=True); (d / "whisper.json").write_text('[{"t0_ms":1,"t1_ms":2,"text":"a","engine":"w"}]')
-        r = self.run_load(sidecar=hashlib.sha256(self.live).hexdigest()); self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual((self.t / "r2/eta-lab-ratings__timeline-lanes__room_x__2026-09-25__whisper.json").read_bytes(), (d / "whisper.json").read_bytes())
-        self.assertIn(b"new", self.live_now())
-    def test_bad_lane_object_name_refuses_before_the_main_doc(self):
-        d = self.t / "d/timeline-lanes/room_x/2026-09-25"; d.mkdir(parents=True); (d / "Bad-Name.json").write_text("[]")
-        r = self.run_load(sidecar=hashlib.sha256(self.live).hexdigest()); self.assertNotEqual(r.returncode, 0); self.assertEqual(self.live_now(), self.live)
 if __name__ == "__main__": unittest.main()
