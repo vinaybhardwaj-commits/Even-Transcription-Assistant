@@ -2,7 +2,7 @@
 """fresh_overlap.py — is a candidate consult FRESH? Content check (word-trigram containment), not room_day or time (ship-key.json stores room_day_id = None for the wide-placed shipped items, and long shipped
 encounters hide several sub-consults: 24 Sep, 8 of 40 judge-K items were consults V had already rated). Prints ids and numbers only, never text.
   containment(a, b) = |trigrams(a) & trigrams(b)| / |trigrams(a)|   (a candidate, b a shipped consult); pool pairs use the SMALLER set as the denominator.
-usage: fresh_overlap.py <staging_dir> [<staging_dir> ...] [--shipped-dir ship] [--hit 0.5] [--report 0.2] [--shipped-full]   (staging_dir under ~/eta-data/surgery-review-v3, in-encounter turns = phase not before/after)
+usage: fresh_overlap.py <staging_dir> [<staging_dir> ...] [--shipped-dir ship] [--hit 0.5] [--report 0.2]   (staging_dir under ~/eta-data/surgery-review-v3, in-encounter turns = phase not before/after)
        fresh_overlap.py --selftest"""
 import glob, json, os, re, sys
 
@@ -53,13 +53,12 @@ def selftest():
 def main(argv):
     if argv == ["--selftest"]:
         return selftest()
-    opts = {"--shipped-dir", "--hit", "--report"}  # value-taking options; --shipped-full is a flag
+    opts = {"--shipped-dir", "--hit", "--report"}
     dirs = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or argv[i - 1] not in opts)]
     sd = argv[argv.index("--shipped-dir") + 1] if "--shipped-dir" in argv else "ship"
     hit = float(argv[argv.index("--hit") + 1]) if "--hit" in argv else 0.5
     rep = float(argv[argv.index("--report") + 1]) if "--report" in argv else 0.2
-    full = "--shipped-full" in argv  # ALL turns of a shipped file, greyed context included: V saw those too (24 Sep: W95's file holds a second conversation, judge-K J37, in its greyed turns)
-    shipped = {os.path.basename(f)[:-5]: trigrams([t for t in json.load(open(f))["turns"] if full or "outside" not in t]) for f in sorted(glob.glob(f"{V3}/{sd}/consults/*.json"))}
+    shipped = {os.path.basename(f)[:-5]: trigrams([t for t in json.load(open(f))["turns"] if "outside" not in t]) for f in sorted(glob.glob(f"{V3}/{sd}/consults/*.json"))}
     cands = {}
     for d in dirs:  # several staging dirs: candidates from all of them are also de-duplicated against each other
         d = d if os.path.isabs(d) else f"{V3}/{d}"

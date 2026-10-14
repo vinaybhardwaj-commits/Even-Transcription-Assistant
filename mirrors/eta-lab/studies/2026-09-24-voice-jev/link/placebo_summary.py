@@ -2,7 +2,7 @@
 """vj-link: real vs placebo (vj-refuter P1-P4). Reads dtree18/overnight/glinks-<mode><suffix>.json (overnight_groups.py, pre-Jev tiers: Rx-or-LQ uses Rx only). 14 placebos: hours +-4,+-5,+-6,+-7 and date offsets 1..6.
 For each measure: the real value, the placebo min / median / max and the empirical p = share of placebos with a value >= real (14 placebos: the smallest possible p is 1/15)."""
 import json, os, statistics, collections, sys
-T = os.path.expanduser(f"~/eta-data/voice-linkage/{os.environ.get('TREE', 'dtree18')}/overnight")
+T = os.path.expanduser("~/eta-data/voice-linkage/dtree18/overnight")
 SUF = ["-pl4", "-pl-4", "-pl5", "-pl-5", "-pl6", "-pl-6", "-pl7", "-pl-7", "-pd1", "-pd2", "-pd3", "-pd4", "-pd5", "-pd6"]
 def stats(g):
     xd = [x for x in g if x["xday"]]; ex = [x for x in g if x["xday"] and x["excl"] and x["n5"]]
@@ -25,4 +25,4 @@ for mode in ("complete", "single"):
     for k, v in m.items(): print(f"  {k:32s} real {v['real']!s:8} placebo min/med/max {v['placebo_min']!s:7}/{v['placebo_median']!s:7}/{v['placebo_max']!s:7}  p={v['empirical_p']}")
     hours = [pl[s]["xday_excl_n5"] for s in SUF if s.startswith("-pl")]; dates = [pl[s]["xday_excl_n5"] for s in SUF if s.startswith("-pd")]
     print(f"  xday_excl_n5 under hour-shift placebos {hours} | date-offset placebos {dates}")
-json.dump(out, open(f"{T}/placebo-summary.json", "w"), indent=1)
+json.dump(out, open(os.path.expanduser("~/eta-data/voice-linkage/dtree18/overnight/placebo-summary.json"), "w"), indent=1)

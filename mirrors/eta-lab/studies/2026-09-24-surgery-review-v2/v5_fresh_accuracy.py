@@ -35,9 +35,6 @@ def show(title, m, cols):
         print(f"{r:>15} " + "".join(f"{v[k]:>15}" for k in cols) + f"   {sum(v.values())}")
 
 
-SHIPPED_FULL = SHIPPED | {"J37"}  # + J37: 100% inside shipped V3-09's FILE (its greyed turns), found by eta-refuter-2 #1275 (full-file content check); J31 shares 0.20 with it (neighbouring talk, checked by hand: see notes)
-
-
 def main(exclude=()):
     lab, pred = load(); ids = [j for j in sorted(lab) if j not in exclude]
     print(f"items scored: {len(ids)} (excluded: {sorted(exclude) or 'none'})")
@@ -73,8 +70,6 @@ if __name__ == "__main__":
         print("\nlow-confidence:", sorted(LOW), "| medium:", sorted(MED))
     elif sys.argv[1:] == ["notshipped"]:
         main(exclude=SHIPPED)
-    elif sys.argv[1:] == ["notshipped-full"]:
-        main(exclude=SHIPPED_FULL)
     elif sys.argv[1:] == ["notshipped-headline"]:
         main(exclude=SHIPPED | LOW | MED)
     elif sys.argv[1:] == ["headline"]:
