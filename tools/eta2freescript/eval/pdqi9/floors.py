@@ -272,14 +272,17 @@ def _cited_turns(p: dict) -> list[int]:
 
 SOURCES = ("eta", "pulse_catalogue", "pulse_extraction", "check")
 FLOOR_BASES = ("all", "eta")
+DEFAULT_FLOOR_BASIS = "eta"
 ATTRIBUTED = {"unsupported drugs": "unsupported_drugs", "invented fields": "invented_fields",
               "dose precedence errors (judge)": "dose_precedence_errors", "invented numbers (deterministic)": "invented_numbers",
               "dose precedence errors (deterministic)": "dose_precedence_det", "printable errors": "printable_errors"}
 
 
 def floor_basis(basis: str | None = None) -> str:
-    """FREESCRIPT_FLOOR_BASIS in {all, eta}, default all. A typo is an error, not a default."""
-    b = basis if basis is not None else os.environ.get("FREESCRIPT_FLOOR_BASIS", "all")
+    """FREESCRIPT_FLOOR_BASIS in {all, eta}; unset or empty is eta (fable ruling). A typo is an error, never mapped to a default."""
+    b = basis if basis is not None else os.environ.get("FREESCRIPT_FLOOR_BASIS", "")
+    if b == "":
+        b = DEFAULT_FLOOR_BASIS
     if b not in FLOOR_BASES:
         raise ValueError("FREESCRIPT_FLOOR_BASIS must be one of: " + ", ".join(FLOOR_BASES))
     return b
@@ -698,10 +701,20 @@ def _attr_sum(rows: list[dict], key: str) -> dict | None:
     return out
 
 
+def header(rows: list[dict], basis: str) -> dict:
+    """The round header: the basis, and the eta, pulse_catalogue, pulse_extraction and check counts summed over the attributed
+    floors, whichever basis is chosen."""
+    att = [t for t in rows if t.get("eta") is not None and t["floor"] in ATTRIBUTED]
+    h = {"floor_basis": basis}
+    h.update({k: sum(t[k] or 0 for t in att) for k in SOURCES})
+    h["total"] = sum(t["bn"] or 0 for t in att)
+    return h
+
+
 def aggregate(bn: list[dict], b0: list[dict] | None = None, basis: str | None = None) -> dict:
     """Floor table for arm Bn (pass/fail against spec 12.3) with B0 baselines where given. `bn` is the total of every hit; the
-    attributed floors also carry eta, pulse_catalogue, pulse_extraction and check. basis `all` (default) passes on the total, `eta`
-    on the eta column only; it changes the pass column and the stamp, never a count."""
+    attributed floors also carry eta, pulse_catalogue, pulse_extraction and check. basis `eta` (default) passes on the eta column
+    only, `all` on the total; it changes the pass column and the stamp, never a count."""
     basis = floor_basis(basis)
     n = len(bn)
     comp = lambda rows: (None if any(r["completion"]["missing"] is None for r in rows) else
@@ -747,4 +760,4 @@ def aggregate(bn: list[dict], b0: list[dict] | None = None, basis: str | None = 
     zero("unknown-key printable errors", "unknown_key_errors")
     table.append({"floor": "unclear items (reported, not a breach)", "bn": _sum(bn, "unclear_items"), "b0": _sum(b0, "unclear_items") if b0 else None, "rule": "info", "pass": True})
     table.append({"floor": "artifacts missing", "bn": sum(1 for x in bn if x["artifact_missing"]), "b0": None, "rule": "info", "pass": True})
-    return {"n": n, "basis": basis, "rows": table, "all_pass": all(t["pass"] for t in table)}
+    return {"n": n, "basis": basis, "header": header(table, basis), "rows": table, "all_pass": all(t["pass"] for t in table)}

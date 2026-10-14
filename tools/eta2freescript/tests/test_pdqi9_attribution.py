@@ -109,11 +109,13 @@ def test_basis_switch_changes_only_pass_and_stamp():
     assert strip(a) == strip(e) and a["all_pass"] is False and e["all_pass"] is True
 
 
-def test_basis_env_default_all_and_a_typo_raises(monkeypatch):
+def test_basis_env_default_eta_and_a_typo_raises(monkeypatch):
     monkeypatch.delenv("FREESCRIPT_FLOOR_BASIS", raising=False)
-    assert floors.floor_basis() == "all"
-    monkeypatch.setenv("FREESCRIPT_FLOOR_BASIS", "eta")
     assert floors.floor_basis() == "eta"
+    monkeypatch.setenv("FREESCRIPT_FLOOR_BASIS", "")
+    assert floors.floor_basis() == "eta"
+    monkeypatch.setenv("FREESCRIPT_FLOOR_BASIS", "all")
+    assert floors.floor_basis() == "all"
     monkeypatch.setenv("FREESCRIPT_FLOOR_BASIS", "ETA ")
     with pytest.raises(ValueError):
         floors.floor_basis()
@@ -135,7 +137,7 @@ def test_jev_skips_bare_headings_and_counts_them():
 
 def test_end_to_end_basis_all_totals_equal_the_sum_of_sources_and_stamp(tmp_path, monkeypatch):
     monkeypatch.delenv("JEV_MCP_CMD", raising=False)
-    monkeypatch.delenv("FREESCRIPT_FLOOR_BASIS", raising=False)
+    monkeypatch.setenv("FREESCRIPT_FLOOR_BASIS", "all")
     fdir = make_frozen(tmp_path / "frozen")
     arts, arms = _write_inputs(tmp_path, UIDS[:2])
     assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=FakeClient(responder)) == 0
@@ -145,7 +147,9 @@ def test_end_to_end_basis_all_totals_equal_the_sum_of_sources_and_stamp(tmp_path
         if "eta" in t:
             assert t["bn"] == sum(t[k] for k in floors.SOURCES), t["floor"]
     md = (tmp_path / "SCOREBOARD.md").read_text()
-    assert "floor basis" in md.splitlines()[0] and "[eta " in md and "| all |" in md
+    assert "floor basis" in md.splitlines()[0] and "[eta " in md and "| all [eta " in md
+    h = row["floor_header"]
+    assert h["floor_basis"] == "all" and h == row["floors"]["header"] and all(k in h for k in floors.SOURCES) and h["total"] == sum(h[k] for k in floors.SOURCES)
     assert "jev_skipped_empty_headings" in row["jev"]
 
 
@@ -543,3 +547,21 @@ def test_r4_2_permuting_line_order_never_changes_the_class_counts():
     for m in itertools.permutations([dolo, {**dolo, "strength": "250 mg"}]):
         pa = floors.printable_attribution({"medicines": list(m)}, clean)
         assert pa["sources"]["pulse_extraction"] == 0 and pa["sources"]["pulse_catalogue"] >= 1
+
+
+def test_unset_basis_end_to_end_is_eta_and_header_carries_eta_and_pulse_counts(tmp_path, monkeypatch):
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    monkeypatch.delenv("FREESCRIPT_FLOOR_BASIS", raising=False)
+    fdir = make_frozen(tmp_path / "frozen")
+    arts, arms = _write_inputs(tmp_path, UIDS[:2])
+    assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=FakeClient(responder)) == 0
+    row = json.loads((tmp_path / "SCOREBOARD.R1.json").read_text())
+    assert row["floor_basis"] == "eta" and row["floors"]["basis"] == "eta" and row["floor_header"]["floor_basis"] == "eta"
+    md = (tmp_path / "SCOREBOARD.md").read_text()
+    assert "| eta [eta " in md and "pulse_catalogue " in md and "pulse_extraction " in md
+
+
+def test_header_carries_basis_and_both_eta_and_pulse_counts_whichever_basis():
+    for b in ("eta", "all"):
+        h = _agg(b)["header"]
+        assert h["floor_basis"] == b and h["eta"] == 0 and h["pulse_catalogue"] == 3 and h["pulse_extraction"] == 0 and h["check"] == 0 and h["total"] == 3

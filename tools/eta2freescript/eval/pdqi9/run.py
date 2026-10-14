@@ -274,7 +274,7 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
         "thorough_bn_minus_b0": thorough,
         "total_bn_minus_a": total_a, "total_bn_minus_b0": compare_family(scores, uids, combos, "Bn", "B0"),
         "total_family_primary": fam, "target_12_7": target_check(gt, fam, thorough, total_a),
-        "floors": table, "floor_basis": basis, "jev": jev, "replay_drops": sum(arms["Bn"][u]["drops"] for u in uids),
+        "floors": table, "floor_basis": basis, "floor_header": table["header"], "jev": jev, "replay_drops": sum(arms["Bn"][u]["drops"] for u in uids),
         "rendered_chars_mean": {arm: statistics.fmean(len(texts[(u, arm)]) for u in uids) for arm in ARMS},
         "cost_usd": cost, "verdict": "PENDING (freescript-lead)",
     }
