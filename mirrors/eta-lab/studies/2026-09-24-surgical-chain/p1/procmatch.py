@@ -1,4 +1,4 @@
-"""proc_match stage 1, rule v6 (P1-PREREG-v6.md; v5 + implant as content word + -our spelling): patient-side comparison of an advised procedure name with a done-evidence name.
+"""proc_match stage 1, rule v5 (P1-PREREG-v5.md): patient-side comparison of an advised procedure name with a done-evidence name.
 No transcript, no patient identity, no link score. Returns 'match', 'technique_changed', 'mismatch' or 'unknown'.
 Conservative: doubt -> 'unknown'. 'technique_changed' = same indication, different technique (its own stratum, never a positive until ruled).
 
@@ -12,7 +12,7 @@ local general anaesthesia anesthesia spinal complete partial total left right cl
 endoscopic arthroscopic robotic open closed primary revision diagnostic internal day care minor major single double
 scar tissue lesion mass growth operative assisted""".split())
 # action nouns: carry the kind of act but no anatomy; if both names carry one they must share it (v5: + ablation, closure)
-ACT = set("replacement fixation reduction excision incision drainage repair release removal insertion ligation decompression reconstruction resection ablation".split())
+ACT = set("replacement fixation reduction implant excision incision drainage repair release removal insertion ligation decompression reconstruction resection ablation".split())
 BODY = set("""knee hip shoulder ankle elbow wrist radius ulna femur tibia fibula humerus spine lumbar cervical thoracic hand foot finger toe kidney ureter
               bladder prostate uterus ovary breast thyroid gallbladder appendix colon rectum anal skin scalp eye lens cornea retina vagina vaginal vault
               nasal septum tonsil adenoid ear sinus perineal pelvic""".split())
@@ -27,7 +27,6 @@ def _norm(name):
     n = (name or "").lower()
     n = re.sub(r"\bc\.?\s*t\.?\b", "ct", n)
     n = re.sub(r"\blap\b", "laparoscopic", n)
-    n = re.sub(r"(\w)our\b", r"\1or", n)                  # v6: tumour -> tumor and similar British -our forms
     n = re.sub(r"[^a-z0-9 ]+", " ", n)
     return n.replace("ae", "e").replace("oe", "e")
 
@@ -75,27 +74,6 @@ def proc_match(advised, done):
     return "unknown"
 
 
-SPLIT = re.compile(r"\s*(?:\+|,|;|\band\b|\bwith\b)\s*")
-
-
-def items(name):
-    """Items of a multi-item name ("a + b", "a and b"); an item must carry a procedure feature (bare letters like 'd', 'c' are dropped)."""
-    out = []
-    for part in SPLIT.split((name or "").lower()):
-        k, s_, a_, c_ = _features(part)
-        if k or c_ or a_:
-            out.append(part.strip())
-    return out
-
-
-def partial(advised_names, done_names):
-    """A+ flag: True if some advised item is not covered by any done item (the advised list was longer than what is named as done).
-    An 'extended' match (more done than advised) inside a single item is NOT detected by rule."""
-    A = [i for n in advised_names for i in items(n)]
-    D = [i for n in done_names for i in items(n)]
-    return any(not any(proc_match(a, d) == "match" for d in D) for a in A)
-
-
 TESTS = [
     # refuter #590: five false pairs of v3 must not match
     ("knee arthroscopy", "hip arthroplasty", "mismatch"),
@@ -130,12 +108,6 @@ TESTS = [
     ("dj stent removal", "dj stent removal", "match"),
     ("hysteroscopy + d&c + polypectomy - (package )", "hysteroscopy + d&c + polypectomy - (package )", "match"),
     # other true matches and doubts
-    # v6 (refuter #628): implant is a content word, so a subset advice with a shared distinctive word matches; a bare action noun does not
-    ("implant removal", "implant removal of large bones - ortho pkg", "match"),
-    ("excision of the tumour", "tumor excision-minor - onc mus", "match"),
-    ("wide local excision", "lipoma excision - multiple", "unknown"),
-    ("excision", "lipoma excision", "unknown"),
-    ("removal", "implant removal", "unknown"),
     ("laparoscopic cholecystectomy", "Cholecystectomy", "match"),
     ("haemorrhoidectomy", "hemorrhoidectomy", "match"),
     ("total knee replacement", "knee replacement bilateral", "match"),

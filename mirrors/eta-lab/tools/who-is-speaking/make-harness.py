@@ -5,11 +5,11 @@ the invented turns in mock-turns/ and, if ffmpeg exists, a quiet 10 s test tone 
   python3 make-harness.py <out.html>
 The mock turns carry hidden fields (machine_label, doubtful, room, doctor, speaker_basis, margin) on purpose:
 the page must never show them."""
-import json, os, pathlib, shutil, subprocess, sys
+import json, pathlib, shutil, subprocess, sys
 
 here = pathlib.Path(__file__).parent
 out = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else here / "harness.html"
-turns = [json.loads(p.read_text()) for p in sorted(pathlib.Path(os.environ.get("MOCK_DIR", here / "mock-turns")).glob("*.json"))]
+turns = [json.loads(p.read_text()) for p in sorted((here / "mock-turns").glob("*.json"))]
 for t in turns:
     if shutil.which("ffmpeg"):
         dst = out.parent / t["audio"]

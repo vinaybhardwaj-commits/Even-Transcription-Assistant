@@ -1,7 +1,6 @@
 freeze_text sha256 (b961291ae64c...): b961291ae64c9e88b34019822067cf90f2e1a7498c33385293e28fe142ccb6ea
-addendum.txt (165) sha256 (9c335c59c5be...): 9c335c59c5be97aa55acf99d36bcb951136f37a7f9d727c70346999cc9eeff12
-addendum166.txt sha256 (87b8cdac4330...): 87b8cdac4330c3903afcafdd4aab9e7933ca1dc6cec306ee6db69cad3b0be502
-COMBINE_RULE.md (v7) sha256: d36c9472569d755e1c9ced9888e7d0cd97a52cb7af18569ee15347d10f1c550e
-ARM4_PROMPT.txt sha256: 9d155a2ffe3c3106c745a9696503bced6b78701c817624473c54e2da6d0f4abe  (unchanged)
-Superseded, never used on real scoring: rule v1 2d492c426198, v2 adff4ae90407, v3 132b115db6be, v4 738e5c499d7f, v5 75f0a44250b9, v6 50983ba06ef8
-v7 hashed 24 Sep 2026 21:37 IST; raw arm outputs on real cards exist (no scoring, no truth read); the rule text changed only in the F2 weights source
+addendum.txt sha256 (9c335c59c5be...): 9c335c59c5be97aa55acf99d36bcb951136f37a7f9d727c70346999cc9eeff12
+COMBINE_RULE.md (v2) sha256: adff4ae9040717f26992e3abb0980c2c589b29fbabae7e1d402604e1097eb700
+ARM4_PROMPT.txt sha256: 9d155a2ffe3c3106c745a9696503bced6b78701c817624473c54e2da6d0f4abe  (unchanged since v1; accepted by ruling 165 I)
+COMBINE_RULE v1 (2d492c426198..., superseded, never used on real data)
+v2 hashed 24 Sep 2026 17:31 IST, before any real data (fixture only)

@@ -3,11 +3,10 @@
 const {chromium}=require("playwright");
 const {spawn}=require("child_process");
 const fs=require("fs"),path=require("path");
-const out=process.argv[2],here=__dirname,port=20000+Math.floor(Math.random()*30000);
+const out=process.argv[2],here=__dirname,port=8781;
 fs.mkdirSync(path.join(out,"shots"),{recursive:true});
 (async()=>{
  const srv=spawn("python3",[path.join(here,"serve-harness.py"),out,String(port)],{stdio:"ignore"});
- process.on('exit',()=>{try{srv.kill()}catch(e){}});
  await new Promise(r=>setTimeout(r,900));
  const br=await chromium.launch({args:["--autoplay-policy=no-user-gesture-required"]});
  const settings=[

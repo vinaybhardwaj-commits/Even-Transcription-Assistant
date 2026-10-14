@@ -7,7 +7,7 @@ import hashlib, json, os, re, subprocess, time, urllib.error, urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 FREEZE_SHA12 = "b961291ae64c"
 ADDENDUM_SHA12 = "9c335c59c5be"
-ADDENDUM166_SHA12 = "87b8cdac4330"   # ruling 166 amends 165 (ECAPA margins, truth priority)
+CONFIDENT_SAMPLE_N, CONFIDENT_SAMPLE_SEED = 40, 24092026   # ruling 165 E
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_KEY = os.path.expanduser("~/.config/even-jev/key")
 VERTEX_PROJECT = "clinical-infra"
@@ -36,30 +36,21 @@ def addendum_sha():
     return full
 
 
-def addendum166_sha():
-    full = sha256_file(os.path.join(HERE, "addendum166.txt"))
-    if not full.startswith(ADDENDUM166_SHA12):
-        raise SystemExit(f"addendum166.txt sha {full[:12]} != VJ-ADDENDUM-166 {ADDENDUM166_SHA12}")
-    return full
-
-
 def stamp():
-    """All three hashes, put on every result row (ruling 165 K, ruling 166 D)."""
-    freeze_text(); addendum_sha(); addendum166_sha()
-    return {"freeze_sha12": FREEZE_SHA12, "addendum_sha12": ADDENDUM_SHA12, "addendum166_sha12": ADDENDUM166_SHA12}
+    """Both hashes, put on every result row (ruling 165 K)."""
+    freeze_text(); addendum_sha()
+    return {"freeze_sha12": FREEZE_SHA12, "addendum_sha12": ADDENDUM_SHA12}
 
 
-def select_turns(arm1_rows, mode, turn_ids=None, confident_ids=None, extra_ids=None):
-    """Which turns an arm runs on. doubtful = every DOUBTFUL turn; doubtful+page = those plus the confident sample, which is the 40 confident items of the
-    "Who is speaking" page (ruling 169 X1: they have human truth), given as confident_ids; all = everything.
-    extra_ids = turns that are NOT in the arm 1 file but must still be run (ruling 290 E3X pseudo-turns: no production row, so they never enter arm1_in);
-    they are added as given. turn_ids (a list) restricts the result further (used by the refuter's stability re-query)."""
-    have = {r["turn_id"] for r in arm1_rows}
-    ids = {r["turn_id"] for r in arm1_rows if is_doubtful(r)} if mode != "all" else set(have)
-    if mode == "doubtful+page":
-        if confident_ids is None: raise SystemExit("--select doubtful+page needs --confident-ids (the page's 40 confident items)")
-        ids |= set(confident_ids) & have
-    if extra_ids: ids |= set(extra_ids) - have          # ids that ARE in arm 1 follow the normal selection, not this back door
+def select_turns(arm1_rows, mode, turn_ids=None):
+    """Which turns an arm runs on. doubtful = every DOUBTFUL turn; doubtful+sample = those plus a random sample of
+    CONFIDENT_SAMPLE_N confident turns (seed CONFIDENT_SAMPLE_SEED, drawn from the sorted confident ids so it is reproducible); all = everything.
+    turn_ids (a list) restricts the result further (used by the refuter's stability re-query)."""
+    import random
+    ids = {r["turn_id"] for r in arm1_rows if is_doubtful(r)} if mode != "all" else {r["turn_id"] for r in arm1_rows}
+    if mode == "doubtful+sample":
+        conf = sorted(r["turn_id"] for r in arm1_rows if not is_doubtful(r))
+        ids |= set(random.Random(CONFIDENT_SAMPLE_SEED).sample(conf, min(CONFIDENT_SAMPLE_N, len(conf))))
     return ids & set(turn_ids) if turn_ids is not None else ids
 
 
@@ -88,16 +79,12 @@ def blind_check(path, rows):
 
 
 # ---- frozen definitions ----
-MIN_CONFIDENT_MARGIN, MIN_CONFIDENT_BEST = 0.10, 0.50
-
-
 def is_doubtful(rec):
-    """Phase 0 DOUBTFUL: margin < 0.10 OR speaker_basis == diarization_only OR nemotron_n != pyannote_n, amended by ruling 186: CONFIDENT also needs
-    best >= 0.50 (the turn's best match to the room-day doctor's VERIFIED centroid). Gaps (COMBINE_RULE.md D1): missing margin or missing best => doubtful;
-    a missing diarizer count is not a disagreement."""
+    """Phase 0 DOUBTFUL: margin < 0.10 OR speaker_basis == diarization_only OR nemotron_n != pyannote_n.
+    Gaps (COMBINE_RULE.md D1): missing margin => doubtful; a missing count is not a disagreement."""
     if rec.get("speaker_basis") == "diarization_only": return True
-    m, b = rec.get("margin"), rec.get("best")
-    if m is None or m < MIN_CONFIDENT_MARGIN or b is None or b < MIN_CONFIDENT_BEST: return True
+    m = rec.get("margin")
+    if m is None or m < 0.10: return True
     n, p = rec.get("nemotron_n"), rec.get("pyannote_n")
     return n is not None and p is not None and n != p
 

@@ -360,8 +360,6 @@ def stage_d():
     def status_name(n):
         if ptype(n) == "CT_ANGIOGRAPHY":
             return "REFERRED_OUT"                     # V, ruling 163
-        if re.search(r"\bmri\b|magnetic resonance|\bmr\b", n, re.I):
-            return "REFERRED_OUT"                     # V, ruling 181: MRI is not done at EHRC (hard-coded)
         e = ev[n]
         if e["stems"] == 0:
             return "UNJUDGED"                         # no distinctive term to look up
@@ -534,7 +532,7 @@ def stage_f():
             psr_type[uid] = ty or ""
     stamp = datetime.now(IST).isoformat(timespec="seconds")
     save("done_names_stamp.json", dict(pulled_at=stamp, notes=sum(map(len, notes.values())), bills=sum(map(len, bills.values())), manual_cases=sum(map(len, mcase.values()))))
-    out, pairs_match, names_out = [], [], {}
+    out, pairs_match = [], []
     for r in cand:
         ts = P(r["ts"]); u = uhid.get(r["ind"])
         res = {}
@@ -558,26 +556,20 @@ def stage_f():
             mname = sorted({nm.strip().lower() for nm, c in mcase.get(r["ind"], []) if lo <= c <= hi and nm.strip()})
             manual_would_match = any(proc_match(a_, m_) == "match" for a_ in adv for m_ in mname)
             res[str(W)] = dict(verdict=verdict, n_adv=len(adv), n_done=len(dn), manual_case_name_would_match=manual_would_match)
-            names_out.setdefault(r["rx"], {"adv": adv})[f"done{W}"] = dn
             if W == 30 and verdict == "match":
                 pairs_match.append((r["ind"], *next((x[0], x[1]) for x in results if x[2] == "match")))
         out.append(dict(rx=r["rx"], flag_class=r["flag_class"], day=r["day"], res=res, done_30=bool(r["ev30"]["NOTE"] or r["ev30"]["BILL"]), done_14=bool(r["ev14"]["NOTE"] or r["ev14"]["BILL"])))
     save("proc_match_stage1.json", out)
-    save("proc_match_names.json", names_out)   # names only, keyed by Rx uid: box only
     # v5: units are (patient, advised name); pairs already graded in the v4 sample (which shaped the v5 rule) are excluded; seed 25
-    prev = set()
-    for fn in os.listdir(OUT):
-        if fn.startswith("proc_match_sample20") and fn.endswith(".json"):
-            prev |= {tuple(x) for x in load(fn)}
+    prev = {tuple(x) for x in load("proc_match_sample20.json")}
     seen, units = set(), []
     for ind, a_, d_ in sorted(pairs_match):
         if (ind, a_) in seen or (a_, d_) in prev:
             continue
         seen.add((ind, a_)); units.append((a_, d_))
-    seed = int(os.environ.get("PROC_SEED", "25"))
-    rnd = random.Random(seed)
+    rnd = random.Random(25)
     sample = rnd.sample(units, min(20, len(units)))
-    save(f"proc_match_sample20_s{seed}.json", sample)   # names only, no identity
+    save("proc_match_sample20_v5.json", sample)   # names only, no identity
     print(f"F: distinct (patient, advised name) match units, excluding the v4 graded pairs: {len(units)}; all match pairs before dedupe: {len(pairs_match)}")
     def tab(W, cut):
         c = collections.Counter()
@@ -596,8 +588,8 @@ def stage_f():
 
 
 # ---------------------------------------------------------------- stage E: plain CT (ruling 164, P1-PREREG-v3 A7)
-CT_NAME = re.compile(r"(^|[^a-z])(ct|c\s?t|hrct|ncct|cect)([^a-z]|$)|ct scan|computed tomo", re.I)
-CT_EXCLUDE = re.compile(r"angio|calcium|\bcta\b|ctpa|\bpet\b|\bmri\b|\bmr\b|venogram|aortogram|arteriogram|portogram", re.I)   # v6: vascular contrast studies are the angio family (referred out, ruling 163)
+CT_NAME = re.compile(r"(^|[^a-z])(ct|c\s?t|hrct)([^a-z]|$)|ct scan|computed tomo", re.I)
+CT_EXCLUDE = re.compile(r"angio|calcium|\bcta\b|ctpa|\bpet\b|\bmri\b|\bmr\b", re.I)
 
 
 def is_plain_ct(name):
@@ -612,7 +604,7 @@ def stage_e():
     for a, b in days(D0, D1, 7):
         for rx, iuid, nm in pull(f"""SELECT _parent_id, investigation__uid, investigation__name FROM "individuals-prescriptions__further_investigation"
               WHERE _create_time >= '{a}T00:00:00+05:30' AND _create_time < '{b}T00:00:00+05:30'
-                AND investigation__name ~* '(^|[^a-z])(ct|c ?t|hrct|ncct|cect)([^a-z]|$)|ct scan|computed tomo'"""):
+                AND investigation__name ~* '(^|[^a-z])(ct|c ?t|hrct)([^a-z]|$)|ct scan|computed tomo'"""):
             if is_plain_ct(nm):
                 orders[rx] = (iuid, nm)
     print(f"E: plain-CT order rows on distinct Rx {len(orders)}  [{time.time()-t:.0f}s]")
@@ -740,197 +732,6 @@ def stage_r():
     print(f"R: done  [{time.time()-t:.0f}s]")
 
 
-
-# ---------------------------------------------------------------- stage W: RXWIN window rule (P1-PREREG-v6.md)
-RXWIN_CAP = timedelta(minutes=30)
-RXWIN_MIN_GAP = timedelta(seconds=60)      # a next visit must start more than 60 s after this window's start to count as a cut
-
-
-def stage_w():
-    """RXWIN windows: end = min(Rx updated_at, start + 30 min, start of the same doctor's next visit). Next visit = the doctor's next
-    queue `called_at` or next hospital-type Rx `timestamp` (an Rx opens at the consult start). Reports how many windows each rule truncates."""
-    t = time.time()
-    win = load("rxwin.json")
-    RX = {}
-    for ch in chunks(win, 150):
-        for uid, doc, ts in pull(f"""SELECT uid, doctor_uid, "timestamp" FROM "individuals-prescriptions" WHERE uid IN ({','.join(map(q, ch))})"""):
-            RX[uid] = (doc, P(ts))
-    docs = sorted({d for d, _ in RX.values()})
-    starts = collections.defaultdict(list)                     # doctor -> [datetime]
-    for v in load("visits_links.json"):
-        if v["doc"] in docs:
-            starts[v["doc"]].append(P(v["called"]))
-    def page(day_a, day_b, dlist):
-        try:
-            return pull(f"""SELECT doctor_uid, "timestamp" FROM "individuals-prescriptions" WHERE type_of_prescription LIKE 'HOSPITAL%'
-                 AND "timestamp" >= '{day_a}T00:00:00+05:30' AND "timestamp" < '{day_b}T00:00:00+05:30' AND doctor_uid IN ({','.join(map(q, dlist))})""")
-        except AssertionError:
-            if len(dlist) == 1:
-                raise
-            h = len(dlist) // 2
-            return page(day_a, day_b, dlist[:h]) + page(day_a, day_b, dlist[h:])
-    for a, b in days(D0, D1 + timedelta(days=1), 2):
-        for d, ts in page(a, b, docs):
-            starts[d].append(P(ts))
-    for d in starts:
-        starts[d].sort()
-    print(f"W: windows {len(win)}; doctors {len(docs)}; visit starts pulled {sum(map(len, starts.values()))}  [{time.time()-t:.0f}s]")
-    out, c = {}, collections.Counter()
-    for u, w in win.items():
-        doc, s0 = RX[u]
-        e_raw = P(w["end"])
-        cap_end = s0 + RXWIN_CAP
-        nxt = next((x for x in starts.get(doc, []) if x > s0 + RXWIN_MIN_GAP), None)
-        cut_end = nxt if nxt else None
-        final = min([e_raw, cap_end] + ([cut_end] if cut_end else []))
-        cap_trunc = e_raw > cap_end
-        cut_trunc = bool(cut_end) and e_raw > cut_end
-        c["cap alone truncates"] += cap_trunc
-        c["next-visit cut alone truncates"] += cut_trunc
-        c["either truncates"] += (cap_trunc or cut_trunc)
-        c["both would truncate"] += (cap_trunc and cut_trunc)
-        c["cut binds tighter than the cap"] += (cut_trunc and (not cap_trunc or cut_end < cap_end))
-        out[u] = dict(doc=doc, start=str(s0), end=str(final), minutes=round((final - s0).total_seconds() / 60, 1), raw_minutes=w["minutes"],
-                      truncated_by=("none" if final == e_raw else ("cut" if cut_end and final == cut_end and cut_end < cap_end else "cap")))
-    save("rxwin_v6.json", out)
-    mins = sorted(v["minutes"] for v in out.values()); raw = sorted(v["raw_minutes"] for v in out.values())
-    n = len(out)
-    print(f"W: raw window minutes: median {raw[n//2]}, p90 {raw[int(n*.9)]}, max {raw[-1]}; after the v6 rule: median {mins[n//2]}, p90 {mins[int(n*.9)]}, max {mins[-1]}")
-    for k, v in c.items():
-        print(f"W: {k}: {v} of {n} ({100*v/n:.0f}%)")
-    print("W: final binding rule:", dict(collections.Counter(v["truncated_by"] for v in out.values())))
-    print(f"W: windows with no later visit by the same doctor in the pulled data: {sum(1 for u,(d,s0) in RX.items() if not any(x > s0 + RXWIN_MIN_GAP for x in starts.get(d, [])))}  [{time.time()-t:.0f}s]")
-
-
-
-# ---------------------------------------------------------------- stage L: A+ labels, matched negatives, link-3 worklist (P1-PREREG-v6.1.md)
-def stage_l():
-    import random
-    from procmatch import partial
-    t = time.time()
-    rows = load("advised_rx_typed.json"); st1 = {o["rx"]: o for o in load("proc_match_stage1.json")}; names = load("proc_match_names.json")
-    visits = load("visits_links.json"); win = load("rxwin_v6.json"); PSR = load("psr_window.json"); surg = set(load("surgical_docs.json"))
-    cta = set(load("cta_rx_uids.json")) if os.path.exists(OUT + "cta_rx_uids.json") else set()
-    qv = {v["rx"]: v for v in visits if v.get("rx") and v["tier"] in ("A", "B")}
-    Sset = {r["rx"] for r in rows if r["flag_class"] in ("S_ONLY", "BOTH")}
-    def visit_of(rx):
-        v = qv.get(rx)
-        if v:
-            return dict(route=v["route"], tier=v["tier"], start=v["called"], end=v["done"])
-        w = win.get(rx)
-        return dict(route="RXWIN", tier="B", start=w["start"], end=w["end"]) if w else None
-    def klass(ev):
-        return "DONE_STRONG" if (ev["NOTE"] or ev["BILL"]) else ("ADM_ONLY" if ev["ADM"] else ("BOOKED_MANUAL_ONLY" if ev["MANUAL_CASE"] else "NONE"))
-    def wk(dstr):
-        y, w, _ = date.fromisoformat(dstr).isocalendar(); return y * 100 + w
-    def wk_label(n):
-        return f"{n//100}-W{n%100:02d}"
-    relax = os.environ.get("L_RELAX") == "1"          # v7 C2: maturity applies to N1 only; positives and N2 take any date
-    sfx = "_relaxed" if relax else ""
-    report, worklists = {}, {}
-    for W, cut in (("30", MATURE_30), ("14", MATURE_14)):
-        pcut = date(2099, 1, 1) if relax else cut
-        cand = [r for r in rows if r["rx"] in st1 and date.fromisoformat(r["day"]) <= pcut and klass(r[f"ev{W}"]) == "DONE_STRONG" and r["rx"] not in cta]
-        units, strata = {}, collections.Counter()
-        for r in sorted(cand, key=lambda z: z["ts"]):
-            verdict = st1[r["rx"]]["res"][W]["verdict"]
-            nm = names.get(r["rx"], {"adv": [], f"done{W}": []})
-            key = (r["ind"], tuple(sorted(x for x in nm["adv"]))) if nm["adv"] else (r["ind"], r["rx"])
-            if key in units:
-                continue
-            if verdict == "match":
-                stratum = "A+ partial" if partial(nm["adv"], nm.get(f"done{W}", [])) else "A+ full"
-            elif verdict == "technique_changed":
-                stratum = "B only"
-            else:
-                stratum = verdict                      # mismatch / unknown
-            units[key] = dict(rx=r["rx"], doc=r["doc"], day=r["day"], week=wk(r["day"]), flag_class=r["flag_class"], stratum=stratum, visit=visit_of(r["rx"]))
-            strata[stratum] += 1
-        pos = [u for u in units.values() if u["stratum"] in ("A+ full", "A+ partial")]
-        b_only = [u for u in units.values() if u["stratum"] == "B only"]
-        pos_v = [u for u in pos if u["visit"]]
-        # negatives
-        n1 = [dict(rx=r["rx"], doc=r["doc"], day=r["day"], week=wk(r["day"]), flag_class=r["flag_class"], visit=visit_of(r["rx"])) for r in rows
-              if r["flag_class"] in ("S_ONLY", "BOTH") and date.fromisoformat(r["day"]) <= cut and klass(r[f"ev{W}"]) == "NONE"
-              and r["type_status"] != "REFERRED_OUT_ONLY" and r["rx"] not in cta]
-        n1 = [x for x in n1 if x["visit"]]
-        n2 = []
-        for v in visits:
-            if v["tier"] in ("A", "B") and v["rx"] and v["doc"] in surg and date.fromisoformat(v["day"]) <= pcut:
-                p_ = PSR.get(v["rx"])
-                if p_ and p_[2] == "no" and v["rx"] not in Sset:
-                    n2.append(dict(rx=v["rx"], doc=v["doc"], day=v["day"], week=wk(v["day"]), visit=visit_of(v["rx"])))
-        for u, w in win.items():
-            p_ = PSR.get(u)
-            if p_ and p_[2] == "no" and u not in Sset and u not in qv and w.get("doc") in surg:
-                d = str(ist_date(P(w["start"])))
-                if date.fromisoformat(d) <= pcut:
-                    n2.append(dict(rx=u, doc=w["doc"], day=d, week=wk(d), visit=dict(route="RXWIN", tier="B", start=w["start"], end=w["end"])))
-        rnd = random.Random(24)
-        used, work, short = set(), [], collections.Counter()
-        def draw(pool, pos_u, tag):
-            for shift, borrowed in ((0, False), (-1, True), (1, True)):
-                opts = sorted((x for x in pool if x["doc"] == pos_u["doc"] and x["week"] == pos_u["week"] + shift and x["rx"] not in used), key=lambda z: z["rx"])
-                if opts:
-                    x = rnd.choice(opts); used.add(x["rx"]); return x, borrowed
-            short[tag] += 1
-            return None, False
-        for u in sorted(pos_v, key=lambda z: z["rx"]):
-            work.append(dict(role="POS", stratum=u["stratum"], flag_class=u["flag_class"], rx=u["rx"], doc=u["doc"], day=u["day"], visit=u["visit"]))
-            for pool, tag in ((n1, "N1"), (n2, "N2")):
-                x, borrowed = draw(pool, u, tag)
-                if x:
-                    work.append(dict(role=tag, stratum=("N1 no evidence of done in our records" if tag == "N1" else "N2 no procedure advised"), flag_class=x.get("flag_class"), rx=x["rx"], doc=x["doc"],
-                                     day=x["day"], visit=x["visit"], borrowed_week=borrowed, matched_to=u["rx"]))
-        worklists[W] = work
-        cnt = collections.Counter
-        report[W] = dict(mature_cutoff=str(cut), maturity_rule=("positives and N2 any date, N1 mature only (v7 C2)" if relax else "all classes mature only (v6.1)"),
-                         positives_mature=sum(u["day"] <= str(cut) for u in pos), positives_immature=sum(u["day"] > str(cut) for u in pos),
-                         done_candidates_units=len(units), strata=dict(strata),
-                         A_plus_positives=len(pos), A_plus_with_a_visit=len(pos_v), A_plus_by_route=dict(cnt(u["visit"]["route"] for u in pos_v)),
-                         A_plus_partial=sum(u["stratum"] == "A+ partial" for u in pos), B_sensitivity_extra=len(b_only), A_plus_plus_B=len(pos) + len(b_only),
-                         N1_pool_with_visit=len(n1), N2_pool=len(n2),
-                         drawn=dict(cnt(x["role"] for x in work)), borrowed_week=sum(bool(x.get("borrowed_week")) for x in work),
-                         positives_without_a_drawn_N1=short["N1"], positives_without_a_drawn_N2=short["N2"],
-                         positives_by_flag_class=dict(cnt(u["flag_class"] for u in pos)))
-    save(f"labels_worklist_30d{sfx}.json", worklists["30"]); save(f"labels_worklist_14d{sfx}.json", worklists["14"]); save(f"REPORT_L{sfx}.json", report)
-    print(json.dumps(report, indent=1)); print(f"L: done  [{time.time()-t:.0f}s]")
-
-
-
-# ---------------------------------------------------------------- stage T: near-identical same-day neighbours, from the prescription side alone (v7.3a; no transcript)
-def stage_t():
-    """Upper bound on margin ties: the share of coded visits whose same doctor has another hospital-type Rx the same IST day with an IDENTICAL
-    diagnosis-code set. Medicines can still differ, so this is an upper bound on near-identical; visits with no diagnosis code are not judged."""
-    t = time.time()
-    visits = load("visits_links.json"); surg = set(load("surgical_docs.json"))
-    key = load("link3_key.json") if os.path.exists(OUT + "link3_key.json") else {}
-    rx_day = collections.defaultdict(list)
-    for a, b in days(D0, D1, 1):
-        for uid, doc, icd in pull(f"""SELECT uid, doctor_uid, diagnosis_icd_codes::text FROM "individuals-prescriptions" WHERE type_of_prescription LIKE 'HOSPITAL%'
-              AND "timestamp" >= '{a}T00:00:00+05:30' AND "timestamp" < '{b}T00:00:00+05:30'"""):
-            codes = tuple(sorted(x.strip() for x in (icd or "").strip("{}[]").replace('"', "").split(",") if x.strip()))
-            rx_day[(doc, str(a))].append((uid, codes))
-    idx = {u: (d, day, c) for (d, day), lst in rx_day.items() for u, c in lst}
-    def share(uids, label):
-        n = coded = same = 0
-        for u in uids:
-            if u not in idx:
-                continue
-            n += 1; d, day, c = idx[u]
-            if c:
-                coded += 1
-                same += any(uu != u and cc == c for uu, cc in rx_day[(d, day)])
-        print(f"T: {label}: {n} Rx; coded {coded} ({100*coded/max(n,1):.0f}%); identical-diagnosis same-day neighbour {same} = {100*same/max(coded,1):.0f}% of the coded")
-    q = [v for v in visits if v.get("rx") and v["tier"] in ("A", "B")]
-    share([v["rx"] for v in q], "all queue visits with an Rx")
-    share([v["rx"] for v in q if v["doc"] in surg], "queue visits of surgical-clinic doctors")
-    share([v["rx"] for v in q if v["doc"] not in surg], "queue visits of all other doctors")
-    share([k["rx"] for k in key.values()], "the 37 blind link-3 items (class-blind, together)")
-    nb = sorted(len(rx_day[(idx[v["rx"]][0], idx[v["rx"]][1])]) - 1 for v in q if v["rx"] in idx)
-    print(f"T: other same-doctor same-day hospital Rx per visit: median {nb[len(nb)//2]}, p90 {nb[int(len(nb)*.9)]}; none at all {sum(x == 0 for x in nb)} of {len(nb)}  [{time.time()-t:.0f}s]")
-
-
 if __name__ == "__main__":
     stage = sys.argv[1] if len(sys.argv) > 1 else ""
-    {"A": stage_a, "B": stage_b, "C": stage_c, "D": stage_d, "drift": stage_drift, "F": stage_f, "E": stage_e, "R": stage_r, "W": stage_w, "L": stage_l, "T": stage_t}.get(stage, lambda: sys.exit(__doc__))()
+    {"A": stage_a, "B": stage_b, "C": stage_c, "D": stage_d, "drift": stage_drift, "F": stage_f, "E": stage_e, "R": stage_r}.get(stage, lambda: sys.exit(__doc__))()

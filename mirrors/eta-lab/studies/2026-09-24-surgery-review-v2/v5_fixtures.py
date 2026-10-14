@@ -8,21 +8,6 @@ V3 = os.path.expanduser("~/eta-data/surgery-review-v3")
 EXPECT = {"F02": "positive: CT advised now (proposed_now)", "F11": "positive: CONDITIONAL plain CT (proposed / conditional)", "F06": "history negative", "F07": "history negative", "F10": "history negative", "F15": "history negative"}
 
 
-def main_ct():
-    """Same trial on surg-deid's FIXED de-identification of hist-miner's staged files (CT01..CT06; tool fix for a capitalised-phrase false positive). CT04 (= pool #11) has its named
-    procedure word redacted (an ASR garble read as a name): reported SEPARATELY and excluded from the bar (eta-refuter-2 #633)."""
-    key = json.load(open(os.path.expanduser("~/eta-data/hist-mining/ct-fixtures/fixtures-key.json")))
-    Q = {"named": v5.A["named"], "described": v5.A["described"], **v5.B}
-    for cid in sorted(key):
-        doc = json.load(open(os.path.expanduser(f"~/eta-data/hist-mining/ct-fixtures/deid/{cid}.json")))
-        assert not finalize.residual_identifiers(doc["turns"]), cid
-        st = bc.state_text(finalize.to_bc_turns(doc)); runs = []
-        for _ in range(2):
-            a = u9.ask(st, Q)["answers"]
-            runs.append((round(a["named"]["noul"], 2), round(a["described"]["noul"], 2), a["status"]["choice"], round((a["status"].get("probabilities") or {}).get(a["status"]["choice"], 0), 2), a["category"]["choice"]))
-        print(cid, "pool", key[cid]["pool_n"], key[cid]["label"], "| " + " || ".join(f"named {r[0]} desc {r[1]} status {r[2]}({r[3]}) cat {r[4]}" for r in runs), flush=True)
-
-
 def main():
     Q = {"named": v5.A["named"], "described": v5.A["described"], **v5.B}
     for fid in ("F02", "F11", "F06", "F07", "F10", "F15"):
@@ -38,4 +23,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main_ct() if sys.argv[1:] == ["ct"] else main()
+    main()

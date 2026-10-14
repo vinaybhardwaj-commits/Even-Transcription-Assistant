@@ -36,8 +36,3 @@ Open with Fable:
 - Rescore from raw outputs, and cross-check with indep_score.py after updating it to the ruling 165 rules.
 - Apply the ruling 165 section F pass bar.
 - Run the section G stability re-query on 20% of doubtful turns.
-
-## Status 17:55 IST
-- Refuter env ready on voice-lab-1 at ~/vj/refute/.venv: pyannote.audio 3.3.2, torch 2.4.1, huggingface_hub 0.25.2 (pinned <0.26; 0.26+ breaks pyannote 3.3.2).
-- wespeaker-voxceleb-resnet34-LM loads at HF revision 837717ddb9ff and gives 256-dim embeddings. vj-data's margin recompute should cite the same revision; if it cites a different one, M4 is expected to drift.
-- arms/addendum.txt sha256 = 9c335c59c5be, which matches ruling 165.

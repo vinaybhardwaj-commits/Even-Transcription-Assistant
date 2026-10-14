@@ -24,19 +24,6 @@ Check before writing to the db:
 
     python3 check_seed.py <seed_dir> --expect 150      # seed_dir/turns/*.json + seed_dir/audio/*
 
-## Building the seed (ruling 170)
-vj-data hands over `selection.json` (turn identities `{window_id, s, e}` in the pool's clock, no labels) and, if it
-wants, `labelled.json` (turns that already carry a usable V label; they are dropped, deduped by turn):
-
-    python3 build_seed.py --pool ~/eta-data/vj --selection selection.json --exclude labelled.json \
-            --out ~/eta-data/who-is-speaking --expect <n>
-    python3 check_seed.py ~/eta-data/who-is-speaking/seed --expect <n>
-
-It cuts each turn from the window WAV (3 s either side, mono 32 kbps MP3), writes `seed/turns/<id>.json`,
-`seed/audio/<id>.mp3` and `seed/FILES.txt` (the upload list with sizes and sha256), and the private
-`key.json` (id -> window_id, s, e) for the scorer. It refuses turns from the pool's `profile` group, turns under 0.8 s,
-missing audio, unknown or duplicate turns. Output holds PHI: it stays under `~/eta-data/`, mode 700, never in git.
-
 ## Capabilities and db rules (for the publish)
 `db` and `user` (`user` with scopes `["profile"]` so the Results tab can show names).
 
