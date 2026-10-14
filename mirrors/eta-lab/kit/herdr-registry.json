@@ -66,6 +66,15 @@
       "session_id": "a83477f0-ef02-4f60-aace-50b586d7fe51",
       "model": "sonnet",
       "task": ""
+    },
+    "warden": {
+      "pane_id": "w17:p1",
+      "cwd": "/Users/vinaybhardwaj/oc/warden",
+      "purpose": "fleet warden + dispatcher",
+      "machine": "mini",
+      "model": "sonnet",
+      "note": "29 Sep 2026: added by herdr-kit (display owner, Fable 6183); workspace w17 renamed \"C sonnet · fleet warden + dispatcher\" so the sidebar group is readable. No session id from herdr agent get; restart FRESH: herdr agent start warden --kind claude --pane w17:p1 --timeout 120000 -- -n \"warden · C sonnet · fleet warden + dispatcher\" --model sonnet --permission-mode auto",
+      "label": "warden · C sonnet · fleet warden + dispatcher"
     }
   },
   "machine:eta-lab-t4": {
@@ -352,6 +361,52 @@
       "session_id": "14701b50-d340-43e4-bf42-4c56f7353077",
       "model": "haiku",
       "task": ""
+    }
+  },
+  "machine:eta-ci-c3 · E2E 24-core": {
+    "cap": {
+      "pane": "w1:p1",
+      "cwd": "/home/eta",
+      "purpose": "CAP-3 prescribing agent",
+      "label": "cap · C sonnet · CAP-3 PRESCRIBE",
+      "note": "29 Sep 2026 (display owner, Fable order 6183): added to registry by herdr-kit; pane in workspace w1 (renamed \"C sonnet · CAP-3 PRESCRIBE\"). No session id from herdr agent get; restart via label FRESH: herdr --machine 85baa2e0f8428b0b03a3e8606f826e43 agent start cap --kind claude --pane w1:p1 --timeout 120000 ---n \"cap · C sonnet · CAP-3 PRESCRIBE\" --model sonnet --permission-mode auto",
+      "model": "sonnet"
+    },
+    "stt-bench": {
+      "pane": "w4:p1",
+      "cwd": "/home/eta",
+      "purpose": "CLARITY per-language STT bench",
+      "label": "stt-bench · C sonnet · CLARITY bench",
+      "note": "29 Sep 2026 (display owner, Fable order 6183): added by herdr-kit; workspace w4 renamed \"C sonnet · CLARITY bench\". No session id from herdr; restart FRESH: herdr --machine 85baa2e0f8428b0b03a3e8606f826e43 agent start stt-bench --kind claude --pane w4:p1 --timeout 120000 -- -n \"stt-bench · C sonnet · CLARITY bench\" --model sonnet --permission-mode auto",
+      "model": "sonnet"
+    }
+  },
+  "machine:asus-ubuntu · i7 16GB (no GPU)": {
+    "vp-asus": {
+      "pane": "w3:p1",
+      "cwd": "/home/vinay",
+      "purpose": "PARKED (CPU mint moved to HF per Fable 29 Sep; pane kept for later reuse)",
+      "label": "vp-asus · C sonnet · parked (ASUS)",
+      "note": "29 Sep 2026: added by herdr-kit (display owner); workspace w3 label per Fable 6183. No session id from herdr; restart FRESH: herdr --machine 6481ba9074c9fa50c5ebf1a2de931786 agent start vp-asus --kind claude --pane w3:p1 --timeout 120000 -- -n \"vp-asus · C sonnet · parked (ASUS)\" --model sonnet --permission-mode auto",
+      "model": "sonnet"
+    },
+    "chronicle": {
+      "pane": "w4:p1",
+      "cwd": "/home/vinay/lab/chronicle",
+      "purpose": "roadmap documentation (ASUS)",
+      "label": "chronicle · C sonnet · roadmap doc (ASUS)",
+      "note": "29 Sep 2026: added by herdr-kit (display owner, Fable 6183); cwd /home/vinay/lab/chronicle. Restart FRESH: herdr --machine 6481ba9074c9fa50c5ebf1a2de931786 agent start chronicle --kind claude --pane w4:p1 --timeout 120000 -- -n \"chronicle · C sonnet · roadmap doc (ASUS)\" --model sonnet --permission-mode auto",
+      "model": "sonnet"
+    }
+  },
+  "machine:UbuntuYoga": {
+    "yoga-free": {
+      "pane": "w1:p1",
+      "cwd": "/home/vinay",
+      "purpose": "free OpenCode no-PHI tools Y9-Y11 (Yoga)",
+      "label": "yoga-free · OpenCode big-pickle · no-PHI tools",
+      "kind": "opencode",
+      "note": "29 Sep 2026: added by herdr-kit (display owner, Fable 6183). OpenCode pane (kind opencode; its actual model is not reported by herdr agent get — do not copy the · OpenCode big-pickle label field into a model fact) — restart via the OpenCode/OpenRouter pane flow, NOT herdr agent start"
     }
   }
 }

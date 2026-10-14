@@ -13,7 +13,3 @@ Design (v0 rules + v1 Gemini-reads-all-tracks) witnessed through 4 addenda closi
 Refs: #4655-4930, #5014-5032, #5177-5222, #5281-5282.
 
 - 29 Sep 2026 (rev 25): RUN 3 approved (cap USD 15) and started on 4f0d2caba422, 222 DEV windows; G3 page on main; CAP-3 HELPED=FALSE.
-- 29 Sep ~19:27 IST (rev 26): ADDENDUM-9 r3 accepted; TEST n=23, cap USD 20; V's rating set comes from TEST output (#6948, #7009).
-- 29 Sep ~23:10 IST (rev 27): v2 6dbb6947 WITNESSED #7480 after B2 fix #7476; v1 below P in 7 of 8 languages (#7262); DEV gate is beat P on S1 and S2 primary.
-- 30 Sep 2026 ~06:30 IST (rev 28): v2-D FAILED DEV (G4 33.8%/25.3%, G3m; #7635); v2-E frozen 2eccd9dd, M5 42501e65 (#7689), one run on a fresh 384-window set: FAIL (#7873, re-derived #7876, D-any 3/69 false-drug, D-two 40 inserts); FUSER stops, Fable writes it up for V 07:30 (#7918). Refs: #7635, #7675, #7689, #7873, #7876, #7918.
-- 30 Sep 2026 ~10:30 IST (rev 29): V decided 08:15 to build v3 (#8153): doses untouched, drugs need 2 engines plus lexicon, bigger fresh set. Pre-reg r4 cbfece42 PASS; v3 working tree witnessed (#8243); waits for commit. Refs: #8153, #8223, #8243.

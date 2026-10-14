@@ -2,11 +2,35 @@
 
 Written by the `roadmap` pane. Plain words: each item is the question, the choices, and what I recommend. Closed decisions move to the bottom with the date and V's answer.
 
-Last revision: **29 Sep 2026, ~23:10 IST** (rev 10).
+Last revision: **28 Sep 2026, ~15:10 IST** (rev 9).
 
 ---
 
 ## OPEN
+
+### D-2 — ORBOX: you wrote "speakers" around the OT — do you mean microphones?
+- **Question:** the brief lists "more speakers around the room". Speakers make sound; microphones collect it. Which do you want?
+- **Options:** (a) microphones (more pickup); (b) speakers (playback); (c) both.
+- **Recommendation:** (a) — capture needs more mics, not more speakers.
+- **Raised:** 26 Sep. **Status:** open. Update 27 Sep: orbox's design v2 prices both bundles assuming (a); flip this and the bundles change.
+
+### D-3 — ORBOX: video of patients in the OT — consent and PHI policy?
+- **Question:** the robotic-surgery webcam records VIDEO of the patient and the room. Video is more sensitive than audio. What are the rules?
+- **Options:** (a) full video with patient consent form; (b) audio-only until consent is sorted; (c) video with face blur / non-identifying framing.
+- **Recommendation:** (a) with a proper consent step, or (b) as a safe first phase.
+- **Raised:** 26 Sep. **Status:** open. **This is your call, V — it is a patient-data decision.** Update 27 Sep: orbox's design v2 test plan assumes audio+video sync only, no patient video yet.
+
+### D-4 — ORBOX: hardware purchase
+- **Question:** what to buy for the OT upgrade?
+- **Options:** (a) USB webcam (audio+video separately) + a few wired mics; (b) add wireless directional mics; (c) full kit list for a quote.
+- **Recommendation:** (a) first (webcam + 2-3 mics), defer wireless directional mics until the wired setup is proven. Update 27 Sep: two priced bundles (lean/full) are ready in orbox's design v2 (`~/oc/orbox/ORBOX-DESIGN-v2.md`) — this decision can now be made against real rupee numbers.
+- **Raised:** 26 Sep. **Status:** open.
+
+### D-5 — ORBOX: who owns the build?
+- **Question:** which pane runs the ORBOX project?
+- **Options:** (a) lab-mover (Linux/capture); (b) scribe/minibot (recorder lineage); (c) a new dedicated pane.
+- **Recommendation:** (a) lab-mover for capture software + herdr-kit for Linux install, fleet for monitoring — reuse, don't mint.
+- **Raised:** 26 Sep. **Status:** open.
 
 ### D-6 — RECORDER: which room follows Home Office in the 0.1.25 rollout?
 - **Question:** 0.1.25 is PASSed (1da7232) and a signed test build is going to Home Office only (auto-start left on). Scope/owner (scribe build + minibot monitor) is settled. What's left is the next hop after the Home Office canary.
@@ -69,13 +93,6 @@ Last revision: **29 Sep 2026, ~23:10 IST** (rev 10).
 
 ## CLOSED
 
-- **r7406 (29 Sep):** ROLE v4 rulings: D = 29 Sep; stop rule is a data cut (INSUFFICIENT if fewer than 30 VERIFIED sessions); Staff button deployed (e0ef0665, 22:24). T-ROLE-5 open.
-- **r7588 (29 Sep):** KOYAL bulk GO; HF daily guard USD 300 for 29-30 Sep; Koyal cap USD 150 to 30 Sep 12:00.
-- **r7262 (29 Sep):** FUSER re-plan; DEV gate is beat P on S1 and S2 primary.
-- **ADDENDUM-25 (29 Sep):** T-TERMS-40 twin identity accepted (aa6fa2b9); new-file route.
-- **r7598 (29 Sep):** Herdr live handoff failed on the spare; no live change; runbook due 08:00 30 Sep (T-HERDR-2).
-
-- **V via Fable #6990 (29 Sep ~18:50 IST), ORBOX D-2..D-5:** D-2 = BOTH, more microphones and more speakers around the OT. D-3 = DROPPED: video consent is already settled (V); the ORBOX video stream is the robotic surgical device's telemetry display, not video of the patient, so the patient-video concern leaves the design and test plan. D-4 = a full itemised kit list for a vendor quote (mics, speakers, telemetry video capture); orbox writes the list only and buys nothing (board task T-ORBOX-5). D-5 = HOLD: no ORBOX building of any kind until V says so; the kit list is paperwork, not building.
 - **V via Fable #6051 (29 Sep, ~13:10 IST):** patient audio allowed on Hugging Face GPUs (approved ZDR vendor). Private buckets only; our own code and open-weight models only; outputs come back to the box; each job posts job id, machines, hours, spend; guard USD 150/day across all HF jobs; up to 10 L4 at once. Closes D-16 in spirit (HF is now a used path, not only a backup); D-16 itself left open until V says so.
 - **V via Fable #6161 (29 Sep):** keep patient data in the HF buckets until V says delete. No bucket or file is deleted after copy-back. hf-fleet keeps the ledger at ~/eta-data/hf-buckets-ledger.md.
 
@@ -97,7 +114,3 @@ Last revision: **29 Sep 2026, ~23:10 IST** (rev 10).
 - **r370 (V):** room live-transcription switches stay OFF in production.
 - **r409 (25 Sep):** OpenCode migration waves 1-3 executed (18 panes).
 - **r308 → r406 (25 Sep):** Link-3 interim class join → reopened by V to widen the translated stratum.
-- **Fable #7918 (30 Sep 06:25):** FUSER stops after the v2-E fresh-set FAIL; router LID fix BUILD GO in the lab only; ROLE v4 runs doctor-rank only (staff stratum UNSUPPORTED); KOYAL 25 concurrent HF jobs OK (#7858).
-- **Fable #8153 (30 Sep 08:20, V go 08:15):** FUSER restarts as v3 with fixed rules R1-R5 (doses never touched; drug needs 2 engines plus lexicon; bars as v2-E; size for G4; new fresh set). **#8196:** tonight 21:00-21:30 fleet update, only on a Fable GO. **#8245:** orchestrator thread handoff at 10:00.
-- **Fable #8315 (30 Sep, new thread):** all 29 WAITS answered; fleet update conditional GO; FUSER v3 seed commitment 0453361fcac11be7; T-ROLE-2/-3/-40 cancelled; Koyal 11/13 Sep re-id jobs launched.
-- **Fable #8369/#8412/#8483 (30 Sep):** room control is the Kiosk Bot's, not the bus's; BAKEOFF Sarvam-only; T-BACKFILL-HF cap USD 250; fleet update needs Fable GO by 20:40 or moves to 1 Oct 21:00.
