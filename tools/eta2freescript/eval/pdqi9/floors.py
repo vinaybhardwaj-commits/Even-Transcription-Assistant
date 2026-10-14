@@ -192,6 +192,7 @@ def judge_items(client, frozen, items: list[dict], transcript: str, cache_dir: P
     if not items:
         if attr_out is not None:
             attr_out.update({k: _zero_attr() for k in ("unsupported_drugs", "invented_fields", "dose_precedence_errors")})
+            attr_out["by_scope"] = {sc: {k: _zero_attr() for k in ("unsupported_drugs", "invented_fields", "dose_precedence_errors")} for sc in FLOOR_SCOPES}
         return {**dict.fromkeys(_ZERO, 0), "parse_failure": False}
     user = f"TRANSCRIPT:\n{transcript}\n\nITEMS:\n{_list(items)}\n"
     res, tolerated = _judge_json(client, frozen, "floor-items-v1.system.txt", user, lambda t: _parse_rows(t, "items", len(items), _item_ok),
@@ -200,6 +201,7 @@ def judge_items(client, frozen, items: list[dict], transcript: str, cache_dir: P
         return {**dict.fromkeys(_ZERO), "parse_failure": True}
     if attr_out is not None:
         attr_out.update(_judge_attribution(res, items, art, scope))
+        attr_out["by_scope"] = {sc: _judge_attribution(res, items, art, sc) for sc in FLOOR_SCOPES}
     kind = {it["n"]: it["kind"] for it in items}
     med = [x for x in res if kind[x["n"]] == "medicine"]
     return {"unsupported_drugs": sum(1 for x in med if x["said"] == "no"),
@@ -358,11 +360,11 @@ def parse_number_words(text: str) -> list[Decimal]:
     return [v for v, _, _, _ in _scan_numbers(text)[1]]
 
 
-# Safety floor: a number word is "heard" only when it is plainly a quantity. A bare quantity word needs a quantity word next.
-_BARE = frozenset({"zero", "one", "hundred", "thousand"})
+# Safety floor: a number word is "heard" only when it is plainly a quantity: the next token (past one a/an/of) is a quantity word.
+# Clock-time units (hour, minute) are deliberately absent: "fifteen minutes in the waiting room" is not a 15 mg strength.
 _QUANTITY = frozenset(
     "mg g gm gms gram milligram mcg microgram kg ml millilitre milliliter l litre liter iu unit tablet tab capsule cap spoon teaspoon "
-    "tablespoon drop puff sachet sachets patch lozenge ampoule vial injection time day week month year hour hr min minute dose".split())
+    "tablespoon drop puff sachet sachets patch lozenge ampoule vial injection time day week month year dose".split())
 
 
 def _is_quantity_word(tok: str) -> bool:
@@ -370,29 +372,45 @@ def _is_quantity_word(tok: str) -> bool:
 
 
 def spoken_values(text: str) -> set[Decimal]:
-    """The numbers the text plainly speaks as a quantity, whole (0.5 stays 0.5, never the runs 0 and 5). A number counts if it is a
-    compound ("twenty one", "one hundred", "one and a half", "one point five") or if it is not a bare "one", "zero", "half", "hundred" or
-    "thousand"; a bare one of those counts only when the next token (past one "a", "an" or "of") is a quantity word. "point" counts only
-    after a number. Bare digit tokens are the digit-run path's business, not this one's."""
+    """The numbers the text plainly speaks as a quantity, whole (0.5 stays 0.5, never the runs 0 and 5), whatever their words: single
+    words, compounds, decimals, "N and a half". ONE check at the exit: a value counts only if the next token, after an optional "a",
+    "an" or "of", is a quantity word. So every value returned is immediately followed by a quantity word in the source text. A bare
+    "point" counts only after a number. Bare digit tokens are the digit-run path's business, not this one's."""
     toks, spans = _scan_numbers(text)
-    out: set[Decimal] = set()
-    for v, i, j, kind in spans:
-        if kind in ("lead_point", "digit"):
+    cands: list[tuple[Decimal, int]] = []  # (value, index after its last token)
+    k = 0
+    while k < len(spans):
+        v, i, j, kind = spans[k]
+        nxt = spans[k + 1] if k + 1 < len(spans) else None
+        if (kind == "num" and j - i == 1 and toks[i] in _UNITS and 1 <= _UNITS[toks[i]] <= 9 and nxt and nxt[1] == j and nxt[3] == "num"
+                and toks[j] in _TENS and v == _UNITS[toks[i]]):  # colloquial hundreds: "two fifty", "two twenty five" = 250, 225
+            cands.append((v * 100 + nxt[0], nxt[2]))
+            k += 2
             continue
-        if kind == "half" or (j - i == 1 and toks[i] in _BARE):
-            k = j + 1 if toks[j:j + 1] and toks[j] in ("a", "an", "of") else j
-            if not (k < len(toks) and _is_quantity_word(toks[k])):
-                continue
-        out.add(v)
+        if kind not in ("lead_point", "digit"):
+            cands.append((v, j))
+        k += 1
+    out: set[Decimal] = set()
+    for v, j in cands:  # the ONE quantity-context check
+        n = j + 1 if toks[j:j + 1] and toks[j] in ("a", "an", "of") else j
+        if n < len(toks) and _is_quantity_word(toks[n]):
+            out.add(v)
+    # "1/2" in digits counts as 0.5 only before a quantity word
+    for m in _SLASH_HALF.finditer((text or "").lower()):
+        if _is_quantity_word(m.group(1)):
+            out.add(Decimal("0.5"))
     return out
 
 
+_SLASH_HALF = re.compile(r"(?<![\d/.])1\s*/\s*2(?![\d/])\s+(?:(?:a|an|of)\s+)?([a-z]+)")
+
+
 FLOOR_SCOPES = ("global", "medicine")
-DEFAULT_FLOOR_SCOPE = "global"
+DEFAULT_FLOOR_SCOPE = "medicine"
 
 
 def floor_scope(scope: str | None = None) -> str:
-    """FREESCRIPT_FLOOR_SCOPE in {global, medicine}; unset or empty is global (lead, 14 Oct, until fable rules). Anything else raises."""
+    """FREESCRIPT_FLOOR_SCOPE in {global, medicine}; unset or empty is medicine (fable ruling, 14 Oct: GO for scope=medicine); global stays selectable. Anything else raises."""
     s = scope if scope is not None else os.environ.get("FREESCRIPT_FLOOR_SCOPE", "")
     if s == "":
         s = DEFAULT_FLOOR_SCOPE
@@ -515,8 +533,10 @@ def _in_text(value: str, text: str) -> bool:
     return bool(v) and v in re.sub(r"\s+", " ", text)
 
 
-def _quote_text(p: dict | None) -> str:
-    return "\n".join(str((e or {}).get(k) or "") for e in (p or {}).get("evidence") or [] for k in ("quote", "quote_en"))
+def _line_names(line: str, names: set[str]) -> bool:
+    """A note line names a medicine only on a whole-word, case-insensitive match of one of its names. In doubt the line stays."""
+    low = re.sub(r"\s+", " ", line.lower())
+    return any(len(n) >= 3 and re.search(r"(?<![a-z0-9])" + re.escape(n) + r"(?![a-z0-9])", low) for n in names)
 
 
 def _is_other_medicine(p, m: dict) -> bool:
@@ -536,13 +556,13 @@ def _medicine_output(m: dict, art: dict | None, prov: dict | None) -> str | None
     gp_all = ((art or {}).get("gp_extraction") or {}).get("medicines")
     gp_all = [g for g in gp_all if isinstance(g, dict)] if isinstance(gp_all, list) else []
     other_names += [_rx_names(g) for g in gp_all if not _names_match(names, _rx_names(g))]
-    keep = [ln for ln in lines if _names_match(names, {_norm_name(ln)}) or not any(_names_match({_norm_name(ln)}, o) for o in other_names)]
+    keep = [ln for ln in lines if _names_match(names, {_norm_name(ln)}) or not any(_line_names(ln, o) for o in other_names)]
     parts = list(keep)
     for g in gp_all:
         if _names_match(names, _rx_names(g)):
             _prov_values(g, parts)
     parts += [_prov_text(p) for p in (art or {}).get("provenance") or [] if isinstance(p, dict) and not _is_other_medicine(p, m)]
-    parts += [_prov_text(prov), _quote_text(prov)]
+    parts += [_prov_text(prov)]  # a transcript quote is not ETA's output
     return _numnorm("\n".join(parts))
 
 
@@ -854,10 +874,16 @@ def consult_floors(client, frozen, *, uid: str, arm_kind: str, rx: dict, signed_
     inv = _invented_core(rx, art, consult, scope)
     dps = dose_precedence_sources(rx, art)
     pa = printable_attribution(rx, art)
-    attribution = {**judged_attr, "invented_numbers": _tally(inv["sources"]), "dose_precedence_det": _tally(dps), "printable_errors": pa["sources"]}
+    by_scope_judged = judged_attr.pop("by_scope", None)
+    by_scope = {}
+    for sc in FLOOR_SCOPES:  # counts at BOTH scopes whatever the selected one (fable condition 4)
+        invs = inv if sc == scope else _invented_core(rx, art, consult, sc)
+        by_scope[sc] = {**(by_scope_judged[sc] if by_scope_judged else judged_attr), "invented_numbers": _tally(invs["sources"]),
+                        "dose_precedence_det": _tally(dps), "printable_errors": pa["sources"]}
+    attribution = by_scope[scope]
     rec = {"uid": uid, "arm": arm_kind, "n_items": len(items), **j, "invented_numbers": inv["count"],
            "invented_numbers_detail": {k: inv[k] for k in ("offending_runs", "unmatched_medicines")},
-           "unmatched_no_digits": inv["unmatched_no_digits"], "attribution": attribution,
+           "unmatched_no_digits": inv["unmatched_no_digits"], "attribution": attribution, "attribution_by_scope": by_scope,
            "printable_detail": {k: pa[k] for k in ("raw", "dedup", "check")},
            "dose_precedence_det": len(dps), "printable_errors": printable_count(rx, art), "unknown_key_errors": unknown_key_errors(rx),
            "validator_failures": validator_failures(art), "artifact_missing": art is None}
@@ -871,13 +897,14 @@ def _sum(rows: list[dict], key: str):
     return None if any(v is None for v in vals) else sum(vals)
 
 
-def _attr_sum(rows: list[dict], key: str) -> dict | None:
+def _attr_sum(rows: list[dict], key: str, scope: str | None = None) -> dict | None:
     """Per-source totals of floor `key`. A row without attribution is all eta (nothing shown to be someone else's); None when the floor total is None."""
     out = _zero_attr()
     for r in rows:
         if r.get(key) is None:
             return None
-        a = (r.get("attribution") or {}).get(key)
+        a = ((r.get("attribution_by_scope") or {}).get(scope) if scope else None) or r.get("attribution")
+        a = (a or {}).get(key)
         for k in SOURCES:
             out[k] += r[key] if a is None and k == "eta" else (a or {}).get(k, 0)
     return out
@@ -890,6 +917,7 @@ def header(rows: list[dict], basis: str, scope: str = DEFAULT_FLOOR_SCOPE) -> di
     h = {"floor_basis": basis, "floor_scope": scope}
     h.update({k: sum(t[k] or 0 for t in att) for k in SOURCES})
     h["total"] = sum(t["bn"] or 0 for t in att)
+    h["by_scope"] = {sc: {k: sum(((t.get("by_scope") or {}).get(sc) or {}).get(k) or 0 for t in att) for k in SOURCES} for sc in FLOOR_SCOPES}
     return h
 
 
@@ -911,6 +939,7 @@ def aggregate(bn: list[dict], b0: list[dict] | None = None, basis: str | None = 
         if key in ATTRIBUTED.values():
             at = _attr_sum(bn, key)
             row.update(at or {k: None for k in SOURCES})
+            row["by_scope"] = {sc: _attr_sum(bn, key, sc) for sc in FLOOR_SCOPES}
             basis_v = v if basis == "all" else (at or {}).get("eta")
             row["basis_value"] = basis_v
             row["pass"] = basis_v == 0
