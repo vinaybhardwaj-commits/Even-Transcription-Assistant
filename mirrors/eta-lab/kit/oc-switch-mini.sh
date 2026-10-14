@@ -25,7 +25,7 @@ ins=[i for i in ins if os.path.exists(i)]
 c={"$schema":"https://opencode.ai/config.json","model":m,
  "provider":{"opencode":{"options":{"apiKey":"{file:%s/.claude/secrets/opencode_zen_key}"%h}}},
  "instructions":ins,
- "mcp":{"eta-bus":{"type":"local","command":["/bin/sh",f"{h}/dev/eta-bus-mcp/run.sh"],"enabled":True,"timeout":60000},
+ "mcp":{"eta-bus":{"type":"local","command":["/bin/sh",f"{h}/dev/eta-bus-mcp/run.sh"],"enabled":True},
         "even-jev":{"type":"local","command":[f"{h}/dev/even-jev-mcp/run.sh"],"enabled":True}},
  "permission":{"edit":"allow","webfetch":"allow",
    "external_directory":{"*":"allow",f"{h}/.claude/*":"deny",f"{h}/.ssh/*":"deny"},

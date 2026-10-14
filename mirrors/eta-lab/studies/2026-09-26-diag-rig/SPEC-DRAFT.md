@@ -109,8 +109,7 @@ DER/JER scoring = the bakeoff eval unchanged.
   (confirmed IN SCOPE by FABLE 434 item 4, no longer an open question).
 - NIGHTLY SCORED REPORT: one run per night on a fixed suite (tones + canary + call-and-response + noise +
   5 languages + diarizer multi-speaker), scored, posted to the bus as counts/scores only ([SELFTEST] tag).
-- FLEET DEAD-ROOM SELF-CHECK (434 item 4): ALREADY BUILT by fleet (his loop, fleet #3556) - the rig does not
-  rebuild it; the nightly report JOINs fleet-watch's EXISTING room-state loop (the 08:01-style
+- FLEET DEAD-ROOM SELF-CHECK (434 item 4): the nightly report JOINs fleet-watch's room state (the 08:01-style
   NOT_RECORDING/KIOSK_OFFLINE alerts) with the rig's own latest acoustic proof, so one report answers "is the
   fleet's room-audio chain alive": per room, last rig proof + last fleet-watch state; the rig never runs IN a
   clinic room - the acoustic proof it cites is Home Office's own chain plus fleet-watch's passive checks.

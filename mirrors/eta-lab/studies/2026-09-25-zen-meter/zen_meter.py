@@ -22,8 +22,11 @@ DEFAULT_CFG = {
     "pane_notes": {"box:fleet-watch": "includes model-selection benchmarks and gate injection tests run with --agent fleet-watch; the loop's own cost is in ~/fleet-watch/cost.jsonl (refuter-2 found $0.333 here vs $0.039 logged by the loop)",
                    "box:linker-oc": "attributed by directory /home/eta/dev/eta-lab (its session runs the default agent): any other OpenCode run in that directory counts here"},
     "provider": "opencode",            # Zen. Other providers (openrouter) are reported separately and never touch the Zen ledger
+    "go_provider": "opencode-go",      # r438: the OpenCode GO subscription - SAME console, SAME credit, addressed opencode-go/<id>. Ledger counts Zen+Go; every per-model/per-pane figure carries the route so Go-vs-balance attribution stays visible.
     "daily_cap_usd": None, "cap_alert_frac": 0.8,      # r407b: no fixed cap; the 80% alert exists for when V sets one
     "low_usd": 10.0, "low_runway_h": 24.0, "burn_window_h": 3.0, "remind_h": 6.0, "interval_s": 600,
+    "free_prefixes": ["big-pickle", "space-bunny", "muse-spark", "nemotron", "mimo", "omen", "longcat", "ling-"],   # r447 (Fable): the FREE Zen ids - may train on prompts; seeing ANY of them is an incident, not a $0 curiosity
+    "usage": {"files": {"7d": "usage-7d.csv", "24h": "usage-24h.csv"}, "burn_alert_usd_h": 2.0, "day_alert_usd": 30.0, "max_age_s": 2700},   # r413a(2): the console usage export written by herdr-kit's ~/bin/zen-usage-export every 15 min (opencode.ai/console/guides/usage: cost_micro_cents/1e8 = USD; ranges from midnight UTC). max_age_s (45 min = 3 missed exports): an older file is STALE -> UNMEASURED; a frozen file must never look like "$0 burn" (refuter-2 #2797)
     "mini": {"host": "mini", "dir": "/Users/vinaybhardwaj/dev/zen-meter"},
     "hsend": os.path.expanduser("~/dev/eta-lab/kit/hsend.sh"),
 }
@@ -87,6 +90,47 @@ def gather(cfg, since_ms, local=None, remote=None):
 
 
 # ---------------------------------------------------------------- attribution and aggregation
+def free_seen(rows, cfg, now):
+    """r447: rows on known FREE models (any provider), last 3 h -> {pane: {model: n}}; empty when clean. The Zen balance charges them $0 and the export zeroes them, so NEITHER money path can ever show a free model - only this does."""
+    wms = (now.timestamp() - 3 * 3600) * 1000
+    acc = {}
+    for r in rows:
+        mdl = str(r.get("model") or "")
+        if r["t"] >= wms and any(mdl.startswith(p) for p in cfg["free_prefixes"]):
+            pane = pane_of(r["host"], r["agent"], r["dir"], cfg)
+            d = acc.setdefault(pane, {})
+            d[mdl] = d.get(mdl, 0) + r["n"]
+    return acc
+
+
+def advance_free_alerts(state, free, cfg, now):
+    """Once per (pane, model) while it KEEPS appearing (remind every remind_h); a cycle with NO free rows CLEARS the tracker, so a re-appearance after that is a NEW incident and pages fresh (r447)."""
+    st = json.loads(json.dumps(state)); out = []
+    if not free:
+        st["free_seen"] = {}
+        return st, out
+    seen = st.get("free_seen", {})
+    fresh = {}
+    for pane, mods in sorted(free.items()):
+        for m, n in sorted(mods.items()):
+            k = pane + "|" + m
+            prev = seen.get(k)
+            if prev and (now - parse_iso(prev["alerted"])).total_seconds() < cfg["remind_h"] * 3600:
+                fresh[k] = prev; continue
+            fresh[k] = {"alerted": ts_iso(now), "n": n}
+            tag = "FREE MODEL (reminder) " if prev else "FREE MODEL SEEN "
+            out.append("NF| " + tag + "%s on %s (%d calls in 3h) - may-train vendor, PHI barred by r409, check provider/model config (r447 fallback class)" % (m, pane, n))
+    st["free_seen"] = fresh
+    return st, out
+
+
+def ts_iso(t):
+    return t.isoformat()
+
+
+def is_zen(prov, cfg):
+    return prov in (cfg["provider"], cfg.get("go_provider"))
+
 def pane_of(host, agent, directory, cfg):
     if agent and agent not in cfg["default_agents"] and agent != "?":
         p = agent
@@ -108,14 +152,116 @@ def day_key(t_ms):
 
 
 def aggregate(rows, cfg):
-    """Zen rows only -> per_pane_hour {(pane, 'YYYY-MM-DD HH:00'): $}, per_day {day: $}, per_model {model: $}, per_pane_day {(pane, day): $}. Other providers go to `other`."""
+    """Zen+Go rows -> per_pane_hour {(pane, 'YYYY-MM-DD HH:00'): $}, per_day {day: $}, per_model {(route, model): $}, per_pane_day {(pane, day): $}. Other providers go to `other`. r438: opencode (Zen balance) and opencode-go (Go subscription) share ONE console and ONE credit, so BOTH are ledger spend; the route key keeps them visible."""
     pph, pd, pm, ppd, other, ppm = (collections.defaultdict(float) for _ in range(6))      # ppm: (pane, model, day) -> $, so a mid-session model change is visible
     for r in rows:
-        if r["provider"] != cfg["provider"]:
+        if not is_zen(r["provider"], cfg):
             other[r["provider"]] += r["cost"]; continue
         pane = pane_of(r["host"], r["agent"], r["dir"], cfg)
-        pph[(pane, hour_key(r["t"]))] += r["cost"]; pd[day_key(r["t"])] += r["cost"]; pm[r["model"]] += r["cost"]; ppd[(pane, day_key(r["t"]))] += r["cost"]; ppm[(pane, r["model"], day_key(r["t"]))] += r["cost"]
+        pph[(pane, hour_key(r["t"]))] += r["cost"]; pd[day_key(r["t"])] += r["cost"]; pm[(r["provider"], r["model"])] += r["cost"]; ppd[(pane, day_key(r["t"]))] += r["cost"]; ppm[(pane, r["model"], day_key(r["t"]))] += r["cost"]
     return {"per_pane_hour": dict(pph), "per_day": dict(pd), "per_model": dict(pm), "per_pane_day": dict(ppd), "per_pane_model_day": dict(ppm), "other": dict(other)}
+
+
+# ---------------------------------------------------------------- usage export (r413a(2): MEASURED, no more COMPUTED — when the export exists and is trusted)
+def read_usage(path):
+    """One Zen console usage-export CSV (opencode.ai/console/guides/usage): rows newest-first, cost_micro_cents / 1e8 = USD, range starts at midnight UTC, blank = empty optional.
+    -> (rows [{model, provider, t, usd}], error). A missing file or any schema mismatch is an ERROR string and UNMEASURED, never $0; unparseable rows are skipped and counted."""
+    import csv
+    if not os.path.exists(path):
+        return None, "missing"
+    try:
+        with open(path, newline="") as f:
+            rd = csv.DictReader(f)
+            hdr = rd.fieldnames or []
+            miss = [c for c in ("model", "cost_micro_cents", "created_at") if c not in hdr]
+            if miss:
+                return None, "schema mismatch: header %s lacks %s" % (hdr, miss)
+            rows, bad = [], 0
+            for r in rd:
+                try:
+                    rows.append({"model": r["model"] or "?", "provider": r.get("provider") or "?",
+                                 "t": int(parse_iso(r["created_at"]).timestamp() * 1000), "usd": float(r["cost_micro_cents"] or 0) / 1e8})
+                except Exception:
+                    bad += 1
+            return rows, ("%d row(s) unparseable and skipped" % bad if bad else None)
+    except Exception as ex:
+        return None, type(ex).__name__
+
+
+def load_usage(cfg, rt=None):
+    """-> {"rows", "status" ("ok" or the error), "file", "mtime", "status_24h", "rows_24h"}. The 7d export is the source; the 24h file only reports alongside."""
+    u = cfg["usage"]; rt = rt or RT
+    p7 = os.path.join(rt, u["files"]["7d"])
+    rows, err = read_usage(p7)
+    out = {"file": p7, "status": err or "ok", "rows": rows or [], "mtime": None}
+    try:
+        mt = os.path.getmtime(p7); out["mtime"] = dt.datetime.fromtimestamp(mt, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if out["status"] == "ok":
+            age = dt.datetime.now(dt.timezone.utc).timestamp() - mt
+            if age > u["max_age_s"]:
+                out["status"] = "stale (export file %d min old > %d min: the 15-min cron has missed 3+ runs)" % (age // 60, u["max_age_s"] // 60)   # refuter-2 #2797: a frozen file must read UNMEASURED, not $0 burn
+    except OSError:
+        pass
+    r24, e24 = read_usage(os.path.join(rt, u["files"]["24h"]))
+    out["rows_24h"], out["status_24h"] = r24, e24
+    return out
+
+
+def usage_metrics(usage, cfg, now):
+    """-> {total, today, burn_h, per_model_today, n, oldest} from the 7d export, or None (UNMEASURED) if unusable. A VALID file with ZERO rows is also None: zero spend in the window is not believed (docs: header-only CSVs come back for any filter)."""
+    if usage["status"] != "ok" or not usage["rows"]:
+        return None
+    rows = usage["rows"]; today = now.astimezone(IST).strftime("%Y-%m-%d")
+    wms = (now.timestamp() - cfg["burn_window_h"] * 3600) * 1000
+    pmt = collections.defaultdict(float)
+    for r in rows:
+        if day_key(r["t"]) == today: pmt[r["model"]] += r["usd"]
+    return {"total": sum(r["usd"] for r in rows), "today": sum(r["usd"] for r in rows if day_key(r["t"]) == today),
+            "burn_h": sum(r["usd"] for r in rows if r["t"] >= wms) / cfg["burn_window_h"], "per_model_today": dict(pmt),
+            "n": len(rows), "oldest": min(r["t"] for r in rows)}
+
+
+def overlay_measured(m, usage, um, cfg, zen_rows=()):
+    """Measured replaces the computed figures (r413a(2)); the computed spend stays as the cross-check `spent_computed`. m is returned updated; nothing changes when um is None.
+    window_clipped means the export window starts after the ledger base AND the computed record shows Zen spend in that pre-window gap: a warning backed by evidence, not by an empty-but-possibly-clean window (refuter-2 #2797: today the first Zen call IS in the ledger, so an older-row-less export clips nothing)."""
+    m["go_share_computed"] = sum(r["cost"] for r in zen_rows if r.get("provider") == cfg.get("go_provider"))   # route split in BOTH bases: it went missing in COMPUTED mode when set only below (eta-refuter-2 review follow-up)
+    if um is None:
+        m["basis"] = "computed from OpenCode cost, the console balance is the truth (usage export: %s)" % usage["status"]
+        return m
+    bms = parse_iso(m["base_ts"]).timestamp() * 1000
+    spent = sum(r["usd"] for r in usage["rows"] if r["t"] >= bms)      # rows BEFORE the base must never join the spend since it
+    burn = um["burn_h"]
+    m.update({"spent_computed": m["spent"], "delta_computed_minus_measured": m["spent"] - spent, "basis": "MEASURED (Zen usage export %s)" % (usage["mtime"] or "unknown mtime")})
+    m["spent"] = spent; m["burn_h"] = burn
+    m["remaining"] = m["base_usd"] + m["topups"] - spent
+    m["burn_day"] = burn * 24
+    m["runway_h"] = (m["remaining"] / burn) if burn > 0 else None
+    gap_cost = sum(r["cost"] for r in zen_rows if is_zen(r["provider"], cfg) and bms <= r["t"] < um["oldest"])
+    m["window_clipped"] = um["oldest"] > bms + 3600 * 1000 and gap_cost > 0.005      # and there is COMPUTED spend the export window does not cover
+    return m
+
+
+def advance_usage_alerts(state, m, um, cfg, now):
+    """r413a(2): alert Fable when the MEASURED burn > burn_alert_usd_h or the measured IST day > day_alert_usd. Measured-only (no export, no invented alert). Once on entry, remind every remind_h, OK on clear recovery (1.2x hysteresis); the day alert is once per IST day."""
+    st = json.loads(json.dumps(state)); out = []
+    if um is None:
+        return st, out
+    ucfg = cfg["usage"]; ts = now.isoformat(); tail = " (measured, Zen usage export)"
+    b = st.get("burn_hi", {"active": False})
+    text = "NF| ZEN BURN HIGH $%.2f/h%s, alert > $%g/h; remaining $%.2f" % (m["burn_h"], tail, ucfg["burn_alert_usd_h"], m["remaining"])
+    if not b.get("active"):
+        if m["burn_h"] > ucfg["burn_alert_usd_h"]:
+            st["burn_hi"] = {"active": True, "since": ts, "last_sent": ts}; out.append(text)
+    else:
+        if m["burn_h"] < ucfg["burn_alert_usd_h"] / 1.2:
+            st["burn_hi"] = {"active": False}; out.append("NF| ZEN BURN OK $%.2f/h%s" % (m["burn_h"], tail))
+        elif (now - parse_iso(b["last_sent"])).total_seconds() >= cfg["remind_h"] * 3600:
+            b["last_sent"] = ts; st["burn_hi"] = b; out.append(text.replace("HIGH ", "HIGH (reminder) ", 1))
+    day = now.astimezone(IST).strftime("%Y-%m-%d"); d = st.get("day_hi", {})
+    if um["today"] > ucfg["day_alert_usd"] and d.get("day") != day:
+        st["day_hi"] = {"day": day}; out.append("NF| ZEN DAY HIGH $%.2f today (IST)%s, alert > $%g/day" % (um["today"], tail, ucfg["day_alert_usd"]))
+    return st, out
+
 
 
 # ---------------------------------------------------------------- ledger
@@ -127,7 +273,7 @@ def ledger_state(ledger, rows, cfg, now):
             base_ts, base_usd, base_kind = parse_iso(c["ts"]), float(c["balance_usd"]), "checkpoint"
     bms = base_ts.timestamp() * 1000
     topups = sum(float(t["usd"]) for t in ledger.get("topups", []) if parse_iso(t["ts"]) > base_ts)
-    zen = [r for r in rows if r["provider"] == cfg["provider"]]
+    zen = [r for r in rows if is_zen(r["provider"], cfg)]
     spent = sum(r["cost"] for r in zen if r["t"] >= bms)
     remaining = base_usd + topups - spent
     w = float(cfg["burn_window_h"]); wms = (now.timestamp() - w * 3600) * 1000
@@ -149,7 +295,7 @@ def advance_alerts(state, m, spend_today, cfg, now, unmeasured=()):
     """Pure. -> (new_state, [messages]). LOW once on entry, a reminder every remind_h, OK once on a clear recovery; the 80% cap alert once per IST day (and once more at 100%)."""
     st = json.loads(json.dumps(state)); out = []; ts = now.isoformat()
     lo = st.get("low", {"active": False})
-    tail = " | computed from OpenCode cost, the console balance is the truth (basis: %s%s)" % (m["base_kind"], (" | NOT MEASURED: " + ",".join(unmeasured)) if unmeasured else "")
+    tail = " | %s%s" % (m.get("basis") or ("computed from OpenCode cost, the console balance is the truth (basis: %s)" % m["base_kind"]), (" | NOT MEASURED: " + ",".join(unmeasured)) if unmeasured else "")
     text = "NF| ZEN CREDIT LOW %.2f %.2f/day (runway %s h at the trailing %gh burn)%s" % (m["remaining"], m["burn_day"], ("%.1f" % m["runway_h"]) if m["runway_h"] is not None else "n/a", cfg["burn_window_h"], tail)
     if not lo.get("active"):
         if is_low(m, cfg):
@@ -173,18 +319,32 @@ def advance_alerts(state, m, spend_today, cfg, now, unmeasured=()):
 
 
 # ---------------------------------------------------------------- report
-def render(now, agg, m, status, cfg, hours=8):
+def render(now, agg, m, status, cfg, usage=None, um=None, hours=8):
     """Markdown. Money only: pane names, model ids, hosts, hours. No text of any kind."""
     hrs = [(now - dt.timedelta(hours=i)).astimezone(IST).strftime("%Y-%m-%d %H:00") for i in range(hours - 1, -1, -1)]
     today = now.astimezone(IST).strftime("%Y-%m-%d")
-    L = ["# Zen spend meter (computed from OpenCode cost x Zen token counts; the console balance is the truth)", "",
-         "**UNVERIFIED against Zen's own balance: %s.** Every dollar below is computed.\n" % (("no console checkpoint has been recorded yet (`zen_meter.py --checkpoint <balance>`)" if m["base_kind"] == "start" else "last console checkpoint at %s" % m["base_ts"][:16].replace("T", " ") + "Z; spend since it is still computed")), "",
+    basis_line = ("**MEASURED** from the Zen console usage export (`%s`, mtime %s); the computed OpenCode figures stay below as the cross-check; the console balance remains the ground truth." % (os.path.basename(usage["file"]), usage["mtime"])) if um else \
+        ("**UNVERIFIED against Zen's own balance: usage export %s; %s.** Every dollar below is computed." % (usage["status"] if usage else "not attempted",
+         "no console checkpoint has been recorded yet (`zen_meter.py --checkpoint <balance>`)" if m["base_kind"] == "start" else "last console checkpoint at %s; spend since it is still computed" % m["base_ts"][:16].replace("T", " ")))
+    if um and m.get("window_clipped"):
+        basis_line += " WARNING: the export window starts AFTER the ledger base (oldest row %s): early spend may be clipped from the measured figures." % dt.datetime.fromtimestamp(um["oldest"] / 1000, dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+    L = ["# Zen spend meter (measured from the Zen usage export when available; computed OpenCode cost as cross-check; the console balance is the truth)", "",
+         basis_line + "\n",
          "Generated %s IST. Provider counted: `%s` (Zen). Hosts: %s." % (now.astimezone(IST).strftime("%Y-%m-%d %H:%M"), cfg["provider"], ", ".join("%s=%s" % kv for kv in status.items())), "",
          "## Credit ledger", "",
          "| base (%s) | top-ups since | computed spend since | **remaining** | burn/h (trailing %gh) | burn/day | runway |" % (m["base_kind"], cfg["burn_window_h"]), "|---|---|---|---|---|---|---|",
          "| $%.2f at %s | $%.2f | $%.2f | **$%.2f** | $%.3f | $%.2f | %s |" % (m["base_usd"], m["base_ts"][:16].replace("T", " ") + "Z", m["topups"], m["spent"], m["remaining"], m["burn_h"], m["burn_day"], ("%.1f h" % m["runway_h"]) if m["runway_h"] is not None else "n/a"), "",
-         "Alert rule: remaining < $%g OR runway < %g h -> `ZEN CREDIT LOW <remaining> <burn/day>` to Fable via conductor." % (cfg["low_usd"], cfg["low_runway_h"]), "",
-         "## Per pane per hour ($, IST hour starting)", ""]
+         "Alert rule: remaining < $%g OR runway < %g h -> `ZEN CREDIT LOW` to Fable via conductor." % (cfg["low_usd"], cfg["low_runway_h"])]
+    if um:
+        L += ["", "## Measured (Zen usage export, r413a)", "",
+              "| window total (7d export) | today (IST) | burn/h (trailing %gh) | computed-vs-measured delta since base | rows |" % cfg["burn_window_h"], "|---|---|---|---|---|",
+              "| $%.2f | $%.2f | $%.3f | $%.2f | %d |" % (um["total"], um["today"], um["burn_h"], m.get("delta_computed_minus_measured", 0.0), um["n"]),
+              "", "24h export: %s | alert rules added: measured burn > $%g/h -> ZEN BURN HIGH; measured day > $%g -> ZEN DAY HIGH." % (usage["status_24h"] or "ok", cfg["usage"]["burn_alert_usd_h"], cfg["usage"]["day_alert_usd"]),
+              "", "| model | today $ (measured) |", "|---|---|"] + ["| %s | %.3f |" % (k, v) for k, v in sorted(um["per_model_today"].items(), key=lambda kv: -kv[1])]
+    else:
+        L += ["", "## Measured (Zen usage export, r413a)", "", "UNMEASURED: %s." % (usage["status"] if usage else "not attempted"),
+              "Until a usable export lands every $ above and below is COMPUTED; the burn/day alerts do not fire on computed figures."]
+    L += ["", "", "## Per pane per hour ($, IST hour starting)", ""]
     panes = sorted({p for p, _ in agg["per_pane_hour"]}, key=lambda p: -sum(v for (q, _), v in agg["per_pane_hour"].items() if q == p))
     L += ["| pane | " + " | ".join(h[5:] for h in hrs) + " | today |", "|---|" + "---|" * (len(hrs) + 1)]
     for p in panes:
@@ -201,7 +361,7 @@ def render(now, agg, m, status, cfg, hours=8):
     L += ["", "## Daily total ($, IST day)", "", "| day | total |", "|---|---|"] + ["| %s | %.3f |" % (d, v) for d, v in sorted(agg["per_day"].items())]
     if cfg.get("daily_cap_usd"):
         L += ["", "Daily cap $%.2f: today $%.2f (%.0f%%)." % (cfg["daily_cap_usd"], agg["per_day"].get(today, 0.0), 100 * agg["per_day"].get(today, 0.0) / cfg["daily_cap_usd"])]
-    L += ["", "## By model ($, all time in the window)", "", "| model | total |", "|---|---|"] + ["| %s | %.3f |" % (k, v) for k, v in sorted(agg["per_model"].items(), key=lambda kv: -kv[1])]
+    L += ["", "## By model ($, all time in the window; route: opencode = Zen balance, opencode-go = Go subscription - one console, ONE credit either way; the export cannot split them, so the route column is COMPUTED from the OpenCode dbs)", "", "| route | model | total |", "|---|---|---|"] + ["| %s | %s | %.3f |" % (k[0], k[1], v) for k, v in sorted(agg["per_model"].items(), key=lambda kv: -kv[1])]
     if agg["other"]:
         L += ["", "Not Zen (not in the ledger): " + ", ".join("%s $%.3f" % kv for kv in sorted(agg["other"].items()))]
     return "\n".join(L) + "\n"
@@ -221,7 +381,8 @@ class Sinks:
         try:
             subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", m["host"], "mkdir -p '%s' && cat > '%s.tmp' && mv '%s.tmp' '%s'" % (m["dir"], path, path, path)],
                            input=text.encode(), check=True, timeout=40, capture_output=True); return True
-        except Exception:
+        except Exception as ex:
+            sys.stderr.write("mini mirror FAILED: %s\n" % type(ex).__name__)   # refuter-2 #2853: silent False hid the hf mirror being dead for a day; the local copy and jsonl stand
             return False
 
     def jsonl(self, obj):
@@ -231,7 +392,42 @@ class Sinks:
         if self.dry:
             open(os.path.join(RT, "dry", "notify.log"), "a").write(msg + "\n"); return
         open(os.path.join(RT, "notify.log"), "a").write(msg + "\n")
-        subprocess.run(["/bin/zsh", self.cfg["hsend"], msg, "conductor"], timeout=40, capture_output=True)
+        try:
+            before = hsend_size(self.cfg)
+            r = subprocess.run(["/bin/zsh", self.cfg["hsend"], msg, "conductor"], timeout=40, capture_output=True)
+            if r.returncode != 0:
+                sys.stderr.write("hsend notify FAILED: exit %d\n" % r.returncode)
+            else:
+                bad = hsend_result(self.cfg, "conductor", before)   # appended-window + allowlist (refuter-2 #2945)
+                if bad: sys.stderr.write("hsend notify RESULT: %s\n" % bad)
+        except Exception as ex:
+            sys.stderr.write("hsend notify FAILED: %s\n" % type(ex).__name__)
+
+
+def hsend_log(cfg):
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(cfg["hsend"]))), "scratch", "hsend.log")
+
+
+def hsend_size(cfg):
+    try:
+        return os.path.getsize(hsend_log(cfg))
+    except OSError:
+        return 0
+
+
+def hsend_result(cfg, target, since_pos):
+    """refuter-2 #2945: the log is SHARED (the newest line may be another pane's) and its token list is not a closed set - so read ONLY bytes appended after since_pos and ALLOWLIST the single success token; anything else is a failure."""
+    try:
+        with open(hsend_log(cfg), "rb") as f:
+            f.seek(0, 2)
+            if since_pos > f.tell(): since_pos = 0                      # rotated
+            f.seek(since_pos)
+            tail = f.read().decode("utf-8", "replace")
+        lines = [l for l in tail.splitlines() if ("-> %s :" % target) in l]
+        if not lines: return "no appended hsend line for %s" % target
+        return None if '"type":"agent_prompted"' in lines[-1] else "undelivered: " + lines[-1].split(" : ", 1)[-1].strip()[:48]
+    except Exception as ex:
+        return "hsend log unread: %s" % type(ex).__name__
 
 
 def live_mode_ok(rt=None):
@@ -245,11 +441,16 @@ def run_cycle(cfg, sinks, now, state, ledger, local=None, remote=None):
     since = parse_iso(ledger["start"]["ts"]).timestamp() * 1000      # nothing before the ledger start is counted or shown
     rows, status = gather(cfg, since, local, remote)
     agg = aggregate(rows, cfg); m = ledger_state(ledger, rows, cfg, now)
+    usage = load_usage(cfg); um = usage_metrics(usage, cfg, now)
+    m = overlay_measured(m, usage, um, cfg, rows)
     today = now.astimezone(IST).strftime("%Y-%m-%d")
     unmeasured = [h for h, s in status.items() if s != "ok"]
     state, msgs = advance_alerts(state, m, agg["per_day"].get(today, 0.0), cfg, now, unmeasured)
-    sinks.report("ZEN-SPEND.md", render(now, agg, m, status, cfg))
-    sinks.jsonl({"ts": now.isoformat(), "remaining": round(m["remaining"], 4), "spent": round(m["spent"], 4), "burn_h": round(m["burn_h"], 5), "today": round(agg["per_day"].get(today, 0.0), 4), "hosts": status, "alerts": len(msgs)})
+    st2, msgs2 = advance_usage_alerts(state, m, um, cfg, now); state, msgs = st2, msgs + msgs2
+    fr = free_seen(rows, cfg, now)
+    st3, msgs3 = advance_free_alerts(state, fr, cfg, now); state, msgs = st3, msgs + msgs3
+    sinks.report("ZEN-SPEND.md", render(now, agg, m, status, cfg, usage, um))
+    sinks.jsonl({"ts": now.isoformat(), "remaining": round(m["remaining"], 4), "spent": round(m["spent"], 4), "burn_h": round(m["burn_h"], 5), "today": round(um["today"], 4) if um else round(agg["per_day"].get(today, 0.0), 4), "measured": bool(um), "free": sum(sum(v.values()) for v in fr.values()), "go_share": round(m.get("go_share_computed", 0.0), 4), "hosts": status, "alerts": len(msgs)})
     for x in msgs:
         sinks.notify(x)
     return state, m, msgs

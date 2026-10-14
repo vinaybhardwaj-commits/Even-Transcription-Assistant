@@ -1,12 +1,5 @@
 # HANDOVER vj-refuter (Claude Code pane -> OpenCode, Fable 432), written 26 Sep 2026 ~12:05 IST
 
-
-## (0) READ FIRST (added 26 Sep ~14:20, bus #3635)
-- Your OpenCode config (~/oc/vj-refuter/opencode.jsonc) denies ~/.claude/* and *secrets-archive*, and the VJ seal KEY is at ~/.claude/secrets-archive/voice-lab-1/vj-truth-seal.key. So you CANNOT decrypt the seal until Fable 448's route exists: (a) ADOPTED, meaning herdr-kit builds ~/bin/vj-seal-decrypt and eta-refuter-2 reviews it; you verify the deployed sha before first use. Option (c) (Claude pane) is SUPERSEDED: no Claude Code work until Tue 18:30. VJ scoring/ingest WAITS for the wrapper; if urgent, it goes to V. Do NOT work around the deny.
-- vj-data's config now HAS the vj-truth-sealed deny (herdr-kit #3641, verified #3643); and every vj-* launch needs the OPENCODE_CONFIG=~/oc/<name>/opencode.jsonc prefix (Fable 447). Re-check the VJ block + denies after each relaunch.
-- 448a wrapper (installer kit/vj-seal-decrypt-apply.sh v2 @5e87c644, sha 181de4cd2c41...; supersedes 2247a7e0) is NOT installed. herdr-kit #3659 says done; vj-refuter-cc verified the 3 configs carry "*vj-seal-decrypt*". Still owed: eta-refuter-2 review + Fable GO, then YOU verify the installed sha. Conditions were (#3653): vj-data/vj-arms/vj-link bash deny "*vj-seal-decrypt*" (a relative outdir bypasses their *vj-truth-sealed* deny), and the wrapper refuses vj-* builder panes. Verify both, then the installed sha. Your model: opencode-go/deepseek-v4-pro (Fable 449).
-- Arm 4 now also needs vj-arms relaunched (stopped by Fable 442).
-
 ## (a) Role
 Checker (Refuter) for the VJ queue ("Voice Jev": can Jev/Gemini tell doctor vs not-doctor on doubtful turns), plus the VJ Phase L voice-linkage pages. Order: orders/VOICE-JEV-BUILD.md (freeze b961291ae64c); addenda 165 (9c335c59c5be) and 166 (87b8cdac4330); COMBINE_RULE v7 d36c9472569d (studies/2026-09-24-voice-jev/arms/COMBINE_RULE.md).
 I am the ONLY pane that reads VJ truth (human labels) and the ONLY one that scores (r168, r248). I never edit builder files (vj-data, vj-arms, vj-link). The builders are on OpenCode and stay on the box (416.1). All my notes are in studies/2026-09-24-voice-jev/refute/ (00-35). Read refute/22, 33, 34 and 35 first.

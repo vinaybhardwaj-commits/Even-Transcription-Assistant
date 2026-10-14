@@ -205,7 +205,7 @@ def report_says_unverified_until_a_checkpoint_and_carries_pane_notes():
     c = cfg(); p = make_db([(ms(0.3), "opencode", "m", "fleet-watch", 0.3, "/home/eta/fleet-watch", "assistant")])
     rows = [dict(r, host="box") for r in zm.collect_local(p, 0)]; g = zm.aggregate(rows, c)
     led = json.loads(json.dumps(zm.DEFAULT_LEDGER)); md = zm.render(NOW, g, zm.ledger_state(led, rows, c, NOW), {"box": "ok"}, c)
-    assert "UNVERIFIED against Zen's own balance: no console checkpoint" in md and "Note on `box:fleet-watch`" in md and "$0.039" in md
+    assert "UNVERIFIED against Zen's own balance" in md and "usage export" in md and "no console checkpoint" in md and "Note on `box:fleet-watch`" in md and "$0.039" in md
     led["checkpoints"].append({"ts": (NOW - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"), "balance_usd": 40.0})
     md = zm.render(NOW, g, zm.ledger_state(led, rows, c, NOW), {"box": "ok"}, c); assert "last console checkpoint at" in md and "no console checkpoint" not in md
 
@@ -231,6 +231,178 @@ def main():
         except Exception as ex:
             bad += 1; print("FAIL", f.__name__, "-", repr(ex)[:300])
     print("zen_meter tests: %d run, %d failed" % (len(T), bad)); return 1 if bad else 0
+
+
+# ---------------------------------------------------------------- r413a(2): measured usage export
+UH = "provider,model,input_tokens,output_tokens,reasoning_tokens,cost_micro_cents,created_at"
+def urow(t, model, usd, provider="opencode"):
+    return "%s,%s,10,1,0,%d,%s" % (provider, model, int(round(usd * 1e8)), t.strftime("%Y-%m-%dT%H:%M:%SZ"))
+def ufile(rows_text, name="usage-7d.csv", d=None):
+    d = d or tempfile.mkdtemp(); p = os.path.join(d, name); open(p, "w").write(UH + "\n" + rows_text + ("\n" if rows_text else "")); return d
+
+@test
+def read_usage_converts_microcents_and_fails_loud_never_zero():
+    d = ufile(urow(NOW - dt.timedelta(hours=1), "glm-5.3-flash", 1.25) + "\n" + urow(NOW - dt.timedelta(hours=2), "qwen3.8-flash", 0.004))
+    rows, err = zm.read_usage(os.path.join(d, "usage-7d.csv")); assert err is None and len(rows) == 2
+    assert abs(rows[0]["usd"] - 1.25) < 1e-9 and rows[0]["model"] == "glm-5.3-flash" and rows[1]["t"] < rows[0]["t"]
+    assert zm.read_usage(os.path.join(d, "nope.csv")) == (None, "missing")
+    bad = os.path.join(d, "wrong.csv"); open(bad, "w").write("a,b,c\n1,2,3\n"); e = zm.read_usage(bad)[1]; assert "schema mismatch" in e, e
+    d2 = ufile("opencode,m,1,1,0,NOT-A-NUMBER,2026-09-25T01:00:00Z\n" + urow(NOW, "m2", 0.5))
+    rows, err = zm.read_usage(os.path.join(d2, "usage-7d.csv")); assert len(rows) == 1 and "unparseable" in err, "a garbage row is skipped and COUNTED, never silently $0"
+
+@test
+def usage_metrics_bucket_ist_days_and_the_trailing_window_and_distrust_empty():
+    c = cfg()
+    d = ufile("\n".join([urow(NOW - dt.timedelta(minutes=30), "a", 0.6), urow(NOW - dt.timedelta(hours=10), "b", 1.0), urow(NOW - dt.timedelta(hours=20), "c", 2.0)]))
+    um = zm.usage_metrics(zm.load_usage(c, d), c, NOW)
+    assert abs(um["total"] - 3.6) < 1e-9 and abs(um["burn_h"] - 0.6 / 3) < 1e-9, "only the last 30 min row is in the trailing 3 h window"
+    assert abs(um["today"] - 1.6) < 1e-9, "NOW-10h is 04:30 IST today, NOW-20h is yesterday IST"
+    assert um["per_model_today"] == {"a": 0.6, "b": 1.0}
+    assert zm.usage_metrics(zm.load_usage(c, ufile("", d=tempfile.mkdtemp())), c, NOW) is None, "a valid header-only CSV claims zero spend in the window: NOT BELIEVED, UNMEASURED"
+    assert zm.usage_metrics(zm.load_usage(c, tempfile.mkdtemp()), c, NOW) is None, "missing file is UNMEASURED"
+
+@test
+def overlay_measured_replaces_but_never_forgets_computed():
+    c = cfg(); led = json.loads(json.dumps(zm.DEFAULT_LEDGER))
+    rows = [dict(t=ms(1.0), provider="opencode", model="m", agent="a", dir="/d", cost=4.0, host="box")]
+    m0 = zm.ledger_state(led, rows, c, NOW)
+    d = ufile("\n".join([urow(NOW - dt.timedelta(hours=10), "m", 4.0), urow(NOW - dt.timedelta(hours=14), "m", 0.4), urow(NOW - dt.timedelta(hours=16), "m", 9.9)]))   # base 24 Sep 18:30Z = NOW-14.5h; the 16 h row is PRE-BASE and must never join the spend since it (refuter-2 #2797 M3)
+    u = zm.load_usage(c, d); um = zm.usage_metrics(u, c, NOW)
+    m = zm.overlay_measured(dict(m0), u, um, c, rows)
+    assert abs(m["spent_computed"] - 4.0) < 1e-9 and abs(m["spent"] - 4.4) < 1e-9 and m["basis"].startswith("MEASURED"), "pre-base export rows are filtered out of the spend-since-base"
+    assert abs(m["remaining"] - (50.0 - 4.4)) < 1e-9 and abs(m["delta_computed_minus_measured"] + 0.4) < 1e-9, "delta = computed minus measured"
+    assert not m.get("window_clipped"), "oldest row predates base + 1 h: no clip"
+    d2 = ufile(urow(NOW - dt.timedelta(hours=1), "m", 0.5))
+    u2 = zm.load_usage(c, d2)
+    m2 = zm.overlay_measured(dict(m0), u2, zm.usage_metrics(u2, c, NOW), c, [])
+    assert not m2["window_clipped"], "an export whose window starts after the base is only CLIPPED if the computed record has Zen spend in the gap (refuter-2 #2797: first call today -> nothing clipped)"
+    gap = [dict(t=ms(13.0), provider="opencode", model="m", agent="a", dir="/d", cost=1.0, host="box")]   # computed Zen spend 13 h ago, before the export's oldest row (NOW-1h)
+    m3 = zm.overlay_measured(dict(m0), u2, zm.usage_metrics(u2, c, NOW), c, gap)
+    assert m3["window_clipped"], "real evidence of spend the export window cannot see: warn"
+    covered = [dict(t=ms(0.5), provider="opencode", model="m", agent="a", dir="/d", cost=5.0, host="box")]  # refuter-2 #2818: spend AFTER the oldest export row is covered by the window: no false clip warning
+    m5 = zm.overlay_measured(dict(m0), u2, zm.usage_metrics(u2, c, NOW), c, covered)
+    assert not m5["window_clipped"], "ordinary covered spend must never read as clipped"
+    m4 = zm.overlay_measured(dict(m0), {"status": "missing", "rows": []}, None, c)
+    assert m4["remaining"] == m0["remaining"] and "console balance is the truth" in m4["basis"] and "usage export: missing" in m4["basis"]
+
+@test
+def a_stale_export_file_is_UNMEASURED_not_zero_burn():
+    import time as _t
+    c = cfg(); d = ufile(urow(NOW - dt.timedelta(minutes=5), "m", 0.2))
+    p = os.path.join(d, "usage-7d.csv"); old = _t.time() - 7200
+    os.utime(p, (old, old))
+    u = zm.load_usage(c, d)
+    assert u["status"].startswith("stale"), u["status"]
+    assert zm.usage_metrics(u, c, NOW) is None, "a 2 h old file must not be read as MEASURED $0 burn"
+
+@test
+def burn_and_day_alerts_are_measured_only_once_reminded_and_hysteresis_clears():
+    c = cfg(); M2 = lambda b: {"burn_h": b, "remaining": 20.0}
+    assert zm.advance_usage_alerts({}, M2(99), None, c, NOW) == ({}, []), "no export: no invented alert"
+    um = lambda td: {"today": td, "total": td, "burn_h": 0, "per_model_today": {}, "n": 1, "oldest": 0}
+    st, out = zm.advance_usage_alerts({}, M2(2.5), um(5.0), c, NOW); assert len(out) == 1 and "ZEN BURN HIGH $2.50/h" in out[0] and "measured" in out[0], out
+    st, out = zm.advance_usage_alerts(st, M2(2.5), um(5.0), c, NOW + dt.timedelta(minutes=5)); assert out == []
+    st, out = zm.advance_usage_alerts(st, M2(1.9), um(5.0), c, NOW + dt.timedelta(hours=7)); assert "(reminder)" in out[0]
+    st, out = zm.advance_usage_alerts(st, M2(1.75), um(5.0), c, NOW + dt.timedelta(hours=8)); assert out == [], "1.75 > 2/1.2: hysteresis band, no flapping"
+    st, out = zm.advance_usage_alerts(st, M2(1.5), um(5.0), c, NOW + dt.timedelta(hours=9)); assert any("BURN OK" in x for x in out)
+    st, out = zm.advance_usage_alerts({}, M2(0.1), um(31.0), c, NOW); assert any("DAY HIGH $31.00" in x for x in out)
+    st, out = zm.advance_usage_alerts(st, M2(0.1), um(35.0), c, NOW + dt.timedelta(hours=2)); assert out == [], "once per IST day"
+    st, out = zm.advance_usage_alerts(st, M2(0.1), um(35.0), c, NOW + dt.timedelta(days=1, hours=1)); assert len(out) == 1 and "DAY HIGH" in out[0], "the next IST day re-arms"
+
+@test
+def render_switches_its_basis_line_and_shows_the_measured_models():
+    c = cfg(); led = json.loads(json.dumps(zm.DEFAULT_LEDGER))
+    rows = [dict(t=ms(0.5), provider="opencode", model="m", agent="a", dir="/d", cost=1.0, host="box")]
+    g = zm.aggregate(rows, c); m0 = zm.ledger_state(led, rows, c, NOW)
+    d = ufile(urow(NOW - dt.timedelta(minutes=30), "glm-5.3-flash", 3.0))
+    u = zm.load_usage(c, d); um = zm.usage_metrics(u, c, NOW); m = zm.overlay_measured(dict(m0), u, um, c)
+    md = zm.render(NOW, g, m, {"box": "ok"}, c, u, um)
+    assert "MEASURED** from the Zen console usage export" in md and "glm-5.3-flash" in md and "| $3.00 | $3.00 | $1.000 |" in md, md[md.find("## Measured"):md.find("## Measured") + 500]
+    u2 = zm.load_usage(c, tempfile.mkdtemp())
+    md2 = zm.render(NOW, g, m0, {"box": "ok"}, c, u2, None)
+    assert "UNVERIFIED" in md2 and "UNMEASURED: missing" in md2
+
+@test
+def read_usage_tolerates_the_real_wide_header_and_never_carries_identity_fields():
+    hdr = "id,user_email,service_account_name,app,provider,model,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_5m_tokens,cache_write_1h_tokens,cost_micro_cents,created_at"
+    d = tempfile.mkdtemp(); p = os.path.join(d, "usage-7d.csv")
+    open(p, "w").write(hdr + "\n" + "123,SOME@PERSON.example,ETA-FLEET,opencode,opencode,qwen3.8-flash,6,181,0,68002,338,0,124160," + (NOW - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z") + "\n")
+    rows, err = zm.read_usage(p)
+    assert err is None and len(rows) == 1 and abs(rows[0]["usd"] - 0.00124160) < 1e-9
+    blob = json.dumps(rows) + json.dumps(zm.load_usage(cfg(), d)["rows"])
+    assert "SOME@PERSON" not in blob and "ETA-FLEET" not in blob, "only provider/model/tokens/cost/time are mapped; identity columns are never carried"
+    um = zm.usage_metrics(zm.load_usage(cfg(), d), cfg(), NOW)
+    assert "SOME@PERSON" not in json.dumps(um) and um is not None, "millisecond-Z timestamps parse"
+
+@test
+def cycle_uses_measured_remaining_and_flags_measured_in_the_jsonl():
+    c = cfg(); c["hosts"] = [{"name": "box", "local": True}]
+    def local(db, since): return [dict(t=ms(1.0), provider="opencode", model="m", agent="a", dir="/d", cost=5.0)]
+    led = json.loads(json.dumps(zm.DEFAULT_LEDGER))
+    for n, text in (("usage-7d.csv", "\n".join([urow(NOW - dt.timedelta(hours=10), "m", 44.0), urow(NOW - dt.timedelta(hours=1), "m", 1.0)])), ("usage-24h.csv", "")):
+        open(os.path.join(zm.RT, n), "w").write(UH + "\n" + text + "\n")
+    try:
+        sk = FakeSinks(); st, m, msgs = zm.run_cycle(c, sk, NOW, {}, led, local=local)
+        assert abs(m["remaining"] - 5.0) < 1e-9, "measured $45 spent, not the computed $5 (50-45=5)"
+        assert sk.rows[-1]["measured"] is True and any("ZEN CREDIT LOW" in x and "MEASURED" in x for x in msgs), msgs
+        assert any("DAY HIGH" in x for x in msgs), "45 today (IST) measured > 30"
+    finally:
+        for n in ("usage-7d.csv", "usage-24h.csv"):
+            os.replace(os.path.join(zm.RT, n), os.path.join(zm.RT, n + ".test-done"))
+
+
+@test
+def hsend_result_reads_only_appended_lines_and_allowlists_success():
+    d = tempfile.mkdtemp(); os.makedirs(os.path.join(d, "kit")); os.makedirs(os.path.join(d, "scratch"))
+    p = os.path.join(d, "kit", "hsend.sh"); open(p, "w").write("#!/bin/zsh\nexit 0\n")
+    c = cfg(); c["hsend"] = p
+    assert zm.hsend_result(c, "conductor", 0).startswith("hsend log unread")
+    log = os.path.join(d, "scratch", "hsend.log")
+    open(log, "w").write('20:00:00 -> conductor : "type":"agent_prompted" \n'); before = os.path.getsize(log)
+    assert "no appended" in zm.hsend_result(c, "conductor", before), "pre-existing success is not my receipt (refuter-2 #2945)"
+    open(log, "a").write('20:00:01 -> eta-refuter-2 : "type":"agent_prompted" \n')
+    assert "no appended" in zm.hsend_result(c, "conductor", before), "another pane's receipt cannot mask a missing one"
+    open(log, "a").write('20:00:02 -> conductor : "type":"agent_prompted" \n'); assert zm.hsend_result(c, "conductor", before) is None
+    for tok in ('{"code":"agent_not_ready"}', '{"code":"empty_agent_prompt"}'):
+        open(log, "a").write('20:00:03 -> conductor : %s \n' % tok)
+        assert str(zm.hsend_result(c, "conductor", before)).startswith("undelivered:"), tok
+        before = os.path.getsize(log)
+    open(log, "w").write('20:00:09 -> conductor : "type":"agent_prompted" \n')
+    assert zm.hsend_result(c, "conductor", 9999) is None, "rotated log restarts from 0: the fresh success counts (refuter-2 #2964)"
+    open(log, "a").write('20:00:10 -> conductor : {"code":"agent_not_ready"} \n')
+    assert str(zm.hsend_result(c, "conductor", 9999)).startswith("undelivered:"), "rotation is not a silence either"
+
+
+@test
+def free_model_rows_alert_once_realert_after_remind_and_never_depend_on_cost():
+    c = cfg()
+    rows = [dict(t=ms(0.1), provider="opencode", model="big-pickle", agent="eta-refuter-2", dir="/d", cost=0.0, host="box", n=7),
+            dict(t=ms(2.0), provider="opencode", model="muse-spark-1.3", agent="x", dir="/home/eta/dev/eta-lab", cost=0.0, host="box", n=2),
+            dict(t=ms(5.0), provider="opencode", model="big-pickle", agent="y", dir="/d", cost=0.0, host="box", n=9)]   # outside 3 h
+    fr = zm.free_seen(rows, c, NOW)
+    assert fr["box:eta-refuter-2"]["big-pickle"] == 7 and fr["box:x"]["muse-spark-1.3"] == 2 and len(fr) == 2, fr
+    assert zm.free_seen([dict(t=ms(0.1), provider="opencode", model="qwen3.8-flash", agent="a", dir="/d", cost=0.0, host="box", n=3)], c, NOW) == {}
+    st, out = zm.advance_free_alerts({}, fr, c, NOW)
+    assert len(out) == 2 and all("FREE MODEL SEEN" in x for x in out), out
+    st, out = zm.advance_free_alerts(st, fr, c, NOW + dt.timedelta(hours=1)); assert out == [], "once per pane+model"
+    st, out = zm.advance_free_alerts(st, fr, c, NOW + dt.timedelta(hours=6, minutes=1)); assert len(out) == 2, "re-alert after remind_h while it KEEPS happening"
+    clean = zm.free_seen([dict(t=ms(0.1), provider="opencode", model="qwen3.8-flash", agent="a", dir="/d", cost=1.0, host="box", n=1)], c, NOW)
+    st, out = zm.advance_free_alerts(st, clean, c, NOW + dt.timedelta(hours=7)); assert out == []
+    st, out = zm.advance_free_alerts(st, zm.free_seen([dict(t=ms(0.1), provider="opencode", model="big-pickle", agent="eta-refuter-2", dir="/d", cost=0.0, host="box", n=1)], c, NOW), c, NOW + dt.timedelta(hours=8))
+    assert len(out) == 1 and "big-pickle" in out[0], "a RE-APPEARANCE after a clean cycle is a new incident"
+
+
+@test
+def go_share_survives_the_computed_fallback():
+    c = cfg()
+    rows = [dict(t=ms(1.0), provider="opencode-go", model="deepseek-v4-pro", agent="eta-refuter-2", dir="/d", cost=1.5, host="box"),
+            dict(t=ms(1.0), provider="opencode", model="glm-5.3-flash", agent="a", dir="/d", cost=2.0, host="box")]
+    led = json.loads(json.dumps(zm.DEFAULT_LEDGER)); m0 = zm.ledger_state(led, rows, c, NOW)
+    mu = zm.overlay_measured(dict(m0), {"status": "stale (x)", "rows": [], "mtime": None, "file": "usage-7d.csv"}, None, c, rows)
+    assert abs(mu["go_share_computed"] - 1.5) < 1e-9 and mu["spent"] == m0["spent"], "COMPUTED basis must still show the Go split"
+    m1 = zm.overlay_measured(dict(m0), zm.load_usage(c, tempfile.mkdtemp()), None, c, rows)
+    assert abs(m1["go_share_computed"] - 1.5) < 1e-9
+    assert abs(m0["spent"] - 3.5) < 1e-9, "ledger_state counted BOTH routes into spent"
 
 
 if __name__ == "__main__":
