@@ -525,11 +525,12 @@ def floor_scope(scope: str | None = None) -> str:
 
 
 # ---- attribution (FLOOR-ATTRIBUTION kickoff, 14 Oct 2026) -------------------------------------------------------
-# Every floor hit gets a source, decided deterministically. Priority when one hit has several parts: eta > pulse_catalogue >
-# pulse_extraction > check. A medicine row with a uid and other=False carries the resolved catalogue entity's name, brand, generic
+# Every floor hit gets a source, decided deterministically. Priority when one hit has several parts: eta > eta_coincidence >
+# pulse_catalogue > pulse_extraction > check. eta_coincidence is a digit run that occurs in ETA's text only by coincidence (fewer than
+# 3 digits and not the same unit); old eta == new eta + new eta_coincidence, for every floor. A medicine row with a uid and other=False carries the resolved catalogue entity's name, brand, generic
 # and strength (replay.build copies them); frequency, duration and instructions come from the Pulse LLM extraction.
 
-SOURCES = ("eta", "pulse_catalogue", "pulse_extraction", "check")
+SOURCES = ("eta", "eta_coincidence", "pulse_catalogue", "pulse_extraction", "check")
 FLOOR_BASES = ("all", "eta")
 DEFAULT_FLOOR_BASIS = "eta"
 ATTRIBUTED = {"unsupported drugs": "unsupported_drugs", "invented fields": "invented_fields",
@@ -672,18 +673,56 @@ def _medicine_output(m: dict, art: dict | None, prov: dict | None) -> str | None
     return _numnorm("\n".join(parts))
 
 
-def _eta_has_run(m: dict, run: str, art: dict | None, prov: dict | None, scope: str) -> bool:
+def _eta_run_text(m: dict, art: dict | None, prov: dict | None, scope: str) -> str:
+    """The ETA text a run is searched in: the medicine-scoped text when it applies, else the global text."""
     if scope == "medicine":
         own = _medicine_output(m, art, prov)
         if own is not None:
-            return run in _DIGITS.findall(own)
-    return run in _DIGITS.findall(_eta_text(art, prov))  # _eta_text is number-word normalised
+            return own
+    return _eta_text(art, prov)  # _eta_text is number-word normalised
+
+
+def _eta_has_run(m: dict, run: str, art: dict | None, prov: dict | None, scope: str) -> bool:
+    return run in _DIGITS.findall(_eta_run_text(m, art, prov, scope))
+
+
+_UNIT_RE = re.compile(r"[ \t]*((?:[^\W\d_]\.)+[^\W\d_]*|[^\W\d_]+\.?)")
+_DECIMAL_TAIL = re.compile(r"[.,]\d+")
+
+
+def _unit_norm(tok: str) -> str:
+    t = tok.lower().replace(".", "").replace(" ", "")
+    return t[:-1] if t.endswith("s") else t
+
+
+def _run_units(text: str, run: str) -> list[str | None]:
+    """The normalised unit token after each occurrence of the digit run in text (None: no unit token). The number ends after any
+    decimal or thousands tail (0.5, 1,000), so the unit is the first letters-only token after the whole number."""
+    out: list[str | None] = []
+    for mt in _DIGITS.finditer(text):
+        if mt.group() != run:
+            continue
+        end = mt.end()
+        while (t := _DECIMAL_TAIL.match(text, end)):
+            end = t.end()
+        u = _UNIT_RE.match(text, end)
+        out.append(_unit_norm(u.group(1)) if u else None)
+    return out
+
+
+def _strict_run(run: str, own_text: str, eta_text: str) -> bool:
+    """3+ digits, or the unit after the run in own_text equals the unit after it at some occurrence in eta_text (no unit never matches)."""
+    if len(run) >= 3:
+        return True
+    have = {u for u in _run_units(eta_text, run) if u}
+    return any(u in have for u in _run_units(own_text, run) if u)
 
 
 def _run_source(m: dict, field: str, run: str, art: dict | None, prov: dict | None, scope: str | None = None) -> str:
     """Source of one digit run found in field of replayed medicine m."""
-    if _eta_has_run(m, run, art, prov, floor_scope(scope)):
-        return "eta"
+    sc = floor_scope(scope)
+    if _eta_has_run(m, run, art, prov, sc):
+        return "eta" if _strict_run(run, _s(m.get(field)).replace(_CUT, ""), _eta_run_text(m, art, prov, sc)) else "eta_coincidence"
     if field == "strength":
         return "pulse_catalogue" if _is_catalogue(m) else "eta"
     return "pulse_extraction"
@@ -695,7 +734,11 @@ def _field_source(m: dict, field: str, art: dict | None, prov: dict | None, scop
     if not value:  # a field the judge invented that the rx leaves empty: in doubt, ETA's
         return "eta"
     own = _medicine_output(m, art, prov) if floor_scope(scope) == "medicine" else None
-    if _in_text(value, own if own is not None else _eta_text(art, prov)):
+    text = own if own is not None else _eta_text(art, prov)
+    if _in_text(value, text):
+        runs = _DIGITS.findall(_numnorm(value))
+        if runs and not any(_strict_run(r, _numnorm(value), text) for r in runs):
+            return "eta_coincidence"
         return "eta"
     if field == "strength":
         return "pulse_catalogue" if _is_catalogue(m) else "eta"
@@ -1022,7 +1065,7 @@ def header(rows: list[dict], basis: str, scope: str = DEFAULT_FLOOR_SCOPE) -> di
     floors, whichever basis is chosen."""
     att = [t for t in rows if t.get("eta") is not None and t["floor"] in ATTRIBUTED]
     h = {"floor_basis": basis, "floor_scope": scope}
-    h.update({k: sum(t[k] or 0 for t in att) for k in SOURCES})
+    h.update({k: sum(t.get(k) or 0 for t in att) for k in SOURCES})  # .get: a stored row from before eta_coincidence has no such key
     h["total"] = sum(t["bn"] or 0 for t in att)
     h["by_scope"] = {sc: {k: sum(((t.get("by_scope") or {}).get(sc) or {}).get(k) or 0 for t in att) for k in SOURCES} for sc in FLOOR_SCOPES}
     return h

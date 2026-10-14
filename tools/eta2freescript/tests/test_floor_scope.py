@@ -98,7 +98,8 @@ def test_note_line_names_another_medicine_only_on_a_whole_word():
     # control: "Pan 40 once daily" is still another medicine's line and is removed
     art2 = _syn("Medication:\nParacetamol 650 mg twice a day\nPan 40 once daily", [_prov("Paracetamol"), _prov("Pan 40")])
     rx40 = {"medicines": [{**CAT, "strength": "40 mg"}]}
-    assert floors._invented_core(rx40, art2, _consult("hello"), "global")["sources"] == ["eta"]
+    # "40" occurs in global ETA text only as "Pan 40 once daily": 2 digits and no same unit after it, so a coincidence (old tag: eta)
+    assert floors._invented_core(rx40, art2, _consult("hello"), "global")["sources"] == ["eta_coincidence"]
     assert floors._invented_core(rx40, art2, _consult("hello"), "medicine")["sources"] == ["pulse_catalogue"]
 
 
