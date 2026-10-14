@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  455.A V-RUN INSTALL TEMPLATE (herdr-kit never touches launchd itself).
+
+  ONE agent runs the combined guard loop (context watchdog every pass + token
+  budget watch every pass); the script itself spaces its two passes and sleeps
+  to the 15-min cadence, and fires the 08:00 IST table when the IST clock
+  crosses 08:00 (it knows the last-fired day from its state file).
+
+  Install (V, from a checker-PASSed sha):
+    plutil -lint <this file> && \
+    cp <this file> ~/Library/LaunchAgents/com.eta-lab.waste-guards.plist && \
+    launchctl load ~/Library/LaunchAgents/com.eta-lab.waste-guards.plist
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.eta-lab.waste-guards.plist && \
+    rm ~/Library/LaunchAgents/com.eta-lab.waste-guards.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.eta-lab.waste-guards</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/vinaybhardwaj/dev/eta-lab/kit/waste-guards/guards_main.py</string>
+    <string>--enforce</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/Users/vinaybhardwaj/dev/eta-lab/scratch/waste-guards.err</string>
+</dict>
+</plist>
