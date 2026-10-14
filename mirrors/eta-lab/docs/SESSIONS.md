@@ -1,80 +1,82 @@
 # SESSIONS — every agent/session in the ETA lab
 
-Written by the `roadmap` pane. Machine names are real hostnames or herdr ids; PHI/account/hostname redaction rules still apply elsewhere — here I name only internal machine labels already used in the board and handovers.
+Written by the `roadmap` pane. One table per harness group, then the CC re-migration plan. Machine names are real hostnames or herdr ids; PHI/account/hostname redaction rules still apply elsewhere — here I name only internal machine labels already used in the board and handovers.
 
-Last revision: **29 Sep 2026, ~23:10 IST** (rev 8, addendum only; the table below is still the rev 6 query of 28 Sep and is UNVERIFIED for today).
+Last revision: **27 Sep 2026, ~10:45 IST** (rev 5). Rebuilt from herdr snapshot 2026-09-27-1030 (authoritative for who is live now, cross-checked against FLEET.md and the bus). Pool C move (W27, 26 Sep 20:10 IST) stands: agents run on Claude Code on V's personal Max ("Pool C"); OpenCode pools A and B are small-dose top-ups (see the pool key below); Pool A is NO-PHI, Pool B is PHI-OK.
 
-**Roster addendum, 29 Sep ~23:10 IST (rev 8, UNVERIFIED against a live query):** eta-refuter-2 and eta-refuter-3 are the active checkers (#7480, #7600); hf-fleet runs the Koyal pump (#7592); terms owns T-TERMS-40; Herdr on the Mini is 0.9.1 (spare 0.9.2 handoff failed, #7598). The table body below is still the 28 Sep query and is UNVERIFIED.
+## A. Agents today
 
-**Roster change of record, 29 Sep 18:30 IST (Fable handover, bus #6855-6857):** Mini-Fable stood down at 18:26; Cowork Fable on V's MacBook Air resumed as `fable` at 18:30. Added since rev 6: warden (dispatcher, sweeps ~10 min), hist-bulk, split, router-fix, lid-debug, sig-research, sig-debug, surg-link, scribe, terms, notesafe, tone, acoustics, freescript, stt-bench, yoga-free, vp-asus, hf-fleet, lab-viewer, lx, jev-audit, jev-fix, reb, diar-lab, linker, cap, three refuters (eta-refuter Mini, eta-refuter-2 box, eta-refuter-3 REB/terms/mint; vj-refuter for VOICEPRINT/CAP). `chronicle` (asus-ubuntu) is not a registered bus name; Fable relays. Whether each agent is idle or busy right now: UNVERIFIED (Fable's 19:40 audit names acoustics, freescript, jev-fix, fleet, lab-mover, stt-bench, terms, notesafe and surg-jev as idle, #7097).
-
-## A. Agents today (Mini + box, live query)
-
-Some herdr `group` labels are stale (an agent's opening-order label that never got updated as it moved to later orders) — where I know the real current work from the bus, I've corrected the Project(s) column and noted the stale label.
+Source: herdr snapshot 2026-09-27-1030 (`~/oc/fable/snapshots/2026-09-27-1030/HERDR-SUMMARY.md`) + FLEET.md, cross-checked against the bus. State = the snapshot's own claude/opencode + working/done/idle reading at 10:30 IST; a pane can move between DONE and WORKING within the hour without a new snapshot.
 
 | Agent | Machine·ws | Pool · Model | Project(s) | State | Order | Handover |
 |---|---|---|---|---|---|---|
-| roadmap | Mini w12 | C · sonnet | all (records) | working | W27.9 | ~/oc/roadmap/ |
+| Fable | Air/Cowork | C · Opus 5.5 (kimi-k3 reserved) | all (orchestrator) | working | — | — |
+| roadmap | Mini w12 | C · sonnet | all (records) | done | W27.9 | ~/oc/roadmap/ |
 | eta-refuter | Mini w11 | C · opus | SHIP, RECORDER, FOUNDRY | done | standing | HANDOVER-eta-refuter.md |
-| minibot | Mini w0 | C · sonnet | ROOMS, RECORDER, SHIP | done | standing | HANDOVER-minibot.md |
-| herdr-kit | Mini w13 | B OpenCode glm-5.3-flash | FOUNDRY (bus latency fix, HF fleet support) | done | W28 | HANDOVER-herdr-kit.md |
-| orbox | Mini w14 | A OpenCode glm-5.3-flash (NO PHI) | ORBOX | idle | W29.1 (done) | ~/oc/orbox/ |
-| surg-jev | Mini w16 | C · sonnet | SURGERY (Jev wording trial, W40 skill handover) | done | W40 | ~/oc/surg-jev/ |
-| lab-mover | box w16 | C · sonnet | BACKFILL, FOUNDRY (mirror scripts) | done | standing | HANDOVER-lab-mover.md |
-| fleet | box w17 | C · sonnet | BACKFILL (PARITY-389), ROOMS | done | standing | HANDOVER-fleet.md |
-| eta-refuter-2 | box w18 | C · opus | checker: CLARITY/REB/FUSER/W50/LABVIEW/ACOUSTICS/SELFTEST/most builder branches | done | standing | HANDOVER-eta-refuter-2.md |
-| scribe | box w1C | C · sonnet | SHIP, RECORDER, ROOMS | done | R25 / D4 / post-D4 | HANDOVER-scribe.md |
-| lab-viewer | box w1D | C · sonnet | LABVIEW (/timeline P1-P3, pitch25, /clarity) | done | W49 | HANDOVER-lab-viewer.md |
-| diar-lab | box w1E | C · sonnet | SELFTEST, CLARITY (S1/confirm suites), W52 (diarization support) | working | S1 / W33.1 / W52 | HANDOVER-diar-lab.md |
+| eta-refuter-2 | box w18 | C · opus | CLARITY, PRESCRIBE, BACKFILL, SELFTEST, LABVIEW, NOTESAFE, ACOUSTICS | working | standing | HANDOVER-eta-refuter-2.md |
+| vj-refuter | box w1A | C · opus | VOICEPRINT, PRESCRIBE (CAP-2 checker) | done | waits V shim (Sun) | HANDOVER-vj-refuter.md |
+| lab-mover | box w16 | C · sonnet | BACKFILL, FOUNDRY | done | 19:26 GCP | HANDOVER-lab-mover.md |
+| fleet | box w17 | C · sonnet | ROOMS, BACKFILL, SHIP-adjacent (PARITY) | armed | standing | HANDOVER-fleet.md |
+| scribe | box w1C | C · sonnet | SHIP, RECORDER, ROOMS | working | R25 / D4 | HANDOVER-scribe.md |
+| lab-viewer | box w1D | C · sonnet | LABVIEW, CLARITY, PRESCRIBE | done | L1 / W27.4 / W33.5 | HANDOVER-lab-viewer.md |
+| diar-lab | box w1E | C · sonnet | SELFTEST, CLARITY (S1 suites) | working | S1 / W33.1 | HANDOVER-diar-lab.md |
+| linker | box w1G | C · sonnet | PRESCRIBE, CLARITY (S3 judge) | done | W27.2 / W33.4 | HANDOVER-linker.md |
 | split | box w1H | C · sonnet | SPLIT | done | W27.6 | diar-lab's HANDOVER (337e state) |
-| hist-bulk | box w1K | B OpenCode glm-5.3-flash | BACKFILL (daily drain) | working | W28.1 | HANDOVER-hist-bulk.md |
-| lid-debug | box w1N | C · opus (DEBUGGER, no fixes) | CLARITY (router root cause, S1-REPORT), FUSER (design consultant) | done | W30.1 / W31.2 | ~/oc/lid-debug/ |
-| router-fix | box w1Q | C · sonnet | CLARITY (S1 re-run), FUSER/G3 (builder) — *stale group label "M1-M5"* | done | W31.1 / FUSER | ~/oc/router-fix/ |
-| acoustics | box w1S | C · sonnet | ACOUSTICS | done | W34.2 / W39 | ~/oc/acoustics/ |
-| freescript | box w1T | C · opus (RESEARCHER, no code) | FREESCRIPT | done | W35 / W38 | ~/oc/freescript/ |
-| jev-audit | box w1V | C · sonnet | NOTESAFE (W36 Jev audit, closed) | done | W36 | ~/oc/jev-audit/ |
-| sig-debug | box w1W | C · opus (DEBUGGER) | RECORDER (W37 signature_mismatch, closed) | done | W37 | ~/oc/sig-bug/ |
-| sig-research | box w1X | C · sonnet | RECORDER (W37 signature facts, closed) | done | W37 | ~/oc/sig-bug/ |
-| notesafe | box w1Z | C · sonnet | NOTESAFE — *stale group label "W40 skill-aware"* | done | W27.7 / W40 | ~/oc/notesafe/ |
-| vj-refuter | box w10 | C · opus | VOICEPRINT (W51/W52 checker, sealed-truth custodian), PRESCRIBE (CAP-2) — *stale group label "W40 skill-aware"* | working | W40 / W51 / W52 | HANDOVER-vj-refuter.md |
-| lx | box w21 | C · sonnet | ENCOUNTER (W44 Jev loop), VOICEPRINT (W51/W52 voice scan + diarization) — *stale group label "W40 skill-aware"* | working | W40 / W44 / W51 / W52 | HANDOVER-lx.md |
-| jev-fix | box w22 | C · sonnet | NOTESAFE (W41 Jev fixes, closed) | done | W41 | ~/oc/jev-audit/ |
-| linker | box w23 | C · sonnet | PRESCRIBE, BACKFILL (nightly PQM), VOICEPRINT (W52 encounters+Rx), CLARITY (S3 judge) — *stale group label "W40 skill-aware"* | idle | W40 / W49 / W52 | HANDOVER-linker.md |
-| tone | box w24 | C · sonnet | TONE | done | W45 | (tone HANDOVER, UNVERIFIED) |
-| surg-link | box w25 | C · sonnet | SURGERY (W46 interventional pitch linking) | done | W46 | ~/oc/surg-link/ |
-| reb | box w26 | C · sonnet | REB (W47), CLARITY, W52 (package integrator) | working | W47 | ~/oc/reb/ |
-| hf-fleet | box w27 | C · sonnet | FOUNDRY (W48 HF GPU fleet), REB/W50/W52 (GPU jobs) | working | W48 | ~/oc/hf-fleet/ |
-| terms | box w28 | C · sonnet | W50 clinical-language STT bake-off | done | W50 | ~/oc/terms/ |
-| eta-refuter-3 | box w29 | C · opus | checker: REB + W50 (second checker, never the same branch as eta-refuter-2) | working | standing | HANDOVER-eta-refuter-3.md |
+| notesafe | box w1J | C · sonnet | NOTESAFE | idle | W27.7 / W30.3 | ~/oc/notesafe/ |
+| lid-debug | box w1N | C · opus (DEBUGGER, no fixes) | CLARITY (router root cause) | done, on call | W30.1 / W31.2 | ~/oc/lid-debug/ |
+| router-fix | box w1Q | C · sonnet | CLARITY (router fix + eval) | done (eval running) | W31.1 | ~/oc/router-fix/ |
+| acoustics | box w1S | C · sonnet | ACOUSTICS | done (chunk run in progress) | W34.2 | ~/oc/acoustics/ |
+| freescript | box w1T | C · opus (RESEARCHER, no code) | FREESCRIPT | done | W35 | ~/oc/freescript/ |
+| cap | c3 w1 | C · sonnet | PRESCRIBE, CLARITY (S2 router arm) | idle | W27.1 / W30.7 / W33.3 | — |
+| stt-bench | c3 w4 | C · sonnet | CLARITY (engine bench, support) | idle | W27.3 / W30.2 / W31.3 | ~/oc/stt-bench/ |
+| minibot | Mini w0 | C · sonnet | ROOMS, RECORDER, SHIP | done | standing | HANDOVER-minibot.md |
+| t4-serve | box w14 | LOCAL vLLM | FOUNDRY (serves Qwen2.5-7B) | up | — | — |
+| mini-serve | Mini wY | LOCAL llama.cpp | FOUNDRY (serves Qwen2.5-Coder-14B) | up | — | — |
+| hist-bulk | box w1K | B OpenCode glm-5.3-flash | BACKFILL | done | W28.1 | HANDOVER-hist-bulk.md |
+| lx | box w1M | B OpenCode glm-5.3-flash | ENCOUNTER | done | W28.2 | HANDOVER-lx.md |
+| herdr-kit | Mini w13 | B OpenCode glm-5.3-flash | FOUNDRY | idle | W28.3 (done) | HANDOVER-herdr-kit.md |
+| tone | box w1R | B OpenCode glm-5.3-flash (PHI OK) | TONE | done | W32.1 | (tone HANDOVER, UNVERIFIED) |
+| orbox | Mini w14 | A OpenCode glm-5.3-flash (NO PHI) | ORBOX | idle (done) | W29.1 | ~/oc/orbox/ |
+| surg-jev | Mini w15 | A OpenCode glm-5.3-flash (NO PHI) | SURGERY | done | W29.2 | ~/oc/surg-jev/ |
+| yoga-free | Yoga w1 | FREE big-pickle (NO PHI) | FOUNDRY (free pool: digest/pane-watch/historian/rotate) | idle | Y9-Y12 | — |
 
-## B. Not queried this pass — carried forward from rev 5, UNVERIFIED
+**Parked / no active agent in the 10:30 snapshot (workspace exists, last known role unchanged from earlier revisions; not necessarily stopped, just not a live agent row today):** conductor, indic-mt, hist-miner, join-shard, surg-deid, surg-page, split-speaker, mb-rx, mb-ot, mb-ipd, vj-data, vj-arms, vj-link, yoga-drain, tunnel-ops, radar-kit, linker-oc. Their last confirmed role/model is in rev 12/13 of this file; treat as UNVERIFIED for today until they post or appear in a snapshot.
 
-| Agent | Machine·ws (rev 5) | Pool · Model (rev 5) | Project(s) (rev 5) |
-|---|---|---|---|
-| cap | c3 w1 | C · sonnet | PRESCRIBE, CLARITY (S2 router arm) |
-| stt-bench | c3 w4 | C · sonnet | CLARITY (engine bench, support) |
-| yoga-free | Yoga w1 | FREE big-pickle (NO PHI) | FOUNDRY (free pool) |
-| t4-serve | box w14 | LOCAL vLLM | FOUNDRY (Qwen2.5-7B serving) |
-| mini-serve | Mini wY | LOCAL llama.cpp | FOUNDRY (Qwen2.5-Coder-14B serving) |
+FLEET.md pool key (Fable, 26 Sep wave 27, current): **A** = main OpenCode Go (capped, resets ~21:30) — NO-PHI, invented/public only. **B** = personal OpenCode Go (capped, ~22:00) — PHI OK, no training, small-dose lanes (one task, then stop, no loops). **C** = V's personal Claude Max (Claude Code, `CLAUDE_CONFIG_DIR=~/.claude-personal`) — the main PHI harness. **FREE** = big-pickle on Yoga — NO-PHI. **LOCAL** = T4 vLLM :8000 / Mini llama.cpp :8082 — PHI-safe overflow. **CLOUD** = $250 Claude Code web credits, GitHub repos only.
 
-**Parked / not a live agent row in either query (workspace may still exist; last known role from earlier revisions):** conductor, indic-mt, hist-miner, join-shard, surg-deid, surg-page, split-speaker, mb-rx, mb-ot, mb-ipd, vj-data, vj-arms, vj-link, yoga-drain, tunnel-ops, radar-kit, linker-oc.
 
-**New agents this revision (stood up since rev 5):** jev-audit, sig-debug, sig-research, jev-fix (all NOTESAFE/RECORDER threads, now closed/done), surg-link (SURGERY), reb (REB), hf-fleet (FOUNDRY/REB), terms (W50), eta-refuter-3 (second Opus checker — added because eta-refuter-2 alone could not keep up with REB + W50's parallel branch volume; the two checkers never review the same branch).
+## Pool C — Claude Code on V's personal Max (W27, 26 Sep 20:10 IST)
 
-## Pool key (unchanged since rev 5)
+- **What changed:** the lab's agents are being brought back up on Claude Code (sonnet for builders, opus for checkers) on V's personal Max, which has headroom. PHI is allowed in these panes (training off, ZDR vendors only). Free models (Yoga big-pickle) stay NO-PHI. OpenCode pools A/B are small top-ups only (Zen stays overflow-only, r452).
+- **Confirmed "back on CC-personal" on the bus (26 Sep 20:10-20:12):** lab-mover, fleet, eta-refuter-2, vj-refuter, cap, scribe, lab-viewer, diar-lab, minibot, eta-refuter, linker, split, notesafe, stt-bench, roadmap (#3837-#3886).
+- **Not mentioned in W27, so state UNVERIFIED (rows below stay as last recorded):** conductor, herdr-kit, indic-mt, hist-bulk, hist-miner, surg-*, join-shard, split-speaker, mb-*, lx, vj-data/arms/link, yoga-drain, tunnel-ops, radar-kit.
+- **Rules that still hold:** builders never review their own work; eta-refuter-2 (box) reviews lab code, eta-refuter (Mini) production/evenscribe code and herdr-kit, vj-refuter (box) CAP-2 and stt-bench; the Mini is off-limits 08:15-20:30; no secrets on argv.
+- **Effect on section B:** step 1 (checkers) is already done in effect, and most builders came back at the same time, so the re-migration plan below is now a fallback and a reference for the panes not yet moved, not a to-do.
 
-**A** = main OpenCode Go (capped, resets ~21:30) — NO-PHI, invented/public only. **B** = personal OpenCode Go (capped, ~22:00) — PHI OK, no training, small-dose lanes (one task, then stop, no loops). **C** = V's personal Claude Max (Claude Code, `CLAUDE_CONFIG_DIR=~/.claude-personal`) — the main PHI harness, sonnet for builders, opus for checkers/debuggers/researchers. **FREE** = big-pickle on Yoga — NO-PHI. **LOCAL** = T4 vLLM :8000 / Mini llama.cpp :8082 — PHI-safe overflow (local Qwen models were later removed from both machines, 27 Sep 12:05 V ruling, to free T4 capacity for STT — these two rows may now be stale; UNVERIFIED this pass). **CLOUD** = $250 Claude Code web credits, GitHub repos only. **HF Jobs** (new, W48): pay-per-job L4 GPU (`l4x1`, $0.80/h), up to 5 concurrent, used by REB/W50/W52 — not an always-on pool, no idle billing.
+## B. CC RE-MIGRATION PLAN (when V's Claude Max recharges)
+
+The reverse switch, in priority order — the same role split that moved to OpenCode, undone in the cheapest-safe order:
+
+1. **Checkers first** (eta-refuter, eta-refuter-2, vj-refuter) → Claude Code / Opus 5.5. Cross-family checking is the whole point; without an Opus checker the builders' work is unrefuted.
+2. **Orchestrator (Fable)** → Cowork / Opus 5.5 (kimi-k3 stays reserved for Fable + PHI/security/production checks).
+3. **Production deploy train (scribe)** → Claude Code, with an Opus refuter on every push.
+4. **Long-protocol study builders** (linker, surg-deid, hist-miner) → Claude Code / Sonnet or OpenCode glm-5.3 escalated.
+5. **Everyone else** stays on OpenCode until a job actually fails twice on its OpenCode model (the r408 escalation rule).
+
+### Per-pane reverse-switch procedure
+- Mirror the forward tool: box `~/oc/oc-switch2.sh <name> <model> ~/oc/SECURITY-RULES.md`; Mini `zsh ~/oc/oc-switch-mini.sh <name> <model>`. Write a `cc-switch.sh` that is the reverse (OpenCode pane → Claude Code), same checks:
+  1. Read the pane's handover from origin/main `handover/HANDOVER-<name>.md`.
+  2. Verify the handover sha matches the live file.
+  3. Stop the OpenCode pane cleanly; rename it `<name>-oc` (24 h rollback).
+  4. Spawn the Claude Code pane as `<name>`; confirm model line reads the intended Claude model (no free fallback).
+  5. First task on the new pane is checked by a refuter.
+- **Budget guard rules:** switch only while Zen runway is comfortable; if Zen < $10 or < 24 h runway, Fable tells V at once (r407 standing rule). No auto-recharge. Log every overflow switch (pane, time, reason).
+- **Handovers carry state both ways:** each handover must carry the pane's rules verbatim (VJ panes carry the three blinding rules + the sealed-path deny block; deploy train carries the never-push-without-Fable rule; checkers carry rerun-tests-yourself + positive-controls-first).
 
 ## C. Non-pane processes (live, survive pane restarts)
 
-| Process | Owner | Notes |
-|---|---|---|
-| fleet-watch loop | fleet | room polling, budget-capped |
-| Zen usage export daemon | fleet | polls org usage every 15 min |
-| eta-bus MCP server | V (restart only) | latency fix (Promise.all parallel herdr calls) shipped this revision |
-| mirror_daily.sh (nightly backup mirror) | lab-mover | hardened this revision (4 real bugs fixed); runs after 20:30 |
-| REB fan-out runner | reb | claim-once workers across box/c3/HF, used by REB/W50/W52 GPU jobs |
-
-## Note on the CC re-migration plan (rev 4/5's section B)
-
-That plan (the reverse OpenCode→Claude Code switch order) is now moot in practice: every substantive builder and checker role runs on Pool C (Claude Code) today, and has for two days straight. The only OpenCode rows left are genuinely small-dose lanes (Pool A/B, one task then stop) by design, not a migration backlog. The budget-guard rule still stands if that ever needs to reverse: switch only while Zen/pool runway is comfortable, log every move, checker roles first.
+| Process | Owner | Model | Notes |
+|---|---|---|---|
+| fleet-watch loop (pid 9332, herdr wZ:p1) | fleet | opencode-go/glm-5.3-flash (was gemini-3.5-flash-lite) | 5-min room polling, $2/day cap |
+| Zen usage export daemon | fleet | — | polls org usage every 15 min |
+| eta-bus MCP server | V (restart only) | — | needs V's restart to fix `fable` addressing + async wake + timeouts |

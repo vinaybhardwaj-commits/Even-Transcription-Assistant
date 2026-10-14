@@ -22,8 +22,7 @@ const windowDoc = { schema: "eta-lab-result/1", window_id: WID, room_id: ROOM, s
 const viewRow = { key: `runs/${KEY}.json`, run_id: RUN, room_id: ROOM, room_name: "OPD 5", ist_date: DAY, status: "text", complete: true, t0: "09:00", t1: "09:15" };
 const inspect = { room_id: ROOM, date: DAY, window: { k: KEY, t0: "09:00", t1: "09:15", status: "text", n_words: 3 },
   rx: [{ id: "C1", s: 1, e: 2, basis: "time+voice", items: [{ id: "i1", type: "drug", term: "TESTDRUG 5MG", cls: "CAPTURED", score: 1, matched: "testdrug five", tm: false }] }],
-  speakers: [{ l: "A", pct: 63 }, { l: "B", pct: 37 }], acoustics: { missed_speech_pct: 4.2, missed_in_window: 1 },
-  reb: { loaded: false } };   // W49 P3: real REB Chromium checks (current/superseded/failed rows, cursor sync) live in test/render_reb.mjs
+  speakers: [{ l: "A", pct: 63 }, { l: "B", pct: 37 }], acoustics: { missed_speech_pct: 4.2, missed_in_window: 1 } };
 
 const srv = http.createServer((q, res) => {
   const p = new URL(q.url, "http://x").pathname; const json = (o) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(o)); };
@@ -48,7 +47,7 @@ try {
   const txt = await page.evaluate(() => document.body.textContent);   // <details> panels are collapsed by default (like the existing Technical details section), so use textContent not innerText
   check("Prescription panel shows the linked item", /Prescription/.test(txt) && /CAPTURED/.test(txt) && /TESTDRUG 5MG/.test(txt) && /heard: testdrug five/.test(txt));
   check("Sound and speakers panel shows both speakers + acoustics line", /Sound and speakers/.test(txt) && /Speaker A: 63%/.test(txt) && /Speaker B: 37%/.test(txt) && /sampled, lower bound.*4\.2%/.test(txt));
-  check("Technical detail panel present, says REB not available yet when reb.loaded is false", /Technical detail/.test(txt) && /REB engine tracks: not available yet for this window/.test(txt));
+  check("Technical detail panel present, says P3 not available yet", /Technical detail/.test(txt) && /not available yet \(P3\)/.test(txt));
   const html = await page.content();
   check("no inline style attribute", !html.includes('style="'));
   check("zero console errors", errors.length === 0);

@@ -2,47 +2,65 @@
 
 Written by the `roadmap` pane. Plain words: each item is the question, the choices, and what I recommend. Closed decisions move to the bottom with the date and V's answer.
 
-Last revision: **29 Sep 2026, ~23:10 IST** (rev 10).
+Last revision: **26 Sep 2026, ~10:45 IST** (rev 7).
 
 ---
 
 ## OPEN
 
+### D-2 — ORBOX: you wrote "speakers" around the OT — do you mean microphones?
+- **Question:** the brief lists "more speakers around the room". Speakers make sound; microphones collect it. Which do you want?
+- **Options:** (a) microphones (more pickup); (b) speakers (playback); (c) both.
+- **Recommendation:** (a) — capture needs more mics, not more speakers.
+- **Raised:** 26 Sep. **Status:** open. Update 27 Sep: orbox's design v2 prices both bundles assuming (a); flip this and the bundles change.
+
+### D-3 — ORBOX: video of patients in the OT — consent and PHI policy?
+- **Question:** the robotic-surgery webcam records VIDEO of the patient and the room. Video is more sensitive than audio. What are the rules?
+- **Options:** (a) full video with patient consent form; (b) audio-only until consent is sorted; (c) video with face blur / non-identifying framing.
+- **Recommendation:** (a) with a proper consent step, or (b) as a safe first phase.
+- **Raised:** 26 Sep. **Status:** open. **This is your call, V — it is a patient-data decision.** Update 27 Sep: orbox's design v2 test plan assumes audio+video sync only, no patient video yet.
+
+### D-4 — ORBOX: hardware purchase
+- **Question:** what to buy for the OT upgrade?
+- **Options:** (a) USB webcam (audio+video separately) + a few wired mics; (b) add wireless directional mics; (c) full kit list for a quote.
+- **Recommendation:** (a) first (webcam + 2-3 mics), defer wireless directional mics until the wired setup is proven. Update 27 Sep: two priced bundles (lean/full) are ready in orbox's design v2 (`~/oc/orbox/ORBOX-DESIGN-v2.md`) — this decision can now be made against real rupee numbers.
+- **Raised:** 26 Sep. **Status:** open.
+
+### D-5 — ORBOX: who owns the build?
+- **Question:** which pane runs the ORBOX project?
+- **Options:** (a) lab-mover (Linux/capture); (b) scribe/minibot (recorder lineage); (c) a new dedicated pane.
+- **Recommendation:** (a) lab-mover for capture software + herdr-kit for Linux install, fleet for monitoring — reuse, don't mint.
+- **Raised:** 26 Sep. **Status:** open.
+
 ### D-6 — RECORDER: which room follows Home Office in the 0.1.25 rollout?
 - **Question:** 0.1.25 is PASSed (1da7232) and a signed test build is going to Home Office only (auto-start left on). Scope/owner (scribe build + minibot monitor) is settled. What's left is the next hop after the Home Office canary.
 - **Options:** (a) a low-traffic OPD room next; (b) wait for a full nightly SELFTEST cycle first; (c) name the room now so scribe can prep.
 - **Recommendation:** (a) once the Home Office self_test scores clean.
-- **Raised:** 26 Sep; narrowed 27 Sep after 0.1.25 PASS. **Status:** open. Update 28 Sep: the Home Office canary itself is now blocked one step earlier — the app's self_test needs a server permission fix (minibot's MCP token lacks write scope) before it can even run once at Home Office, so this decision is not yet actionable.
+- **Raised:** 26 Sep; narrowed 27 Sep after 0.1.25 PASS. **Status:** open.
 
 ### D-8 — ROOMS: OPD 4 physical mic; Cardiology restart
 - **Question:** DEVICE_MISSING still flags on OPD 4 at 07:58 this morning even though the app reports the C270 by name — someone needs to physically look at it before clinic opens. Separately, Cardiology OPD has had no kiosk since 26 Sep (offline, last heartbeat 26 Sep 19:54) and is not expected to start on its own.
 - **Options:** (a) dispatch a hands-on-site check of the OPD 4 mic now; (b) for Cardiology: send someone to open the kiosk page, or leave it off until further notice.
 - **Recommendation:** (a) for OPD 4 (blocks clinic recording there); (b) leave Cardiology off unless you want it recording today.
-- **Raised:** 26 Sep; updated 27 Sep 08:00 with today's room-readiness reads. **Status:** open. Update 28 Sep: NOT independently re-verified this revision — no OPD 4 or Cardiology status appeared in today's bus range (4285-5320). Carried forward as last known state; do not assume it is still accurate without a fresh check.
+- **Raised:** 26 Sep; updated 27 Sep 08:00 with today's room-readiness reads. **Status:** open.
 
 ### D-14 — ROOMS: permission rule for fleet's read-only report_diag
 - **Question:** fleet's one named, read-only `report_diag` command to OPD 4 (to check for signature_mismatch) was refused by fleet's own pane classifier as a remote write. The exact command is posted on the bus (#4221).
 - **Options:** (a) add a Bash/MCP permission rule for that one command in fleet's pane; (b) you or Fable run the exact line and hand fleet the reply.
 - **Recommendation:** (a) if this kind of read-only room diagnostic will recur; (b) as a one-off.
-- **Raised:** 27 Sep (W34.3). **Status:** open, but lower priority: sig-debug/sig-research closed out the signature_mismatch investigation this revision using only read-only Scribe MCP calls, without needing this permission rule, so nothing is currently blocked on it. Leave open in case another read-only room diagnostic hits the same wall.
+- **Raised:** 27 Sep (W34.3). **Status:** open.
+
+### D-15 — FREESCRIPT: two open questions before any pilot
+- **Question:** the FreeScript bridge design (option A: doctor pastes an ETA-written note into FreeScript) needs two answers before even an offline pilot: is Gemini's ZDR route acceptable for the stage-A note-writer LLM, and will Even run the staging parse (vs. Pulse's own team)?
+- **Options:** (a) approve Gemini ZDR + Even runs staging, start the 20-consult offline pilot; (b) hold for a different model or team.
+- **Recommendation:** (a) — matches how CAP-1's ceiling listening and CLARITY's S3 judge already use the Gemini ZDR route.
+- **Raised:** 27 Sep (W35). **Status:** open.
 
 ### D-10 — FOUNDRY: Zen top-up cadence
 - **Question:** Zen is pay-per-token from prepaid credit; no auto-reload (r407). When should it be topped up?
 - **Options:** (a) V tops up on Fable's alert (< $10 or < 24 h runway); (b) enable auto-reload $20.
 - **Recommendation:** (a) — keep it manual.
 - **Raised:** 25 Sep; re-confirmed 26 Sep (r452). **Status:** open (standing).
-
-### D-16 — BACKFILL: re-attempt PARITY-389 later, or accept HF as an unproven backup path?
-- **Question:** the HF-vs-Mini transcription comparison came back NO MATCH because the HF capture couldn't reach the Mini's own SraVaani instance (a tailnet/network permission gap), not because the STT itself disagreed in a worrying way. Fixing the network path would let a cleaner comparison run later.
-- **Options:** (a) fix the tailnet ACL so HF can reach the Yoga SraVaani instance, and re-run the comparison later; (b) leave HF as an unproven overflow path indefinitely (no GCP-disk deletion decision rides on this until it's revisited).
-- **Recommendation:** (b) for now — no pressing need for HF overflow today; revisit if/when it's actually needed.
-- **Raised:** 28 Sep (from the 27 Sep PARITY-389 final verdict). **Status:** open, not urgent.
-
-### D-17 — ACOUSTICS/ROOMS: Third Floor needs a physical acoustic fix
-- **Question:** Third Floor Consultation room measurably misses 23.7% of real speech before it ever reaches the transcription engine (the noise-detector cuts it) — a software threshold tune was tried and does not fix it. It needs a physical change: move the mic, swap it, or reduce a noise source in the room.
-- **Options:** (a) send someone to move/swap the mic and re-test; (b) leave as-is and accept the loss.
-- **Recommendation:** (a) — this is a measured, material gap in what gets transcribed for that room.
-- **Raised:** 28 Sep (W39 final report). **Status:** open.
 
 ---
 
@@ -55,31 +73,17 @@ Last revision: **29 Sep 2026, ~23:10 IST** (rev 10).
 5. ~~Re-save the ElevenLabs key~~ **done — diar-lab's first real ElevenLabs synth landed 26 Sep night (rev 13).**
 6. **Deploy the gcloud shim be2b6682** + temporary Vertex credentials (unblocks VJ arm 4).
 7. **Authorise the GCP S7 delete** (gcloud auth on the Air, after the 24 h window; also gated on the PARITY-389 verdict, see BACKFILL).
-8. ~~SHIP D4~~ **done — shipped 27 Sep 21:16-21:48 (dpl_3s2o, then post-D4 train 4d7d8e0 live 21:48); migrations 0119/0121 applied, Jev model pinned.**
+8. **SHIP D4 (now 21:00 tonight, Fable-gated):** confirm SCRIBE_MCP_TOKENS_EXTRA + WHISPER_BULK_URLS r394 removal in the Vercel dashboard, and name someone with Vercel promote access — scribe's pane cannot promote.
 9. **VOICEPRINT:** run the vj-seal-decrypt v3 `--apply` (tomorrow) so vj-refuter can verify.
 10. ~~Restart the eta-bus MCP server~~ **done.**
 11. **Approve the Kanglish SELFTEST phrase set** once, before the first nightly run that includes it (S1 ruling, standing ask).
 12. **Physically check OPD 4's C270** before clinic opens — DEVICE_MISSING still flags it at 07:58 (see D-8).
-13. ~~FREESCRIPT: answer the two open questions~~ **done — resolved by your 27 Sep 11:05 ruling (ZDR confirmed generally, no-doctor-paste artifact approach); D-15 closed.**
-14. **W52 Manoj package:** be reachable / have your MacBook Air online around 15:00-17:00 IST today (28 Sep) to receive the first cut and the full package — you're on a spotty hotspot today, which Fable has already flagged as a risk.
-15. **Rotate the R2 read key `r2_audio_read`** (`~/.claude/secrets/r2_audio_read`) — part of it was printed to a tool output during routine housekeeping. No content was ever posted on the bus and every agent correctly refused to open or handle it themselves; this needs your hands (agents never create or rotate credentials). When you rotate it, every consumer (box, Mini, HF) needs the new value or reads will start failing.
-16. **W52 first cut is ready now** — `~/eta-data/manoj-package-cut1` is frozen, independently verified (26/26 checks), and waiting for Fable to pull to your Air whenever you're reachable; no need to wait for the full 17:00 package.
+13. **FREESCRIPT:** answer the two open questions (D-15) before any pilot.
 
 ---
 
 ## CLOSED
 
-- **r7406 (29 Sep):** ROLE v4 rulings: D = 29 Sep; stop rule is a data cut (INSUFFICIENT if fewer than 30 VERIFIED sessions); Staff button deployed (e0ef0665, 22:24). T-ROLE-5 open.
-- **r7588 (29 Sep):** KOYAL bulk GO; HF daily guard USD 300 for 29-30 Sep; Koyal cap USD 150 to 30 Sep 12:00.
-- **r7262 (29 Sep):** FUSER re-plan; DEV gate is beat P on S1 and S2 primary.
-- **ADDENDUM-25 (29 Sep):** T-TERMS-40 twin identity accepted (aa6fa2b9); new-file route.
-- **r7598 (29 Sep):** Herdr live handoff failed on the spare; no live change; runbook due 08:00 30 Sep (T-HERDR-2).
-
-- **V via Fable #6990 (29 Sep ~18:50 IST), ORBOX D-2..D-5:** D-2 = BOTH, more microphones and more speakers around the OT. D-3 = DROPPED: video consent is already settled (V); the ORBOX video stream is the robotic surgical device's telemetry display, not video of the patient, so the patient-video concern leaves the design and test plan. D-4 = a full itemised kit list for a vendor quote (mics, speakers, telemetry video capture); orbox writes the list only and buys nothing (board task T-ORBOX-5). D-5 = HOLD: no ORBOX building of any kind until V says so; the kit list is paperwork, not building.
-- **V via Fable #6051 (29 Sep, ~13:10 IST):** patient audio allowed on Hugging Face GPUs (approved ZDR vendor). Private buckets only; our own code and open-weight models only; outputs come back to the box; each job posts job id, machines, hours, spend; guard USD 150/day across all HF jobs; up to 10 L4 at once. Closes D-16 in spirit (HF is now a used path, not only a backup); D-16 itself left open until V says so.
-- **V via Fable #6161 (29 Sep):** keep patient data in the HF buckets until V says delete. No bucket or file is deleted after copy-back. hf-fleet keeps the ledger at ~/eta-data/hf-buckets-ledger.md.
-
-- **D-15 (27 Sep, FREESCRIPT ZDR + staging-parse questions): RESOLVED.** V's 11:05 ruling (Jev/OpenRouter are ZDR for Even generally; no doctor-paste, no Pulse code change — ETA hands Pulse a structured artifact instead) answers both questions in substance. W38 shipped and closed on this basis.
 - **D-1 (26 Sep, ROOMS auto-start): APPROVED by V.** Built into RECORDER 0.1.25 (R25/W34.1): per-room schedule (`lib/room-schedule.ts` 93a1f17), 08:30 clinic rooms / 06:00 ORB3, never Dietary unless re-enabled, 10-min grace, a room already started by hand is left alone; fleet-watch alerts if a room has not started 10 min after open.
 - **D-9 (27 Sep, SELFTEST spec + TTS route): RULED (S1 order).** Phrase-set owner = diar-lab (invented only, V approves Kanglish once); TTS = ElevenLabs first, Google Cloud TTS fallback; nightly 23:30 IST + manual trigger, never in clinic hours; scores the PRODUCTION path, offline models as shadow columns only.
 - **W33 (27 Sep, CLARITY automatic judging): V ruled — no human listening today.** Every CLARITY change (starting with the router fix) is judged by three pre-registered automatic scores: S1 synthetic truth (SELFTEST WER/CER/hit-rate), S2 clinical truth (CAP capture score vs Pulse, scorer efcc9c9 unchanged), S3 language truth (a Gemini 3.8 Flash judge via the ZDR route, itself proven ≥95%/≥90% on known-language audio first). **A change ships only if S2 improves and S1/S3 do not get worse.** V's own labels become a later spot-check, not a gate.
@@ -97,7 +101,3 @@ Last revision: **29 Sep 2026, ~23:10 IST** (rev 10).
 - **r370 (V):** room live-transcription switches stay OFF in production.
 - **r409 (25 Sep):** OpenCode migration waves 1-3 executed (18 panes).
 - **r308 → r406 (25 Sep):** Link-3 interim class join → reopened by V to widen the translated stratum.
-- **Fable #7918 (30 Sep 06:25):** FUSER stops after the v2-E fresh-set FAIL; router LID fix BUILD GO in the lab only; ROLE v4 runs doctor-rank only (staff stratum UNSUPPORTED); KOYAL 25 concurrent HF jobs OK (#7858).
-- **Fable #8153 (30 Sep 08:20, V go 08:15):** FUSER restarts as v3 with fixed rules R1-R5 (doses never touched; drug needs 2 engines plus lexicon; bars as v2-E; size for G4; new fresh set). **#8196:** tonight 21:00-21:30 fleet update, only on a Fable GO. **#8245:** orchestrator thread handoff at 10:00.
-- **Fable #8315 (30 Sep, new thread):** all 29 WAITS answered; fleet update conditional GO; FUSER v3 seed commitment 0453361fcac11be7; T-ROLE-2/-3/-40 cancelled; Koyal 11/13 Sep re-id jobs launched.
-- **Fable #8369/#8412/#8483 (30 Sep):** room control is the Kiosk Bot's, not the bus's; BAKEOFF Sarvam-only; T-BACKFILL-HF cap USD 250; fleet update needs Fable GO by 20:40 or moves to 1 Oct 21:00.
