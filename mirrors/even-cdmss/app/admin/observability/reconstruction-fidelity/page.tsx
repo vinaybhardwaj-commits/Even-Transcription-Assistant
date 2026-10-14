@@ -47,8 +47,6 @@ export default async function ReconstructionFidelityPage({ searchParams }: { sea
           <p className="mt-1.5 max-w-3xl text-sm text-slate-500">
             Human ratings of whether the assembled EpisodeState faithfully reconstructs the documented course — <b>faithful / missed-material / mis-phased / over-included</b>. A <b>builder-fidelity</b> measurement, kept separate from finding precision: a faithful reconstruction is never a “true positive”.
           </p>
-          {/* WM0 W0.2 — disambiguation only; this surface's scope is unchanged. */}
-          <p className="mt-1 text-[11.5px] text-slate-400">This rates <b>EpisodeState</b>, not the MemberState walk.</p>
         </div>
         <div className="flex items-center gap-3 text-xs">
           <Link href="/admin/observability/adjudications" className="whitespace-nowrap text-brand hover:underline">Adjudication Ledger →</Link>

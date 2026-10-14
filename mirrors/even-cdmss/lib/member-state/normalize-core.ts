@@ -13,7 +13,7 @@
 import type { NormalizedConcept } from './schema';
 import { NORMALIZATION_VERSION } from './schema';
 
-export type NormalizeDomain = 'problem' | 'medication' | 'allergy' | 'investigation' | 'procedure';
+export type NormalizeDomain = 'problem' | 'medication' | 'allergy' | 'investigation';
 
 /** Canonical surface form: lowercase, strip punctuation to spaces, collapse whitespace. */
 export function normalizeRaw(raw: string): string {
@@ -85,38 +85,11 @@ const ALLERGY_SEED: Record<string, SeedEntry> = {
   'sulphonamide': { canonicalId: 'local:sulfonamide', relation: 'exact' },
 };
 
-// ── Procedure seed (1.2, §6.1) — the same conservative posture as every seed above, and for a
-//    sharper reason: a false procedure MERGE on the spine says a member had an operation they did
-//    not have. So only obviously-identical surface forms of the SAME operation are paired, an
-//    approach is never merged with another approach (open ≠ laparoscopic — they are different
-//    operations with different risk), and a side is NEVER part of a canonical id (laterality is its
-//    own field, from its own source column). Everything else stays `unresolved`, which merges only
-//    on an identical normalized raw string.
-const PROCEDURE_SEED: Record<string, SeedEntry> = {
-  'cholecystectomy': { canonicalId: 'local:cholecystectomy', relation: 'exact' },
-  'lap cholecystectomy': { canonicalId: 'local:laparoscopic-cholecystectomy', relation: 'synonym' },
-  'laparoscopic cholecystectomy': { canonicalId: 'local:laparoscopic-cholecystectomy', relation: 'exact' },
-  'open cholecystectomy': { canonicalId: 'local:open-cholecystectomy', relation: 'exact' },
-  'appendicectomy': { canonicalId: 'local:appendicectomy', relation: 'exact' },
-  'appendectomy': { canonicalId: 'local:appendicectomy', relation: 'synonym' },
-  'laparoscopic appendicectomy': { canonicalId: 'local:laparoscopic-appendicectomy', relation: 'exact' },
-  'inguinal hernia repair': { canonicalId: 'local:inguinal-hernia-repair', relation: 'exact' },
-  'hernioplasty': { canonicalId: 'local:inguinal-hernia-repair', relation: 'synonym' },
-  'lower segment caesarean section': { canonicalId: 'local:lscs', relation: 'exact' },
-  'lscs': { canonicalId: 'local:lscs', relation: 'synonym' },
-  'total knee replacement': { canonicalId: 'local:total-knee-replacement', relation: 'exact' },
-  'tkr': { canonicalId: 'local:total-knee-replacement', relation: 'synonym' },
-  'coronary angiography': { canonicalId: 'local:coronary-angiography', relation: 'exact' },
-  'upper gi endoscopy': { canonicalId: 'local:upper-gi-endoscopy', relation: 'exact' },
-  'ugi endoscopy': { canonicalId: 'local:upper-gi-endoscopy', relation: 'synonym' },
-};
-
 const SEEDS: Record<NormalizeDomain, Record<string, SeedEntry>> = {
   problem: PROBLEM_SEED,
   medication: MEDICATION_SEED,
   allergy: ALLERGY_SEED,
   investigation: INVESTIGATION_SEED,
-  procedure: PROCEDURE_SEED,
 };
 
 /** Resolve a raw surface concept to a NormalizedConcept. EXACT normalized-key dictionary lookup

@@ -59,7 +59,6 @@ function toEncounter(row: Record<string, unknown>): KxEncounter | null {
     admissionType: s(pick(row, [...ADT_COLUMN_CANDIDATES.admissionType])),
     department: s(pick(row, [...ADT_COLUMN_CANDIDATES.department])),
     doctor: s(pick(row, [...ADT_COLUMN_CANDIDATES.doctor])),
-    ward: s(pick(row, [...ADT_COLUMN_CANDIDATES.ward])),
     payer: s(pick(row, [...ADT_COLUMN_CANDIDATES.payer])),
     patientName: s(pick(row, [...ADT_COLUMN_CANDIDATES.patientName])),
     dob: s(pick(row, [...ADT_COLUMN_CANDIDATES.dob])),

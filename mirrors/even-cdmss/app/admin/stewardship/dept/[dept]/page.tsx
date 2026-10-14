@@ -5,7 +5,6 @@
  * Admin-gated (identical to the parent page). Weekly trend = inline SVG. Reuses funnel-card + the O/E
  * fns (no reimplementation, decision 18). Fail-safe: any section that errors degrades to empty/hidden.
  */
-import { Suspense } from 'react';
 import Link from 'next/link';
 import { sql } from '@/lib/db';
 import { isAdminUnlocked, adminTokenConfigured } from '@/lib/admin-cookie';
@@ -16,10 +15,7 @@ import {
 } from '@/lib/opd-audit-doctor';
 import { computeDoctorOE, FUNNEL_MIN_N, type DoctorOE } from '@/lib/opd-funnel-core';
 import { LVC_CATEGORY_LABELS } from '@/lib/opd-lvc-classify-core';
-import { STEWARDSHIP_HONESTY } from '@/lib/stewardship-danger-core';
-import OpsSection, { OpsSectionFallback } from '../../ops-section';
 import { FunnelCard } from '../../../opd-audit/doctor/[uid]/funnel-card';
-import { DeptAskPanel } from '../../stewardship-ask-panel';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Stewardship · Department · Admin' };
@@ -82,11 +78,6 @@ export default async function DeptDetail({ params }: { params: Promise<{ dept: s
 
   const specMap: Record<string, string> = {}, nameMap: Record<string, string> = {};
   for (const r of dirRows) { const u = String(r.doctor_uid); specMap[u] = String(r.spec || 'Unspecified'); if (r.name) nameMap[u] = String(r.name); }
-  // D-ops-identity — the ops pane on this route is scoped by the DIRECTORY's clinicians for this
-  // department, never by card 8747's `mapped_speciality`. That column is a calendar mode
-  // (INTERNAL_MEDICINE_SPECIALIST and the like), it is computed over all history rather than the
-  // window, and one doctor in five carries a compound value. It is not this page's department.
-  const deptUids = Object.entries(specMap).filter(([, sp]) => sp === dept).map(([u]) => u);
   const exclSet = new Set(rcExclusions);
   const oeAll = computeDoctorOE(lvcCells, exclSet);
   const deptDoctors: DoctorOE[] = oeAll
@@ -102,12 +93,7 @@ export default async function DeptDetail({ params }: { params: Promise<{ dept: s
         <h1 className="font-serif text-[26px] font-semibold text-slate-900">{dept}</h1>
         <Link href="/admin/stewardship" className="text-[12.5px] text-brand hover:underline">← All departments</Link>
       </div>
-      {/* Acceptance #3 — the internal-MS honesty line, the same sentence the board carries. The
-          "not a clinician score" clause is deliberately gone on this page too: it is the same
-          extra-gated room, one level down, and two different claims about what the room is would be
-          worse than either. */}
-      <p className="mt-1 max-w-3xl text-sm text-slate-600">{STEWARDSHIP_HONESTY}</p>
-      <p className="mt-1 max-w-3xl text-[12px] text-slate-500">Last 90 days, latest audit per note. Banded coverage {kpis.banded.toLocaleString()}/{kpis.n.toLocaleString()}. This department label is the OPD speciality vocabulary; the inpatient vocabulary is a different list and is never merged with it.</p>
+      <p className="mt-1 max-w-3xl text-sm text-slate-500">Last 90 days, latest audit per note. Advisory — a process &amp; appropriateness lens, not a clinician score. Banded coverage {kpis.banded.toLocaleString()}/{kpis.n.toLocaleString()}.</p>
 
       {kpis.n === 0 ? (
         <div className="mt-4 rounded-xl border border-slate-200 bg-white p-6 text-center text-[13px] text-slate-500">No audited notes for {dept} in the window.</div>
@@ -205,22 +191,8 @@ export default async function DeptDetail({ params }: { params: Promise<{ dept: s
             </div>
           )}
 
-          {/* D-ops — the ops pane, scoped to this department's clinicians as the OPD directory
-              assigns them. The two department dictionaries stay two: nothing here reads 8747's
-              `mapped_speciality`, and no ops row is attributed to a department by it. */}
-          <Suspense fallback={<OpsSectionFallback />}>
-            <OpsSection scope={dept} only={deptUids} />
-          </Suspense>
-
-          {/* S1 (A2 / A3) — the persisted MS conversation, keyed to THIS department in the OPD
-              speciality vocabulary. The inpatient vocabulary is a different case key and never
-              merges with this one. Nothing said in the box changes a number on this page. */}
-          <div className="mt-4">
-            <DeptAskPanel vocab="opd_speciality" label={dept} />
-          </div>
-
           <p className="mt-4 text-[11px] text-slate-400">
-            “vs exp” = observed minus case-mix-expected LVC rate (points); “O/E” = observed / expected. Clinicians with n&lt;{FUNNEL_MIN_N} banded notes are greyed. Case-mix adjustment uses the complexity-band strata (§4). These are process and appropriateness measures on the notes a clinician wrote — not an outcomes measure, and never shown to the clinician being reviewed.
+            “vs exp” = observed minus case-mix-expected LVC rate (points); “O/E” = observed / expected. Clinicians with n&lt;{FUNNEL_MIN_N} banded notes are greyed. Case-mix adjustment uses the complexity-band strata (§4). Advisory — not an outcomes measure or clinician scorecard.
             {rcExclusions.length > 0 && ` ${rcExclusions.length} house/non-clinician account(s) excluded.`}
           </p>
         </>

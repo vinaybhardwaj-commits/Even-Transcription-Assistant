@@ -28,7 +28,6 @@ import { FindingTriage, ReviewerBar } from './finding-triage';
 import { MissedFindingCapture, type MissedEntry } from './missed-finding';
 import { EscalateButton } from './escalate-button';
 import { TriageProgress } from './triage-progress';
-import OpdCaseAskPanel from './case-ask-panel';
 import {
   bandColor, scoreColor, parseJson, doctorLabel, fmtIstTime, PDQI9_LABEL, PDQI9_HELP,
 } from '@/lib/opd-audit-ui';
@@ -905,13 +904,6 @@ export default async function OpdCaseAudit({ params }: { params: Promise<{ id: s
           )}
 
           <div id="verdict" className="mt-4 scroll-mt-4"><FeedbackPanel auditId={id} uid={uid || null} initial={feedback as unknown as FeedbackEntry[]} /></div>
-
-          {/* Ask the agent — the shared persisted case conversation (CASE-AGENTS-SPINE PRD P1).
-              Additive: it sits BELOW the adjudication panel because the pills stay the primary
-              adjudication loop (D2), and it changes nothing above it — no NQI, no band, no
-              feedback row, no MemberState (§3.3). Before migration 0046 has run the box is simply
-              empty and its turns do not persist; nothing else on this page notices. */}
-          <div id="ask" className="mt-4 scroll-mt-4"><OpdCaseAskPanel auditId={id} /></div>
 
           <p className="mt-5 text-[11px] text-slate-400">Advisory note-level quality proxy — documentation, PDQI-9, appropriateness and prescribing safety as demonstrated in the note. uid <code className="rounded bg-slate-100 px-1">{uid}</code> links back to the source encounter in db13. Not an outcomes measure; not a clinician scorecard.</p>
         </div>

@@ -50,13 +50,26 @@ CREATE TABLE IF NOT EXISTS lvc_rule_versions (
   sample_seed           text NOT NULL,
   n_not_belonging       int,
   created_at            timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (rule_ref, version)
+  PRIMARY KEY (rule_ref, version),
+  CONSTRAINT lvc_rule_versions_version_positive CHECK (version > 0),
+  CONSTRAINT lvc_rule_versions_ref_nonblank     CHECK (btrim(rule_ref) <> ''),
+  CONSTRAINT lvc_rule_versions_statement_nonblank CHECK (btrim(statement) <> ''),
+  CONSTRAINT lvc_rule_versions_ratifier_named CHECK (
+    btrim(ratified_by) <> ''
+    AND lower(btrim(ratified_by)) NOT IN ('admin','system','cron','worker','care-manager')),
+  CONSTRAINT lvc_rule_versions_rationale_nonblank CHECK (btrim(rationale) <> ''),
+  CONSTRAINT lvc_rule_versions_seed_nonblank      CHECK (btrim(sample_seed) <> ''),
+  CONSTRAINT lvc_rule_versions_counts_nonneg      CHECK (sample_size >= 0 AND reviewed_n >= 0),
+  CONSTRAINT lvc_rule_versions_reviewed_le_sample CHECK (reviewed_n <= sample_size),
+  CONSTRAINT lvc_rule_versions_nnb_bounds         CHECK (n_not_belonging IS NULL
+                                           OR (n_not_belonging >= 0 AND n_not_belonging <= reviewed_n))
 );
 
 CREATE INDEX IF NOT EXISTS lvc_rule_versions_ref_idx ON lvc_rule_versions (rule_ref, version DESC);
 
 CREATE TABLE IF NOT EXISTS lvc_rule_activation_events (
   id              bigserial PRIMARY KEY,
+  event_ref       uuid NOT NULL UNIQUE,
   rule_ref        text NOT NULL,
   version         int  NOT NULL,
   event           text NOT NULL CHECK (event IN ('activate','retire')),
@@ -67,7 +80,19 @@ CREATE TABLE IF NOT EXISTS lvc_rule_activation_events (
   reviewed_n      int  NOT NULL,
   sample_seed     text NOT NULL,
   n_not_belonging int,
-  created_at      timestamptz NOT NULL DEFAULT now()
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT lvc_rule_activation_events_version_positive CHECK (version > 0),
+  CONSTRAINT lvc_rule_activation_events_version_fk
+    FOREIGN KEY (rule_ref, version) REFERENCES lvc_rule_versions (rule_ref, version),
+  CONSTRAINT lvc_rule_activation_events_ratifier_named CHECK (
+    btrim(ratified_by) <> ''
+    AND lower(btrim(ratified_by)) NOT IN ('admin','system','cron','worker','care-manager')),
+  CONSTRAINT lvc_rule_activation_events_rationale_nonblank CHECK (btrim(rationale) <> ''),
+  CONSTRAINT lvc_rule_activation_events_seed_nonblank      CHECK (btrim(sample_seed) <> ''),
+  CONSTRAINT lvc_rule_activation_events_counts_nonneg      CHECK (sample_size >= 0 AND reviewed_n >= 0),
+  CONSTRAINT lvc_rule_activation_events_reviewed_le_sample CHECK (reviewed_n <= sample_size),
+  CONSTRAINT lvc_rule_activation_events_nnb_bounds         CHECK (n_not_belonging IS NULL
+                                           OR (n_not_belonging >= 0 AND n_not_belonging <= reviewed_n))
 );
 
 CREATE INDEX IF NOT EXISTS lvc_rule_activation_events_stream_idx ON lvc_rule_activation_events (rule_ref, effective_at, id);
@@ -83,7 +108,18 @@ CREATE TABLE IF NOT EXISTS rule_pattern_map (
   reviewed_n        int  NOT NULL,
   sample_seed       text NOT NULL,
   n_not_belonging   int,
-  created_at        timestamptz NOT NULL DEFAULT now()
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT rule_pattern_map_pattern_nonblank CHECK (btrim(lvp_pattern_id) <> ''),
+  CONSTRAINT rule_pattern_map_ref_nonblank     CHECK (btrim(rule_ref) <> ''),
+  CONSTRAINT rule_pattern_map_ratifier_named CHECK (
+    btrim(ratified_by) <> ''
+    AND lower(btrim(ratified_by)) NOT IN ('admin','system','cron','worker','care-manager')),
+  CONSTRAINT rule_pattern_map_rationale_nonblank CHECK (btrim(rationale) <> ''),
+  CONSTRAINT rule_pattern_map_seed_nonblank      CHECK (btrim(sample_seed) <> ''),
+  CONSTRAINT rule_pattern_map_counts_nonneg      CHECK (sample_size >= 0 AND reviewed_n >= 0),
+  CONSTRAINT rule_pattern_map_reviewed_le_sample CHECK (reviewed_n <= sample_size),
+  CONSTRAINT rule_pattern_map_nnb_bounds         CHECK (n_not_belonging IS NULL
+                                           OR (n_not_belonging >= 0 AND n_not_belonging <= reviewed_n))
 );
 
 CREATE INDEX IF NOT EXISTS rule_pattern_map_pattern_idx ON rule_pattern_map (lvp_pattern_id, created_at DESC);

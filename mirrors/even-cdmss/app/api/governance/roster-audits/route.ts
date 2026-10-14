@@ -14,10 +14,7 @@ import { fetchDoctorNames } from '@/lib/metabase';
 import { sql } from '@/lib/db';
 import { listSignalsRoster, toSignalRow, type StoredSignal } from '@/lib/opd-gov-signal-store';
 import { signalObject, isOverdue } from '@/lib/opd-gov-signal-core';
-import { resolveInstancesForSignal, doctorAuditMetrics, mapWithConcurrency } from '@/lib/opd-gov-read';
-
-/** Per-doctor view: how many thread resolutions (each may hit Neon and Metabase) run at once. */
-const RESOLVE_CONCURRENCY = 5;
+import { resolveInstances, doctorAuditMetrics } from '@/lib/opd-gov-read';
 import { getOperationalBlocks, type OperationalBlock } from '@/lib/doctor-metrics-store';
 
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
@@ -60,11 +57,12 @@ export async function GET(req: NextRequest) {
     const open = list.filter((s) => ['routed', 'responded', 'escalated'].includes(s.status)).length;
     const overdue = list.filter((s) => isOverdue({ status: s.status, response_required: s.response_required, sla_due_at: s.sla_due_at }, now)).length;
     const awaiting = list.filter((s) => s.status === 'escalated').length;
-    // resolve representatives only for the focused profile view (?doctor_uid=), a few at a time
-    const sigObjs = await mapWithConcurrency(list, RESOLVE_CONCURRENCY, async (s) => {
-      const inst = doctorUid ? await resolveInstancesForSignal(s) : { count: null, representative: null };
-      return signalObject(toSignalRow(s, inst.count), inst.representative, now);
-    });
+    const sigObjs = [];
+    for (const s of list) {
+      // resolve representatives only for the focused profile view (?doctor_uid=)
+      const inst = doctorUid ? await resolveInstances(s.doctor_uid, s.signal_type, s.window_from, s.window_to) : { count: null, representative: null };
+      sigObjs.push(signalObject(toSignalRow(s, inst.count), inst.representative, now));
+    }
     // operational folded in (batch, cheap); audit metrics only for the focused profile view
     const metrics: Record<string, unknown> = { operational: operationalBlocks[uid] ?? null };
     if (doctorUid) metrics.audit = await doctorAuditMetrics(uid, Math.max(1, Math.min(120, Number(sp.get('window')) || 30)));

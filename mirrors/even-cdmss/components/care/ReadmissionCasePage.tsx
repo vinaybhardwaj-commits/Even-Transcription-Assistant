@@ -10,15 +10,11 @@
  * render) · THE MONEY (judgements + both bills, R3) · the download button · ASK THE AGENT (R4.3 — a
  * conversation fenced to this case's stored material, citations checked by code, ephemeral).
  *
- * R9 (CDMSS-READMISSIONS-R9-DUAL-CONTRACT-PRD-27-AUG-2026-GO §12.3, D12 / D14) makes the Ask box the
- * place the argument LIVES rather than a box that forgets: the thread is loaded from the server on
- * mount and survives a reload, and what the care manager STATES is stored as a clinical review and
- * shown in the header BESIDE the agent's own judgement — never instead of it, and never on the rate.
- *
- * READ-ONLY EVERYWHERE ELSE (R4-2 / R4-9): the page still renders stored artefacts and makes no model
- * call of its own. The single write on this page goes through the ask route, which gates it. Everything
- * it decides comes from lib/readmission-surface-core.ts, lib/readmission-narrative-core.ts and
- * lib/readmission-ask-core.ts so it is unit-tested; this file is markup and fetch.
+ * READ-ONLY, RENDERS STORED ARTEFACTS ONLY (R4-2 / R4-9): two fetches — the case route (the pinned
+ * finding + artefacts + bills) and the list route (the KX identity the board already resolved,
+ * decision 13 — the case route does not re-join it). No model call, no write, no escalate control,
+ * no external links in v1. Everything it decides comes from lib/readmission-surface-core.ts and
+ * lib/readmission-narrative-core.ts so it is unit-tested; this file is markup and fetch.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
@@ -31,11 +27,7 @@ import {
 } from '@/lib/readmission-surface-core';
 import { denominatorLine, relatedLvcCopy, segmentNarrative } from '@/lib/readmission-narrative-core';
 import { returnContextLines } from '@/lib/readmission-rates-core';
-import {
-  ASK_ADVISORY, ASK_PER_LOAD_LIMIT, ASK_QUESTION_MAX_CHARS, ASK_SUGGESTIONS, ASK_WORKING_COPY, ASK_WITHHELD_COPY,
-  ASK_THREAD_UNAVAILABLE_COPY, CLINICAL_REVIEW_CHIP_NOTE, CLINICAL_REVIEW_DECISION_LABEL,
-  RECORD_FETCH_MAX, type StoredClinicalReview,
-} from '@/lib/readmission-ask-core';
+import { ASK_ADVISORY, ASK_PER_LOAD_LIMIT, ASK_QUESTION_MAX_CHARS, ASK_SUGGESTIONS, ASK_WORKING_COPY, ASK_WITHHELD_COPY, type AskTurn } from '@/lib/readmission-ask-core';
 import type { BillBreakdown, ExtractSubset } from '@/lib/readmission/brief';
 import { downloadBrief } from './ReadmissionsBoard';
 
@@ -63,9 +55,6 @@ const CHIP_STATE: Record<ChipState, string> = {
   present: 'bg-emerald-100 text-emerald-800 border border-emerald-200',
   empty: 'bg-transparent text-amber-800 border border-amber-300',
   absent: 'bg-transparent text-slate-600 border border-slate-300',
-  // R10-A — "OT in document": the text exists and is cited, it is just not a structured OT row.
-  // Solid enough to read as evidence, sky rather than emerald so it is never mistaken for a db13 row.
-  document_text: 'bg-sky-50 text-sky-800 border border-sky-200',
   unknown: 'bg-transparent text-slate-500 border border-slate-200 border-dashed',
   'n/a': 'bg-slate-50 text-slate-400 border border-slate-100 line-through',
 };
@@ -124,117 +113,41 @@ function BillTable({ heading, bill }: { heading: string; bill: BillBreakdown | n
   );
 }
 
-/** R10-B — one artefact the agent pulled out of the patient's record, as both endpoints return it. */
-type RetrievedRecord = { id: string; kind: string; date: string | null; label: string; chip: string; text: string };
-type AskResponse = {
-  ok: boolean; error?: string; withheld?: boolean; reason?: string; copy?: string; answer?: string;
-  citedIds?: string[]; answerable?: boolean; cost?: { usd: number } | null;
-  overlay?: unknown; overlayReason?: string | null; clinicalReview?: StoredClinicalReview | null; persisted?: boolean;
-  retrieved?: RetrievedRecord[]; fetches?: number; loopExhausted?: boolean;
-};
-type ThreadTurn = { turnIndex: number; role: 'user' | 'agent'; content: string; actor: string | null; withheld: boolean; at: string | null };
-type ThreadPayload = {
-  ok: boolean; turns?: ThreadTurn[]; threadError?: string | null; clinicalReview?: StoredClinicalReview | null; error?: string;
-  retrieved?: RetrievedRecord[]; retrievedError?: string | null;
-};
+type AskResponse = { ok: boolean; error?: string; withheld?: boolean; reason?: string; copy?: string; answer?: string; citedIds?: string[]; answerable?: boolean; cost?: { usd: number } | null };
 type AskEntry = { question: string; answer: string | null; citedIds: string[]; withheld: boolean; copy?: string };
 
-/** The stored thread, folded back into the question/answer pairs this component renders. A user turn
- *  opens a pair; the next agent turn closes it. A trailing question with no answer yet is shown as a
- *  withheld pair carrying the honest copy — it is what actually happened. */
-function entriesFromThread(turns: readonly ThreadTurn[]): AskEntry[] {
-  const out: AskEntry[] = [];
-  let open: string | null = null;
-  for (const t of [...turns].sort((a, b) => a.turnIndex - b.turnIndex)) {
-    if (t.role === 'user') {
-      if (open) out.push({ question: open, answer: null, citedIds: [], withheld: true, copy: ASK_WITHHELD_COPY });
-      open = t.content;
-      continue;
-    }
-    if (open == null) continue;
-    if (t.withheld) out.push({ question: open, answer: null, citedIds: [], withheld: true, copy: t.content || ASK_WITHHELD_COPY });
-    else out.push({ question: open, answer: t.content, citedIds: [], withheld: false });
-    open = null;
-  }
-  if (open) out.push({ question: open, answer: null, citedIds: [], withheld: true, copy: ASK_WITHHELD_COPY });
-  return out;
-}
-
 /**
- * ASK THE AGENT — R4.3 (R43-1..R43-8), promoted by R9 (§12.3, D10 / D12 / D13).
- *
- * The conversation's whole world is still this case's stored material and the route still enforces
- * that. What changed: the thread PERSISTS. It is loaded from the server on mount and it survives a
- * reload (acceptance #5); no history is sent up, because the server owns the thread (O1) and a client
- * that could pass its own history could rewrite what was said. Every answer still arrives with
- * code-checked citations rendered as the clickable tags the account uses; a withheld answer still
- * shows the honest copy. A stated judgement comes back as a clinical review and is lifted to the page
- * header — beside the agent's proposal, never over it.
- *
- * `citedIds` come back only for the turn just asked; earlier turns render their markers as plain text
- * against the ledger the page already knows, so a reloaded thread reads the same as a live one.
+ * R4.3 — ASK THE AGENT (R43-1..R43-8). The conversation's whole world is this case's stored material
+ * (the route enforces that); it is EPHEMERAL — component state only, gone on reload; the last ≤ 6
+ * turns go back as context. Every answer arrives with code-checked citations rendered as the same
+ * clickable tags the account uses (jump to the ledger row); a withheld answer shows the honest copy.
+ * Question length capped; ASK_PER_LOAD_LIMIT questions per page load (builder's proposal, flagged).
  */
-function AskTheAgent({ dedupKey, known, onJump, onReview }: { dedupKey: string; known: Set<string>; onJump: (id: string) => void; onReview: (r: StoredClinicalReview | null) => void }) {
+function AskTheAgent({ dedupKey, known, onJump }: { dedupKey: string; known: Set<string>; onJump: (id: string) => void }) {
   const [q, setQ] = useState('');
   const [entries, setEntries] = useState<AskEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [threadErr, setThreadErr] = useState<string | null>(null);
-  const [asked, setAsked] = useState(0);
-  // R10-B §4.4 — the records the agent pulled INTO this conversation, keyed by their `X…` id. Loaded
-  // with the thread (so a reload shows the same evidence, acceptance #3) and extended by each turn.
-  const [records, setRecords] = useState<Record<string, RetrievedRecord>>({});
-  const left = Math.max(0, ASK_PER_LOAD_LIMIT - asked);
-  // The citable universe of THIS box: the audited ledger plus the retrieved records. Two namespaces,
-  // one set — exactly as `askVerdict` resolves them server-side, so a marker the server accepted can
-  // never render here as an unresolved one.
-  const citable = useMemo(() => new Set([...known, ...Object.keys(records)]), [known, records]);
-  const mergeRecords = useCallback((xs: RetrievedRecord[] | undefined) => {
-    if (!xs?.length) return;
-    setRecords((prev) => { const next = { ...prev }; for (const x of xs) next[x.id] = x; return next; });
-  }, []);
-
-  // The stored thread. A failure here is not an error the care manager must act on: the box still
-  // works and the next turn still persists, so it says exactly that.
-  useEffect(() => {
-    let alive = true;
-    fetch(`/api/care/readmissions/ask?dedup_key=${encodeURIComponent(dedupKey)}`)
-      .then((r) => r.json() as Promise<ThreadPayload>)
-      .then((j) => {
-        if (!alive || !j?.ok) return;
-        setEntries(entriesFromThread(j.turns ?? []));
-        setThreadErr(j.threadError ?? null);
-        mergeRecords(j.retrieved);
-        onReview(j.clinicalReview ?? null);
-      })
-      .catch(() => { if (alive) setThreadErr(ASK_THREAD_UNAVAILABLE_COPY); });
-    return () => { alive = false; };
-  }, [dedupKey, mergeRecords, onReview]);
+  const left = Math.max(0, ASK_PER_LOAD_LIMIT - entries.length);
 
   const ask = useCallback(async (question: string) => {
     const text = question.trim();
     if (!text || busy || left <= 0) return;
     setBusy(true); setErr(null);
+    const history: AskTurn[] = entries.filter((e) => !e.withheld && e.answer).slice(-6).map((e) => ({ question: e.question, answer: e.answer! }));
     try {
-      // O1 — no history in the body. The server reads the thread it stored.
       const r = await fetch('/api/care/readmissions/ask', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ dedup_key: dedupKey, question: text }),
+        body: JSON.stringify({ dedup_key: dedupKey, question: text, history }),
       });
       const j = (await r.json()) as AskResponse;
       if (!r.ok || !j.ok) throw new Error(String(j.error || `status ${r.status}`));
-      // Merge BEFORE the entry is pushed: the answer's `X…` markers must already resolve when the
-      // new turn first renders, or a freshly-fetched citation would flash as unknown.
-      mergeRecords(j.retrieved);
       if (j.withheld) setEntries((xs) => [...xs, { question: text, answer: null, citedIds: [], withheld: true, copy: j.copy ?? ASK_WITHHELD_COPY }]);
       else setEntries((xs) => [...xs, { question: text, answer: j.answer ?? '', citedIds: j.citedIds ?? [], withheld: false }]);
-      if (j.clinicalReview) onReview(j.clinicalReview);
-      if (j.persisted === false) setThreadErr(ASK_THREAD_UNAVAILABLE_COPY);
-      setAsked((n) => n + 1);
       setQ('');
     } catch (e) { setErr(String((e as Error).message)); }
     finally { setBusy(false); }
-  }, [busy, dedupKey, left, mergeRecords, onReview]);
+  }, [busy, dedupKey, entries, left]);
 
   return (
     <div>
@@ -249,48 +162,31 @@ function AskTheAgent({ dedupKey, known, onJump, onReview }: { dedupKey: string; 
                   <div className="mt-1 rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] leading-relaxed text-slate-800">
                     {segmentNarrative(e.answer ?? '').map((seg, si) => seg.kind === 'text'
                       ? <span key={si}>{seg.text}</span>
-                      : <span key={si}>[{seg.ids.map((id, k) => <span key={id}>{k > 0 && ','}<CiteLink id={id} known={citable.has(id)} onJump={onJump} /></span>)}]</span>)}
+                      : <span key={si}>[{seg.ids.map((id, k) => <span key={id}>{k > 0 && ','}<CiteLink id={id} known={known.has(id)} onJump={onJump} /></span>)}]</span>)}
+                    {e.citedIds.length === 0 && <div className="mt-1 text-[10.5px] italic text-slate-500">the case record does not answer this — nothing to cite</div>}
                   </div>
                 )}
             </div>
           ))}
         </div>
       )}
-      {/* R10-B §4.4 — retrieved evidence, labelled. It sits BELOW the thread and above the box, in its
-          own frame, so it reads as what it is: this patient's other records, pulled in and cited —
-          never part of the audited case ledger, which chat does not touch. */}
-      {Object.keys(records).length > 0 && (
-        <div className="mb-3 rounded-lg border border-sky-200 bg-sky-50/60 px-3 py-2">
-          <div className="text-[11.5px] font-medium text-sky-900">From this patient&apos;s other records · fetched into this conversation · cited above by id</div>
-          <div className="mt-1.5 space-y-1.5">
-            {Object.values(records).sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true })).map((rec) => (
-              <div key={rec.id} id={`ev-${rec.id}`} className="rounded border border-sky-200 bg-white px-2.5 py-1.5">
-                <div className="text-[11px] text-sky-800"><span className="font-semibold">[{rec.id}]</span> {rec.chip}</div>
-                <div className="mt-0.5 whitespace-pre-wrap text-[12px] leading-relaxed text-slate-700">{rec.text}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
       {busy && <p className="mb-2 text-[12px] italic text-slate-500">{ASK_WORKING_COPY}</p>}
       {err && <p className="mb-2 text-[12px] text-red-700">{err}</p>}
-      {threadErr && <p className="mb-2 text-[11.5px] italic text-amber-800">{ASK_THREAD_UNAVAILABLE_COPY}</p>}
       <div className="flex flex-wrap gap-1.5">
         {ASK_SUGGESTIONS.map((sug) => (
           <button key={sug} type="button" disabled={busy || left <= 0} onClick={() => void ask(sug)}
             className="rounded-full border border-line bg-white px-2.5 py-0.5 text-[11.5px] text-slate-600 transition hover:border-brand/40 hover:text-brand disabled:opacity-50">{sug}</button>
         ))}
       </div>
-      {/* §12.3 — questions AND findings in the same box: he argues where he asks. */}
       <form className="mt-2 flex gap-2" onSubmit={(e) => { e.preventDefault(); void ask(q); }}>
         <input type="text" value={q} maxLength={ASK_QUESTION_MAX_CHARS} disabled={busy || left <= 0}
           onChange={(e) => setQ(e.target.value)}
-          placeholder={left <= 0 ? `Question limit reached for this page load (${ASK_PER_LOAD_LIMIT}) — reload to ask more` : 'Ask about this case, or state what you found — both go in this box'}
+          placeholder={left <= 0 ? `Question limit reached for this page load (${ASK_PER_LOAD_LIMIT}) — reload to ask more` : 'Ask about this case — answered only from its stored evidence'}
           className="w-full rounded-lg border border-line bg-white px-3 py-1.5 text-[12.5px] text-slate-800 disabled:bg-slate-50 disabled:text-slate-400" />
         <button type="submit" disabled={busy || left <= 0 || !q.trim()}
           className="rounded-lg border border-line bg-white px-3 py-1.5 text-[12px] font-medium text-slate-600 transition hover:border-brand/40 hover:text-brand disabled:opacity-50">Ask</button>
       </form>
-      <p className="mt-2 text-[10.5px] italic text-slate-500">{ASK_ADVISORY} · at most {RECORD_FETCH_MAX} records fetched per question · {left} of {ASK_PER_LOAD_LIMIT} questions left on this page load · {entries.length} saved turn{entries.length === 1 ? '' : 's'} on this case</p>
+      <p className="mt-2 text-[10.5px] italic text-slate-500">{ASK_ADVISORY} · {left} of {ASK_PER_LOAD_LIMIT} questions left on this page load · the conversation is not saved</p>
     </div>
   );
 }
@@ -302,11 +198,6 @@ export default function ReadmissionCasePage({ dedupKey }: { dedupKey: string }) 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [highlight, setHighlight] = useState<string | null>(null);
-  // D14 — the human overlay, lifted out of the Ask box so the header can show it BESIDE the agent's
-  // judgement. It is never merged into `row`: the agent's `avoidable` and the reviewer's `decision`
-  // are two different claims and the page must not be able to blur them.
-  const [review, setReview] = useState<StoredClinicalReview | null>(null);
-  const onReview = useCallback((r: StoredClinicalReview | null) => setReview(r), []);
 
   const load = useCallback(async () => {
     setLoading(true); setErr(null);
@@ -382,21 +273,7 @@ export default function ReadmissionCasePage({ dedupKey }: { dedupKey: string }) 
                 {coverageChips(row).map((c) => (
                   <span key={c.key} title={`${c.label}: ${c.state}`} className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${CHIP_STATE[c.state]}`}>{chipText(c)}</span>
                 ))}
-                {/* R9 / D14 — the human's chip sits with the others, saying whose judgement it is. The
-                    agent's own justification is unchanged and still printed under THE MONEY below. */}
-                {review && (
-                  <span title={`${CLINICAL_REVIEW_CHIP_NOTE}${review.actor ? ` · ${review.actor}` : ''}`}
-                    className="rounded-full border border-brand/40 bg-brand-faint px-2 py-0.5 text-[11px] font-medium text-brand-dark">
-                    {CLINICAL_REVIEW_DECISION_LABEL[review.decision]}
-                  </span>
-                )}
               </div>
-              {review && (
-                <div className="mt-1 text-[11px] text-slate-500">
-                  {CLINICAL_REVIEW_CHIP_NOTE}
-                  {review.quote && <> · “{review.quote}”</>}
-                </div>
-              )}
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <button onClick={() => void load()} disabled={loading}
@@ -526,7 +403,7 @@ export default function ReadmissionCasePage({ dedupKey }: { dedupKey: string }) 
 
           {/* R4.3 (R43-7) — ask the agent: a conversation fenced to this case's stored material */}
           <Section title="Ask the agent">
-            <AskTheAgent dedupKey={dedupKey} known={known} onJump={jump} onReview={onReview} />
+            <AskTheAgent dedupKey={dedupKey} known={known} onJump={jump} />
           </Section>
 
           <p className="mt-7 border-t border-line pt-3.5 text-[11.5px] leading-relaxed text-slate-500">

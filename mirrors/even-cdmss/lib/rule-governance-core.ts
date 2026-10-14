@@ -96,6 +96,13 @@ export function validateEvidence(raw: unknown): EvidenceProblem[] {
   const nnb = e.n_not_belonging;
   if (nnb != null && (typeof nnb !== 'number' || !Number.isInteger(nnb) || nnb < 0)) {
     problems.push('n_not_belonging: when supplied, a non-negative integer');
+  } else if (nnb != null && typeof e.reviewed_n === 'number' && (nnb as number) > (e.reviewed_n as number)) {
+    // ⚠️ THE BOUND THAT WAS MISSING (R3-A2 §2). `n_not_belonging` counts, among the rows a human
+    // REVIEWED, how many did not belong. It cannot exceed the number reviewed — a tuple claiming
+    // 12 did not belong out of 5 reviewed is not a strict reading of a sample, it is an
+    // arithmetic impossibility, and a later reader cannot tell which of the two numbers is wrong.
+    // Enforced here AND as a table constraint, because the tuple can arrive by either path.
+    problems.push('n_not_belonging: cannot exceed reviewed_n');
   }
   return problems;
 }
@@ -272,3 +279,121 @@ export const PATTERN_SNAPSHOT_KEYS: readonly (keyof PatternEvidenceSnapshot)[] =
 export function missingSnapshotKeys(snapshot: Record<string, unknown>): string[] {
   return PATTERN_SNAPSHOT_KEYS.filter((k) => !(k in snapshot)).map(String);
 }
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// R3-A2 — the activation request, and what writing one can RESULT in
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * One caller-supplied activation or retirement.
+ *
+ * ⚠️ `event_ref` IS SUPPLIED BY THE CALLER AND IS THE IDEMPOTENCY KEY. Not minted here and not
+ * defaulted in the database: a key the writer invents is a new key on every retry, which is the
+ * opposite of idempotence. The caller decides that two attempts are the SAME attempt, and the
+ * unique index on the column is what makes that decision binding.
+ *
+ * ⚠️ THERE IS NO `effective_at` FIELD, DELIBERATELY (§3). The database stamps `now()`. A
+ * caller-supplied instant would let two events be written out of order relative to their real
+ * sequence, and the validity window is DERIVED from that order — so a wrong timestamp does not
+ * merely mislabel a row, it silently rewrites which version was live and when.
+ */
+export interface ActivationRequest {
+  event_ref: string;
+  rule_ref: string;
+  version: number;
+  event: ActivationEventKind;
+  evidence: GovernanceEvidence;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Pure validation of an activation request. Returns [] when it may be attempted. */
+export function validateActivationRequest(raw: unknown): EvidenceProblem[] {
+  const problems: EvidenceProblem[] = [];
+  if (raw == null || typeof raw !== 'object') return ['request: must be an object'];
+  const r = raw as Record<string, unknown>;
+
+  const ref = typeof r.event_ref === 'string' ? r.event_ref.trim() : '';
+  if (!ref) problems.push('event_ref: required — the caller supplies the idempotency key');
+  else if (!UUID_RE.test(ref)) problems.push('event_ref: must be a UUID');
+
+  const rule = typeof r.rule_ref === 'string' ? r.rule_ref.trim() : '';
+  if (!rule) problems.push('rule_ref: required');
+
+  const v = r.version;
+  // POSITIVE, not merely non-negative: versions start at 1 and a version 0 would sort before
+  // every real one in the `(rule_ref, version DESC)` index.
+  if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
+    problems.push('version: required — a positive integer');
+  }
+
+  if (r.event !== 'activate' && r.event !== 'retire') {
+    problems.push("event: must be 'activate' or 'retire'");
+  }
+
+  // ⚠️ NO `effective_at` ACCEPTED. Not ignored silently — refused, so a caller that believes it is
+  // setting the instant learns otherwise here rather than after the window is wrong.
+  if ('effective_at' in r && r.effective_at != null) {
+    problems.push('effective_at: not accepted — the database stamps now() (§3)');
+  }
+
+  problems.push(...validateEvidence(r.evidence));
+  return problems;
+}
+
+/**
+ * What an attempted write RESULTED in. Three outcomes, and they are not interchangeable:
+ *
+ *   inserted        the event is now in the stream
+ *   already_applied this exact event_ref, with this exact payload, was already written — a replay
+ *   refused         nothing was written, and `reason` says which rule said no
+ *
+ * ⚠️ `already_applied` IS A SUCCESS AND `refused` IS NOT. A caller retrying after a timeout must be
+ * able to tell "your write landed the first time" from "your write will never land", and folding
+ * both into a falsy result is how a retry loop turns a permanent refusal into an infinite one.
+ */
+export type ActivationOutcome =
+  | { status: 'inserted'; event_ref: string; id: string }
+  | { status: 'already_applied'; event_ref: string; id: string }
+  | { status: 'refused'; event_ref: string; reason: ActivationRefusal };
+
+/**
+ * Every reason a write can be refused. A CLOSED set, and each is a distinct operator action.
+ *
+ * ⚠️ `idempotency_conflict` IS NOT `already_applied`. The same key with a DIFFERENT payload means
+ * the caller reused an idempotency key for a different intention — which is a bug in the caller,
+ * not a replay, and answering "already applied" would tell them their second, different write had
+ * succeeded when nothing of the sort happened.
+ */
+export const ACTIVATION_REFUSALS = [
+  'idempotency_conflict',
+  'unknown_version',
+  'incomplete_definition',
+  'definition_hash_mismatch',
+  'not_informational',
+  'not_ratified_proposal',
+  'no_ratification_ledger_entry',
+  'promoted_id_mismatch',
+  'bootstrap_origin_not_ratification',
+  'version_not_active',
+] as const;
+
+export type ActivationRefusal = (typeof ACTIVATION_REFUSALS)[number];
+
+/**
+ * THE SIX PRECONDITIONS ON AN ACTIVATION (§4), named once so the statement, the tests and the
+ * evidence document cannot drift. Each maps to exactly one refusal above.
+ *
+ * ⚠️ NOTHING CURRENTLY IN THE SYSTEM SATISFIES ALL SIX, AND THAT IS THE CORRECT OUTCOME. A
+ * shelf-origin version has no matcher keywords, so it fails the first. A bootstrap-origin version
+ * has no proposal at all, so it fails the fourth — bootstrap is a snapshot, not a ratification.
+ * There is no bypass, no force flag and no seed-activation path, by design.
+ */
+export const ACTIVATION_PRECONDITIONS = [
+  { id: 'complete_definition', refusal: 'incomplete_definition' },
+  { id: 'matching_hash', refusal: 'definition_hash_mismatch' },
+  { id: 'informational_disposition', refusal: 'not_informational' },
+  { id: 'proposal_ratified', refusal: 'not_ratified_proposal' },
+  { id: 'ratification_ledger_entry', refusal: 'no_ratification_ledger_entry' },
+  { id: 'promoted_id_equals_rule_ref', refusal: 'promoted_id_mismatch' },
+] as const satisfies ReadonlyArray<{ id: string; refusal: ActivationRefusal }>;
