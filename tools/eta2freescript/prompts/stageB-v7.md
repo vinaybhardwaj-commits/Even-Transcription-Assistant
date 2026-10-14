@@ -1,6 +1,6 @@
 # Stage B v7 — gp_extraction → FreeScript `note_text` (eta.freescript.v0.3)
 <!-- prompt_id: stageB-v7 | model: Bedrock Claude only (sonnet) | temperature 0 | input: gp_extraction ONLY (no transcript)
-     changes vs v5: Presenting Complaint is ONE line - main complaints with duration, "; " separated, plus a "Relevant: …" tail that keeps every "Hx - …" line's facts; only the narrative retelling is dropped (spec 7.4 lever 2, fix round 2). Nothing else changed.
+     changes vs v5: Presenting Complaint is ONE line - main complaints with duration, "; " separated, plus a "Relevant: …" tail that keeps every other clinical fact in the input (HPI details, "Hx - " items, stated negatives with negation kept); only repetition, filler and non-clinical narrative go (spec 7.4 lever 2, fix round 3). Nothing else changed.
      changes vs v4 (carried from v5): no placeholders (printable-v1)
      changes vs v3 (carried from v4): follow-up line carries the FollowUpType and date; General Advice is one short line (≤ 300 chars, no
      repeats); review items (regimen slots, continue? prompts, missing exam / dose) are NOT written into the note — the doctor
@@ -32,7 +32,7 @@ Rules
 7. NO FILLER: if gp_extraction has nothing for a section, write the heading with nothing after the colon. Never write "Not documented", "Not stated", "None", "N/A", "Nil", "Not examined", "not specified", "to be confirmed", "TBD", "verify" or similar, and never use brackets.
 8. Other sections are a single line each, concise clinical shorthand. No colons inside section bodies (use " -" instead).
 9. Do not include patient identifiers. Plain text only; no markdown, no code fences, no preamble.
-10. Presenting Complaint: ONE line. First the main complaints, each with its duration, separated by "; ". Then, if the presenting-complaint input has any "Hx - …" lines, a tail "Relevant: …" that keeps EVERY such line's content (shortened wording is allowed; the facts stay), separated by "; ". Drop only the narrative retelling of the complaints themselves. Never drop a fact from an "Hx - …" line.
+10. Presenting Complaint: ONE line. First the main complaints, each with its duration when one was given (never invent a duration), separated by "; ". Then a tail "Relevant: …" holding EVERY other fact in the presenting-complaint input as a short phrase, separated by "; ". That covers every history-of-present-illness detail, every "Hx - " item, and every stated negative or normal finding, with its negation kept exactly ("no fever" stays "no fever"). Remove only repetition, filler words and non-clinical narrative. Never drop or merge away a clinical fact. If nothing remains for the tail, omit it.
 
 ## USER
 gp_extraction:

@@ -34,7 +34,7 @@ def test_v7_differs_from_v5_only_in_pc_rule_and_header():
     # every removed line is a header line; every added line is a header line or the single PC rule
     assert all(l.startswith(header) for l in removed)
     pc = [l for l in added if not l.startswith(header)]
-    assert len(pc) == 1 and pc[0].startswith("10. Presenting Complaint:") and "ONE line." in pc[0] and "Relevant:" in pc[0] and '"Hx - …"' in pc[0]
+    assert len(pc) == 1 and pc[0].startswith("10. Presenting Complaint:") and "ONE line." in pc[0] and "Relevant:" in pc[0] and '"Hx - "' in pc[0] and "Never drop or merge away a clinical fact" in pc[0]
     # and the body (from ## SYSTEM on) is v5's body plus exactly that line
     body5 = v5[v5.index("## SYSTEM"):].splitlines()
     body7 = [l for l in v7[v7.index("## SYSTEM"):].splitlines() if l != pc[0]]
@@ -47,7 +47,7 @@ def test_stage_b_version_flag_selects_v7_prompt(tmp_path, capsys):
     fake = FakeClient({"stageA-v2": json.dumps(stage_a("synth-fever-dose")), "stageB-v7": note})
     lg = run_consult(c, fake, tmp_path, Options(stage_b="stageB-v7"))
     assert [x["tag"] for x in fake.calls] == ["stageA-v2:synth-fever-dose", "stageB-v7:synth-fever-dose"]
-    assert "Never drop a fact from an" in fake.calls[1]["system"] and lg["note_source"] == "llm_stageB-v7"
+    assert "Never drop or merge away a clinical fact" in fake.calls[1]["system"] and lg["note_source"] == "llm_stageB-v7"
     # through the CLI parser too
     out = tmp_path / "cli"
     assert main(["run", "--consult", "synth-fever-dose", "--data", str(CONSULTS), "--replay", str(MODEL), "--out", str(out), "--stage-b-version", "v7"]) == 0
@@ -63,7 +63,7 @@ def test_default_is_v5_and_output_byte_identical(tmp_path):
             run_consult(load_consult(CONSULTS, uid), fake, d, opts)
             outs.append((_stable(d / uid / "artifact.json"), [x["system"] for x in fake.calls]))
         assert outs[0] == outs[1]
-        assert "Never drop a fact from an" not in outs[0][1][-1]
+        assert "Never drop or merge away a clinical fact" not in outs[0][1][-1]
 
 
 def test_v7_two_hx_lines_rule_in_prompt_and_fallback_keeps_both(tmp_path):
@@ -77,10 +77,21 @@ def test_v7_two_hx_lines_rule_in_prompt_and_fallback_keeps_both(tmp_path):
     fake = FakeClient({"stageA-v2": json.dumps(enc), "stageB-v7": note_llm})
     run_consult(load_consult(CONSULTS, uid), fake, tmp_path / "llm", Options(stage_b="stageB-v7"))
     system = fake.calls[1]["system"]
-    assert 'Then, if the presenting-complaint input has any "Hx - …" lines' in system and "Never drop a fact from an" in system
+    assert 'Then a tail "Relevant: …" holding EVERY other fact' in system and "Never drop or merge away a clinical fact" in system
     # no LLM: the deterministic fallback note carries both Hx facts
     fake = FakeClient({"stageA-v2": json.dumps(enc)})
     lg = run_consult(load_consult(CONSULTS, uid), fake, tmp_path / "det", Options(stage_b="stageB-v7", stage_b_enabled=False))
     assert [x["tag"] for x in fake.calls] == ["stageA-v2:" + uid]
     note = lg["artifact"]["note_text"]
     assert "Hx - Mother had tuberculosis" in note and "Hx - Works with poultry" in note
+
+
+def test_v7_cough_native_rule_in_prompt_and_fallback_keeps_no_fever(tmp_path):
+    uid = "synth-cough-native"
+    fake = FakeClient({"stageA-v2": json.dumps(stage_a(uid)), "stageB-v7": ""})
+    run_consult(load_consult(CONSULTS, uid), fake, tmp_path / "llm", Options(stage_b="stageB-v7"))
+    system = fake.calls[1]["system"]
+    assert 'every stated negative or normal finding' in system and '"no fever" stays "no fever"' in system
+    fake = FakeClient({"stageA-v2": json.dumps(stage_a(uid))})
+    lg = run_consult(load_consult(CONSULTS, uid), fake, tmp_path / "det", Options(stage_b="stageB-v7", stage_b_enabled=False))
+    assert "no fever" in lg["artifact"]["note_text"].lower()
