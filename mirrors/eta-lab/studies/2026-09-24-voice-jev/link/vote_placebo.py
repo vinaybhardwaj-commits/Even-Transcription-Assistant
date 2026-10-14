@@ -6,11 +6,11 @@ Reports real vs placebo: (a) groups passing the strict vote, (b) of those, ancho
 import collections, json, math, os, statistics, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tiering as T
-H = os.path.expanduser(f"~/eta-data/voice-linkage/{os.environ.get('TREE', 'dtree70')}"); P0 = 0.125
+H = os.path.expanduser("~/eta-data/voice-linkage/dtree70"); P0 = 0.125
 SUF = ["", "-pl4", "-pl-4", "-pl5", "-pl-5", "-pl6", "-pl-6", "-pl7", "-pl-7", "-pd1", "-pd2", "-pd3", "-pd4", "-pd5", "-pd6"]
-rds = json.load(open(os.path.expanduser(f"~/eta-data/voice-linkage/overnight/{os.environ.get('RDSJSON', 'rds70.json')}")))
+rds = json.load(open(os.path.expanduser("~/eta-data/voice-linkage/overnight/rds70.json")))
 real_g = {x["gid"]: x for x in json.load(open(f"{H}/overnight/glinks-complete.json"))}
-A = json.load(open(f"{H}/overnight/anchored-groups.json"))
+A = json.load(open(os.path.expanduser("~/eta-data/voice-linkage/dtree_ext/overnight/anchored-groups.json")))
 anch_members = {a["gid"]: ({tuple(m) for m in real_g[a["gid"]]["members"]}, a["anchor_doctor_uid"]) for a in A}
 tail = lambda k, n: sum(math.comb(n, i) * P0 ** i * (1 - P0) ** (n - i) for i in range(k, n + 1))
 rows = {}
@@ -32,7 +32,7 @@ for suf in SUF:
     rows[suf or "real"] = res
 real = rows["real"]; pl = {k: v for k, v in rows.items() if k != "real"}
 out = {"real": real, "placebo": pl, "summary": {}}
-print("group vote rule, real vs 14 placebos (extended set, complete linkage; tree from TREE env)")
+print("group vote rule, real vs 14 placebos (70 room-days, complete linkage)")
 for m in ("passing", "passing_non_anchored", "passing_anchored_correct", "passing_anchored_wrong", "anchored_plurality_correct"):
     vals = [v[m] for v in pl.values()]
     s = {"real": real[m], "placebo_min": min(vals), "placebo_median": statistics.median(vals), "placebo_max": max(vals), "empirical_p_ge_real": round((1 + sum(v >= real[m] for v in vals)) / (1 + len(vals)), 3)}

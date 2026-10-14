@@ -7,9 +7,7 @@ a NEW out dir and both readers locking fresh counts. This file draws the turns, 
 summarises them and compares the two readers' counts.
 
   python3 link3_nameleak.py draw    [--seed 27] [--n 20] [--mt-dir D] [--out-dir D]
-  python3 link3_nameleak.py pin     --counts COUNTS.json --salt-out SALTFILE      (EACH reader, once, right after locking)
-  python3 link3_nameleak.py summary --draw DRAW.json --counts COUNTS.json --counts-pin HEX --counts-salt HEX
-                                    --second COUNTS2.json --second-pin HEX --second-salt HEX [--out SUMMARY.json]
+  python3 link3_nameleak.py summary --draw DRAW.json --counts COUNTS.json --second COUNTS2.json --second-sha256 HEX [--out SUMMARY.json]
 
 INPUT (box only, never git; frozen by linker #1100). mt/translated.json: list of {item, room, i, lang, en, q, dropped}. mt/deid.json: the same
 records plus en_deid. The mt dir defaults to ~/eta-data/surgical-chain/p1/mt/ (or $ETA_MT_DIR, or --mt-dir).
@@ -32,17 +30,15 @@ STDOUT carries counts and turn keys (ids) only. No transcript text reaches stdou
 (refuter-2 #1219 F-B2; there is no override flag), and if git cannot be asked the answer is "inside" (fail closed).
 
 SUMMARY. BOTH readers are mandatory (v7.15 M4.3; refuter-2 #1219 F-B1). Each counts file must hold EXACTLY the drawn keys, each a non-negative int.
-A missing key or a null is "never looked", not "zero": the run stops with exit 2. EACH reader's file has a SALTED pin, sha256(salt || file bytes)
-with a 32-byte random salt, posted on the bus BEFORE any summary was made; without a pin nothing proves the labels were locked first. The salt
-(refuter-2 #1559 and #1570) is because a plain sha256 of an all-zero counts file is the same for everyone: anyone who sees a plain hash can test "all
-zeros" in one line, so the hash would reveal the common answer before the other reader has written his. Each reader keeps his salt file private and
-reveals the salt only at the summary (--counts-salt / --second-salt); `pin` makes it. A plain sha256 is not accepted for either reader. Reports per-turn counts, the total, per-turn agree/disagree between the two readers and both totals. The summary carries
+A missing key or a null is "never looked", not "zero": the run stops with exit 2. --second-sha256 must equal the sha256 of the second reader's
+counts file as that reader posted it on the bus BEFORE any summary was made; without that pin nothing proves the second labels were locked first and
+the independent check would be optional. Reports per-turn counts, the total, per-turn agree/disagree between the two readers and both totals. The summary carries
 deid_sha256 / translated_sha256 / eligible_sha256 copied from draw.json, so a gate can check that the counts were made on the deid.json it is
 about to score (a re-de-identified file changes the hash).
-EXIT  0 = no name missed by either reader | 1 = GATE FAILED (a total is > 0 in either file) | 2 = bad or incomplete input, a wrong pin or salt for either reader,
+EXIT  0 = no name missed by either reader | 1 = GATE FAILED (a total is > 0 in either file) | 2 = bad or incomplete input, a wrong --second-sha256,
 or a write refused inside a git work tree | 3 = draw too short.
 """
-import argparse, hashlib, itertools, json, os, random, re, secrets, subprocess, sys, textwrap
+import argparse, hashlib, itertools, json, os, random, re, subprocess, sys, textwrap
 
 DEFAULT_MT = os.path.expanduser("~/eta-data/surgical-chain/p1/mt/")
 COL = 58
@@ -245,45 +241,20 @@ def load_counts(path, keys):
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
-def salted_pin(counts_path, salt_hex):
-    """sha256(salt || counts-file bytes). `salt_hex` is 64 lowercase hex characters (32 random bytes); the salt is BYTES, not its hex text."""
-    with open(counts_path, "rb") as f:
-        return hashlib.sha256(bytes.fromhex(salt_hex) + f.read()).hexdigest()
-
-
-def cmd_pin(counts_path, salt_out):
-    """EACH reader, once, right after locking his counts file: draw a random salt, store it 0600 (never overwritten, never inside a git work
-    tree), print the pin to post. The salt stays private until the summary."""
-    if not os.path.isfile(counts_path):
-        raise InputError(f"{os.path.basename(counts_path)}: unreadable (not a file)")
-    salt_hex = secrets.token_bytes(32).hex()
-    write_private(salt_out, salt_hex + "\n")
-    pin = salted_pin(counts_path, salt_hex)
-    print(f"pin (post this on the bus): {pin}")
-    print("counts file sha256 is NOT the pin and must not be posted before the summary; keep the salt file private and do not edit the counts file.")
-    return pin
-
-
-def check_pin(path, pin, salt, flag_pin, flag_salt, who):
-    for name, v in ((flag_pin, pin), (flag_salt, salt)):
-        if not isinstance(v, str) or not HEX64.fullmatch(v):
-            raise InputError(f"{name} must be 64 lowercase hex characters")
-    if not os.path.isfile(path):
-        raise InputError(f"{os.path.basename(path)}: unreadable (not a file)")
-    if salted_pin(path, salt) != pin:
-        raise InputError(f"the {who} reader's counts file and salt do not reproduce {flag_pin}: these are not the labels that reader locked, or the salt is wrong")
-
-
-def summarise(draw_path, counts_path, counts_pin, counts_salt, second_path, second_pin, second_salt):
-    check_pin(counts_path, counts_pin, counts_salt, "--counts-pin", "--counts-salt", "first")
-    check_pin(second_path, second_pin, second_salt, "--second-pin", "--second-salt", "second")
-    actual = sha256_file(second_path)
+def summarise(draw_path, counts_path, second_path, second_sha256):
+    if not isinstance(second_sha256, str) or not HEX64.fullmatch(second_sha256):
+        raise InputError("--second-sha256 must be 64 lowercase hex characters")
+    actual = sha256_file(second_path) if os.path.isfile(second_path) else None
+    if actual is None:
+        raise InputError(f"{os.path.basename(second_path)}: unreadable (not a file)")
+    if actual != second_sha256:
+        raise InputError("the second reader's counts file does not match --second-sha256: these are not the labels that reader locked")
     with open(draw_path) as f:
         meta = json.load(f)
     keys = meta["keys"]
     first = load_counts(counts_path, keys)
     second = load_counts(second_path, keys)
-    s = dict(seed=meta["seed"], n_turns=len(keys), counts_sha256=sha256_file(counts_path), counts_pin=counts_pin, counts_salt=counts_salt, second_counts_sha256=actual, second_pin=second_pin, second_salt=second_salt, deid_sha256=meta["deid_sha256"], translated_sha256=meta["translated_sha256"],
+    s = dict(seed=meta["seed"], n_turns=len(keys), counts_sha256=sha256_file(counts_path), second_counts_sha256=actual, deid_sha256=meta["deid_sha256"], translated_sha256=meta["translated_sha256"],
              eligible_sha256=meta["eligible_sha256"], per_turn=first, total_missed=sum(first.values()),
              turns_with_a_miss=sum(v > 0 for v in first.values()))
     s.update(second_per_turn=second, second_total_missed=sum(second.values()),
@@ -304,25 +275,16 @@ def main(argv=None):
     s = sub.add_parser("summary")
     s.add_argument("--draw", required=True)
     s.add_argument("--counts", required=True)
-    s.add_argument("--counts-pin", required=True)
-    s.add_argument("--counts-salt", required=True)
     s.add_argument("--second", required=True)
-    s.add_argument("--second-pin", required=True)
-    s.add_argument("--second-salt", required=True)
+    s.add_argument("--second-sha256", required=True)
     s.add_argument("--out")
-    pn = sub.add_parser("pin")
-    pn.add_argument("--counts", required=True)
-    pn.add_argument("--salt-out", required=True)
     a = ap.parse_args(argv)
     try:
         if a.cmd == "draw":
             out = a.out_dir or os.path.join(a.mt_dir, f"nameleak-seed{a.seed}")
             draw(a.mt_dir, out, a.seed, a.n, a.allow_short)
             return 0
-        if a.cmd == "pin":
-            cmd_pin(a.counts, a.salt_out)
-            return 0
-        s = summarise(a.draw, a.counts, a.counts_pin, a.counts_salt, a.second, a.second_pin, a.second_salt)
+        s = summarise(a.draw, a.counts, a.second, a.second_sha256)
         if a.out:
             write_private(a.out, json.dumps(s, indent=1) + "\n")
     except InputError as e:
@@ -335,7 +297,7 @@ def main(argv=None):
         return e.code if isinstance(e.code, int) else 3
     print(f"name-leak summary seed={s['seed']}: {s['n_turns']} turns, missed {s['total_missed']} in {s['turns_with_a_miss']} turns")
     print("per turn: " + " ".join(f"{k}={v}" for k, v in s["per_turn"].items()))
-    print(f"both pins (salted) verified; second reader: missed {s['second_total_missed']}; agree on {len(s['agree'])} turns, disagree on {len(s['disagree'])}"
+    print(f"second reader (sha256 pinned): missed {s['second_total_missed']}; agree on {len(s['agree'])} turns, disagree on {len(s['disagree'])}"
           + (": " + " ".join(s["disagree"]) if s["disagree"] else ""))
     print(f"GATE {s['gate']}" + ("" if s["gate"] == "PASS" else ": a name was missed. Fix the redactor, regenerate deid.json, then re-read the FULL eligible set of the new file (v7.15a N2 step 4)"))
     return 0 if s["gate"] == "PASS" else 1
