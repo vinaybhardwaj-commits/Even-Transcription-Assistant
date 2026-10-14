@@ -25,4 +25,3 @@ Refs: brief.
 ## Relevant existing facts
 orbox3 is a 12-core CPU Linux box (no GPU), herdr machine, off-hours worker (r415.7: user-local Node install, no sudo). It already runs the OT recorder app. Never change its recorder app without a ruling.
 Refs: r415.7; orders/LANES.md; HANDOVER-scribe.md §(b)6.
-- 29 Sep ~19:27 IST (rev 26): V answered D-2..D-5 (#6990); kit list delivered; all building on hold.

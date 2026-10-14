@@ -2,16 +2,6 @@
 
 Build and event log, newest first. Owner panes: linker (bundle), cap (c3 evaluator), eta-refuter-2 (checker).
 
-## 28 Sep ~13:3x-15:1x -- CAP-2 CLOSED (clean null); W53 CAP-3 ordered
-Session: cap, vj-refuter, linker, Fable.
-CAP-2 FINAL PASS 03b8777afc6bfe36: HELPED=FALSE (captured/169 base1 55/base2 53/real 53/placebo 52, net +1 item/+1 drug, below the 9-item/3-drug bar). Fable ruled: SECONDARY arm not run. W53 CAP-3 ordered same day (Rx-informed post-consult cleanup, OWN/SWAP/PRIOR arms); pre-reg PASS 15cebdc358384250 after 2 fix rounds; OWN+SWAP code PASS e95d502 after 4 blocking fixes; runs starting.
-Refs: #5339-5386, #5388-5422.
-
-## 27-28 Sep -- CAP-2 running; 26 Sep stratum ruling; feeds W50/FUSER S2
-Session: cap, linker, eta-refuter-2.
-Fable ruled (12:50) the 26 Sep CAP bundle is its own never-pooled stratum. CAP-2's 24-consult and 22-24 Sep sets now double as truth for CLARITY's S2 router arm and W50's bake-off sets (b)/(c), kept strictly separate from each other and from FUSER's own 24-consult TEST set.
-Refs: #4420-4457 (26 Sep stratum), W33 ruling.
-
 ## 27 Sep ~00:0x-06:3x IST — CAP-2 pre-registered, Step 0 done, real/placebo running
 Session: cap, linker, vj-refuter, eta-refuter-2.
 Pre-registration v4 frozen sha256 cc0484c77c8f319d (#4009/#4010) after 4 draft rounds and vj-refuter's 6-fix review. Step 0 (whisper baselines) done both arms; ceiling checks Nflip 2/A 9/B 3/LOSTMAX 2 vj-refuter VERIFIED (#4154). GLOSS GO real+placebo launched on c3 (#4155). New router arm (W33.3): score router-fix's old vs new router on the same 24 consults for CLARITY's S2.
@@ -64,4 +54,3 @@ Refs: r429, r430, r430b.
 
 ## Standing leak rule
 A prescription or note never feeds the transcript of the same encounter or day. CAP-2 (vocabularies to steer STT/translation) is the second half, not yet started.
-- 29 Sep ~19:27 IST (rev 26): CAP-3 OWN/SWAP no help; PRIOR arm launched (pid 55701, bundle c979b5d, #7093).
