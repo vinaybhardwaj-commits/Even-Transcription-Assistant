@@ -46,8 +46,58 @@ def test_table(text, want):
     assert floors.parse_number_words(text) == [Decimal(w) for w in want]
 
 
-def test_spoken_runs_are_digit_runs():
-    assert floors.spoken_runs("two point five and five hundred") == {"2", "5", "500"}
+def test_spoken_values_stay_whole():
+    assert floors.spoken_values("two point five and five hundred") == {Decimal("2.5"), Decimal("500")}
+    assert floors.spoken_values("take half a tablet") == {Decimal("0.5")}
+    assert floors.spoken_values("one and a half tablets") == {Decimal("1.5")}
+    assert floors.spoken_values("one point five") == {Decimal("1.5")}
+    assert floors.spoken_values("twenty one") == {Decimal(21)}
+    assert floors.spoken_values("one hundred") == {Decimal(100)}
+    assert floors.spoken_values("one gram, two times a day") == {Decimal(1), Decimal(2)}
+
+
+@pytest.mark.parametrize("said", ["a hundred percent", "at this point two", "which one", "the white one", "take this one",
+                                  "which one? the white one, at night, zero side effects", "a hundred percent sure",
+                                  "this one, half in the morning", "zero side effects", "nil"])
+def test_bare_quantity_words_outside_quantity_context_are_not_heard(said):
+    assert floors.spoken_values(said) <= {Decimal(2)}  # "at this point two": the two is a number, the point is not
+
+
+def _inv(strength=None, frequency=None, duration=None):
+    art = _syn("Medication: Paracetamol", [_prov("Paracetamol")])
+    m = {"name": "Paracetamol", **{k: v for k, v in (("strength", strength), ("frequency", frequency), ("duration", duration)) if v}}
+    return lambda said: floors._invented_core({"medicines": [m]}, art, _consult(said))
+
+
+@pytest.mark.parametrize("field,value,said,count", [
+    ("strength", "5 mg", "take half a tablet", 1), ("duration", "5 days", "one and a half tablets", 1),
+    ("frequency", "1-0-1", "this one, half in the morning", 3), ("strength", "1 g", "take this one", 1),
+    ("frequency", "0-0-1", "which one? the white one, at night, zero side effects", 3),
+    ("strength", "100 mg", "a hundred percent sure", 1), ("strength", "0.2 mg", "at this point two of them", 2),
+    ("strength", "1 g", "take one gram", 0), ("strength", "5 mg", "take 0.5 mg", 0), ("strength", "0.5 mg", "half a tablet", 0),
+    ("strength", "1.5 mg", "one and a half mg", 0), ("strength", "500 mg", "five hundred milligram", 0),
+    ("strength", "5 mg", "five hundred milligram", 1), ("strength", "2.5 mg", "two point five milligram", 0),
+])
+def test_floor_cases(field, value, said, count):
+    assert _inv(**{field: value})(said)["count"] == count, (value, said)
+
+
+def test_d3_digits_only_in_a_non_medicine_part_stay_eta():
+    c = _consult("hello")
+    rx = {"medicines": [{**CAT, "strength": "500 mg"}]}
+    for note in ("Plan of Management: tablet 500 mg SOS for fever\nMedication: Paracetamol twice a day",
+                 "Follow up: review in 500 days\nMedication: Paracetamol twice a day"):
+        art = _syn(note, [_prov("Paracetamol")])
+        assert floors._invented_core(rx, art, c, "global")["sources"] == ["eta"]
+        assert floors._invented_core(rx, art, c, "medicine")["sources"] == ["eta"]
+    fu = {"kind": "follow_up", "text": "review after 5 days", "evidence": []}
+    art = _syn("Medication: Paracetamol twice a day", [_prov("Paracetamol")], [fu])
+    rxd = {"medicines": [{**CAT, "duration": "5 days"}]}
+    assert floors._invented_core(rxd, art, c, "medicine")["sources"] == ["eta"]
+    # another medicine's gp_extraction entry still does not count for this one
+    art2 = _two()
+    art2["gp_extraction"] = {"medicines": [{"name": "Amoxicillin 500 mg"}]}
+    assert floors._invented_core({"medicines": [{**CAT, "strength": "500 mg"}]}, art2, c, "medicine")["sources"] == ["pulse_catalogue"]
 
 
 def _consult(said):

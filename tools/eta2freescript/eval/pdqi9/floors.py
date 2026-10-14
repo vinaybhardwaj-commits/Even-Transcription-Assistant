@@ -231,6 +231,7 @@ def completion_counts(client, frozen, signed: list[dict], draft: list[dict], rev
 
 _FORM = re.compile(r"\b(tab(?:let)?s?|cap(?:sule)?s?|syp|syrup|inj(?:ection)?|oint(?:ment)?|drops?|gel|cream)\b\.?", re.I)
 _DIGITS = re.compile(r"\d+")
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
 _STRENGTH = re.compile(r"(\d+(?:\.\d+)?)\s*(mg|g|ml|mcg|iu|%)", re.I)
 
 
@@ -317,41 +318,73 @@ def _integer_at(toks: list[str], j: int):
     return (total + cur, k) if last is not None else None
 
 
-def parse_number_words(text: str) -> list[Decimal]:
-    """Every number the text speaks as English words, or as digits with a magnitude word, in order: "five hundred", "two thousand and
-    fifty", "one and a half", "two point five", "half", "5 hundred". Bare digit tokens come back too (they are already digit runs).
-    Consecutive units ("one two three") are separate numbers."""
+def _scan_numbers(text: str):
+    """(tokens, spans): every number the text speaks, as (value, start, end, kind) over token indexes; kind is "num", "digit" (a bare
+    digit token), "half" or "lead_point" ("point five" with no number before it)."""
     toks = _SPOKEN_TOKEN.findall((text or "").lower())
-    out: list[Decimal] = []
+    out: list[tuple[Decimal, int, int, str]] = []
     i, n = 0, len(toks)
     while i < n:
         got = _integer_at(toks, i)
         if got is not None:
-            val, i = got
-            v = Decimal(val)
-            if toks[i:i + 3] == ["and", "a", "half"]:
-                v, i = v + Decimal("0.5"), i + 3
-            elif toks[i:i + 2] == ["and", "half"]:
-                v, i = v + Decimal("0.5"), i + 2
-            elif toks[i:i + 1] == ["point"]:
-                dec, j = _digit_word_run(toks, i + 1)
+            val, j = got
+            v, kind = Decimal(val), ("digit" if j - i == 1 and toks[i].isdigit() else "num")
+            if toks[j:j + 3] == ["and", "a", "half"]:
+                v, j, kind = v + Decimal("0.5"), j + 3, "num"
+            elif toks[j:j + 2] == ["and", "half"]:
+                v, j, kind = v + Decimal("0.5"), j + 2, "num"
+            elif toks[j:j + 1] == ["point"]:
+                dec, k = _digit_word_run(toks, j + 1)
                 if dec:
-                    v, i = Decimal(f"{val}.{dec}"), j
-            out.append(v)
+                    v, j, kind = Decimal(f"{val}.{dec}"), k, "num"
+            out.append((v, i, j, kind))
+            i = j
         elif toks[i] == "point" and _digit_word_run(toks, i + 1)[0]:
-            dec, i = _digit_word_run(toks, i + 1)
-            out.append(Decimal(f"0.{dec}"))
+            dec, j = _digit_word_run(toks, i + 1)
+            out.append((Decimal(f"0.{dec}"), i, j, "lead_point"))
+            i = j
         elif toks[i] == "half":
-            out.append(Decimal("0.5"))
+            out.append((Decimal("0.5"), i, i + 1, "half"))
             i += 1
         else:
             i += 1
+    return toks, out
+
+
+def parse_number_words(text: str) -> list[Decimal]:
+    """Every number the text speaks as English words, or as digits with a magnitude word, in order: "five hundred", "two thousand and
+    fifty", "one and a half", "two point five", "half", "5 hundred". Bare digit tokens come back too. Consecutive units ("one two
+    three") are separate numbers. Context-free: spoken_values() is the one that decides what is plainly a quantity."""
+    return [v for v, _, _, _ in _scan_numbers(text)[1]]
+
+
+# Safety floor: a number word is "heard" only when it is plainly a quantity. A bare quantity word needs a quantity word next.
+_BARE = frozenset({"zero", "one", "hundred", "thousand"})
+_QUANTITY = frozenset(
+    "mg g gm gms gram milligram mcg microgram kg ml millilitre milliliter l litre liter iu unit tablet tab capsule cap spoon teaspoon "
+    "tablespoon drop puff sachet sachets patch lozenge ampoule vial injection time day week month year hour hr min minute dose".split())
+
+
+def _is_quantity_word(tok: str) -> bool:
+    return tok in _QUANTITY or (tok.endswith("s") and tok[:-1] in _QUANTITY) or (tok.endswith("es") and tok[:-2] in _QUANTITY)
+
+
+def spoken_values(text: str) -> set[Decimal]:
+    """The numbers the text plainly speaks as a quantity, whole (0.5 stays 0.5, never the runs 0 and 5). A number counts if it is a
+    compound ("twenty one", "one hundred", "one and a half", "one point five") or if it is not a bare "one", "zero", "half", "hundred" or
+    "thousand"; a bare one of those counts only when the next token (past one "a", "an" or "of") is a quantity word. "point" counts only
+    after a number. Bare digit tokens are the digit-run path's business, not this one's."""
+    toks, spans = _scan_numbers(text)
+    out: set[Decimal] = set()
+    for v, i, j, kind in spans:
+        if kind in ("lead_point", "digit"):
+            continue
+        if kind == "half" or (j - i == 1 and toks[i] in _BARE):
+            k = j + 1 if toks[j:j + 1] and toks[j] in ("a", "an", "of") else j
+            if not (k < len(toks) and _is_quantity_word(toks[k])):
+                continue
+        out.add(v)
     return out
-
-
-def spoken_runs(text: str) -> set[str]:
-    """Digit runs of every number the text speaks as words (see parse_number_words)."""
-    return {r for v in parse_number_words(text) for r in _DIGITS.findall(format(v, "f"))}
 
 
 FLOOR_SCOPES = ("global", "medicine")
@@ -482,25 +515,35 @@ def _in_text(value: str, text: str) -> bool:
     return bool(v) and v in re.sub(r"\s+", " ", text)
 
 
-def _gp_entries(m: dict, art: dict | None) -> list[dict]:
-    meds = ((art or {}).get("gp_extraction") or {}).get("medicines")
-    return [g for g in meds if isinstance(g, dict) and _names_match(_rx_names(m), _rx_names(g))] if isinstance(meds, list) else []
-
-
 def _quote_text(p: dict | None) -> str:
     return "\n".join(str((e or {}).get(k) or "") for e in (p or {}).get("evidence") or [] for k in ("quote", "quote_en"))
 
 
+def _is_other_medicine(p, m: dict) -> bool:
+    return isinstance(p, dict) and p.get("kind") == "medicine" and bool(_prov_names(p)) and not _names_match(_rx_names(m), _prov_names(p))
+
+
 def _medicine_output(m: dict, art: dict | None, prov: dict | None) -> str | None:
-    """ETA's output for this one medicine (scope `medicine`): the note line that names it, its gp_extraction entry and its provenance
-    text and quote, number words normalised. None when no ETA line pairs with it or 2+ lines could (then the global rule applies)."""
-    lines = [ln for ln in ((art or {}).get("note_text") or "").split("\n") if ln.strip() and _names_match(_rx_names(m), {_norm_name(ln)})]
-    if len(lines) != 1:
+    """ETA's output with ONLY the other medicines' parts removed (scope `medicine`): the note lines that name another ETA medicine and
+    not this one, and other medicines' gp_extraction entries and provenance items. Non-medicine lines, follow-up and other provenance
+    stay, so a run found there is ETA's. None when no ETA line pairs with this medicine or 2+ lines could (then the global rule applies)."""
+    names = _rx_names(m)
+    lines = [ln for ln in ((art or {}).get("note_text") or "").split("\n") if ln.strip()]
+    if sum(1 for ln in lines if _names_match(names, {_norm_name(ln)})) != 1:
         return None
-    gp: list[str] = []
-    for g in _gp_entries(m, art):
-        _prov_values(g, gp)
-    return _numnorm("\n".join(lines + gp + [_prov_text(prov), _quote_text(prov)]))
+    others = [p for p in (art or {}).get("provenance") or [] if _is_other_medicine(p, m)]
+    other_names = [_prov_names(p) for p in others]
+    gp_all = ((art or {}).get("gp_extraction") or {}).get("medicines")
+    gp_all = [g for g in gp_all if isinstance(g, dict)] if isinstance(gp_all, list) else []
+    other_names += [_rx_names(g) for g in gp_all if not _names_match(names, _rx_names(g))]
+    keep = [ln for ln in lines if _names_match(names, {_norm_name(ln)}) or not any(_names_match({_norm_name(ln)}, o) for o in other_names)]
+    parts = list(keep)
+    for g in gp_all:
+        if _names_match(names, _rx_names(g)):
+            _prov_values(g, parts)
+    parts += [_prov_text(p) for p in (art or {}).get("provenance") or [] if isinstance(p, dict) and not _is_other_medicine(p, m)]
+    parts += [_prov_text(prov), _quote_text(prov)]
+    return _numnorm("\n".join(parts))
 
 
 def _eta_has_run(m: dict, run: str, art: dict | None, prov: dict | None, scope: str) -> bool:
@@ -563,12 +606,15 @@ def _invented_core(rx: dict, art: dict | None, consult: Consult, scope: str | No
             unmatched += 1
             sources.append(_worst(_run_source(m, k, r, art, None, scope) for k, r in runs))
             continue
-        heard = set()
+        heard, spoken = set(), set()
         for t in _cited_turns(match):
             if 0 <= t < len(consult.turns):
                 said = f"{consult.turns[t].text} {consult.turns[t].native_text or ''}"
-                heard |= set(_DIGITS.findall(said)) | spoken_runs(said)
-        bad = [(k, r) for k, r in runs if r not in heard]
+                heard |= set(_DIGITS.findall(said))
+                spoken |= spoken_values(said)
+        # a number spoken in words is heard only as a whole value: an rx number equals a spoken value or it is not heard that way
+        bad = [(k, r) for k in ("strength", "frequency", "duration") for tok in _NUMBER.findall(m.get(k) or "")
+               if Decimal(tok) not in spoken for r in _DIGITS.findall(tok) if r not in heard]
         offending += len(bad)
         sources += [_run_source(m, k, r, art, match, scope) for k, r in bad]
     return {"offending_runs": offending, "unmatched_medicines": unmatched, "count": offending + unmatched,
