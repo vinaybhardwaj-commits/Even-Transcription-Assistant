@@ -64,7 +64,7 @@ try {
     nested: document.querySelectorAll("ul ul").length,
     overflow: document.documentElement.scrollWidth <= 392,
   }));
-  check("h1s: page header + roadmap doc title + 18 roadmap project H1s + decisions doc title = 21 (docs are sha-pinned snapshots)", dom.h1 === 21);
+  check("h1s: page header + 17 roadmap project H1s + decisions H1 = 19 (docs are sha-pinned snapshots)", dom.h1 === 19);
   check("both anchored sections", dom.sections.join(",") === "roadmap,decisions");
   check("project table: 5 cols + >=10 rows", dom.table?.length === 5 && dom.rows >= 10);
   check("nested lists render", dom.nested >= 1);

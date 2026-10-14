@@ -25,15 +25,8 @@ so the same shape extends cleanly to the other engines/machines.
    didn't need (the order explicitly asked for "lease + retry; nothing lost if a worker dies" —
    hist-bulk's claims persist until a person resets them between epochs; REB's don't need a person).
    A claim past its lease is atomically stealable (guarded by a per-claim `.lock` so two stealers can't
-   both think they won, and by a per-claim token so a stale worker can never touch a claim it no longer
-   holds — see the fencing fix from eta-refuter-2/3's review, git log). `release()` lets a worker give
-   up a claim early for immediate retry after a clean failure, without waiting out the lease.
-   `is_done()` means "was 'done' EVER logged for this (queue_name, window_id)" — **this means a
-   deliberate re-run of an already-done window needs a NEW `queue_name`, not just re-calling `claim()`
-   on the same one** (eta-refuter-2, post-PASS note #4852). There's no "force re-run in place" API by
-   design: append-only tracks already handle a genuine re-run at the `write_track()` level (a changed
-   config gets a new file); the queue's job is only "has this exact unit of work ever finished," and
-   conflating that with "let me redo it anyway" would reopen the fencing hole the token exists to close.
+   both think they won). `release()` lets a worker give up a claim early for immediate retry after a
+   clean failure, without waiting out the lease.
 4. **Whisper writer + LID convention** (`engines/whisper.py`), adopting lid-debug's #4735 proposal as
    final: whisper.cpp's language-ID only scores the first 30s of whatever it's given, so the writer
    chunks each window at <=30s and calls whisper once per chunk (not once per window) — this is
@@ -57,7 +50,7 @@ so the same shape extends cleanly to the other engines/machines.
 | stt | IndicConformer (5 heads) + SraVaani | **HF L4 GPU Job, together** | hf-fleet real validation: 18.7x RTF, $0.0427/tape-hour (bus #4731) — moved SraVaani off c3 onto the SAME HF job as IndicConformer, since that's now the proven cheap combined path; not built yet |
 | diar | pyannote.ai (hosted API) | none (API-bound, not machine-bound) | Fable's ruling (bus #4535 addendum); not built yet, needs `run_real.sh` for the real per-window calls (real patient audio to a paid external vendor) |
 | diar | local pyannote twin + Nemotron (optional shadow) | HF GPU, never box | Fable's ruling; not built yet |
-| emotion | wavlm crosslingual, per speaker turn (whole-window fallback if no diar track) | HF L4 GPU Job | Fable's T-REB order (28 Sep); built — `engines/emotion_wavlm.py` + `hf_emotion_manifest.py`/`hf_emotion_job.py`/`hf_emotion_collect.py`, following point 2's box-writes/HF-computes split; not yet run against real audio; audio = private HF buckets vrbeven/reb-backfill-2Xsep-audio (.webm, not uploaded yet, human-gated), job decodes with PyAV |
+| emotion | wavlm | HF GPU | Fable's ruling; not built yet |
 | acoustics | production vad_segments, reference VAD, frame stats | cheap, any CPU | sized (Silero ~53x on box CPU); not built yet |
 | terms | medasr / parakeet-med / whisper-arca-lora | **unsized, unplaced** | Fable FYI 14:38 (W50): layer went live scope; no RTF numbers exist yet for any of these 3 engines — needs its own sizing pass before it can be placed here |
 | translate | Gemini 3.8 Flash (text->EN, audio->EN) | OpenRouter, ZDR | not sized, not built; needs `run_real.sh` when exercised |
@@ -75,26 +68,8 @@ so the same shape extends cleanly to the other engines/machines.
 6. terms layer sizing (3 unmeasured engines) before it can be placed anywhere.
 7. Re-measure whisper's real per-window throughput under the <=30s-chunked calling convention (the
    sizing report's whisper RTF numbers were single-whole-file calls, not chunked).
-8. `task_queue.renew()` (heartbeat) exists but nothing calls it yet. Measure a real multi-pass window's
-   wall time against the 30-min default lease before assuming it's fine at step-3 scale (eta-refuter-2,
-   post-PASS note) — wire renew() in only if that measurement shows a real risk, not preemptively.
-9. `MirrorPendingError`s are recorded on the `done` state line (`mirror_pending=[...]`) but nothing
-   sweeps them for a retry yet (eta-refuter-3, post-PASS note: "name who sweeps it"). Needs an owner
-   once `REB_R2_MIRROR` is actually turned on for real traffic.
 
 ## Files
 
-`kit/reb_runner/{task_queue.py, engines/whisper.py, run_box_whisper.py}` + `tests/*` — 26/26 tests
-across kit/reb + kit/reb_runner, all offline except one manual real-whisper-server smoke check during
-development (not part of the committed suite). PASSED by both eta-refuter-2 and eta-refuter-3
-(independent reviews, both probed the fixes rather than just re-running the test files).
-
-`kit/reb_runner/{engines/emotion_wavlm.py, hf_emotion_manifest.py, hf_emotion_job.py,
-hf_emotion_collect.py}` + `tests/test_emotion_engine.py`/`test_hf_emotion_manifest.py` (tone, 28 Sep,
-Fable's T-REB order) — emotion layer, wavlm crosslingual per speaker turn. Same box/HF split as
-whisper (point 2): `hf_emotion_manifest.py` (box-side, reads the local REB root only) picks the
-windows + turns; `hf_emotion_job.py` (HF-side, no REB root access) scores turns and hands back
-raw per-turn scores (standalone uv script, PyAV decode, turns over 30 s scored in 30 s pieces with
-length-weighted mean probabilities); `hf_emotion_collect.py` (box-side) builds the track body via
-`emotion_wavlm.build_track` and is the only one of the three that calls `write_track()`. tests offline (model + audio slicing faked); not yet run
-against real audio — the manifest/job pair is queued for review before a real HF run.
+`kit/reb_runner/{task_queue.py, engines/whisper.py, run_box_whisper.py}` + `tests/*` (16 tests, all
+offline except one manual real-whisper-server smoke check during development, not part of the suite).

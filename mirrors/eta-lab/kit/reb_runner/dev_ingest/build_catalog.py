@@ -89,7 +89,6 @@ def build_dev30():
                 "audio": {"r2_key": f"local:readability/label200-audio/{lid}.wav",
                           "sha256": sha256_file(wav_path), "sample_rate": sample_rate, "duration_ms": duration_ms},
                 "source_kind": "dev_clip", "clock": clock,
-                "source_windows": [{"run_id": run_id, "window_id": window_id}],
             },
         })
     return entries

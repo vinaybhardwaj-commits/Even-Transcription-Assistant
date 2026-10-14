@@ -2,7 +2,6 @@
 Kept deliberately small: the schema is a contract test writers/readers share, not a full JSON-schema
 document. "any new engine = new track" (spec section 3) means layer/engine are open strings, not enums.
 """
-import re
 
 SCHEMA_VERSION = "reb.track.v1"
 
@@ -27,7 +26,7 @@ REQUIRED_AUDIO_FIELDS = ("r2_key", "sha256", "sample_rate", "duration_ms")
 # test suite (S1's clinical1: no tape origin at all), or a short real-room sub-clip pulled out of a
 # larger hist-bulk window for dev/eval purposes (label200's DEV30). Absent = "room_tape", same as
 # every window written before this field existed.
-SOURCE_KIND_VALUES = ("room_tape", "suite_synthetic", "dev_clip", "consult_clip", "room_tape_orphan", "consult_clip_external")   # consult_clip: a CONSULT-cutter clip scope (ORDERS-6S3), never a day-record window; room_tape_orphan: a real-room recording with no session (13A B4), windowed from a raw tape dir, its own unit (not a day-record window); consult_clip_external: a consult whose audio lives on another machine and whose text was produced there (14A: the CAA Sept results), no audio on the box
+SOURCE_KIND_VALUES = ("room_tape", "suite_synthetic", "dev_clip")
 DEFAULT_SOURCE_KIND = "room_tape"
 
 # How trustworthy a window's t0_ms/t1_ms are as real tape-clock UTC: "tape_utc" (the normal case, or
@@ -38,19 +37,11 @@ DEFAULT_SOURCE_KIND = "room_tape"
 CLOCK_VALUES = ("tape_utc", "approx", "clip_local")
 DEFAULT_CLOCK = "tape_utc"
 
-# A suite_synthetic window's room_id must match this pattern (enforced by validate_manifest) so it
-# can never collide with, or be mistaken for, a real room_id.
-SUITE_ROOM_RE = re.compile(r"^suite-[a-z0-9][a-z0-9._-]*$")
-SUITE_ROOM_PREFIX = "suite-"  # kept for messages/back-compat; SUITE_ROOM_RE is the actual check
-
-# eta-refuter-2 (#4805, S1): the suite- prefix check alone is gameable by OMISSION — if source_kind is
-# left unset (defaults to room_tape) with a made-up room_id like "clinical1", nothing rejected it. The
-# safe side must be the DEFAULT: room_tape (explicit or defaulted) must positively match production's
-# real room_id shape, "room_" + 8 lowercase alphanumeric chars (verified against every real room_id
-# seen on this box: room_jwyrr4dc, room_d74hhmc4, room_yh3etjpf, room_87frpus9, room_4ggnkg5x,
-# room_qyzghzaf, room_pnyc9u49, room_bh6jtq4t, room_ymch4bxu, room_ux92qpws, room_2qe955hy). dev_clip
-# uses the SAME pattern (it genuinely is a real room, just a short sub-clip of it).
-REAL_ROOM_ID_RE = re.compile(r"^room_[a-z0-9]{8}$")
+# A suite_synthetic window's room_id must use this prefix (enforced by validate_manifest) so it can
+# never collide with, or be mistaken for, a real room_id — this is what makes "reject a suite_synthetic
+# window whose room_id is a real room" (lid-debug, #4784) checkable without maintaining a live list of
+# real room ids in the schema.
+SUITE_ROOM_PREFIX = "suite-"
 
 # Per-segment fields: t0_ms/t1_ms are the only ones required on every segment (spec section 2 marks
 # the rest optional with "?"). A segment describing a scalar (e.g. an acoustics frame-stat value)

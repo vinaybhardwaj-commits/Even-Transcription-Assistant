@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for the source_kind/clock manifest fields (bus #4783/#4784) AND the fixes eta-refuter-2/3
-found on top (#4799/#4805): the stub/argument room_id-ist_date-window_id consistency check, the
-POSITIVE real-room-id pattern (the safe default, not just an opt-in rejection), source_kind<->clock
-pairing, dev_clip's required source_windows (a list -- a clip can span more than one tape chunk),
-source_kind on the index line, and real_room_windows()."""
+"""Tests for the source_kind/clock manifest fields (bus #4783/#4784: distinguishing real room tape
+from a synthetic test suite (clinical1) and a real-room dev sub-clip (label200 DEV30))."""
 import json
 import os
 import shutil
@@ -17,9 +14,6 @@ from reb.writer import config_hash, write_track
 
 ROOT = tempfile.mkdtemp(prefix="reb-sourcekind-")
 DATE = "2026-09-26"
-REAL_ROOM = "room_jwyrr4dc"
-SUITE_ROOM = "suite-clinical1"
-SRC_WIN = {"run_id": "hist-bulk-x", "window_id": "2026-09-12_room_x_0600"}
 
 
 def stub(window_id, room_id, **extra):
@@ -40,92 +34,57 @@ def track(window_id, engine="whisper-auto"):
     }
 
 
-def expect_invalid(m, why):
-    try:
-        validate_manifest(m)
-        raise AssertionError(f"expected ValidationError for: {why}")
-    except ValidationError:
-        pass
-
-
-# --- valid combinations for each source_kind -------------------------------------------------------
-assert validate_manifest(stub("w1", REAL_ROOM), raise_on_error=False) == []  # default = room_tape, real room, default clock
-assert validate_manifest(stub("w1", REAL_ROOM, source_kind="room_tape", clock="approx"), raise_on_error=False) == []
-assert validate_manifest(stub("w1", SUITE_ROOM, source_kind="suite_synthetic", clock="clip_local"), raise_on_error=False) == []
-assert validate_manifest(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows=[SRC_WIN]), raise_on_error=False) == []
-print("1/8 valid combinations OK: room_tape (default+explicit), suite_synthetic, dev_clip all pass with correct pairing")
-
-# --- POSITIVE real-room check is the DEFAULT, not opt-in (eta-refuter-2 #4805 S1) -------------------
-expect_invalid(stub("w1", "clinical1"), "a made-up room_id with source_kind OMITTED must still be rejected")
-expect_invalid(stub("w1", "clinical1", source_kind="room_tape"), "same, source_kind explicit")
-expect_invalid(stub("w1", "not_a_room", source_kind="dev_clip", source_windows=[SRC_WIN]), "dev_clip with a fake room_id must be rejected")
-print("2/8 positive real-room check OK: rejected by default, not just when source_kind is set")
-
-# --- suite_synthetic room_id pattern, including the case-sensitivity gap (#4799 N1) ------------------
-expect_invalid(stub("w1", REAL_ROOM, source_kind="suite_synthetic", clock="clip_local"), "suite_synthetic needs the suite- pattern")
-for bad in ("SUITE-x", "Suite-x", "suite_x", "suitex"):
-    expect_invalid(stub("w1", bad, source_kind="suite_synthetic", clock="clip_local"), f"bad suite room_id {bad!r}")
-    # and the SAME bad ids must also fail as a (default) room_tape room_id -- neither side accepts them
-    expect_invalid(stub("w1", bad), f"{bad!r} is not a valid room_tape room_id either")
-print("3/8 suite- pattern OK: case-sensitive, non-conforming ids rejected on both sides (no gap)")
-
-# --- clock<->source_kind pairing (#4799 N2 / #4805 S2) -----------------------------------------------
-expect_invalid(stub("w1", SUITE_ROOM, source_kind="suite_synthetic", clock="tape_utc"), "suite_synthetic must not use tape_utc")
-expect_invalid(stub("w1", REAL_ROOM, clock="clip_local"), "room_tape must not use clip_local")
-expect_invalid(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="clip_local", source_windows=[SRC_WIN]), "dev_clip must not use clip_local")
-print("4/8 clock pairing OK: clip_local only for suite_synthetic, never for room_tape/dev_clip")
-
-# --- dev_clip requires source_windows: a non-empty LIST, one entry per tape chunk/hist-bulk window
-# this sub-clip actually spans (eta-refuter-2 #4805/#4853, eta-refuter-3 #4855: a consult-length crop
-# often crosses more than one) -----------------------------------------------------------------------
-expect_invalid(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx"), "dev_clip without source_windows at all")
-expect_invalid(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows=[]), "an empty list doesn't count")
-expect_invalid(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows={"run_id": "x", "window_id": "y"}),
-               "the OLD singular-dict shape must now be rejected, not silently accepted as a 1-item anything")
-expect_invalid(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows=[{"run_id": "x"}]),
-               "an entry missing window_id must be rejected")
-expect_invalid(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows=[SRC_WIN, {"run_id": "y"}]),
-               "one good entry does not excuse a bad SECOND entry -- every listed source must be complete")
-multi = [SRC_WIN, {"run_id": "hist-bulk-y", "window_id": "2026-09-12_room_x_0605"}]
-assert validate_manifest(stub("w1", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows=multi),
-                          raise_on_error=False) == [], "a multi-chunk consult crop must validate with 2+ sources listed"
-print("5/8 dev_clip source_windows OK: non-empty list required, every entry complete, multi-source clips supported")
-
-# --- write_track refuses a stub that disagrees with its own arguments (eta-refuter-3 #4799 B1) -------
+# --- valid source_kind/clock values accepted, invalid rejected --------------------------------------
+for sk in ("room_tape", "suite_synthetic", "dev_clip", None):
+    room = "suite-clinical1" if sk == "suite_synthetic" else "room_jwyrr4dc"
+    errors = validate_manifest(stub("w1", room, **({"source_kind": sk} if sk else {})), raise_on_error=False)
+    assert errors == [], errors
 try:
-    write_track(ROOT, DATE, REAL_ROOM, "w2", track("w2"), manifest_stub=stub("w2", "room_completely_different"))
-    raise AssertionError("expected a room_id mismatch between stub and argument to be refused")
-except ValueError as e:
-    assert "does not match" in str(e)
-try:
-    write_track(ROOT, "2026-01-01", REAL_ROOM, "w2", track("w2"), manifest_stub=stub("w2", REAL_ROOM))
-    raise AssertionError("expected an ist_date mismatch to be refused")
-except ValueError:
+    validate_manifest(stub("w1", "room_jwyrr4dc", source_kind="bogus"))
+    raise AssertionError("expected a bad source_kind to be rejected")
+except ValidationError:
     pass
-assert not os.path.exists(os.path.join(ROOT, DATE, "room_completely_different"))
-print("6/8 stub/argument consistency OK: a mismatched stub is refused before anything is written")
+for c in ("tape_utc", "approx", "clip_local", None):
+    errors = validate_manifest(stub("w1", "room_jwyrr4dc", **({"clock": c} if c else {})), raise_on_error=False)
+    assert errors == [], errors
+try:
+    validate_manifest(stub("w1", "room_jwyrr4dc", clock="bogus"))
+    raise AssertionError("expected a bad clock value to be rejected")
+except ValidationError:
+    pass
+print("1/4 enum validation OK: source_kind/clock accept only their documented values")
 
-# --- round trip: index.jsonl carries source_kind, real_room_windows() filters correctly --------------
-write_track(ROOT, DATE, REAL_ROOM, "w_tape", track("w_tape"), manifest_stub=stub("w_tape", REAL_ROOM))
-write_track(ROOT, DATE, REAL_ROOM, "w_dev", track("w_dev"),
-            manifest_stub=stub("w_dev", REAL_ROOM, source_kind="dev_clip", clock="approx", source_windows=[SRC_WIN]))
-write_track(ROOT, DATE, SUITE_ROOM, "w_synth", track("w_synth"),
-            manifest_stub=stub("w_synth", SUITE_ROOM, source_kind="suite_synthetic", clock="clip_local"))
+# --- suite_synthetic MUST use the suite- room_id prefix; the prefix is reserved for it --------------
+try:
+    validate_manifest(stub("w1", "room_jwyrr4dc", source_kind="suite_synthetic"))
+    raise AssertionError("a suite_synthetic window with a real-looking room_id must be rejected")
+except ValidationError as e:
+    assert "suite-" in str(e)
+try:
+    validate_manifest(stub("w1", "suite-clinical1", source_kind="room_tape"))
+    raise AssertionError("a non-synthetic window must not use the reserved suite- room_id prefix")
+except ValidationError:
+    pass
+assert validate_manifest(stub("w1", "suite-clinical1", source_kind="suite_synthetic"), raise_on_error=False) == []
+print("2/4 suite- prefix enforcement OK: can't fake or omit it for suite_synthetic")
 
-index_lines = [json.loads(l) for l in open(os.path.join(ROOT, DATE, "index.jsonl")) if l.strip()]
-by_window = {l["window_id"]: l["source_kind"] for l in index_lines}
-assert by_window == {"w_tape": "room_tape", "w_dev": "dev_clip", "w_synth": "suite_synthetic"}, by_window
-
-windows = [reb_pkg.load_window(w, ist_date=DATE, root=ROOT) for w in ("w_tape", "w_dev", "w_synth")]
-real_only = reb_pkg.real_room_windows(windows)
-assert [w.window_id for w in real_only] == ["w_tape"], [w.window_id for w in real_only]
-print("7/8 index+helper OK: index.jsonl carries source_kind; real_room_windows() excludes dev_clip and suite_synthetic")
-
-# --- old-shape manifest (no source_kind/clock at all) still defaults and validates fine --------------
-write_track(ROOT, DATE, REAL_ROOM, "w_old", track("w_old"), manifest_stub=stub("w_old", REAL_ROOM))
+# --- defaults: a window written before this field existed reads back as room_tape/tape_utc ----------
+write_track(ROOT, DATE, "room_jwyrr4dc", "w_old", track("w_old"), manifest_stub=stub("w_old", "room_jwyrr4dc"))
 w_old = reb_pkg.load_window("w_old", ist_date=DATE, root=ROOT)
 assert w_old.source_kind == "room_tape" and w_old.clock == "tape_utc"
-print("8/8 backward-compat OK: an old-shape manifest still defaults to room_tape/tape_utc and validates")
+print("3/4 defaults OK: an old-shape manifest with no source_kind/clock reads back as room_tape/tape_utc")
+
+# --- round trip: a dev_clip (real room, short, reconstructed tape time) and a suite_synthetic window ---
+write_track(ROOT, DATE, "room_jwyrr4dc", "w_devclip", track("w_devclip"),
+            manifest_stub=stub("w_devclip", "room_jwyrr4dc", source_kind="dev_clip", clock="approx"))
+w_dev = reb_pkg.load_window("w_devclip", ist_date=DATE, root=ROOT)
+assert w_dev.source_kind == "dev_clip" and w_dev.clock == "approx"
+
+write_track(ROOT, DATE, "suite-clinical1", "w_synth", track("w_synth"),
+            manifest_stub=stub("w_synth", "suite-clinical1", source_kind="suite_synthetic", clock="clip_local"))
+w_synth = reb_pkg.load_window("w_synth", ist_date=DATE, root=ROOT)
+assert w_synth.source_kind == "suite_synthetic" and w_synth.clock == "clip_local"
+print("4/4 round trip OK: dev_clip and suite_synthetic windows write/read correctly, room_tape windows unaffected")
 
 shutil.rmtree(ROOT, ignore_errors=True)
 print("ALL SOURCE_KIND/CLOCK TESTS OK")

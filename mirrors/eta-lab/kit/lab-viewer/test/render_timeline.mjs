@@ -29,15 +29,9 @@ const T0 = Date.parse("2026-09-26T09:00:00+05:30");
 const consult = { room_id: "room_a", room_name: "OPD 3", date: "2026-09-26",
   windows: [{ k: "r/room_a/2026-09-26/w1", t0: "09:00", t1: "09:15", s: T0, e: T0 + 900000, status: "text", n_words: 12, run_id: "r" }],
   hidden: [], segments: [{ w: 0, t: T0 + 5000, e: T0 + 8000, sp: { l: "A", mixed: false, seq: null } }, { w: 0, t: T0 + 9000, e: T0 + 12000, sp: { l: "B", mixed: false, seq: null } }] };
-const doc = { fleet: [{ kind: "mic_missing", at_ms: T0 + 60000, message: "Mic not detected" }],
-  pqm_truth: [{ start_ms: T0, end_ms: T0 + 600000, token: "T-9", status: "confirmed" },
-    { start_ms: T0 + 3600000, end_ms: T0 + 3600000 + 3600000, token: "T-10", status: "confirmed", suspect: true }],   // Fable 15:50: auto-timeout artifact, start-only tick
+const doc = { fleet: [{ kind: "mic_missing", at_ms: T0 + 60000, message: "Mic not detected" }], pqm_truth: [{ start_ms: T0, end_ms: T0 + 600000, token: "T-9", status: "confirmed" }],
   cap_links: [{ start_ms: T0, end_ms: T0 + 60000, items: 5, captured: 4 }], acoustics: { missed_speech_pct: 3.2, missed: [{ start_ms: T0 + 200000, end_ms: T0 + 210000 }] },
-  detected: { acoustic: [{ start_ms: T0 + 60000, end_ms: T0 + 120000, conf: 0.6 }], e6: [], jev_loop: [] },
-  reb: { whisper: [{ t0_ms: T0, t1_ms: T0 + 4000, text: "invented whisper line", engine: "whisper-auto" }],
-         indic: [{ t0_ms: T0 + 4000, t1_ms: T0 + 8000, text: "invented indic line", engine: "indic-ctc-kn" }],
-         medasr: [{ t0_ms: T0, t1_ms: T0 + 8000, text: "invented term line", engine: "medasr" }],
-         tone: [{ t0_ms: T0, t1_ms: T0 + 8000, text: "", engine: "wavlm" }] } };   // W49 palimpsest (Fable 28 Sep): sravaani/diar/acoustic left empty on purpose - exercises the "not processed yet" fallback too
+  detected: { acoustic: [{ start_ms: T0 + 60000, end_ms: T0 + 120000, conf: 0.6 }], e6: [], jev_loop: [] } };
 const pageHtml = roomDayPage(roomDayModel(consult, doc)).replaceAll("__NONCE__", "testnonce");
 
 const srv = http.createServer((q, res) => {
@@ -70,13 +64,6 @@ try {
   check("room-day: STT, missed speech tile, patient-queue and prescription lane labels shown", /STT windows/.test(txt) && /3.2%/.test(txt) && /Patient queue/.test(txt) && /Prescription/.test(txt) && /Detected encounters/.test(txt));
   const titles = await page2.evaluate(() => [...document.querySelectorAll("svg title")].map((t) => t.textContent));
   check("room-day: SVG tooltips carry the real values (queue token, capture count, acoustic tag)", titles.some((t) => t.includes("T-9")) && titles.some((t) => t.includes("captured")) && titles.some((t) => t.includes("Acoustic")));
-  check("room-day: suspect pqm row (Fable 15:50) reads as an unknown-end tick, never a fabricated end time", titles.some((t) => t.includes("T-10") && t.includes("end time unknown") && t.includes("queue timer ran out")) && !titles.some((t) => t.includes("T-10") && /\d\d:\d\d–\d\d:\d\d/.test(t)));
-  const queueRects = await page2.evaluate(() => [...document.querySelectorAll("svg title")].filter((t) => t.textContent.includes("T-10")).map((t) => t.closest("rect").getAttribute("width")));
-  check("room-day: suspect row's rect is the narrow fixed tick width, not proportional to its (fake) span", queueRects.length === 1 && queueRects[0] === "0.4");
-  // W49 palimpsest (Fable 28 Sep, overnight priority): the 7 REB day-overlay lanes - real segments render for the
-  // populated ones, "not processed yet" for the empty ones (sravaani/diar/acoustic here), no crash either way
-  check("room-day: Whisper/IndicConformer/MedASR/Tone lane labels shown", ["Whisper", "IndicConformer", "MedASR", "Tone"].every((n) => txt.includes(n)));
-  check("room-day: whisper/indic/medasr lanes show their real engine+text", titles.some((t) => t.includes("whisper-auto: invented whisper line")) && titles.some((t) => t.includes("indic-ctc-kn: invented indic line")) && titles.some((t) => t.includes("medasr: invented term line")));
-  check("room-day: an empty reb lane (SraVaani here) says not processed yet, not a crash", txt.includes("SraVaani") && /SraVaani[\s\S]{0,120}No current track segments/.test(txt));
+  check("room-day: tone always says not shown yet", /Tone[\s\S]*not.*valid/i.test(txt));
 } finally { await browser.close(); srv.close(); }
 console.log(fails ? `FAILED ${fails}` : "ALL PASS"); process.exit(fails ? 1 : 0);

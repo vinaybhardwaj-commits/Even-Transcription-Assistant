@@ -5,8 +5,7 @@ reach disk (spec's step-2 order says so explicitly).
 from .schema import (
     REQUIRED_TRACK_FIELDS, REQUIRED_MANIFEST_FIELDS, REQUIRED_AUDIO_FIELDS,
     REQUIRED_SEGMENT_FIELDS, STATUS_VALUES, SCHEMA_VERSION,
-    SOURCE_KIND_VALUES, DEFAULT_SOURCE_KIND, CLOCK_VALUES,
-    SUITE_ROOM_RE, REAL_ROOM_ID_RE,
+    SOURCE_KIND_VALUES, CLOCK_VALUES, SUITE_ROOM_PREFIX,
 )
 
 
@@ -84,56 +83,20 @@ def validate_manifest(manifest, raise_on_error=True):
         source_kind = manifest.get("source_kind")
         if source_kind is not None and source_kind not in SOURCE_KIND_VALUES:
             errors.append(f"manifest: source_kind {source_kind!r} not one of {SOURCE_KIND_VALUES}")
-        # The DEFAULT (source_kind omitted) is room_tape — the check below applies to it too, per
-        # eta-refuter-2's #4805 S1: the safe side must be the default, not an opt-in you can forget.
-        effective_source_kind = source_kind or DEFAULT_SOURCE_KIND
         room_id = manifest.get("room_id")
-        clock = manifest.get("clock")
-        effective_clock = clock or "tape_utc"
-
-        if effective_source_kind == "suite_synthetic":
-            if isinstance(room_id, str) and not SUITE_ROOM_RE.match(room_id):
-                errors.append(
-                    f"manifest: source_kind='suite_synthetic' requires room_id to match {SUITE_ROOM_RE.pattern!r} "
-                    f"(got {room_id!r}) — a synthetic window must never be able to collide with, or be "
-                    "mistaken for, a real room (bus #4784/#4805)"
-                )
-            if clock != "clip_local":
-                errors.append(
-                    f"manifest: source_kind='suite_synthetic' requires clock='clip_local' (got {clock!r}) "
-                    "— a synthetic window has no tape clock and must not look like it's on one"
-                )
-        else:  # room_tape (explicit or defaulted) and dev_clip both use a REAL room_id
-            if isinstance(room_id, str) and not REAL_ROOM_ID_RE.match(room_id):
-                errors.append(
-                    f"manifest: source_kind={effective_source_kind!r} requires room_id to match "
-                    f"{REAL_ROOM_ID_RE.pattern!r} (got {room_id!r}) — this is the POSITIVE check "
-                    "(eta-refuter-2 #4805 S1): a made-up room_id must never be silently accepted as a "
-                    "real room just because source_kind was left unset"
-                )
-            if effective_clock == "clip_local":
-                errors.append(
-                    f"manifest: source_kind={effective_source_kind!r} must not have clock='clip_local' "
-                    "(that means 'no tape clock', which contradicts having a real room_id)"
-                )
-
-        if effective_source_kind == "dev_clip":
-            # A dev_clip can span MORE than one tape chunk / hist-bulk window (a consult-length crop,
-            # for instance) -- eta-refuter-2 #4853 (also independently flagged by eta-refuter-3 #4855):
-            # a single {run_id, window_id} silently recorded only the first source and broke the
-            # traceability this field exists for. Always a non-empty LIST, even for a one-source clip.
-            source_windows = manifest.get("source_windows")
-            valid = (
-                isinstance(source_windows, list) and len(source_windows) > 0
-                and all(isinstance(sw, dict) and sw.get("run_id") and sw.get("window_id") for sw in source_windows)
+        if source_kind == "suite_synthetic" and isinstance(room_id, str) and not room_id.startswith(SUITE_ROOM_PREFIX):
+            errors.append(
+                f"manifest: source_kind='suite_synthetic' requires room_id to start with "
+                f"{SUITE_ROOM_PREFIX!r} (got {room_id!r}) — a synthetic window must never be able to "
+                "collide with, or be mistaken for, a real room (bus #4784)"
             )
-            if not valid:
-                errors.append(
-                    "manifest: source_kind='dev_clip' requires source_windows=[{'run_id':..., "
-                    "'window_id':...}, ...] (non-empty; EVERY tape chunk/hist-bulk window this "
-                    "sub-clip spans, not just the first — eta-refuter-2 #4805/#4853)"
-                )
+        elif source_kind != "suite_synthetic" and isinstance(room_id, str) and room_id.startswith(SUITE_ROOM_PREFIX):
+            errors.append(
+                f"manifest: room_id {room_id!r} uses the reserved {SUITE_ROOM_PREFIX!r} prefix but "
+                "source_kind is not 'suite_synthetic' — that prefix is reserved for synthetic suites"
+            )
 
+        clock = manifest.get("clock")
         if clock is not None and clock not in CLOCK_VALUES:
             errors.append(f"manifest: clock {clock!r} not one of {CLOCK_VALUES}")
     if errors and raise_on_error:

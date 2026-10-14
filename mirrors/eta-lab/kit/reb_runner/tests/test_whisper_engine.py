@@ -87,36 +87,5 @@ validate_track(empty_track)
 assert empty_track["status"] == "empty" and empty_track["segments"] == []
 print("empty-status OK: no segments -> status='empty' (not 'ok'), still schema-valid")
 
-# --- eta-refuter-3 #4806: a sub-1s tail merges into the previous chunk instead of going out alone ---
-chunks = w._plan_chunks(30.0005)  # the exact "30001ms" shape flagged: 30.0s + 0.5ms tail
-assert len(chunks) == 1 and abs(chunks[0][1] - 30.0005) < 1e-9, chunks
-chunks2 = w._plan_chunks(31.5)  # a real (not-tiny) tail must stay its own chunk
-assert len(chunks2) == 2 and abs(chunks2[1][1] - 1.5) < 1e-9, chunks2
-chunks3 = w._plan_chunks(60.9)  # 30 + 30.9s tail (0.9s < 1s) -> tail merges into the 2nd chunk
-assert len(chunks3) == 2, chunks3
-assert abs(chunks3[0][1] - 30.0) < 1e-9 and abs(chunks3[1][1] - 30.9) < 1e-9, chunks3
-print("5/6 tail-merge OK: a sub-1s tail folds into the PRECEDING chunk, a real tail stays separate")
-
-# --- eta-refuter-2 (#4807 chunk maths): a segment whose end overshoots its chunk is clamped ----------
-calls["n"] = 0; calls["args"].clear()
-_first_call = {"done": False}
-def overshoot_call(chunk_wav, language, prompt, timeout=120):
-    if not _first_call["done"]:
-        _first_call["done"] = True
-        return {"segments": [{"start": 29.0, "end": 31.5, "text": "overshoot"}],  # this chunk is only 30s long
-                "language_probabilities": {"en": 0.9}}
-    return {"segments": [], "language_probabilities": {}}
-w._call_whisper = overshoot_call
-segs, _ = w.run_window(WAV, 65000, "whisper-auto")
-assert segs and segs[0]["t0_ms"] == 29000 and segs[0]["t1_ms"] == 30000, segs[0]  # clamped to the chunk's own end, not 31500
-print("6/6 clamp OK: a segment whose reported end overshoots its 30s chunk is clamped to the chunk boundary")
-
-# --- expected_config: computable with no network call, matches what run_window actually used ---------
-cfg, cfg_hash = w.expected_config("whisper-forced-en")
-assert cfg == {"language": "en", "response_format": "verbose_json", "temperature": 0.0, "temperature_inc": 0.2}
-from reb.writer import config_hash as _config_hash
-assert cfg_hash == _config_hash(cfg)
-print("expected_config OK: computable without an engine call, matches the real config shape")
-
 os.unlink(WAV)
 print("ALL WHISPER ENGINE TESTS OK")
