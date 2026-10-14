@@ -2,15 +2,17 @@
 # shellcheck disable=SC2034,SC2154
 # Kiosk Guardian: probe responder (spec 2.2, A2). `probe <room> <id>` -> one reply on
 # kiosk/<room>/probe-reply. Every A2 row runs in parallel; a timeout is a verdict.
-# One DEADLINE from probe start (PROBE_BUDGET_MS, 4.5 s: 0.5 s under the spec's 5 s), so a busy host cannot push the reply late:
+# One DEADLINE from probe start (PROBE_BUDGET_MS, 4.0 s: 1 s under the spec's 5 s for timer and fork lateness on a busy host), so a busy host cannot push the reply late:
 #   check cap   = min(PROBE_CAP_S, remaining - PROBE_PUBLISH_RESERVE_MS)   (no check is started when under 0.2 s is left: all rows are marked timeout)
 #   publish cap = remaining at publish time minus how late the check timers fired and PROBE_TIMER_SLACK_MS (the publish timer itself fires late too), at least PROBE_PUBLISH_MIN_MS
 
 PROBE_CAP_S="${PROBE_CAP_S:-2.5}"
-PROBE_BUDGET_MS="${PROBE_BUDGET_MS:-4500}"
+PROBE_BUDGET_MS="${PROBE_BUDGET_MS:-4000}"
 PROBE_PUBLISH_RESERVE_MS="${PROBE_PUBLISH_RESERVE_MS:-1000}"
 PROBE_PUBLISH_MIN_MS="${PROBE_PUBLISH_MIN_MS:-300}"
-PROBE_TIMER_SLACK_MS="${PROBE_TIMER_SLACK_MS:-250}"   # run_capped fires its kill about 0.2-0.3 s after the cap on a busy host (measured)
+# Deviation from the R3 ruling, accepted by gating-lead at R5: this allowance comes off the publish cap. It only shortens the publish.
+# run_capped fires its kill 0.2-0.6 s after the cap on a busy host (refuter: publish lateness 171-593 ms; builder trace 0.2-0.3 s).
+PROBE_TIMER_SLACK_MS="${PROBE_TIMER_SLACK_MS:-250}"
 PROBE_NAMES="rms_dbfs_2s tcc usb audio_engine default_input coreaudiod recorder helper upload presence disk power"
 
 # Pure bash, no external process (every fork costs real time on a loaded host).

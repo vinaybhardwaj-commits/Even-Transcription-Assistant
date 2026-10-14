@@ -37,7 +37,7 @@ test_probe_via_main_entry() {
   assert_has "$(cat "$T/pub.log")" '"probe_id":"z9"' "guardian.sh handle"
 }
 
-# Spec 2.2: a probe is answered within 5 s. Checks are capped at 2.5 s and the reply publish at 1.5 s; process overhead is about 0.5 s, so the worst case stays under 5 s.
+# Spec 2.2: a probe is answered within 5 s. The deadline is 4.0 s from probe start (checks end by 3.0 s), leaving about 1 s for timer and fork lateness.
 ms() { mono_ms; }
 test_probe_reply_within_5_s_when_a_check_and_the_publish_both_hang() {
   unset PROBE_CAP_S; load_libs; mk_tcc 2
@@ -64,12 +64,14 @@ test_probe_check_timing_out_at_the_default_cap_yields_a_verdict() {
   assert_eq "$(find "$STATE_DIR" -maxdepth 1 -name 'probe.*' | wc -l | tr -d ' ')" "0" "no probe temp dir left behind"
 }
 
-# ---- R3: one deadline from probe start (4.5 s), not fixed caps ----
+# ---- R3/R5: one deadline from probe start (4.0 s), not fixed caps ----
 
 test_probe_caps_are_computed_from_the_time_left() {
   unset PROBE_CAP_S; load_libs
-  assert_eq "$PROBE_BUDGET_MS" "4500" "budget: 0.5 s under the spec's 5 s"
-  assert_eq "$(probe_check_cap 4500)" "2.500" "full budget: the 2.5 s ceiling"
+  assert_eq "$PROBE_BUDGET_MS" "4000" "budget: 1 s under the spec's 5 s"
+  assert_eq "$((PROBE_BUDGET_MS - PROBE_PUBLISH_RESERVE_MS))" "3000" "the check phase ends 3.0 s after probe start"
+  assert_eq "$PROBE_TIMER_SLACK_MS" "250" "publish-timer allowance"
+  assert_eq "$(probe_check_cap 4000)" "2.500" "full budget (4.0 s left): the 2.5 s ceiling"
   assert_eq "$(probe_check_cap 3000)" "2.000" "3.0 s left: leave 1.0 s for the publish"
   assert_eq "$(probe_check_cap 2500)" "1.500" "2.5 s left"
   assert_eq "$(probe_check_cap 1100)" "0.000" "under 0.2 s for checks: none are started"
