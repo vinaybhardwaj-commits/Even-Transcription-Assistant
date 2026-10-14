@@ -20,6 +20,7 @@ from tools.eta2freescript.eval.pulse.vertex import (ReplayUnavailable, Transcrip
 FIX = Path(__file__).resolve().parent / "fixtures" / "pulse"
 VISIT = date(2026, 10, 13)
 SERVED = "synthetic-served-id-007"
+OK_RULING = "FABLE-REPLAY-EXTRACT-14OCT"
 
 
 @pytest.fixture
@@ -442,7 +443,7 @@ def test_other_region_needs_a_ruling():
             VertexClient("synth-proj-001", loc, lambda: "t")
         with pytest.raises(ReplayUnavailable):
             VertexClient("synth-proj-001", loc, lambda: "t", location_ruling="  ")
-    c = VertexClient("synth-proj-001", "europe-west4", lambda: "t", location_ruling="fable-ruling-99")
+    c = VertexClient("synth-proj-001", "europe-west4", lambda: "t", location_ruling=OK_RULING)
     assert c.location == "europe-west4"
     VertexClient("synth-proj-001", "asia-northeast1", lambda: "t")  # the default needs none
 
@@ -456,7 +457,7 @@ def test_from_env_region_ruling(tmp_path):
         VertexClient.from_env(env, token_provider=lambda: "t")
     with pytest.raises(ReplayUnavailable):
         VertexClient.from_env({**env, "VERTEX_LOCATION_OVERRIDE_RULING": ""}, token_provider=lambda: "t")
-    c = VertexClient.from_env({**env, "VERTEX_LOCATION_OVERRIDE_RULING": "fable-ruling-99"}, token_provider=lambda: "t")
+    c = VertexClient.from_env({**env, "VERTEX_LOCATION_OVERRIDE_RULING": OK_RULING}, token_provider=lambda: "t")
     assert c.location == "us-central1"
 
 
@@ -525,7 +526,7 @@ def test_region_fullmatch_and_real_ruling():
         with pytest.raises(ReplayUnavailable):
             VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
     with pytest.raises(ReplayUnavailable):
-        VertexClient("synth-proj-001", "us-central1\n", lambda: "t", location_ruling="fable-ruling-99")
+        VertexClient("synth-proj-001", "us-central1\n", lambda: "t", location_ruling=OK_RULING)
     with pytest.raises(ReplayUnavailable):
         VertexClient("synth-proj-001", "asia-northeast1\n", lambda: "t")
 
@@ -534,18 +535,46 @@ def test_region_fullmatch_and_real_ruling():
 def test_ruling_that_must_not_unlock(ruling):
     with pytest.raises(ReplayUnavailable):
         VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
-    VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling="r1")
+    VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=OK_RULING)
 
 
-@pytest.mark.parametrize("ruling", ["\u2028", "\u2029", "\u0378", "\uffff", "\U0010ffff", "\u3164", "\u0020", "\u0000"])
+@pytest.mark.parametrize("ruling", [" ", " ", "͸", "￿", "\U0010ffff", "ㅤ", " ", "\u0000", "r", "7", "क"])
 def test_ruling_allow_list_more(ruling):
     with pytest.raises(ReplayUnavailable):
         VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
 
 
-@pytest.mark.parametrize("ruling", ["r", "7", "#", "+", "\u093e", "\u0915"])
-def test_ruling_allow_list_unlocks(ruling):
-    VertexClient("synth-proj-001", "us-central1", lambda: "t", location_ruling=ruling)
+@pytest.mark.parametrize("loc", ["global", "us-central1"])
+def test_exact_id_unlocks_global_and_us_central1(loc):
+    assert VertexClient("synth-proj-001", loc, lambda: "t", location_ruling=OK_RULING).location == loc
+
+
+@pytest.mark.parametrize("ruling", [
+    "FABLE-REPLAY-EXTRACT-15OCT",
+    "FABLE-REPLAY-EXTRACT-14OCТ",
+    "FABLE-REPLAY-EXTRACT-14OCT ",
+    "FABLE-REPLAY-EXTRACT-14OCT​",
+    "fable-replay-extract-14oct",
+    "FABLE-REPLAY-EXTRACT-14OCT\n", "fable-ruling-99", "", None,
+])
+@pytest.mark.parametrize("loc", ["global", "us-central1"])
+def test_other_ids_are_refused(loc, ruling):
+    with pytest.raises(ReplayUnavailable):
+        VertexClient("synth-proj-001", loc, lambda: "t", location_ruling=ruling)
+
+
+def test_default_location_unchanged_without_a_ruling():
+    assert VertexClient("synth-proj-001", "asia-northeast1", lambda: "t").location == "asia-northeast1"
+
+
+def test_construction_log_carries_location_and_ruling_only(caplog):
+    with caplog.at_level(logging.INFO, logger="eta.pulse_replay.vertex"):
+        VertexClient("synth-proj-001", "global", lambda: "secret-token", location_ruling=OK_RULING)
+        VertexClient("synth-proj-001", "asia-northeast1", lambda: "t")
+    msgs = [r.getMessage() for r in caplog.records if r.name == "eta.pulse_replay.vertex"]
+    assert msgs == ["vertex client location=global ruling=FABLE-REPLAY-EXTRACT-14OCT",
+                    "vertex client location=asia-northeast1 ruling=none"]
+    assert "synth-proj-001" not in " ".join(msgs) and "secret-token" not in " ".join(msgs)
 
 
 def test_every_writer_label_is_refused():
@@ -830,7 +859,7 @@ def test_global_needs_a_ruling_and_uses_the_global_host():
             VertexClient("synth-proj-001", "global", lambda: "t", location_ruling=ruling)
     seen = []
     c = VertexClient("synth-proj-001", "global", lambda: "t", transport=lambda u, h, b: seen.append(u) or {},
-                     location_ruling="fable-ruling-99")
+                     location_ruling=OK_RULING)
     c.generate(stage="extract", model="m-1", system="s", user="u", schema={}, temperature=0, max_tokens=1)
     assert seen[0].startswith("https://aiplatform.googleapis.com/v1/projects/synth-proj-001/locations/global/")
     assert "-aiplatform" not in seen[0]
@@ -846,7 +875,7 @@ def test_asia_northeast1_host_unchanged_after_global_change():
 def test_global_guard_hit_aborts_before_the_call():
     seen = []
     c = VertexClient("synth-proj-001", "global", lambda: "t", transport=lambda u, h, b: seen.append(u) or {},
-                     location_ruling="fable-ruling-99")
+                     location_ruling=OK_RULING)
     with pytest.raises(TranscriptGuardError):
         c.generate(stage="extract", model="m-1", system="s", user="x T0 [S1] (00:00) y", schema={}, temperature=0, max_tokens=1)
     with pytest.raises(TranscriptGuardError):
