@@ -1,40 +1,10 @@
 # LOG — RECORDER (next Room Recorder fleet release)
 
-Build and event log, newest first. Owner: scribe (build/deploy) + minibot (Mini monitor). This project was named new on 26 Sep.
+Build and event log, newest first. Owner to confirm (scribe build + minibot Mini monitor — verify in records). This project was named new on 26 Sep; entries below gather what the records already hold.
 
-## 27-28 Sep -- signature_mismatch CLOSED; self_test parked on write-scope
-Session: sig-debug, sig-research, scribe, eta-refuter.
-Root cause: every failure traced to old app build 0.1.8, not a new bug (see ROOMS log). W37 closed, SIG-ROOT-CAUSE.md + SIG-FACTS.md final. A 0.1.26 fix spec written (codesign-stderr logging, ISO-UTC log lines). Home Office's live self_test is parked: minibot's MCP token lacks write scope, the same class of gap SHIP fixed generally for room commands; scribe designing the least-privilege fix for this specific path.
-Refs: #4334-4375, #4350, #5016-5033.
-
-## 27 Sep ~09:5x-10:3x IST — 0.1.25 PASS 1da7232; self-test hook + server command built
-Session: scribe, eta-refuter, diar-lab.
-Swift gate PASS at 1da7232 on the Air (637 tests, 2 pre-existing flakes also on 0.1.24, not a regression, #4276) after 3 FAIL/fix rounds. New self_test bench command (plays a fixed stimulus, records into a separate segment, uploads with a manifest) built into the app; a separate server-side self-test-server (d82ef4c) is NOT yet pushable (eta-refuter FAIL: no self_test variant in the MCP tool group, #4281/#4284). Fable's GO: signed test build to Home Office only, auto-start left on.
-Refs: #4252, #4262, #4276, #4280, #4281.
-
-## 26 Sep ~19:3x-20:0x IST — 0.1.25 plan
-Session: scribe.
-Plan a5009c4 pushed (#3857), corrected d179c38 then d7949f5: DEVICE_MISSING does fire (retraction #3862), 7-day hours, room-schedule code 93a1f17 built and unchecked (#3879).
-Refs: #3857, #3862, #3879.
-
-## 26 Sep ~12:15 IST — queue named: 0.1.25 with 5 defects
-Session: scribe (OpenCode) + minibot.
-Current versions: macOS stable **0.1.24** (build c4a0289, published 17 Sep; branch `vinay/rr-0.1.24`) on all 10 macOS rooms; Linux **0.1.22.2** (build 7b0a67e3) on ORB3. **Recorder releases ride their own branch `vinay/rr-*` + the app_release shelf — never the app branch** (which carries recorder 0.1.22). Next release queue = **0.1.25**, holding scribe's defects #1-#4 (tape_advancing follows tape.pcm not tape.idx; poll reports device_lost; same-uid set_audio_input is a no-op; DEVICE_MISSING flag semantics UNVERIFIED) **plus defect #5 device-loss recovery** (minibot #3581, fleet #3572).
-Refs: #3558, #3581, #3572.
-
-## 26 Sep — Mini STT side of the fleet release
-Session: minibot.
-Mini STT stack (manifest MINI-STT-MANIFEST.v2.json, sha c85d1e6e): whisper-shim 50fcc4e, eta-router 5e841f0, eta-indic e9b71b3 (VAD off), eta-diarize 54248d60. Queued Mini-side: diarize-guard stale in_flight fix (r245, install HOLD r352), migrations 0119/0120/0121 (r357). Deploy-train holds (5907cbc, SCRIBE_MCP_TOKENS_EXTRA, WHISPER_BULK_URLS, ORB3) are SHIP, NOT part of the 0.1.25 queue.
-Refs: #3553, #3564.
-
-## 26 Sep ~14:10 IST — Home Office recorder = the production Mini
-Session: minibot (read-only, local).
-Home Office room (room_2qe955hy) hostname "Vinay's Mac mini" = the production Mini itself (macOS 27.0, Mac16,11); app 0.1.24, TONOR TM20 configured. Read is LOCAL (no ssh/tailnet). DISK_AMBER = data volume 79% used (93 Gi free of 460 Gi). Device present and clean now — the 25 Sep DEVICE_MISSING points to an intermittent USB enumeration fault.
-Refs: #3584, #3591.
-
-## 26 Sep — project named
+## 26 Sep — project named; scope to confirm
 Session: roadmap (this pane).
-Programme 15 created. Queued items gathered from records: self-test hooks (r368/369), auto-start at clinic open if V approves (item 151), mute/silence/unplug detection, device-missing handling.
+Programme 15 created. Current version stated as 0.1.24 **UNVERIFIED** (scribe's handover records ORB3's Linux recorder at 0.1.22.2, a different build). Queued items gathered from records: self-test hooks (r368/369), auto-start at clinic open if V approves (item 151), mute/silence/unplug detection, device-missing handling.
 Refs: brief; HANDOVER-scribe.md.
 
 ## 25 Sep — recorder backlog facts (from scribe)
@@ -49,4 +19,3 @@ Refs: orders/RULING-MINI-NIGHT-LAB.md.
 
 ## Release process (to confirm)
 R3 self-update proven 10 Sep (**UNVERIFIED exact date**). Gates + rollout plan still to be written once scope + owner are confirmed.
-- 29 Sep ~23:10 IST (rev 27): T-RECORDER-2 done (two Macs dropped off Tailscale); T-RECORDER-3 on-site check 30 Sep (person UNVERIFIED); T-RECORDER-1 parked to morning.

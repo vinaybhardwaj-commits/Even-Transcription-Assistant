@@ -73,26 +73,6 @@ elif [ -n "$SESSION" ]; then
 fi
 REGISTRY_KEY="${MACHINE:+machine:$MACHINE}"
 REGISTRY_KEY="${REGISTRY_KEY:-${SESSION:-default}}"
-# F1 regression fix (eta-refuter 27 Sep, report 5107): eta-bus-mcp's
-# KNOWN_MACHINES now passes herdr machines BY ID (name lookups cost ~2 s,
-# eta-refuter msg 5100), but the registry/log namespace is keyed
-# machine:<LABEL>. Resolve a 32-hex id to its label once via the read-only
-# `herdr machine list`, and key the registry under the label so existing
-# registry data (machine:eta-lab-t4 etc.) keeps matching. No label match
-# or listing failure: fall back to the raw id key — fail-safe, no
-# behavior change for keys that were already correct.
-if [[ "$MACHINE" =~ ^[0-9a-f]{32}$ ]]; then
-  _MACH_LABEL=$("$HERDR" machine list 2>/dev/null \
-    | python3 -c '
-import sys
-mid = sys.argv[1]
-for line in sys.stdin:
-    parts = line.rstrip("\n").split("\t")
-    if len(parts) >= 2 and parts[0] == mid:
-        print(parts[1]); break
-' "$MACHINE")
-  REGISTRY_KEY="machine:${_MACH_LABEL:-$MACHINE}"
-fi
 
 hcli() { $HERDR "${HFLAGS[@]}" "$@"; }
 

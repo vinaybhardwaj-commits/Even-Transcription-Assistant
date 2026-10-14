@@ -20,7 +20,7 @@
 #   - logs one line per call (ts, caller agent from HERDR_PANE_ID when present, the
 #     .gpg basename, the outdir basename, success/fail) to $HOME/.vj-seal-decrypt.log;
 #   - writes the plaintext to $OUTDIR/<name without .gpg>, mode 0600, refusing to
-#     overwrite an existing output (add --force to overwrite).
+#     overwrite an existing output (set env FORCE=1 to overwrite).
 #
 # THIS INSTALLER: default --dry-run prints the wrapper content + the exact install
 # commands; --apply writes the wrapper on the box (user-local, no sudo) and verifies
@@ -106,7 +106,7 @@ OUTDIR_ARG="${2:-.}"
 
 # name: bare filename, .gpg suffix, no traversal
 case "$NAME" in
-  *[!/]*|*/*) echo "vj-seal-decrypt: name must be a bare .gpg filename" >&2; exit 3 ;;
+  */*) echo "vj-seal-decrypt: name must be a bare .gpg filename" >&2; exit 3 ;;
 esac
 if ! printf '%s' "$NAME" | grep -qE '^[A-Za-z0-9._-]+\.gpg$'; then
   echo "vj-seal-decrypt: bad name" >&2
