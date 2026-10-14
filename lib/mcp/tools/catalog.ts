@@ -11,7 +11,7 @@ import { istDateOf } from "@/lib/sarvam-lab";
 import { listJevDecisions } from "@/lib/room-access/tool-reads";
 import { listResults } from "@/lib/rubrics/store";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
-import { clipKeyOf, decodeCursor, encodeCursor, layerAbsent, layerError, layerNotAvailable, layerOk, loadCatalog, presignClip, readPartsLayer, readTranscriptLayer, searchView, CATALOG_MIN_DATE, type Layer, type Row } from "@/lib/room-access/readers/catalog-consult";
+import { fetchManifest, clipKeyOf, decodeCursor, encodeCursor, layerAbsent, layerError, layerNotAvailable, layerOk, loadCatalog, presignClip, readPartsLayer, readTranscriptLayer, searchView, CATALOG_MIN_DATE, type Layer, type Row } from "@/lib/room-access/readers/catalog-consult";
 import { argBool, argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
 import { AmbiguousRoomError, resolveRoom } from "./brain";
 
@@ -195,9 +195,10 @@ async function get(args: ToolArgs): Promise<Row> {
   const row = cat.rows.get(uid);
   if (!row) return { ok: false, error: "not_found" };
   if (blind(row)) return { ok: false, error: "blind_room_day" };
+  const mf = fetchManifest(row); // C4c: one manifest read shared by transcript and parts
   const [transcript, parts, freescript, rubric, jev] = await Promise.all([
-    guard([], () => readTranscriptLayer(row, includeText)),
-    guard([], () => readPartsLayer(row)),
+    guard([], () => readTranscriptLayer(row, includeText, mf)),
+    guard([], () => readPartsLayer(row, mf)),
     guard(["freescript_latest"], () => freescriptLayer(uid, includeText)),
     guard(["rubric_result"], () => rubricLayer(uid)),
     guard(["jev_decision"], () => jevLayer(uid)),

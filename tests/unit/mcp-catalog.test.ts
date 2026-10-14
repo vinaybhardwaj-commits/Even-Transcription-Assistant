@@ -10,6 +10,7 @@ const H = vi.hoisted(() => ({
   sqlCalls: [] as Array<{ text: string; values: unknown[] }>,
   rooms: [] as Array<{ id: string; slug: string; name: string; disabled_at: null }>,
   freescriptRows: [] as Array<Record<string, unknown>>,
+  indexRows: [] as Array<Record<string, unknown>>,
   freescriptThrows: false,
   signCalls: [] as Array<Record<string, unknown>>,
   jev: [] as Array<Record<string, unknown>>,
@@ -26,6 +27,7 @@ vi.mock("@/lib/db", () => {
       const want = values.filter((v): v is string => typeof v === "string");
       return Promise.resolve(H.rooms.filter((r) => want.some((w) => w === r.id || w === r.slug || w.toLowerCase() === r.name.toLowerCase())));
     }
+    if (/FROM reb_track_index/.test(text)) return Promise.resolve(H.indexRows);
     if (/FROM freescript_latest/.test(text)) {
       if (H.freescriptThrows) return Promise.reject(Object.assign(new Error("boom"), { code: "42P01" }));
       return Promise.resolve(H.freescriptRows);
@@ -127,6 +129,7 @@ beforeEach(() => {
   H.sqlCalls = [];
   H.rooms = [{ id: "room_a", slug: "opd-a", name: "OPD A", disabled_at: null }, { id: "room_b", slug: "opd-b", name: "OPD B", disabled_at: null }];
   H.freescriptRows = [];
+  H.indexRows = [];
   H.freescriptThrows = false;
   H.signCalls = [];
   H.jev = [];
@@ -466,7 +469,7 @@ describe("get: parts", () => {
     setTrack(tk("parts.clef-jev"), parts("clef+jev"));
     setManifest();
     let p = ((await run({ action: "get", consult_uid: UID })).layers as Record<string, Row>).parts!;
-    expect(p).toEqual({ status: "ok", source: [tk("parts.clef-jev"), mkey()], data: [{ part: "history", t0_ms: 0, t1_ms: 900, score: 0.8, confidence: 0.7, source: "jev" }] });
+    expect(p).toEqual({ status: "ok", source: [tk("parts.clef-jev"), mkey()], data: [{ part: "history", t0_ms: 0, t1_ms: 900, score: 0.8, confidence: 0.7, source: "jev" }], n_clamped: 0 });
     setTrack(tk("parts.clef-jev"), parts("clef"));
     p = ((await run({ action: "get", consult_uid: UID })).layers as Record<string, Row>).parts!;
     expect(p).toMatchObject({ status: "absent", data: null });
@@ -591,15 +594,15 @@ describe("FIX1 X1: the clock (segment times are epoch ms; the answer is ms from 
     const t = (await get()).transcript!;
     const d = t.data as Row;
     expect((d.segments as Row[]).map((x) => [x.t0_ms, x.t1_ms])).toEqual([[0, 2000], [2000, 4000], [4000, 6000]]);
-    expect(d).toMatchObject({ clock: "ms_from_clip_start", manifest_t0_ms: T0, consult_span_ms: { t0: -60_000, t1: 5_000 }, duration_ms: 6000, n_clamped: 0 });
+    expect(d).toMatchObject({ clock: "ms_from_clip_start", manifest_t0_ms: T0, consult_span_ms: { t0: -60_000, t1: 5_000 }, duration_ms: 6000, n_clamped: 3 }); // the 6,400 ms Sarvam overrun, in each of the three tracks, is clamped to 6,000
     expect(t.source).toContain(mkey());
   });
   it("a negative offset clamps to 0 and is counted; t1 is clamped to the duration AFTER the conversion (never row.t_open)", async () => {
     seedLayers();
-    setTrack(tk("stt.sarvam-saaras-v3"), stt({ segments: [{ t0_ms: E(-5000), t1_ms: E(-1000), speaker: "0", lang: "en", text: "A" }, { t0_ms: E(-500), t1_ms: E(1500), speaker: "0", lang: "en", text: "B" }, { t0_ms: E(5000), t1_ms: E(9000), speaker: "0", lang: "en", text: "C" }] }));
+    setTrack(tk("stt.sarvam-saaras-v3"), stt({ segments: [{ t0_ms: E(-5000), t1_ms: E(-1000), speaker: "0", lang: "en", text: "A" }, { t0_ms: E(-500), t1_ms: E(1500), speaker: "0", lang: "en", text: "B" }, { t0_ms: E(5000), t1_ms: E(9000), speaker: "0", lang: "en", text: "C" }, { t0_ms: E(1000), t1_ms: E(2000), speaker: "0", lang: "en", text: "D" }, { t0_ms: E(2000), t1_ms: E(3000), speaker: "0", lang: "en", text: "E" }] }));
     const d = (await get()).transcript!.data as Row;
-    expect((d.segments as Row[]).map((x) => [x.t0_ms, x.t1_ms])).toEqual([[0, 0], [0, 1500], [5000, 6000]]);
-    expect(d.n_clamped).toBe(3); // -5000, -1000, -500
+    expect((d.segments as Row[]).map((x) => [x.t0_ms, x.t1_ms])).toEqual([[0, 0], [0, 1500], [5000, 6000], [1000, 2000], [2000, 3000]]);
+    expect(d.n_clamped).toBe(6); // stt: -5000, -1000, -500, 9000 over the 6,000 ms duration; translate and role: their 6,400 overrun each
   });
   it("duration is the manifest's audio.duration_ms when present (even if clip.minutes differs), else the contract's `duration`, else clip.minutes", async () => {
     seedLayers();
@@ -748,6 +751,100 @@ describe("FIX2 Y1/Y2: consult uids with an underscore (1,507 of 3,242 cutter uid
     expect(reads.filter((r) => r !== ENCOUNTER_CATALOG_KEY)).toEqual([]);
     expect(await run({ action: "clip_audio_url", consult_uid: u })).toEqual({ ok: false, error: "bad_clip_key" });
     expect(H.signCalls).toEqual([]);
+  });
+});
+
+describe("CATALOG-2 C4: parts clamp, clock mismatch, one manifest read", () => {
+  const partsRow = () => crow(UID, { layers: { stt: layer("stt.sarvam-saaras-v3"), translate: null, role: null, parts: layer("parts.clef-jev") } });
+  const ptrack = (segments: Row[]): Row => ({ layer: "parts", status: "ok", config: { clef_mode: "clef+jev" }, extras: {}, segments });
+  const lay = async () => (await run({ action: "get", consult_uid: UID })).layers as Record<string, Row>;
+  it("C4a: parts are clamped to [0, duration] after the conversion and report n_clamped beside data (refuter case [t0-100, t0+9000] at 5,000 ms -> [0, 5000])", async () => {
+    setCatalog([partsRow()]);
+    setManifest({ audio: { duration_ms: 5000 } });
+    setTrack(tk("parts.clef-jev"), ptrack([{ part: "history", t0_ms: E(-100), t1_ms: E(9000), source: "jev" }, { part: "exam", t0_ms: E(1000), t1_ms: E(2000), source: "jev" }, { part: "order", t0_ms: E(2000), t1_ms: E(3000), source: "jev" }]));
+    const p = (await lay()).parts!;
+    expect(p.status).toBe("ok");
+    expect((p.data as Row[]).map((x) => [x.t0_ms, x.t1_ms])).toEqual([[0, 5000], [1000, 2000], [2000, 3000]]);
+    expect(p.n_clamped).toBe(2);
+    expect(Array.isArray(p.data)).toBe(true);
+  });
+  it("C4b: relative 0-4000 times under an epoch manifest are clock_mismatch (transcript and parts), data null, never ok", async () => {
+    setCatalog([crow(UID, { layers: { stt: layer("stt.sarvam-saaras-v3"), translate: null, role: null, parts: layer("parts.clef-jev") } })]);
+    setManifest();
+    setTrack(tk("stt.sarvam-saaras-v3"), stt({ segments: [{ t0_ms: 0, t1_ms: 2000, speaker: "0", lang: "en", text: "A" }, { t0_ms: 2000, t1_ms: 4000, speaker: "1", lang: "en", text: "B" }] }));
+    setTrack(tk("parts.clef-jev"), ptrack([{ part: "history", t0_ms: 0, t1_ms: 2000 }, { part: "exam", t0_ms: 2000, t1_ms: 4000 }]));
+    const l = await lay();
+    expect(l.transcript).toMatchObject({ status: "error", error: "clock_mismatch", data: null });
+    expect(l.parts).toMatchObject({ status: "error", error: "clock_mismatch", data: null });
+  });
+  it("C4b: a normal epoch track with one pre-roll clamp stays ok; exactly half clamped stays ok, over half is a mismatch", async () => {
+    setCatalog([partsRow()]);
+    setManifest();
+    setTrack(tk("parts.clef-jev"), ptrack([{ part: "a", t0_ms: E(-60_000), t1_ms: E(500) }, { part: "b", t0_ms: E(500), t1_ms: E(900) }, { part: "c", t0_ms: E(900), t1_ms: E(2000) }]));
+    expect((await lay()).parts).toMatchObject({ status: "ok", n_clamped: 1 });
+    setTrack(tk("parts.clef-jev"), ptrack([{ part: "a", t0_ms: E(-5), t1_ms: E(-1) }, { part: "b", t0_ms: E(10), t1_ms: E(20) }])); // 2 of 4 = half
+    expect((await lay()).parts).toMatchObject({ status: "ok", n_clamped: 2 });
+    setTrack(tk("parts.clef-jev"), ptrack([{ part: "a", t0_ms: E(-5), t1_ms: E(-1) }, { part: "b", t0_ms: E(-3), t1_ms: E(20) }])); // 3 of 4
+    expect((await lay()).parts).toMatchObject({ status: "error", error: "clock_mismatch" });
+  });
+  it("C4c: one get reads the manifest once, whatever layers use it", async () => {
+    setCatalog([crow(UID, { layers: { stt: layer("stt.sarvam-saaras-v3"), translate: layer("translate.sarvam-saaras-v3"), role: layer("role.llm-roles"), parts: layer("parts.clef-jev") } })]);
+    seedLayers();
+    setTrack(tk("parts.clef-jev"), ptrack([{ part: "a", t0_ms: E(0), t1_ms: E(500) }]));
+    reads.length = 0;
+    const l = await lay();
+    expect(l.transcript!.status).toBe("ok");
+    expect(l.parts!.status).toBe("ok");
+    expect(reads.filter((k) => k === mkey())).toHaveLength(1);
+  });
+});
+
+describe("CATALOG-2 C5: reb-consult readers accept _ uids and still refuse the rest", () => {
+  const U = "ab12_cd34_ef56_gh78_ij90_k"; // 26
+  const rk = (kind: string, u = U) => `reb/2026-10-05/room_a/_consults/${u}/tracks/${kind}__v1__ab12cd34.json`;
+  it("UID_RE: _ accepted; - . / .. space and lengths 9 and 61 refused", async () => {
+    const { UID_RE } = await import("@/lib/room-access/readers/reb-consult");
+    expect(UID_RE.test(U)).toBe(true);
+    for (const ok of ["a".repeat(10), "a".repeat(60), "_".repeat(10)]) expect(UID_RE.test(ok), ok).toBe(true);
+    for (const bad of [`${U}-x`, `${U}.x`, `${U}/x`, `${U}..`, `${U} x`, "a".repeat(9), "a".repeat(61), "", "../../x"]) expect(UID_RE.test(bad), bad).toBe(false);
+  });
+  const idxCalls = () => H.sqlCalls.filter((c) => /FROM reb_track_index/.test(c.text)).length;
+  const span = (uid: string) => ({ consult_uid: uid, room_id: "room_a", ist_date: "2026-10-05", t_open_ms: E(0), t_close_ms: E(6000), windows: [] }) as never;
+  const entries: Array<[string, (u: string) => Promise<unknown>]> = [
+    ["readRebConsult", async (u) => (await import("@/lib/room-access/readers/reb-consult")).readRebConsult(span(u))],
+    ["findRebTrack", async (u) => (await import("@/lib/room-access/readers/reb-consult")).findRebTrack(u, "room_a", "2026-10-05")],
+    ["findSarvamTracks", async (u) => (await import("@/lib/room-access/readers/reb-consult")).findSarvamTracks(u, "room_a", "opd-a", "cut1", () => null)],
+    ["loadRoleDoc (via readRebRoleFlags)", async (u) => (await import("@/lib/room-access/readers/reb-consult")).readRebRoleFlags(u, "room_a", "opd-a")],
+  ];
+  it("each of the four readers gets past its uid door for a 26-char _ uid (it asks the index) and stays shut for - . / .. space and lengths 9 and 61 (it asks nothing)", async () => {
+    process.env.ETA_REB_ROLE_LLM = "1";
+    try {
+      for (const [name, call] of entries) {
+        H.sqlCalls = [];
+        await call(U);
+        expect(idxCalls(), `${name} _ uid`).toBeGreaterThan(0);
+        for (const bad of ["ab12-cd34-ef56-gh78", `${U}.x`, `${U}/x`, `${U}..`, `${U} x`, "a".repeat(9), "a".repeat(61)]) {
+          H.sqlCalls = [];
+          await call(bad);
+          expect(idxCalls(), `${name} ${bad}`).toBe(0);
+        }
+      }
+    } finally {
+      delete process.env.ETA_REB_ROLE_LLM;
+    }
+  });
+  it("the key's uid still binds to the requested uid: an index row naming ANOTHER uid's track is skipped, the right one is returned", async () => {
+    const { findRebTrack } = await import("@/lib/room-access/readers/reb-consult");
+    const { createHash } = await import("node:crypto");
+    const body = JSON.stringify(translate());
+    const sha = createHash("sha256").update(body, "utf8").digest("hex");
+    const other = "zz99_yy88_xx77_ww66_vv55_u";
+    store.set(rk("translate.sarvam-saaras-v3", other), { body, etag: null });
+    store.set(rk("translate.sarvam-saaras-v3"), { body, etag: null });
+    H.indexRows = [{ layer: "translate", engine: "sarvam-saaras-v3", config_hash: "ab12cd34", r2_key: rk("translate.sarvam-saaras-v3", other), sha256: sha }];
+    expect((await findRebTrack(U, "room_a", "2026-10-05")).found).toBeNull();
+    H.indexRows = [{ layer: "translate", engine: "sarvam-saaras-v3", config_hash: "ab12cd34", r2_key: rk("translate.sarvam-saaras-v3"), sha256: sha }];
+    expect((await findRebTrack(U, "room_a", "2026-10-05")).found).toMatchObject({ layer: "translate", n_segments: 3 });
   });
 });
 
