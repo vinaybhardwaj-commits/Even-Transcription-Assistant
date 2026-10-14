@@ -1,0 +1,1221 @@
+{
+ "blind": [
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790394300000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790394300000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790394300000,
+   "room_days": [
+    "2026-09-26"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790395200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790395200000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790395200000,
+   "room_days": [
+    "2026-09-26"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790396100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790396100000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790396100000,
+   "room_days": [
+    "2026-09-26"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790397000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790397000000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790397000000,
+   "room_days": [
+    "2026-09-26"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790566200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790566200000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790566200000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790567100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790567100000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790567100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790568000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790568000000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790568000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790568900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790568900000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790568900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790569800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790569800000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790569800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790570700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790570700000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790570700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790571600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790571600000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790571600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790572500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790572500000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790572500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790573400000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790573400000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790573400000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790574300000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790574300000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790574300000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790575200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790575200000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790575200000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790576100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790576100000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790576100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790577000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790577000000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790577000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790577900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790577900000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790577900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790578800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790578800000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790578800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790579700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790579700000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790579700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790580600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790580600000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790580600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790581500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790581500000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790581500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790582400000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790582400000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790582400000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790583300000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790583300000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790583300000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790584200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790584200000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790584200000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790585100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790585100000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790585100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790586000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790586000000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790586000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790586900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790586900000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790586900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790587800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790587800000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790587800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790588700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790588700000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790588700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790589600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790589600000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790589600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790590500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790590500000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790590500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790591400000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790591400000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790591400000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790592300000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790592300000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790592300000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790593200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790593200000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790593200000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790594100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790594100000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790594100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790595000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790595000000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790595000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790595900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790595900000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790595900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790596800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790596800000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790596800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790597700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790597700000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790597700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790598600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790598600000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790598600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790599500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790599500000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790599500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790600400000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790600400000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790600400000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790601300000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790601300000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790601300000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790602200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790602200000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790602200000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790603100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790603100000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790603100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790604000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790604000000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790604000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790604900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790604900000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790604900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790605800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790605800000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790605800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790606700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790606700000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790606700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790607600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790607600000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790607600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790608500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790608500000_primary.json",
+   "room": "room_ux92qpws",
+   "start_ms": 1790608500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790533800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790533800000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790533800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790534700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790534700000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790534700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790535600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790535600000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790535600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790536500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790536500000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790536500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790537400000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790537400000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790537400000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790538300000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790538300000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790538300000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790539200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790539200000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790539200000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790540100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790540100000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790540100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790541000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790541000000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790541000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790541900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790541900000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790541900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790542800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790542800000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790542800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790543700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790543700000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790543700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790544600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790544600000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790544600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790545500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790545500000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790545500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790546400000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790546400000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790546400000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790547300000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790547300000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790547300000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790548200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790548200000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790548200000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790549100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790549100000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790549100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790550000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790550000000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790550000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790550900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790550900000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790550900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790551800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790551800000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790551800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790552700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790552700000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790552700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790553600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790553600000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790553600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790554500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790554500000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790554500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790555400000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790555400000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790555400000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790556300000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790556300000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790556300000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790557200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790557200000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790557200000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790558100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790558100000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790558100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790559000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790559000000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790559000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790559900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790559900000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790559900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790560800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790560800000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790560800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790561700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790561700000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790561700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790562600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790562600000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790562600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790563500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790563500000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790563500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790564400000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790564400000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790564400000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790567100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790567100000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790567100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790568000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790568000000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790568000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790568900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790568900000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790568900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790569800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790569800000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790569800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790570700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790570700000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790570700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790571600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790571600000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790571600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790572500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790572500000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790572500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790573400000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790573400000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790573400000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790574300000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790574300000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790574300000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790575200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790575200000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790575200000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790576100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790576100000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790576100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790577000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790577000000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790577000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790577900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790577900000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790577900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790578800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790578800000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790578800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790579700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790579700000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790579700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790580600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790580600000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790580600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790581500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790581500000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790581500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790582400000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790582400000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790582400000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790583300000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790583300000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790583300000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790584200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790584200000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790584200000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790585100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790585100000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790585100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790586000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790586000000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790586000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790586900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790586900000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790586900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790587800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790587800000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790587800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790588700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790588700000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790588700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790589600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790589600000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790589600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790590500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790590500000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790590500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790591400000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790591400000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790591400000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790592300000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790592300000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790592300000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790593200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790593200000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790593200000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790594100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790594100000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790594100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790595000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790595000000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790595000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790595900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790595900000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790595900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790596800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790596800000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790596800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790597700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790597700000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790597700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790598600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790598600000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790598600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790599500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790599500000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790599500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790600400000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790600400000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790600400000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790601300000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790601300000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790601300000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790602200000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790602200000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790602200000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790603100000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790603100000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790603100000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790604000000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790604000000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790604000000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790604900000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790604900000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790604900000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790605800000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790605800000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790605800000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790606700000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790606700000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790606700000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790607600000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790607600000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790607600000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "src": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790608500000_primary.json",
+   "rel": "runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790608500000_primary.json",
+   "room": "room_qyzghzaf",
+   "start_ms": 1790608500000,
+   "room_days": [
+    "2026-09-28"
+   ]
+  }
+ ],
+ "non_blind_count": 1901,
+ "total_records": 2035,
+ "non_record_files": [
+  "runs/hist-bulk-tone-20260927T1204/provenance.json",
+  "runs/hist-bulk-tone-driver-2026-09-24/provenance.json",
+  "runs/hist-bulk-tone-driver-2026-09-25/provenance.json",
+  "runs/hist-bulk-tone-nightly-20260927/provenance.json",
+  "runs/hist-bulk-tone-nightly-20260928/provenance.json",
+  "runs/hist-bulk-tone-nightly-20260929/provenance.json"
+ ],
+ "union_sha16": "f07171dcb708d080"
+}

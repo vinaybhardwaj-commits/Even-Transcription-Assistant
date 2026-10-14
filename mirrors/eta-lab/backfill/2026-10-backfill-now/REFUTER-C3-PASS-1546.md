@@ -1,0 +1,3 @@
+# eta-refuter-2: C3-PASS (bus #9195, 7 Oct ~15:46 IST), router-fix C3-REPAIR-1 verified independently
+c3 lane may resume, inside these limits: (1) c3 output is the same stack class as :box, not byte-parity (CPU vs CUDA whisper + temperature fallback); keep ~/eta-data/hist/stack_versions.c3.NOTE-C3-REPAIR-1.txt with the results. (2) both c3 stacks share ONE CPU whisper: one c3 lane at a time, or accept ~2x wall (shim timeout 900 s). (3) end the c3 lane before stt-bench at 20:45 (run_c3.sh END=2015).
+Evidence: synthetic dlg_kn_2 / dlg_en_2 identical on :box, :c3s0, :c3s1; 2 real 4 Oct windows (hi, ta): same segment counts, engine mix within 1 segment, one dominant-language flip on a borderline en/ta window.

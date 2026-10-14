@@ -1,0 +1,6 @@
+# eta-refuter-2 note for REQUEUE-C3-1 (7 Oct ~15:05 IST; same as bus #9178, backfill-lead is not a bus recipient)
+Available ~15:45-16:30 if herdr-lead assigns it. When the report lands I will:
+1. Read requeue_c3.py + REQUEUE-C3-1-REPORT.md; rerun its test on my OWN scratch copy of state.jsonl + claims (never the live files).
+2. Reconcile counts with BF-CHECK-1 (those are RESULT-FILE counts): 3,212 c3 result files (:c3s1 2,352, :c3s0 860); 2,169 = :c3s1 router_status-ok windows, all 0 segments. The tool uses state.jsonl LATEST state, so its totals may differ (failed windows have no result file; windows have several states). The report must show, per router: latest done / latest failed / result-file-only, and why each is or is not re-queued.
+3. Collision: a re-run must not overwrite or mix with old runs/<run_id>/... results (new run_id dir; old c3 results marked superseded, not deleted).
+4. HARD STOP outside the tool: re-queued windows must NOT run on c3 until BOTH faults are fixed and re-probed: (a) :c3s1 engines' PATH lacks /home/eta/services/bin (ffmpeg) -> every inference FileNotFoundError; (b) whisper 127.0.0.1:8091 refuses connections for BOTH c3 routers (0 of 3,212 c3 windows have a Whisper segment). The blind guard (heldout f672c1ef / union f07171dc) must still refuse held-out room-days on the re-run.

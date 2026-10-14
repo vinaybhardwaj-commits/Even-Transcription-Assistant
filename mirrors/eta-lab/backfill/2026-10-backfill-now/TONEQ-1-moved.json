@@ -1,0 +1,1346 @@
+{
+ "moved": 134,
+ "dest_root": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007",
+ "records": [
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790394300000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790394300000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790394300000_primary.json",
+   "sha256": "be4eba65be27fc8d9640723cd671f209c1939f54dba944530ad86e4eb9cbe439",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-26"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790395200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790395200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790395200000_primary.json",
+   "sha256": "3ff689704e8567a97d193c22835f0329de25fa52d3d8250704ce778f369d3fc1",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-26"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790396100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790396100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790396100000_primary.json",
+   "sha256": "53d1f2b2f552a0e06d5260e9d05d554463c4988f322fbc9147057baaba34acce",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-26"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790397000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790397000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260927/bw_8rnx6tzj_1790397000000_primary.json",
+   "sha256": "4bcb958356a2d2ce51a0c7a63a13846a15214bf2501631296b665d39d6657c15",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-26"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790566200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790566200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790566200000_primary.json",
+   "sha256": "75e6c055800aa6f0d95dc5a17f46d008a8bf5742ffad46fa66ba3ca342ba2daf",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790567100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790567100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790567100000_primary.json",
+   "sha256": "d6df7e1069b33e458a599608d579efee88454b59cd5eeca06d8bcd2a4ad0c6b5",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790568000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790568000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790568000000_primary.json",
+   "sha256": "4d0055b03e28b34ca056be11c621286cdf4a3a3d00916160d041f04590cff3df",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790568900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790568900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790568900000_primary.json",
+   "sha256": "1d0a459b5039774b779ec40dfef37a043f5758f979bc71ece61b0239a1c4e89e",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790569800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790569800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790569800000_primary.json",
+   "sha256": "6ce255f0ab671b54362b31c89b8bc040cd6561ebbb956af7d26a9d7556f2c4fb",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790570700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790570700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790570700000_primary.json",
+   "sha256": "b5df220b343126c2d8b50bb92457747293cc65bbb27fa857f58b3b348765ef77",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790571600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790571600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790571600000_primary.json",
+   "sha256": "eec055380ff69ecc48172ed1ad4cafb525697f62aa7b9ae4da6a9a2147df2ffe",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790572500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790572500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790572500000_primary.json",
+   "sha256": "928b58df53c5832dd825b0ab9203cd74644c3d4a994fbd61c47b7ac2b10c1e50",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790573400000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790573400000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790573400000_primary.json",
+   "sha256": "db5aa066bac73dec24bbfe8f87bd00ffe51c515ac300af88d62c16c47f9ea696",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790574300000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790574300000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790574300000_primary.json",
+   "sha256": "ea000166fca89b0de0c92e31e054ec42daec434c8cfbd0c1e8005cda04f71336",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790575200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790575200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790575200000_primary.json",
+   "sha256": "a434c48e3ca0ad3c97d6b6aabaf8b6761b1178e107544cc571c0aea18e1859da",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790576100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790576100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790576100000_primary.json",
+   "sha256": "f2a1d2cabb562da598be4054455b60354abd1f2dbfe86bb08a815cee540200c1",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790577000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790577000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790577000000_primary.json",
+   "sha256": "b6da8cae4a2711804ddeee4c956ae0b0e88a152cc99f6c91c5a42bba4c845d94",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790577900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790577900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790577900000_primary.json",
+   "sha256": "153d3c0f4b5cbfefdd03364ebda0fb052ece68eb2de8dab2f52cf26a28961799",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790578800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790578800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790578800000_primary.json",
+   "sha256": "8c59deb35eb31493876151aafff69c98d3facb7bd7a9419c3bca72e3d102e70e",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790579700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790579700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790579700000_primary.json",
+   "sha256": "cecd4d98a04477b7382b2dcbee501108c046a0126c9051ca983f21fa78d9c328",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790580600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790580600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790580600000_primary.json",
+   "sha256": "97cb4269bf9a29c284a44d6e64e0b6132b20a19b7046cdb3a7d9489f75a1c0cd",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790581500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790581500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790581500000_primary.json",
+   "sha256": "d638eed25de4150073d3b81874af9994af2d8af288bcc373f704fb48c030e0a3",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790582400000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790582400000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790582400000_primary.json",
+   "sha256": "1ed809cab496861394fff3d67d3f4af33cb8439e911d9a13965dbebfb4cf8731",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790583300000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790583300000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790583300000_primary.json",
+   "sha256": "12e8f90e3a60371e4fe47b7f9ce75a49e26a1125901b2eca996a1ed1216e3880",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790584200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790584200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790584200000_primary.json",
+   "sha256": "45cc6c6000587e4cb43cd25ac645b4a64554927d19149fab17952a006e15b37c",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790585100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790585100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790585100000_primary.json",
+   "sha256": "99737c54aa4ae4c23a740ac2d5caa44a15374375e36e76edbfe61359e68d4fd3",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790586000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790586000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790586000000_primary.json",
+   "sha256": "6f92358d0edec74df0a04fd71741476e898ba3f57d899c68afcf670413f5c2f9",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790586900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790586900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790586900000_primary.json",
+   "sha256": "367916713258f90b8612bf75ba67c73c62d406b5779d4c07826c73e807166481",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790587800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790587800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790587800000_primary.json",
+   "sha256": "779c6d26ff2000a0f827fa05040896c69c128c24bb4598d202383e536e979551",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790588700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790588700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790588700000_primary.json",
+   "sha256": "a34488a47ae006ee86b61c84bcecfd2a32d0b5062505095df0a47e12854dd719",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790589600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790589600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790589600000_primary.json",
+   "sha256": "811cc87332952cd13a2d00bd38c2b1ee5e85eed75f3de2de93718b20b866b1f7",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790590500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790590500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790590500000_primary.json",
+   "sha256": "7f5055dd03754ced0761af639a8f6b39c526f926f2b606e34351bf8988de8e24",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790591400000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790591400000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790591400000_primary.json",
+   "sha256": "fa7eecddf06af5260018bd224db46ea8f24bd3bd415473eb998a9f187236c307",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790592300000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790592300000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790592300000_primary.json",
+   "sha256": "27f94617517c98434ffecc28e7f6492265a2b9ed1effd04e107f1509996fca9d",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790593200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790593200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790593200000_primary.json",
+   "sha256": "0bddf906818cd8c3d56591786a85518b70c444064b5bf56dbd05dac5ffdf0a5a",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790594100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790594100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790594100000_primary.json",
+   "sha256": "d63215188ac195e91cc3ec7c433a69f78c721831005e8445e56c93fb769f789b",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790595000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790595000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790595000000_primary.json",
+   "sha256": "778659da22c770f5badcd7ff280bdb69f87f80c9df789e130a31d5127a41c2b6",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790595900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790595900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790595900000_primary.json",
+   "sha256": "9a2ac37829e48bfa89c4663deb927f19d2b77bdcfbd66b1fd2db249449115944",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790596800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790596800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790596800000_primary.json",
+   "sha256": "040947aaecc1a24833a99ca5c4409356f461672ac66cd76b2f4035bb6f403fec",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790597700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790597700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790597700000_primary.json",
+   "sha256": "946d729bf98849cd84f221379810af18e7552ba9e36ca1cb029b81eaada8060f",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790598600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790598600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790598600000_primary.json",
+   "sha256": "5eaa13fb59a9093a113eb146a15a374822bfb0d761f52f77a2fdaa552d1c2e8f",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790599500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790599500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790599500000_primary.json",
+   "sha256": "743c76003dd1afb8fa62ba1938a291fb0ff2b94a4e73aaa1910568c1a770c067",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790600400000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790600400000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790600400000_primary.json",
+   "sha256": "8d44db3ca724bd3377bdea0a9e249b6250a605fd20abaf329e8d0b26be230e9a",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790601300000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790601300000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790601300000_primary.json",
+   "sha256": "d2b3245c1b282c6bd2b13cc2dc68ec3d0e90cf79cd37d43d05d6393271a45314",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790602200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790602200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790602200000_primary.json",
+   "sha256": "37d1b18535b10b05670366f5edd13037f4b073c0d536ac8d30f18e0e54fb2f16",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790603100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790603100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790603100000_primary.json",
+   "sha256": "8f34a17adfd43784b505fa721f9624dce471f8f20633e8539af1ada92b919d76",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790604000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790604000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790604000000_primary.json",
+   "sha256": "230745279144cb2966744a12a61b60bbbaea2124a26bd333984be4b5e7e89ac0",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790604900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790604900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790604900000_primary.json",
+   "sha256": "f063664a978b52e528bafd463b62d0b9f477e42f9eb7056a14b529314cd8c7b9",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790605800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790605800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790605800000_primary.json",
+   "sha256": "b6a481bcfd96e921468ba4285b0499b95f49b4ac0fcd5704e26915ee4c70b049",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790606700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790606700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790606700000_primary.json",
+   "sha256": "0edc37a4ed29632d481aa35f2cafeb1ec5c9a0b9317d440d3ffaa4cd06764dbf",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790607600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790607600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790607600000_primary.json",
+   "sha256": "00f564eff163053255d602eef5b9c9336ab0777586372094afa48c42ebcdd8f0",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790608500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790608500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_25ddrw7s_1790608500000_primary.json",
+   "sha256": "ed2fb9a82d0f42a6028c84f76989f91bba6c9b6c1659c04c43ab73c8c7d37bed",
+   "room": "room_ux92qpws",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790533800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790533800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790533800000_primary.json",
+   "sha256": "6b4d5fd40957054df9a4bc3848290b41705a4954bb63c245c33bc16f7a69ec16",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790534700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790534700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790534700000_primary.json",
+   "sha256": "76a679cf787aa9d22a5cc090192c8450674af44603e0685772581cab0817ced9",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790535600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790535600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790535600000_primary.json",
+   "sha256": "476db6d1fb69e1932ca6ded0570a0c994128e208a479bd9dd0eb84f9024371f1",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790536500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790536500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790536500000_primary.json",
+   "sha256": "0d6b7fef8f84d91a535e3174173264162ba0546c9879d3f43e29f0b5f8df59e8",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790537400000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790537400000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790537400000_primary.json",
+   "sha256": "1dab20e977f312ae19b02e7699339d93055eba2e65a176f2cf1d1ffa78f6914a",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790538300000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790538300000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790538300000_primary.json",
+   "sha256": "c37e3bf01b0b56670eedaad46dc6b98a0e424e9803e31ab0af5da99edf8c0df4",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790539200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790539200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790539200000_primary.json",
+   "sha256": "817802d1cc0382b1ebbf52488db484f41686395ae602c840f10a063ea0bbd973",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790540100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790540100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790540100000_primary.json",
+   "sha256": "ab54bf3a3c8b774c20c39ad4d25ef98646232b53a0ab1ec592c8a4e77b72b586",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790541000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790541000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790541000000_primary.json",
+   "sha256": "521234aca31995b137f9a83e772eb3172d26eb73df8be344bbdf610e5a7f8568",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790541900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790541900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790541900000_primary.json",
+   "sha256": "b75b005e472295584701b2c23adea589f1d18a8e0fc8fb64c91489c3558d22fb",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790542800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790542800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790542800000_primary.json",
+   "sha256": "1d8186e6975dbff8d96d1151e637799eafd9faee343cd4fab96b267ce3d46555",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790543700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790543700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790543700000_primary.json",
+   "sha256": "12f437bf073021c49a001b231ead7a330f54b987cfa763afacc49c70561cb9a3",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790544600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790544600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790544600000_primary.json",
+   "sha256": "9ff745d5b042ebe1dfd1694e8afcda9edfa0d7b37b7a8ad5b422a890c111b09a",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790545500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790545500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790545500000_primary.json",
+   "sha256": "432922ebb2f43b155930e55e8c092d45fc15fe56d47154f58489b7ebb73c8ef2",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790546400000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790546400000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790546400000_primary.json",
+   "sha256": "bee9a5fe145ce7ddb8f0918238526004e207210d5aa1ab7a0747b0b2247e06bf",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790547300000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790547300000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790547300000_primary.json",
+   "sha256": "e3fcca1b644fd1a726d67a1729437f25977dcbc3553ced7ee2127c464b3b1e52",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790548200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790548200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790548200000_primary.json",
+   "sha256": "0cfa11482317d733856062d99cbd8a46dc4aab28c5b3350456388c54e5957d20",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790549100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790549100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790549100000_primary.json",
+   "sha256": "82d42bb1efb20797d5a1c29c51c501f58d72d7516f9b3ff65a904481a93b2e83",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790550000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790550000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790550000000_primary.json",
+   "sha256": "8be1d1b25c7bf1f4888c0767919a10aeb6429a711b3bbd734f7ae2598a18de6d",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790550900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790550900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790550900000_primary.json",
+   "sha256": "e31ff778db91597f571829a6eb2e90f2c330a07db5a114b8afd430a70bfb6720",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790551800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790551800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790551800000_primary.json",
+   "sha256": "a06ae689cdc617f22d7ce3d28c2408a66dcf754c0dd7136ef35680c937f26a29",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790552700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790552700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790552700000_primary.json",
+   "sha256": "f5f6d05290da11ec7ccf774633cc10a05128414e315c8e04f378797a70538c00",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790553600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790553600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790553600000_primary.json",
+   "sha256": "f0ba3fcf5fcb208ec57b4e7fde8fd1a9fbcbf8e70600ac10e2203564c39973bc",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790554500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790554500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790554500000_primary.json",
+   "sha256": "a021730620d7ea40c8a87449efed99db3d0ecc9928787c0ed552346e7c6577e3",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790555400000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790555400000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790555400000_primary.json",
+   "sha256": "fc29e0d480676df6bd1a004a6a1639b7da522ebffb953e0af399fbcd5fa58582",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790556300000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790556300000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790556300000_primary.json",
+   "sha256": "ca1455f2ea35970194713fbd909b55822d2ad765dfa675ae156e2f629c5f4fda",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790557200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790557200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790557200000_primary.json",
+   "sha256": "19619168d2e343330f6eaa09cd10abdae2e21397fe04744c8c22628546a81be4",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790558100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790558100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790558100000_primary.json",
+   "sha256": "2e09b6447b3c54c757269bb1c1bf2c4aff37528ecf7906754789d4bb5724cfd3",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790559000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790559000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790559000000_primary.json",
+   "sha256": "06518f201cca1b7e02d418d3a92dcd54b14f681aad255d63054de48ba43d664f",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790559900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790559900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790559900000_primary.json",
+   "sha256": "6d0bd5e15566beb8e0c05f3d7a7d59bb8fbf2b3aaeac33b2046e7aeca2421cbe",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790560800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790560800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790560800000_primary.json",
+   "sha256": "fa844ffd7af368cd9a25cfded406d8cb852b9d200817e29902288e5653dc1d13",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790561700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790561700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790561700000_primary.json",
+   "sha256": "c9f27d448332edecf8512a4004dc38ae6ee7e0ab61b77f17f97613fbee075895",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790562600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790562600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790562600000_primary.json",
+   "sha256": "767badd94a39adb324a948c43cdaf609888da27f5c7d50f4e477145ccffbf291",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790563500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790563500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790563500000_primary.json",
+   "sha256": "1a4e20c9ac9dcc7dcee1b39d46249d282af5d8abf15aeb49f0338e45536f5da9",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790564400000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790564400000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_4tpmuz7v_1790564400000_primary.json",
+   "sha256": "a6026a062fb9d00688f80ab3da73797911d7a50c02d64d2c955bad2f31757a1c",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790567100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790567100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790567100000_primary.json",
+   "sha256": "b6999a1caa02916b6986b833e52c2ccb578d526007a5afb183a0777b72ea4ade",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790568000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790568000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790568000000_primary.json",
+   "sha256": "d3558e85a3cfec84536fd1bd4145d3de76b4d341f5cb9f14d98aab2d59a99323",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790568900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790568900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790568900000_primary.json",
+   "sha256": "f318962a19f336eef3c7028b3f284139672503a530a64e1607513c9c9a63d5c7",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790569800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790569800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790569800000_primary.json",
+   "sha256": "59f326ef043fde6202d91333e950772885a736ee8851dc7f4dd3a458d4123ea8",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790570700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790570700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790570700000_primary.json",
+   "sha256": "4a885d9130beeed48b31b0290327429286e70b96f148e261ce4a26e2c98108a3",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790571600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790571600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790571600000_primary.json",
+   "sha256": "88bc3991c0f865dec24ed9cf62bcdf270a3e83d41d6c6ef05a2190f384357eba",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790572500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790572500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790572500000_primary.json",
+   "sha256": "a187378b8000903bad570e82f32f1ddb431998a32901077aae645aacff41d10f",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790573400000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790573400000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790573400000_primary.json",
+   "sha256": "b81948adad53e12e773c59183a58ceed10df2de8c5a853e6565da38dd89f0998",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790574300000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790574300000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790574300000_primary.json",
+   "sha256": "8ff0ba77a16e928e4ad1fef3d689d6bec6d103680f74da2b56d7b8368f5beae4",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790575200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790575200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790575200000_primary.json",
+   "sha256": "0b89c29af491eb5309a2ef32ed60132d6dbc1ef0d58e8ac57143eb3618044d01",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790576100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790576100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790576100000_primary.json",
+   "sha256": "7a41069edaf7bdde41d2fe39713777683fd04c074d54ec66785cb25244a6e357",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790577000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790577000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790577000000_primary.json",
+   "sha256": "f87b6f933df9d38529252ee009cce29ec4c0491d7a97440a28341783f853ad3a",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790577900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790577900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790577900000_primary.json",
+   "sha256": "76b113b344b0dba5c5e7f57431c1531701ed88b7f09d666274f5d80f064d15fc",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790578800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790578800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790578800000_primary.json",
+   "sha256": "ce68bf0c484aeb5c22ceafe14dd49b002971fe6dcfe85ba2787a4b2c2d121bfc",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790579700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790579700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790579700000_primary.json",
+   "sha256": "4f46c78b28f064a94b251b477d56e5cd5b116f0bb2183a2a355ace1d07be21d6",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790580600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790580600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790580600000_primary.json",
+   "sha256": "1eb318cf0a128905d46d50af007c3823b8e220a7a3b07609a6e67fc1a23ab4ce",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790581500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790581500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790581500000_primary.json",
+   "sha256": "127221127abf45249cc7993cdd79af94a3c7350890e64cbf9bfa533d4f1e0a3d",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790582400000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790582400000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790582400000_primary.json",
+   "sha256": "1ae676cbcaee763c790453c53a5c762a1db834bf7632fc9286c0feea9eb11786",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790583300000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790583300000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790583300000_primary.json",
+   "sha256": "26f5c4132d52697c1a10d380134170dd7637b171224dd80c57a2ab7b20d4c74a",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790584200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790584200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790584200000_primary.json",
+   "sha256": "dd140fdbfc505542d1a818d08b70bfae34ca98e6dafd52cff56be1958ca81b9c",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790585100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790585100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790585100000_primary.json",
+   "sha256": "df566d0d3e7bbf09dccbfebda63d6527d82b742c10c9ea83e02440fbd511632a",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790586000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790586000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790586000000_primary.json",
+   "sha256": "d47b4f600d2d701f2b062523500ff0b6d438050cddccc62f02e787a008ef4ede",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790586900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790586900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790586900000_primary.json",
+   "sha256": "693b7d13f938a8cc0536d70b156fa57c6ce1fc8642aeb01e49f97f513709bbdd",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790587800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790587800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790587800000_primary.json",
+   "sha256": "8a13d5ce421ada254de060ef7824d6fbe93a796d1f4d558412e36fdc781d7a0f",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790588700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790588700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790588700000_primary.json",
+   "sha256": "b92f4fab3e15169ca16ace14db5355b25b1cb2c8551aa56aaa714bfd04f15060",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790589600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790589600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790589600000_primary.json",
+   "sha256": "39dbb76a2b69ea41c420ee909270827c620edd93e2a22a5380671551959b947e",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790590500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790590500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790590500000_primary.json",
+   "sha256": "8af317ee11cf8de538c98c56857d3d0080924ad78f44ecd8cee99f7ef2fbbcec",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790591400000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790591400000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790591400000_primary.json",
+   "sha256": "c44b5488641508bbcb1a3fa2a9406c65c95bf4e4e827f3e0e8e6fbc773e24a39",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790592300000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790592300000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790592300000_primary.json",
+   "sha256": "91fb154935a8c3efe4267d8e386942f076ed4fc26dc2dc2b25a9aa067ea3dc75",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790593200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790593200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790593200000_primary.json",
+   "sha256": "0d4935689666de92ce1b479ff2bab4eedc49179bbad7c4a5a9d2fc9f125d3913",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790594100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790594100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790594100000_primary.json",
+   "sha256": "4e4058d4ba0146af96459f1df5748a15be57b8da9fa5baa67284827325e7aba3",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790595000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790595000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790595000000_primary.json",
+   "sha256": "8db7e64fb9cbfec1689ba6f517c3a9a1d848c46b37aa1509d268fed0e93afbe4",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790595900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790595900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790595900000_primary.json",
+   "sha256": "2c85f53e6d59387f61fc9e3862f42f76c9a140eb5187e554462a04659c229469",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790596800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790596800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790596800000_primary.json",
+   "sha256": "6de86ade868da15b4aaaccde4aa93ac43fa8fa6655c62160ed2f3c6c4a2b55f3",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790597700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790597700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790597700000_primary.json",
+   "sha256": "48be1fd306b2136b6fd40effed0bd8e92fede04e73c779d349131deec42142c7",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790598600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790598600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790598600000_primary.json",
+   "sha256": "92fdd4f3fa2bc6074deee9db1efd2e088d9a7dba3c23cbf8f93af3721f9e859b",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790599500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790599500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790599500000_primary.json",
+   "sha256": "ab2e836d3ccf2f21814c1f081cef1dc45a766261d90abf8696bb3bd2f6efc39a",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790600400000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790600400000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790600400000_primary.json",
+   "sha256": "7e77558097dd5a95b832570bf5bdfa1c1bb9be35c76b65df29954c8443f1e4ac",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790601300000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790601300000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790601300000_primary.json",
+   "sha256": "8ce8253f28616124f8c5fda4ede37dd5f785c568fed7753cf40d47ad306b1327",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790602200000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790602200000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790602200000_primary.json",
+   "sha256": "5f0efa4d51a3cf73f4e3970425f59069ee977020eac07c87ec1ab7616699645f",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790603100000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790603100000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790603100000_primary.json",
+   "sha256": "ba9f8e734f6e53c6ae87d67df7ecf5d7b7edc2e8c818b2633cb824b0ec702b4b",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790604000000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790604000000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790604000000_primary.json",
+   "sha256": "c1cccb3f19a8f55e997b366d1d990f93c0b5c436e652f87766c2fac81cfbccd6",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790604900000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790604900000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790604900000_primary.json",
+   "sha256": "c1bce983ae6abc086106f7a9a9be640cf5f9d5aa6961f3d579d93f09364d24ef",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790605800000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790605800000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790605800000_primary.json",
+   "sha256": "3bba2599efec8138dd05ebe7a16187fb7f9c7bb2f5250f6148b6956387c667c7",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790606700000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790606700000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790606700000_primary.json",
+   "sha256": "069ede22d90e6a70082cc2db5e241a93141e6daacf102ab5dd3f6f400da33034",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790607600000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790607600000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790607600000_primary.json",
+   "sha256": "189f2e11b92445d9fbae3d98d0742f075ab48cad7574f617109fb6e1da31ea1f",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  },
+  {
+   "source": "/home/eta/eta-data/hist/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790608500000_primary.json",
+   "rel": "tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790608500000_primary.json",
+   "dest": "/home/eta/eta-data/hist/_to_delete/tone-blind-20261007/tone/runs/hist-bulk-tone-nightly-20260928/bw_s2t8vpvf_1790608500000_primary.json",
+   "sha256": "e09cbd0cefcc3ce67ede0894a5cbc89513004f0c2f8a887670bca183610c7322",
+   "room": "room_qyzghzaf",
+   "room_days": [
+    "2026-09-28"
+   ]
+  }
+ ]
+}

@@ -1,0 +1,5 @@
+# ORDERS-HF-3d-SRAVAANI-29SEP (backfill-lead, 08 Oct ~13:30 IST)
+Ruling (backfill-lead): HF-3c PASS (eta-refuter-2). Indic on HF-1 CPU = 694 s/window (4.9/h) fails the >= 6/h bar, so HF-1 runs SraVaani ONLY for 29 Sep (418 windows in windows-2026-09-29.json; ~39 s/window => ~5 h). Indic for 29 Sep is deferred to a GPU lane (not now).
+DO: 1. Append the final 5-window bench numbers to HF-3-REPORT.md. 2. Push the 29 Sep window audio box -> HF-1 directly (hf_box_ed25519 key, cat pipes, never via the Mini), sha256-verified against the manifest; blind windows never leave the box. 3. stage_local.sh so the READY marker covers them. 4. run_lane3.sh sravaani windows-2026-09-29.json; outputs mirror to /data/lane3/out/sravaani. 5. Report start time, rate after 30 min, projected finish; it must finish or be STOPped cleanly before herdr pauses HF-1 at 21:30 (touch STOP by 21:15 if not done; resume is automatic skip-if-done next session).
+DO NOT: run indic; touch the HF-5 driver (I run it); delete anything; Mini traffic.
+REPORT: HF-3d section in HF-3-REPORT.md, <= 12 lines. Cap 45 min to launch.
