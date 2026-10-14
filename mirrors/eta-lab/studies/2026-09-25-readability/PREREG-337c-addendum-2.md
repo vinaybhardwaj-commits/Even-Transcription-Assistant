@@ -1,8 +1,0 @@
-# Ruling 337c: PRE-REGISTRATION ADDENDUM 2 (split-speaker, 25 Sep 2026, ~08:40 IST; BEFORE any label exists)
-How labels from one or two raters become the precision and recall (code: `score_labels.py`, tested on invented labels in `test_score_labels.py`, 7 OK). Nothing else changes.
-- **One rater:** their labels are the primary labels. **Two raters (V and Sandhya):** a row's PRIMARY label is their common label when both agree; a disagreement becomes `unsure` (counted and reported); each rater is also scored alone, and their agreement is reported as the raw share and Cohen's kappa over the five labels.
-- **True positive:** a FLAGGED row labelled garbled or wrong_language. readable and romanised_readable are false positives. `unsure` is excluded and bounded both ways (all unsure counted as true positives, then all as false positives).
-- **Per cell (precision first):** labelled flagged rows, true positives, precision with the exact Clopper-Pearson 95 % interval, romanised_readable share, unsure count and its two bounds, then the miss rate among unflagged rows.
-- **Floor:** a cell may collapse lines by default only with >= 10 labelled non-unsure flagged rows, precision >= 0.80 AND romanised_readable <= 0.20 of them (addendum 1, item 4).
-- **Overall (frozen estimator):** precision = sum F_c*prec_c / sum F_c; recall = sum F_c*prec_c / (sum F_c*prec_c + sum U_c*miss_c), F_c and U_c the cell's flagged and unflagged segment counts.
-- Joins: the rating page's key (row L### -> sheet id) and the box-only sample key (`sample200_key_v2.json`: sheet row -> id, cell, flagged), only after labelling. Counts and rates only; no text.

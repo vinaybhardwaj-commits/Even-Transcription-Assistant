@@ -31,29 +31,17 @@ def voices(L):
     return V
 
 
-def groups(V, mode=None):
-    """mode 'complete' (default, vj-refuter P2): complete linkage on the voice centroids cut at cos 0.85, so EVERY pair inside a group has cos >= 0.85 (no chaining) and two voices of one room-day can
-    only meet if they are also >= 0.85 similar. mode 'single': the first version (chaining allowed: one group spanned 31 room-days / 16 doctors). Env GROUP_MODE overrides."""
-    mode = mode or os.environ.get("GROUP_MODE", "complete")
-    keys = list(V)
-    if mode == "single":
-        parent = {k: k for k in keys}
-        def find(x):
-            while parent[x] != x: parent[x] = parent[parent[x]]; x = parent[x]
-            return x
-        for i, a in enumerate(keys):
-            for b in keys[i + 1:]:
-                if a[0] != b[0] and float(V[a]["centroid"] @ V[b]["centroid"]) >= XDAY_COS: parent[find(a)] = find(b)
-        G = {}
-        for k in keys: G.setdefault(find(k), []).append(k)
-        return {k: G[find(k)] for k in keys}
-    from scipy.cluster.hierarchy import linkage, fcluster
-    from scipy.spatial.distance import squareform
-    C = np.array([V[k]["centroid"] / np.linalg.norm(V[k]["centroid"]) for k in keys]); D = np.clip(1 - C @ C.T, 0, 2); np.fill_diagonal(D, 0)
-    lab = fcluster(linkage(squareform(D, checks=False), "complete"), 1 - XDAY_COS + 1e-9, "distance")
+def groups(V):
+    keys = list(V); parent = {k: k for k in keys}
+    def find(x):
+        while parent[x] != x: parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    for i, a in enumerate(keys):
+        for b in keys[i + 1:]:
+            if a[0] != b[0] and float(V[a]["centroid"] @ V[b]["centroid"]) >= XDAY_COS: parent[find(a)] = find(b)
     G = {}
-    for k, l in zip(keys, lab): G.setdefault(l, []).append(k)
-    return {k: G[l] for k, l in zip(keys, lab)}
+    for k in keys: G.setdefault(find(k), []).append(k)
+    return {k: G[find(k)] for k in keys}
 
 
 def tier_links(rds, links, H, edge, jev, suffix=""):
