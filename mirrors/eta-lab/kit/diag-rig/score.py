@@ -15,7 +15,7 @@ import wavio
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mic-selftest"))
 from mic_selftest import fuzzy_canary   # noqa: E402  (canary matcher reused verbatim; phonetic skeleton + transliteration)
 
-LANG_NAMES = {"english": "en", "hindi": "hi", "kannada": "kn", "telugu": "te", "tamil": "ta", "malayalam": "ml"}
+LANG_NAMES = {"english": "en", "hindi": "hi", "kannada": "kn", "telugu": "te", "tamil": "ta"}
 
 
 def lang_iso(v):
@@ -109,14 +109,6 @@ def der(ref_turns, hyp_segs, dur_s, frame=0.01, collar=0.25):
     return dict(der=round(e / sp, 4), miss=round(miss / sp, 4), false_alarm=round(fa / sp, 4), confusion=round(conf / sp, 4))
 
 
-# ------------------------------------------------------------------ clinical items (W33.1): script-normalised, see clinical_score.py
-import clinical_score
-
-
-def clinical_items_score(items, hyp, lang):
-    return clinical_score.items_score(items, hyp, lang)
-
-
 # ------------------------------------------------------------------ silence
 def detect_silence(x, sr=wavio.SR, frame=0.1, dead_rms=10 ** (-70 / 20), min_s=2.0):
     """Reference dead-input detector: runs of >= min_s seconds with frame RMS <= dead_rms. -> [(start_s, end_s, detected_at_s)]"""
@@ -192,7 +184,6 @@ def score_stimulus(truth, result, wav_path=None):
         else:
             r["stt"] = "ok"
             r["text"] = text_scores(truth_text(truth), stt.get("text", ""))
-            r["text_roman"] = clinical_score.roman_text_scores(truth_text(truth), stt.get("text", ""))
             base = (r["lang"] or "").split("+")[0].split("-")[0]
             if stt.get("language"):
                 r["lang_id_ok"] = lang_iso(stt["language"]) == base
@@ -204,7 +195,6 @@ def score_stimulus(truth, result, wav_path=None):
             r["shadow_sravaani"] = "ok" if sh.get("ok") else "failed"
             if sh.get("ok"):
                 r["shadow_text"] = text_scores(truth_text(truth), sh.get("text", ""))
-                r["shadow_text_roman"] = clinical_score.roman_text_scores(truth_text(truth), sh.get("text", ""))
         turns = [e for e in truth["events"] if e["type"] == "turn"]
         if turns and dz is not None:
             if not dz.get("ok"):
@@ -216,14 +206,6 @@ def score_stimulus(truth, result, wav_path=None):
                 r["speakers_true"], r["speakers_hyp"] = len({t[0] for t in ref}), len({s[0] for s in segs})
                 r["speaker_count_err"] = r["speakers_hyp"] - r["speakers_true"]
                 r["der"] = der(ref, segs, truth["duration_s"])
-    if truth.get("clinical_items"):
-        r["variant"] = "clean" if truth["kind"] == "dialogue" else "%s_snr%s" % (truth.get("bed"), truth.get("snr_db"))
-        if stt is not None and stt.get("ok"):
-            r["items"] = clinical_items_score(truth["clinical_items"], stt.get("text", ""), r.get("lang"))
-        sh2 = eng.get("shadow_sravaani")
-        if sh2 is not None and sh2.get("ok"):
-            r["shadow_items"] = clinical_items_score(truth["clinical_items"], sh2.get("text", ""), r.get("lang"))
-        r["clinical_lang"] = r.get("lang")
     if truth["kind"] == "silence" and wav_path:
         r["silence"] = score_silence(truth, wav_path, result)
     for k in ("bed", "snr_db", "base"):
@@ -238,7 +220,7 @@ def _mean(v):
 
 
 def _bucket():
-    return dict(rwer=[], rcer=[], rhit=[], shadow_hit=[], shadow_failed=0, shadow_attempted=0, n_attempted=0, n_ok=0, n_failed=0, n_no_result=0, wer=[], hit=[], cer=[], lang_id=[], der=[], count_err=[],
+    return dict(shadow_hit=[], shadow_failed=0, n_attempted=0, n_ok=0, n_failed=0, n_no_result=0, wer=[], hit=[], cer=[], lang_id=[], der=[], count_err=[],
                 diar_attempted=0, diar_failed=0)
 
 
@@ -265,8 +247,6 @@ def build_report(suite_dir, results_dir, machine, target_sha=None):
             b["n_ok"] += 1
             if r.get("text"):
                 b["wer"].append(r["text"]["wer"]); b["hit"].append(r["text"]["hit_rate"]); b["cer"].append(r["text"]["cer"])
-            if r.get("text_roman"):
-                b["rwer"].append(r["text_roman"]["wer"]); b["rcer"].append(r["text_roman"]["cer"]); b["rhit"].append(r["text_roman"]["hit_rate"])
             if "lang_id_ok" in r:
                 b["lang_id"].append(1.0 if r["lang_id_ok"] else 0.0)
         elif st == "failed":
@@ -277,8 +257,6 @@ def build_report(suite_dir, results_dir, machine, target_sha=None):
             b["shadow_hit"].append(r["shadow_text"]["hit_rate"])
         elif r.get("shadow_sravaani") == "failed":
             b["shadow_failed"] += 1
-        if r.get("shadow_sravaani") is not None:
-            b["shadow_attempted"] += 1
         if r["kind"] == "dialogue" and r.get("diarizer") is not None:
             b["diar_attempted"] += 1
             if r["diarizer"] == "failed":
@@ -290,9 +268,8 @@ def build_report(suite_dir, results_dir, machine, target_sha=None):
         nat = b["n_attempted"]
         return dict(n_attempted=nat, n_ok=b["n_ok"], n_failed=b["n_failed"], n_no_result=b["n_no_result"],
                     wer=_mean(b["wer"]), hit_rate=_mean(b["hit"]), cer=_mean(b["cer"]), lang_id_acc=_mean(b["lang_id"]),
-                    roman_wer=_mean(b["rwer"]), roman_cer=_mean(b["rcer"]), roman_hit_rate=_mean(b["rhit"]),      # script-normalised: the fair S1 text metric
                     hit_rate_incl_failures=round(sum(b["hit"]) / nat, 4) if nat else None,     # failed/no-result stimuli count as 0
-                    shadow_sravaani_hit_rate=_mean(b["shadow_hit"]), shadow_sravaani_failed=b["shadow_failed"], shadow_sravaani_attempted=b["shadow_attempted"],
+                    shadow_sravaani_hit_rate=_mean(b["shadow_hit"]), shadow_sravaani_failed=b["shadow_failed"],
                     diarizer_attempted=b["diar_attempted"], diarizer_failed=b["diar_failed"],
                     der=_mean(b["der"]), abs_speaker_count_err=_mean(b["count_err"]))
     languages = {k: stats(v) for k, v in sorted(buckets.items()) if k != "canary"}
@@ -323,37 +300,12 @@ def build_report(suite_dir, results_dir, machine, target_sha=None):
                   stt_failed=sum(1 for r in scored if r.get("stt") == "failed"), stt_no_result=sum(1 for r in scored if r.get("stt") == "no_result"),
                   stt_not_run=sum(1 for r in scored if r.get("stt") == "not_run"),
                   diarizer_attempted=len(diar_rows), diarizer_failed=sum(1 for r in diar_rows if r["diarizer"] == "failed"))
-    clin = {}
-    for r in rows:
-        if "variant" not in r or "clinical_lang" not in r:
-            continue
-        b = clin.setdefault(r["clinical_lang"], {}).setdefault(r["variant"], dict(n=0, ok=0, tot={}, shadow_tot={}, wer=[], hit=[], shadow_hit=[], rwer=[], rcer=[], rhit=[]))
-        b["n"] += 1
-        if r.get("stt") == "ok":
-            b["ok"] += 1
-            if r.get("text"):
-                b["wer"].append(r["text"]["wer"]); b["hit"].append(r["text"]["hit_rate"])
-            if r.get("text_roman"):
-                b["rwer"].append(r["text_roman"]["wer"]); b["rcer"].append(r["text_roman"]["cer"]); b["rhit"].append(r["text_roman"]["hit_rate"])
-            for tkey, key in (("tot", "items"), ("shadow_tot", "shadow_items")):
-                for k, (h, n) in (r.get(key) or {}).items():
-                    a = b[tkey].setdefault(k, [0, 0]); a[0] += h; a[1] += n
-        if r.get("shadow_text"):
-            b["shadow_hit"].append(r["shadow_text"]["hit_rate"])
-    clinical = {}
-    for lang, vs in sorted(clin.items()):
-        for var, b in sorted(vs.items()):
-            rate = lambda tot, k: None if not tot.get(k, [0, 0])[1] else round(tot[k][0] / tot[k][1], 4)
-            clinical.setdefault(lang, {})[var] = dict(
-                n=b["n"], n_ok=b["ok"], wer=_mean(b["wer"]), hit_rate=_mean(b["hit"]), roman_wer=_mean(b["rwer"]), roman_cer=_mean(b["rcer"]), roman_hit_rate=_mean(b["rhit"]),
-                **{k + "_hit": rate(b["tot"], k) for k in ("drug", "dose", "diagnosis", "investigation", "follow_up_days")},
-                shadow_hit_rate=_mean(b["shadow_hit"]), **{"shadow_" + k + "_hit": rate(b["shadow_tot"], k) for k in ("drug", "dose")})
     return dict(
         report="diag-rig", machine=machine, ts_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), suite=man["suite"],
         suite_manifest_sha256=wavio.sha256_file(os.path.join(suite_dir, "suite.json")),
         phraseset_sha=man["phraseset_sha"], rig_git=man.get("rig_git"), target_sha=target_sha, tts_mode=man.get("tts_mode"),
         synthetic_fallback_voices=man.get("tts_mode") == "fake",
-        health=health, languages=languages, clinical=clinical, canary=canary, silence=silence, robustness=robust, stimuli=rows)
+        health=health, languages=languages, canary=canary, silence=silence, robustness=robust, stimuli=rows)
 
 
 def report_md(rep):
@@ -366,8 +318,8 @@ def report_md(rep):
     if rep["synthetic_fallback_voices"]:
         L.append("!! synthetic fallback voices (not speech): text metrics are meaningless in this run")
     for k, v in rep["languages"].items():
-        L.append("%-6s ok %d/%d hit=%s (incl failures %s) wer=%s cer=%s langid=%s der=%s cnt_err=%s | shadow SraVaani ok %d/%d hit=%s" % (
-            k, v["n_ok"], v["n_attempted"], v["hit_rate"], v["hit_rate_incl_failures"], v["wer"], v["cer"], v["lang_id_acc"], v["der"], v["abs_speaker_count_err"], v["shadow_sravaani_attempted"] - v["shadow_sravaani_failed"], v["shadow_sravaani_attempted"], v["shadow_sravaani_hit_rate"]))
+        L.append("%-6s ok %d/%d hit=%s (incl failures %s) wer=%s cer=%s langid=%s der=%s cnt_err=%s | shadow SraVaani hit=%s" % (
+            k, v["n_ok"], v["n_attempted"], v["hit_rate"], v["hit_rate_incl_failures"], v["wer"], v["cer"], v["lang_id_acc"], v["der"], v["abs_speaker_count_err"], v["shadow_sravaani_hit_rate"]))
     c = rep["canary"]
     L.append("canary hits %d/%d (failed calls %d count as misses)" % (c["hits"], c["n"], c["failed"]))
     sc, st = rep["silence"]["rig_selfcheck"], rep["silence"]["target"]
