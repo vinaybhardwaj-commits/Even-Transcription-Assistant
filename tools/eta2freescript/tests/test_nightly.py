@@ -1353,7 +1353,7 @@ def test_other_ledger_states_still_skip_with_the_day_read_listing_them(tmp_path,
 
 # ---- fix round 1: an invalidation is open until written / rejected / attempts_exhausted ----
 
-def _keeping(cfg, run_one):
+def _keeping_all(cfg, run_one):
     def keeping(uid):  # the real runner keeps the artifact under out/<uid>
         log = run_one(uid)
         d = Path(cfg["out"]) / uid
@@ -1375,17 +1375,20 @@ def _open_setup(tmp_path, monkeypatch):
 def test_case_a_post_failed_after_invalidation_is_reposted_with_no_bedrock(tmp_path, bundle_env, monkeypatch, capsys):
     ran, run_one = bundle_env
     cfg, stored = _open_setup(tmp_path, monkeypatch)
-    keeping = _keeping(cfg, run_one)
+    keeping = _keeping_all(cfg, run_one)
 
     def down(_b):
         raise ConnectionError("down")
 
     assert run(cfg, "2026-10-05", run_one=keeping, post=down, pending=False, sealed=["x"], skip_existing=True, day_read=lambda *_: stored) == 1
     assert ran == ["x"] and _states(cfg, "x")[-1] == "post_failed"
+    assert _last_summary(capsys)["invalidated_rerun"] == 1  # the Bedrock call counts
     capsys.readouterr()
     assert run(cfg, "2026-10-05", run_one=keeping, post=lambda b: {"ok": True, "inserted": 1, "run_id": 31}, pending=False,
                sealed=["x"], skip_existing=True, day_read=lambda *_: stored) == 0
     assert ran == ["x"]  # no second Bedrock run
+    out = _last_summary(capsys)
+    assert out["invalidated_rerun"] == 0 and out["invalidated_reposted"] == 1 and out["cost_usd"] == 0.0  # L1: a re-post is not a rerun
     last = _lines(cfg)[-1]
     assert last["state"] == "written" and last["reposted"] is True and last["artifact_id"] == "31"
     assert "skipped_existing" not in _states(cfg, "x")[2:]
@@ -1397,7 +1400,7 @@ def test_case_a_post_failed_after_invalidation_is_reposted_with_no_bedrock(tmp_p
 def test_case_b_a_crash_in_the_post_is_reposted(tmp_path, bundle_env, monkeypatch):
     ran, run_one = bundle_env
     cfg, stored = _open_setup(tmp_path, monkeypatch)
-    keeping = _keeping(cfg, run_one)
+    keeping = _keeping_all(cfg, run_one)
 
     def crash(_b):
         raise KeyboardInterrupt
@@ -1478,3 +1481,81 @@ def test_folder_mode_ignores_invalidated_and_bills_nothing_extra(tmp_path, monke
                    skip_existing=True, day_read=lambda *_: stored) == 0
     out = capsys.readouterr().out
     assert ran == [] and out.count("invalidated_ignored_folder: 1") == 4
+
+
+def _folder_cfg(tmp_path, monkeypatch):
+    monkeypatch.setenv("FREESCRIPT_INGEST_SECRET", "s3cret")
+    monkeypatch.setenv("REB_INDEX_READ_TOKEN", "")
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _folder(tmp_path, "synth-a")
+    return {"enabled": True, "data": str(tmp_path), "app_url": "https://app.test", "max_consults": 40, "out": str(tmp_path / "keep")}
+
+
+@pytest.mark.parametrize("day_read", ["raises", "partial"])
+def test_p1_folder_mode_written_then_invalidated_skips_whatever_the_day_read_does(tmp_path, monkeypatch, capsys, day_read):
+    cfg = _folder_cfg(tmp_path, monkeypatch)
+    nightly.append_states(cfg["out"], [{"consult_uid": "synth-a", "state": "written", "code_sha256": "old-sha", "artifact_id": "9"}])
+    _invalidate(cfg, "synth-a")
+    ran = []
+
+    def run_one(uid):
+        ran.append(uid)
+        raise AssertionError("must not run")
+
+    def read(*_):
+        if day_read == "raises":
+            raise ConnectionError("down")
+        return [], True
+
+    capsys.readouterr()
+    for _ in range(4):
+        assert run(cfg, "2026-10-05", run_one=run_one, post=lambda b: {"ok": True}, pending=False, sealed=False,
+                   skip_existing=True, day_read=read) == 0
+    assert ran == [] and capsys.readouterr().out.count("invalidated_ignored_folder: 1") == 4
+
+
+def test_p1_folder_mode_counts_ignored_only_for_uids_really_skipped(tmp_path, monkeypatch, capsys):
+    cfg = _folder_cfg(tmp_path, monkeypatch)
+    _invalidate(cfg, "synth-a")  # no earlier ledger line, the day read does not list it: nothing skips it
+    ran = []
+
+    def run_one(uid):
+        ran.append(uid)
+        return {"uid": uid, "final_valid": False, "cost_usd": 0.0}
+
+    capsys.readouterr()
+    run(cfg, "2026-10-05", run_one=run_one, post=lambda b: {"ok": True}, pending=False, sealed=False,
+        skip_existing=True, day_read=lambda *_: [])
+    assert "invalidated_ignored_folder: 0" in capsys.readouterr().out
+
+
+def test_p9_an_artifact_kept_before_the_invalidation_is_regenerated_not_reposted(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    keeping = _keeping_all(cfg, run_one)
+    keeping("x")  # K: kept before the invalidation
+    ran.clear()
+    nightly.append_states(cfg["out"], [{"consult_uid": "x", "state": s, "code_sha256": "sha-A"} for s in ("started", "post_failed")])
+    _invalidate(cfg, "x", "sha-A")
+    posts = []
+    assert run(cfg, "2026-10-05", run_one=keeping, post=lambda b: posts.append(1) or {"ok": True, "inserted": 1, "run_id": 5},
+               pending=False, sealed=["x"], skip_existing=True, day_read=lambda *_: []) == 0
+    assert ran == ["x"]  # a Bedrock re-run
+    assert not any(l.get("reposted") for l in _lines(cfg)) and _states(cfg, "x")[-1] == "written"
+
+
+def test_p9b_an_artifact_older_than_the_invalidated_run_ts_is_not_reposted(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg, stored = _open_setup(tmp_path, monkeypatch)
+    keeping = _keeping_all(cfg, run_one)
+
+    def down(_b):
+        raise ConnectionError("down")
+
+    run(cfg, "2026-10-05", run_one=keeping, post=down, pending=False, sealed=["x"], skip_existing=True, day_read=lambda *_: stored)
+    nightly.append_states(cfg["out"], [{"consult_uid": "x", "state": "invalidated", "code_sha256": "sha-A",
+                                        "run_ts": "2999-01-01T00:00:00+00:00"}])  # invalidated AFTER the kept artifact
+    assert run(cfg, "2026-10-05", run_one=keeping, post=lambda b: {"ok": True, "inserted": 1}, pending=False, sealed=["x"],
+               skip_existing=True, day_read=lambda *_: stored) == 0
+    assert ran == ["x", "x"]  # regenerated, not re-posted
