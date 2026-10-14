@@ -528,3 +528,15 @@ def test_r7_generated_trailers_never_excuse():
     for t in trailers:
         for said in ("two times", "I had two times", "two doses"):
             assert _inv(frequency=f"2 times {t}")(said)["count"] >= 1, (t, said)
+
+
+@pytest.mark.parametrize("value,unit", [("2 a day", "freq:day"), ("2 per day", "freq:day"), ("3 a week", "freq:week"),
+                                        ("1 per week", "freq:week"), ("1 a month", "freq:month"), ("1 a year", "freq:year")])
+def test_r8_replayed_units_gives_the_listed_unit_for_a_bare_period(value, unit):
+    assert floors.replayed_units(value, "frequency") == [(value.split()[0], unit)]
+
+
+@pytest.mark.parametrize("value,said,count", [("2 a day", "two a day", 0), ("3 a week", "three a week", 0),
+                                              ("2 per day", "two a day", 0), ("2 a day", "two a week", 1)])
+def test_r8_bare_period_frequency_is_excused_only_by_an_equal_period(value, said, count):
+    assert _inv(frequency=value)(said)["count"] == count, (value, said)

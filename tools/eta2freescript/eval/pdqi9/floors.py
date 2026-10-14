@@ -430,8 +430,8 @@ _REPLAYED_UNIT = re.compile(r"(\d+(?:\.\d+)?)[ \t]*(?:international[ \t]+)?([a-z
 
 
 _AFTER_NUMBER = re.compile(r"[ \t]*(?:international[ \t]+)?([a-z\u00b5\u03bc]+)")
-_REPLAYED_FREQ = re.compile(r"[ \t]*(?:(hourly|daily)\b|(?:times?|doses?)\b(?:[ \t]*(?:(?:a|per|each)[ \t]+(day|week|month|year)s?\b|(daily)\b)|(?P<bare>(?=[ \t]*(?:\Z|[,.;:)\]]))))"
-                            r"|(?:a|per)[ \t]+(day|week|month|year)s?\b)")
+_REPLAYED_FREQ = re.compile(r"[ \t]*(?:(?P<hd>hourly|daily)\b|(?:times?|doses?)\b(?:[ \t]*(?:(?:a|per|each)[ \t]+(?P<tp>day|week|month|year)s?\b|(?P<td>daily)\b)|(?P<bare>(?=[ \t]*(?:\Z|[,.;:)\]]))))"
+                            r"|(?:a|per)[ \t]+(?P<ap>day|week|month|year)s?\b)")
 
 
 def replayed_units(value: str, field: str) -> list[tuple[str, str | None]]:
@@ -446,8 +446,9 @@ def replayed_units(value: str, field: str) -> list[tuple[str, str | None]]:
             if re.search(r"every[ \t]+$", text[:m.start()]) and re.match(r"[ \t]*hours?\b", text[m.end():]):
                 u = "freq:hour"
             elif (f := _REPLAYED_FREQ.match(text, m.end())):
-                u = ("freq:hour" if f.group(1) == "hourly" else "freq:day" if f.group(1) == "daily" or f.group(3)
-                     else f"freq:{f.group(2) or f.group(4)}" if f.group(2) or f.group(4) else "freq:count" if f.group("bare") is not None else None)
+                period = f.group("tp") or f.group("ap")
+                u = ("freq:hour" if f.group("hd") == "hourly" else "freq:day" if f.group("hd") == "daily" or f.group("td")
+                     else f"freq:{period}" if period else "freq:count" if f.group("bare") is not None else None)
         elif (w := _AFTER_NUMBER.match(text, m.end())):
             word = re.sub(r"^[\u00b5\u03bc]", "mc", w.group(1))  # µg = mcg
             u = _unit_of(word) or ("iu" if "international" in w.group(0) and word.rstrip("s") == "unit" else None)
