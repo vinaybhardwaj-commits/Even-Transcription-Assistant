@@ -8,7 +8,6 @@
  */
 
 import { randomUUID } from 'crypto';
-import { assertOpdProductionWrite } from './opd-lab-write-guard';
 import { sql } from './db';
 import {
   formatAuditRef, computeSlaDueAt, mintStatus, statusAfterDoctorVerb, statusAfterAction,
@@ -20,7 +19,6 @@ const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Reco
 const SLA_DAYS = Math.max(1, Math.min(60, Number(process.env.OPD_AUDIT_SLA_DAYS) || 7));
 
 export async function ensureGovSignalTables(): Promise<void> {
-  assertOpdProductionWrite('opd_gov_signal.ensureGovSignalTables');
   await run(`CREATE TABLE IF NOT EXISTS opd_gov_signal (
     signal_id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     app_source        text NOT NULL DEFAULT 'standalone',
@@ -58,7 +56,6 @@ export async function ensureGovSignalTables(): Promise<void> {
 }
 
 export async function ensureDoctorResponseRequestsTable(): Promise<void> {
-  assertOpdProductionWrite('opd_gov_signal.ensureDoctorResponseRequestsTable');
   await run(`CREATE TABLE IF NOT EXISTS opd_doctor_response_request (
     id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     signal_id         uuid NOT NULL,
@@ -148,7 +145,6 @@ async function ensureGovReady(): Promise<void> {
 }
 
 export async function mintOrUpdateSignal(input: MintInput): Promise<StoredSignal> {
-  assertOpdProductionWrite('opd_gov_signal.mintOrUpdateSignal');
   await ensureGovReady();
   const note_class = noteClassOf(input.note_class);
   const actor = input.cm_user ? `cm:${input.cm_user}` : 'cm:unknown';
@@ -185,8 +181,8 @@ export async function mintOrUpdateSignal(input: MintInput): Promise<StoredSignal
       return (await getBySignalId(signalId))!;
     } catch (e) {
       // unique-violation on reference OR on the (doctor,signal_type,window) key → re-resolve and retry.
-      // The winning thread must carry THIS decision's UUID, or doctor-audits cannot join
-      // source_triage_ref to triage_stamp_events.decision_id.
+      // The winning thread must carry THIS decision's UUID so stamp correlation
+      // stays on the signal. doctor-audits does not project stamp reason or policy_version.
       const existingNow = await getByKey(input.doctor_uid, input.signal_type, input.window_from, input.window_to, note_class);
       if (existingNow) {
         if (input.source_triage_ref) {
@@ -211,7 +207,6 @@ export async function withdrawSignal(
   doctorUid: string, signalType: string, windowFrom: string | null, windowTo: string | null, cmUser: string | null,
   noteClass: NoteClass = 'opd',
 ): Promise<void> {
-  assertOpdProductionWrite('opd_gov_signal.withdrawSignal');
   await ensureGovReady();
   const existing = await getByKey(doctorUid, signalType, windowFrom, windowTo, noteClass);
   if (!existing || existing.status === 'closed') return;
@@ -286,7 +281,6 @@ export async function claimDoctorResponseRequest(
   signal: StoredSignal,
   resp: NormalizedDoctorResponse,
 ): Promise<DoctorResponseRequestClaim> {
-  assertOpdProductionWrite('opd_gov_signal.claimDoctorResponseRequest');
   const replay = await run(
     `SELECT client_request_id, verb, comment
      FROM opd_doctor_response_request
@@ -336,7 +330,6 @@ export async function completeDoctorResponseRequest(
   resp: NormalizedDoctorResponse,
   stored: StoredSignal,
 ): Promise<void> {
-  assertOpdProductionWrite('opd_gov_signal.completeDoctorResponseRequest');
   await run(
     `UPDATE opd_doctor_response_request
      SET response=$4::jsonb, completed_at=now()
@@ -346,7 +339,6 @@ export async function completeDoctorResponseRequest(
 }
 
 export async function releaseDoctorResponseRequest(signal: StoredSignal, resp: NormalizedDoctorResponse): Promise<void> {
-  assertOpdProductionWrite('opd_gov_signal.releaseDoctorResponseRequest');
   await run(
     `DELETE FROM opd_doctor_response_request
      WHERE signal_id=$1::uuid AND doctor_uid=$2 AND client_request_id=$3 AND completed_at IS NULL`,
@@ -356,7 +348,6 @@ export async function releaseDoctorResponseRequest(signal: StoredSignal, resp: N
 
 /** Record a doctor response (portal). Sets latest_response + status + an event. */
 export async function applyDoctorResponse(signal: StoredSignal, resp: NormalizedDoctorResponse): Promise<StoredSignal> {
-  assertOpdProductionWrite('opd_gov_signal.applyDoctorResponse');
   const newStatus = statusAfterDoctorVerb(resp.verb, resp.type, resp.verdict);
   const payload = {
     verb: resp.verb,
@@ -376,39 +367,12 @@ export async function applyDoctorResponse(signal: StoredSignal, resp: Normalized
   return (await getBySignalId(signal.signal_id))!;
 }
 
-/**
- * Has this exact governance action, under this gov_intervention_ref, already been applied to the
- * thread? `ruling` keeps only the latest action; the event log keeps every one, so an ack(ref A)
- * retried after close(ref B) is still recognised as a replay. Only applySignalAction writes a
- * ruled/closed event with a payload.action (withdrawSignal's closed event has none).
- */
-export async function hasSignalActionEvent(signalId: string, action: string, ref: string | null): Promise<boolean> {
-  if (!ref) return false;
-  const rows = await run(
-    `SELECT 1 AS hit FROM opd_gov_signal_event
-     WHERE signal_id=$1::uuid AND event IN ('ruled','closed')
-       AND payload->>'action'=$2 AND payload->>'gov_intervention_ref'=$3 LIMIT 1`,
-    [signalId, action, ref]);
-  return rows.length > 0;
-}
-
-/** Thrown by applySignalAction when the thread moved after the caller read it. The route answers 409. */
-export const SIGNAL_CHANGED = 'signal_changed';
-
-/**
- * Record a governance ruling (roster). Sets ruling + status + an event.
- * The write is conditional on the status the caller validated against, so two racing actions cannot
- * both pass the transition guard: the loser writes nothing and gets SIGNAL_CHANGED.
- */
+/** Record a governance ruling (roster). Sets ruling + status + an event. */
 export async function applySignalAction(signal: StoredSignal, action: NormalizedSignalAction): Promise<StoredSignal> {
-  assertOpdProductionWrite('opd_gov_signal.applySignalAction');
   const newStatus = statusAfterAction(action.action);
   const payload = { action: action.action, note: action.note, actor: action.actor, gov_intervention_ref: action.gov_intervention_ref, ruled_at: new Date().toISOString() };
-  const written = await run(
-    `UPDATE opd_gov_signal SET ruling=$2::jsonb, status=$3, updated_at=now()
-     WHERE signal_id=$1 AND status=$4 RETURNING signal_id`,
-    [signal.signal_id, JSON.stringify(payload), newStatus, signal.status]);
-  if (!written.length) throw new Error(SIGNAL_CHANGED);
+  await run(`UPDATE opd_gov_signal SET ruling=$2::jsonb, status=$3, updated_at=now() WHERE signal_id=$1`,
+    [signal.signal_id, JSON.stringify(payload), newStatus]);
   await appendEvent(signal.signal_id, newStatus === 'closed' ? 'closed' : 'ruled', action.actor || 'gov:unknown', payload);
   return (await getBySignalId(signal.signal_id))!;
 }
