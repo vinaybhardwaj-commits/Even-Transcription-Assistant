@@ -1,0 +1,32 @@
+# systemd --user unit for the newcat worker (docker). Install per docs/WORKER-HOST.md.
+# One worker at a time: never enable this unit on c4 and t4 together.
+[Unit]
+Description=newcat worker (docker)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 0600 file, names only in git (worker.env.example). systemd reads it for the ${...} mount sources; docker reads it for the container.
+EnvironmentFile=%h/.config/newcat/worker.env
+ExecStartPre=-/usr/bin/docker rm -f newcat-worker
+# Root fs read-only, only /tmp writable (tmpfs). Bind mounts are read-only; the mount option errors if a source is missing
+# (the short bind flag would silently create a root-owned directory). Health is published on loopback only.
+ExecStart=/usr/bin/docker run --rm --name newcat-worker \
+  --env-file %h/.config/newcat/worker.env \
+  -e NEWCAT_ETA_LAB_DIR=/eta-lab -e NEWCAT_REB_ROOT=/reb -e PORT=43123 \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m \
+  --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 \
+  --mount type=bind,src=${NEWCAT_HOST_LAB_DIR},dst=/eta-lab,readonly \
+  --mount type=bind,src=${NEWCAT_HOST_REB_ROOT},dst=/reb,readonly \
+  --mount type=bind,src=${NEWCAT_HOST_SSH_DIR},dst=/home/node/.ssh,readonly \
+  -p 127.0.0.1:43124:43123 \
+  --stop-timeout 40 \
+  newcat-worker:current
+ExecStop=/usr/bin/docker stop --time 40 newcat-worker
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

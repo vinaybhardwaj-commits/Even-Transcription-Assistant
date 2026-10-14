@@ -6,7 +6,7 @@ import { runQueuedJob } from './api/http.js'
 import { log } from './log.js'
 import { runLeasedWork } from './pipeline/audit.js'
 import { AGENTS } from './agents/index.js'
-import { startWorkerLoop } from './jobs/loop.js'
+import { healthOf, startWorkerLoop } from './jobs/loop.js'
 import { createRetentionRunner } from './jobs/retention.js'
 import { createBridge } from './platform/ubus/bridge.js'
 
@@ -19,8 +19,9 @@ bridge?.start()
 const health = createServer((req, res) => {
   const path = (req.url ?? '/').split('?')[0]
   if (req.method === 'GET' && path === '/health') {
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-    res.end(JSON.stringify({ status: 'ok', jev: jevReadiness(started.env) }))
+    const h = healthOf(workerLoop.tickAgeS(), started.env.WORKER_POLL_MS, jevReadiness(started.env))
+    res.writeHead(h.http, { 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify(h.body))
     return
   }
   res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' })
@@ -32,6 +33,8 @@ health.listen(started.env.PORT, '0.0.0.0', () => {
 
 const workerLoop = startWorkerLoop({
   pollMs: started.env.WORKER_POLL_MS,
+  heartbeat: (tick_age_s) => log('info', 'worker.heartbeat', { tick_age_s }),
+  heartbeatMs: started.env.NEWCAT_HEARTBEAT_S * 1000,
   paused: () => bridge?.paused === true,
   retentionTick: () => retention.tick(),
   runJob: () => runQueuedJob(started.deps, owner),
