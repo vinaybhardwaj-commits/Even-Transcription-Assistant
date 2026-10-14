@@ -565,3 +565,29 @@ def test_header_carries_basis_and_both_eta_and_pulse_counts_whichever_basis():
     for b in ("eta", "all"):
         h = _agg(b)["header"]
         assert h["floor_basis"] == b and h["eta"] == 0 and h["pulse_catalogue"] == 3 and h["pulse_extraction"] == 0 and h["check"] == 0 and h["total"] == 3
+
+
+# ---- scoreboard split: eta_coincidence and eta_legacy (FIX1, 15 Oct 2026) ------------------------------------------
+def test_scoreboard_split_prints_coincidence_and_legacy():
+    from tools.eta2freescript.eval.pdqi9 import scoreboard
+    t = {"eta": 4, "eta_coincidence": 3, "pulse_catalogue": 2, "pulse_extraction": 1, "check": 0}
+    assert scoreboard.split_cell(t) == ("[eta 4, eta_coincidence 3, pulse_catalogue 2, pulse_extraction 1, check 0; eta_legacy (old rule) 7]")
+
+
+def test_scoreboard_old_row_without_coincidence_reads_zero():
+    from tools.eta2freescript.eval.pdqi9 import scoreboard
+    t = {"eta": 5, "pulse_catalogue": 0, "pulse_extraction": 1, "check": 0}
+    assert scoreboard.split_cell(t) == "[eta 5, eta_coincidence 0, pulse_catalogue 0, pulse_extraction 1, check 0; eta_legacy (old rule) 5]"
+    assert "eta_legacy (old rule) -" in scoreboard.split_cell({**t, "eta": None})
+
+
+def test_scoreboard_eta_legacy_is_eta_plus_coincidence_for_random_counts():
+    import random
+    import re
+    from tools.eta2freescript.eval.pdqi9 import scoreboard
+    rng = random.Random(1510)
+    for _ in range(2000):
+        e, c = rng.randint(0, 500), rng.randint(0, 500)
+        out = scoreboard.split_cell({"eta": e, "eta_coincidence": c, "pulse_catalogue": 0, "pulse_extraction": 0, "check": 0})
+        assert int(re.search(r"eta_legacy \(old rule\) (\d+)", out).group(1)) == e + c
+        assert f"eta {e}," in out and f"eta_coincidence {c}," in out

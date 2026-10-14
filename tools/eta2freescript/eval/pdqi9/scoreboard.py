@@ -13,6 +13,15 @@ def _f(v, nd=2):
     return "-" if v is None else (f"{v:.{nd}f}" if isinstance(v, float) else str(v))
 
 
+def split_cell(t: dict) -> str:
+    """The source split of a floor row or the header: every source, then `eta_legacy` (= eta + eta_coincidence, labelled old rule).
+    A stored row from before eta_coincidence has no such key and reads it as 0. Pass/fail is on eta, never on eta_legacy."""
+    coin = t.get("eta_coincidence") or 0
+    legacy = None if t.get("eta") is None else t["eta"] + coin
+    return (f"[eta {_f(t['eta'])}, eta_coincidence {_f(None if t.get('eta') is None else coin)}, pulse_catalogue {_f(t['pulse_catalogue'])}, "
+            f"pulse_extraction {_f(t['pulse_extraction'])}, check {_f(t['check'])}; eta_legacy (old rule) {_f(legacy)}]")
+
+
 def _combo_cell(d: dict, key: str) -> str:
     return "<br>".join(f"{c}: {_f(v.get('median'))}/{_f(v.get('mean'))}" if isinstance(v, dict) else f"{c}: {_f(v)}" for c, v in d.items())
 
@@ -24,12 +33,12 @@ def _models_cell(r: dict) -> str:
 
 def md_row(r: dict) -> str:
     def floor_cell(t):
-        att = f" [eta {_f(t['eta'])}, pulse_catalogue {_f(t['pulse_catalogue'])}, pulse_extraction {_f(t['pulse_extraction'])}, check {_f(t['check'])}]" if "eta" in t else ""
+        att = " " + split_cell(t) if "eta" in t else ""
         return f"{t['floor']} {_f(t['bn'], 3)}{att} ({'ok' if t['pass'] else 'FAIL'})"
 
     fh = r.get("floor_header") or r["floors"].get("header") or {}
     basis_cell = r.get("floor_basis", r["floors"].get("basis", "eta")) + (
-        f" [eta {fh['eta']}, pulse_catalogue {fh['pulse_catalogue']}, pulse_extraction {fh['pulse_extraction']}, check {fh['check']}]" if fh else "")
+        " " + split_cell(fh) if fh else "")
     floors = "; ".join(floor_cell(t) for t in r["floors"]["rows"])
     cells = [r["round"], r["code_sha"][:12], r["prompt_sha"][:12], r["judge_sha"][:12], _models_cell(r), r["render"], r["split_sha"][:12], r["split"], r["n"],
              _combo_cell({c: v["A"] for c, v in r["totals"].items()}, "A"), _combo_cell({c: v["B0"] for c, v in r["totals"].items()}, "B0"),
