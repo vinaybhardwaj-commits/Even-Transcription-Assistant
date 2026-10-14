@@ -122,14 +122,21 @@ control_store() {
   { printf '%s\n' "$(now_epoch)"; printf '%s\n' "$1"; } >"$tmp" && mv -f "$tmp" "$STATE_DIR/control.last"
 }
 
+# Unbuffered NUL -> 0x01 filter (tr and cat buffer on a pipe, which would hold a message back until EOF). /usr/bin/perl ships with macOS.
+# Missing perl = empty stream = the loop only reconnects = no control messages = stale = shadow.
+nul_to_soh() {
+  /usr/bin/perl -e 'while (sysread(STDIN, $b, 65536)) { $b =~ tr/\0/\1/; syswrite(STDOUT, $b); }'
+}
+
 # Kiosk's own subscription to guardian/control. Same backoff pattern as subscriber_loop.
 control_loop() {
   local line backoff=2
   [ -n "$GUARDIAN_CONTROL_SUB_CMD" ] || return 0
   loop_init
   while :; do
+    # bash drops NUL on read, which would turn "fa<NUL>lse" into a clean "false": map NUL to 0x01 first so the raw-byte check on control.last kills it.
     loop_parent_ok || loop_orphaned
-    { bash -c "$GUARDIAN_CONTROL_SUB_CMD" _ "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | while IFS= read -r line; do
+    { bash -c "$GUARDIAN_CONTROL_SUB_CMD" _ "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | nul_to_soh | while IFS= read -r line; do
       [ -n "$line" ] && control_store "$line"
     done; } </dev/null &
     loop_watch $!

@@ -15,7 +15,7 @@ CONTROL_LAST="$STATE_DIR/control.last"
 # No JSON scanner. The Mini publishes exactly one form (json.dumps with sort_keys and default separators), and only that form is accepted:
 #   {"kill": true|false, "modes": {"<room>": "shadow|heal", ...}, "ts": <epoch>}
 # Everything else is killed. Order of checks:
-#   1. raw bytes of the FILE, before any variable read (bash drops NUL): at most CONTROL_MAX_BYTES (4096), exactly 2 lines,
+#   1. raw bytes of the FILE, before any variable read (bash drops NUL): the payload line at most CONTROL_MAX_BYTES (4096) and the file at most that plus 17, exactly 2 lines,
 #      every byte in 0x20-0x7E or the newline, ending in a newline;
 #   2. line 1 matches ^[1-9][0-9]{0,14}$ (read base 10); stale/latch/skew rules on the receive epoch and on "ts";
 #   3. line 2 matches ONE anchored regex under LC_ALL=C.
@@ -33,13 +33,15 @@ control_parse() {
   # 1. raw bytes, as a file
   size="$(wc -c <"$CONTROL_LAST" 2>/dev/null | tr -d " ")"
   case "$size" in ""|*[!0-9]*) CTRL_WHY=unparseable; return 1 ;; esac
-  if [ "$size" -gt "${CONTROL_MAX_BYTES:-4096}" ]; then CTRL_WHY=unparseable; return 1; fi
-  bad="$(tr -d '\n\040-\176' <"$CONTROL_LAST" 2>/dev/null | wc -c | tr -d " ")"
+  if [ "$size" -gt "$((${CONTROL_MAX_BYTES:-4096} + 17))" ]; then CTRL_WHY=unparseable; return 1; fi
+  bad="$(LC_ALL=C tr -d '\n\040-\176' <"$CONTROL_LAST" 2>/dev/null | wc -c | tr -d " ")"
   nl="$(wc -l <"$CONTROL_LAST" 2>/dev/null | tr -d " ")"
-  if [ "$bad" != "0" ] || [ "$nl" != "2" ] || [ "$(tail -c 1 "$CONTROL_LAST" 2>/dev/null | wc -l | tr -d " ")" != "1" ]; then CTRL_WHY=unparseable; return 1; fi
+  if [ "$bad" != "0" ] || [ "$nl" != "2" ] || [ "$(tail -c 1 "$CONTROL_LAST" 2>/dev/null | wc -l | tr -d " ")" != "1" ]; then CTRL_WHY=rawbytes; return 1; fi
   recv="$(sed -n '1p' "$CONTROL_LAST" 2>/dev/null)"
   payload="$(sed -n '2p' "$CONTROL_LAST" 2>/dev/null)"
   now="$(now_epoch)"
+  # the payload line itself is capped (the file cap above is the payload cap plus a 15-digit epoch and 2 newlines)
+  if [ "${#payload}" -gt "${CONTROL_MAX_BYTES:-4096}" ]; then CTRL_WHY=unparseable; return 1; fi
   # 2. receive epoch
   [[ $recv =~ $CONTROL_RECV_RE ]] || { CTRL_WHY=unparseable; return 1; }
   CTRL_AGE=$((10#$now - 10#$recv))

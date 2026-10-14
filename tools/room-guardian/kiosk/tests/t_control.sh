@@ -792,3 +792,84 @@ test_no_scanner_is_left() {
   assert_eq "$(grep -rl 'control_top_keys' "$KDIR/lib" "$KDIR/bin" | wc -l | tr -d ' ')" "0" "control_top_keys is gone"
   assert_eq "$(grep -rn 'python' "$KDIR/lib" "$KDIR/bin" | grep -vc '^[^:]*:[0-9]*:#')" "0" "no python outside comments in kiosk code"
 }
+
+# ---- R8: payload cap 4096 (not the file), raw check independent of the caller's locale ----
+# canon_len <ts> <target length>: canonical payload (python3 json.dumps, sort_keys) of exactly <target> bytes; opd9 is heal
+canon_len() {
+  python3 -I -c '
+import json, sys
+ts, target = int(sys.argv[1]), int(sys.argv[2])
+modes = {"opd9": "heal"}
+def dump(m): return json.dumps({"kill": False, "modes": m, "ts": ts}, sort_keys=True)
+i = 0
+while len(modes) < 63:
+    i += 1
+    name = ("r%03d" % i).ljust(64, "x")
+    trial = dict(modes); trial[name] = "shadow"
+    if len(dump(trial)) > target - 8: break
+    modes = trial
+for n in range(1, 65):
+    name = ("z" + "y" * 80)[:n]
+    trial = dict(modes); trial[name] = "shadow"
+    if len(dump(trial)) == target: modes = trial; break
+out = dump(modes)
+assert len(out) == target, (len(out), target)
+sys.stdout.write(out)
+' "$@"
+}
+
+test_payload_of_exactly_4096_bytes_is_accepted_4097_is_killed() {
+  use_ctl
+  local p
+  p="$(canon_len "$GUARDIAN_FAKE_NOW" 4096)"; assert_eq "${#p}" "4096" "built payload length"
+  ctl_engaged 1 "$p"; assert_rc $? 1 "4096-byte canonical payload is accepted"
+  assert_eq "$(current_mode)" "heal" "heal read from a 4096-byte payload"
+  assert_eq "$([ "$(wc -c <"$STATE_DIR/control.last" | tr -d ' ')" -gt 4096 ] && echo over)" "over" "the file itself is over 4096 (payload cap, not file cap)"
+  p="$(canon_len "$GUARDIAN_FAKE_NOW" 4095)"; ctl_engaged 1 "$p"; assert_rc $? 1 "4095 accepted"
+  p="$(canon_len "$GUARDIAN_FAKE_NOW" 4097)"; assert_eq "${#p}" "4097" "built payload length"
+  ctl_engaged 1 "$p"; assert_rc $? 0 "4097-byte payload killed"
+  assert_eq "$(current_mode)" "shadow" "shadow"
+  # file framing: a file over payload cap + 17 is killed whatever its content
+  p="$(canon_len "$GUARDIAN_FAKE_NOW" 4096)"
+  { printf '%s\n' "$((GUARDIAN_FAKE_NOW - 1))"; printf '%s\n' "$p"; printf 'x%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; } >"$STATE_DIR/control.last"
+  raw_engaged; assert_rc $? 0 "4096 payload plus extra bytes beyond the frame"
+}
+
+test_raw_check_catches_a_high_byte_under_a_utf8_locale_with_lc_all_unset() {
+  use_ctl
+  unset LC_ALL; export LANG=en_US.UTF-8 LC_CTYPE=en_US.UTF-8
+  write_raw 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}\377' "$GUARDIAN_FAKE_NOW"
+  has_byte "$STATE_DIR/control.last" ff && ok || fail "no 0xFF in file"
+  raw_engaged; assert_rc $? 0 "0xFF killed"
+  assert_eq "$CTRL_WHY" "rawbytes" "caught by the raw check itself"
+  write_raw 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}\303\251' "$GUARDIAN_FAKE_NOW"
+  raw_engaged; assert_rc $? 0 "a valid UTF-8 e-acute killed"
+  assert_eq "$CTRL_WHY" "rawbytes" "caught by the raw check itself (UTF-8)"
+}
+
+# NUL on the wire: bash read would drop it before control_store; control_loop maps it to 0x01 so the file check kills the message
+test_nul_inside_false_on_the_wire_is_killed_through_control_loop() {
+  load_libs
+  use_ctl
+  export GUARDIAN_CONTROL_SUB_CMD='printf "{\"kill\": fa\000lse, \"modes\": {\"opd9\": \"heal\"}, \"ts\": %s}\n" "$GUARDIAN_FAKE_NOW"; sleep 30 & echo $! >>"$T/ctl.pid"; wait'
+  start_loops control_loop
+  local i=0
+  while [ "$i" -lt 40 ] && ! grep -q 'kill' "$STATE_DIR/control.last" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
+  has_byte "$STATE_DIR/control.last" 01 && ok || fail "control.last holds no 0x01 byte"
+  has_byte "$STATE_DIR/control.last" 00 && fail "a NUL reached the file" || ok
+  assert_has "$(sed -n '2p' "$STATE_DIR/control.last" | tr '\001' '#')" 'fa#lse' "the NUL became one 0x01 inside false"
+  rm -f "$STATE_DIR/control_latch"; flag_fetch; killswitch_engaged; assert_rc $? 0 "control_parse kills it"
+  assert_eq "$CTRL_WHY" "rawbytes" "by the raw-byte check"
+  assert_eq "$(current_mode)" "shadow" "no heal"
+}
+
+test_backslashes_survive_control_loop() {
+  load_libs
+  export GUARDIAN_CONTROL_SUB_CMD='printf "%s\n" "{\"kill\": false, \"x\": \"a\\\\b\"}"; sleep 30 & echo $! >>"$T/ctl.pid"; wait'
+  start_loops control_loop
+  local i=0
+  while [ "$i" -lt 40 ] && ! grep -q 'kill' "$STATE_DIR/control.last" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
+  has_bs "$STATE_DIR/control.last" && ok || fail "the backslash did not survive read -r"
+}
