@@ -283,10 +283,11 @@ def fetch_role_doc(app_url: str, token: str, uid: str, timeout_s: int = 30) -> d
     return role_doc_from_feed(rows[0])
 
 
-def fetch_day(app_url: str, secret: str, day: str, timeout_s: int = 30) -> list[dict]:
-    """GET /api/freescript/day?ist_date= (same HMAC as the pending read). Stored rows for the day; any failure raises.
+def fetch_day(app_url: str, secret: str, day: str, timeout_s: int = 30) -> tuple[list[dict], bool]:
+    """GET /api/freescript/day?ist_date= (same HMAC as the pending read). (stored rows, partial); an HTTP or body failure raises.
 
-    A truncated read is a failure: uids past the cap would look absent and be run twice.
+    ``partial`` is true when the read was truncated (50-row cap) or withheld blind room-days: the rows are then a subset,
+    and the ledger is what covers the rest.
     """
     path = f"/api/freescript/day?ist_date={day}"
     ts = int(datetime.now(timezone.utc).timestamp())
@@ -298,9 +299,34 @@ def fetch_day(app_url: str, secret: str, day: str, timeout_s: int = 30) -> list[
     rows = body.get("rows") if isinstance(body, dict) else None
     if not isinstance(body, dict) or body.get("ok") is not True or not isinstance(rows, list):
         raise NightlyError("day read returned no rows list")
-    if body.get("truncated"):
-        raise NightlyError("day read was truncated")
-    return [r for r in rows if isinstance(r, dict)]
+    withheld = body.get("withheld_blind")
+    partial = bool(body.get("truncated")) or (isinstance(withheld, (int, float)) and withheld > 0)
+    return [r for r in rows if isinstance(r, dict)], partial
+
+
+def current_code_sha() -> str:
+    """sha256 over the package sources, the same value the pipeline stamps as generator.code_sha256."""
+    from .prompts import code_paths, sha
+    return sha(*code_paths())
+
+
+def read_ledger(out_root: str) -> dict[str, dict] | None:
+    """Last <out>/consult-state.jsonl line per uid. A missing file is an empty ledger; an unreadable one is None."""
+    last: dict[str, dict] = {}
+    try:
+        with open(Path(out_root) / "consult-state.jsonl", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and isinstance(row.get("consult_uid"), str):
+                    last[row["consult_uid"]] = row
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError):
+        return None
+    return last
 
 
 def existing_uids(rows: list[dict]) -> dict[str, str | None]:
@@ -578,16 +604,46 @@ def _sealed_uids(cfg: dict, day: str, sealed, reb_token: str) -> list[str] | Non
     return None
 
 
-def _day_filter(cfg: dict, day: str, secret: str, day_read) -> dict[str, str | None] | None:
-    """Uids already stored for ``day``, or None when the day read failed (the caller aborts; never run blind)."""
+def _skip_map(cfg: dict, day: str, secret: str, day_read, code_sha: str) -> tuple[dict[str, tuple[str, str | None]], dict] | None:
+    """uid -> (ledger state to record, artifact id) for every uid to skip, plus {day_read_partial, day_read_failed}.
+
+    The box's ledger comes first: a last line of ``written`` or ``skipped_existing`` skips, and so does ``rejected`` with this
+    run's code sha (a rejected uid is retried only when the code changed). The day read adds every uid it lists with a state other
+    than ``rejected``. A truncated or blind-withholding read is partial, a failed read is ledger-only. None only when the ledger is
+    unreadable AND the day read fails: the caller aborts.
+    """
+    ledger = read_ledger(cfg["out"])
+    skips: dict[str, tuple[str, str | None]] = {}
+    for uid, row in (ledger or {}).items():
+        aid = row.get("artifact_id") if isinstance(row.get("artifact_id"), str) else None
+        st = row.get("state")
+        if st in ("written", "skipped_existing"):
+            skips[uid] = ("skipped_existing", aid)
+        elif st == "rejected" and row.get("code_sha256") == code_sha:
+            skips[uid] = ("rejected", aid)  # still rejected at this code: the line keeps saying so, so a code change retries it
+    info = {"day_read_partial": False, "day_read_failed": False}
     try:
         if not cfg.get("app_url") or not secret:
             raise NightlyError("no app url or secret for the day read")
-        rows = day_read(cfg["app_url"], secret, day) if day_read else fetch_day(cfg["app_url"], secret, day)
-        return existing_uids(rows)
+        got = day_read(cfg["app_url"], secret, day) if day_read else fetch_day(cfg["app_url"], secret, day)
+        rows, partial = got if isinstance(got, tuple) else (got, False)
+        info["day_read_partial"] = bool(partial)
+        for uid, aid in existing_uids(rows).items():
+            skips[uid] = ("skipped_existing", aid)
     except Exception as e:
         print("day-read", type(e).__name__, flush=True)
-        return None
+        info["day_read_failed"] = True
+        if ledger is None:
+            return None
+    return skips, info
+
+
+def _abort_summary(dry_run: bool, day: str, out: dict | None) -> None:
+    print(json.dumps({"date": day, "dry_run": dry_run, "n": 0, "posted": 0, "rejected": 0, "failed": 0, "skipped": 0, "missing": 0,
+                      "skipped_existing": 0, "mode": "bundle", "bundle_failed": 0, "missing_layers": 0, "not_this_day": 0,
+                      "day_read_failed": True, "ledger_unreadable": True}))
+    if out is not None:
+        out.update(fatal=True)
 
 
 STATE_FILE = "consult-state.jsonl"
@@ -607,14 +663,6 @@ def append_states(out_root: str, lines: list[dict]) -> None:
     finally:
         os.close(fd)
     os.chmod(path, 0o600)
-
-
-def _abort_summary(dry_run: bool, day: str, out: dict | None) -> None:
-    print(json.dumps({"date": day, "dry_run": dry_run, "n": 0, "posted": 0, "rejected": 0, "failed": 0, "skipped": 0, "missing": 0,
-                      "skipped_existing": 0, "mode": "bundle", "bundle_failed": 0, "missing_layers": 0, "not_this_day": 0,
-                      "day_read_failed": True}))
-    if out is not None:
-        out.update(fatal=True)
 
 
 def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed, secret: str, reb_token: str,
@@ -639,16 +687,19 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
     # explicit pending requests first (they skip the day check), then the sealed feed; the cap applies before any fetch
     uids = [(u, j, False) for u, j in jobs_by_uid.items()] + [(u, None, True) for u in sealed_uids if u not in jobs_by_uid]
     skipped_existing = 0
+    flags: dict = {}
+    code_sha = current_code_sha()
     states: dict[str, tuple[str, str | None]] = {}  # uid -> (state, artifact_id) for the ledger
     if skip_existing:
-        have = _day_filter(cfg, day, secret, day_read)
-        if have is None:
+        got = _skip_map(cfg, day, secret, day_read, code_sha)
+        if got is None:
             _abort_summary(dry_run, day, out)
             return 1
+        have, flags = got
         kept = [t for t in uids if t[0] not in have]
         for t in uids:
             if t[0] in have:
-                states[t[0]] = ("skipped_existing", have[t[0]])
+                states[t[0]] = have[t[0]]
         skipped_existing, uids = len(uids) - len(kept), kept
     cap = int(cfg.get("max_consults") or 40)
     overflow, uids = len(uids) - cap if len(uids) > cap else 0, uids[:cap]
@@ -678,9 +729,10 @@ def _run_bundle(cfg: dict, day: str, *, dry_run, run_one, post, pending, sealed,
                               on_result=lambda u, st, aid=None: states.__setitem__(u, (st, aid)))
     if cfg.get("out") and not dry_run:
         run_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        append_states(cfg["out"], [{"consult_uid": u, "ist_date": day, "state": st, "artifact_id": aid, "run_ts": run_ts}
+        append_states(cfg["out"], [{"consult_uid": u, "ist_date": day, "state": st, "artifact_id": aid, "run_ts": run_ts,
+                                    "code_sha256": code_sha}
                                    for u, (st, aid) in states.items()])
-    summary.update(counts, mode="bundle", skipped_existing=skipped_existing, date=day, eligible=len(rows))
+    summary.update(counts, **flags, mode="bundle", skipped_existing=skipped_existing, date=day, eligible=len(rows))
     summary["skipped"] = summary.get("skipped", 0) + overflow
     summary["missing"] = counts["missing_layers"] + unexpanded
     rc = _finish(summary, dry_run, extra_failed=counts["bundle_failed"], out=out)
@@ -768,6 +820,7 @@ def _finish(summary: dict, dry_run: bool, extra_failed: int = 0, out: dict | Non
     keys = ("dry_run", "n", "posted", "rejected", "failed", "skipped", "missing", "mode", "bundle_failed", "missing_layers", "not_this_day",
             "skipped_existing", "cost_usd")
     line = {k: summary[k] for k in keys}
+    line.update({k: True for k in ("day_read_partial", "day_read_failed") if summary.get(k)})
     if summary.get("date"):
         line = {"date": summary["date"], **line}
     print(json.dumps(line))
@@ -788,6 +841,11 @@ def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, 
         return 0
     secret = os.environ.get("FREESCRIPT_INGEST_SECRET", "").strip()
     reb_token = os.environ.get("REB_INDEX_READ_TOKEN", "").strip()
+    if skip_existing and not cfg.get("out"):
+        print("config error: --skip-existing needs out (the ledger directory)")
+        if out is not None:
+            out.update(fatal=True)
+        return 1
     if cfg.get("bundle_cmd"):
         return _run_bundle(cfg, day, dry_run=dry_run, run_one=run_one, post=post, pending=pending, sealed=sealed, secret=secret,
                            reb_token=reb_token, skip_existing=skip_existing, day_read=day_read, out=out)
@@ -825,13 +883,15 @@ def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, 
             if r["uid"] not in have:
                 rows.append(r)
     skipped_existing = 0
+    flags: dict = {}
     if skip_existing:
-        have = _day_filter(cfg, day, secret, day_read)
-        if have is None:
-            print(json.dumps({"date": day, "mode": "folder", "day_read_failed": True}))
+        got = _skip_map(cfg, day, secret, day_read, current_code_sha())
+        if got is None:
+            print(json.dumps({"date": day, "mode": "folder", "day_read_failed": True, "ledger_unreadable": True}))
             if out is not None:
                 out.update(fatal=True)
             return 1
+        have, flags = got
         kept = [r for r in rows if r["uid"] not in have]
         skipped_existing, rows = len(rows) - len(kept), kept
     if not rows and not missing and not sealed_missing:
@@ -846,6 +906,7 @@ def run(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=None, 
     summary = execute(rows, cfg, dry_run=dry_run, run_one=run_one, post=sender or (lambda _p: {"ok": True, "inserted": 0}))
     summary["missing"] = len(missing) + len(sealed_missing)
     summary["skipped_existing"] = skipped_existing
+    summary.update(flags)
     return _finish(summary, dry_run, out=out)
 
 

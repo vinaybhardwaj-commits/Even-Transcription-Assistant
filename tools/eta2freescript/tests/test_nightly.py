@@ -1,5 +1,6 @@
 """Nightly selection, the off switch, and the ingest payload. Synthetic folders only. No model call."""
 import json
+from pathlib import Path
 from datetime import datetime, timezone
 
 import pytest
@@ -184,9 +185,21 @@ def test_payload_omits_empty_optional_fields():
 
 # ---- skip-existing, hourly, backfill (bundle mode; HTTP and run_one mocked) ----
 
+class _Resp:
+    def __init__(self, body):
+        import io
+        self._b = io.BytesIO(json.dumps(body).encode())
+
+    def read(self):
+        return self._b.read()
+
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
 def _bcfg(tmp_path, **kw):
     return {"enabled": True, "app_url": "https://app.test", "max_consults": 40, "bundle_cmd": ["x", "{uid}", "{out}"],
-            "bundle_cwd": str(tmp_path), **kw}
+            "bundle_cwd": str(tmp_path), "out": str(tmp_path / "keep"), **kw}
 
 
 @pytest.fixture
@@ -236,19 +249,108 @@ def test_skip_existing_applies_before_the_cap(tmp_path, bundle_env):
     assert ran == ["b"]
 
 
-def test_day_read_failure_aborts_with_exit_1_and_runs_nothing(tmp_path, bundle_env, capsys):
+def test_day_read_down_uses_the_ledger_alone_and_continues(tmp_path, bundle_env, capsys):
     ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    _ledger(cfg, [("a", "written", None, "x"), ("b", "skipped_existing", None, "x")])
+
+    def boom(*_):
+        raise OSError("down")
+
+    assert _call(cfg, "2026-10-05", run_one, ["a", "b", "c"], boom) == 0
+    assert ran == ["c"]
+    line = json.loads([l for l in capsys.readouterr().out.splitlines() if l.startswith("{")][-1])
+    assert line["day_read_failed"] is True and line["skipped_existing"] == 2
+
+
+def test_both_ledger_and_day_read_down_aborts_with_exit_1(tmp_path, bundle_env, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    (tmp_path / "keep").mkdir()
+    (tmp_path / "keep" / "consult-state.jsonl").mkdir()  # a directory where the file should be: unreadable
 
     def boom(*_):
         raise OSError("down")
 
     out = {}
-    assert _call(_bcfg(tmp_path), "2026-10-05", run_one, ["a"], boom, out=out) == 1
+    assert _call(cfg, "2026-10-05", run_one, ["a"], boom, out=out) == 1
     assert ran == [] and out["fatal"] is True
-    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["day_read_failed"] is True
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["ledger_unreadable"] is True
 
 
-def test_fetch_day_treats_truncated_and_bad_bodies_as_failure(monkeypatch):
+def test_skip_existing_without_out_is_a_config_error(tmp_path, bundle_env, capsys):
+    ran, run_one = bundle_env
+    out = {}
+    assert _call(_bcfg(tmp_path, out=""), "2026-10-05", run_one, ["a"], lambda *_: [], out=out) == 1
+    assert ran == [] and out["fatal"] is True and "config error" in capsys.readouterr().out
+
+
+def _ledger(cfg, entries):
+    """entries: (uid, state, artifact_id, code_sha)"""
+    root = Path(cfg["out"])
+    root.mkdir(parents=True, exist_ok=True)
+    with open(root / "consult-state.jsonl", "a") as f:
+        for uid, st, aid, sha in entries:
+            f.write(json.dumps({"consult_uid": uid, "ist_date": "2026-10-05", "state": st, "artifact_id": aid,
+                                "run_ts": "t", "code_sha256": sha}) + "\n")
+
+
+def test_truncated_day_read_continues_and_skips_by_ledger(tmp_path, bundle_env, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    _ledger(cfg, [("old", "written", "9", "x")])
+    assert _call(cfg, "2026-10-05", run_one, ["old", "listed", "new"],
+                 lambda *_: ([{"consult_uid": "listed", "state": "ok", "run_id": 4}], True)) == 0
+    assert ran == ["new"]
+    line = json.loads([l for l in capsys.readouterr().out.splitlines() if l.startswith("{")][-1])
+    assert line["day_read_partial"] is True and line["skipped_existing"] == 2
+
+
+def test_fetch_day_flags_withheld_blind_as_partial(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(nightly.urllib.request, "urlopen", lambda req, timeout=0: _Resp(seen["body"]))
+    seen["body"] = {"ok": True, "rows": [], "truncated": False, "withheld_blind": 3}
+    assert fetch_day("https://app.test", "s", "2026-10-05") == ([], True)
+    seen["body"] = {"ok": True, "rows": [], "truncated": False, "withheld_blind": 0}
+    assert fetch_day("https://app.test", "s", "2026-10-05") == ([], False)
+
+
+def test_blind_room_day_continues_end_to_end(tmp_path, bundle_env, capsys):
+    ran, run_one = bundle_env
+    assert _call(_bcfg(tmp_path), "2026-10-05", run_one, ["a"], lambda *_: ([], True)) == 0
+    assert ran == ["a"]
+    assert json.loads([l for l in capsys.readouterr().out.splitlines() if l.startswith("{")][-1])["day_read_partial"] is True
+
+
+def test_rejected_is_skipped_at_the_same_code_sha_and_retried_at_a_new_one(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _ledger(cfg, [("r", "rejected", "5", "sha-A")])
+    assert _call(cfg, "2026-10-05", run_one, ["r"], lambda *_: []) == 0
+    assert ran == []
+    last = [json.loads(l) for l in (tmp_path / "keep" / "consult-state.jsonl").read_text().splitlines()][-1]
+    assert last["state"] == "rejected" and last["artifact_id"] == "5"  # still rejected, so a later code change still retries
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-B")
+    assert _call(cfg, "2026-10-05", run_one, ["r"], lambda *_: []) == 0
+    assert ran == ["r"]
+
+
+def test_written_is_skipped_across_two_hourly_runs(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    kw = dict(run_one=run_one, post=lambda b: {"ok": True, "inserted": 1, "run_id": 11}, sealed=["a", "b"], pending=[],
+              day_read=lambda *_: ([], True))  # the day read shows nothing: only the ledger can stop a rerun
+    assert hourly(cfg, now=_ist(2026, 10, 14, 10, 5), **kw) == 0
+    assert sorted(ran) == ["a", "b"]
+    assert hourly(cfg, now=_ist(2026, 10, 14, 11, 5), **kw) == 0
+    assert sorted(ran) == ["a", "b"]  # nothing ran twice
+    states = [json.loads(l)["state"] for l in (tmp_path / "keep" / "consult-state.jsonl").read_text().splitlines()]
+    assert states.count("written") == 2 and states.count("skipped_existing") == 2
+
+
+def test_fetch_day_reports_truncation_as_partial_and_bad_bodies_as_failure(monkeypatch):
     import io
 
     class R(io.BytesIO):
@@ -263,11 +365,10 @@ def test_fetch_day_treats_truncated_and_bad_bodies_as_failure(monkeypatch):
 
     monkeypatch.setattr(nightly.urllib.request, "urlopen", opener)
     seen["body"] = {"ok": True, "rows": [{"consult_uid": "a", "state": "ok"}], "truncated": False}
-    assert fetch_day("https://app.test", "s", "2026-10-05") == [{"consult_uid": "a", "state": "ok"}]
+    assert fetch_day("https://app.test", "s", "2026-10-05") == ([{"consult_uid": "a", "state": "ok"}], False)
     assert "X-freescript-signature" in seen["h"]
     seen["body"] = {"ok": True, "rows": [], "truncated": True}
-    with pytest.raises(NightlyError):
-        fetch_day("https://app.test", "s", "2026-10-05")
+    assert fetch_day("https://app.test", "s", "2026-10-05") == ([], True)
     seen["body"] = {"ok": False}
     with pytest.raises(NightlyError):
         fetch_day("https://app.test", "s", "2026-10-05")
@@ -434,12 +535,12 @@ def test_consult_state_ledger_has_every_state(tmp_path, bundle_env):
     assert by["have"]["artifact_id"] == "3" and by["rej"]["artifact_id"] == "7" and by["okk"]["artifact_id"] == "8"
     assert by["boom"]["artifact_id"] is None and by["nl"]["artifact_id"] is None
     for l in lines:
-        assert set(l) == {"consult_uid", "ist_date", "state", "artifact_id", "run_ts"} and l["ist_date"] == "2026-10-05"
+        assert set(l) == {"consult_uid", "ist_date", "state", "artifact_id", "run_ts", "code_sha256"} and l["code_sha256"] == nightly.current_code_sha() and l["ist_date"] == "2026-10-05"
 
 
 def test_ledger_not_written_without_out_or_on_dry_run(tmp_path, bundle_env):
     ran, run_one = bundle_env
     kw = dict(run_one=run_one, post=lambda b: {"ok": True, "inserted": 1}, pending=False, sealed=["a"])
-    run(_bcfg(tmp_path), "2026-10-05", **kw)
+    run(_bcfg(tmp_path, out=""), "2026-10-05", **kw)
     run(_bcfg(tmp_path, out=str(tmp_path / "k")), "2026-10-05", dry_run=True, **kw)
     assert not (tmp_path / "k").exists() and not list(tmp_path.glob("**/consult-state.jsonl"))
