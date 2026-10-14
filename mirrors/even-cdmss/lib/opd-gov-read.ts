@@ -20,7 +20,6 @@ import { fetchIpdDoctorHop } from './ipd-doctor-hop';
 import { landDischargeAudits, type DischargeAuditSource } from './triage/ds-lander';
 import { landOtAudits } from './triage/ot-lander';
 import { OT_ENGINE_VERSION } from './triage/ot-audit-core';
-import { emptyPatient, evidenceExcerpt, patientContext, type PatientContext } from './doctor-facing';
 
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 const APP = process.env.APP_SOURCE || 'standalone';
@@ -28,38 +27,14 @@ const APP = process.env.APP_SOURCE || 'standalone';
  *  before ranking, which is what makes the int[] cast in CANONICAL_RANK_SQL safe. */
 const ENG_FAMILY_SQL = `ANY(ARRAY[${OPD_ENGINE_VERSIONS_CURRENT.map((v) => `'${v}'`).join(', ')}])`;
 
-export interface Instance extends SignalRepresentative {
-  /** Present only on an `enrich` read (doctor-facing). Governance reads never carry these. */
-  evidence_excerpt?: string | null;
-  patient?: PatientContext;
-}
+export interface Instance extends SignalRepresentative {}
 
-export interface ResolveOpts {
-  /**
-   * Doctor-facing read: add the audit's evidence points, the patient context CDMSS already stores,
-   * and (discharge) resolved citations. Off by default, so every governance route keeps its shape.
-   */
-  enrich?: boolean;
-}
-
-export interface Resolved {
-  count: number;
-  representative: Instance | null;
-  instances: Instance[];
-}
-
-/** At most this many audits get their `report.sources` read for citation titles in one call. */
-const ENRICH_AUDIT_CAP = 25;
-
-function citationsFromSources(ids: readonly number[], sources: readonly Source[]): { n: number; title: string; url: string }[] {
+function citationsFor(f: OpdFinding, sources: Source[]): { n: number; title: string; url: string }[] {
+  const ids = Array.isArray(f.citation_ids) ? f.citation_ids : [];
   return ids.map((i) => {
     const s = sources.find((x) => x?.n === i);
     return { n: i, title: s ? (s.chapter ? `${s.book} — ${s.chapter}` : s.book) : `Source ${i}`, url: s?.url || '' };
   });
-}
-
-function citationsFor(f: OpdFinding, sources: Source[]): { n: number; title: string; url: string }[] {
-  return citationsFromSources(Array.isArray(f.citation_ids) ? f.citation_ids : [], sources);
 }
 
 /**
@@ -68,8 +43,7 @@ function citationsFor(f: OpdFinding, sources: Source[]): { n: number; title: str
  */
 export async function resolveInstances(
   doctorUid: string, signalType: string, windowFrom: string | null, windowTo: string | null,
-  opts: ResolveOpts = {},
-): Promise<Resolved> {
+): Promise<{ count: number; representative: SignalRepresentative | null; instances: Instance[] }> {
   const params: unknown[] = [APP, OPD_ENGINE_VERSION, doctorUid];
   let where = `app_source=$1 AND engine_version=$2 AND doctor_uid=$3 AND excluded_reason IS NULL`;   // Fix C
   if (windowFrom) { params.push(windowFrom); where += ` AND (note_date AT TIME ZONE 'Asia/Kolkata')::date >= $${params.length}`; }
@@ -91,15 +65,13 @@ export async function resolveInstances(
       instances.push({
         audit_id, finding_ref: f.finding_ref as string, subject: f.subject, verdict: f.verdict,
         rationale: f.rationale, note_date, citations: citationsFor(f, sources),
-        // OPD rows hold no patient fields at all (migration 0007), so the context stays all-null.
-        ...(opts.enrich ? { evidence_excerpt: evidenceExcerpt(f.evidence), patient: emptyPatient() } : {}),
       });
     }
   }
   return { count: instances.length, representative: instances[0] ?? null, instances };
 }
 
-function emptyInstances(): Resolved {
+function emptyInstances(): { count: number; representative: SignalRepresentative | null; instances: Instance[] } {
   return { count: 0, representative: null, instances: [] };
 }
 
@@ -113,14 +85,7 @@ interface LandedInstance {
   signal_type: string;
   finding_ref: string;
   citation_ids?: number[];
-  evidence?: string[];
   informational?: boolean;
-}
-
-/** Per-audit context for an enriched read. Its presence is what switches enrichment on. */
-export interface InstanceAux {
-  patients?: ReadonlyMap<string, Partial<Record<keyof PatientContext, unknown>>>;
-  sources?: ReadonlyMap<string, readonly Source[]>;
 }
 
 /**
@@ -134,8 +99,7 @@ export function selectSignalInstances(
   signalType: string,
   windowFrom: string | null,
   windowTo: string | null,
-  aux?: InstanceAux,
-): Resolved {
+): { count: number; representative: SignalRepresentative | null; instances: Instance[] } {
   const uid = doctorUid.trim();
   const from = windowFrom ? windowFrom.slice(0, 10) : '';
   const to = windowTo ? windowTo.slice(0, 10) : '';
@@ -150,7 +114,6 @@ export function selectSignalInstances(
   }).slice().sort((a, b) => String(b.note_date).slice(0, 10).localeCompare(String(a.note_date).slice(0, 10)));
   const instances: Instance[] = ranked.map((f) => {
     const ids = Array.isArray(f.citation_ids) ? f.citation_ids : [];
-    const resolved = aux?.sources?.get(f.audit_id);
     return {
       audit_id: f.audit_id,
       finding_ref: f.finding_ref,
@@ -158,11 +121,7 @@ export function selectSignalInstances(
       verdict: f.verdict,
       rationale: f.rationale,
       note_date: String(f.note_date).slice(0, 10),
-      citations: resolved ? citationsFromSources(ids, resolved as Source[]) : ids.map((n) => ({ n, title: `Source ${n}`, url: '' })),
-      ...(aux ? {
-        evidence_excerpt: evidenceExcerpt(f.evidence),
-        patient: patientContext(aux.patients?.get(f.audit_id)),
-      } : {}),
+      citations: ids.map((n) => ({ n, title: `Source ${n}`, url: '' })),
     };
   });
   return { count: instances.length, representative: instances[0] ?? null, instances };
@@ -180,8 +139,7 @@ function classWindowOpen(windowFrom: string | null, windowTo: string | null): bo
  */
 export async function resolveDischargeInstances(
   doctorUid: string, signalType: string, windowFrom: string | null, windowTo: string | null,
-  opts: ResolveOpts = {},
-): Promise<Resolved> {
+): Promise<{ count: number; representative: SignalRepresentative | null; instances: Instance[] }> {
   if (!doctorUid.trim() || !signalType.trim() || !classWindowOpen(windowFrom, windowTo)) return emptyInstances();
   const params: unknown[] = [APP];
   let where = `app_source = $1 AND engine_version LIKE 'ipd-discharge-audit/%' AND engine_version NOT LIKE '%-mini'
@@ -226,25 +184,7 @@ export async function resolveDischargeInstances(
     };
   }
   const landed = landDischargeAudits(sources, hop);
-  const plain = selectSignalInstances(landed.findings, doctorUid, signalType, windowFrom, windowTo);
-  if (!opts.enrich || !plain.count) return plain;
-
-  // Enriched read. The IP number is the stay id already on the row. Citation titles live in the
-  // stored report; read only that one key, and only for the audits this thread actually shows.
-  const patients = new Map<string, Partial<Record<keyof PatientContext, unknown>>>(
-    sources.map((s) => [s.id, { ip_number: s.ip_uid }]),
-  );
-  const ids = [...new Set(plain.instances.map((i) => i.audit_id))].slice(0, ENRICH_AUDIT_CAP);
-  const srcRows = await run(
-    `SELECT id::text AS id, report->'sources' AS sources FROM ipd_discharge_audits WHERE id = ANY($1::uuid[])`,
-    [ids],
-  ).catch(() => []);
-  const sourcesById = new Map<string, Source[]>();
-  for (const r of srcRows as Record<string, unknown>[]) {
-    const list = parseJson<Source[]>(r.sources, []);
-    if (Array.isArray(list) && list.length) sourcesById.set(String(r.id), list);
-  }
-  return selectSignalInstances(landed.findings, doctorUid, signalType, windowFrom, windowTo, { patients, sources: sourcesById });
+  return selectSignalInstances(landed.findings, doctorUid, signalType, windowFrom, windowTo);
 }
 
 /**
@@ -254,8 +194,7 @@ export async function resolveDischargeInstances(
  */
 export async function resolveOtInstances(
   doctorUid: string, signalType: string, windowFrom: string | null, windowTo: string | null,
-  opts: ResolveOpts = {},
-): Promise<Resolved> {
+): Promise<{ count: number; representative: SignalRepresentative | null; instances: Instance[] }> {
   if (!doctorUid.trim() || !signalType.trim() || !classWindowOpen(windowFrom, windowTo)) return emptyInstances();
   const params: unknown[] = [APP, OT_ENGINE_VERSION, doctorUid];
   let where = `app_source = $1 AND engine_version = $2 AND doctor_uid = $3 AND map_status = 'mapped'`;
@@ -267,32 +206,25 @@ export async function resolveOtInstances(
     params.push(windowTo.slice(0, 10));
     where += ` AND note_day <= $${params.length}::date`;
   }
-  const uhidCol = opts.enrich ? ', uhid' : '';
   const rows = await run(
-    `SELECT id, doctor_uid, map_status, note_day${uhidCol}, findings
+    `SELECT id, doctor_uid, map_status, note_day, findings
      FROM (${canonicalDistinctOnSql({
        table: 'ot_note_audits',
        identity: 'uid',
-       cols: `id::text AS id, doctor_uid, map_status, to_char(note_day,'YYYY-MM-DD') AS note_day${uhidCol}, findings`,
+       cols: `id::text AS id, doctor_uid, map_status, to_char(note_day,'YYYY-MM-DD') AS note_day, findings`,
        where,
      })}) canonical
      LIMIT 8000`,
     params,
   ).catch(() => []);
-  const list = rows as Record<string, unknown>[];
-  const landed = landOtAudits(list.map((r) => ({
+  const landed = landOtAudits((rows as Record<string, unknown>[]).map((r) => ({
     id: String(r.id),
     doctor_uid: r.doctor_uid == null ? null : String(r.doctor_uid),
     map_status: r.map_status == null ? 'unmapped' : String(r.map_status),
     note_day: String(r.note_day || ''),
     findings: r.findings,
   })));
-  if (!opts.enrich) return selectSignalInstances(landed.findings, doctorUid, signalType, windowFrom, windowTo);
-  // OT notes carry no citation store, so citations stay empty; the UHID is the one patient field held.
-  const patients = new Map<string, Partial<Record<keyof PatientContext, unknown>>>(
-    list.map((r) => [String(r.id), { uhid: r.uhid }]),
-  );
-  return selectSignalInstances(landed.findings, doctorUid, signalType, windowFrom, windowTo, { patients });
+  return selectSignalInstances(landed.findings, doctorUid, signalType, windowFrom, windowTo);
 }
 
 /**
@@ -302,54 +234,10 @@ export async function resolveOtInstances(
 export async function resolveInstancesForNoteClass(
   noteClass: string | null | undefined,
   doctorUid: string, signalType: string, windowFrom: string | null, windowTo: string | null,
-  opts: ResolveOpts = {},
-): Promise<Resolved> {
-  if (noteClass === 'discharge_summary') return resolveDischargeInstances(doctorUid, signalType, windowFrom, windowTo, opts);
-  if (noteClass === 'ot') return resolveOtInstances(doctorUid, signalType, windowFrom, windowTo, opts);
+): Promise<{ count: number; representative: SignalRepresentative | null; instances: Instance[] }> {
+  if (noteClass === 'discharge_summary') return resolveDischargeInstances(doctorUid, signalType, windowFrom, windowTo);
+  if (noteClass === 'ot') return resolveOtInstances(doctorUid, signalType, windowFrom, windowTo);
   return emptyInstances();
-}
-
-/**
- * The one resolver every thread-reading route uses. A thread resolves against ITS OWN note class:
- * opd → opd_note_audits, discharge_summary → ipd_discharge_audits, ot → ot_note_audits.
- * (Calling resolveInstances directly for a non-OPD thread returns OPD text or nothing.)
- */
-export async function resolveInstancesForSignal(
-  signal: { note_class?: string | null; doctor_uid: string; signal_type: string; window_from: string | null; window_to: string | null },
-  opts: ResolveOpts = {},
-): Promise<Resolved> {
-  const cls = signal.note_class || 'opd';
-  return cls === 'opd'
-    ? resolveInstances(signal.doctor_uid, signal.signal_type, signal.window_from, signal.window_to, opts)
-    : resolveInstancesForNoteClass(cls, signal.doctor_uid, signal.signal_type, signal.window_from, signal.window_to, opts);
-}
-
-/**
- * The same resolver without any call out of Neon, for doctor-interactive POSTs (doctor-response,
- * signal-reaction). A discharge thread resolves through the Metabase treating-doctor hop, which can
- * outlast the portal's timeout after the write is already committed; those POSTs only need the
- * thread row, so a discharge thread resolves to nothing here. OPD and OT read Neon only.
- */
-export async function resolveInstancesLocal(
-  signal: { note_class?: string | null; doctor_uid: string; signal_type: string; window_from: string | null; window_to: string | null },
-): Promise<Resolved> {
-  if (signal.note_class === 'discharge_summary') return emptyInstances();
-  return resolveInstancesForSignal(signal);
-}
-
-/** Run `fn` over `items` with at most `limit` in flight; results keep input order. */
-export async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  const worker = async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= items.length) return;
-      out[i] = await fn(items[i], i);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
-  return out;
 }
 
 export interface AuditMetrics {
