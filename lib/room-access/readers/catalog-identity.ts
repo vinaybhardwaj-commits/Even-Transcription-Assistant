@@ -27,7 +27,7 @@ export async function identityFor(uids: readonly string[], opts: { withPrescript
   try {
     const got = (await sql`
       SELECT consult_uid, doctor_name, patient_name, individual_uid, prescription_uid, presc_state,
-             (prescription IS NOT NULL) AS has_prescription,
+             (prescription IS NOT NULL OR prescription_uid IS NOT NULL) AS has_prescription,
              CASE WHEN ${withRx}::boolean THEN prescription END AS prescription
         FROM encounter_catalog
        WHERE consult_uid = ANY(${[...uids]}::text[])

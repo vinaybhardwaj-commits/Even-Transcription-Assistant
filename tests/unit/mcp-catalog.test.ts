@@ -47,7 +47,7 @@ vi.mock("@/lib/db", () => {
       const withRx = values[0] === true;
       const uids = values[1] as string[];
       H.identityQueries.push({ uids, withRx });
-      return Promise.resolve(H.identity.filter((r) => uids.includes(r.consult_uid as string)).map((r) => ({ ...r, has_prescription: r.prescription !== null && r.prescription !== undefined, prescription: withRx ? r.prescription ?? null : null })));
+      return Promise.resolve(H.identity.filter((r) => uids.includes(r.consult_uid as string)).map((r) => ({ ...r, has_prescription: (r.prescription !== null && r.prescription !== undefined) || (r.prescription_uid !== null && r.prescription_uid !== undefined), prescription: withRx ? r.prescription ?? null : null })));
     }
     if (/FROM reb_track_index/.test(text)) return Promise.resolve(H.indexRows);
     if (/FROM freescript_latest/.test(text)) {
@@ -1046,7 +1046,7 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
     H.identity = [idrow(UID, { prescription_uid: null, prescription: { x: 1 } })];
     expect((await layersOf()).rx).toMatchObject({ status: "ok", data: { has_prescription: true, prescription_uid: null } });
     H.identity = [idrow(UID, { prescription: null })];
-    expect((await layersOf()).rx).toMatchObject({ status: "ok", data: { has_prescription: false } }); // a prescription_uid alone is enough
+    expect((await layersOf()).rx).toMatchObject({ status: "ok", data: { has_prescription: true } }); // a prescription_uid alone is enough (C3 never fills the jsonb)
     H.identity = [idrow(UID, { prescription_uid: null, prescription: null, presc_state: null, doctor_name: NAME_D })];
     expect((await layersOf()).rx!.status).toBe("absent");
   });
@@ -1266,6 +1266,22 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
     const viaJoin = (await runA({ action: "search", include_identity: true, limit: 200 })).rows as Row[];
     const oldPath = viaJoin.filter((r) => (r.identity as Row | null)?.individual_uid === "IND-A").map((r) => r.consult_uid);
     expect(viaSql).toEqual(oldPath);
+  });
+  it("CATALOG-6 FIX1: has_prescription = (prescription IS NOT NULL OR prescription_uid IS NOT NULL): uid-only is true / rx ok / matches =true and not =false; both null is false; jsonb-only is true", async () => {
+    setCatalog([crow("UID_ONLY_AAA", { t_open: 300 }), crow("BOTH_NULL_BBB", { t_open: 200 }), crow("JSONB_ONLY_CC", { t_open: 100 })]);
+    H.identity = [
+      idrow("UID_ONLY_AAA", { prescription_uid: "RX-U", prescription: null }),
+      idrow("BOTH_NULL_BBB", { prescription_uid: null, prescription: null }),
+      idrow("JSONB_ONLY_CC", { prescription_uid: null, prescription: { m: 1 } }),
+    ];
+    const rows = (await runA({ action: "search" })).rows as Row[];
+    expect(rows.map((r) => [r.consult_uid, r.has_prescription])).toEqual([["UID_ONLY_AAA", true], ["BOTH_NULL_BBB", false], ["JSONB_ONLY_CC", true]]);
+    expect(uidsOf(await runA({ action: "search", has_prescription: true }))).toEqual(["UID_ONLY_AAA", "JSONB_ONLY_CC"]);
+    expect(uidsOf(await runA({ action: "search", has_prescription: false }))).toEqual(["BOTH_NULL_BBB"]);
+    const rx = async (uid: string) => ((await runA({ action: "get", consult_uid: uid })).layers as Record<string, Row>).rx!;
+    expect(await rx("UID_ONLY_AAA")).toMatchObject({ status: "ok", data: { has_prescription: true } });
+    expect((await rx("BOTH_NULL_BBB")).status).toBe("absent");
+    expect(await rx("JSONB_ONLY_CC")).toMatchObject({ status: "ok", data: { has_prescription: true } });
   });
 });
 });
