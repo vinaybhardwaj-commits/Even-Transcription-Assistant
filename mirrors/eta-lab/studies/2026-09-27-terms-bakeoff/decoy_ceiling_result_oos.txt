@@ -1,0 +1,13 @@
+lexicon rows: 495
+decoy rows: 234
+spurious-hit rows: 27 (0.1154)
+  - Calcific tendinopathy of the pectoralis major. Pectoralis major calcif -> ['amlodipine5mg']
+  - Patient has been on a predominantly milk-based diet for the past 5 yea -> ['calcitrolsoyisoflavonesvitk2calciumcitrateaspartateorotate']
+  - Cholesterol Total/Cholesterol HDL, the value is 4.1 ratio LDL/HDL Rati -> ['thyroxine']
+  - The patient did not have any other significant medical or traumatic hi -> ['albendazole']
+  - Patient is a teacher by profession, a role that involves significant m -> ['albendazole']
+  - A heart scan, also known as a coronary calcium scan, is a specialized  -> ['calcitrolsoyisoflavonesvitk2calciumcitrateaspartateorotate']
+  - Patient has been on a milk-based diet for the past 5 years, providing  -> ['calcitrolsoyisoflavonesvitk2calciumcitrateaspartateorotate']
+  - Absolute Basophil, the value is 0.03 10*3/mm3 Total Triglycerides, the -> ['thyroxine']
+  - Pre-operative magnetic resonance imaging scan. The arrow on the axial  -> ['hydroxychloroquine']
+  - Computed tomography scan showing the bowel interposed between the urin -> ['amlodipine5mg']

@@ -1,0 +1,10 @@
+lexicon rows: 495
+decoy rows: 273
+spurious-hit rows: 7 (0.0256)
+  - Fever, with the temperature 50 °C and since 3 days, I advise the patie -> ['hydroxychloroquine']
+  - B and C, odd and further details are not known. On examination, he is  -> ['hydroxychloroquine']
+  - Patient reported stomach pain since 3 days. He also reported severe he -> ['betahistine8mg']
+  - Folic Acid -> ['folicacid', 'folicacid5mg']
+  - low vitamin d -> ['vitamind3', 'vitamins']
+  - Pantocid 40mg Tablet -> ['pantocidtab40mg', 'pantoprazole']
+  - telmisartan 40 chlorthalidone 12.5 -> ['telmisartan20mg', 'telmisartan40mg']
