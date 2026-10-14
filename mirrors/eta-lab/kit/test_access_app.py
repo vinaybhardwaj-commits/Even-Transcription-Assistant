@@ -134,7 +134,7 @@ class Flows(unittest.TestCase):
         self.assertEqual(api.mutations(), [])
 
     def test_non_even_in_refused(self):
-        for bad in ("user@example.com", "a@b.even.in", "staff-redacted@even.in.evil.com"):
+        for bad in ("user@example.com", "staff-redacted@b.even.in", "staff-redacted@even.in.evil.com"):
             api = FakeAPI()
             code, _ = run(api, "--hostname", HOST, "--name", NAME, "--email", bad)
             self.assertNotEqual(code, 0, bad)
