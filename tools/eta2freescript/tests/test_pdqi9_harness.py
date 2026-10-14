@@ -61,6 +61,14 @@ def responder(tag: str, prompt: str, system: str) -> str:
     raise KeyError(tag)
 
 
+@pytest.fixture(autouse=True)
+def _lockbox_rule(tmp_path_factory, monkeypatch):
+    """A benign rule (no hash, a date range no synthetic consult falls in); test_pdqi9_lockbox.py covers the guard itself."""
+    p = tmp_path_factory.mktemp("rule") / "rule.json"
+    p.write_text(json.dumps({"version": 1, "uid_sha256": [], "date_from": "2099-01-01", "date_to": "2099-01-02"}), encoding="utf-8")
+    monkeypatch.setenv(splits.RULE_ENV, str(p))
+
+
 @pytest.fixture
 def frozen(tmp_path):
     return judge.load_frozen(make_frozen(tmp_path / "frozen"))

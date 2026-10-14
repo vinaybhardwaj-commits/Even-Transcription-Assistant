@@ -98,6 +98,28 @@ def target_check(items_gt: dict, family: dict, thorough: dict, total_a: dict) ->
             "met": all9 and tot and thor and sdir, "basis": PRIMARY}
 
 
+def lockbox_guard(uids: list[str], artifacts: Path, is_lockbox: bool) -> int:
+    """Fail closed, before any model call, output file or scoreboard row. The rule file is required for every run; the checks apply to tuning runs only."""
+    try:
+        rule = splits.LockboxRule.load()
+    except splits.LockboxRuleError as e:
+        print(f"lockbox_guard: abort {e.code} n_hash=0 n_date=0 n_nodate=0")
+        return 1
+    if is_lockbox:
+        return 0
+    dates = {}
+    for u in uids:
+        try:
+            dates[u] = ((_load_art(artifacts, u) or {}).get("encounter") or {}).get("visit_date_ist")
+        except (OSError, ValueError, AttributeError):
+            dates[u] = None
+    n_hash, n_date, n_nodate = splits.tuning_guard(rule, dates)
+    if n_hash or n_date or n_nodate:
+        print(f"lockbox_guard: abort n_hash={n_hash} n_date={n_date} n_nodate={n_nodate}")
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_client=None) -> int:
     ap = argparse.ArgumentParser(prog="pdqi9.run")
     ap.add_argument("--round", required=True)
@@ -120,16 +142,18 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
     paths = a.arms.split(",")
     if len(paths) != 3:
         raise SystemExit("--arms takes exactly three files: A, B0, Bn (in that order)")
-    out = Path(a.out)
-    os.umask(0o077)
-    out.mkdir(parents=True, exist_ok=True)
-
-    frozen = judge.load_frozen(a.frozen)
     arms = {n: read_arm(Path(p)) for n, p in zip(ARMS, paths)}
     uids = sorted(set(arms["A"]) & set(arms["B0"]) & set(arms["Bn"]))
     dropped_uids = len(set().union(*[set(v) for v in arms.values()]) - set(uids))
     if not uids:
         raise SystemExit("no uid is present in all three arm files")
+    if lockbox_guard(uids, Path(a.artifacts), a.lockbox) != 0:
+        return 1
+    out = Path(a.out)
+    os.umask(0o077)
+    out.mkdir(parents=True, exist_ok=True)
+
+    frozen = judge.load_frozen(a.frozen)
     spl = splits.Splits.load(frozen.split_path)
     split_name = splits.gate(spl, uids, a.lockbox, a.candidate)
 
