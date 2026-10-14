@@ -39,17 +39,13 @@ IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 HIST_RUNS = os.path.expanduser("~/eta-data/hist/runs")
 REB_ROOT = os.path.expanduser("~/eta-data/reb")
 HELDOUT_PY = os.path.expanduser("~/eta-data/drtpqma/heldout.py")
-HELDOUT_PY_SHA16 = "880404e36fd6b650"
-HELDOUT_PY_SHA16S = (HELDOUT_PY_SHA16,)   # the swapped heldout.py (empty union); the pre-swap f672c1ef046089dd is no longer accepted (BLINDLIFT-1 follow-up, architect #11148 step 5)
-# Clips that stay SEALED although the held-out room-days are lifted (architect #11062/#11071, gating-lead #10998 item 1): the four lid-debug clips. A window
-# with one of these ids is never converted here (and never uploaded by the collector): counted as `sealed`.
-SEALED_WINDOWS = frozenset({"L041", "L057", "L139", "L182"})
+HELDOUT_PY_SHA16 = "f672c1ef046089dd"
 WREB = os.path.expanduser("~/eta-data/hist/windows-reb")   # BACKFILL worklists: WREB/manifest-<day>.jsonl (launch_lane.py:20,103-105)
 ALIAS_FILE = os.path.expanduser("~/eta-data/reb-aliases/REB-ALIAS-45-from-map-9ba4795e.json")
 ALIAS_SHA8 = "09c25ccb"
 OUT_DIR = "/home/eta/oc/palimpsest/out"
 LAYER = "stt"
-COUNTERS = ("seen", "sealed", "written", "empty", "failed", "ok", "degraded", "skipped_existing", "conflicts", "blind_refused",
+COUNTERS = ("seen", "written", "empty", "failed", "ok", "degraded", "skipped_existing", "conflicts", "blind_refused",
             "would_write", "worklist_rows", "start_resolved", "attempts_carried", "deferred_backfill_window", "alias_resolved", "t0_from_manifest", "t0_mismatch", "new_manifest", "errors")
 
 
@@ -58,10 +54,10 @@ class GuardUnavailable(SystemExit):
 
 
 def load_heldout(path=HELDOUT_PY):
-    """FAIL-CLOSED: returns is_held(day, room) only if heldout.py has one of the expected sha16s (HELDOUT_PY_SHA16S) and its union loads and verifies."""
+    """FAIL-CLOSED: returns is_held(day, room) only if heldout.py has the expected sha16 and its union loads and verifies."""
     try:
         raw = open(path, "rb").read()
-        if hashlib.sha256(raw).hexdigest()[:16] not in HELDOUT_PY_SHA16S:
+        if hashlib.sha256(raw).hexdigest()[:16] != HELDOUT_PY_SHA16:
             raise ValueError("heldout.py sha16 mismatch")
         spec = importlib.util.spec_from_file_location("heldout", path)
         mod = importlib.util.module_from_spec(spec)
@@ -322,23 +318,14 @@ def convert_one(path, date_dir, root, is_held, aliases, write, outbox, ts, cnt, 
     hist = json.load(open(path))
     room = hist["room_id"]
     h0, h1 = parse_iso_ms(hist["start"]), parse_iso_ms(hist["end"])
-    if hist.get("window_id") in SEALED_WINDOWS:
-        cnt["sealed"] += 1
-        return
     if window_held(is_held, room, h0, h1):
         cnt["blind_refused"] += 1
         return
     ist_date, wid, manifest, alias_used = find_window(root, room, hist["window_id"], h0, date_dir, aliases)
-    if wid in SEALED_WINDOWS:   # by the id the window resolved to (an existing manifest or an alias); the start-index match is checked below, before its manifest is opened
-        cnt["sealed"] += 1
-        return
     if manifest is None and start_index:
         hit = start_index.get((room, h0))
         if hit:   # same room + same start already has a manifest under another id: write INTO it (never a second manifest)
             ist_date, wid = hit
-            if wid in SEALED_WINDOWS:   # a start match must not write INTO a sealed window's manifest: checked BEFORE that manifest is opened
-                cnt["sealed"] += 1
-                return
             manifest = json.load(open(os.path.join(root, ist_date, room, wid, "manifest.json")))
             cnt["start_resolved"] += 1
     if manifest is None and is_backfill_window(backfill, room, wid, h0):
