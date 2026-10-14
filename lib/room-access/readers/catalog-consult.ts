@@ -14,8 +14,9 @@
  */
 import { signGetUrl } from "@/lib/r2";
 import { ENCOUNTER_CATALOG_KEY, labReader, REB_CONSULT_KEY } from "@/lib/sarvam-lab";
-import { CONSULT_CLIPS_PREFIX } from "@/lib/room-access/keys";
+import { CONSULT_CLIPS_PREFIX, REB_PREFIX } from "@/lib/room-access/keys";
 import { isRebRole, speakerRoleMap } from "@/lib/room-access/readers/reb-consult";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 
 export type Row = Record<string, unknown>;
 export const CATALOG_CACHE_MS = 5 * 60_000;
@@ -136,8 +137,21 @@ export function selectTrack(cands: Track[], source: unknown): Track | null {
 type Fetched = { kind: "track"; track: Track } | { kind: "absent" } | { kind: "error"; code: string };
 
 /** One layer key: validated against the REB consult shape, read, parsed, run through selectTrack. */
-async function fetchTrack(key: unknown, source: unknown): Promise<Fetched> {
-  if (typeof key !== "string" || !REB_CONSULT_KEY.test(key)) return { kind: "error", code: "key_not_readable" };
+/** F1: a layer or manifest key must belong to THIS row (date, room, consult) and not to a held-out room-day. null = fine, else the layer error code. */
+export function bindRefusal(key: unknown, row: Row): "key_not_readable" | "blind_room_day" | null {
+  if (typeof key !== "string") return "key_not_readable";
+  const m = REB_CONSULT_KEY.exec(key);
+  if (!m) return "key_not_readable";
+  if (m[1] !== row.ist_date || m[2] !== row.room_id || m[3] !== row.consult_uid) return "key_not_readable";
+  if (isBlindRoomDay(m[1], m[2])) return "blind_room_day";
+  return null;
+}
+
+async function fetchTrack(key: unknown, row: Row): Promise<Fetched> {
+  const source = row.source;
+  const refused = bindRefusal(key, row);
+  if (refused) return { kind: "error", code: refused };
+  if (typeof key !== "string") return { kind: "error", code: "key_not_readable" };
   const reader = labReader();
   if (!reader) return { kind: "error", code: "catalog_unavailable" };
   let got: Awaited<ReturnType<typeof reader.get>>;
@@ -167,8 +181,64 @@ const layerKey = (row: Row, name: string): unknown => {
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const segs = (t: Track): Seg[] => (t.body.segments as unknown[]).filter((s): s is Seg => !!asRec(s));
 
+// --- X1: the clock. Consult-scope segment times are EPOCH ms (manifest clock tape_utc); the answer is ms from clip start. -----------------------------
+export type Manifest = { key: string; t0_ms: number; duration_ms: number | null };
+type ManifestResult = { kind: "ok"; manifest: Manifest } | { kind: "error"; code: string };
+
+/** The consult scope's manifest.json, bound to the row. Missing, or without a finite t0_ms, is no_clock: the clock is never guessed from row.t_open. */
+async function fetchManifest(row: Row): Promise<ManifestResult> {
+  const key = `${REB_PREFIX}${String(row.ist_date)}/${String(row.room_id)}/_consults/${String(row.consult_uid)}/manifest.json`;
+  const refused = bindRefusal(key, row);
+  if (refused) return { kind: "error", code: refused };
+  const reader = labReader();
+  if (!reader) return { kind: "error", code: "catalog_unavailable" };
+  let got: Awaited<ReturnType<typeof reader.get>>;
+  try {
+    got = await reader.get(key);
+  } catch {
+    return { kind: "error", code: "read_failed" };
+  }
+  if (!got) return { kind: "error", code: "no_clock" };
+  let body: unknown;
+  try {
+    body = JSON.parse(got.body);
+  } catch {
+    return { kind: "error", code: "no_clock" };
+  }
+  const rec = asRec(body);
+  const t0 = rec ? num(rec.t0_ms) : null;
+  if (!rec || t0 === null) return { kind: "error", code: "no_clock" };
+  const audio = asRec(rec.audio);
+  // The schema (kit/reb/schema.py REQUIRED_AUDIO_FIELDS) names duration_ms; the contract text says `duration`. Both are taken as milliseconds.
+  const d = num(audio?.duration_ms) ?? num(audio?.duration);
+  return { kind: "ok", manifest: { key, t0_ms: t0, duration_ms: d !== null && d > 0 ? Math.round(d) : null } };
+}
+
+/** PURE. A copy of the track with every segment's t0_ms / t1_ms moved from epoch to ms from clip start; a negative result becomes 0 and is counted. */
+export function toClipClock(t: Track, t0: number): { track: Track; n_clamped: number } {
+  let n = 0;
+  const rel = (v: unknown): unknown => {
+    const x = num(v);
+    if (x === null) return v;
+    const r = x - t0;
+    if (r < 0) {
+      n++;
+      return 0;
+    }
+    return r;
+  };
+  const segments = (t.body.segments as unknown[]).map((g) => {
+    const r = asRec(g);
+    return r ? { ...r, t0_ms: rel(r.t0_ms), t1_ms: rel(r.t1_ms) } : g;
+  });
+  return { track: { ...t, body: { ...t.body, segments } }, n_clamped: n };
+}
+
 export type TranscriptSegment = { i: number; t0_ms: number; t1_ms: number; speaker: string | null; role: string; lang: string | null; text_native?: string | null; text_en?: string | null };
-export type TranscriptData = { segments: TranscriptSegment[]; clock: "ms_from_clip_start"; duration_ms: number | null; n_segments: number; degraded?: string[] };
+export type TranscriptData = {
+  segments: TranscriptSegment[]; clock: "ms_from_clip_start"; duration_ms: number | null; n_segments: number; degraded?: string[];
+  manifest_t0_ms?: number; consult_span_ms?: { t0: number | null; t1: number | null }; n_clamped?: number;
+};
 
 const overlap = (a0: number, a1: number, b0: number, b1: number): number => Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
 const speakerLabel = (v: unknown): string | null => (typeof v === "string" ? v : typeof v === "number" && Number.isFinite(v) ? String(v) : null);
@@ -262,38 +332,60 @@ export async function readTranscriptLayer(row: Row, includeText: boolean): Promi
   const keys = ["stt", "translate", "role"].map((n) => layerKey(row, n));
   const source = keys.filter((k): k is string => typeof k === "string" && k !== "");
   if (keys[0] === null) return layerAbsent(source) as Layer<TranscriptData>;
-  const [stt, tr, ro] = await Promise.all(keys.map((k) => (k !== null ? fetchTrack(k, row.source) : Promise.resolve<Fetched | null>(null))));
+  const [mf, stt, tr, ro] = await Promise.all([fetchManifest(row), ...keys.map((k) => (k !== null ? fetchTrack(k, row) : Promise.resolve<Fetched | null>(null)))]);
   if (stt!.kind === "error") return layerError(source, stt!.code) as Layer<TranscriptData>;
   if (stt!.kind === "absent") return layerAbsent(source) as Layer<TranscriptData>;
+  if (mf.kind === "error") return layerError(source, mf.code) as Layer<TranscriptData>;
+  source.push(mf.manifest.key);
+  const t0 = mf.manifest.t0_ms;
+  let nClamped = 0;
   const degraded: string[] = [];
   const pick = (name: string, f: Fetched | null | undefined): Track | null => {
     if (!f) return null;
-    if (f.kind === "track") return f.track;
+    if (f.kind === "track") {
+      const c = toClipClock(f.track, t0);
+      nClamped += c.n_clamped;
+      return c.track;
+    }
     if (f.kind === "error") degraded.push(`${name}:${f.code}`);
     return null;
   };
-  const data = buildTranscript(stt!.track, pick("translate", tr), pick("role", ro), clipDurationMs(row), includeText);
+  const sttTrack = pick("stt", stt)!;
+  const data = buildTranscript(sttTrack, pick("translate", tr), pick("role", ro), mf.manifest.duration_ms ?? clipDurationMs(row), includeText);
+  const o = num(row.t_open);
+  const c = num(row.t_close);
+  data.manifest_t0_ms = t0;
+  data.consult_span_ms = { t0: o !== null ? o - t0 : null, t1: c !== null ? c - t0 : null };
+  data.n_clamped = nClamped;
   if (degraded.length) data.degraded = degraded;
   return layerOk(source, data);
 }
 
 export type PartRow = { part: unknown; t0_ms: number | null; t1_ms: number | null; score: unknown; confidence: unknown; source: unknown };
+const PART_SOURCE = /^[A-Za-z0-9_.:-]{1,40}$/;
 export async function readPartsLayer(row: Row): Promise<Layer<PartRow[]>> {
   const key = layerKey(row, "parts");
   const source = typeof key === "string" && key !== "" ? [key] : [];
   if (key === null) return layerAbsent(source) as Layer<PartRow[]>;
-  const f = await fetchTrack(key, row.source);
+  const [mf, f] = await Promise.all([fetchManifest(row), fetchTrack(key, row)]);
   if (f.kind === "error") return layerError(source, f.code) as Layer<PartRow[]>;
   if (f.kind === "absent") return layerAbsent(source) as Layer<PartRow[]>;
   if (asRec(f.track.body.config)?.clef_mode !== "clef+jev") return layerAbsent(source) as Layer<PartRow[]>;
-  return layerOk(source, segs(f.track).map((s) => ({ part: s.part ?? null, t0_ms: num(s.t0_ms), t1_ms: num(s.t1_ms), score: s.score ?? null, confidence: s.confidence ?? null, source: s.source ?? null })));
+  if (mf.kind === "error") return layerError(source, mf.code) as Layer<PartRow[]>;
+  source.push(mf.manifest.key);
+  const { track } = toClipClock(f.track, mf.manifest.t0_ms);
+  return layerOk(source, segs(track).map((s) => ({ part: s.part ?? null, t0_ms: num(s.t0_ms), t1_ms: num(s.t1_ms), score: s.score ?? null, confidence: s.confidence ?? null, source: typeof s.source === "string" && PART_SOURCE.test(s.source) ? s.source : null })));
 }
 
 // --- clip -----------------------------------------------------------------------------------------------------------------------------------
-/** The clip key a row names, or null when it is not a consult-clips key (or holds ".."). */
+/** F1: the clip key a row names, only in the consult-clips shape of THIS row (its IST date, its consult uid) and not held out; else null. */
+const CLIP_KEY = /^consult-clips\/(\d{4}-\d{2}-\d{2})\/([A-Za-z0-9_-]{1,64})\/([A-Za-z0-9_-]{1,64})\/consult\.flac$/;
 export function clipKeyOf(row: Row): string | null {
   const k = asRec(row.clip)?.r2_key;
-  return typeof k === "string" && k.startsWith(CONSULT_CLIPS_PREFIX) && !k.includes("..") && k.length <= 512 ? k : null;
+  if (typeof k !== "string" || !k.startsWith(CONSULT_CLIPS_PREFIX) || k.includes("..") || k.length > 512) return null;
+  const m = CLIP_KEY.exec(k);
+  if (!m || m[1] !== row.ist_date || m[3] !== row.consult_uid) return null;
+  return k;
 }
 
 export async function presignClip(key: string, now: number = Date.now()): Promise<{ url: string; expires_at: string }> {

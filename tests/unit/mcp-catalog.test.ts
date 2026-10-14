@@ -92,24 +92,29 @@ const lab: LabStore = {
 const setCatalog = (rows: Row[], extra: string[] = [], etag: string | null = '"e1"') => store.set(ENCOUNTER_CATALOG_KEY, { body: jsonl(rows, extra), etag });
 const setTrack = (key: string, body: Row, lm: string | null = null) => store.set(key, { body: JSON.stringify(body), etag: '"t"', last_modified: lm });
 
+const T0 = 1_760_000_000_000; // manifest t0_ms (epoch): consult-scope segment times are epoch ms (X1)
+const E = (rel: number) => T0 + rel;
+const mkey = (uid = UID, room = "room_a", day = "2026-10-05") => `reb/${day}/${room}/_consults/${uid}/manifest.json`;
+const setManifest = (o: Row = {}, uid = UID) => store.set(mkey(uid), { body: JSON.stringify({ source_kind: "consult_clip", clock: "tape_utc", t0_ms: T0, t1_ms: E(6000), audio: { duration_ms: 6000 }, ...o }), etag: null });
 // 0.1 min = 6,000 ms clip. Sarvam overruns the end by <= 0.56 s: the last stt segment ends at 6,400.
 const stt = (o: Row = {}): Row => ({
   layer: "stt", engine: "sarvam-saaras-v3", version: "v1", status: "ok", extras: {}, config: {},
   segments: [
-    { t0_ms: 0, t1_ms: 2000, speaker: "0", lang: "hi-IN", text: "NATIVE0" },
-    { t0_ms: 2000, t1_ms: 4000, speaker: "1", lang: "en-IN", text: "ENGLISH1" },
-    { t0_ms: 4000, t1_ms: 6400, speaker: 2, lang: "hi-IN", text: "NATIVE2" },
+    { t0_ms: E(0), t1_ms: E(2000), speaker: "0", lang: "hi-IN", text: "NATIVE0" },
+    { t0_ms: E(2000), t1_ms: E(4000), speaker: "1", lang: "en-IN", text: "ENGLISH1" },
+    { t0_ms: E(4000), t1_ms: E(6400), speaker: 2, lang: "hi-IN", text: "NATIVE2" },
   ], ...o,
 });
 const translate = (o: Row = {}): Row => ({
   layer: "translate", engine: "sarvam-saaras-v3", version: "v1", status: "ok", extras: {}, config: {},
-  segments: [{ t0_ms: 0, t1_ms: 2000, speaker: "0", text: "TR0" }, { t0_ms: 2000, t1_ms: 4000, speaker: "1", text: "TR1" }, { t0_ms: 4000, t1_ms: 6400, speaker: "2", text: "TR2" }], ...o,
+  segments: [{ t0_ms: E(0), t1_ms: E(2000), speaker: "0", text: "TR0" }, { t0_ms: E(2000), t1_ms: E(4000), speaker: "1", text: "TR1" }, { t0_ms: E(4000), t1_ms: E(6400), speaker: "2", text: "TR2" }], ...o,
 });
 const roles = (o: Row = {}): Row => ({
   layer: "role", engine: "llm-roles", version: "v1", status: "ok", extras: { map: { "0": "doctor", "1": "patient", "2": "attender" } }, config: {},
-  segments: [{ t0_ms: 0, t1_ms: 1900, speaker: "0", role: "doctor" }, { t0_ms: 1900, t1_ms: 4000, speaker: "1", role: "patient" }, { t0_ms: 4000, t1_ms: 6400, speaker: "2", role: "staff" }], ...o,
+  segments: [{ t0_ms: E(0), t1_ms: E(1900), speaker: "0", role: "doctor" }, { t0_ms: E(1900), t1_ms: E(4000), speaker: "1", role: "patient" }, { t0_ms: E(4000), t1_ms: E(6400), speaker: "2", role: "staff" }], ...o,
 });
 const seedLayers = () => {
+  setManifest();
   setTrack(tk("stt.sarvam-saaras-v3"), stt());
   setTrack(tk("translate.sarvam-saaras-v3"), translate());
   setTrack(tk("role.llm-roles"), roles());
@@ -117,6 +122,8 @@ const seedLayers = () => {
 
 let logs: string[];
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-14T06:00:00Z")); // 11:30 IST on 2026-10-14
   H.sqlCalls = [];
   H.rooms = [{ id: "room_a", slug: "opd-a", name: "OPD A", disabled_at: null }, { id: "room_b", slug: "opd-b", name: "OPD B", disabled_at: null }];
   H.freescriptRows = [];
@@ -136,6 +143,7 @@ beforeEach(() => {
   for (const m of ["log", "warn", "error", "info", "debug"] as const) vi.spyOn(console, m).mockImplementation((...a: unknown[]) => { logs.push(a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ")); });
 });
 afterEach(() => {
+  vi.useRealTimers();
   setLabStoreForTests(null);
   vi.restoreAllMocks();
 });
@@ -149,32 +157,54 @@ describe("search", () => {
     crow("AAAAAA04", { t_open: 50, ist_date: "2026-09-10", doctor_uid: "docA", room_id: "room_a" }),
     crow("AAAAAA05", { t_open: 10, ist_date: "2026-09-01", doctor_uid: "docA", room_id: "room_a" }),
   ];
+  const ALL = { from: "2026-09-09", to: "2026-10-14" };
   const uids = (o: Row) => (o.rows as Row[]).map((r) => r.consult_uid);
 
   it("reads the one exact key, sorts newest t_open first, and returns the documented envelope; the pre-2026-09-09 row never appears", async () => {
     setCatalog(many());
-    const o = await run({ action: "search" });
+    const o = await run({ action: "search", ...ALL });
     expect(o).toMatchObject({ ok: true, total_matched: 4, next_cursor: null, n_bad_lines: 0, n_blind_excluded: 0, catalog_generated_at: "2026-10-14T01:00:00Z" });
     expect(uids(o)).toEqual(["AAAAAA02", "AAAAAA03", "AAAAAA01", "AAAAAA04"]);
     expect(reads).toEqual([ENCOUNTER_CATALOG_KEY]);
   });
+  it("F4: neither from nor to = the last 30 IST days ending today, default_window:true; a to in the future is clamped to today with clamped:true", async () => {
+    setCatalog([...many(), crow("AAAAAA06", { t_open: 400, ist_date: "2026-09-15" }), crow("AAAAAA07", { t_open: 20, ist_date: "2026-09-14" }), crow("AAAAAA08", { t_open: 500, ist_date: "2026-10-14" }), crow("AAAAAA09", { t_open: 600, ist_date: "2027-03-01" })]);
+    const o = await run({ action: "search" });
+    expect(o).toMatchObject({ ok: true, default_window: true });
+    expect("clamped" in o).toBe(false);
+    expect(uids(o)).toEqual(["AAAAAA08", "AAAAAA06", "AAAAAA02", "AAAAAA03", "AAAAAA01"]); // 2026-09-15 .. 2026-10-14 inclusive = 30 days; 09-14 and the 2027 row are out
+    const f = await run({ action: "search", from: "2026-10-01", to: "2027-12-31" });
+    expect(f).toMatchObject({ ok: true, clamped: true });
+    expect("default_window" in f).toBe(false);
+    expect(uids(f)).toEqual(["AAAAAA08", "AAAAAA02", "AAAAAA03", "AAAAAA01"]);
+    expect(await run({ action: "search", from: "2026-10-01", to: "2026-10-14" })).not.toHaveProperty("clamped");
+  });
+  it("F3: from is clamped to 2026-09-09 BEFORE the 92-day check", async () => {
+    vi.setSystemTime(new Date("2026-10-14T06:00:00Z"));
+    setCatalog(many());
+    const o = await run({ action: "search", from: "2026-06-01", to: "2026-10-05" });
+    expect(o).toMatchObject({ ok: true, clamped: true });
+    expect(uids(o)).toEqual(["AAAAAA02", "AAAAAA03", "AAAAAA01", "AAAAAA04"]);
+  });
   it("filters: doctor_uid, room (slug, id and name resolve), source, from/to", async () => {
     setCatalog(many());
-    expect(uids(await run({ action: "search", doctor_uid: "docA" }))).toEqual(["AAAAAA03", "AAAAAA01", "AAAAAA04"]);
-    expect(uids(await run({ action: "search", room: "opd-b" }))).toEqual(["AAAAAA02"]);
-    expect(uids(await run({ action: "search", room: "room_b" }))).toEqual(["AAAAAA02"]);
-    expect(uids(await run({ action: "search", room: "opd b" }))).toEqual(["AAAAAA02"]);
-    expect(uids(await run({ action: "search", source: "caa" }))).toEqual(["AAAAAA02"]);
+    expect(uids(await run({ action: "search", doctor_uid: "docA", ...ALL }))).toEqual(["AAAAAA03", "AAAAAA01", "AAAAAA04"]);
+    expect(uids(await run({ action: "search", room: "opd-b", ...ALL }))).toEqual(["AAAAAA02"]);
+    expect(uids(await run({ action: "search", room: "room_b", ...ALL }))).toEqual(["AAAAAA02"]);
+    expect(uids(await run({ action: "search", room: "opd b", ...ALL }))).toEqual(["AAAAAA02"]);
+    expect(uids(await run({ action: "search", source: "caa", ...ALL }))).toEqual(["AAAAAA02"]);
     expect(uids(await run({ action: "search", from: "2026-10-02", to: "2026-10-03" }))).toEqual(["AAAAAA02", "AAAAAA03"]);
     expect(await run({ action: "search", room: "nowhere" })).toEqual({ ok: false, error: "unknown_room" });
     expect(await run({ action: "search", source: "other" })).toMatchObject({ ok: false, error: "bad_args" });
   });
   it("a span over 92 days is bad_args; exactly 92 days passes; from alone and to alone get a 92-day partner", async () => {
     setCatalog(many());
+    vi.setSystemTime(new Date("2027-03-01T06:00:00Z")); // far enough on that the clamped span can exceed 92 days
     expect(await run({ action: "search", from: "2026-09-09", to: "2026-12-10" })).toMatchObject({ ok: false, error: "bad_args" });
     expect(await run({ action: "search", from: "2026-09-09", to: "2026-12-09" })).toMatchObject({ ok: true });
     expect(await run({ action: "search", from: "2026-13-40" })).toMatchObject({ ok: false, error: "bad_args" });
     expect(await run({ action: "search", from: "2026-10-04", to: "2026-10-01" })).toMatchObject({ ok: false, error: "bad_args" });
+    vi.setSystemTime(new Date("2026-10-14T06:00:00Z"));
     expect(uids(await run({ action: "search", from: "2026-10-02" }))).toEqual(["AAAAAA02", "AAAAAA03"]);
     expect(uids(await run({ action: "search", to: "2026-10-01" }))).toEqual(["AAAAAA01", "AAAAAA04"]);
   });
@@ -187,10 +217,10 @@ describe("search", () => {
   });
   it("cursor pages through every row once; a made-up cursor is bad_args; limit caps at 200", async () => {
     setCatalog(many());
-    const p1 = await run({ action: "search", limit: 3 });
+    const p1 = await run({ action: "search", limit: 3, ...ALL });
     expect(uids(p1)).toHaveLength(3);
     expect(typeof p1.next_cursor).toBe("string");
-    const p2 = await run({ action: "search", limit: 3, cursor: p1.next_cursor });
+    const p2 = await run({ action: "search", limit: 3, cursor: p1.next_cursor, ...ALL });
     expect([...uids(p1), ...uids(p2)]).toEqual(["AAAAAA02", "AAAAAA03", "AAAAAA01", "AAAAAA04"]);
     expect(p2.next_cursor).toBeNull();
     expect(await run({ action: "search", cursor: "not a cursor!" })).toMatchObject({ ok: false, error: "bad_args" });
@@ -303,7 +333,7 @@ describe("get: transcript (contract §5)", () => {
     const whole = JSON.stringify(await run({ action: "get", consult_uid: UID }));
     for (const w of ["NATIVE0", "ENGLISH1", "NATIVE2", "TR0", "TR1", "TR2"]) expect(whole).not.toContain(w);
     expect(d).toMatchObject({ clock: "ms_from_clip_start", duration_ms: 6000, n_segments: 3 });
-    expect(t.source).toEqual([tk("stt.sarvam-saaras-v3"), tk("translate.sarvam-saaras-v3"), tk("role.llm-roles")]);
+    expect(t.source).toEqual([tk("stt.sarvam-saaras-v3"), tk("translate.sarvam-saaras-v3"), tk("role.llm-roles"), mkey()]);
   });
   it("include_text true: text_native from stt, text_en from translate at the same index; segments carry i, times, speaker, role, lang", async () => {
     const segs = ((await tr({ include_text: true })).data as Row).segments as Row[];
@@ -323,7 +353,7 @@ describe("get: transcript (contract §5)", () => {
     expect(t.status).toBe("ok");
   });
   it("translate with a different segment count is matched by time overlap, not index", async () => {
-    setTrack(tk("translate.sarvam-saaras-v3"), translate({ segments: [{ t0_ms: 1000, t1_ms: 3900, text: "ONE" }] }));
+    setTrack(tk("translate.sarvam-saaras-v3"), translate({ segments: [{ t0_ms: E(1000), t1_ms: E(3900), text: "ONE" }] }));
     const segs = ((await tr({ include_text: true })).data as Row).segments as Row[];
     expect(segs.map((s) => s.text_en)).toEqual(["ONE", "ONE", null]); // seg 2 (4000-6400) overlaps nothing; lang hi: no fallback
   });
@@ -332,7 +362,7 @@ describe("get: transcript (contract §5)", () => {
     let segs = ((await tr()).data as Row).segments as Row[];
     expect(segs.map((s) => s.role)).toEqual(["doctor", "patient", "staff"]);
     // no overlapping role segment for seg 2: the track's speaker map answers
-    setTrack(tk("role.llm-roles"), roles({ segments: [{ t0_ms: 0, t1_ms: 2000, speaker: "0", role: "doctor" }] }));
+    setTrack(tk("role.llm-roles"), roles({ segments: [{ t0_ms: E(0), t1_ms: E(2000), speaker: "0", role: "doctor" }] }));
     segs = ((await tr()).data as Row).segments as Row[];
     expect(segs.map((s) => s.role)).toEqual(["doctor", "patient", "attender"]);
     // no map either: unknown
@@ -340,7 +370,7 @@ describe("get: transcript (contract §5)", () => {
     segs = ((await tr()).data as Row).segments as Row[];
     expect(segs.map((s) => s.role)).toEqual(["unknown", "unknown", "unknown"]);
     // an invalid role string is unknown, never passed through
-    setTrack(tk("role.llm-roles"), roles({ extras: {}, segments: [{ t0_ms: 0, t1_ms: 6400, speaker: "0", role: "wizard" }] }));
+    setTrack(tk("role.llm-roles"), roles({ extras: {}, segments: [{ t0_ms: E(0), t1_ms: E(6400), speaker: "0", role: "wizard" }] }));
     segs = ((await tr()).data as Row).segments as Row[];
     expect(segs.every((s) => s.role === "unknown")).toBe(true);
   });
@@ -419,7 +449,7 @@ describe("get: key safety (D6)", () => {
       const l = (await run({ action: "get", consult_uid: UID })).layers as Record<string, Row>;
       expect(l.transcript, k).toMatchObject({ status: "error", error: "key_not_readable", data: null });
       expect(l.parts, k).toMatchObject({ status: "error", error: "key_not_readable" });
-      expect(reads, k).toEqual([ENCOUNTER_CATALOG_KEY]);
+      expect(reads.filter((r) => r !== ENCOUNTER_CATALOG_KEY && !r.endsWith("/manifest.json")), k).toEqual([]);
     }
   });
   it("a non-string key is key_not_readable too", async () => {
@@ -430,12 +460,13 @@ describe("get: key safety (D6)", () => {
 });
 
 describe("get: parts", () => {
-  const parts = (mode: string): Row => ({ layer: "parts", engine: "clef-jev", version: "v0", status: "ok", config: { clef_mode: mode }, extras: {}, segments: [{ part: "history", t0_ms: 0, t1_ms: 900, score: 0.8, confidence: 0.7, source: "jev" }] });
+  const parts = (mode: string): Row => ({ layer: "parts", engine: "clef-jev", version: "v0", status: "ok", config: { clef_mode: mode }, extras: {}, segments: [{ part: "history", t0_ms: E(0), t1_ms: E(900), score: 0.8, confidence: 0.7, source: "jev" }] });
   it("clef+jev only: other modes are absent; the rows carry part, times, score, confidence, source", async () => {
     setCatalog([crow(UID, { layers: { stt: null, translate: null, role: null, parts: layer("parts.clef-jev") } })]);
     setTrack(tk("parts.clef-jev"), parts("clef+jev"));
+    setManifest();
     let p = ((await run({ action: "get", consult_uid: UID })).layers as Record<string, Row>).parts!;
-    expect(p).toEqual({ status: "ok", source: [tk("parts.clef-jev")], data: [{ part: "history", t0_ms: 0, t1_ms: 900, score: 0.8, confidence: 0.7, source: "jev" }] });
+    expect(p).toEqual({ status: "ok", source: [tk("parts.clef-jev"), mkey()], data: [{ part: "history", t0_ms: 0, t1_ms: 900, score: 0.8, confidence: 0.7, source: "jev" }] });
     setTrack(tk("parts.clef-jev"), parts("clef"));
     p = ((await run({ action: "get", consult_uid: UID })).layers as Record<string, Row>).parts!;
     expect(p).toMatchObject({ status: "absent", data: null });
@@ -476,7 +507,7 @@ describe("get: db layers", () => {
     const r = (await layers()).rubric!;
     expect(H.rubricFilters[0]).toMatchObject({ unit_kind: "consult", unit_key: UID });
     expect(r.status).toBe("ok");
-    expect((r.data as Row[])[0]).toEqual({ rubric_id: "pitch_detect", version: "1.0.0", run_id: "rub_1", status: "ok", score: { n: 3, ok: true, verdict: "pass" }, verdict: "pass", created_at: "2026-10-06T00:00:00Z" });
+    expect((r.data as Row[])[0]).toEqual({ rubric_id: "pitch_detect", version: "1.0.0", run_id: "rub_1", status: "ok", score: { n: 3, ok: true }, verdict: "pass", created_at: "2026-10-06T00:00:00Z" });
     expect(JSON.stringify(r)).not.toContain("FINDINGTEXT");
   });
   it("rubric: none is absent; a failure is a layer error and the call still answers", async () => {
@@ -547,6 +578,130 @@ describe("clip_audio_url", () => {
     const { signGetUrl } = await import("@/lib/r2");
     vi.mocked(signGetUrl).mockRejectedValueOnce(new Error("R2_BUCKET not set"));
     expect(await run({ action: "clip_audio_url", consult_uid: UID })).toEqual({ ok: false, error: "presign_failed" });
+  });
+});
+
+// --- FIX1 --------------------------------------------------------------------------------------------------------------------------------------
+describe("FIX1 X1: the clock (segment times are epoch ms; the answer is ms from clip start)", () => {
+  const get = async (args: Row = {}) => ((await run({ action: "get", consult_uid: UID, ...args })).layers as Record<string, Row>);
+  beforeEach(() => setCatalog([crow(UID, { t_open: E(-60_000), t_close: E(5_000) })]));
+
+  it("offset = t - manifest.t0_ms; manifest_t0_ms and consult_span_ms (t_open/t_close minus t0) are reported; the manifest path is in source; the clock label stays", async () => {
+    seedLayers();
+    const t = (await get()).transcript!;
+    const d = t.data as Row;
+    expect((d.segments as Row[]).map((x) => [x.t0_ms, x.t1_ms])).toEqual([[0, 2000], [2000, 4000], [4000, 6000]]);
+    expect(d).toMatchObject({ clock: "ms_from_clip_start", manifest_t0_ms: T0, consult_span_ms: { t0: -60_000, t1: 5_000 }, duration_ms: 6000, n_clamped: 0 });
+    expect(t.source).toContain(mkey());
+  });
+  it("a negative offset clamps to 0 and is counted; t1 is clamped to the duration AFTER the conversion (never row.t_open)", async () => {
+    seedLayers();
+    setTrack(tk("stt.sarvam-saaras-v3"), stt({ segments: [{ t0_ms: E(-5000), t1_ms: E(-1000), speaker: "0", lang: "en", text: "A" }, { t0_ms: E(-500), t1_ms: E(1500), speaker: "0", lang: "en", text: "B" }, { t0_ms: E(5000), t1_ms: E(9000), speaker: "0", lang: "en", text: "C" }] }));
+    const d = (await get()).transcript!.data as Row;
+    expect((d.segments as Row[]).map((x) => [x.t0_ms, x.t1_ms])).toEqual([[0, 0], [0, 1500], [5000, 6000]]);
+    expect(d.n_clamped).toBe(3); // -5000, -1000, -500
+  });
+  it("duration is the manifest's audio.duration_ms when present (even if clip.minutes differs), else the contract's `duration`, else clip.minutes", async () => {
+    seedLayers();
+    setManifest({ audio: { duration_ms: 5000 } });
+    expect(((await get()).transcript!.data as Row).duration_ms).toBe(5000);
+    setManifest({ audio: { duration: 4500 } });
+    expect(((await get()).transcript!.data as Row).duration_ms).toBe(4500);
+    setManifest({ audio: {} });
+    expect(((await get()).transcript!.data as Row).duration_ms).toBe(6000); // clip.minutes 0.1
+  });
+  it("no manifest, or a manifest without a finite t0_ms, is no_clock for the transcript AND the parts; the clock is never guessed from row.t_open", async () => {
+    seedLayers();
+    setCatalog([crow(UID, { layers: { stt: layer("stt.sarvam-saaras-v3"), translate: null, role: null, parts: layer("parts.clef-jev") } })]);
+    setTrack(tk("parts.clef-jev"), { layer: "parts", status: "ok", config: { clef_mode: "clef+jev" }, extras: {}, segments: [{ part: "history", t0_ms: E(0), t1_ms: E(900) }] });
+    for (const bad of [null, { t0_ms: null }, { t0_ms: "x" }, { t0_ms: Number.NaN }, { t0_ms: undefined }]) {
+      if (bad === null) store.delete(mkey());
+      else setManifest(bad as Row);
+      const l = await get();
+      expect(l.transcript, JSON.stringify(bad)).toMatchObject({ status: "error", error: "no_clock", data: null });
+      expect(l.parts, JSON.stringify(bad)).toMatchObject({ status: "error", error: "no_clock", data: null });
+    }
+    store.set(mkey(), { body: "{nope", etag: null });
+    expect((await get()).transcript).toMatchObject({ status: "error", error: "no_clock" });
+  });
+  it("parts get the same conversion", async () => {
+    setCatalog([crow(UID, { layers: { stt: null, translate: null, role: null, parts: layer("parts.clef-jev") } })]);
+    setManifest();
+    setTrack(tk("parts.clef-jev"), { layer: "parts", status: "ok", config: { clef_mode: "clef+jev" }, extras: {}, segments: [{ part: "exam", t0_ms: E(1000), t1_ms: E(2500), score: 1, confidence: 1, source: "jev" }] });
+    expect(((await get()).parts!.data as Row[])[0]).toMatchObject({ t0_ms: 1000, t1_ms: 2500 });
+  });
+});
+
+describe("FIX1 F1: layer and clip keys are bound to the row", () => {
+  const get = async () => ((await run({ action: "get", consult_uid: UID, include_text: true })).layers as Record<string, Row>);
+  it("N1: a layer key of another consult, another day, another room, or a held-out room-day is refused and NEVER read", async () => {
+    seedLayers();
+    const other = [tk("stt.sarvam-saaras-v3", "OTHERCONSULT9"), tk("stt.sarvam-saaras-v3", UID, "room_a", "2026-10-04"), tk("stt.sarvam-saaras-v3", UID, "room_b"), tk("stt.sarvam-saaras-v3", UID, "room_blind", "2026-10-01")];
+    for (const k of other) {
+      resetCatalogCacheForTests();
+      store.set(k, { body: JSON.stringify(stt()), etag: null });
+      setCatalog([crow(UID, { layers: { stt: { r2_key: k, status: "ok" }, translate: null, role: null, parts: { r2_key: k, status: "ok" } } })]);
+      reads.length = 0;
+      const l = await get();
+      expect(l.transcript, k).toMatchObject({ status: "error", error: "key_not_readable", data: null });
+      expect(l.parts, k).toMatchObject({ status: "error", error: "key_not_readable" });
+      expect(reads, k).not.toContain(k);
+      expect(JSON.stringify(l), k).not.toContain("NATIVE0");
+    }
+  });
+  it("a held-out room-day in a (non-blind) row: the row's own pair matches the key's pair, so the key's blind check is what refuses it", async () => {
+    // a row that is itself on a blind room-day is refused at the door of get; this proves the second line of defence in the reader
+    const { bindRefusal } = await import("@/lib/room-access/readers/catalog-consult");
+    const row = crow(UID, { ist_date: "2026-10-01", room_id: "room_blind" });
+    expect(bindRefusal(tk("stt.sarvam-saaras-v3", UID, "room_blind", "2026-10-01"), row)).toBe("blind_room_day");
+    expect(bindRefusal(tk("stt.sarvam-saaras-v3"), crow(UID))).toBeNull();
+  });
+  it("the manifest is bound the same way (a row whose room_id is not a legal key part gets key_not_readable, not a read)", async () => {
+    seedLayers();
+    setCatalog([crow(UID, { room_id: "room a/../x", layers: { stt: layer("stt.sarvam-saaras-v3"), translate: null, role: null, parts: null } })]);
+    reads.length = 0;
+    const l = await get();
+    expect(l.transcript).toMatchObject({ status: "error" });
+    expect(reads.filter((r) => r !== ENCOUNTER_CATALOG_KEY)).toEqual([]);
+  });
+  it("N2: a clip key of another day, another uid, or the wrong shape is bad_clip_key and never signed", async () => {
+    const mk = (k: string) => crow(UID, { clip: { r2_key: k, bytes: 1, minutes: 1 } });
+    for (const k of [`consult-clips/2026-10-04/opd-a/${UID}/consult.flac`, `consult-clips/2026-10-05/opd-a/OTHERCONSULT9/consult.flac`, `consult-clips/2026-10-05/opd-a/${UID}/other.flac`, `consult-clips/2026-10-05/${UID}/consult.flac`, `consult-clips/2026-10-05/opd-a/x/${UID}/consult.flac`, `consult-clips/2026-10-05/opd-a/${UID}/consult.flac/extra`, `consult-clips/2026-10-05/opd-a/${UID}/consult.flac?x=1`]) {
+      resetCatalogCacheForTests();
+      setCatalog([mk(k)]);
+      expect(await run({ action: "clip_audio_url", consult_uid: UID }), k).toEqual({ ok: false, error: "bad_clip_key" });
+    }
+    expect(H.signCalls).toEqual([]);
+    resetCatalogCacheForTests();
+    setCatalog([mk(`consult-clips/2026-10-05/opd-a/${UID}/consult.flac`)]);
+    expect(await run({ action: "clip_audio_url", consult_uid: UID })).toMatchObject({ ok: true });
+  });
+});
+
+describe("FIX1 F2 and F5: no free text from rubric score or parts source", () => {
+  it("rubric score keeps numbers and booleans only; verdict only when it is a short lowercase token, else null", async () => {
+    setCatalog([crow(UID)]);
+    const l = async () => (((await run({ action: "get", consult_uid: UID })).layers as Record<string, Row>).rubric!.data as Row[])[0]!;
+    H.rubric = [{ rubric_id: "r", version: "1.0.0", run_id: "x", status: "ok", score: { n: 3, ok: true, note: "pt says chest pain", verdict: "pass_with_fixes" }, created_at: "t" }];
+    expect(await l()).toMatchObject({ score: { n: 3, ok: true }, verdict: "pass_with_fixes" });
+    for (const v of ["Pass", "pt says chest pain 3d", "1abc", "", "a".repeat(33), "pass fail"]) {
+      H.rubric = [{ rubric_id: "r", version: "1.0.0", run_id: "x", status: "ok", score: { verdict: v, n: 1 }, created_at: "t" }];
+      const row = await l();
+      expect(row.verdict, v).toBeNull();
+      expect(JSON.stringify(row), v).not.toContain("chest");
+    }
+  });
+  it("parts source passes only as a short label", async () => {
+    setCatalog([crow(UID, { layers: { stt: null, translate: null, role: null, parts: layer("parts.clef-jev") } })]);
+    setManifest();
+    const src = async (v: string) => {
+      setTrack(tk("parts.clef-jev"), { layer: "parts", status: "ok", config: { clef_mode: "clef+jev" }, extras: {}, segments: [{ part: "exam", t0_ms: E(0), t1_ms: E(1), source: v }] });
+      return (((await run({ action: "get", consult_uid: UID })).layers as Record<string, Row>).parts!.data as Row[])[0]!.source;
+    };
+    expect(await src("jev")).toBe("jev");
+    expect(await src("clef:v0.1")).toBe("clef:v0.1");
+    expect(await src("the patient said his chest hurts")).toBeNull();
+    expect(await src("x".repeat(41))).toBeNull();
   });
 });
 

@@ -7,6 +7,7 @@
  * Details: docs/operator-mcp/TOOL-NOTES.md and scribe_help.
  */
 import { freescriptRead } from "./freescript";
+import { istDateOf } from "@/lib/sarvam-lab";
 import { listJevDecisions } from "@/lib/room-access/tool-reads";
 import { listResults } from "@/lib/rubrics/store";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
@@ -18,6 +19,7 @@ export const CATALOG_ACTIONS = ["search", "get", "clip_audio_url"] as const;
 export const CATALOG_LIMIT_DEFAULT = 50;
 export const CATALOG_LIMIT_MAX = 200;
 export const CATALOG_MAX_SPAN_DAYS = 92;
+export const CATALOG_DEFAULT_DAYS = 30;
 const UID = /^[A-Za-z0-9_-]{6,64}$/;
 const DOCTOR = /^[A-Za-z0-9_.:@-]{1,64}$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -48,13 +50,6 @@ async function search(args: ToolArgs): Promise<Row> {
   let from = args.from === undefined || args.from === null || args.from === "" ? null : argStr(args, "from", 10);
   let to = args.to === undefined || args.to === null || args.to === "" ? null : argStr(args, "to", 10);
   if ((args.from !== undefined && args.from !== null && args.from !== "" && !realDate(from)) || (args.to !== undefined && args.to !== null && args.to !== "" && !realDate(to))) return badArgs("from and to are IST dates YYYY-MM-DD");
-  if (from && to) {
-    const span = (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS;
-    if (span < 0) return badArgs("from is after to");
-    if (span > CATALOG_MAX_SPAN_DAYS - 1) return badArgs(`from..to is at most ${CATALOG_MAX_SPAN_DAYS} days`);
-  }
-  if (from && !to) to = shift(from, CATALOG_MAX_SPAN_DAYS - 1);
-  if (to && !from) from = shift(to, -(CATALOG_MAX_SPAN_DAYS - 1));
   let clamped = false;
   if (from && from < CATALOG_MIN_DATE) {
     from = CATALOG_MIN_DATE;
@@ -64,6 +59,26 @@ async function search(args: ToolArgs): Promise<Row> {
     to = CATALOG_MIN_DATE;
     clamped = true;
   }
+  const today = istDateOf(Date.now());
+  if (to && to > today) {
+    to = today;
+    clamped = true;
+  }
+  let defaultWindow = false;
+  if (!from && !to) {
+    to = today;
+    from = shift(today, -(CATALOG_DEFAULT_DAYS - 1));
+    if (from < CATALOG_MIN_DATE) from = CATALOG_MIN_DATE;
+    defaultWindow = true;
+  } else if (from && !to) {
+    to = shift(from, CATALOG_MAX_SPAN_DAYS - 1);
+    if (to > today) to = today;
+  } else if (to && !from) {
+    from = shift(to, -(CATALOG_MAX_SPAN_DAYS - 1));
+    if (from < CATALOG_MIN_DATE) from = CATALOG_MIN_DATE;
+  }
+  if (from! > to!) return badArgs("from is after to");
+  if ((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS > CATALOG_MAX_SPAN_DAYS - 1) return badArgs(`from..to is at most ${CATALOG_MAX_SPAN_DAYS} days`);
   const limit = argInt(args, "limit", CATALOG_LIMIT_DEFAULT, 1, CATALOG_LIMIT_MAX);
   let offset = 0;
   if (args.cursor !== undefined && args.cursor !== null && args.cursor !== "") {
@@ -106,6 +121,7 @@ async function search(args: ToolArgs): Promise<Row> {
   return {
     ok: true,
     ...(clamped ? { clamped: true } : {}),
+    ...(defaultWindow ? { default_window: true } : {}),
     rows: page.map(searchView),
     next_cursor: end < matched.length ? encodeCursor(end) : null,
     total_matched: matched.length,
@@ -128,12 +144,12 @@ async function guard(source: string[], fn: () => Promise<Layer>): Promise<Layer>
   }
 }
 
-const SHORT = 40;
-/** A rubric score with only numbers, booleans and short strings: no free text can ride along. */
+const VERDICT = /^[a-z][a-z0-9_]{0,31}$/;
+/** F2: a rubric score with only numbers and booleans: no free text can ride along. */
 function plainScore(score: unknown): Row | null {
   if (!score || typeof score !== "object" || Array.isArray(score)) return null;
   const out: Row = {};
-  for (const [k, v] of Object.entries(score as Row)) if (typeof v === "number" || typeof v === "boolean" || (typeof v === "string" && v.length <= SHORT)) out[k] = v;
+  for (const [k, v] of Object.entries(score as Row)) if (typeof v === "number" || typeof v === "boolean") out[k] = v;
   return out;
 }
 
@@ -155,7 +171,7 @@ async function rubricLayer(uid: string): Promise<Layer> {
     source,
     rows.map((r) => {
       const score = plainScore(r.score);
-      return { rubric_id: r.rubric_id, version: r.version, run_id: r.run_id, status: r.status, score, verdict: typeof score?.verdict === "string" ? score.verdict : null, created_at: r.created_at };
+      return { rubric_id: r.rubric_id, version: r.version, run_id: r.run_id, status: r.status, score, verdict: typeof (r.score as Row | null)?.verdict === "string" && VERDICT.test((r.score as Row).verdict as string) ? ((r.score as Row).verdict as string) : null, created_at: r.created_at };
     }),
   );
 }
