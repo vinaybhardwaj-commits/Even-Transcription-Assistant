@@ -7,7 +7,7 @@ from faster_whisper import WhisperModel
 import soundfile as sf
 d, ids_file = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else None)
 want = set(json.load(open(ids_file))) if ids_file else None
-dev = os.environ.get("LID_DEVICE", "cuda"); m = WhisperModel("large-v3", device=dev, compute_type="float16" if dev == "cuda" else "int8")
+m = WhisperModel("large-v3", device="cuda", compute_type="float16")
 out = os.path.join(d, "lid.jsonl"); done = {json.loads(l)["id"] for l in open(out)} if os.path.exists(out) else set()
 man = [json.loads(l) for l in open(os.path.join(d, "manifest.jsonl"))]
 with open(out, "a") as fo:

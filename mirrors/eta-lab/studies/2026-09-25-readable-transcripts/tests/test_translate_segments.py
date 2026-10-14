@@ -6,7 +6,6 @@ import shutil
 import stat
 import sys
 import tempfile
-import threading
 import unittest
 from datetime import datetime, timezone
 
@@ -143,91 +142,6 @@ class Select(Base):
         self.assertEqual(sorted(len(j["todo"]) for j in jobs), [1, 1, 1, 2])
         self.assertEqual(sorted(j["k"] for j in jobs), sorted(K.values()))
         with self.assertRaises(ValueError): T.wkey("hist/x.json")
-
-
-class Workers(Base):
-    def items_by_key(self):
-        return {(it["k"], it["i"]): it for it in self.items()}
-
-    def test_four_workers_give_exactly_the_same_items_as_one(self):
-        self.go(); one = self.items_by_key(); shutil.rmtree(self.ann)
-        c, _f = self.go(workers=4); four = self.items_by_key()
-        self.assertEqual(one, four); self.assertEqual(c["done"], 4)
-
-    def test_no_segment_is_written_twice_and_no_two_files_share_a_key(self):
-        big = {f"runs/hist-bulk-20260924T0000-abc1234/room_{r}/2026-09-24/w{n}.json": ("2026-09-24", f"2026-09-24T{n:02d}:00", [("kn", KN + f"{r}-{n}-{i}") for i in range(3)], "payload", f"room_{r}")
-               for r in (1, 2) for n in range(1, 13)}
-        d = os.path.join(self.tmp, "par"); os.makedirs(d); idx, roots = make_world(d, big)
-        jobs = T.select(idx, roots)[0]
-        for fe in (1, 5, 100):
-            shutil.rmtree(self.ann, ignore_errors=True)
-            T.run(jobs, Fake(), "S", self.ann, self.ops, now=NOW, workers=8, flush_every=fe)
-            pairs = [(it["k"], it["i"]) for it in self.items()]
-            self.assertEqual(len(pairs), 24 * 3); self.assertEqual(len(pairs), len(set(pairs)))          # each (k, i) exactly once across all files
-            self.assertEqual(len(self.files()), len(set(self.files())))                                      # no key twice
-            for f in self.files():                                                                            # every file's items belong to its own room and date, and its sources are exactly its k
-                b = jload(self.ann + f); self.assertEqual({it["k"] for it in b["items"]}, set(b["sources"]))
-
-    def test_two_windows_are_really_in_flight_at_once(self):
-        barrier = threading.Barrier(2, timeout=5); base = Fake()
-
-        def send(body):
-            barrier.wait()                       # a sequential implementation never gets a second party here and times out
-            return base(body)
-        jobs = self.jobs()[0][:2]
-        c = T.run(jobs, send, "S", self.ann, self.ops, now=NOW, workers=2)
-        self.assertEqual(c["done"], 2)
-
-    def test_max_windows_is_respected_with_workers(self):
-        c, f = self.go(workers=3, max_windows=2)
-        self.assertEqual((c["done"], c["left_for_later"]), (2, 2)); self.assertEqual(sorted(set(it["k"] for it in self.items())), sorted([K["w3"], K["w2"]]))
-
-    def test_a_failing_window_does_not_stop_the_others(self):
-        base = Fake()
-
-        def send(body):
-            if any(l == KN + "7" for l in user_lines(body)):
-                return 500, None
-            return base(body)
-        jobs = self.jobs()[0]
-        c = T.run(jobs, send, "S", self.ann, self.ops, now=NOW, workers=3)
-        self.assertEqual((c["failed"], c["done"]), (1, 3))
-
-    def test_an_unexpected_exception_is_raised_and_collected_results_are_kept(self):
-        base = Fake()
-
-        def send(body):
-            if any(l == "MR-line-9" for l in user_lines(body)):
-                raise RuntimeError("boom")
-            return base(body)
-        with self.assertRaises(RuntimeError):
-            T.run(self.jobs()[0], send, "S", self.ann, self.ops, now=NOW, workers=3, flush_every=100)
-        self.assertTrue(self.files())                                # what was already collected is on disk
-
-    def test_resume_after_a_parallel_run_skips_everything(self):
-        self.go(workers=4); c, f = self.go(workers=4, now=LATER)
-        self.assertEqual(c["skipped_done"], 4); self.assertEqual(f.calls, 0)
-
-    def test_workers_outside_the_range_are_refused(self):
-        for bad in (0, -1, T.MAX_WORKERS + 1, 2.5, True, "4"):
-            with self.assertRaises(SystemExit): self.go(workers=bad)
-        self.assertEqual(T.MAX_WORKERS, 16)
-
-    def test_a_name_taken_between_check_and_create_moves_to_the_next_minute(self):
-        orig = os.path.exists; taken = []
-
-        def sneaky(p):
-            r = orig(p)
-            if p.endswith("202609250930-linker.json") and not r and not taken:                 # report "free", but create it first, as a second writer would
-                taken.append(p); os.makedirs(os.path.dirname(p), exist_ok=True); open(p, "w").write("{}")
-            return r
-        os.path.exists = sneaky
-        try:
-            self.go()
-        finally:
-            os.path.exists = orig
-        self.assertTrue(taken); self.assertTrue(any(f.endswith("202609250931-linker.json") for f in self.files()))
-        self.assertEqual(open(taken[0]).read(), "{}")                                           # the other writer's file was not overwritten
 
 
 class Sources(Base):
@@ -432,7 +346,7 @@ class Failure(Base):
 
 
 class Gate(Base):
-    PROV = dict(script_sha="a", route_sha="b", prereg_sha="c", prereg_sha1="d", prereg_sha2="e", prereg_sha3="f", prereg_sha4="g")
+    PROV = dict(script_sha="a", route_sha="b", prereg_sha="c", prereg_sha1="d", prereg_sha2="e", prereg_sha3="f")
 
     def test_run_refused_without_preflight(self):
         with self.assertRaises(SystemExit): T.cmd_run(send=Fake(), ann=self.ann, ops=self.ops, index=self.idx, roots=self.roots, prov=self.PROV)
@@ -460,8 +374,8 @@ class Gate(Base):
             p = T.provenance()
         finally:
             L.committed_sha = orig
-        self.assertEqual(sorted(seen), sorted(["translate_segments.py", "link3_translate.py", "PREREG-337b.md", "PREREG-337b-A1.md", "PREREG-337b-A2.md", "PREREG-337b-A3.md", "PREREG-337b-A4.md"]))
-        self.assertEqual(set(p), {"script_sha", "route_sha", "prereg_sha", "prereg_sha1", "prereg_sha2", "prereg_sha3", "prereg_sha4"})
+        self.assertEqual(sorted(seen), sorted(["translate_segments.py", "link3_translate.py", "PREREG-337b.md", "PREREG-337b-A1.md", "PREREG-337b-A2.md", "PREREG-337b-A3.md"]))
+        self.assertEqual(set(p), {"script_sha", "route_sha", "prereg_sha", "prereg_sha1", "prereg_sha2", "prereg_sha3"})
 
     def test_the_preflight_line_is_invented(self):
         f = Fake(); T.cmd_preflight(send=f, ops=self.ops, prov=self.PROV); self.assertEqual(f.sent, [T.PREFLIGHT_LINE])

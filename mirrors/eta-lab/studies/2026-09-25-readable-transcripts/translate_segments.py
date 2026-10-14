@@ -6,7 +6,7 @@ Logs carry counts, statuses and reasons, never text.
 
     python3 translate_segments.py select            # counts only
     python3 translate_segments.py preflight         # one invented line; binds this script's, the route script's and the pre-registrations' commits
-    python3 translate_segments.py run [--max-windows N] [--workers N]   # N windows at once (1..16, default 1)
+    python3 translate_segments.py run [--max-windows N]
     python3 translate_segments.py report            # counts by date from the annotation files
     python3 translate_segments.py selftest
 """
@@ -17,8 +17,6 @@ import json
 import os
 import subprocess
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,12 +28,11 @@ INDEX_DIR = HOME + "lab-vault/staged/index/"                            # A2.1: 
 ROOTS = (HOME + "hist-mining/", HOME + "hist/", HOME + "lab-vault/staged/")     # A2.1: first that exists
 ANN = HOME + "lab-vault/staged/annotations/translation/"
 OPS = HOME + "translate-337b/"                                          # box-only operational files: preflight and the call log (no text)
-PREREGS = ("PREREG-337b.md", "PREREG-337b-A1.md", "PREREG-337b-A2.md", "PREREG-337b-A3.md", "PREREG-337b-A4.md")
+PREREGS = ("PREREG-337b.md", "PREREG-337b-A1.md", "PREREG-337b-A2.md", "PREREG-337b-A3.md")
 LANGS = ("kn", "hi", "ta", "ml", "bn", "gu", "te", "mr")              # T1: exactly the ruling's list; und and pa are counted, not sent
 PREFLIGHT_LINE = "Good morning, please have a seat."                   # invented; no patient text
 IST = timezone(timedelta(hours=5, minutes=30))
 FLUSH_EVERY = 10
-MAX_WORKERS = 16                                                        # A4.1: --workers is an integer 1..16; 1 is the sequential run
 MAX_K = 400                                                             # A3.1: the vault Worker accepts at most 400 distinct k per annotation file
 ERRS = ("isolated_line_failed", "route_mismatch", "http_failed", "malformed_twice", "retries_exhausted", "all_lines_failed")   # A1.1: the closed list of failure reasons
 
@@ -203,85 +200,48 @@ def flush(pending, ann, script, prompt_sha, now, index_name=None):
         for n in range(0, len(ks), MAX_K):
             sub = set(ks[n:n + MAX_K])
             t = now
+            while True:
+                path = f"{ann}{room}/{date}/{t.astimezone(IST).strftime('%Y%m%d%H%M')}-linker.json"
+                if not os.path.exists(path):
+                    break
+                t += timedelta(minutes=1)
             body = dict(schema="eta-lab-annotation/1", kind="translation",
                         provenance=dict(producer="linker", model=model, provider=provider, zdr=True, created_at=now.astimezone(IST).isoformat(), prompt_sha256=prompt_sha,
                                         script_commit=script, index_file=index_name),
                         sources={k: g["sources"][k] for k in ks[n:n + MAX_K]}, items=[it for it in g["items"] if it["k"] in sub])
-            while True:
-                path = f"{ann}{room}/{date}/{t.astimezone(IST).strftime('%Y%m%d%H%M')}-linker.json"
-                if not os.path.exists(path):
-                    try:
-                        write_file(path, body, ann)                                  # O_EXCL: if the name was taken since the check, the next minute is used
-                    except FileExistsError:
-                        pass
-                    else:
-                        written += 1
-                        break
-                t += timedelta(minutes=1)
+            write_file(path, body, ann); written += 1
     pending.clear()
     return written
 
 
-def run(jobs, send, script, ann=ANN, ops=OPS, max_windows=None, now=None, flush_every=FLUSH_EVERY, index_name=None, workers=1):
-    """Translate every job's not-done segments. Returns counts. A failed window is written as failure items (closed reason, no text) and retried by the next run.
-    workers (A4): 1 = one window at a time (the v4 behaviour); N > 1 = up to N windows in flight, results collected and files written by this thread only, in submission order."""
-    if not isinstance(workers, int) or isinstance(workers, bool) or not 1 <= workers <= MAX_WORKERS:
-        raise SystemExit(f"refused: --workers must be an integer from 1 to {MAX_WORKERS}")
+def run(jobs, send, script, ann=ANN, ops=OPS, max_windows=None, now=None, flush_every=FLUSH_EVERY, index_name=None):
+    """Translate every job's not-done segments. Returns counts. A failed window is written as failure items (closed reason, no text) and retried by the next run."""
     mkdirs_private(ops, ops)
-    lock = threading.Lock()
-
-    def log(rec):
-        with lock:
-            L.write_private(ops + "calls.jsonl", rec, jsonl=True)
+    log = lambda rec: L.write_private(ops + "calls.jsonl", rec, jsonl=True)
     last = last_items(ann)
-    c = collections.Counter(); pending = {}; since = [0]
+    c = collections.Counter(); pending = {}; since = 0
     clock = now if callable(now) else (lambda: now or datetime.now(timezone.utc))
-    attempts = []
     for job in jobs:
         todo = remaining(job, last)
         if not todo:
             c["skipped_done"] += 1; continue
-        if max_windows is not None and len(attempts) >= max_windows:
+        if max_windows is not None and c["attempted"] >= max_windows:
             c["left_for_later"] += 1; continue
-        attempts.append((job, todo))
-    if attempts:
-        c["attempted"] = len(attempts)
-
-    def work(jt):
-        job, todo = jt; st = {}
+        c["attempted"] += 1
+        st = {}
         try:
             items, provs, models = translate_window(job, todo, send, log, st)
         except L.ItemFail as e:
-            return job, todo, None, [], [], st, e.status
-        return job, todo, items, provs, models, st, None
-
-    def absorb(res):
-        job, todo, items, provs, models, st, status = res
-        if status is not None:
-            c["failed"] += 1; items = failure_items(job, todo, status)
+            c["failed"] += 1; items, provs, models = failure_items(job, todo, e.status), [], []
         else:
             c["done"] += 1; c["isolated_failed_lines"] += st.get("isolated_failed_lines", 0)
         for it in items:
             c["seg_" + it["q"]] += 1
         g = pending.setdefault((job["room"], job["date"], provs[0] if provs else None, models[0] if models else None), dict(items=[], sources={}))    # translate_item guarantees one provider and model per window
         g["items"] += items; g["sources"][job["k"]] = job["rec_sha"]
-        since[0] += 1
-        if since[0] >= flush_every:
-            c["files"] += flush(pending, ann, script, L.prompt_sha256(), clock(), index_name); since[0] = 0
-
-    ex = ThreadPoolExecutor(workers) if workers > 1 else None
-    try:
-        for res in (ex.map(work, attempts) if ex else map(work, attempts)):
-            absorb(res)
-    except BaseException:
-        try:
-            flush(pending, ann, script, L.prompt_sha256(), clock(), index_name)                 # results already collected are kept
-        except Exception:
-            pass
-        raise
-    finally:
-        if ex:
-            ex.shutdown(wait=True, cancel_futures=True)
+        since += 1
+        if since >= flush_every:
+            c["files"] += flush(pending, ann, script, L.prompt_sha256(), clock(), index_name); since = 0
     c["files"] += flush(pending, ann, script, L.prompt_sha256(), clock(), index_name)
     return dict(c)
 
@@ -332,13 +292,13 @@ def require_preflight(ops, prov):
         raise SystemExit("refused: the preflight did not pass for these commits")
 
 
-def cmd_run(max_windows=None, send=None, ann=ANN, ops=OPS, index=None, roots=ROOTS, prov=None, workers=1):
+def cmd_run(max_windows=None, send=None, ann=ANN, ops=OPS, index=None, roots=ROOTS, prov=None):
     prov = prov or provenance()
     require_preflight(ops, prov)
     index = index or latest_index()
     jobs, stats, _lang = select(index, roots)
     send = send or L.http_transport(L.get_key())
-    counts = run(jobs, send, prov["script_sha"], ann, ops, max_windows, index_name=os.path.basename(index), workers=workers)
+    counts = run(jobs, send, prov["script_sha"], ann, ops, max_windows, index_name=os.path.basename(index))
     print(json.dumps(dict(select=stats, run=counts)))
 
 
@@ -351,8 +311,7 @@ def main(argv=None):
         cmd_preflight()
     elif cmd == "run":
         mw = int(a[a.index("--max-windows") + 1]) if "--max-windows" in a else None
-        wk = int(a[a.index("--workers") + 1]) if "--workers" in a else 1
-        cmd_run(mw, workers=wk)
+        cmd_run(mw)
     elif cmd == "report":
         jobs, _s, _l = select(); print(json.dumps(report(jobs)))
     elif cmd == "selftest":
