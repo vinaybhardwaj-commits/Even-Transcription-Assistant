@@ -6,5 +6,9 @@
 # Switch off: TIMBRE_NIGHTLY_ENABLED=0 on the schedule, or `hf jobs scheduled suspend <id>`.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
+if [ "${TIMBRE_JOB:-nightly}" = "turns" ]; then
+  # Turn-level benchmark (tools/timbre/turns.py). Separate from the nightly pipeline.
+  exec bash tools/timbre/deploy/turns_job.sh
+fi
 export TIMBRE_COMPUTE="${TIMBRE_COMPUTE:-hf_gpu}"
 exec python -m tools.timbre.nightly run --config "${TIMBRE_NIGHTLY_CONFIG:-tools/timbre/deploy/nightly.example.json}"

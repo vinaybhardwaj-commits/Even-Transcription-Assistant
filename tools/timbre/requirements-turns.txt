@@ -1,0 +1,13 @@
+# Pins for the turn-level benchmark job (deploy/turns_job.sh). FunASR lives here, not in the shared/nightly image.
+# torch and torchaudio come from the image (pytorch/pytorch:2.5.1-cuda12.4): do not install torch here.
+# transformers 4.46.3 is a release contemporary with torch 2.5; it needs huggingface_hub < 1.0.
+# UNVERIFIED until the first job: resolver agreement of funasr 1.4.16 with these pins and torchaudio 2.5.1.
+transformers==4.46.3
+huggingface_hub==0.26.5
+safetensors==0.4.5
+funasr==1.4.16
+numpy==2.1.3
+scipy==1.14.1
+soundfile==0.13.1
+boto3==1.43.111
+opensmile==2.6.0
