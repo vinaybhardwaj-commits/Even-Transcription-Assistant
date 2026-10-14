@@ -80,7 +80,7 @@ describe("registration", () => {
     expect(t.find((x) => x.name === "scribe_lanes")!.annotations.readOnlyHint).toBe(true);
     const aspect = ((t.find((x) => x.name === "scribe_health")!.inputSchema as { properties: Row }).properties.aspect as { enum: string[] }).enum;
     expect(aspect).toContain("routes");
-    expect(JSON.stringify(body.result).length).toBeLessThanOrEqual(46_377); // measured 46,374: main 45,350 + scribe_catalog 1,024
+    expect(JSON.stringify(body.result).length).toBeLessThanOrEqual(46_588); // measured 46,585: main 46,374 + CATALOG-5 211
   });
 
   it("the write needs write scope at the door; a room-restricted token is refused", async () => {

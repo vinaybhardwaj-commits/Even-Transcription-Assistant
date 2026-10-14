@@ -12,6 +12,7 @@ import { listJevDecisions } from "@/lib/room-access/tool-reads";
 import { listResults } from "@/lib/rubrics/store";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { fetchManifest, clipKeyOf, decodeCursor, encodeCursor, layerAbsent, layerError, layerNotAvailable, layerOk, loadCatalog, presignClip, readPartsLayer, readTranscriptLayer, searchView, CATALOG_MIN_DATE, type Layer, type Row } from "@/lib/room-access/readers/catalog-consult";
+import { hasAnyIdentity, IDENTITY_CHUNK, IDENTITY_ID, identityFor, identityView, pulseUrl, type IdentityRow } from "@/lib/room-access/readers/catalog-identity";
 import { argBool, argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
 import { AmbiguousRoomError, resolveRoom } from "./brain";
 
@@ -26,9 +27,9 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 86_400_000;
 
 const HELP = [
-  "Read-only; touches no room. Times UTC; from/to are IST dates. Encounter Explorer catalog (palimpsest C1) of consults since 2026-09-09. Internal admins only; NO PHI removal: include_text=true returns transcript text.",
-  "action=search {doctor_uid?, room?, from?, to? (span <= 92 days, clamped to 2026-09-09), source? cutter|caa, limit<=200 (default 50), cursor?}: newest first, layers without keys plus layers_present, next_cursor, total_matched, n_bad_lines, n_blind_excluded. has_rx arrives with catalog C2.",
-  "action=get {consult_uid, include_text?}: the full row and layers {transcript, parts, freescript, rubric, jev, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call.",
+  "Read-only; touches no room. Times UTC; from/to are IST dates. Encounter Explorer catalog (palimpsest C1) of consults since 2026-09-09. Internal admins only; NO PHI removal: include_text=true returns transcript text; include_identity=true returns patient and doctor names, ids and the Pulse link (rx.prescription only with both flags).",
+  "action=search {doctor_uid?, room?, from?, to? (span <= 92 days, clamped to 2026-09-09), source? cutter|caa, limit<=200 (default 50), cursor?}: newest first, layers without keys plus layers_present, next_cursor, total_matched, n_bad_lines, n_blind_excluded. Filters has_prescription (alias has_rx), prescription_uid, individual_uid join encounter_catalog (identity_rows says how many consults had a row; an empty table returns no rows, never a false has_prescription=false). include_identity=true adds identity per row.",
+  "action=get {consult_uid, include_text?, include_identity?}: the full row and layers {transcript, parts, freescript, rubric, jev, identity, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call.",
   "action=clip_audio_url {consult_uid}: presigned GET of the clip, 900 s, {url, expires_at, bytes, minutes, signature_sha256}. The URL is never audited or logged.",
   "Held-out room-days are refused blind_room_day on get and clip_audio_url and left out of search.",
 ].join(" ");
@@ -42,7 +43,23 @@ const blind = (r: Row): boolean => isBlindRoomDay(rowDay(r), rowRoom(r));
 const tOpen = (r: Row): number => (typeof r.t_open === "number" && Number.isFinite(r.t_open) ? r.t_open : Number.NEGATIVE_INFINITY);
 
 async function search(args: ToolArgs): Promise<Row> {
-  if ("has_rx" in args) return badArgs("has_rx arrives with catalog C2");
+  // V3: has_rx is an alias of has_prescription
+  const rawHas = args.has_prescription !== undefined && args.has_prescription !== null && args.has_prescription !== "" ? args.has_prescription : args.has_rx;
+  let hasPresc: boolean | null = null;
+  if (rawHas !== undefined && rawHas !== null && rawHas !== "") {
+    if (rawHas === true || rawHas === "true") hasPresc = true;
+    else if (rawHas === false || rawHas === "false") hasPresc = false;
+    else return badArgs("has_prescription is a boolean");
+  }
+  const idFilter = (k: string): string | null | "bad" => {
+    const v = args[k];
+    if (v === undefined || v === null || v === "") return null;
+    return typeof v === "string" && IDENTITY_ID.test(v) ? v : "bad";
+  };
+  const prescUid = idFilter("prescription_uid");
+  const indivUid = idFilter("individual_uid");
+  if (prescUid === "bad" || indivUid === "bad") return badArgs("prescription_uid and individual_uid match [A-Za-z0-9_.:@-]{1,128}");
+  const includeIdentity = argBool(args, "include_identity");
   const doctor = args.doctor_uid === undefined || args.doctor_uid === null || args.doctor_uid === "" ? null : argStr(args, "doctor_uid", 64);
   if (args.doctor_uid !== undefined && args.doctor_uid !== null && args.doctor_uid !== "" && (!doctor || !DOCTOR.test(doctor))) return badArgs("doctor_uid malformed");
   const source = args.source === undefined || args.source === null || args.source === "" ? null : argStr(args, "source", 16);
@@ -116,15 +133,54 @@ async function search(args: ToolArgs): Promise<Row> {
     matched.push(r);
   }
   matched.sort((a, b) => tOpen(b) - tOpen(a) || String(a.consult_uid).localeCompare(String(b.consult_uid)));
-  const page = matched.slice(offset, offset + limit);
+  // V3: any identity filter joins encounter_catalog over EVERY candidate (chunks of 500), then filters; otherwise only the returned page is joined.
+  const filtering = hasPresc !== null || prescUid !== null || indivUid !== null;
+  let candidates = matched;
+  let joined = new Map<string, IdentityRow>();
+  let identityRows: number | null = null;
+  let identityErr = false;
+  const join = async (rows: Row[]): Promise<boolean> => {
+    for (let i = 0; i < rows.length; i += IDENTITY_CHUNK) {
+      const got = await identityFor(rows.slice(i, i + IDENTITY_CHUNK).map((r) => String(r.consult_uid)));
+      if (got.status === "error") return false;
+      for (const [k, v] of got.rows) joined.set(k, v);
+    }
+    return true;
+  };
+  if (filtering) {
+    if (!(await join(matched))) return { ok: false, error: "identity_unavailable" };
+    identityRows = joined.size;
+    // an empty table must never read as "no prescription": with no joined row at all the answer is no rows, and identity_rows says why
+    candidates = matched.filter((r) => {
+      const j = joined.get(String(r.consult_uid));
+      if (!j) return false;
+      if (hasPresc !== null && j.has_prescription !== hasPresc) return false;
+      if (prescUid !== null && j.prescription_uid !== prescUid) return false;
+      if (indivUid !== null && j.individual_uid !== indivUid) return false;
+      return true;
+    });
+  }
+  const page = candidates.slice(offset, offset + limit);
   const end = offset + page.length;
+  if (!filtering) {
+    const ok = await join(page);
+    if (ok) identityRows = joined.size;
+    else identityErr = true;
+    if (!ok && includeIdentity) return { ok: false, error: "identity_unavailable" };
+  }
+  const view = (r: Row): Row => {
+    const j = joined.get(String(r.consult_uid));
+    return { ...searchView(r), has_prescription: j ? j.has_prescription : null, ...(includeIdentity ? { identity: j ? identityView(j) : null } : {}) };
+  };
   return {
     ok: true,
     ...(clamped ? { clamped: true } : {}),
     ...(defaultWindow ? { default_window: true } : {}),
-    rows: page.map(searchView),
-    next_cursor: end < matched.length ? encodeCursor(end) : null,
-    total_matched: matched.length,
+    rows: page.map(view),
+    next_cursor: end < candidates.length ? encodeCursor(end) : null,
+    total_matched: candidates.length,
+    identity_rows: identityRows,
+    ...(identityErr ? { identity_error: true } : {}),
     n_blind_excluded: nBlind,
     catalog_generated_at: cat.generated_at,
     n_bad_lines: cat.n_bad_lines,
@@ -186,27 +242,52 @@ async function jevLayer(uid: string): Promise<Layer> {
   );
 }
 
+/** V2: the identity and rx layers from ONE encounter_catalog read. Names and ids only behind include_identity; the stored prescription only behind include_identity AND include_text. */
+async function identityLayers(uid: string, includeIdentity: boolean, includeText: boolean): Promise<{ identity: Layer; rx: Layer }> {
+  const source = ["encounter_catalog"];
+  const withRx = includeIdentity && includeText;
+  const got = await identityFor([uid], { withPrescription: withRx });
+  if (got.status === "error") return { identity: layerError(source, got.code), rx: layerError(source, got.code) };
+  const r = got.rows.get(uid);
+  const anyId = r ? hasAnyIdentity(r) : false;
+  const identity: Layer = !r || !anyId
+    ? { ...layerAbsent(source), data: includeIdentity ? null : { present: false } }
+    : layerOk(source, includeIdentity ? identityView(r) : { present: true });
+  const rxPresent = !!r && (r.prescription_uid !== null || r.has_prescription);
+  // The order lists prescription_uid and pulse_url (which carries individual_uid) in rx.data; the identity rule says no uids without include_identity. Withheld (null) without the flag: FLAG in the report.
+  const rx: Layer = !r || !rxPresent
+    ? layerAbsent(source)
+    : layerOk(source, {
+        prescription_uid: includeIdentity ? r.prescription_uid : null, presc_state: r.presc_state, has_prescription: r.has_prescription,
+        pulse_url: includeIdentity ? pulseUrl(r.prescription_uid, r.individual_uid) : null,
+        ...(withRx ? { prescription: r.prescription ?? null } : {}),
+      });
+  return { identity, rx };
+}
+
 async function get(args: ToolArgs): Promise<Row> {
   const uid = argStr(args, "consult_uid", 64);
   if (!uid || !UID.test(uid)) return badArgs("consult_uid must match [A-Za-z0-9_-]{6,64}");
   const includeText = argBool(args, "include_text");
+  const includeIdentity = argBool(args, "include_identity");
   const cat = await loadCatalog();
   if (!cat) return { ok: false, error: "catalog_unavailable" };
   const row = cat.rows.get(uid);
   if (!row) return { ok: false, error: "not_found" };
   if (blind(row)) return { ok: false, error: "blind_room_day" };
   const mf = fetchManifest(row); // C4c: one manifest read shared by transcript and parts
-  const [transcript, parts, freescript, rubric, jev] = await Promise.all([
+  const [transcript, parts, freescript, rubric, jev, idl] = await Promise.all([
     guard([], () => readTranscriptLayer(row, includeText, mf)),
     guard([], () => readPartsLayer(row, mf)),
     guard(["freescript_latest"], () => freescriptLayer(uid, includeText)),
     guard(["rubric_result"], () => rubricLayer(uid)),
     guard(["jev_decision"], () => jevLayer(uid)),
+    identityLayers(uid, includeIdentity, includeText).catch(() => ({ identity: layerError(["encounter_catalog"], "read_failed"), rx: layerError(["encounter_catalog"], "read_failed") })),
   ]);
   return {
     ok: true,
     row,
-    layers: { transcript, parts, freescript, rubric, jev, cdmss: layerNotAvailable(["consult-audit S5 (pending)"]), rx: layerNotAvailable(["catalog C2 (pending)"]) },
+    layers: { transcript, parts, freescript, rubric, jev, identity: idl.identity, cdmss: layerNotAvailable(["consult-audit S5 (pending)"]), rx: idl.rx },
   };
 }
 
@@ -248,6 +329,10 @@ export const catalogTool: McpTool = {
       source: { type: "string", enum: ["cutter", "caa"] },
       limit: { type: "integer", minimum: 1, maximum: CATALOG_LIMIT_MAX, default: CATALOG_LIMIT_DEFAULT },
       cursor: { type: "string", description: "previous next_cursor" },
+      include_identity: { type: "boolean", description: "names, ids, Pulse link; default false" },
+      has_prescription: { type: "boolean" },
+      prescription_uid: { type: "string" },
+      individual_uid: { type: "string" },
     },
     required: ["action"],
     additionalProperties: false,
