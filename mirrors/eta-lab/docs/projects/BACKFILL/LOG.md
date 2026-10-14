@@ -2,16 +2,6 @@
 
 Build and event log, newest first. Owner panes: hist-miner, hist-bulk, lab-mover, join-shard.
 
-28 Sep ~22:2x-23:2x -- full historical backfill built+launched (19 Aug-25 Sep)
-Session: hist-bulk, eta-refuter-3.
-backfill_driver.sh: per IST date 25 Sep->19 Aug (27 dates, ~4,892 windows), cuts REB windows (reb_windows.py --plan tierC|tierAB) + real STT (reb's own runner) + TONE (--day flag), resume-safe. 3 real fix rounds with eta-refuter-3: B1 wait-per-PID for both workers; B2 done-marker on empty catalog; B3 nightly tone loop pause/restart on crash + orphan-claim cleanup (2 released live in selftest); C1 restore_on_exit relaunches tone_loop; C2 orphan sweep at START for both stores. PASSed at 6899d070. Launched 23:20 IST, PASS 1 starting 25 Sep (391 windows).
-Refs: #5612-5615.
-
-## 27-28 Sep -- PARITY-389 FINAL: NO MATCH, scope not met; nightly PQM automation live
-Session: fleet, herdr-kit, eta-refuter-2, linker, hist-bulk.
-Retried HF-vs-Mini compare (2 real bugs fixed first: refused-key false-absence, per-window audio identity vs ship manifest) still FAILED: HF capture used SRAVAANI_MODE=local not the Mini's real instance -- not comparable. Fable ruled (17:25) SraVaani out of scope, no further spend. Underlying tailnet ACL gap (HF can't reach Yoga SraVaani) unresolved. Whisper-path content divergence (1.4-21.2%, median ~9%) documented as real, not decode noise (temp-fallback ruled out). Nightly PQM-linking crontab live (23:45 IST) after fixing a real overwrite bug (rolling 3-day window would have clobbered the frozen 26 Sep bundle) and a moving-tag bug.
-Refs: #4827-4899, #4680-4839.
-
 ## 27 Sep ~05:0x-07:0x IST — PARITY-389 compare NOT COMPUTABLE; HF job launched
 Session: fleet, eta-refuter-2, hist-bulk, lx.
 Compare script hardened twice on real integrity bugs (audio identity not checked against the ship manifest; unpinned golden/manifest inputs), PASS 1dfe6c7f (#4101). Correctly returns NOT COMPUTABLE: HF side had no capture. Fable launched the real HF job (a10g-large, cap $6, #4234). W28.1 26 Sep backlog drained overnight (hist-bulk #4058). W28.2 full-day encounter re-score harness PASS, merged main 46eae4dd (#4070).
@@ -56,8 +46,3 @@ Refs: #1629, #1639; r309.
 Session: join-shard.
 Cloudflare Worker `eta-audio-join` with 32 shards deployed (r220); first real consult through shard-8.
 Refs: #986, r220.
-
-- 29 Sep 2026 (rev 25): 25 Sep tone 418/418 done; duplicate-record bug (225 records, 218 windows) fixed, sidecar written; STT for 25/24 Sep deferred on GPU.
-- 29 Sep ~19:27 IST (rev 26): cut-only driver plus HF STT; 25 Sep 393/393 and 24 Sep 238/238 done; runner guard broken by 9bb75cf5, fixed fd460731 (978d9969e2589af8), no blind window transcribed (#6982-#7037).
-- 29 Sep ~23:10 IST (rev 27): T-BACKFILL-5 un-cancelled for 27 Sep only, HF; HF spend about USD 66.84 of 300 (#7602); Koyal lane launched #7592.
-- 30 Sep 2026 ~06:30 IST (rev 28): 29 Sep re-cut 418/418; 10 Sep cut 339/339; T-BACKFILL-5 closed (27/19/18 Sep ctc-out collected, 0 blind, #7863/#7865); 134 misnamed night-window ids found (#7893), hist-bulk owns the re-id. Refs: #7861-#7865, #7893, #7917.

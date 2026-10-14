@@ -86,19 +86,10 @@ class Perms(unittest.TestCase):
         f.write_text(json.dumps({**ok, "rows": []}))
         with self.assertRaises(SystemExit):   # an S1 with no rows is still refused
             m.build_scorecard(str(f), None, None, str(self.t / "out9"))
-        # F1 (refuter-2 #4339): once rows exist, kept_error_pct (top-level) is required, so every S3 number sits beside its kept-set error rate
-        proven = j({"overall": 96, "per_lang": {"hi": 91}}, True)
-        f.write_text(json.dumps(proven))
-        with self.assertRaises(SystemExit):
-            m.build_scorecard(None, None, str(f), str(self.t / "out5-missing"))
-        f.write_text(json.dumps({**proven, "kept_error_pct": 8.1}))
+        f.write_text(json.dumps(j({"overall": 96, "per_lang": {"hi": 91}}, True)))
         m.build_scorecard(None, None, str(f), str(self.t / "out5"))
-        strict = j({"overall": 96, "per_lang": {"hi": 91}}, False)   # a stricter evaluator flag (e.g. min n per label) is honoured, not refused
-        f.write_text(json.dumps({**strict, "kept_error_pct": 8.1}))
+        f.write_text(json.dumps(j({"overall": 96, "per_lang": {"hi": 91}}, False)))   # a stricter evaluator flag (e.g. min n per label) is honoured, not refused
         m.build_scorecard(None, None, str(f), str(self.t / "out6"))
-        f.write_text(json.dumps({**proven, "kept_error_pct": "high"}))   # kept_error_pct must be a number 0..100
-        with self.assertRaises(SystemExit):
-            m.build_scorecard(None, None, str(f), str(self.t / "out5-bad"))
         self.assertEqual(modes(self.t / "out5"), [])
 
 

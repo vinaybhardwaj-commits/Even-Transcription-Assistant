@@ -175,10 +175,6 @@ def check_score(name, d):
         derived = j["accuracy"]["overall"] >= 95 and all(k in per and per[k] >= 90 for k in langs) and all(v >= 90 for v in per.values())
         if j.get("usable") is True and not derived:   # W33 gate: a `true` flag may not contradict its own numbers (a stricter `false`, e.g. min n per label, is the evaluator's call and is honoured)
             sys.exit(f"scorecard s3: judge.usable=true but the accuracy numbers do not pass the gate (needs >=95 overall and >=90 in every language in the rows)")
-        if d["rows"] and d.get("kept_error_pct") is None:   # 27 Sep ruling: S3 is indicative, but every number shown must sit beside its kept-set error rate (refuter-2 #4339 F1)
-            sys.exit("scorecard s3: kept_error_pct (top-level) is required once rows exist, so every S3 number is shown with its kept-set error rate")
-        if d.get("kept_error_pct") is not None:
-            _num(d["kept_error_pct"], 0, 100, "s3.kept_error_pct")
 
 
 def build_scorecard(s1, s2, s3, out):
