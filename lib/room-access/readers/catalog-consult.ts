@@ -379,7 +379,7 @@ export async function readPartsLayer(row: Row): Promise<Layer<PartRow[]>> {
 
 // --- clip -----------------------------------------------------------------------------------------------------------------------------------
 /** F1: the clip key a row names, only in the consult-clips shape of THIS row (its IST date, its consult uid) and not held out; else null. */
-const CLIP_KEY = /^consult-clips\/(\d{4}-\d{2}-\d{2})\/([A-Za-z0-9_-]{1,64})\/([A-Za-z0-9_-]{1,64})\/consult\.flac$/;
+const CLIP_KEY = /^consult-clips\/(\d{4}-\d{2}-\d{2})\/([A-Za-z0-9_-]{1,64})\/([A-Za-z0-9_]{10,60})\/consult\.flac$/;
 export function clipKeyOf(row: Row): string | null {
   const k = asRec(row.clip)?.r2_key;
   if (typeof k !== "string" || !k.startsWith(CONSULT_CLIPS_PREFIX) || k.includes("..") || k.length > 512) return null;

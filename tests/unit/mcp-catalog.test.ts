@@ -705,6 +705,52 @@ describe("FIX1 F2 and F5: no free text from rubric score or parts source", () =>
   });
 });
 
+describe("FIX2 Y1/Y2: consult uids with an underscore (1,507 of 3,242 cutter uids are 26 chars with _)", () => {
+  const U = "ab12_cd34_ef56_gh78_ij90_k";
+  it("a 26-char uid with _ is readable end to end: transcript ok (manifest bound), clip signed", async () => {
+    expect(U).toHaveLength(26);
+    setCatalog([crow(U)]);
+    setManifest({}, U);
+    setTrack(tk("stt.sarvam-saaras-v3", U), stt());
+    setTrack(tk("translate.sarvam-saaras-v3", U), translate());
+    setTrack(tk("role.llm-roles", U), roles());
+    const o = await run({ action: "get", consult_uid: U, include_text: true });
+    const t = (o.layers as Record<string, Row>).transcript!;
+    expect(t).toMatchObject({ status: "ok" });
+    expect(t.source).toContain(mkey(U));
+    expect(((t.data as Row).segments as Row[])[0]).toMatchObject({ text_native: "NATIVE0", text_en: "TR0" });
+    expect(await run({ action: "clip_audio_url", consult_uid: U })).toMatchObject({ ok: true });
+    expect(H.signCalls).toEqual([{ key: `consult-clips/2026-10-05/opd-a/${U}/consult.flac`, expiresInSeconds: 900 }]);
+  });
+  it("., /, - and .. inside the uid segment, and lengths 9 and 61, are refused by the allowlist, the row binding and the clip shape", async () => {
+    const { bindRefusal, clipKeyOf } = await import("@/lib/room-access/readers/catalog-consult");
+    const base = "ab12_cd34_ef56";
+    const bad = [`${base}.x`, `${base}-x`, `${base}/x`, `${base}..x`, "a".repeat(9), "a".repeat(61), `${base} x`];
+    for (const u of bad) {
+      const key = tk("stt.sarvam-saaras-v3", u);
+      expect(labReadable(key), u).toBe(false);
+      expect(bindRefusal(key, crow(u)), u).toBe("key_not_readable");
+      expect(clipKeyOf(crow(u, { clip: { r2_key: `consult-clips/2026-10-05/opd-a/${u}/consult.flac` } })), u).toBeNull();
+      expect(labReadable(mkey(u)), u).toBe(false);
+    }
+    for (const u of ["a".repeat(10), "a".repeat(60), "_".repeat(10), base + "_"]) {
+      expect(labReadable(tk("stt.sarvam-saaras-v3", u)), u).toBe(true);
+      expect(bindRefusal(tk("stt.sarvam-saaras-v3", u), crow(u)), u).toBeNull();
+    }
+  });
+  it("end to end: a uid with - is a layer error and a bad_clip_key, never a read or a signature", async () => {
+    const u = "ab12-cd34-ef56-gh78";
+    setCatalog([crow(u)]);
+    store.set(tk("stt.sarvam-saaras-v3", u), { body: JSON.stringify(stt()), etag: null });
+    reads.length = 0;
+    const o = await run({ action: "get", consult_uid: u });
+    expect((o.layers as Record<string, Row>).transcript).toMatchObject({ status: "error", error: "key_not_readable" });
+    expect(reads.filter((r) => r !== ENCOUNTER_CATALOG_KEY)).toEqual([]);
+    expect(await run({ action: "clip_audio_url", consult_uid: u })).toEqual({ ok: false, error: "bad_clip_key" });
+    expect(H.signCalls).toEqual([]);
+  });
+});
+
 // --- the door ---------------------------------------------------------------------------------------------------------------------------------
 describe("the door", () => {
   const { handleMcpRpc } = { handleMcpRpc: (...a: Parameters<typeof import("@/lib/mcp/handler").handleMcpRpc>) => import("@/lib/mcp/handler").then((m) => m.handleMcpRpc(...a)) };

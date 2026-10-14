@@ -39,7 +39,7 @@ export const labWritable = (key: string): boolean => WRITE_ALLOW.some((r) => r.t
  * S7-2B: the ONE reb/ shape this code may READ (never write, never list): palimpsest's consult-clip tracks and manifest,
  * reb/<ist_date>/<room_id>/_consults/<consult_uid>/tracks/<file>.json and .../manifest.json. Any other reb/ path stays unreadable, and nothing under reb/ is writable.
  */
-export const REB_CONSULT_KEY = /^reb\/(\d{4}-\d{2}-\d{2})\/([A-Za-z0-9_-]{1,64})\/_consults\/([A-Za-z0-9]{10,60})\/(?:tracks\/[A-Za-z0-9._-]{1,200}\.json|manifest\.json)$/;
+export const REB_CONSULT_KEY = /^reb\/(\d{4}-\d{2}-\d{2})\/([A-Za-z0-9_-]{1,64})\/_consults\/([A-Za-z0-9_]{10,60})\/(?:tracks\/[A-Za-z0-9._-]{1,200}\.json|manifest\.json)$/;
 /** CONSULT's index mirror: exactly these two objects, GET only (nothing else under consult/ is readable, and nothing is writable). */
 export const CONSULT_INDEX_KEYS = ["consult/index/latest.jsonl", "consult/index/manifest.json"] as const;
 /** CATALOG-1: palimpsest's encounter catalog (C1), ONE exact object, GET only. Not a prefix: nothing else under palimpsest/ is readable. */
