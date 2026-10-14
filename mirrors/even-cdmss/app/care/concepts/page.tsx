@@ -1,7 +1,6 @@
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-import Link from 'next/link';
 import { redirect, notFound } from 'next/navigation';
 import { ShieldCheck } from 'lucide-react';
 import { isCareUnlocked } from '@/lib/care-cookie';
@@ -33,12 +32,6 @@ export default async function ConceptsPage() {
       <p className="mt-1.5 max-w-3xl text-[12.5px] leading-relaxed text-slate-500">
         Codes each free-text finding to a governed clinical concept, the way a diagnosis is coded to ICD.
         Writes <span className="font-medium text-slate-600">concept_id</span> only; nothing here changes an audit score.
-      </p>
-
-      {/* Destine banner (LVP-L1 kickoff O9): off the chooser, worker panel stays. */}
-      <p className="mt-3 max-w-3xl rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-[12px] leading-relaxed text-slate-500">
-        Off the chooser since 20 Aug 2026. The dictionary still stamps in the background; suggestions now
-        surface on <Link href="/care/patterns" className="font-medium text-slate-700 underline">Low-value patterns</Link>.
       </p>
 
       <ConceptWorkerPanel />

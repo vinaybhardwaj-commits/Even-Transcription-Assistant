@@ -241,7 +241,11 @@ test('⚠️ FILL-ONLY: the skip rule is unchanged, and it is what makes a prod-
 // row is PROD-LINE (no pipeline:'mini', no engineTag), and it is never stamped with the local model.
 test('the row is PROD-LINE and stamped with WHAT SERVED, never MINI_MODEL', () => {
   const c = code(ROUTE);
-  assert.ok(c.includes("await auditOpdNote(row, provider === 'bedrock' ? { bedrockModel: modelId } : {})"), 'no pipeline:mini, no engineTag ⇒ plain prod engine');
+  // Re-pointed by the step 14-17 build: the call now also carries the retrieval-telemetry options,
+  // so the pin holds the PART THAT CARRIES THE INVARIANT — the bedrock arm threads its modelId and
+  // the vertex arm passes nothing — rather than the whole call expression. The "plain prod engine"
+  // half of the claim is asserted independently on the next line and is unchanged.
+  assert.ok(c.includes("...(provider === 'bedrock' ? { bedrockModel: modelId } : {}),"), 'no pipeline:mini, no engineTag ⇒ plain prod engine');
   assert.ok(!/pipeline:\s*'mini'/.test(c) && !/engineTag/.test(c), 'a prod-line run never tags its engine');
   assert.ok(c.includes('const served = await servedCallForAudit(audit.traceId);'), 'the stamp is read back, not assumed');
   assert.ok(c.includes('model: served.model ?? modelId, provider: served.provider ?? provider'), 'and it is what answered');

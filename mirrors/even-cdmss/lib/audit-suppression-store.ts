@@ -92,21 +92,6 @@ export async function loadActiveSuppressions(): Promise<Suppression[]> {
   }));
 }
 
-/**
- * Paired-audit reader. `listSuppressions` swallows a database error and returns [],
- * which would hide SOURCE_UNAVAILABLE. This query throws instead.
- */
-export async function loadActiveSuppressionsOrThrow(): Promise<Suppression[]> {
-  const rows = await run(
-    `SELECT ${COLS} FROM audit_suppression WHERE active = true ORDER BY created_at DESC LIMIT 1000`,
-    [],
-  );
-  return (rows as Record<string, unknown>[]).map(rowToSuppression).filter((s) => s.action !== 'demote').map((s) => ({
-    id: s.id, signal_type: s.signal_type, discriminator: s.discriminator, match_kind: s.match_kind,
-    scope: s.scope, doctor_uid: s.doctor_uid, action: s.action, active: s.active,
-  }));
-}
-
 /** ACTIVE demote rules + the current policy generation, in one read for the engine seam.
  *  Fail-safe at the caller: any throw here must degrade to { rules: [], gen: 0 }. */
 export async function loadQuietingConfig(): Promise<{ rules: Suppression[]; gen: number }> {

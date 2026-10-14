@@ -42,6 +42,19 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/admin-gate';
 import { sql } from '@/lib/db';
 import { matchLowValueCare, type MatchInput } from '@/lib/lvc';
+// ⚠️ ONE STATEMENT, WITH AN INLINE `type` SPECIFIER, DELIBERATELY. `scripts/lib/import-scan.mjs`
+// marks a standalone type-only declaration as a type-only edge, and the committed architecture map
+// holds exactly one `app/api → retrieval-telemetry-core` edge, of kind `value`. Splitting this into
+// a value import plus a separate type-only one would add a second, `type`-kind edge and rewrite
+// lib/architecture/map.generated.ts, which this pass is not authorized to change. The inline form
+// leaves the map untouched because a clause is type-only only when EVERY specifier carries `type`.
+//
+// ⚠️ AND THE WORDING ABOVE IS LOAD-BEARING, WHICH IS NOT OBVIOUS. That scanner is text-level and
+// does not skip comments: its pattern is `import` + `type` + anything-without-a-quote + `from` +
+// a quoted specifier. Spelling those two keywords adjacently in this comment let the match run on
+// past the prose and bind to the REAL statement's specifier below, which added exactly the `type`
+// edge this comment exists to prevent. Measured, not reasoned about: it moved map.generated.ts.
+import { telemetryContextFor, type TelemetryRequestContext } from '@/lib/retrieval-telemetry-core';
 import type { JudgedRec, LvcRecommendation, Verdict } from '@/lib/lvc-core';
 import { compareJudgedRuns, summarizeAa, resolveAaExperiment, AA_EXPERIMENT_DEFAULT, type AaCaseComparison } from '@/lib/lvc-judge-aa-core';
 import { fetchOpdNoteByUid } from '@/lib/metabase';
@@ -173,8 +186,12 @@ interface CaseResult {
 /**
  * One case: assemble ONCE, judge TWICE on the pinned context, compare, store.
  * Never throws — the caller records the status and moves to the next uid.
+ *
+ * `ctx` is REQUIRED and comes last. It is the request's telemetry context, made once in `GET` and
+ * threaded down — not optional, and not an options bag, so a future caller cannot quietly drop it
+ * and leave pass 0's retrieval unrecorded while everything still compiles.
  */
-async function runCase(uid: string, save: boolean, experiment: string): Promise<CaseResult> {
+async function runCase(uid: string, save: boolean, experiment: string, ctx: TelemetryRequestContext): Promise<CaseResult> {
   const t0 = Date.now();
   try {
     const row = await fetchOpdNoteByUid(uid);
@@ -187,8 +204,23 @@ async function runCase(uid: string, save: boolean, experiment: string): Promise<
     // captures what the real judge WOULD have been handed and returns the pipeline's own soft-fail
     // shape, so no LLM judge call is spent and nothing downstream is disturbed. Untraced: it makes
     // no model call worth attributing.
+    //
+    // ⚠️ AND THIS IS THE ONLY PASS THAT DECLARES TELEMETRY (D7, step 13). Pass 0 is the one that
+    // reaches `defaultRecall` and performs real semantic retrieval, so it is the one that has a
+    // retrieval to record. `defaultRecall` opens the invocation itself, idempotently and fail-open,
+    // whenever `input.telemetry` is present — so nothing here calls `startInvocation`, and nothing
+    // closes: no retrieval route closes an invocation, and these rows stay `closure_unknown` by
+    // design.
+    //
+    // ⚠️ WHY THE FIELD GOES ON THE SPREAD AND NOT ON `input`, stated accurately. What actually keeps
+    // passes A and B clean is their INJECTED `recall`: `matchLowValueCare` resolves
+    // `deps.recall ?? defaultRecall`, the pinned arms supply their own, so `defaultRecall` — the one
+    // and only reader of `input.telemetry` in this codebase — never runs on them. A field set on
+    // `input` would therefore not instrument them today either. The spread is defence in depth: if a
+    // later change ever removes the pinned `recall` injection, a field living on `input` would
+    // silently begin instrumenting arms that perform no semantic retrieval at all, which D7 forbids.
     let captured: LvcRecommendation[] = [];
-    await matchLowValueCare({ ...input, trace: false }, {
+    await matchLowValueCare({ ...input, trace: false, telemetry: { ctx, route: 'lvc_judge_aa' } }, {
       judge: async (_ctx, recs) => {
         captured = recs;
         return recs.map((rec) => ({ rec, verdict: 'insufficient_info' as Verdict, confidence: 0, why: '', consider_instead: null }));
@@ -260,6 +292,15 @@ export async function GET(req: NextRequest) {
   // `lvc_judge_aa_R2` must be able to see that they measured r1 again.
   const experimentRejected = !!experimentRaw && experiment !== experimentRaw.trim();
 
+  // ── THE TELEMETRY CONTEXT, MINTED HERE AND ONLY HERE (D7, D11, step 13) ──────────────────────
+  // ONE context per REQUEST. This boundary is the only thing that knows the request, so it is the
+  // only thing that can make one; `runCase` receives it and never mints its own. Minting it per case
+  // instead would give every note in one call its own invocation id and report a single run as N
+  // invocations — which is the exact shape §2 forbids reporting as a workload. Never module-global:
+  // §4.1 forbids mutable process-global state, and two overlapping requests would share an id.
+  // `labExperimentId` carries the round tag, so a row is attributable to the A/A round that made it.
+  const ctx = telemetryContextFor('lvc_judge_aa', req.headers, { labExperimentId: experiment });
+
   const sample = await sampleUids(n);
   if (sample.error) return NextResponse.json({ ok: false, experiment, experimentRejected, error: sample.error, stored: 0 });
 
@@ -272,7 +313,7 @@ export async function GET(req: NextRequest) {
   let stopped: string | null = null;
   for (const item of queue) {
     if (remainingBudgetMs(deadlineAt) < PER_CASE_RESERVE_MS) { stopped = 'deadline'; break; }
-    results.push(await runCase(item.uid, save, experiment));   // sequential — concurrency 1 (§4.2)
+    results.push(await runCase(item.uid, save, experiment, ctx));   // sequential — concurrency 1 (§4.2)
   }
 
   const comparisons = results.map((r) => r.comparison).filter((c): c is AaCaseComparison => !!c);

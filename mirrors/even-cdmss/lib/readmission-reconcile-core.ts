@@ -54,20 +54,9 @@
  *     day it is populated. No numeric behaviour depends on it.
  */
 
-// The only import: the R2 coverage TYPE (lib/readmission-template-core.ts is pure too).
-import type { TemplateCoverage } from './readmission-template-core';
-
 // ── Evidence ────────────────────────────────────────────────────────────────────
 
-/** R2 (READMISSIONS-R2 PRD v1.0 §3.3, T-2): source 4 = KX clinical templates — 'ot_note' |
- *  'pac_note' | 'progress_note'. Their weight is decided by SIDE (R2-2, evidenceWeight
- *  below), never by the source name alone. Adding a value here without a case in
- *  evidenceWeight is a compile error — the old silent fall-through is gone. */
-/** R10-A (PRD §3.2, R10-D10): `doc_operative_text` = an operative / procedure block printed inside
- *  a DISCHARGE DOCUMENT and copied verbatim by the extractor (`verbatim_sections`). Ids `DOT1…`.
- *  It is NOT a structured OT note and is never promoted to one — the label the model and the
- *  reviewer both read says "found in the discharge document". */
-export type EvidenceSource = 'index_summary' | 'readmit_summary' | 'lab' | 'adt' | 'cm_form' | 'ot_note' | 'pac_note' | 'progress_note' | 'doc_operative_text';
+export type EvidenceSource = 'index_summary' | 'readmit_summary' | 'lab' | 'adt' | 'cm_form';
 
 /**
  * Where a lab evidence item's number came from (Phase 1.5 §3).
@@ -101,46 +90,13 @@ export interface EvidenceItem {
 
 export interface EvidenceCatalog { items: EvidenceItem[] }
 
-export type EvidenceWeight = 'interested' | 'disinterested' | 'neither';
-
-/**
- * PRD §5 rule 1, made EXHAUSTIVE in R2 (a new EvidenceSource without a branch here no
- * longer compiles, so it can no longer corrupt the provenance ratio silently):
- *   · index_summary — the audited team's own prose: interested.
- *   · lab / adt / readmit_summary — disinterested.
- *   · cm_form — interested-but-not-clinical (§5a): patient-reported, so NOT disinterested
- *     corroboration either.
- *   · ot_note / pac_note / progress_note (R2-2) — by SIDE, mirroring the two summaries:
- *     index-stay template items are interested (the audited team's contemporaneous
- *     record); readmit-stay items are disinterested (the other admission's record). PAC on
- *     pre-admit OPR is index-side. An item with NO side is read as index-side — the
- *     fail-closed weight, since interested evidence can never carry an avoidable verdict.
- */
-export function evidenceWeight(item: Pick<EvidenceItem, 'source' | 'side'>): EvidenceWeight {
-  switch (item.source) {
-    case 'index_summary': return 'interested';
-    case 'lab': case 'adt': case 'readmit_summary': return 'disinterested';
-    case 'cm_form': return 'neither';
-    case 'ot_note': case 'pac_note': case 'progress_note':
-      return item.side === 'readmit' ? 'disinterested' : 'interested';
-    // R10-A (kickoff, normative): DOT is INTERESTED — it is an index-side document, the same weight
-    // index_summary carries, and for the same reason: it is the treating team's own printed account
-    // of what happened, merely printed in a different part of the same document. Deliberately NOT
-    // weighed by side: a readmit-side operative block is still a treating team writing about its own
-    // operation, and 'interested' is the fail-closed answer (interested evidence can never carry an
-    // avoidable verdict on its own). Flagged in the R10 build report.
-    case 'doc_operative_text': return 'interested';
-    default: {
-      const exhaustive: never = item.source;
-      return exhaustive;
-    }
-  }
-}
+/** PRD §5 rule 1. The CM form is an interested-but-not-clinical source (§5a):
+ *  patient-reported, so NOT disinterested corroboration either. */
 export function isDisinterested(item: EvidenceItem): boolean {
-  return evidenceWeight(item) === 'disinterested';
+  return item.source === 'lab' || item.source === 'adt' || item.source === 'readmit_summary';
 }
 export function isInterested(item: EvidenceItem): boolean {
-  return evidenceWeight(item) === 'interested';
+  return item.source === 'index_summary';
 }
 
 // ── Analyte bundles (PRD §5 rule 4) ─────────────────────────────────────────────
@@ -554,10 +510,6 @@ export interface ReadmissionFinding {
   /** Phase 1.5 §3 — the coverage tier this finding was built under, and what from. */
   labTier: LabTier;
   labSourceProvenance?: LabSourceProvenance | null;
-  /** R2 §3.4 — what was looked for in db13 templates and what was found, five honest
-   *  states per source. ABSENT from the blob = never looked (tier-3 / pre-R2 rows) → the
-   *  chip reads `unknown`. Blob-only; no column, no migration. */
-  templateCoverage?: TemplateCoverage | null;
   /** Never 'corroborated' from absence of labs (§5 rule 6). */
   stabilityAssessment: 'contradicted' | 'corroborated' | 'unverifiable';
   corroborationTrack: 'lab_corroborated' | 'prose_only';
@@ -584,8 +536,6 @@ export interface ReconcileInput {
    *  callers keep their exact behaviour. */
   labTier?: LabTier;
   labSourceProvenance?: LabSourceProvenance | null;
-  /** R2: rides the finding unchanged and writes the constraint-21 refusal lines. */
-  templateCoverage?: TemplateCoverage | null;
 }
 
 const byId = (catalog: EvidenceCatalog) => {
@@ -779,7 +729,6 @@ export function reconcileFinding(input: ReconcileInput): ReadmissionFinding {
 
   const labTier = input.labTier ?? inferLabTier(catalog);
   const labSourceProvenance = input.labSourceProvenance ?? null;
-  const templateCoverage = input.templateCoverage ?? null;
 
   const sameCondition = resolveSameCondition(a.sameCondition ?? null, catalog, input.formFlags);
 
@@ -788,11 +737,11 @@ export function reconcileFinding(input: ReconcileInput): ReadmissionFinding {
       findingClass: input.findingClass, verdictScope: 'pair',
       planned: null, sameCondition, omissions: [], exculpatory: [], avoidable: null,
       promoteToFull: sameCondition?.verdict === 'same',
-      labProfile, labTier, labSourceProvenance, templateCoverage,
+      labProfile, labTier, labSourceProvenance,
       stabilityAssessment: 'unverifiable', corroborationTrack: labProfile === 'no_labs' ? 'prose_only' : 'lab_corroborated',
       provenance: provenanceOf([...(sameCondition?.evidenceIds ?? [])], m),
       weakestStep: a.weakestStep ?? null,
-      refusalRecord: [...(a.refusalRecord ?? []), ...templateRefusalLines(templateCoverage)],
+      refusalRecord: a.refusalRecord ?? [],
     };
   }
 
@@ -842,54 +791,16 @@ export function reconcileFinding(input: ReconcileInput): ReadmissionFinding {
   if (labTier === 'tier2') refusal.push({ lookedFor: 'structured lab values for this patient inside the index window', found: false, note: 'tier 2: labs are the ones the doctor wrote in the discharge summary, cross-read against the readmit team’s account — a summary-vs-summary contradiction, not an independent numeric one' });
   if (labTier === 'tier3') refusal.push({ lookedFor: 'an index discharge-summary PDF', found: false, note: 'tier 3: no index document could be read — this pair is not auditable' });
   if (oon) refusal.push({ lookedFor: 'a readmit discharge summary', found: false, note: 'the readmission happened outside Even; readmit facts are patient-reported via the CM note' });
-  refusal.push(...templateRefusalLines(templateCoverage));
 
   return {
     findingClass: input.findingClass,
     verdictScope: oon ? 'index_side_only' : 'pair',
     planned, sameCondition, omissions, exculpatory, avoidable,
-    labProfile, labTier, labSourceProvenance, templateCoverage, stabilityAssessment, corroborationTrack, provenance,
+    labProfile, labTier, labSourceProvenance, stabilityAssessment, corroborationTrack, provenance,
     weakestStep: a.weakestStep ?? null,
     refusalRecord: refusal,
     ...(oon ? { readmitFactsPatientReported: true, identityResolved: true } : {}),
   };
-}
-
-/**
- * R2 constraint 21: every template fetch that RAN writes a refusal-record line
- * `{ lookedFor: 'ot_note' | 'pac_note' | 'progress_note', found }`. A chip `absent` MUST
- * correspond to found:false; `empty` (rows exist, no usable text) is also found:false — no
- * usable text was found — with the note saying why; `present` writes found:true so the
- * record is complete; `fetch_failed` writes NOTHING (the look did not complete → chip
- * `unknown` ↔ unwritten line). Never-looked → coverage null → nothing written.
- *
- * R10-A adds `absent_document_text`: found:false (no structured OT row was found) with the note
- * "no structured OT row; operative text found in the discharge document". The PLAIN-absence line is
- * untouched and still fires for a case whose document prints nothing either — a legitimately
- * non-surgical stay reads exactly as it did before R10 (acceptance #2).
- */
-export function templateRefusalLines(cov: TemplateCoverage | null | undefined): ReadmissionFinding['refusalRecord'] {
-  if (!cov) return [];
-  const out: ReadmissionFinding['refusalRecord'] = [];
-  const one = (lookedFor: 'ot_note' | 'pac_note' | 'progress_note', e: TemplateCoverage[keyof TemplateCoverage] | undefined) => {
-    if (!e) return;
-    switch (e.status) {
-      case 'present': out.push({ lookedFor, found: true, note: `${e.count} row(s) with usable text` }); break;
-      case 'empty': out.push({ lookedFor, found: false, note: `${e.count} row(s) exist but none carries usable text` }); break;
-      case 'absent': out.push({ lookedFor, found: false, note: 'no row in db13 for this stay/window' }); break;
-      // R10-A (PRD §3.2): the refusal that was a LIE becomes true. The look completed, db13 has no
-      // structured OT row — and the discharge document prints operative text, which is in the ledger
-      // as `DOT…`. `found` stays FALSE because what was looked for (a structured OT row) is still
-      // not there; the note says where the text actually came from, so the model can neither claim a
-      // theatre record nor deny the text exists.
-      case 'absent_document_text': out.push({ lookedFor, found: false, note: 'no structured OT row; operative text found in the discharge document' }); break;
-      case 'fetch_failed': break;   // deliberately unwritten — the look did not complete
-    }
-  };
-  one('ot_note', cov.ot);
-  one('pac_note', cov.pac);
-  one('progress_note', cov.progress);
-  return out;
 }
 
 function provenanceOf(citedIds: string[], m: Map<string, EvidenceItem>): ReadmissionFinding['provenance'] {
@@ -900,81 +811,4 @@ function provenanceOf(citedIds: string[], m: Map<string, EvidenceItem>): Readmis
   // only on treating-team prose scores low and auto-routes to human review.
   const ratio = interested > 0 ? disinterested / interested : disinterested;
   return { interested, disinterested, ratio, needsHumanReview: disinterested === 0 };
-}
-
-// ── R1 advisory judgements (CDMSS-READMISSIONS-R1-PRD v1.1 §4, ratified 17 Aug 2026) ────
-//
-// Two STORED, human-decided, advisory judgements derived deterministically from a finding
-// — never a legal finding, never a court or council finding. Pure: no DB, no model. The
-// same function runs at audit time (store.saveAuditResult) and in the versioned backfill
-// (migrate-readmissions), reading the `finding` jsonb; the input type below is therefore
-// a structural SUBSET with every field optional, so an older stored blob is data, not a
-// type guarantee. A rule-list change bumps JUDGEMENT_RULE_VERSION and the same backfill
-// re-derives every audited row — nothing goes silently stale.
-//
-// Medical justification is a DISPLAY mapping of `avoidable` (lib/readmission-surface-core.ts),
-// not stored here — it is already the stored money verdict.
-
-export type JudgementValue = 'suspected' | 'not_suggested' | 'unknown';
-
-/** Bump when CLINICAL_HARM_STEMS / PERI_OP_EVENT_PATTERNS or the rule order change. */
-export const JUDGEMENT_RULE_VERSION = 'readmit-judgement/1';
-
-export interface Judgements {
-  preventableInjury: JudgementValue;
-  negligence: JudgementValue;
-}
-
-/** Everything deriveJudgements reads. ReadmissionFinding satisfies it structurally, and
- *  so does a parsed `finding` blob written by an older engine (all optional). */
-export interface JudgementInput {
-  planned?: { verdict?: string | null } | null;
-  sameCondition?: { verdict?: string | null } | null;
-  omissions?: Array<{ claim?: string | null; danger?: string | null }> | null;
-  corroborationTrack?: string | null;
-  stabilityAssessment?: string | null;
-}
-
-/** §4 preventable-injury rule 2 — clinical-HARM stems, case-insensitive. A moderate
- *  omission that is a documentation gap ("follow-up date not written") matches none of
- *  these and lands in `unknown`, not `suspected`. */
-export const CLINICAL_HARM_STEMS: readonly RegExp[] = [
-  /wound/i, /infect/i, /bleed/i, /sepsis/i, /dehisc/i, /implant fail/i, /intra-?op/i, /unstable/i, /\bSSI\b/i,
-];
-
-/** §4 negligence rule 3 — intra-op / peri-op EVENT patterns. Bare procedure nouns and
- *  all discharge-instruction language are deliberately NOT on this list (ratified
- *  clinical-safety rule, PRD §4 — the Khan fixture in the tests is what it protects). */
-export const PERI_OP_EVENT_PATTERNS: readonly RegExp[] = [
-  /intra-?op/i, /intraoperative/i, /operative finding/i, /calcar/i, /cerclage/i, /anastomot/i, /retained/i, /wrong[- ]site/i,
-];
-
-const matchesAny = (claim: string | null | undefined, patterns: readonly RegExp[]): boolean =>
-  typeof claim === 'string' && patterns.some((rx) => rx.test(claim));
-
-export function deriveJudgements(finding: JudgementInput | null | undefined): Judgements {
-  const omissions = Array.isArray(finding?.omissions) ? finding!.omissions! : [];
-  const cleanBaseline = omissions.length === 0
-    && finding?.corroborationTrack === 'lab_corroborated'
-    && finding?.stabilityAssessment === 'corroborated';
-
-  // Preventable injury (§4 rules 1–4, in order).
-  let preventableInjury: JudgementValue;
-  if (omissions.some((o) => o?.danger === 'high')) preventableInjury = 'suspected';
-  else if (omissions.some((o) => o?.danger === 'moderate' && matchesAny(o?.claim, CLINICAL_HARM_STEMS))) preventableInjury = 'suspected';
-  else if (cleanBaseline) preventableInjury = 'not_suggested';
-  else preventableInjury = 'unknown';
-
-  // Negligence (§4) — `suspected` ONLY when all four hold; a missing peri-op event
-  // pattern is `unknown`, never `suspected`.
-  const unplanned = finding?.planned?.verdict === 'unplanned';
-  const sameVerdict = finding?.sameCondition?.verdict;
-  const conditionOk = sameVerdict !== 'different';   // 'same', absent, or 'unknown'
-  const periOpEvent = omissions.some((o) => matchesAny(o?.claim, PERI_OP_EVENT_PATTERNS));
-  let negligence: JudgementValue;
-  if (unplanned && conditionOk && periOpEvent) negligence = 'suspected';
-  else if (cleanBaseline) negligence = 'not_suggested';
-  else negligence = 'unknown';
-
-  return { preventableInjury, negligence };
 }

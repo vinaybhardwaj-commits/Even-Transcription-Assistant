@@ -24,6 +24,10 @@ import { auditedUidsForDayInLine, cloudAuditedUidsForDay, saveOpdAudit } from '.
 import { BEDROCK_MODELS } from '../lib/bedrock-core.ts';
 import { usageForTrace } from '../lib/backfill-runs.ts';
 import { costUsd } from '../lib/llm-cost-core.ts';
+import { telemetryContextFor } from '../lib/retrieval-telemetry-core.ts';
+import { startInvocation } from '../lib/retrieval-invocation-store.ts';
+import { settleOwned, outcomeForOwnedSave } from '../lib/retrieval-settlement.ts';
+import { readRetrievalTelemetry } from '../lib/retrieval-telemetry-store.ts';
 import { PRICING } from '../lib/llm-cost.ts';
 
 const argv = process.argv.slice(2);
@@ -47,8 +51,25 @@ async function main() {
   const rows = await fetchOpdNotesForDay(day, skip, 1);
   if (!rows.length) { log('no un-audited note on this day — pass a different --day'); process.exit(2); }
 
+  // ⚠️ ONE INVOCATION PER PROCESS (D11). A script is a boundary like any route; what it is not is a
+  // request, so there are no headers and the deployment SHA is whatever the local environment says.
+  // Its route is `script`, which §8's overlap analysis reads as manual — never as a canary window.
+  const ctx = telemetryContextFor('script', null);
+  await startInvocation(ctx);
+  let handle = null;
+  let published = false;
+  /** The last map the callback delivered (v10 requirement 4), for the paths that return no audit. */
+  let publishedDefects;
+
   const started = Date.now();
-  const audit = await auditOpdNote(rows[0], { bedrockModel: MODEL });
+  const audit = await auditOpdNote(rows[0], {
+    bedrockModel: MODEL,
+    telemetry: { ctx, route: 'script', persistenceIntent: SAVE ? 'will_persist' : 'never_persists' },
+    // ⚠️ `if (d)` IS LOAD-BEARING. The DECLARATION publication passes no map, and letting it
+    // overwrite a real one with undefined would throw away the verdict this exists to keep.
+    onLifecycleHandleUpdated: (h, d) => { handle = h; published = true; if (d) publishedDefects = d; },
+  });
+  void published;
   const ms = Date.now() - started;
 
   const usage = await usageForTrace(audit.traceId);
@@ -98,9 +119,34 @@ async function main() {
   console.log(json);
 
   if (SAVE) {
-    const status = await saveOpdAudit(audit, { model: MODEL, latencyMs: ms });
+    // As the worker (D9) — and its OWN save failure is `audit_persistence_failed`, because nothing
+    // above this line would otherwise ever hear about it.
+    let linked = false;
+    let status;
+    // ⚠️ A PERSISTENCE OWNER, SO IT CARRIES THE ROLE MAP (pass 0b). This path passed no defects at
+    // all, so every row it settled read `persisted_clean` whatever its manifest actually said.
+    // ⚠️ NO `?? {}` (v10 requirement 5). An empty map is NOT "no map": under requirement 6 a
+    // PROVIDED map carrying no key for a role settles that linkable role partial, so `?? {}` would
+    // have made every uninstrumented save partial and left requirement 7 unreachable. The attached
+    // map first, then whatever the callback delivered, then undefined — which is a real answer.
+    const defectsByRole = readRetrievalTelemetry(audit)?.manifestDefectsByRole ?? publishedDefects;
+    try {
+      status = await saveOpdAudit(audit, { model: MODEL, latencyMs: ms }, {
+        onPersisted: async ({ status: st, auditId }) => { linked = true; await settleOwned(handle, outcomeForOwnedSave(st), auditId, defectsByRole); },
+      });
+    } catch (e) {
+      // ⚠️ NO `closeInvocation` HERE, AND THAT IS DELIBERATE. Who closes an invocation is genuinely
+      // unspecified — D9's owner matrix assigns settlement outcomes per path and names no closure
+      // owner at all — so this build proposes an owner matrix in the report and wires none. A
+      // script that ends without closing leaves `closure_unknown`, which is the honest record.
+      await settleOwned(handle, 'audit_persistence_failed');
+      throw e;
+    }
+    if (!linked) await settleOwned(handle, outcomeForOwnedSave(status), null, defectsByRole);
     log(`\nsaved: ${status} (model column = ${MODEL})`);
   } else {
+    // The dry arm audits and deliberately writes nothing.
+    await settleOwned(handle, 'no_persistence_intended');
     log(`\nDRY RUN — no row written. Re-run with --save to store it.`);
   }
   log(problems.length ? '\nVERDICT: SUSPECT — do not wire the cron until this is explained.' : '\nVERDICT: intact.');
