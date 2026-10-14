@@ -139,14 +139,11 @@ details summary{cursor:pointer;color:var(--acc)}
 /* Doctor voice check. Cards come from the db collection "links" through a whitelist; nothing else in a doc (a tier, a
    score, a cluster id, the true doctor ...) is ever kept or shown, whatever the doc holds. Verdicts are saved to
    verdicts/<rater id> = {rater, schema, v:{<cardId>:{a, who?, note?, ts}}}.
-   link card: {id, kind:"link", batch?, room, date, doctor, evidence:[text,...], clips:[{src,duration_s}x3], contrast:{src,duration_s}}
-   pair card: {id, kind:"pair", batch?, a:{src,duration_s}, b:{src,duration_s}}
-   batch (optional integer, default 0): rolling batches show in batch order, so new cards never slip in among answered ones.
-   optional doc config/doctors = {names:[...]} for the "Who is it?" list (else the proposed doctors on the link cards).
-   optional doc config/settings = {evidence:"after"}: the evidence lines appear only after the rater's first verdict (blind-first);
-   every link answer records a0 (the first verdict) and blind (true when the evidence was still hidden). */
+   link card: {id, kind:"link", room, date, doctor, evidence:[text,...], clips:[{src,duration_s}x3], contrast:{src,duration_s}}
+   pair card: {id, kind:"pair", a:{src,duration_s}, b:{src,duration_s}}
+   optional doc config/doctors = {names:[...]} for the "Who is it?" list (else the proposed doctors on the link cards). */
 let db=null,user=null,meId=null,owner=false,claudeOk=false,loaded=false;
-let cards=[],sig="",cur=0,mine={v:{}},all=[],doctors=[],evMode="before"; // evMode "after": the evidence appears only once the rater has given a first verdict
+let cards=[],sig="",cur=0,mine={v:{}},all=[],doctors=[];
 let saveTimer=null,saving=Promise.resolve(),dirty=false;
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -248,7 +245,7 @@ function cardHtml(c){
   return `<div class="card">
     <div class="wh"><h2>Card ${cur+1} of ${cards.length}</h2><span class="tag">link</span></div>
     <p class="ctx"><b>${esc(c.room)}</b>${c.date?" · "+esc(fmtDate(c.date)):""} · Proposed doctor: <b>${esc(c.doctor)}</b></p>
-    ${!c.evidence.length?"":(evMode==="after"&&!(a&&a.a))?`<div class="ev"><div class="qlab">Evidence</div><p class="meta" id="evhide">Shown after your first answer, so you judge the voice by listening first.</p></div>`:`<div class="ev"><div class="qlab">Evidence</div><ul>${c.evidence.map(t=>`<li>${esc(t)}</li>`).join("")}</ul></div>`}
+    ${c.evidence.length?`<div class="ev"><div class="qlab">Evidence</div><ul>${c.evidence.map(t=>`<li>${esc(t)}</li>`).join("")}</ul></div>`:""}
     <div class="clips">${clips}</div>
     <button class="btn ghost playall" id="playall">Play all in order</button><div class="msg" id="msg" aria-live="polite"></div>
     <fieldset><legend>Is the voice in the proposed-doctor clips ${esc(c.doctor)}?</legend><div class="opts">${radios("a",[["agree","Agree"],["disagree","Disagree"],["unsure","Not sure"]])}</div></fieldset>
@@ -291,9 +288,7 @@ function flush(){
 }
 function setAnswer(v){
   const c=curC();if(!c||!AL[v])return;
-  const a=V(c.id);
-  if(!a.a0&&c.kind==="link"){a.a0=v;a.blind=(evMode==="after")} // the first verdict, and whether the evidence was still hidden
-  a.a=v;a.ts=new Date().toISOString();
+  const a=V(c.id);a.a=v;a.ts=new Date().toISOString();
   if(v!=="disagree")delete a.who; // "who is it" only belongs to a disagreement
   progress();queueSave();
   if(c.kind==="link")render(); // shows or hides "Who is it?"
@@ -334,7 +329,7 @@ async function renderRes(){
   if(!all.length){$("res").innerHTML=`<p class="empty">No answers yet.</p>`;return}
   const T={link:{agree:0,disagree:0,unsure:0,cards:0},pair:{agree:0,disagree:0,unsure:0,cards:0}};
   let compared=0,same=0;
-  const cell=(c,a)=>!a||!AL[a.a]?"—":c.kind==="pair"?(a.a==="agree"?"Same person":"Different people"):AL[a.a]+(a.a==="disagree"?": "+esc(a.who==="unknown"?"unknown":a.who||"?"):"")+(a.a0&&a.a0!==a.a?` <span class="meta">(first: ${esc(AL[a.a0]||a.a0)}${a.blind?", blind":""})</span>`:"");
+  const cell=(c,a)=>!a||!AL[a.a]?"—":c.kind==="pair"?(a.a==="agree"?"Same person":"Different people"):AL[a.a]+(a.a==="disagree"?": "+esc(a.who==="unknown"?"unknown":a.who||"?"):"");
   const rows=cards.map((c,i)=>{
     const ans=all.map(r=>((r.v||{})[c.id])).filter(a=>a&&AL[a.a]);
     if(!ans.length)return"";
@@ -365,17 +360,15 @@ render();
   db.collection("links").onSnapshot(s=>{
     // whitelist: nothing but the fields listed at the top of this script is ever kept
     const next=s.docs.filter(d=>d.exists!==false).map(d=>{const x=d.data()||{},id=String(x.id??d.id??"");
-      const batch=Number.isFinite(+x.batch)?+x.batch:0; // rolling batches: earlier batches come first
-      if(x.kind==="pair"){const a=clip(x.a),b=clip(x.b);return a&&b?{id,kind:"pair",batch,a,b}:null}
+      if(x.kind==="pair"){const a=clip(x.a),b=clip(x.b);return a&&b?{id,kind:"pair",a,b}:null}
       const clips=(Array.isArray(x.clips)?x.clips:[]).map(clip).filter(Boolean);
-      return clips.length?{id,kind:"link",batch,room:String(x.room??""),date:String(x.date??""),doctor:String(x.doctor??""),
+      return clips.length?{id,kind:"link",room:String(x.room??""),date:String(x.date??""),doctor:String(x.doctor??""),
         evidence:(Array.isArray(x.evidence)?x.evidence:[]).map(String).filter(Boolean),clips,contrast:clip(x.contrast)}:null})
-      .filter(x=>x&&x.id).sort((a,b)=>a.batch-b.batch||fnv(a.id)-fnv(b.id)||a.id.localeCompare(b.id)); // batch by batch; scrambled within a batch, the same for every rater
+      .filter(x=>x&&x.id).sort((a,b)=>fnv(a.id)-fnv(b.id)||a.id.localeCompare(b.id)); // one fixed scrambled order for every rater
     const ns=JSON.stringify(next);if(ns===sig)return;
     const keep=cards[cur]&&cards[cur].id;sig=ns;cards=next;
     const i=keep?cards.findIndex(x=>x.id===keep):-1;cur=i>=0?i:0;render();
   },()=>{});
-  try{const d=await db.doc("config/settings").get();if(d.exists&&(d.data()||{}).evidence==="after"){evMode="after";render()}}catch(e){}
   try{const d=await db.doc("config/doctors").get();if(d.exists){const n=(d.data()||{}).names;if(Array.isArray(n)){doctors=n.map(String);render()}}}catch(e){}
   if(meId){try{const d=await db.doc("verdicts/"+meId).get();if(d.exists){const b=d.data()||{},v=b.v||{};
     Object.keys(v).forEach(k=>{mine.v[k]=Object.assign({},v[k],mine.v[k]||{})});render()}}catch(e){}}

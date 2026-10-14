@@ -13,6 +13,5 @@
  "pqm_score": 0.9,
  "cluster_id": "clu-4",
  "true_doctor": "Dr Mock A",
- "confidence": 0.86,
- "batch": 1
+ "confidence": 0.86
 }

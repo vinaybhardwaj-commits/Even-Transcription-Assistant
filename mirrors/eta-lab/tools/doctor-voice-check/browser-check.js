@@ -23,7 +23,6 @@ fs.mkdirSync(path.join(out,"shots"),{recursive:true});
   await p.goto(`http://127.0.0.1:${port}/harness.html`);await p.waitForSelector(".clip");
   const phone=opts.viewport.width<=560;
   const kinds=await p.evaluate(()=>cards.map(c=>c.kind).join(","));
-  const lastId=await p.evaluate(()=>cards[cards.length-1].id);
   const m=await p.evaluate(()=>{const q=s=>[...document.querySelectorAll(s)],H=e=>Math.round(e.getBoundingClientRect().height);
    return{minOpt:Math.min(...q(".opt span").map(H)),minPb:Math.min(...q(".pb").map(H)),nextH:H(document.getElementById("next")),
     overflow:document.documentElement.scrollWidth>innerWidth,hdr:getComputedStyle(document.getElementById("hdr")).position,
@@ -61,7 +60,7 @@ fs.mkdirSync(path.join(out,"shots"),{recursive:true});
   await p.click("#tab-res");await p.waitForTimeout(250);
   const res=await p.evaluate(()=>document.getElementById("res").textContent.replace(/\s+/g," ").slice(0,220));
   await p.screenshot({path:path.join(out,"shots",name+"-results.png")});
-  const ok=kinds.split(",").length===5&&lastId==="t8Fv6y"&&!m.overflow&&!m.leak&&audio.a1.src==="blob:"&&audio.a1.t>0.5&&audio.a1.key==="0"&&audio.a2.key==="1"&&audio.stopped
+  const ok=kinds.split(",").length===5&&!m.overflow&&!m.leak&&audio.a1.src==="blob:"&&audio.a1.t>0.5&&audio.a1.key==="0"&&audio.a2.key==="1"&&audio.stopped
     &&seenWho&&saved.n===5&&saved.who===1&&/5 \/ 5 answered/.test(saved.prog)&&/All cards are answered/.test(done)&&/Link cards/.test(res)&&errs.length===0
     &&m.minOpt>=48&&m.minPb>=44&&(!phone||(m.nextH>=44&&m.hdr==="static"));
   if(!ok)bad++;

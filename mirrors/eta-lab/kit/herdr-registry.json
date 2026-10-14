@@ -138,8 +138,8 @@
       "label": "split-speaker · speaker split study · box",
       "purpose": "speaker split study",
       "machine": "box",
-      "note": "Native since 24 Sep 13:37 IST (Fable 13:30 native-move order); resumed session 2f5b94c5 on --model sonnet --permission-mode auto. Its filler_watch.py (ruling 98 revert-trigger watch) runs detached (pid 9978, no claude ancestor) until 20:00 IST, so it survives restarts. Naming: pane w8:p1 had no herdr name before 24 Sep; now split-speaker. | 24 Sep 19:17 IST (Fable ruling 152): restarted (done, no background command; its filler watch had already ended by design at 19:05, EXIT 0) so its 2 MCP ssh sessions use the lab sshd, port 2224; old pid 21581, same session 2f5b94c5.",
-      "binary": "native 2.1.281 (~/.local/share/claude/versions/2.1.281), pid 28134, restarted 24 Sep 19:17 IST onto the lab sshd (ruling 152)"
+      "note": "Native since 24 Sep 13:37 IST (Fable 13:30 native-move order); resumed session 2f5b94c5 on --model sonnet --permission-mode auto. Its filler_watch.py (ruling 98 revert-trigger watch) runs detached (pid 9978, no claude ancestor) until 20:00 IST, so it survives restarts. Naming: pane w8:p1 had no herdr name before 24 Sep; now split-speaker.",
+      "binary": "native 2.1.281 (~/.local/share/claude/versions/2.1.281), pid 21581, restarted 24 Sep 13:37 IST"
     },
     "lx": {
       "pane_id": "w9:p1",
@@ -266,8 +266,8 @@
       "label": "linker · encounter→Rx→OT→discharge chain · box",
       "purpose": "Surgical chain linker (orders/SURGICAL-CHAIN-LINKER.md): consult -> Rx -> OT booking -> OT note -> discharge. Refuter: eta-refuter-2.",
       "machine": "eta-lab-t4",
-      "binary": "native 2.1.281 (~/.local/share/claude/versions/2.1.281), pid 62336, restarted 24 Sep 18:36 IST onto the lab sshd (ruling 152)",
-      "note": "Created 24 Sep 14:4x IST on Fable's order. agent start timed out at 150 s although the session ran; the agent was nameless, fixed with herdr agent rename wP:p1 linker (same race as tunnel-ops). Reads Metabase via the box key in ~/.claude/secrets (never printed). No patient identifiers in git; examples only under box ~/eta-data/surgical-chain/. | 24 Sep 18:36 IST (Fable ruling 152): restarted (done, no background command, no draft) so its 2 MCP ssh sessions use the lab sshd, port 2224; old pid 15703, same session c8227c47.",
+      "binary": "native 2.1.281, pid 15703",
+      "note": "Created 24 Sep 14:4x IST on Fable's order. agent start timed out at 150 s although the session ran; the agent was nameless, fixed with herdr agent rename wP:p1 linker (same race as tunnel-ops). Reads Metabase via the box key in ~/.claude/secrets (never printed). No patient identifiers in git; examples only under box ~/eta-data/surgical-chain/.",
       "task": "P0 read-only Metabase schema scout, due 17:00 IST"
     },
     "mb-rx": {

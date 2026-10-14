@@ -81,30 +81,6 @@ class T(unittest.TestCase):
         self.srv.shutdown()
         r = self.run_check(); self.assertEqual(r.returncode, 3)  # a crash whose alert is lost is also 3
 
-    def test_transient_network_error_is_retried_but_dead_inventory_still_crashes(self):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("cc", CHECK); cc = importlib.util.module_from_spec(spec); spec.loader.exec_module(cc)
-        calls = {"n": 0}; real = cc.urllib.request.urlopen
-        class R:
-            def __enter__(s): return s
-            def __exit__(s, *a): pass
-            def read(s): return b'{"ok":1}'
-        def flaky(req, timeout=0):
-            calls["n"] += 1
-            if calls["n"] < 3: raise cc.urllib.error.URLError("temporary failure in name resolution")
-            return R()
-        real_sleep = cc.time.sleep
-        self.addCleanup(setattr, cc.urllib.request, "urlopen", real); self.addCleanup(setattr, cc.time, "sleep", real_sleep)
-        cc.urllib.request.urlopen = flaky; cc.time.sleep = lambda s: None
-        self.assertEqual(cc.fetch_json("http://x", "t"), {"ok": 1}); self.assertEqual(calls["n"], 3)
-        calls["n"] = -99
-        with self.assertRaises(cc.urllib.error.URLError): cc.fetch_json("http://x", "t", tries=2)
-        def http401(req, timeout=0):
-            calls["n"] += 1; raise cc.urllib.error.HTTPError("u", 401, "no", {}, None)
-        calls["n"] = 0; cc.urllib.request.urlopen = http401
-        with self.assertRaises(cc.urllib.error.HTTPError): cc.fetch_json("http://x", "t")
-        self.assertEqual(calls["n"], 1)  # a real HTTP error is not retried
-
     def test_unreachable_mini_is_a_gap(self):
         self.ssh.write_text("#!/bin/sh\necho 'ssh: connect timed out' >&2\nexit 255\n"); self.ssh.chmod(0o755)
         env = None

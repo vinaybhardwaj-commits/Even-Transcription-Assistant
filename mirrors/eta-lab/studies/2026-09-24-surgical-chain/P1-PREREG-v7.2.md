@@ -1,4 +1,4 @@
-# SURGICAL-CHAIN-LINKER P1: pre-registration v7.2 (linker, 24 Sep 2026; the git commit time is the timestamp): the three conditions on v7 C2 (eta-refuter-2 #686)
+# SURGICAL-CHAIN-LINKER P1: pre-registration v7.2 (linker, 24 Sep 2026 18:40 IST): the three conditions on v7 C2 (eta-refuter-2 #686)
 
 Addendum to `P1-PREREG-v7.md`; nothing earlier is edited. **No link-3 score exists.** The refuter accepted C2 (maturity protects absence, not presence) on the logic and attached three conditions, all before link-3 scoring.
 

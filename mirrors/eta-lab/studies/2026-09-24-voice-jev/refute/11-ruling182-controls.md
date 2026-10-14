@@ -27,9 +27,3 @@
 - The cross-check uses three records: production turns, PIN attestation, and PQM (db 13). This follows the addendum.
 - Caveat: PQM has no room dimension and shows several doctors consulting at once (e.g. 4 in one Cardiology window). "Production's doctor is among PQM's consulting doctors" is a NECESSARY check (the doctor was consulting at that time), not a sufficient one. It will rarely exclude anything, so the disagreement count should not be read as a confirmation of production's attribution.
 - rescore_182 still uses cluster-level embeddings (clusters_core). See conclusion 2 above: the per-turn metric should be used, or at least reported alongside.
-
-## embed_turns_rooms_box.py (ruling 186 per-turn vectors on the box T4)
-- It runs on the PRODUCTION ECAPA install (speechbrain 1.0.0, torch 2.2.2, CUDA). The ruling 182 controls ran on voice-lab-1's CPU install (speechbrain 1.0.3). Ruling 182 asked for "the exact pipeline", so equivalence must be shown.
-  - When turn_vecs_rooms.json lands, I will re-embed 20 random turns in my CPU env and require cosine(box vector, my vector) >= 0.99.
-- savedir = ~/eta-diarize/.cache/ecapa is production's model cache. speechbrain may write or symlink into savedir if files are missing. The risk is low (read-only when complete), but it touches a production directory. A copy under ~/eta-data/vj/ would avoid it.
-- gpu.lock is taken per window: OK.

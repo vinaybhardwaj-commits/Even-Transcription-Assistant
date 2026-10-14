@@ -13,39 +13,14 @@ LINK_QUESTION = {"same_visit": {"type": "noul", "instructions":
     "Answer no if the main complaint or the medications differ. Ignore any operation or procedure that is named; judge only the complaint and the medications."}}
 
 
-# v7.6: the question for real link-3 pairs (P1-PREREG-v7.6.md). Real transcripts are room windows (consult +/- 10 min) that may hold several patients' visits, and
-# surgical-clinic prescriptions often list no medicines. The wording handles both; the procedure name stays out.
-LINK_QUESTION_V2 = {"same_visit": {"type": "noul", "instructions":
-    "The state has two parts: a consultation transcript, and a prescription (its presenting complaint, its diagnosis, and its medicines if any). The transcript may cover more than one patient's visit. "
-    "Is there a visit in the transcript that this prescription was written for? "
-    "Answer yes only if the main complaint or diagnosis of one visit in the transcript matches the prescription's complaint or diagnosis, AND, when the prescription lists medicines, the medicines the doctor prescribes or discusses in that visit are consistent with them. "
-    "If the prescription lists no medicines, judge only the complaint and the diagnosis. Answer no if no visit in the transcript matches. "
-    "Ignore any operation or procedure that is named; judge only the complaint, the diagnosis and the medicines."}}
-
-
-def rx_link_text(complaints, meds):
-    """Prescription text for the link: symptoms + diagnosis names + medicines (or 'none listed'). The plan of management and the diagnoses' advice and
-    treatment-plan text are EXCLUDED: that is where an advised operation is named (v1 section 5, proc_used_in_link = false)."""
-    sym, dx = [], []
-    for blk in (complaints or []):
-        if isinstance(blk, dict):
-            if isinstance(blk.get("symptoms"), str) and blk["symptoms"].strip():
-                sym.append(blk["symptoms"].strip())
-            for d in (blk.get("diagnoses") or []):
-                if isinstance(d, dict) and isinstance(d.get("diagnosis_or_impression"), str) and d["diagnosis_or_impression"].strip():
-                    dx.append(d["diagnosis_or_impression"].strip())
-    med = "; ".join(" ".join(str(m.get(k)) for k in ("generic_name", "brand_name", "name", "strength", "dosage", "frequency", "duration") if m.get(k)) for m in (meds or []) if isinstance(m, dict))
-    return f"Complaints: {'; '.join(sym) or 'not stated'}. Diagnosis: {'; '.join(dx) or 'not stated'}. Medications: {med or 'none listed'}."
-
-
 def build_state(transcript, rx_text):
     return f"CONSULTATION TRANSCRIPT:\n{transcript.strip()}\n\nPRESCRIPTION - COMPLAINTS AND MEDICATIONS:\n{rx_text.strip()}"
 
 
-def score(transcript, rx_text, ask=None, question=None):
+def score(transcript, rx_text, ask=None):
     import u9
     ask = ask or u9.ask
-    a = ask(build_state(transcript, rx_text), question or LINK_QUESTION)["answers"]["same_visit"]
+    a = ask(build_state(transcript, rx_text), LINK_QUESTION)["answers"]["same_visit"]
     return float(a["noul"])
 
 
@@ -140,12 +115,12 @@ H3 = ["dm", "htn2", "thyroid", "uri"]
 # pre-registered (v7.3a F2): H1 and H2: own >= 0.50 and own - decoy >= 0.15 for at least 3 of 4 in EACH group. H3: DESCRIPTIVE ONLY (expected to tie): report own, decoy, margin and the tie rate (share of pairs with own - decoy < 0.15)
 
 
-def hard_check(ask=None, question=None):
+def hard_check(ask=None):
     res = {}
     for name, grp in (("H1_same_complaint_different_medicines", H1), ("H2_different_complaint_same_medicines", H2), ("H3_routine_near_identical", H3)):
         rows = []
         for k in grp:
-            own = score(HT[k], HR[k], ask, question); dec = score(HT[k], HR[k + "_d"], ask, question)
+            own = score(HT[k], HR[k], ask); dec = score(HT[k], HR[k + "_d"], ask)
             rows.append(dict(pair=k, own=own, decoy=dec, margin=round(own - dec, 3)))
         res[name] = rows
     ok = lambda rows: sum(r["own"] >= 0.50 and r["margin"] >= 0.15 for r in rows)
@@ -153,55 +128,6 @@ def hard_check(ask=None, question=None):
     res["criteria"] = dict(H1_separates=f"{ok(res['H1_same_complaint_different_medicines'])}/4", H2_separates=f"{ok(res['H2_different_complaint_same_medicines'])}/4",
                            H3_tie_rate=f"{sum(r['margin'] < 0.15 for r in h3)}/4 pairs with margin < 0.15 (descriptive)",
                            PASS_H1_H2=(ok(res["H1_same_complaint_different_medicines"]) >= 3 and ok(res["H2_different_complaint_same_medicines"]) >= 3))
-    return res
-
-
-# ---- v7.6 synthetic set M: multi-visit windows and prescriptions with no medicines. Invented text only. ----
-V = {
- "uri": "Doctor: What is wrong? Patient: Cold and cough for three days, no fever. Doctor: Steam inhalation and cetirizine at night.",
- "knee": "Doctor: Tell me about the knee. Patient: Right knee pain for two months, worse on stairs. Doctor: Etoricoxib for a week and a diclofenac gel.",
- "htn": "Doctor: Blood pressure review. Patient: I feel fine. Doctor: One forty over ninety. Continue amlodipine five milligrams every morning.",
- "uti": "Doctor: What is the problem? Patient: Burning while passing urine since yesterday, passing urine often. Doctor: Urine infection, I will start nitrofurantoin.",
- "migraine": "Doctor: Describe the headache. Patient: Throbbing on one side with nausea and light bothers me. Doctor: Migraine. Sumatriptan at the start of an attack.",
- "gastritis": "Doctor: What is troubling you? Patient: Burning in the upper stomach after spicy food. Doctor: Pantoprazole before breakfast for two weeks.",
- "back": "Doctor: Where is the pain? Patient: Lower back after lifting, no leg pain. Doctor: Muscle strain. A muscle relaxant and hot fomentation.",
- "gall": "Doctor: What brings you? Patient: Sharp pain in the upper right belly after fatty meals, with nausea, for two months. Doctor: The scan shows stones in the gallbladder. This needs to be dealt with, we will discuss the options.",
- "hernia": "Doctor: Tell me. Patient: A swelling in the right groin that comes when I cough or lift, it goes back when I lie down. Doctor: Let me examine. This is a hernia in the groin.",
- "fever": "Doctor: What is the problem? Patient: Fever for two days with body ache. Doctor: Viral fever. Paracetamol and fluids.",
-}
-def _three(a, b, c): return " ".join(["[Visit 1] " + V[a], "[Visit 2] " + V[b], "[Visit 3] " + V[c]])
-RX2 = {
- "uri": "Complaints: cold and cough 3 days, no fever. Diagnosis: viral upper respiratory infection. Medications: cetirizine at night; steam inhalation.",
- "knee": "Complaints: right knee pain 2 months, worse on stairs. Diagnosis: knee osteoarthritis. Medications: etoricoxib 1 week; diclofenac gel.",
- "htn": "Complaints: hypertension review, no symptoms. Diagnosis: essential hypertension. Medications: amlodipine 5 mg morning.",
- "uti": "Complaints: burning micturition since 1 day, increased frequency. Diagnosis: urinary tract infection. Medications: nitrofurantoin 5 days.",
- "migraine": "Complaints: one-sided throbbing headache with nausea and photophobia. Diagnosis: migraine. Medications: sumatriptan at onset.",
- "gastritis": "Complaints: upper abdominal burning after spicy food. Diagnosis: gastritis. Medications: pantoprazole 2 weeks.",
- "back": "Complaints: lower back pain after lifting, no leg radiation. Diagnosis: lumbar muscle strain. Medications: muscle relaxant; hot fomentation.",
- "gall": "Complaints: right upper abdominal pain after fatty meals with nausea, 2 months. Diagnosis: cholelithiasis. Medications: none listed.",
- "hernia": "Complaints: right groin swelling on coughing and lifting, reduces on lying down. Diagnosis: inguinal hernia. Medications: none listed.",
- "fever": "Complaints: fever 2 days with body ache. Diagnosis: viral fever. Medications: paracetamol; fluids.",
-}
-# M1: three-visit window that CONTAINS the prescription's visit (position varied); M2: three-visit window that does NOT contain it; M3: no-medicine prescriptions, single-visit transcripts (2 match, 2 do not)
-M1 = [(_three("uri", "knee", "htn"), "knee"), (_three("uti", "htn", "uri"), "uti"), (_three("knee", "back", "gastritis"), "gastritis"), (_three("migraine", "uri", "knee"), "migraine")]
-M2 = [(_three("uri", "knee", "htn"), "uti"), (_three("uti", "htn", "uri"), "migraine"), (_three("knee", "back", "gastritis"), "htn"), (_three("migraine", "uri", "knee"), "gastritis")]
-M3 = [(V["gall"], "gall", True), (V["hernia"], "hernia", True), (V["fever"], "gall", False), (V["uti"], "hernia", False)]
-# pre-registered (v7.6 J2): M1 p >= 0.70 for at least 3 of 4; M2 p <= 0.30 for at least 3 of 4; M3 correct (match >= 0.70, non-match <= 0.30) for at least 3 of 4;
-# and the v7.3a hard set re-run UNDER THE NEW QUESTION: H1 and H2 own >= 0.50 and margin >= 0.15 for at least 3 of 4 in each group (H3 descriptive)
-
-
-def v2_check(ask=None):
-    res = {"M1": [], "M2": [], "M3": []}
-    for t, r in M1: res["M1"].append(dict(rx=r, p=score(t, RX2[r], ask, LINK_QUESTION_V2)))
-    for t, r in M2: res["M2"].append(dict(rx=r, p=score(t, RX2[r], ask, LINK_QUESTION_V2)))
-    for t, r, is_match in M3: res["M3"].append(dict(rx=r, expected="match" if is_match else "non-match", p=score(t, RX2[r], ask, LINK_QUESTION_V2)))
-    hard = hard_check(ask, LINK_QUESTION_V2)
-    m1 = sum(x["p"] >= 0.70 for x in res["M1"]); m2 = sum(x["p"] <= 0.30 for x in res["M2"])
-    m3 = sum((x["p"] >= 0.70) if x["expected"] == "match" else (x["p"] <= 0.30) for x in res["M3"])
-    res["hard_under_v2"] = hard
-    res["criteria"] = dict(M1_multivisit_contains=f"{m1}/4", M2_multivisit_absent=f"{m2}/4", M3_no_medicines=f"{m3}/4",
-                           H1_H2_under_v2=hard["criteria"]["PASS_H1_H2"], H3_tie_rate_under_v2=hard["criteria"]["H3_tie_rate"],
-                           PASS=(m1 >= 3 and m2 >= 3 and m3 >= 3 and hard["criteria"]["PASS_H1_H2"]))
     return res
 
 
@@ -217,20 +143,11 @@ def selftest():
     h = hard_check(ask=fake)
     assert set(h) == {"H1_same_complaint_different_medicines", "H2_different_complaint_same_medicines", "H3_routine_near_identical", "criteria"}
     assert all(len(v) == 4 for k, v in h.items() if k != "criteria")
-    v = v2_check(ask=fake)
-    assert set(v["criteria"]) >= {"M1_multivisit_contains", "M2_multivisit_absent", "M3_no_medicines", "PASS"}
-    t = rx_link_text([{"symptoms": "s", "diagnoses": [{"diagnosis_or_impression": "d", "general_advice": "SECRET ADVICE", "treatment_plan": "SECRET PLAN"}]}], [])
-    assert "SECRET" not in t and "none listed" in t, "advice and treatment-plan text must never reach the link text"
     return "selftest ok (harness only, no network)"
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "v2check":
-        out = v2_check()
-        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "P1-LINK3-V2CHECK.json")
-        json.dump(out, open(p, "w"), indent=1)
-        print(json.dumps(out["criteria"], indent=1))
-    elif len(sys.argv) > 1 and sys.argv[1] == "hard":
+    if len(sys.argv) > 1 and sys.argv[1] == "hard":
         out = hard_check()
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "P1-LINK3-HARDCHECK.json")
         json.dump(out, open(p, "w"), indent=1)

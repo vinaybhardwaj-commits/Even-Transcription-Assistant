@@ -1,4 +1,4 @@
-# SURGICAL-CHAIN-LINKER P1: pre-registration v6.1 (linker, 24 Sep 2026; the git commit time is the timestamp): rulings 171-174 recorded; labels and link-3 may start
+# SURGICAL-CHAIN-LINKER P1: pre-registration v6.1 (linker, 24 Sep 2026 18:10 IST): rulings 171-174 recorded; labels and link-3 may start
 
 Addendum to `P1-PREREG-v6.md`; nothing earlier is edited. Source: Fable rulings 171-176 (`orders/RULINGS-FABLE-1835.md`, 18:35 review). **No label and no link-3 score existed when this was committed.** The label stage (`p1/build_chains.py` stage L, committed with this file) runs only afterwards.
 

@@ -28,41 +28,14 @@ def corr(x, y):
     return sum((a - mx) * (b - my) for a, b in zip(x, y)) / (sx * sy) if sx and sy else 0.0
 
 
-def window_chunks(d):
-    """Same rule as the viewer: provenance.source_chunks, else cut.chunk_keys timed from the producers' inventories."""
-    p = d.get("provenance") or {}
-    if p.get("source_chunks"):
-        return p["source_chunks"]
-    keys = (d.get("cut") or {}).get("chunk_keys") or p.get("source_audio_keys") or []
-    timing = _timing()
-    return [timing[k] for k in keys if k in timing]
-
-
-_T = None
-def _timing():
-    global _T
-    if _T is None:
-        _T = {}
-        try:
-            for inv in json.load(open(HOME / "eta-data/hist/inventory.json")):
-                for c in inv["chunks"]:
-                    _T.setdefault(c["r2_key"], c)
-            for chunks in json.load(open(HOME / "eta-data/hist-mining/link3_chunks.json")).values():
-                for c in chunks:
-                    _T.setdefault(c["r2_key"], c)
-        except (OSError, ValueError):
-            pass
-    return _T
-
-
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--n", type=int, default=8); ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--audio-dir", default=str(HOME / "eta-data/hist-mining/audio")); a = ap.parse_args()
     random.seed(a.seed)
-    files = glob.glob(str(HOME / "eta-data/lab-vault/staged/runs/*/*/*/*.json")) + glob.glob(str(HOME / "eta-data/hist/runs/*/*/*/*.json")) + glob.glob(str(HOME / "eta-data/hist-mining/runs/*/*/*/*.json")); random.shuffle(files)
+    files = glob.glob(str(HOME / "eta-data/lab-vault/staged/runs/*/*/*/*.json")); random.shuffle(files)
     done = 0
     for f in files:
-        d = json.load(open(f)); chunks = window_chunks(d)
+        d = json.load(open(f)); chunks = d["provenance"].get("source_chunks") or []
         segs = d.get("segments") or []
         local = {c["r2_key"]: Path(a.audio_dir) / c["r2_key"].replace("/", "__") for c in chunks}
         if len(segs) < 8 or not chunks or not all(v.exists() for v in local.values()):

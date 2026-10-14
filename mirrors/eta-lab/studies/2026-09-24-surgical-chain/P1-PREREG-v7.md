@@ -1,4 +1,4 @@
-# SURGICAL-CHAIN-LINKER P1: pre-registration v7 (linker, 24 Sep 2026; the git commit time is the timestamp): A+ final; maturity applies to absence, not presence
+# SURGICAL-CHAIN-LINKER P1: pre-registration v7 (linker, 24 Sep 2026 18:25 IST): A+ final; maturity applies to absence, not presence
 
 Addendum to v1 to v6.1; nothing earlier is edited. **No link-3 score exists** and no label has been accepted for any downstream claim. The code for C2 is `p1/build_chains.py` stage L with `L_RELAX=1`, committed with this file; it runs afterwards.
 

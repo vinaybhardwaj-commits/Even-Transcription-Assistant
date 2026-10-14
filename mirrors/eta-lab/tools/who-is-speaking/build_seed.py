@@ -95,7 +95,7 @@ for k in keep:
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{c0:.3f}", "-t", f"{c1 - c0:.3f}", "-i", wav,
                     "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k", mp3], check=True)
     doc = {"id": tid, "audio": f"audio/{tid}.mp3", "duration_s": round(probe(mp3), 3),
-           "turn_start_s": round(k[1] - c0, 3), "turn_end_s": round(k[2] - c0, 3), "text": (by_id[k].get("text") or "").strip()}
+           "turn_start_s": round(k[1] - c0, 3), "turn_end_s": round(k[2] - c0, 3), "text": by_id[k].get("text", "")}
     json.dump(doc, open(os.path.join(seed, "turns", tid + ".json"), "w"), ensure_ascii=False, indent=1)
 json.dump(key, open(keyf, "w"), indent=1)
 os.chmod(keyf, 0o600)
@@ -110,8 +110,5 @@ for sub in ("turns", "audio"):
 n_a = sum(1 for r in rows if r.startswith("audio/"))
 open(os.path.join(seed, "FILES.txt"), "w").write(
     "# path\tbytes\tsha256\n" + "\n".join(rows) + f"\n# {len([r for r in rows if r.startswith('turns/')])} turn docs, {n_a} mp3 files, {tot/1e6:.1f} MB total\n")
-n_empty = sum(1 for k in keep if not (by_id[k].get("text") or "").strip())
-if n_empty:
-    print(f"NOTE {n_empty} of {len(keep)} turns have no transcript line (raters see the audio only for those)")
 print(f"wrote {len(keep)} turn docs and {n_a} clips ({tot/1e6:.1f} MB) to {seed}; key (keep private): {keyf}")
 print("next: python3 check_seed.py", seed, "--expect", len(keep))

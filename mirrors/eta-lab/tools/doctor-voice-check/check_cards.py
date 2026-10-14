@@ -4,7 +4,7 @@
   python3 check_cards.py <dir> [--expect N]
 
 <dir> holds links/<id>.json (one doc per card, doc id = the id) and audio/... (the files the cards name).
-A link card holds ONLY (batch is optional): id, kind:"link", room, date, doctor, evidence[], clips[3 x {src,duration_s}], contrast{src,duration_s}.
+A link card holds ONLY: id, kind:"link", room, date, doctor, evidence[], clips[3 x {src,duration_s}], contrast{src,duration_s}.
 A pair card holds ONLY: id, kind:"pair", a{src,duration_s}, b{src,duration_s}.
 Anything else (confidence tier, scores, cluster id, the true doctor, ...) would be readable in the db by anyone with
 devtools and would bias the rating, so it is an ERROR here. Keep the tier and the key off the page.
@@ -13,7 +13,6 @@ import glob, json, os, re, shutil, subprocess, sys
 
 LINK = {"id", "kind", "room", "date", "doctor", "evidence", "clips", "contrast"}
 PAIR = {"id", "kind", "a", "b"}
-OPTIONAL = {"batch"}  # rolling batches: integer, cards show in batch order
 d = sys.argv[1]
 expect = int(sys.argv[sys.argv.index("--expect") + 1]) if "--expect" in sys.argv else None
 errs, warns, ids = [], [], set()
@@ -49,15 +48,13 @@ for f in files:
     if allowed is None:
         errs.append(f"{where}: kind must be 'link' or 'pair'")
         continue
-    extra = sorted(set(c) - allowed - OPTIONAL)
+    extra = sorted(set(c) - allowed)
     if extra:
         errs.append(f"{where}: fields that must not be in the doc: {extra}")
     missing = sorted(allowed - set(c))
     if missing:
         errs.append(f"{where}: missing fields {missing}")
         continue
-    if "batch" in c and not (isinstance(c["batch"], int) and not isinstance(c["batch"], bool)):
-        errs.append(f"{where}: batch must be an integer")
     cid = c["id"]
     if not isinstance(cid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{4,}", cid) or os.path.splitext(where)[0] != cid:
         errs.append(f"{where}: id must be opaque letters/digits/_/- and equal the file name")

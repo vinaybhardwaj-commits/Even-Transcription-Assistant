@@ -1,4 +1,4 @@
-# SURGICAL-CHAIN-LINKER P1: pre-registration v7.3 (linker, 24 Sep 2026; the git commit time is the timestamp): the link-3 judge, its wording, and the synthetic scale check
+# SURGICAL-CHAIN-LINKER P1: pre-registration v7.3 (linker, 24 Sep 2026 19:00 IST): the link-3 judge, its wording, and the synthetic scale check
 
 Addendum to v7.2; nothing earlier is edited. **No real pair has been scored and no patient text has left the box.** Code: `p1/link3_judge.py`, committed with this file; the synthetic run happens only afterwards. eta-refuter-2 (#698) named the route and its conditions; Fable has not yet confirmed the one new input type (item E4).
 
