@@ -1,58 +1,12 @@
 {
- "_note": "Measured on V's Zen account with one trivial non-patient prompt per model, 25 Sep 2026 ~14:10-14:50 IST (fleet), plus Fable ruling 407d (tested ~15:1x Fable clock: qwen3.8-flash, glm-5.3-flash, minimax-m3, gpt-5.4-nano, deepseek-v4.1-flash, gemini-3.5-flash-lite work; deepseek-v4-flash disabled; kimi-k2.7-code route not found). 'chat' = POST /zen/v1/chat/completions; 'opencode' = opencode run. Re-run and edit when V changes the console's model toggles.",
- "deepseek-v4-flash": {
-  "status": "DISABLED",
-  "detail": "403 'Upstream request failed: Model access is disabled' (fleet 14:10 and again ~14:50 IST; Fable r407d, r407c)",
-  "via": "chat"
- },
- "kimi-k2.6": {
-  "status": "DISABLED",
-  "detail": "403 'Upstream request failed: Model access is disabled'",
-  "via": "chat"
- },
- "glm-5.3-flash": {
-  "status": "ok",
-  "detail": "HTTP 200",
-  "via": "chat"
- },
- "deepseek-v4.1-flash": {
-  "status": "ok",
-  "detail": "HTTP 200; also used by fleet-watch as fallback",
-  "via": "chat"
- },
- "deepseek-v4-pro": {
-  "status": "ok",
-  "detail": "HTTP 200",
-  "via": "chat"
- },
- "gemini-3.5-flash-lite": {
-  "status": "ok",
-  "detail": "answers via opencode; fleet-watch primary; spends many reasoning tokens unless variant=low",
-  "via": "opencode"
- },
- "gpt-5.4-nano": {
-  "status": "ok",
-  "detail": "answers via opencode; called tools although told not to",
-  "via": "opencode"
- },
- "qwen3.8-flash": {
-  "status": "ok",
-  "detail": "answers via opencode",
-  "via": "opencode"
- },
- "gpt-5.3-codex": {
-  "status": "ok",
-  "detail": "in use by linker-oc",
-  "via": "opencode"
- },
- "minimax-m3": {
-  "status": "ok",
-  "detail": "HTTP 200 (fleet); also reported working by Fable r407d",
-  "via": "chat"
- },
- "kimi-k2.7-code": {
-  "status": "ROUTE NOT FOUND",
-  "detail": "HTTP 404 'Cannot find any route matching [POST] /zen/v1/chat/completions' (fleet); Fable r407d reports the same",
-  "via": "chat"
- }
+  "_note": "Measured on V's Zen account with one trivial non-patient prompt per model, 25 Sep 2026 ~14:10-14:25 IST. 'chat' = POST /zen/v1/chat/completions; 'opencode' = opencode run. Re-run and edit when V changes the console's model toggles.",
+  "deepseek-v4-flash":     {"status": "DISABLED", "detail": "403 'Upstream request failed: Model access is disabled'", "via": "chat"},
+  "kimi-k2.6":             {"status": "DISABLED", "detail": "403 'Upstream request failed: Model access is disabled'", "via": "chat"},
+  "glm-5.3-flash":         {"status": "ok", "detail": "HTTP 200", "via": "chat"},
+  "deepseek-v4.1-flash":   {"status": "ok", "detail": "HTTP 200; also used by fleet-watch as fallback", "via": "chat"},
+  "deepseek-v4-pro":       {"status": "ok", "detail": "HTTP 200", "via": "chat"},
+  "gemini-3.5-flash-lite": {"status": "ok", "detail": "answers via opencode; fleet-watch primary; spends many reasoning tokens unless variant=low", "via": "opencode"},
+  "gpt-5.4-nano":          {"status": "ok", "detail": "answers via opencode; called tools although told not to", "via": "opencode"},
+  "qwen3.8-flash":         {"status": "ok", "detail": "answers via opencode", "via": "opencode"},
+  "gpt-5.3-codex":         {"status": "ok", "detail": "in use by linker-oc", "via": "opencode"}
 }

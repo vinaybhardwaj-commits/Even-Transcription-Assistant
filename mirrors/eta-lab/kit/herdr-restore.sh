@@ -114,3 +114,40 @@ for row in $T; do
   herdr agent start "$N" --kind claude --pane "$P" --timeout 120000 -- --resume "$S" -n "$L" --model "$MODEL" >/dev/null 2>&1
   echo "restored $N  model=$MODEL (rc=$?)"
 done
+
+# ---------------------------------------------------------------------------------------------------------------
+# OpenCode panes ("<name>-oc"), W25 (Fable r407 + the 25 Sep bus-identity finding, proven on linker-oc #2553).
+# An OpenCode pane has NO bus identity until BOTH of these hold:
+#   (1) `herdr integration install opencode` is installed on THIS machine (status line says "opencode: current"), and
+#   (2) the pane is NAMED with `herdr agent rename <pane> <name>` and OpenCode is then RESTARTED, so the eta-bus MCP
+#       re-resolves its identity from HERDR_PANE_ID. A pane that was started before it was named stays anonymous.
+# Rows: "name-oc|workspace label|cwd|provider/model|opencode session id".  The session id is printed by `/exit`
+# ("Continue  opencode -s ses_..."). Resume flags: -s <id>, -m <provider/model>. Never give the model a secret path.
+# UNTESTED end to end (first real use is the first W25 switch): the relaunch-after-rename below follows Fable's proven
+# sequence; if `agent start NAME` already names the pane before OpenCode starts, the second launch is a no-op restart.
+# BOX panes (18 switched 25 Sep, Fable r409) are restored by kit/oc-restore.sh from ~/oc/REGISTRY.tsv (kept current by kit/oc-registry-snapshot.sh); this section is for Mini -oc panes.
+# Empty until a pane is switched (nothing has been moved yet: P0). Add rows here in the same change as the switch.
+O=(
+  # "linker-oc|linker-oc · link 3 · box|/home/eta/dev/eta-lab|opencode/gpt-5.3-codex|ses_XXXX"   # box pane: restore there, not here
+)
+if [ ${#O} -gt 0 ]; then
+  herdr integration status 2>/dev/null | grep -q '^opencode: current' || {
+    echo "opencode integration not current: installing (writes ~/.config/opencode/plugins/herdr-agent-state.js, herdr-tui-session.js, tui.jsonc)"
+    herdr integration install opencode
+  }
+  for row in $O; do
+    N=${row%%|*}; r=${row#*|}; L=${r%%|*}; r=${r#*|}; C=${r%%|*}; r=${r#*|}; M=${r%%|*}; S=${r#*|}
+    if [[ " $LIVE " == *" $N "* ]]; then echo "live     $N"; continue; fi
+    if pgrep -f "opencode.* -s $S" >/dev/null; then echo "RUNNING OUTSIDE HERDR  $N  (session $S) - left alone, tell Fable"; continue; fi
+    R=$(herdr workspace create --label "$L" --cwd "$C" --no-focus 2>&1)
+    P=$(echo "$R" | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])" 2>/dev/null)
+    [ -z "$P" ] && { echo "FAILED   $N  workspace: $R"; continue; }
+    sleep 2
+    herdr agent start "$N" --kind opencode --pane "$P" --timeout 120000 -- -s "$S" -m "$M" >/dev/null 2>&1
+    herdr agent rename "$P" "$N" >/dev/null 2>&1          # step (2a): name the pane
+    herdr agent prompt "$N" '/exit' >/dev/null 2>&1        # step (2b): stop OpenCode so the bus MCP restarts with the name
+    sleep 4
+    herdr agent start "$N" --kind opencode --pane "$P" --timeout 120000 -- -s "$S" -m "$M" >/dev/null 2>&1
+    echo "restored $N  model=$M session=$S (rc=$?)  - check bus identity: bus_roster must list $N"
+  done
+fi

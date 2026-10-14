@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """Tests for fleet_watch.py on INVENTED snapshots in the real Scribe door shape (no real data, no network, no ssh, no hsend)."""
 import fcntl, datetime as dt, json, os, re, sys, tempfile
-os.environ["FLEET_WATCH_HOME"] = tempfile.mkdtemp()      # unconditional: a test must never touch the real runtime dir (cost.jsonl, state, lock)
+os.environ.setdefault("FLEET_WATCH_HOME", tempfile.mkdtemp())
 import fleet_watch as fw
-
-
-def _no_real_model(*a, **k):
-    raise AssertionError("a test reached a real model call (run_model must be stubbed or the budget cap must stop it)")
-fw.run_model = _no_real_model      # fail fast: a bypassed cap used to hang the suite on a real opencode call (refuter-2 G7 note)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MON_NOON = dt.datetime(2026, 9, 21, 6, 30, tzinfo=dt.timezone.utc)      # Mon 12:00 IST

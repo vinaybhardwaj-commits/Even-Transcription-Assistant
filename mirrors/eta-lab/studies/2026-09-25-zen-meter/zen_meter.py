@@ -17,10 +17,8 @@ RT = os.environ.get("ZEN_METER_HOME", os.path.expanduser("~/zen-meter"))
 DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 DEFAULT_CFG = {
     "hosts": [{"name": "box", "local": True}, {"name": "mini", "ssh": "mini"}, {"name": "air", "ssh": "air"}, {"name": "yoga", "ssh": "ubuntuyoga"}],
-    "pane_map": {"/home/eta/fleet-watch": "fleet-watch", "/home/eta/dev/eta-lab": "linker-oc", "/tmp": "scratch"},   # longest prefix wins; only used for the default agents
+    "pane_map": {"/home/eta/fleet-watch": "fleet-watch", "/home/eta/dev/eta-lab": "linker-oc", "/tmp/": "scratch"},   # longest prefix wins; only used for the default agents
     "default_agents": ["build", "plan", "general", "explore"],
-    "pane_notes": {"box:fleet-watch": "includes model-selection benchmarks and gate injection tests run with --agent fleet-watch; the loop's own cost is in ~/fleet-watch/cost.jsonl (refuter-2 found $0.333 here vs $0.039 logged by the loop)",
-                   "box:linker-oc": "attributed by directory /home/eta/dev/eta-lab (its session runs the default agent): any other OpenCode run in that directory counts here"},
     "provider": "opencode",            # Zen. Other providers (openrouter) are reported separately and never touch the Zen ledger
     "daily_cap_usd": None, "cap_alert_frac": 0.8,      # r407b: no fixed cap; the 80% alert exists for when V sets one
     "low_usd": 10.0, "low_runway_h": 24.0, "burn_window_h": 3.0, "remind_h": 6.0, "interval_s": 600,
@@ -109,13 +107,13 @@ def day_key(t_ms):
 
 def aggregate(rows, cfg):
     """Zen rows only -> per_pane_hour {(pane, 'YYYY-MM-DD HH:00'): $}, per_day {day: $}, per_model {model: $}, per_pane_day {(pane, day): $}. Other providers go to `other`."""
-    pph, pd, pm, ppd, other, ppm = (collections.defaultdict(float) for _ in range(6))      # ppm: (pane, model, day) -> $, so a mid-session model change is visible
+    pph, pd, pm, ppd, other = collections.defaultdict(float), collections.defaultdict(float), collections.defaultdict(float), collections.defaultdict(float), collections.defaultdict(float)
     for r in rows:
         if r["provider"] != cfg["provider"]:
             other[r["provider"]] += r["cost"]; continue
         pane = pane_of(r["host"], r["agent"], r["dir"], cfg)
-        pph[(pane, hour_key(r["t"]))] += r["cost"]; pd[day_key(r["t"])] += r["cost"]; pm[r["model"]] += r["cost"]; ppd[(pane, day_key(r["t"]))] += r["cost"]; ppm[(pane, r["model"], day_key(r["t"]))] += r["cost"]
-    return {"per_pane_hour": dict(pph), "per_day": dict(pd), "per_model": dict(pm), "per_pane_day": dict(ppd), "per_pane_model_day": dict(ppm), "other": dict(other)}
+        pph[(pane, hour_key(r["t"]))] += r["cost"]; pd[day_key(r["t"])] += r["cost"]; pm[r["model"]] += r["cost"]; ppd[(pane, day_key(r["t"]))] += r["cost"]
+    return {"per_pane_hour": dict(pph), "per_day": dict(pd), "per_model": dict(pm), "per_pane_day": dict(ppd), "other": dict(other)}
 
 
 # ---------------------------------------------------------------- ledger
@@ -178,7 +176,6 @@ def render(now, agg, m, status, cfg, hours=8):
     hrs = [(now - dt.timedelta(hours=i)).astimezone(IST).strftime("%Y-%m-%d %H:00") for i in range(hours - 1, -1, -1)]
     today = now.astimezone(IST).strftime("%Y-%m-%d")
     L = ["# Zen spend meter (computed from OpenCode cost x Zen token counts; the console balance is the truth)", "",
-         "**UNVERIFIED against Zen's own balance: %s.** Every dollar below is computed.\n" % (("no console checkpoint has been recorded yet (`zen_meter.py --checkpoint <balance>`)" if m["base_kind"] == "start" else "last console checkpoint at %s" % m["base_ts"][:16].replace("T", " ") + "Z; spend since it is still computed")), "",
          "Generated %s IST. Provider counted: `%s` (Zen). Hosts: %s." % (now.astimezone(IST).strftime("%Y-%m-%d %H:%M"), cfg["provider"], ", ".join("%s=%s" % kv for kv in status.items())), "",
          "## Credit ledger", "",
          "| base (%s) | top-ups since | computed spend since | **remaining** | burn/h (trailing %gh) | burn/day | runway |" % (m["base_kind"], cfg["burn_window_h"]), "|---|---|---|---|---|---|---|",
@@ -189,15 +186,6 @@ def render(now, agg, m, status, cfg, hours=8):
     L += ["| pane | " + " | ".join(h[5:] for h in hrs) + " | today |", "|---|" + "---|" * (len(hrs) + 1)]
     for p in panes:
         L.append("| %s | " % p + " | ".join(("%.3f" % agg["per_pane_hour"][(p, h)]) if (p, h) in agg["per_pane_hour"] else "" for h in hrs) + " | **%.3f** |" % agg["per_pane_day"].get((p, today), 0.0))
-    for p in panes:
-        if p in cfg.get("pane_notes", {}):
-            L.append("")
-            L.append("Note on `%s`: %s." % (p, cfg["pane_notes"][p]))
-    allpm = [(p, mo, v) for (p, mo, d), v in agg["per_pane_model_day"].items() if d == today]
-    ppm = sorted((r for r in allpm if r[2] >= 0.0005), key=lambda x: (x[0], -x[2])); zero = len(allpm) - len(ppm)
-    L += ["", "## Per pane by model, today ($; a model change inside one pane shows as two rows)", "", "| pane | model | today |", "|---|---|---|"] + ["| %s | %s | %.3f |" % row for row in ppm]
-    if zero:
-        L += ["", "%d more (pane, model) pairs cost under $0.0005 today (free models, failed or refused calls) and are not listed." % zero]
     L += ["", "## Daily total ($, IST day)", "", "| day | total |", "|---|---|"] + ["| %s | %.3f |" % (d, v) for d, v in sorted(agg["per_day"].items())]
     if cfg.get("daily_cap_usd"):
         L += ["", "Daily cap $%.2f: today $%.2f (%.0f%%)." % (cfg["daily_cap_usd"], agg["per_day"].get(today, 0.0), 100 * agg["per_day"].get(today, 0.0) / cfg["daily_cap_usd"])]

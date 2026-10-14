@@ -33,9 +33,9 @@ def render(catalogue, access, now):
          "## Access on V's account (measured)", "", "| model | status | detail | via |", "|---|---|---|---|"]
     L += ["| %s | **%s** | %s | %s |" % (k, v["status"], v["detail"], v["via"]) for k, v in access.items() if not k.startswith("_")]
     L += ["", access.get("_note", ""), "", "## All models, free first then by output price", "",
-          "| model | works on our account | in | out | cache read | cache write | context | protocol | tier / note |", "|---|---|---|---|---|---|---|---|---|"]
+          "| model | in | out | cache read | cache write | context | protocol | tier / note |", "|---|---|---|---|---|---|---|---|"]
     for r in rs:
-        L.append("| %s%s | %s | %s | %s | %s | %s | %s | %s | %s |" % (r["id"], " (free)" if r["free"] else "", ("**%s**" % access[r["id"]]["status"]) if r["id"] in access else "untested", num(r["in"]), num(r["out"]), num(r["cr"]), num(r["cw"]), ("%dK" % (r["ctx"] // 1000)) if r["ctx"] else "", r["proto"], r["tier"]))
+        L.append("| %s%s | %s | %s | %s | %s | %s | %s | %s |" % (r["id"], " (free)" if r["free"] else "", num(r["in"]), num(r["out"]), num(r["cr"]), num(r["cw"]), ("%dK" % (r["ctx"] // 1000)) if r["ctx"] else "", r["proto"], r["tier"]))
     return "\n".join(L) + "\n"
 
 
