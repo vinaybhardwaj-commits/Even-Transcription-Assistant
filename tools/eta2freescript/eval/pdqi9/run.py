@@ -12,6 +12,7 @@ import json
 import os
 import statistics
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ... import ingest
@@ -98,6 +99,47 @@ def target_check(items_gt: dict, family: dict, thorough: dict, total_a: dict) ->
             "met": all9 and tot and thor and sdir, "basis": PRIMARY}
 
 
+def _clip_date(consults: str | None, bundles: str | None, uid: str):
+    """IST date (ISO string) of the clip start the run will load for the uid, or None when missing or invalid. Reads only the clip start field."""
+    try:
+        if bundles:
+            t0 = ingest.bundle_window(json.loads((Path(bundles) / f"{uid}.json").read_text(encoding="utf-8")))[0]
+        else:
+            t0 = ((json.loads((Path(consults) / uid / "transcript.json").read_text(encoding="utf-8")).get("clip")) or {}).get("t0_ms")
+        if not isinstance(t0, int) or isinstance(t0, bool):
+            return None
+        return (datetime.fromtimestamp(0, timezone.utc) + timedelta(milliseconds=t0)).astimezone(ingest.IST).date().isoformat()
+    except (OSError, ValueError, TypeError, AttributeError, OverflowError, RecursionError):
+        return None
+
+
+def lockbox_guard(uids: list[str], artifacts: Path, is_lockbox: bool, consults: str | None = None, bundles: str | None = None) -> int:
+    """Fail closed, before any model call, output file or scoreboard row. The rule file is required for every run; the checks apply to tuning runs only."""
+    try:
+        rule = splits.LockboxRule.load()
+    except splits.LockboxRuleError as e:
+        print(f"lockbox_guard: abort {e.code} n_hash=0 n_date=0 n_nodate=0")
+        return 1
+    if is_lockbox:
+        return 0
+    dates = {}
+    for u in uids:
+        got = []
+        try:
+            for d in (artifacts, artifacts / "b0"):
+                if d is artifacts or (d / f"{u}.json").exists():
+                    got.append(((_load_art(d, u) or {}).get("encounter") or {}).get("visit_date_ist"))
+        except (OSError, ValueError, AttributeError, RecursionError):
+            got.append(None)
+        got.append(_clip_date(consults, bundles, u))
+        dates[u] = got
+    n_hash, n_date, n_nodate = splits.tuning_guard(rule, dates)
+    if n_hash or n_date or n_nodate:
+        print(f"lockbox_guard: abort n_hash={n_hash} n_date={n_date} n_nodate={n_nodate}")
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_client=None) -> int:
     ap = argparse.ArgumentParser(prog="pdqi9.run")
     ap.add_argument("--round", required=True)
@@ -120,16 +162,18 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
     paths = a.arms.split(",")
     if len(paths) != 3:
         raise SystemExit("--arms takes exactly three files: A, B0, Bn (in that order)")
-    out = Path(a.out)
-    os.umask(0o077)
-    out.mkdir(parents=True, exist_ok=True)
-
-    frozen = judge.load_frozen(a.frozen)
     arms = {n: read_arm(Path(p)) for n, p in zip(ARMS, paths)}
     uids = sorted(set(arms["A"]) & set(arms["B0"]) & set(arms["Bn"]))
     dropped_uids = len(set().union(*[set(v) for v in arms.values()]) - set(uids))
     if not uids:
         raise SystemExit("no uid is present in all three arm files")
+    if lockbox_guard(uids, Path(a.artifacts), a.lockbox, a.consults, a.bundles) != 0:
+        return 1
+    out = Path(a.out)
+    os.umask(0o077)
+    out.mkdir(parents=True, exist_ok=True)
+
+    frozen = judge.load_frozen(a.frozen)
     spl = splits.Splits.load(frozen.split_path)
     split_name = splits.gate(spl, uids, a.lockbox, a.candidate)
 

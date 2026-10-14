@@ -61,6 +61,14 @@ def responder(tag: str, prompt: str, system: str) -> str:
     raise KeyError(tag)
 
 
+@pytest.fixture(autouse=True)
+def _lockbox_rule(tmp_path_factory, monkeypatch):
+    """A benign rule (no hash, a date range no synthetic consult falls in); test_pdqi9_lockbox.py covers the guard itself."""
+    p = tmp_path_factory.mktemp("rule") / "rule.json"
+    p.write_text(json.dumps({"version": 1, "uid_sha256": [], "date_from": "2099-01-01", "date_to": "2099-01-02"}), encoding="utf-8")
+    monkeypatch.setenv(splits.RULE_ENV, str(p))
+
+
 @pytest.fixture
 def frozen(tmp_path):
     return judge.load_frozen(make_frozen(tmp_path / "frozen"))
@@ -578,9 +586,9 @@ def test_bundles_mode_refused_without_load_bundle_and_used_when_present(tmp_path
     assert not fc.calls
     seen = []
     (tmp_path / "bundles").mkdir()
-    (tmp_path / "bundles" / "synth-fever-dose.json").write_text(json.dumps({"marker": 7}), encoding="utf-8")
+    (tmp_path / "bundles" / "synth-fever-dose.json").write_text(json.dumps({"marker": 7, "manifest": {"t0_ms": 1791174600000, "t1_ms": 1791174700000}}), encoding="utf-8")
     monkeypatch.setattr(ingest, "load_bundle", lambda b, english="auto", use_role_track=True: seen.append(b) or load_consult(CONSULTS, "synth-fever-dose"), raising=False)
-    assert run.main(argv, client=fc) == 0 and seen == [{"marker": 7}]
+    assert run.main(argv, client=fc) == 0 and seen == [{"marker": 7, "manifest": {"t0_ms": 1791174600000, "t1_ms": 1791174700000}}]
     with pytest.raises(SystemExit, match="exactly one"):
         run.main(argv + ["--consults", str(CONSULTS)], client=fc)
 

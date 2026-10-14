@@ -1,12 +1,16 @@
 """Split lists (private) and the lockbox rule: a lockbox uid is scored only with --lockbox --candidate <id>, once per candidate."""
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 
 LEDGER_ENV = "FREESCRIPT_LOCKBOX_LEDGER"
+RULE_ENV = "FREESCRIPT_LOCKBOX_RULE"
 
 
 class SplitError(RuntimeError):
@@ -68,3 +72,93 @@ def gate(splits: Splits, uids: list[str], lockbox: bool, candidate: str | None) 
     if in_lock:
         raise SplitError(f"{len(in_lock)} lockbox uid(s) in this run; lockbox needs --lockbox --candidate <id>")
     return "tuning"
+
+
+class LockboxRuleError(SplitError):
+    """The lockbox rule file is missing, unreadable or invalid. `code` is one of rule_unset, rule_unreadable, rule_invalid; the text never carries file content."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _parse_date(v) -> dt.date:
+    if not isinstance(v, str) or not _DATE.fullmatch(v):
+        raise ValueError("date")
+    return dt.date.fromisoformat(v)
+
+
+def _no_dupes(pairs):
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError("duplicate key")
+        d[k] = v
+    return d
+
+
+class LockboxRule:
+    """Lockbox membership by rule: a set of uid hashes plus an IST date range. The real file lives outside the repo."""
+
+    KEYS = {"version", "uid_sha256", "date_from", "date_to"}
+
+    def __init__(self, uid_sha256: set[str], date_from: dt.date, date_to: dt.date):
+        self.uid_sha256, self.date_from, self.date_to = uid_sha256, date_from, date_to
+
+    @classmethod
+    def load(cls, path: Path | str | None = None) -> "LockboxRule":
+        path = path or os.environ.get(RULE_ENV)
+        if not path:
+            raise LockboxRuleError("rule_unset")
+        try:
+            d = json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=_no_dupes)
+        except (OSError, UnicodeDecodeError):
+            raise LockboxRuleError("rule_unreadable") from None
+        except (ValueError, RecursionError):
+            raise LockboxRuleError("rule_invalid") from None
+        try:
+            if not isinstance(d, dict) or set(d) != cls.KEYS or type(d["version"]) is not int or d["version"] != 1:
+                raise ValueError
+            h = d["uid_sha256"]
+            if not isinstance(h, list) or not all(isinstance(x, str) and _HEX64.fullmatch(x) for x in h):
+                raise ValueError
+            lo, hi = _parse_date(d["date_from"]), _parse_date(d["date_to"])
+            if lo > hi:
+                raise ValueError
+        except (ValueError, TypeError):
+            raise LockboxRuleError("rule_invalid") from None
+        return cls(set(h), lo, hi)
+
+    def hit_hash(self, uid: str) -> bool:
+        return hashlib.sha256(uid.encode("utf-8")).hexdigest() in self.uid_sha256
+
+    def hit_date(self, ist_date: dt.date) -> bool:
+        return self.date_from <= ist_date <= self.date_to
+
+
+def tuning_guard(rule: LockboxRule, dates: dict[str, str | None | list]) -> tuple[int, int, int]:
+    """(n_hash, n_date, n_nodate) over uid -> IST date string(s) (None when unknown; a list holds one entry per artifact the run loads for the uid).
+    Any non-zero count means abort. A date in range counts n_date; an invalid date, or valid dates that differ, count n_nodate.
+    A uid that cannot be hashed counts n_hash. Never returns or raises uids."""
+    n_hash = n_date = n_nodate = 0
+    for uid, raws in dates.items():
+        if not isinstance(raws, list):
+            raws = [raws]
+        try:
+            n_hash += rule.hit_hash(uid)
+        except UnicodeEncodeError:
+            n_hash += 1
+        parsed = []
+        for raw in raws:
+            try:
+                parsed.append(_parse_date(raw))
+            except (ValueError, RecursionError):
+                parsed.append(None)
+        if not parsed or None in parsed or len(set(parsed)) > 1:
+            n_nodate += 1
+        n_date += any(d is not None and rule.hit_date(d) for d in parsed)
+    return n_hash, n_date, n_nodate
