@@ -2,11 +2,6 @@
 
 Build and event log, newest first. Owner panes: fleet, surg-page, eta-refuter-2 (leakage), linker (Link-3).
 
-## 27-28 Sep -- W46 widened to all interventional procedures; pitch25 live with real data
-Session: surg-link, lab-viewer, eta-refuter-2.
-Scope widened beyond surgery to injections/endoscopy/cath-angio/biopsies, using in-house-vs-refer-out knowledge. Per-consult Jev scoring built (pitched_surgery/pitched_intervention, procedure family, patient_agreed/deferred). pitch25 real-case review set LIVE on lab-viewer (15 de-identified cases, inline provenance added after a weak-guard finding). Interim: 554 flagged Rx items; 25-26 Sep CAP batch 19 pitched/3 booked/1 referred/15 not booked.
-Refs: #4682-4788, #4769-4856, #4434-4556.
-
 ## 25 Sep 20:12 IST — Link-3 sealed
 Session: linker + eta-refuter-2.
 T9 name-leak gate passed; class join executed + confirmed byte-identical (cacfc94); s27 safe tables committed (15d84fd).
