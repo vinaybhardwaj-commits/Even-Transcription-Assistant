@@ -26,36 +26,30 @@ def parse_topic(topic):
 
 class RouterSink:
     """Hands Mini-detected alerts straight to the router (C4 R2 ruling 2): same case open / ack / re-page / close path and bus post format as server
-    alerts, source=mini in the body. They never touch the server outbox. Case ids come from the store's local_seq counter (LOCAL_ID_BASE + seq)."""
-    def __init__(self, router, bus_factory):
+    alerts, source=mini in the body. They never touch the server outbox. Case ids come from the store's local_seq counter (LOCAL_ID_BASE + seq).
+    Phase 0 R2 (MF1): opening and closing a case only writes the store (the router job pages within one tick), so no bus is built here and a dead
+    or paused ubus can never lose a case. bus_factory is kept in the signature for callers and is not used."""
+    def __init__(self, router, bus_factory=None):
         self.router, self.bus_factory = router, bus_factory
-
-    def _with_bus(self, fn):
-        bus = self.bus_factory()
-        try:
-            fn(bus)
-        finally:
-            if hasattr(bus, "close"):
-                bus.close()
 
     def open_quiet_rooms(self):
         return [c["room_id"] for c in self.router.store.list_open() if c["kind"] == "guardian_quiet"]
 
     def _open(self, room, kind, now):
         row = {"id": self.router.store.alloc_local_id(), "kind": kind, "room_ids": [room], "room_name": room}
-        self._with_bus(lambda bus: self.router.on_row(bus, row))
+        self.router.on_row(None, row)
 
     def guardian_quiet(self, room, quiet_s, now):
         self._open(room, "guardian_quiet", now)
 
     def guardian_recovered(self, room, now):
-        self._with_bus(lambda bus: self.router.close_room(bus, room, "recovery", kind="guardian_quiet"))
+        self.router.close_room(None, room, "recovery", kind="guardian_quiet")
 
     def heal_escalated(self, room, now):
         self._open(room, "heal_escalated", now)
 
     def heal_resolved(self, room, now):
-        self._with_bus(lambda bus: self.router.close_room(bus, room, "recovery", kind="heal_escalated"))
+        self.router.close_room(None, room, "recovery", kind="heal_escalated")
 
 
 class Subscriber:
@@ -119,7 +113,8 @@ class Subscriber:
         for name in sorted(os.listdir(self.data)):
             p = os.path.join(self.data, name)
             if len(name) == 10 and name[4] == "-" and name[7] == "-" and name < cutoff and os.path.isdir(p):
-                shutil.rmtree(p)
+                os.makedirs(os.path.join(self.data, "_to_delete"), exist_ok=True)   # no hard deletes (G4): rotated days are moved aside
+                shutil.move(p, os.path.join(self.data, "_to_delete", name))
                 gone.append(name)
         return gone
 

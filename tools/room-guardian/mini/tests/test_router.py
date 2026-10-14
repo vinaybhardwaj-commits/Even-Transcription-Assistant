@@ -21,11 +21,37 @@ class Clock:
 
 
 class FakeBus:
+    """R2: pages, V notices and CLOSED notes arrive as ONE batch post on room-alert-batch-<day>. This fake keeps the real batch post (served by
+    thread_messages for the batch thread, so the router's marker check works) and also expands it into per-case pseudo messages on
+    room-alert-<id>, so the older assertions about pages / V / CLOSED per case still read naturally."""
     def __init__(self, fail_after=None):
-        self.msgs, self.fail_after = [], fail_after
+        self.msgs, self.real, self.fail_after, self.sends, self.fail = [], [], fail_after, 0, False
     def post(self, subject, body, priority, thread_id):
+        if self.fail:
+            raise RuntimeError("rate_limited")
+        self.sends += 1
+        if thread_id.startswith(ar.BATCH_PREFIX):
+            self.real.append({"from": "router", "subject": subject, "body": body, "priority": priority, "thread": thread_id})
+            import re
+            for line in body.splitlines():
+                m = re.search(r"room-alert-(\d+) ", line)
+                if not m:
+                    continue
+                tid = f"room-alert-{m.group(1)}"
+                pg = re.search(r"\[page (\d+)\]", line)
+                if line.startswith("V "):
+                    self.msgs.append({"from": "router", "subject": "ROOM ALERT V " + line, "body": line, "priority": priority, "thread": tid})
+                elif pg:
+                    v = " V" if " V: " in line else ""
+                    self.msgs.append({"from": "router", "subject": f"ROOM ALERT{v} {line.split()[1]}: page [page {pg.group(1)}]", "body": line, "priority": priority, "thread": tid})
+                elif "CLOSED" in line:
+                    self.msgs.append({"from": "router", "subject": "ROOM ALERT CLOSED " + line, "body": line, "priority": "normal", "thread": tid})
+            return
         self.msgs.append({"from": "router", "subject": subject, "body": body, "priority": priority, "thread": thread_id})
-    def thread_messages(self, tid): return [m for m in self.msgs if m["thread"] == tid]
+    def thread_messages(self, tid):
+        if tid.startswith(ar.BATCH_PREFIX):
+            return [m for m in self.real if m["thread"] == tid]
+        return [m for m in self.msgs if m["thread"] == tid]
     def human(self, sender, text, tid): self.msgs.append({"from": sender, "subject": text, "body": "", "thread": tid})
     def pages(self, tid=None): return [m for m in self.msgs if "[page" in m["subject"] and (tid is None or m["thread"] == tid)]
 
@@ -49,7 +75,8 @@ class RouterTests(unittest.TestCase):
         self.r = ar.Router(self.store, lambda: self.bus, self.clock)
 
     def test_open_pages_once_then_repages_every_10_min_in_clinic(self):
-        self.r.on_row(self.bus, row(100))
+        self.r.on_row(self.bus, row(100)); self.assertEqual(len(self.bus.pages()), 0)      # R2: on_row never sends
+        self.r.tick(self.bus)
         self.assertEqual(len(self.bus.pages()), 1)
         self.clock.adv(599); self.r.tick(self.bus); self.assertEqual(len(self.bus.pages()), 1)
         self.clock.adv(1); self.r.tick(self.bus); self.assertEqual(len(self.bus.pages()), 2)
@@ -57,12 +84,12 @@ class RouterTests(unittest.TestCase):
 
     def test_repage_every_30_min_outside_clinic(self):
         self.clock.t = SUN_12
-        self.r.on_row(self.bus, row(100, "offline"))
+        self.r.on_row(self.bus, row(100, "offline")); self.r.tick(self.bus)
         self.clock.adv(1799); self.r.tick(self.bus); self.assertEqual(len(self.bus.pages()), 1)
         self.clock.adv(1); self.r.tick(self.bus); self.assertEqual(len(self.bus.pages()), 2)
 
     def test_ack_stops_repages_case_stays_open(self):
-        self.r.on_row(self.bus, row(100))
+        self.r.on_row(self.bus, row(100)); self.r.tick(self.bus)
         self.bus.human("gating-lead", "ACK room-alert-100", "room-alert-100")
         self.clock.adv(600); out = self.r.tick(self.bus)
         self.assertEqual(out["acked"], 1)
@@ -84,19 +111,19 @@ class RouterTests(unittest.TestCase):
     def test_duplicate_bumps_counter_and_replay_of_same_row_is_idempotent(self):
         self.r.on_row(self.bus, row(100)); self.r.on_row(self.bus, row(100))
         self.assertEqual(self.store.get_open("r1", "recorder_off")["suppressed_count"], 0)
-        self.r.on_row(self.bus, row(101)); self.r.on_row(self.bus, row(102))
+        self.r.on_row(self.bus, row(101)); self.r.on_row(self.bus, row(102)); self.r.tick(self.bus)
         c = self.store.get_open("r1", "recorder_off")
         self.assertEqual((c["first_id"], c["suppressed_count"], c["page_count"]), (100, 2, 1))
 
     def test_recovery_closes_once_and_late_duplicate_opens_new_case(self):
-        self.r.on_row(self.bus, row(100)); self.clock.adv(900)
-        self.r.on_row(self.bus, row(110, "recovered"))
+        self.r.on_row(self.bus, row(100)); self.r.tick(self.bus); self.clock.adv(900)
+        self.r.on_row(self.bus, row(110, "recovered")); self.r.tick(self.bus)
         self.assertIsNone(self.store.get_open("r1", "recorder_off"))
         closes = [m for m in self.bus.thread_messages("room-alert-100") if "CLOSED" in m["subject"]]
         self.assertEqual(len(closes), 1)
         self.clock.adv(600); self.r.tick(self.bus)
         self.assertEqual(len(self.bus.pages("room-alert-100")), 1)          # no re-page after close
-        self.r.on_row(self.bus, row(105))                                    # late duplicate of the closed alert
+        self.r.on_row(self.bus, row(105)); self.r.tick(self.bus)             # late duplicate of the closed alert
         self.assertEqual(self.store.get_open("r1", "recorder_off")["first_id"], 105)
         self.assertEqual(len(self.bus.pages("room-alert-105")), 1)
 
@@ -105,8 +132,8 @@ class RouterTests(unittest.TestCase):
         store.insert({"first_id": 100, "room_id": "r1", "kind": "recorder_off", "opened_at": self.clock(), "last_paged_at": None, "page_count": 0,
                       "suppressed_count": 0, "acked_by": None, "acked_at": None, "closed_at": None, "close_reason": None})
         store.armed = True
-        with self.assertRaises(RuntimeError):
-            r.tick(bus)
+        out = r.tick(bus)
+        self.assertEqual(out["errors"], 1)                                   # R2: the failed stage is reported, the tick does not raise
         self.assertEqual(len(bus.pages()), 1)                                # posted, state not written
         self.assertEqual(store.get_open("r1", "recorder_off")["page_count"], 0)
         r2 = ar.Router(store, lambda: bus, self.clock)                       # restart
@@ -117,7 +144,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(len(bus.pages()), 2)                                # next page is page 2
 
     def test_pane_restart_late_ack_after_40_min(self):
-        self.r.on_row(self.bus, row(100, "mic_denied"))
+        self.r.on_row(self.bus, row(100, "mic_denied")); self.r.tick(self.bus)
         for _ in range(4):
             self.clock.adv(600); self.r.tick(self.bus)                       # nobody answers for 40 min
         self.assertEqual(len(self.bus.pages()), 5)
@@ -174,17 +201,17 @@ class DurabilityTests(unittest.TestCase):
             path = os.path.join(t, "data", "cases.sqlite"); clock, bus = Clock(TUE_11), FakeBus()
             st = ar.SqliteStore(path)
             self.assertEqual(st.db.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
-            r = ar.Router(st, lambda: bus, clock); r.on_row(bus, row(100)); r.on_row(bus, row(101))
+            r = ar.Router(st, lambda: bus, clock); r.on_row(bus, row(100)); r.on_row(bus, row(101)); r.tick(bus)
             clock.adv(600); r.tick(bus)                                       # page 2
             bus.human("gating-lead", "ACK room-alert-100", "room-alert-100"); r.tick(bus)
-            r.on_row(bus, row(300, "offline", "r2"))
+            r.on_row(bus, row(300, "offline", "r2"))           # R2: stored, not yet paged (the next tick pages it)
             st.db.close(); del r, st                                          # process dies
             st2 = ar.SqliteStore(path); r2 = ar.Router(st2, lambda: bus, clock)
             c = st2.get_open("r1", "recorder_off")
             self.assertEqual((c["first_id"], c["page_count"], c["suppressed_count"], c["acked_by"]), (100, 2, 1, "gating-lead"))
-            n = len(bus.pages()); r2.tick(bus); self.assertEqual(len(bus.pages()), n)       # no early re-page after restart
-            clock.adv(600); r2.tick(bus)
-            self.assertEqual([m["thread"] for m in bus.pages()][n:], ["room-alert-300"])    # acked 100 stays quiet; unacked 300 pages
+            n = len(bus.pages()); r2.tick(bus)
+            self.assertEqual([m["thread"] for m in bus.pages()][n:], ["room-alert-300"])    # the stored-but-unpaged 300 pages at once; acked 100 stays quiet
+            n = len(bus.pages()); clock.adv(60); r2.tick(bus); self.assertEqual(len(bus.pages()), n)   # no early re-page after restart
             r2.on_row(bus, row(400, "recovered"))
             self.assertIsNone(st2.get_open("r1", "recorder_off")); self.assertIsNotNone(st2.get_open("r2", "offline"))
 
@@ -250,7 +277,7 @@ class EndToEndQuietTests(unittest.TestCase):
             router = ar.Router(ar.SqliteStore(os.path.join(t, "cases.sqlite")), lambda: bus, clock)
             subr = sb.Subscriber(os.path.join(t, "d"), t, ["r1"], sb.RouterSink(router, lambda: bus), clock)
             subr.on_line("kiosk/r1/health", "{}")
-            clock.adv(121); self.assertEqual(subr.check_quiet(), ["r1"])
+            clock.adv(121); self.assertEqual(subr.check_quiet(), ["r1"]); router.tick(bus)
             c = router.store.get_open("r1", "guardian_quiet"); tid = f"room-alert-{c['first_id']}"
             self.assertGreaterEqual(c["first_id"], 1_000_000_000_001)
             pages = bus.pages(tid); self.assertEqual(len(pages), 1)
@@ -260,7 +287,7 @@ class EndToEndQuietTests(unittest.TestCase):
             bus.human("fleet", f"ACK {tid}", tid); clock.adv(600); router.tick(bus)
             self.assertEqual(len(bus.pages(tid)), 2); self.assertEqual(router.store.get_open("r1", "guardian_quiet")["acked_by"], "fleet")
             clock.adv(30); subr.on_line("kiosk/r1/health", "{}")                       # stream returns: closes
-            self.assertIsNone(router.store.get_open("r1", "guardian_quiet"))
+            self.assertIsNone(router.store.get_open("r1", "guardian_quiet")); router.tick(bus)
             self.assertEqual(len([m for m in bus.thread_messages(tid) if "CLOSED" in m["subject"]]), 1)
             clock.adv(121); self.assertEqual(subr.check_quiet(), ["r1"])               # a later quiet spell is a NEW case
             self.assertNotEqual(router.store.get_open("r1", "guardian_quiet")["first_id"], c["first_id"])
@@ -396,7 +423,10 @@ class ThresholdAndSourceTests(unittest.TestCase):
 
     def test_clinic_hours_copy_matches_the_ts_source(self):
         import re
-        ts = open(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "lib", "alerts", "clinic-hours.ts")).read()
+        tsp = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "lib", "alerts", "clinic-hours.ts")
+        if not os.path.exists(tsp):
+            self.skipTest("lib/alerts/clinic-hours.ts is only present in the ETA repo tree")        # Phase 0 workdir is outside the repo
+        ts = open(tsp).read()
         def num(name):
             m = re.search(r"export const %s = ([0-9 +*]+);" % name, ts); self.assertIsNotNone(m, name)
             return eval(m.group(1), {"__builtins__": {}})
@@ -446,7 +476,7 @@ class KitSubclassTests(unittest.TestCase):
             relay.poll_once()
             self.assertEqual(relay.state["cursor"], 7)
             self.assertEqual(router.store.get_open("r1", "recorder_off")["first_id"], 7)
-            self.assertTrue(any("[page 1]" in m[1] for m in fake.sent))
+            self.assertTrue(any("[page 1]" in m[2] for m in fake.sent))      # R2: on_row stores; the tick at the end of the same poll sends the page
 
 
 if __name__ == "__main__":

@@ -21,3 +21,14 @@ Tests: `mini/tests/run.sh` (shellcheck, then 26 unittest cases; clock injected).
 5. A `recovered` outbox row closes every open case of that room; coverage unverified.
 6. Bus message shape from `bus_thread` (`from`, `subject`, `body`) is inferred.
 7. Two processes (relay, subscriber) share the SQLite file. WAL plus a 10 s busy timeout; the unique open-case index settles a race (loser counts as a duplicate).
+
+## Phase 0 live deployment (14 Oct 2026, FR-1 C4 on the Mini)
+The code the Mini actually runs is in this tree. The Mini copies it into `~/oc/fleet-access/guardian/{app,scripts}` (layout in `mini/ops/check-deployed.sh`, which diffs the two). Config, keys, data and logs stay only under `~/oc/fleet-access/guardian/` (G7); examples are in `mini/config/`.
+Changes over 5574b09, in one list:
+- **Pipe**: `pipe/run-pipe.sh` binds the tailnet address read from `tailscale ip -4` at start, refuses port 22 and `PICO_PIPE_ENABLED` anything but false, redacts `DATABASE_URL` from pico's log. New: `init-schema.sh` (pico migrations the pipe touches), `add-key.sh` (idempotent app_users + public_keys rows), `grant-admin.sh` (pico `admin` feature for the subscriber only), `pipe-ssh.sh`, `run-postgres.sh` (own cluster, loopback only), `outbound-check.sh` (pipe process makes no outbound TCP).
+- **Pico topics are per user.** A room key `<room>` publishing `kiosk/<room>/health` lands on `<room>/kiosk/<room>/health`; the admin subscriber reads `/<room>/kiosk/<room>/<stream>` and publishes `/<room>/guardian/control`. Publishers must send newline-terminated JSON and use `pub -c -b=false`.
+- **Router**: opening and closing a case only writes the store (no bus); `tick()` makes ONE ubus send per tick on the day thread `room-alert-batch-<day>`, each stage isolated; ACK accepts several ids per message, one line listing ids, and `Re:` replies; `router.json` is refused if an acker is not in `to`. Bus is ubus (`router/ubus_bus.py`, `router/run_router.py`), not the eta-bus. `router_relay.py` and `relay_watcher.py` are unchanged and NOT run.
+- **Subscriber**: reconnecting readers (`sub -c -k`), per-room control publish, rooms from `rooms.json`; rotated days are moved to `data/_to_delete/`, never deleted.
+- **Backups**: `ops/pgdump.sh` writes to the internal `backup/` (14 kept; older and failed runs move to `backup/_to_delete/`), a failure opens a `backup_failed` case (`ops/backup-case.py`). The Air Drive copy is deferred (no Full Disk Access).
+- **Kill switch**: file `etc/kill-switch`; `off` = actions allowed, anything else or missing = killed. Consumers treat no control message for more than 90 s as kill=true.
+Tests: `mini/tests/run.sh` (shellcheck, then 60 unittest cases; one needs `lib/alerts/clinic-hours.ts` from this repo).

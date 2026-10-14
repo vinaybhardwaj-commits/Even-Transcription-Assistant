@@ -55,7 +55,8 @@ class SubscriberTests(unittest.TestCase):
         for name in ("2026-09-12", "2026-09-13", "2026-10-13", "notes"):
             os.makedirs(os.path.join(s.data, name))
         self.assertEqual(s.prune(), ["2026-09-12"])                             # 2026-09-13 is exactly 30 days back: kept
-        self.assertEqual(sorted(os.listdir(s.data)), ["2026-09-13", "2026-10-13", "notes"])
+        self.assertEqual(sorted(os.listdir(s.data)), ["2026-09-13", "2026-10-13", "_to_delete", "notes"])   # moved aside, not deleted
+        self.assertEqual(os.listdir(os.path.join(s.data, "_to_delete")), ["2026-09-12"])
 
     def test_control_fail_safe_and_modes(self):
         s = self.mk()
@@ -100,7 +101,8 @@ class SeedTests(unittest.TestCase):
             self.assertEqual(sub2.quiet, {"r1"})                                      # unknown rooms are not seeded
             clock.adv(30); sub2.on_line("kiosk/r1/health", "{}")
             self.assertIsNone(router2.store.get_open("r1", "guardian_quiet"))
-            self.assertEqual(len([m for m in bus.msgs if "CLOSED" in m["subject"]]), 1)
+            self.assertEqual(len(router2.store.list_notes()), 1)              # R2: the CLOSED note is queued; the router tick sends it
+            router2.tick(bus); self.assertEqual(len([m for m in bus.msgs if "CLOSED" in m["body"]]), 1)
 
 
 if __name__ == "__main__":
