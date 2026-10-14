@@ -11,6 +11,10 @@ cp -R "$HERE"/fixtures/. "$T/data/"
 # Generated at run time, not committed: the repo's no-identity-literals guard rejects committed person-name fields in test-like files.
 printf '{"patient_%s": "Fake Person", "visit": 1}\n' name > "$T/data/hit-phi-field.json"
 printf '{"a":1,"patient%s":"Fake Person"}\n{"b":2}\n' Name > "$T/data/hit-phi-field-camel.jsonl"
+mkdir -p "$T/data/hit-staff-email/mirrors/fakesrc"
+printf "contact: someone@%s for details\n" even.in > "$T/data/hit-staff-email/mirrors/fakesrc/a.txt"
+mkdir -p "$T/data/ok-staff-redacted/mirrors/fakesrc"
+printf "contact: staff-redacted@%s and LIKE %%@%s and a@example.com\n" even.in even.in > "$T/data/ok-staff-redacted/mirrors/fakesrc/a.txt"
 mkdir -p "$T/data/ok-synthetic/fixtures/synthetic"
 printf '{"patient_%s":"Fake Person"}\n' name > "$T/data/ok-synthetic/fixtures/synthetic/p.json"
 "$ROOT/scripts/steward/scrub.sh" --tree "$T" > "$T/out.tsv" 2>/dev/null
