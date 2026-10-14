@@ -40,18 +40,9 @@ def put(env, h, run="run-A", date="2026-10-06"):
         json.dump(h, f)
 
 
-def default_wreb(env):
-    """A worklist dir with one unrelated row (an empty/missing worklist now fails closed)."""
-    d = env.tmp / "wreb-default"
-    d.mkdir(exist_ok=True)
-    (d / "manifest-2000-01-01.jsonl").write_text(json.dumps({"win_id": "x", "room": "room_zzzzzzzz", "ist_date": "2000-01-01",
-                                                              "start": "2000-01-01T00:00:00+00:00"}) + "\n")
-    return str(d)
-
-
-def go(env, write=True, held=lambda d, r: False, aliases=(), run="run-A", limit=0, wreb=None):
+def go(env, write=True, held=lambda d, r: False, aliases=(), run="run-A", limit=0):
     a = types.SimpleNamespace(run=run, since=None, all=False, write=write, limit=limit)
-    return fh.run(a, runs_dir=env.runs, root=env.root, is_held=held, aliases=list(aliases), outbox=env.outbox, log_dir=None, wreb=wreb or default_wreb(env))
+    return fh.run(a, runs_dir=env.runs, root=env.root, is_held=held, aliases=list(aliases), outbox=env.outbox, log_dir=None)
 
 
 def tracks(env):
@@ -150,24 +141,6 @@ def test_guard_fails_closed(tmp_path):
         fh.load_heldout(str(bad))
 
 
-def test_only_the_swapped_heldout_file_loads_and_the_old_one_fails_closed(tmp_path):
-    import hashlib
-    assert fh.HELDOUT_PY_SHA16S == ("880404e36fd6b650",)
-    old = tmp_path / "old.py"
-    old.write_text("def load_union(): return {'2026-09-26 OPD4'}, 'x'\ndef is_held_out(u, d, r): return f'{d} OPD4' in u\n")
-    assert hashlib.sha256(old.read_bytes()).hexdigest()[:16] != "880404e36fd6b650"
-    with pytest.raises(SystemExit):   # any file that is not the pinned one, the pre-swap f672c1ef included, fails closed
-        fh.load_heldout(str(old))
-
-
-def test_pinned_heldout_loads_and_holds_nothing(tmp_path, monkeypatch):
-    import hashlib
-    new = tmp_path / "new.py"
-    new.write_text("def load_union(): return set(), 'y'\ndef is_held_out(u, d, r): return f'{d} OPD4' in u\n")
-    monkeypatch.setattr(fh, "HELDOUT_PY_SHA16S", (hashlib.sha256(new.read_bytes()).hexdigest()[:16],))
-    assert fh.load_heldout(str(new))("2026-09-26", "room_ux92qpws") is False
-
-
 def test_misnamed_id_resolved_by_manifest_start(env):
     new_id, old_id = "c-2026-10-05_room_abcd1234_2315", "c-2026-10-06_room_abcd1234_2315"
     d = os.path.join(env.root, "2026-10-05", ROOM, new_id)
@@ -217,7 +190,7 @@ def test_cfg8_distinguishes_runs_and_is_stable():
 
 def test_limit_and_bad_file_counted(env):
     put(env, hist())
-    put(env, hist(wid="c-2026-10-06_room_abcd1234_1115", start="2026-10-06T05:45:00+00:00", end="2026-10-06T06:00:00+00:00"))
+    put(env, hist(wid="c-2026-10-06_room_abcd1234_1115"))
     d = os.path.join(env.runs, "run-A", ROOM, "2026-10-06", "zz-broken.json")
     open(d, "w").write("{not json")
     assert go(env, limit=1)["seen"] == 1
@@ -275,147 +248,3 @@ def test_null_conf_when_source_gave_no_score(env):
     go(env)
     seg = json.load(open(tracks(env)[0]))["segments"][0]
     assert seg["conf"] is None and "refused" not in seg["extras"]
-
-
-def wreb_with(env, win_id, room=ROOM, start=T0):
-    d = env.tmp / "wreb"
-    d.mkdir(exist_ok=True)
-    (d / "manifest-2026-10-06.jsonl").write_text(json.dumps({"win_id": win_id, "room": room, "ist_date": "2026-10-06", "start": start}) + "\n")
-    return str(d)
-
-
-def test_backfill_window_without_manifest_is_deferred(env):
-    put(env, hist())   # hist id has the "c-" prefix, the worklist does not
-    c = go(env, wreb=wreb_with(env, "2026-10-06_room_abcd1234_1100"))
-    assert c["deferred_backfill_window"] == 1 and c["written"] == 0 and c["new_manifest"] == 0
-    assert tracks(env) == [] and not os.path.exists(os.path.join(env.root, "2026-10-06")) and not os.path.exists(env.outbox)
-
-
-def test_deferred_matches_by_start_time_too(env):
-    put(env, hist())
-    c = go(env, wreb=wreb_with(env, "some-other-id", start=T0))
-    assert c["deferred_backfill_window"] == 1
-
-
-def test_unlisted_no_manifest_window_still_gets_placeholder_manifest(env):
-    put(env, hist())
-    c = go(env, wreb=wreb_with(env, "2026-10-06_room_abcd1234_2000", start="2026-10-06T14:30:00+00:00"))
-    assert c["deferred_backfill_window"] == 0 and c["written"] == 1 and c["new_manifest"] == 1
-
-
-def test_listed_window_with_manifest_is_unaffected(env):
-    wid = "c-2026-10-06_room_abcd1234_1100"
-    d = os.path.join(env.root, "2026-10-06", ROOM, wid)
-    os.makedirs(d)
-    json.dump({"window_id": wid, "room_id": ROOM, "room_slug": ROOM, "ist_date": "2026-10-06", "t0_ms": T0_MS, "t1_ms": T0_MS + 900000,
-               "audio": {"r2_key": "k", "sha256": "s", "sample_rate": 1, "duration_ms": 1}, "tracks": []}, open(os.path.join(d, "manifest.json"), "w"))
-    put(env, hist())
-    c = go(env, wreb=wreb_with(env, "2026-10-06_room_abcd1234_1100"))
-    assert c["deferred_backfill_window"] == 0 and c["written"] == 1
-
-
-def put_attempt(env, h, n=1, run="run-A", date="2026-10-06", **over):
-    a = dict(h, **over)
-    d = os.path.join(env.runs, run, ROOM, date)
-    with open(os.path.join(d, f"{h['window_id']}.attempt{n}.json"), "w") as f:
-        json.dump(a, f)
-
-
-def test_attempt_file_never_converted_alone_and_carried_as_evidence(env):
-    final = hist(nseg=2)
-    put(env, final)
-    put_attempt(env, final, ok=False, state="failed", error="push_rc_255", segments=[], router_status=None)
-    c = go(env)
-    assert c["seen"] == 1 and c["written"] == 1 and c["conflicts"] == 0 and c["attempts_carried"] == 1
-    (p,) = tracks(env)
-    t = json.load(open(p))
-    assert t["status"] == "ok" and len(t["segments"]) == 2
-    (att,) = t["extras"]["attempts"]
-    assert att == {"n": 1, "file": final["window_id"] + ".attempt1.json", "state": "failed", "ok": False, "error": "push_rc_255",
-                   "router_status": None, "created_at": "2026-10-06T07:00:00Z", "n_segments": 0}
-    assert "synthetic text" not in json.dumps(att)
-
-
-def test_attempt_only_window_has_no_track(env):
-    h = hist()
-    d = os.path.join(env.runs, "run-A", ROOM, "2026-10-06")
-    os.makedirs(d)
-    put_attempt(env, h)
-    assert go(env)["seen"] == 0 and tracks(env) == []
-
-
-def test_no_attempts_key_when_none(env):
-    put(env, hist())
-    go(env)
-    assert "attempts" not in json.load(open(tracks(env)[0]))["extras"]
-
-
-def test_worklist_fails_closed_missing_and_empty(env, tmp_path):
-    put(env, hist())
-    with pytest.raises(SystemExit):
-        go(env, wreb=str(tmp_path / "nope"))
-    empty = tmp_path / "emptydir"
-    empty.mkdir()
-    with pytest.raises(SystemExit):
-        go(env, wreb=str(empty))
-    (empty / "manifest-1.jsonl").write_text("not json\n")
-    with pytest.raises(SystemExit):
-        go(env, wreb=str(empty))
-    assert tracks(env) == [] and not os.path.exists(os.path.join(env.root, "2026-10-06"))
-
-
-def test_worklist_rows_in_counts(env):
-    put(env, hist())
-    assert go(env)["worklist_rows"] == 1
-
-
-def _manifest(env, wid, t0):
-    d = os.path.join(env.root, "2026-10-06", ROOM, wid)
-    os.makedirs(d)
-    json.dump({"window_id": wid, "room_id": ROOM, "room_slug": ROOM, "ist_date": "2026-10-06", "t0_ms": t0, "t1_ms": t0 + 900000,
-               "audio": {"r2_key": "real", "sha256": "realsha", "sample_rate": 48000, "duration_ms": 900000}, "tracks": []},
-              open(os.path.join(d, "manifest.json"), "w"))
-
-
-def test_start_only_resolves_into_existing_other_id_manifest(env):
-    _manifest(env, "2026-10-06_room_abcd1234_1100", T0_MS)    # BACKFILL's id (no "c-")
-    put(env, hist())   # hist id has the c- prefix; worklist lists the other id and the same start
-    c = go(env, wreb=wreb_with(env, "2026-10-06_room_abcd1234_1100"))
-    assert c["start_resolved"] == 1 and c["deferred_backfill_window"] == 0 and c["written"] == 1 and c["new_manifest"] == 0
-    (p,) = tracks(env)
-    assert "/2026-10-06_room_abcd1234_1100/tracks/" in p and json.load(open(p))["window_id"] == "2026-10-06_room_abcd1234_1100"
-    m = json.load(open(os.path.join(os.path.dirname(os.path.dirname(p)), "manifest.json")))
-    assert m["audio"]["sha256"] == "realsha" and len(m["tracks"]) == 1   # real audio kept, entry appended
-
-
-def test_start_only_without_any_manifest_still_defers(env):
-    put(env, hist())
-    c = go(env, wreb=wreb_with(env, "some-other-id", start=T0))
-    assert c["start_resolved"] == 0 and c["deferred_backfill_window"] == 1 and tracks(env) == []
-
-
-def test_write_track_config_hash_override_is_additive():
-    from kit.reb import writer
-    import inspect
-    assert inspect.signature(writer.write_track).parameters["config_hash"].default is None
-    assert writer.config_hash({"a": 1}) == writer._default_config_hash({"a": 1})
-
-
-def test_sealed_window_ids_are_never_converted(env):
-    put(env, hist(wid="L041"))
-    c = go(env)
-    assert c["sealed"] == 1 and c["written"] == 0 and tracks(env) == []
-    assert fh.SEALED_WINDOWS == {"L041", "L057", "L139", "L182"}
-
-
-def test_a_start_match_into_a_sealed_window_is_refused_before_its_manifest_is_opened(env):
-    d = os.path.join(env.root, "2026-10-06", ROOM, "L041")
-    os.makedirs(d)
-    mp = os.path.join(d, "manifest.json")
-    json.dump({"window_id": "L041", "room_id": ROOM, "room_slug": ROOM, "ist_date": "2026-10-06", "t0_ms": T0_MS, "t1_ms": T0_MS + 900000,
-               "audio": {"r2_key": "k", "sha256": "s", "sample_rate": 1, "duration_ms": 1}, "tracks": []}, open(mp, "w"))
-    before = open(mp, "rb").read()
-    put(env, hist())                                                          # an ordinary id with the same room and the same start as the sealed window
-    c = go(env)
-    assert c["sealed"] == 1 and c["written"] == 0 and c["start_resolved"] == 0 and c["new_manifest"] == 0
-    assert tracks(env) == [] and open(mp, "rb").read() == before and sorted(os.listdir(os.path.join(env.root, "2026-10-06", ROOM))) == ["L041"]

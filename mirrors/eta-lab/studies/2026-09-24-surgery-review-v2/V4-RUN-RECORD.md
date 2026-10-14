@@ -1,6 +1,0 @@
-# Jev v4 scoring run record (fleet, 24 Sep 2026, ruling 148)
-
-- Wording: u9-v4.0, canonical hash `b2ebc86f5a74987172d8464529748920b26c4cf1ec9c737c44124dcc961ad960` (V4-WORDING-FROZEN.md, eta-lab df8da7c). v4.py blob `874b897e128684ae14037f3c95137d3771cf22d4` = the blob in the freeze record (unchanged since the freeze).
-- Run 1 (~17:20-17:40 IST): the 12 shipped v3 consults (working ids Q06 Q20 Q27 Q32 Q34 Q36 Q28 Q29 R06 W95 W150 W66 -> V3-01..12, key sha 1ca9a2ec4d55), de-identified in-encounter text only; scored through build_v4.py; Q36 re-scored once after adding the page-option filter (Jev's firmness 'not_applicable' is no proposal).
-- eta-refuter-2 (#549) asked that v4.selftest() be run at the START of each scoring run and its OK line recorded with the hash. Run 1 pre-dates that request: the selftest was run AFTER it, on the unchanged blob above: `v4 selftest OK: named/described independent, described-not-named keeps dependents, named-not-described shows status, history rule, gate on max, freeze enforced (changed question or cut refused)`. From now on build_v4.py runs it first and prints `RUN RECORD: <selftest OK line> | v4 hash <hash> | ids ...` at the top of every run (eta-lab commit with this file).
-- Output: ship-v4/ (158 files); v3 ship/ untouched. Per-doc v3 vs v4 diff: 69 shared answers identical, 6 changed, 8 keys added (fleet #558).
