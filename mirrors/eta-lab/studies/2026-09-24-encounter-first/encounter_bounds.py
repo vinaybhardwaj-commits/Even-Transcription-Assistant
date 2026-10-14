@@ -23,9 +23,8 @@ Usage:  encounter_bounds.py <items.json> <out.json>
                           so the encounter was NOT extended past it. Informational, not a check reason.
                           two_clips / long_pqm (> 20 min: likely several consults) /
                           long_encounter (> 25 min) / speaker_turnover_inside (a voice-set change > 3 min inside the
-                          edges, from the diarizer's labels; times in turnovers_inside) / no_speaker_data (diarizer labels
-                          cover < 50% of an encounter > 15 min: the speaker guard is blind there; fixed 24 Sep, it had only
-                          checked whether the room-day had ANY labels, so V3-01's 43.8 min went unflagged) / no_cut
+                          edges, from the diarizer's labels; times in turnovers_inside) / no_speaker_data (no labels
+                          that day and > 15 min) / no_cut
     greyed                [{start_ms, end_ms, why}]: other arm-d clips inside the PQM interval + context before/after
     check                 true when two clips each cover >= 30% of the PQM interval (a human should look, as P02)
     clips_in_pqm, pqm     for audit
@@ -96,14 +95,6 @@ def voice_change(labels, edge):
     b4, r1 = _others(labels, edge - SLACK_MS, edge); af, r2 = _others(labels, edge, edge + SLACK_MS)
     if b4 is None or af is None or r1 is not r2 or not b4 or not af: return None
     return len(b4 & af) / len(b4 | af) <= 1 / 3
-
-
-def label_coverage(labels, a, b):
-    """Fraction of [a, b) that lies inside a window that has diarizer labels (pyannote.ai or local)."""
-    cov = 0
-    for r in _pref(labels).values():
-        cov += max(0, min(b, int(r["end_ms"])) - max(a, int(r["start_ms"])))
-    return min(1.0, cov / max(1, b - a))
 
 
 def doctor_alone_tail(labels, enc_s, enc_e, min_run_min=2, max_other_s=5.0):
@@ -242,7 +233,7 @@ def bounds(items):
             + (["long_encounter"] if enc_e - enc_s > MAX_ENC_MS else []) \
             + (["speaker_turnover_inside"] if t_in else []) \
             + (["doctor_alone_tail"] if tail else []) \
-            + (["no_speaker_data"] if enc_e - enc_s > NO_SPK_MS and label_coverage(labels, enc_s, enc_e) < 0.5 else [])
+            + (["no_speaker_data"] if not labels and enc_e - enc_s > NO_SPK_MS else [])
         rec.update(basis=source, encounter={"start_ms": enc_s, "end_ms": enc_e}, primary_clip={"start_ms": s0, "end_ms": e0},
                    check=bool(reasons), check_reasons=reasons, turnovers_inside=t_in, snapped_to_voice_change=snapped,
                    doctor_alone_tail=({"from_ms": tail[0], "minutes": tail[1]} if tail else None),
