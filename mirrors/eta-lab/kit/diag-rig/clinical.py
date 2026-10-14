@@ -29,16 +29,6 @@ CONFIRM_CASES = [   # confirm1 (fresh, not in CASES): used for the language-judg
 ]
 MIX_BASES = ("hi", "kn", "ta", "te", "ml", "hi", "kn", "ta")   # 8 truly mixed dialogues (each Indic base at least once): sentence-level switching base <-> en, truth = mixed
 MIX_CASE = (0, 1, 2, 3, 4, 5, 6, 7)
-CONFIRM3_CASES = [   # confirm3 (fresh: no diagnosis/investigation shared with clinical1 or confirm2; drugs avoid the babble lines' Metformin/Amlodipine/Montelukast)
-    dict(dx="dengue fever", inv="platelet count", days=5, back=3, drugs=[("Paracetamol", 500, "mg"), ("Ondansetron", 4, "mg")]),
-    dict(dx="high cholesterol", inv="lipid profile", days=30, back=45, drugs=[("Rosuvastatin", 10, "mg"), ("Ezetimibe", 10, "mg")]),
-    dict(dx="sinusitis", inv="CT scan", days=7, back=10, drugs=[("Levocetirizine", 5, "mg"), ("Amoxicillin", 500, "mg")]),
-    dict(dx="piles", inv="proctoscopy", days=15, back=14, drugs=[("Diosmin", 500, "mg"), ("Pantoprazole", 40, "mg")]),
-    dict(dx="gout", inv="uric acid test", days=3, back=7, drugs=[("Febuxostat", 40, "mg"), ("Prednisolone", 20, "mg")]),
-    dict(dx="pneumonia", inv="blood culture", days=6, back=5, drugs=[("Cefuroxime", 500, "mg"), ("Levofloxacin", 500, "mg")]),
-    dict(dx="hernia", inv="abdominal ultrasound", days=20, back=30, drugs=[("Tramadol", 50, "mg"), ("Ondansetron", 4, "mg")]),
-    dict(dx="depression", inv="vitamin B12 level", days=30, back=21, drugs=[("Escitalopram", 10, "mg"), ("Propranolol", 20, "mg")]),
-]
 
 # frames: greet (doctor), pt (patient), dx, inv, rx (first two drugs are joined by the frame's own "and"-less list: DRUG1 DOSE1 ... ), more (each extra drug), confirm, back
 FRAMES = {
@@ -102,64 +92,14 @@ def build_confirm(lang, k):
     return build(lang, k, CONFIRM_CASES, "conf", skip_pt=True)
 
 
-def build_mixed(base, j, cases=None, prefix="mix"):
+def build_mixed(base, j):
     """j-th mixed dialogue: sentence-level switching base <-> en (even turns base, odd turns en); truth language = mixed."""
-    cases = CONFIRM_CASES if cases is None else cases
     k = MIX_CASE[j]
-    n = 5 + len(cases[k]["drugs"])                          # greet, dx, inv, first drug, extra drugs, confirm, follow-up (no complaint turn)
+    n = 5 + len(CONFIRM_CASES[k]["drugs"])                  # greet, dx, inv, first drug, extra drugs, confirm, follow-up (no complaint turn)
     tl = [base if i % 2 == 0 else "en" for i in range(n)]
-    name, turns, items = build(base, k, cases, prefix, turn_langs=tl, skip_pt=True)
+    name, turns, items = build(base, k, CONFIRM_CASES, "mix", turn_langs=tl, skip_pt=True)
     assert len(turns) == n, (len(turns), n)
-    return "%s_%s_%d" % (prefix, base, j + 1), turns, items
-
-
-def build_confirm3(lang, k):
-    return build(lang, k, CONFIRM3_CASES, "cf3", skip_pt=True)
-
-
-def build_mixed3(base, j):
-    return build_mixed(base, j, CONFIRM3_CASES, "mx3")
-
-
-def crowd_lang(base_langs, k, draw):
-    """other-language crowd for OTHER babble draw 1/2 of case k: two different languages, never the dialogue's own (nor English for mixed items); rotates so
-    English consults sit over every Indic crowd."""
-    cand = [l for l in ("en", "hi", "kn", "ta", "te", "ml") if l not in base_langs]
-    return cand[(k + (0 if draw == 1 else 2)) % len(cand)]
-
-
-CONFIRM4_CASES = [   # confirm4 (fresh: no dx/inv shared with clinical1/confirm2/confirm3; drugs avoid babble lines' Metformin/Amlodipine/Montelukast)
-    dict(dx="chickenpox", inv="varicella IgM test", days=4, back=7, drugs=[("Acyclovir", 400, "mg"), ("Calamine lotion", 1, "application")]),
-    dict(dx="tonsillitis", inv="throat swab test", days=3, back=5, drugs=[("Amoxiclav", 625, "mg"), ("Ibuprofen", 400, "mg")]),
-    dict(dx="conjunctivitis", inv="eye examination", days=2, back=4, drugs=[("Moxifloxacin drops", 1, "drop"), ("Ketorolac drops", 1, "drop")]),
-    dict(dx="varicose veins", inv="Doppler scan", days=60, back=30, drugs=[("Diosmin", 500, "mg"), ("Aspirin", 75, "mg")]),
-    dict(dx="fatty liver", inv="liver ultrasound", days=45, back=60, drugs=[("Ursodeoxycholic acid", 300, "mg"), ("Vitamin E", 400, "mg")]),
-    dict(dx="osteoporosis", inv="bone density scan", days=90, back=90, drugs=[("Alendronate", 70, "mg"), ("Calcium", 500, "mg")]),
-    dict(dx="psoriasis", inv="skin biopsy", days=30, back=21, drugs=[("Methotrexate", 10, "mg"), ("Folic acid", 5, "mg")]),
-    dict(dx="epilepsy", inv="EEG test", days=10, back=14, drugs=[("Levetiracetam", 500, "mg"), ("Clobazam", 10, "mg")]),
-]
-
-
-def build_confirm4(lang, k):
-    return build(lang, k, CONFIRM4_CASES, "cf4", skip_pt=True)
-
-
-def build_mixed4(base, j):
-    return build_mixed(base, j, CONFIRM4_CASES, "mx4")
-
-
-def confirm3_canonical():
-    return json.dumps({"confirm3_cases": CONFIRM3_CASES, "mix_bases": MIX_BASES, "mix_case": MIX_CASE, "frames": FRAMES}, sort_keys=True, ensure_ascii=False)
-
-
-CONFIRM3_SHA = hashlib.sha256(confirm3_canonical().encode("utf-8")).hexdigest()
-
-
-def confirm4_canonical():
-    return json.dumps({"confirm4_cases": CONFIRM4_CASES, "mix_bases": MIX_BASES, "mix_case": MIX_CASE, "frames": FRAMES}, sort_keys=True, ensure_ascii=False)
-
-
-CONFIRM4_SHA = hashlib.sha256(confirm4_canonical().encode("utf-8")).hexdigest()
+    return "mix_%s_%d" % (base, j + 1), turns, items
 
 
 def confirm_canonical():
