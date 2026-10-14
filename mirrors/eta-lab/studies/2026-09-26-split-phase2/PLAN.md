@@ -7,9 +7,9 @@ Author: split (CC-personal sonnet), 26 Sep 2026. DRAFT to Fable. NO training sta
 - So phase 2 is not "train longer": the first job is to stop the merge-speakers drift, then close the DER gap.
 
 ## 1. Data (read-only counts, Neon via neon-select 26 Sep)
-- pyannote.ai teacher labels: 452 windows (454 rows) created 22-24 Sep (last row 24 Sep 13:36 UTC; 0 after; +277 local rows). At 900 s/window = ~113 audio-hours. Latest dataset manifest c4585089: 173 source windows, 19 excluded (test room-days), 114 train, 40 val (4 room-days).
+- pyannote.ai teacher labels: 452 windows (454 rows) over 22-23 Sep only (+277 local rows). At 900 s/window = ~113 audio-hours. Latest dataset manifest c4585089: 173 source windows, 19 excluded (test room-days), 114 train, 40 val (4 room-days).
 - Reference set from 337e: 317 windows with pyannote.ai vs Nemotron scores (RESULTS-REFERENCE.md), usable as extra eval; NOT extra training data until checked for overlap with the 15 permanent test room-days.
-- Labels are not growing: no pyannote.ai row after 24 Sep 13:36 UTC (live transcription off by V, Fable ruling 21:45). Open question for Fable: is pyannote.ai still called in production? If not, new training data needs a paid backfill (cost unknown) or the 4,167 vault windows relabelled through pyannote.ai (each window = 1 API call, price to confirm with V).
+- Labels are NOT growing at the rate the plan assumed: last pyannote.ai row is 23 Sep. Open question for Fable: is pyannote.ai still called in production? If not, new training data needs a paid backfill (cost unknown) or the 4,167 vault windows relabelled through pyannote.ai (each window = 1 API call, price to confirm with V).
 - Hard rules kept: split by room-day; 15 test room-days (V5 + bench20) never trained on; manifest in git, audio only under ~/eta-data.
 
 ## 2. Training method (order of trial, each needs a refuter-2 read of trainer changes)
@@ -33,6 +33,3 @@ Selection = lowest val DER vs teacher subject to |count bias| <= 0.2 (a checkpoi
 1. Is pyannote.ai labelling still running? If not, approve a backfill budget.
 2. Approve trainer changes in section 2.1 (refuter-2 reads them) and the T4 memory probe.
 3. Which night slot on the T4 (hist-bulk shares it).
-
-## 6. Fable rulings 26 Sep 21:45
-Backfill: none until Fable decides on windows x price (pyannote.ai rate is not in the repo; ask V). Trainer 2.1 + 10-step T4 probe approved, refuter-2 reads the diff first. T4 slot 01:00-05:00 IST nightly under /home/eta/gpu.lock, yield to hist-bulk, never touch vLLM. Eval +~60 windows approved once labels exist. Cleanup of 337e bucket/staged audio on HOLD.
