@@ -183,10 +183,10 @@ const segs = (t: Track): Seg[] => (t.body.segments as unknown[]).filter((s): s i
 
 // --- X1: the clock. Consult-scope segment times are EPOCH ms (manifest clock tape_utc); the answer is ms from clip start. -----------------------------
 export type Manifest = { key: string; t0_ms: number; duration_ms: number | null };
-type ManifestResult = { kind: "ok"; manifest: Manifest } | { kind: "error"; code: string };
+export type ManifestResult = { kind: "ok"; manifest: Manifest } | { kind: "error"; code: string };
 
 /** The consult scope's manifest.json, bound to the row. Missing, or without a finite t0_ms, is no_clock: the clock is never guessed from row.t_open. */
-async function fetchManifest(row: Row): Promise<ManifestResult> {
+export async function fetchManifest(row: Row): Promise<ManifestResult> {
   const key = `${REB_PREFIX}${String(row.ist_date)}/${String(row.room_id)}/_consults/${String(row.consult_uid)}/manifest.json`;
   const refused = bindRefusal(key, row);
   if (refused) return { kind: "error", code: refused };
@@ -214,16 +214,25 @@ async function fetchManifest(row: Row): Promise<ManifestResult> {
   return { kind: "ok", manifest: { key, t0_ms: t0, duration_ms: d !== null && d > 0 ? Math.round(d) : null } };
 }
 
-/** PURE. A copy of the track with every segment's t0_ms / t1_ms moved from epoch to ms from clip start; a negative result becomes 0 and is counted. */
-export function toClipClock(t: Track, t0: number): { track: Track; n_clamped: number } {
+/**
+ * PURE. A copy of the track with every segment's t0_ms / t1_ms moved from epoch to ms from clip start, then clamped to [0, duration] (no upper bound when duration is null).
+ * n_clamped counts the converted values that were moved by the clamp; n_values counts the numeric values converted (t0 and t1 separately).
+ */
+export function toClipClock(t: Track, t0: number, durationMs: number | null = null): { track: Track; n_clamped: number; n_values: number } {
   let n = 0;
+  let total = 0;
   const rel = (v: unknown): unknown => {
     const x = num(v);
     if (x === null) return v;
-    const r = x - t0;
+    total++;
+    let r = x - t0;
     if (r < 0) {
       n++;
       return 0;
+    }
+    if (durationMs !== null && r > durationMs) {
+      n++;
+      r = durationMs;
     }
     return r;
   };
@@ -231,8 +240,11 @@ export function toClipClock(t: Track, t0: number): { track: Track; n_clamped: nu
     const r = asRec(g);
     return r ? { ...r, t0_ms: rel(r.t0_ms), t1_ms: rel(r.t1_ms) } : g;
   });
-  return { track: { ...t, body: { ...t.body, segments } }, n_clamped: n };
+  return { track: { ...t, body: { ...t.body, segments } }, n_clamped: n, n_values: total };
 }
+
+/** C4b: more than half of a layer's converted values clamped means the times were not on the epoch clock the manifest names. */
+export const clockMismatch = (c: { n_clamped: number; n_values: number }): boolean => c.n_values > 0 && c.n_clamped * 2 > c.n_values;
 
 export type TranscriptSegment = { i: number; t0_ms: number; t1_ms: number; speaker: string | null; role: string; lang: string | null; text_native?: string | null; text_en?: string | null };
 export type TranscriptData = {
@@ -328,30 +340,34 @@ export function buildTranscript(stt: Track, translate: Track | null, role: Track
   return { segments: out, clock: "ms_from_clip_start", duration_ms: durationMs, n_segments: out.length };
 }
 
-export async function readTranscriptLayer(row: Row, includeText: boolean): Promise<Layer<TranscriptData>> {
+export async function readTranscriptLayer(row: Row, includeText: boolean, manifest?: Promise<ManifestResult>): Promise<Layer<TranscriptData>> {
   const keys = ["stt", "translate", "role"].map((n) => layerKey(row, n));
   const source = keys.filter((k): k is string => typeof k === "string" && k !== "");
   if (keys[0] === null) return layerAbsent(source) as Layer<TranscriptData>;
-  const [mf, stt, tr, ro] = await Promise.all([fetchManifest(row), ...keys.map((k) => (k !== null ? fetchTrack(k, row) : Promise.resolve<Fetched | null>(null)))]);
+  const [mf, stt, tr, ro] = await Promise.all([manifest ?? fetchManifest(row), ...keys.map((k) => (k !== null ? fetchTrack(k, row) : Promise.resolve<Fetched | null>(null)))]);
   if (stt!.kind === "error") return layerError(source, stt!.code) as Layer<TranscriptData>;
   if (stt!.kind === "absent") return layerAbsent(source) as Layer<TranscriptData>;
   if (mf.kind === "error") return layerError(source, mf.code) as Layer<TranscriptData>;
   source.push(mf.manifest.key);
   const t0 = mf.manifest.t0_ms;
+  const durationMs = mf.manifest.duration_ms ?? clipDurationMs(row);
   let nClamped = 0;
+  let mismatch = false;
   const degraded: string[] = [];
   const pick = (name: string, f: Fetched | null | undefined): Track | null => {
     if (!f) return null;
     if (f.kind === "track") {
-      const c = toClipClock(f.track, t0);
+      const c = toClipClock(f.track, t0, durationMs);
       nClamped += c.n_clamped;
+      if (name === "stt" && clockMismatch(c)) mismatch = true;
       return c.track;
     }
     if (f.kind === "error") degraded.push(`${name}:${f.code}`);
     return null;
   };
   const sttTrack = pick("stt", stt)!;
-  const data = buildTranscript(sttTrack, pick("translate", tr), pick("role", ro), mf.manifest.duration_ms ?? clipDurationMs(row), includeText);
+  if (mismatch) return layerError(source, "clock_mismatch") as Layer<TranscriptData>;
+  const data = buildTranscript(sttTrack, pick("translate", tr), pick("role", ro), durationMs, includeText);
   const o = num(row.t_open);
   const c = num(row.t_close);
   data.manifest_t0_ms = t0;
@@ -363,18 +379,21 @@ export async function readTranscriptLayer(row: Row, includeText: boolean): Promi
 
 export type PartRow = { part: unknown; t0_ms: number | null; t1_ms: number | null; score: unknown; confidence: unknown; source: unknown };
 const PART_SOURCE = /^[A-Za-z0-9_.:-]{1,40}$/;
-export async function readPartsLayer(row: Row): Promise<Layer<PartRow[]>> {
+export async function readPartsLayer(row: Row, manifest?: Promise<ManifestResult>): Promise<Layer<PartRow[]> & { n_clamped?: number }> {
   const key = layerKey(row, "parts");
   const source = typeof key === "string" && key !== "" ? [key] : [];
   if (key === null) return layerAbsent(source) as Layer<PartRow[]>;
-  const [mf, f] = await Promise.all([fetchManifest(row), fetchTrack(key, row)]);
+  const [mf, f] = await Promise.all([manifest ?? fetchManifest(row), fetchTrack(key, row)]);
   if (f.kind === "error") return layerError(source, f.code) as Layer<PartRow[]>;
   if (f.kind === "absent") return layerAbsent(source) as Layer<PartRow[]>;
   if (asRec(f.track.body.config)?.clef_mode !== "clef+jev") return layerAbsent(source) as Layer<PartRow[]>;
   if (mf.kind === "error") return layerError(source, mf.code) as Layer<PartRow[]>;
   source.push(mf.manifest.key);
-  const { track } = toClipClock(f.track, mf.manifest.t0_ms);
-  return layerOk(source, segs(track).map((s) => ({ part: s.part ?? null, t0_ms: num(s.t0_ms), t1_ms: num(s.t1_ms), score: s.score ?? null, confidence: s.confidence ?? null, source: typeof s.source === "string" && PART_SOURCE.test(s.source) ? s.source : null })));
+  const conv = toClipClock(f.track, mf.manifest.t0_ms, mf.manifest.duration_ms ?? clipDurationMs(row));
+  if (clockMismatch(conv)) return layerError(source, "clock_mismatch") as Layer<PartRow[]>;
+  const track = conv.track;
+  // n_clamped sits on the layer object beside `data` (data stays an array)
+  return { ...layerOk(source, segs(track).map((s) => ({ part: s.part ?? null, t0_ms: num(s.t0_ms), t1_ms: num(s.t1_ms), score: s.score ?? null, confidence: s.confidence ?? null, source: typeof s.source === "string" && PART_SOURCE.test(s.source) ? s.source : null }))), n_clamped: conv.n_clamped };
 }
 
 // --- clip -----------------------------------------------------------------------------------------------------------------------------------

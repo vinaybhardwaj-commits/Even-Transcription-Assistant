@@ -22,7 +22,7 @@ import type { ConsultSpan } from "@/lib/room-access/readers/consult-span";
 import type { ConsultLine } from "@/lib/rubrics/readers/consult-text";
 import { REB_SPEAKER_ROLES, type RebSpeakerRole, type Turn } from "@/lib/room-access/readers/turns";
 
-export const UID_RE = /^[A-Za-z0-9]{10,60}$/;
+export const UID_RE = /^[A-Za-z0-9_]{10,60}$/;
 /** Arch #91. Unset = off. A value parseFlag does not recognise throws; it is never read as off. Do not set this in production until a shadow hour is accepted. */
 export const ETA_REB_ROLE_LLM = "ETA_REB_ROLE_LLM";
 export const REB_ROLE_LAYER = "role";
