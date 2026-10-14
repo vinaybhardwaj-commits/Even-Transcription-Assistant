@@ -14,6 +14,7 @@ const H = vi.hoisted(() => ({
   identity: [] as Array<Record<string, unknown>>,
   identityThrows: null as string | null,
   identityQueries: [] as Array<{ uids: string[]; withRx: boolean }>,
+  matchQueries: [] as Array<{ individual: string | null; prescription: string | null; from: string; to: string; cap: number }>,
   freescriptThrows: false,
   signCalls: [] as Array<Record<string, unknown>>,
   jev: [] as Array<Record<string, unknown>>,
@@ -29,6 +30,17 @@ vi.mock("@/lib/db", () => {
     if (/FROM room\b/.test(text) && /disabled_at/.test(text)) {
       const want = values.filter((v): v is string => typeof v === "string");
       return Promise.resolve(H.rooms.filter((r) => want.some((w) => w === r.id || w === r.slug || w.toLowerCase() === r.name.toLowerCase())));
+    }
+    if (/SELECT consult_uid FROM encounter_catalog/.test(text)) {
+      if (H.identityThrows) return Promise.reject(Object.assign(new Error("no such table"), { code: H.identityThrows }));
+      const both = /individual_uid = \?(::text)? AND prescription_uid = \?/.test(text);
+      const ind = /individual_uid = \?/.test(text);
+      const v = values as string[];
+      const q = both ? { individual: v[0]!, prescription: v[1]!, from: v[2]!, to: v[3]!, cap: Number(v[4]) } : ind ? { individual: v[0]!, prescription: null, from: v[1]!, to: v[2]!, cap: Number(v[3]) } : { individual: null, prescription: v[0]!, from: v[1]!, to: v[2]!, cap: Number(v[3]) };
+      H.matchQueries.push(q);
+      return Promise.resolve(H.identity
+        .filter((r) => (q.individual === null || r.individual_uid === q.individual) && (q.prescription === null || r.prescription_uid === q.prescription) && String(r.ist_date ?? "2026-10-05") >= q.from && String(r.ist_date ?? "2026-10-05") <= q.to)
+        .slice(0, q.cap).map((r) => ({ consult_uid: r.consult_uid })));
     }
     if (/FROM encounter_catalog/.test(text)) {
       if (H.identityThrows) return Promise.reject(Object.assign(new Error("no such table"), { code: H.identityThrows }));
@@ -75,6 +87,8 @@ import type { McpScope } from "@/lib/mcp/auth";
 
 const CTX: ToolContext = { actor: "mcp:test", origin: "https://example.test", scopes: new Set<McpScope>(["read"]) };
 const run = async (args: Row): Promise<Row> => (await catalogTool.handler(args, CTX)) as Row;
+const ADMIN_CTX: ToolContext = { actor: "mcp:admin:tester", origin: "https://example.test", scopes: new Set<McpScope>(["read", "admin"]) };
+const runA = async (args: Row): Promise<Row> => (await catalogTool.handler(args, ADMIN_CTX)) as Row;
 
 // --- fixtures ---------------------------------------------------------------------------------------------------------------------------------
 const UID = "UIDABCDEFGH1";
@@ -143,6 +157,7 @@ beforeEach(() => {
   H.identity = [];
   H.identityThrows = null;
   H.identityQueries = [];
+  H.matchQueries = [];
   H.freescriptThrows = false;
   H.signCalls = [];
   H.jev = [];
@@ -893,9 +908,9 @@ describe("CATALOG-4 W1/W2: a mis-clocked translate or role track is dropped loud
 // --- the door ---------------------------------------------------------------------------------------------------------------------------------
 describe("the door", () => {
   const { handleMcpRpc } = { handleMcpRpc: (...a: Parameters<typeof import("@/lib/mcp/handler").handleMcpRpc>) => import("@/lib/mcp/handler").then((m) => m.handleMcpRpc(...a)) };
-  const rpc = async (args: Row, principal: { rooms?: Set<string>; scopes?: Set<McpScope> } = {}) => {
+  const rpc = async (args: Row, principal: { rooms?: Set<string>; scopes?: Set<McpScope>; token?: string } = {}) => {
     const req = new NextRequest("https://x/api/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "scribe_catalog", arguments: args } }) });
-    const res = await handleMcpRpc(req, { token_id: "reader", scopes: principal.scopes ?? new Set<McpScope>(["read"]), ...(principal.rooms ? { rooms: principal.rooms } : {}) } as never);
+    const res = await handleMcpRpc(req, { token_id: principal.token ?? "reader", scopes: principal.scopes ?? new Set<McpScope>(["read"]), ...(principal.rooms ? { rooms: principal.rooms } : {}) } as never);
     return (await res.json()) as { result?: { structuredContent: Row }; error?: { code: number; message: string; data?: Row } };
   };
   const auditRows = () => H.sqlCalls.filter((c) => /^INSERT INTO audit_log/.test(c.text));
@@ -979,12 +994,12 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
   const IND = "IND-0001";
   const RX = "RX-0001";
   const idrow = (uid: string, o: Row = {}): Row => ({ consult_uid: uid, doctor_name: NAME_D, patient_name: NAME_P, individual_uid: IND, prescription_uid: RX, presc_state: "signed", prescription: { meds: ["PARACETAMOL"] }, ...o });
-  const layersOf = async (args: Row = {}) => (await run({ action: "get", consult_uid: UID, ...args })).layers as Record<string, Row>;
+  const layersOf = async (args: Row = {}) => (await runA({ action: "get", consult_uid: UID, ...args })).layers as Record<string, Row>;
   beforeEach(() => setCatalog([crow(UID)]));
 
   it("get WITHOUT include_identity: identity data is {present}, rx has only flags; no name, id, URL or prescription anywhere in the JSON", async () => {
     H.identity = [idrow(UID)];
-    const o = await run({ action: "get", consult_uid: UID, include_text: true });
+    const o = await runA({ action: "get", consult_uid: UID, include_text: true });
     const l = o.layers as Record<string, Row>;
     expect(l.identity).toEqual({ status: "ok", source: ["encounter_catalog"], data: { present: true } });
     expect(l.rx).toEqual({ status: "ok", source: ["encounter_catalog"], data: { prescription_uid: null, presc_state: "signed", has_prescription: true, pulse_url: null } });
@@ -1038,7 +1053,7 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
   it("a failing encounter_catalog read is an error on identity and rx only; the rest of get answers; cdmss stays not_available", async () => {
     seedLayers();
     H.identityThrows = "42P01";
-    const o = await run({ action: "get", consult_uid: UID });
+    const o = await runA({ action: "get", consult_uid: UID });
     const l = o.layers as Record<string, Row>;
     expect(o.ok).toBe(true);
     expect(l.identity).toMatchObject({ status: "error", error: "db_error:42P01", data: null });
@@ -1060,7 +1075,7 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
   it("search without filters: rows carry has_prescription (boolean, or null with no joined row) and identity_rows; no identity block, no names", async () => {
     setCatalog([crow("CONSULT_AAA1", { t_open: 300 }), crow("CONSULT_ZZZ9", { t_open: 100 })]);
     H.identity = [idrow("CONSULT_AAA1")];
-    const o = await run({ action: "search" });
+    const o = await runA({ action: "search" });
     expect((o.rows as Row[]).map((r) => r.has_prescription)).toEqual([true, null]);
     expect(o.identity_rows).toBe(1);
     expect(JSON.stringify(o)).not.toMatch(/Synthetic|IND-0001|RX-0001/);
@@ -1069,59 +1084,59 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
   it("include_identity adds identity {names, ids, state, pulse_url} per row (null with no joined row)", async () => {
     setCatalog([crow("CONSULT_AAA1", { t_open: 300 }), crow("CONSULT_ZZZ9", { t_open: 100 })]);
     H.identity = [idrow("CONSULT_AAA1")];
-    const r = (await run({ action: "search", include_identity: true })).rows as Row[];
+    const r = (await runA({ action: "search", include_identity: true })).rows as Row[];
     expect(r[0]!.identity).toEqual({ doctor_name: NAME_D, patient_name: NAME_P, individual_uid: IND, prescription_uid: RX, presc_state: "signed", pulse_url: `https://pulse.even.in/prescription?prescription_uid=${RX}&individual_uid=${IND}` });
     expect(r[1]!.identity).toBeNull();
   });
   it("filters: has_prescription true/false, prescription_uid, individual_uid, combined; has_rx is an alias; total_matched reflects the filter", async () => {
     trio();
-    expect(uidsOf(await run({ action: "search", has_prescription: true }))).toEqual(["CONSULT_AAA1", "CONSULT_CCC3"]);
-    expect(uidsOf(await run({ action: "search", has_prescription: false }))).toEqual(["CONSULT_BBB2"]);
-    expect(uidsOf(await run({ action: "search", has_rx: true }))).toEqual(["CONSULT_AAA1", "CONSULT_CCC3"]);
-    expect(uidsOf(await run({ action: "search", has_rx: false }))).toEqual(["CONSULT_BBB2"]);
-    expect(uidsOf(await run({ action: "search", prescription_uid: "RX-C" }))).toEqual(["CONSULT_CCC3"]);
-    expect(uidsOf(await run({ action: "search", individual_uid: "IND-A" }))).toEqual(["CONSULT_AAA1", "CONSULT_BBB2"]);
-    expect(uidsOf(await run({ action: "search", individual_uid: "IND-A", has_prescription: true }))).toEqual(["CONSULT_AAA1"]);
-    const o = await run({ action: "search", has_prescription: true, limit: 1 });
+    expect(uidsOf(await runA({ action: "search", has_prescription: true }))).toEqual(["CONSULT_AAA1", "CONSULT_CCC3"]);
+    expect(uidsOf(await runA({ action: "search", has_prescription: false }))).toEqual(["CONSULT_BBB2"]);
+    expect(uidsOf(await runA({ action: "search", has_rx: true }))).toEqual(["CONSULT_AAA1", "CONSULT_CCC3"]);
+    expect(uidsOf(await runA({ action: "search", has_rx: false }))).toEqual(["CONSULT_BBB2"]);
+    expect(uidsOf(await runA({ action: "search", prescription_uid: "RX-C" }))).toEqual(["CONSULT_CCC3"]);
+    expect(uidsOf(await runA({ action: "search", individual_uid: "IND-A" }))).toEqual(["CONSULT_AAA1", "CONSULT_BBB2"]);
+    expect(uidsOf(await runA({ action: "search", individual_uid: "IND-A", has_prescription: true }))).toEqual(["CONSULT_AAA1"]);
+    const o = await runA({ action: "search", has_prescription: true, limit: 1 });
     expect(o).toMatchObject({ total_matched: 2, identity_rows: 3 });
     expect(typeof o.next_cursor).toBe("string");
-    expect(uidsOf(await run({ action: "search", prescription_uid: "NOPE" }))).toEqual([]);
+    expect(uidsOf(await runA({ action: "search", prescription_uid: "NOPE" }))).toEqual([]);
   });
   it("filter args are validated: ids must match the 0168 id class; has_prescription must be a boolean", async () => {
     trio();
-    for (const k of ["prescription_uid", "individual_uid"]) for (const bad of ["a b", "x/y", "q&r", "a".repeat(129), 5, {}]) expect(await run({ action: "search", [k]: bad }), `${k} ${String(bad)}`).toMatchObject({ ok: false, error: "bad_args" });
-    for (const bad of ["maybe", 3, {}]) expect(await run({ action: "search", has_prescription: bad })).toMatchObject({ ok: false, error: "bad_args" });
+    for (const k of ["prescription_uid", "individual_uid"]) for (const bad of ["a b", "x/y", "q&r", "a".repeat(129), 5, {}]) expect(await runA({ action: "search", [k]: bad }), `${k} ${String(bad)}`).toMatchObject({ ok: false, error: "bad_args" });
+    for (const bad of ["maybe", 3, {}]) expect(await runA({ action: "search", has_prescription: bad })).toMatchObject({ ok: false, error: "bad_args" });
     expect(H.identityQueries).toEqual([]);
   });
   it("the join comes AFTER the date/room/doctor filters and is chunked at 500 uids per query", async () => {
     const many = Array.from({ length: 1203 }, (_, i) => crow(`CHUNKROW_${String(i).padStart(5, "0")}`, { t_open: 10_000 - i, doctor_uid: i % 2 === 0 ? "docEven" : "docOdd" }));
     setCatalog(many);
     H.identity = many.map((r) => idrow(r.consult_uid as string));
-    const o = await run({ action: "search", has_prescription: true, doctor_uid: "docEven", limit: 200 });
+    const o = await runA({ action: "search", has_prescription: true, doctor_uid: "docEven", limit: 200 });
     expect(o.total_matched).toBe(602);
     expect(H.identityQueries.map((q) => q.uids.length)).toEqual([500, 102]); // only the 602 doctor matches were joined, 500 + 102
     expect(H.identityQueries.every((q) => q.uids.length <= 500)).toBe(true);
     // a plain search joins only the returned page (<= 200, one query)
     H.identityQueries = [];
-    await run({ action: "search", limit: 200 });
+    await runA({ action: "search", limit: 200 });
     expect(H.identityQueries.map((q) => q.uids.length)).toEqual([200]);
   });
   it("an empty table: filters return rows [] with identity_rows 0 (not 'no prescription'); a plain search says identity_rows 0 and has_prescription null", async () => {
     trio();
     H.identity = [];
     for (const f of [{ has_prescription: false }, { has_prescription: true }, { prescription_uid: "RX-A" }, { individual_uid: "IND-A" }]) {
-      expect(await run({ action: "search", ...f }), JSON.stringify(f)).toMatchObject({ ok: true, rows: [], total_matched: 0, identity_rows: 0 });
+      expect(await runA({ action: "search", ...f }), JSON.stringify(f)).toMatchObject({ ok: true, rows: [], total_matched: 0, identity_rows: 0 });
     }
-    const o = await run({ action: "search" });
+    const o = await runA({ action: "search" });
     expect(o.identity_rows).toBe(0);
     expect((o.rows as Row[]).every((r) => r.has_prescription === null)).toBe(true);
   });
   it("a SQL error: filters and include_identity answer identity_unavailable; a plain search degrades (has_prescription null, identity_rows null, identity_error)", async () => {
     trio();
     H.identityThrows = "42P01";
-    expect(await run({ action: "search", has_prescription: true })).toEqual({ ok: false, error: "identity_unavailable" });
-    expect(await run({ action: "search", include_identity: true })).toEqual({ ok: false, error: "identity_unavailable" });
-    const o = await run({ action: "search" });
+    expect(await runA({ action: "search", has_prescription: true })).toEqual({ ok: false, error: "identity_unavailable" });
+    expect(await runA({ action: "search", include_identity: true })).toEqual({ ok: false, error: "identity_unavailable" });
+    const o = await runA({ action: "search" });
     expect(o).toMatchObject({ ok: true, identity_rows: null, identity_error: true });
     expect((o.rows as Row[]).every((r) => r.has_prescription === null)).toBe(true);
   });
@@ -1135,12 +1150,12 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
   });
   it("V4 audit: a search with individual_uid / prescription_uid / has_prescription holds has_prescription (boolean) and neither uid nor any name; a string has_prescription is dropped", async () => {
     trio();
-    await rpc({ action: "search", individual_uid: "IND-A", prescription_uid: "RX-A", has_prescription: true, include_identity: true });
+    await rpc({ action: "search", individual_uid: "IND-A", prescription_uid: "RX-A", has_prescription: true, include_identity: true }, { token: "admin:tester", scopes: new Set<McpScope>(["read", "admin"]) });
     let a = lastAudit().args as Row;
-    expect(a).toEqual({ action: "search", has_prescription: true, include_identity: true });
+    expect(a).toEqual({ action: "search", has_prescription: true, include_identity: true, by_individual_uid: true, by_prescription_uid: true, identity_filter: true });
     const text = JSON.stringify(auditRows()) + logs.join("\n");
     for (const needle of ["IND-A", "RX-A", NAME_D, NAME_P, "Synthetic"]) expect(text, needle).not.toContain(needle);
-    await rpc({ action: "search", has_prescription: "Synthetic Patient" });
+    await rpc({ action: "search", has_prescription: "Synthetic Patient" }, { token: "admin:tester", scopes: new Set<McpScope>(["read", "admin"]) });
     a = lastAudit().args as Row;
     expect(a).not.toHaveProperty("has_prescription");
   });
@@ -1149,10 +1164,108 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
     const b = await rpc({ action: "get", consult_uid: UID, include_identity: true }, { rooms: new Set(["room_a"]), scopes: new Set<McpScope>(["read", "invoke", "write"]) });
     expect(b.error).toMatchObject({ code: -32001 });
     expect(H.identityQueries).toEqual([]);
-    await rpc({ action: "get", consult_uid: "CONSULT_AAA1", include_identity: true, include_text: true });
-    await rpc({ action: "search", include_identity: true });
+    await rpc({ action: "get", consult_uid: "CONSULT_AAA1", include_identity: true, include_text: true }, { token: "admin:tester", scopes: new Set<McpScope>(["read", "admin"]) });
+    await rpc({ action: "search", include_identity: true }, { token: "admin:tester", scopes: new Set<McpScope>(["read", "admin"]) });
     expect(logs.join("\n")).not.toMatch(/Synthetic|IND-|RX-|PARACETAMOL/);
   });
-});
 
+  // --- CATALOG-6 ---
+  const ADM_P = { token: "admin:tester", scopes: new Set<McpScope>(["read", "admin"]) };
+  it("C1: a search by individual_uid audits by_individual_uid and identity_filter and the value appears nowhere; the same for prescription_uid; a search without them has none of the keys", async () => {
+    trio();
+    await rpc({ action: "search", individual_uid: "IND-A" }, ADM_P);
+    expect(lastAudit().args).toEqual({ action: "search", by_individual_uid: true, identity_filter: true });
+    let text = JSON.stringify(auditRows()) + logs.join("\n");
+    expect(text).not.toContain("IND-A");
+    await rpc({ action: "search", prescription_uid: "RX-C" }, ADM_P);
+    expect(lastAudit().args).toEqual({ action: "search", by_prescription_uid: true, identity_filter: true });
+    text = JSON.stringify(auditRows()) + logs.join("\n");
+    expect(text).not.toContain("RX-C");
+    await rpc({ action: "search", limit: 3 });
+    const a = lastAudit().args as Row;
+    for (const k of ["by_individual_uid", "by_prescription_uid", "identity_filter"]) expect(a, k).not.toHaveProperty(k);
+    const { safeArgs } = await import("@/lib/mcp/audit");
+    expect(safeArgs({ individual_uid: "", prescription_uid: 5, action: "search" })).toEqual({ action: "search" });
+    expect(Object.keys(safeArgs({ individual_uid: "x", prescription_uid: "y" })).sort()).toEqual(["by_individual_uid", "by_prescription_uid", "identity_filter"]);
+  });
+  it("C2: a read token with include_identity, a prescription_uid or an individual_uid is refused -32001 and no SQL touches encounter_catalog; an admin: actor without the admin scope is refused too", async () => {
+    trio();
+    for (const args of [{ action: "get", consult_uid: UID, include_identity: true }, { action: "search", include_identity: true }, { action: "search", prescription_uid: "RX-A" }, { action: "search", individual_uid: "IND-A" }, { action: "get", consult_uid: UID, include_identity: "true" }]) {
+      const b = await rpc(args);
+      expect(b.error, JSON.stringify(args)).toMatchObject({ code: -32001 });
+      expect(b.error!.data).toMatchObject({ needed: "admin" });
+    }
+    expect((await rpc({ action: "search", individual_uid: "IND-A" }, { token: "admin:tester", scopes: new Set<McpScope>(["read"]) })).error).toMatchObject({ code: -32001 });
+    expect((await rpc({ action: "search", individual_uid: "IND-A" }, { token: "someone", scopes: new Set<McpScope>(["read", "admin"]) })).error).toMatchObject({ code: -32001 }); // admin scope but no admin: actor
+    expect(H.sqlCalls.filter((c) => /encounter_catalog/.test(c.text))).toEqual([]);
+    expect(H.identityQueries).toEqual([]);
+    expect(H.matchQueries).toEqual([]);
+  });
+  it("C2: an admin token is allowed; a read token without those args still works (identity {present}, has_prescription)", async () => {
+    trio();
+    H.identity = [idrow(UID)];
+    setCatalog([crow(UID), ...[]]);
+    const ok = await rpc({ action: "get", consult_uid: UID, include_identity: true }, ADM_P);
+    expect(ok.error).toBeUndefined();
+    expect(((ok.result!.structuredContent.layers as Row).identity as Row).data).toMatchObject({ doctor_name: NAME_D });
+    const rd = await rpc({ action: "get", consult_uid: UID });
+    expect(rd.error).toBeUndefined();
+    expect(((rd.result!.structuredContent.layers as Row).identity as Row).data).toEqual({ present: true });
+    const s2 = await rpc({ action: "search", has_prescription: true });
+    expect(s2.error).toBeUndefined();
+    expect((s2.result!.structuredContent.rows as Row[])[0]).toMatchObject({ has_prescription: true });
+    expect(JSON.stringify(rd.result) + JSON.stringify(s2.result)).not.toMatch(/Synthetic|IND-0001|RX-0001/);
+  });
+  it("C5: the id filters use the SQL path (windowed, capped at 2000+1), not a chunked join over all candidates", async () => {
+    trio();
+    expect(uidsOf(await runA({ action: "search", individual_uid: "IND-A" }))).toEqual(["CONSULT_AAA1", "CONSULT_BBB2"]);
+    expect(H.matchQueries).toHaveLength(1);
+    expect(H.matchQueries[0]).toMatchObject({ individual: "IND-A", prescription: null, cap: 2001 });
+    expect(H.matchQueries[0]!.from < H.matchQueries[0]!.to).toBe(true);
+    // the identity join then covers the returned page only
+    expect(H.identityQueries.map((q) => q.uids)).toEqual([["CONSULT_AAA1", "CONSULT_BBB2"]]);
+    H.matchQueries = [];
+    expect(uidsOf(await runA({ action: "search", prescription_uid: "RX-C" }))).toEqual(["CONSULT_CCC3"]);
+    expect(H.matchQueries[0]).toMatchObject({ individual: null, prescription: "RX-C" });
+    expect(uidsOf(await runA({ action: "search", prescription_uid: "RX-A", individual_uid: "IND-A" }))).toEqual(["CONSULT_AAA1"]);
+    expect(uidsOf(await runA({ action: "search", prescription_uid: "RX-A", individual_uid: "IND-C" }))).toEqual([]);
+    expect(uidsOf(await runA({ action: "search", individual_uid: "IND-A", has_prescription: true }))).toEqual(["CONSULT_AAA1"]);
+  });
+  it("C5: uid filters are bounded by the window (from/to) and intersected with the R2 candidates", async () => {
+    trio();
+    H.identity.push(idrow("ONLY_IN_TABLE", { individual_uid: "IND-A" })); // not in the R2 catalog: never returned
+    H.identity.push(idrow("OLD_ROW_AAA", { individual_uid: "IND-A", ist_date: "2026-09-12" }));
+    expect(uidsOf(await runA({ action: "search", individual_uid: "IND-A" }))).toEqual(["CONSULT_AAA1", "CONSULT_BBB2"]);
+    expect(H.matchQueries.at(-1)).toMatchObject({ from: "2026-09-15", to: "2026-10-14" }); // the 30-day default window
+    setCatalog([crow("OLD_ROW_AAA", { ist_date: "2026-09-12" }), crow("CONSULT_AAA1", { t_open: 300 })]);
+    resetCatalogCacheForTests();
+    expect(uidsOf(await runA({ action: "search", individual_uid: "IND-A", from: "2026-09-10", to: "2026-09-20" }))).toEqual(["OLD_ROW_AAA"]);
+  });
+  it("C5: more than 2000 matches is too_many_matches; exactly 2000 passes; a SQL error is identity_unavailable", async () => {
+    const mk = (n: number) => Array.from({ length: n }, (_, i) => crow(`BULKROW_${String(i).padStart(5, "0")}`, { t_open: 50_000 - i }));
+    setCatalog(mk(2001));
+    H.identity = mk(2001).map((r) => idrow(r.consult_uid as string, { individual_uid: "IND-BULK" }));
+    expect(await runA({ action: "search", individual_uid: "IND-BULK" })).toEqual({ ok: false, error: "too_many_matches" });
+    H.identity = H.identity.slice(0, 2000);
+    expect(await runA({ action: "search", individual_uid: "IND-BULK" })).toMatchObject({ ok: true, total_matched: 2000 });
+    H.identityThrows = "42P01";
+    expect(await runA({ action: "search", individual_uid: "IND-BULK" })).toEqual({ ok: false, error: "identity_unavailable" });
+  });
+  it("C5: has_prescription refuses a window over 31 days; the 30-day default and a 31-day window pass; uid filters have no such limit", async () => {
+    trio();
+    expect(await runA({ action: "search", has_prescription: true, from: "2026-09-10", to: "2026-10-14" })).toEqual({ ok: false, error: "bad_args", detail: "has_prescription spans at most 31 days" });
+    expect(await runA({ action: "search", has_prescription: true, from: "2026-09-09" })).toMatchObject({ ok: false, error: "bad_args" }); // from alone: a 92-day partner, clamped at today: 36 days
+    expect(await runA({ action: "search", has_prescription: true, from: "2026-09-14", to: "2026-10-14" })).toMatchObject({ ok: true }); // 31 days inclusive
+    expect(await runA({ action: "search", has_prescription: true })).toMatchObject({ ok: true, default_window: true });
+    expect(await runA({ action: "search", has_rx: false, from: "2026-09-09" })).toMatchObject({ ok: false, error: "bad_args" });
+    expect(await runA({ action: "search", individual_uid: "IND-A", from: "2026-09-09", to: "2026-10-14" })).toMatchObject({ ok: true });
+  });
+  it("C5: the new path returns what the old chunked path returned on the same fixture (ids equal, order equal)", async () => {
+    trio();
+    const viaSql = uidsOf(await runA({ action: "search", individual_uid: "IND-A" }));
+    const viaJoin = (await runA({ action: "search", include_identity: true, limit: 200 })).rows as Row[];
+    const oldPath = viaJoin.filter((r) => (r.identity as Row | null)?.individual_uid === "IND-A").map((r) => r.consult_uid);
+    expect(viaSql).toEqual(oldPath);
+  });
+});
 });

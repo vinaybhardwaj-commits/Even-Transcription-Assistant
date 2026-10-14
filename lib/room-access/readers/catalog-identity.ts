@@ -60,3 +60,33 @@ export const identityView = (r: IdentityRow) => ({
   doctor_name: r.doctor_name, patient_name: r.patient_name, individual_uid: r.individual_uid, prescription_uid: r.prescription_uid, presc_state: r.presc_state,
   pulse_url: pulseUrl(r.prescription_uid, r.individual_uid),
 });
+
+// --- C5: the id filters run in SQL, bounded by the search window ------------------------------------------------------------------------------------
+export const IDENTITY_MATCH_CAP = 2000;
+export type MatchResult = { status: "ok"; uids: Set<string> } | { status: "too_many_matches" } | { status: "error"; code: string };
+
+/** The consult_uids whose joined identity matches the given ids inside [from, to] (IST dates). At most 2000; one more than that is too_many_matches. Never throws. */
+export async function consultsByIdentity(f: { individualUid: string | null; prescriptionUid: string | null; from: string; to: string }): Promise<MatchResult> {
+  try {
+    const cap = IDENTITY_MATCH_CAP + 1;
+    const got = (f.individualUid !== null && f.prescriptionUid !== null
+      ? await sql`
+          SELECT consult_uid FROM encounter_catalog
+           WHERE individual_uid = ${f.individualUid}::text AND prescription_uid = ${f.prescriptionUid}::text AND ist_date BETWEEN ${f.from}::date AND ${f.to}::date
+           LIMIT ${cap}::int`
+      : f.individualUid !== null
+        ? await sql`
+          SELECT consult_uid FROM encounter_catalog
+           WHERE individual_uid = ${f.individualUid}::text AND ist_date BETWEEN ${f.from}::date AND ${f.to}::date
+           LIMIT ${cap}::int`
+        : await sql`
+          SELECT consult_uid FROM encounter_catalog
+           WHERE prescription_uid = ${f.prescriptionUid}::text AND ist_date BETWEEN ${f.from}::date AND ${f.to}::date
+           LIMIT ${cap}::int`) as Array<Record<string, unknown>>;
+    if (got.length > IDENTITY_MATCH_CAP) return { status: "too_many_matches" };
+    return { status: "ok", uids: new Set(got.map((r) => String(r.consult_uid))) };
+  } catch (e) {
+    const c = (e as { code?: unknown })?.code;
+    return { status: "error", code: typeof c === "string" && /^[0-9A-Z]{5}$/.test(c) ? `db_error:${c}` : "read_failed" };
+  }
+}
