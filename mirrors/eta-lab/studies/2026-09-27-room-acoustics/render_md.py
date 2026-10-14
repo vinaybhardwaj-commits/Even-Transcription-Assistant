@@ -17,7 +17,6 @@ for p in P:
              f"{g(s,'median')} ({g(s,'p10')} to {g(s,'p90')}) [{g(s,'share_of_chunks_pct')}] | {g(p.get('snr_vad_free_db'),'median')} | {g(p,'chunks_no_vad_speech_pct')} | {g(p,'clip_pct_ge_0.999')} | {g(p,'exact_zero_sample_pct')} | {g(p,'mute_signature_chunk_pct')} | "
              f"{g(r,'median_s')} ({g(r,'n_decays',0)}) | {g(p,'c50_db_from_median_rt60')} |")
 L += ["", "**Reading the SNR columns:** the VAD-based SNR describes only the minority of chunks where Silero hears speech (see the [% chunks] and no-VAD columns), so a high VAD SNR does not mean the room is clean. The VAD-free figure is an upper-bound dynamic range, not a speech SNR.",
-      "**Reading the noise columns for the TONOR rooms (OPD 3 TONOR stint, ORB3):** these rooms show 63-76% of chunks with no VAD-detected speech, higher than the C270 rooms. Their \"quiet\" frames very likely include speech Silero missed, so their noise figure is noise PLUS undetected speech, not a clean noise floor. Do not read their higher noise numbers vs the C270 rooms as \"the TONOR rooms are noisier\" without an independent, VAD-free check (a listen, or level vs time of day).",
       "", "## Speech spectrum (does the mic cut highs?)", "",
       "| room | mic | tilt dB/oct (200-4k) | 4-8k vs 0.3-3k dB | 8-16k vs 0.3-3k dB | bandwidth -30 dB Hz | 95% energy below Hz |", "|---|---|--:|--:|--:|--:|--:|"]
 for p in P:

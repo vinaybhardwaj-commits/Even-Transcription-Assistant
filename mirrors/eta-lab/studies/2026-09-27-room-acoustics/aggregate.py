@@ -133,8 +133,7 @@ def main():
         for (g, mic), rr in sorted(groups.items()):
             if g == rid: profs.append(profile(rr, lab, mic))
     stt = json.load(open(a.stt)) if a.stt else None
-    out = {"generated": datetime.datetime.now().isoformat(timespec="seconds"),
-           "source": "lab tape copies ~/eta-data/tapes as of 2026-09-27 09:39 IST (25-27 Sep 2026 UTC start dates; 27 Sep is PARTIAL, not the full day)",
+    out = {"generated": datetime.datetime.now().isoformat(timespec="seconds"), "source": "lab tape copies ~/eta-data/tapes (25-27 Sep 2026 UTC start dates)",
            "n_chunks": len(rows), "profiles": profs, "no_tape": NOTAPE, "stt_route_by_room": stt}
     os.makedirs(a.out_dir, exist_ok=True)
     jp = os.path.join(a.out_dir, "room-profiles-2026-09-27.json")
