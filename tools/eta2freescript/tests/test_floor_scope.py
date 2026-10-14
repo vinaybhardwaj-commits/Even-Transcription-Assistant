@@ -118,12 +118,12 @@ def _inv(strength=None, frequency=None, duration=None):
     ("duration", "7 days", "come at seven o'clock", 1), ("duration", "10 days", "room ten please", 1),
     ("strength", "15 mg", "fifteen minutes in the waiting room", 1), ("strength", "40 mg", "he is forty", 1),
     ("strength", "50 mg", "fifty fifty chance", 1), ("strength", "20 mg", "in twenty twenty six", 1), ("strength", "0.2 mg", "at this point two of them", 2),
-    ("strength", "1 g", "take one gram", 0), ("strength", "5 mg", "take 0.5 mg", 0), ("strength", "0.5 mg", "half a tablet", 0),
+    ("strength", "1 g", "take one gram", 0), ("strength", "5 mg", "take 0.5 mg", 0), ("strength", "0.5 mg", "half a tablet", 2),
     ("strength", "1.5 mg", "one and a half mg", 0), ("strength", "500 mg", "five hundred milligram", 0),
     ("strength", "5 mg", "five hundred milligram", 1), ("strength", "2.5 mg", "two point five milligram", 0),
     ("strength", "5 mg", "Bed five. Tablets are not helping", 1), ("strength", "5 mg", "Bed five? Tablets are not helping", 1),
     ("strength", "5 mg", "Bed five! Tablets", 1), ("strength", "5 mg", "Bed five; tablets", 1), ("strength", "5 mg", "Bed five\ntablets", 1),
-    ("strength", "5 mg", "take five tablets. Then rest", 0), ("strength", "5 mg", "five a tablet", 0), ("strength", "5 mg", "five. a tablet", 1),
+    ("strength", "5 mg", "take five tablets. Then rest", 1), ("strength", "5 mg", "five a tablet", 1), ("strength", "5 mg", "five. a tablet", 1),
 ])
 def test_floor_cases(field, value, said, count):
     assert _inv(**{field: value})(said)["count"] == count, (value, said)
@@ -261,8 +261,8 @@ def test_wrong_drug_strength_stays_eta_on_the_drug_where_eta_wrote_it():
 @pytest.mark.parametrize("field,value,said,count", [
     ("strength", "250 mg", "take two fifty mg", 0), ("strength", "250 mg", "take two fifty reports", 1), ("strength", "250 mg", "two fifty", 1),
     ("strength", "225 mg", "two twenty five mg", 0), ("strength", "225 mg", "two twenty five", 1), ("strength", "950 mg", "nine fifty mg", 0),
-    ("strength", "0.5 mg", "take half a tablet", 0), ("strength", "0.5 mg", "half past two", 2), ("strength", "0.5 mg", "it is half", 2),
-    ("strength", "0.5 mg", "1/2 tablet", 0), ("strength", "0.5 mg", "1/2 a tablet", 0), ("strength", "0.5 mg", "page 1/2", 2),
+    ("strength", "0.5 mg", "take half a tablet", 2), ("strength", "0.5 mg", "half past two", 2), ("strength", "0.5 mg", "it is half", 2),
+    ("strength", "0.5 mg", "1/2 tablet", 2), ("strength", "0.5 mg", "1/2 a tablet", 2), ("strength", "0.5 mg", "page 1/2", 2),
     ("strength", "0.5 mg", "1/2", 2),
 ])
 def test_colloquial_hundreds_half_and_slash_half(field, value, said, count):
@@ -432,3 +432,39 @@ def test_r4_non_string_note_text_is_handled_in_medicine_mode_as_in_global():
         assert res[0]["sources"] == res[1]["sources"], (bad, res)
         fs = [floors._field_source(rx["medicines"][0], "frequency", art, None, mode) for mode in ("global", "medicine")]
         assert fs[0] == fs[1], bad
+
+
+def test_r5_a_spoken_value_excuses_only_a_replayed_value_of_the_same_unit():
+    assert _inv(strength="2 mg")("two doses")["count"] == 1
+    assert _inv(strength="2 mg")("take two tablets")["count"] == 1
+    assert _inv(strength="60 mg")("sixty kg")["count"] == 1
+    assert _inv(duration="40 days")("forty years old")["count"] == 1
+    assert _inv(strength="500 mg")("five hundred milligram")["count"] == 0
+    assert _inv(strength="250 mg")("two fifty mg")["count"] == 0
+    assert _inv(strength="0.5 mg")("half a tablet")["count"] == 2  # form is not mg (runs 0 and 5)
+    assert _inv(duration="40 days")("for forty days")["count"] == 0
+    # unit normalisation, and a different unit of the same kind is not the same unit
+    assert _inv(strength="500 mcg")("five hundred micrograms")["count"] == 0
+    assert _inv(strength="500 mg")("five hundred micrograms")["count"] == 1
+    assert _inv(strength="2 g")("two grams")["count"] == 0 and _inv(strength="2 ml")("two millilitres")["count"] == 0
+    assert _inv(strength="100 IU")("one hundred international units")["count"] == 0
+    assert _inv(duration="2 weeks")("two days")["count"] == 1 and _inv(duration="2 weeks")("two weeks")["count"] == 0
+    # frequency words excuse a frequency only
+    assert _inv(frequency="2")("two doses")["count"] == 0
+    # a replayed number with no unit is excused by no word
+    assert _inv(strength="500")("five hundred mg")["count"] == 1
+    assert _inv(duration="40")("forty days")["count"] == 1
+
+
+def test_r5_hyphenated_one_and_a_half_is_one_point_five():
+    assert floors.parse_number_words("one-and-a-half") == [Decimal("1.5")]
+    assert floors.parse_number_words("one-and-a-half") == floors.parse_number_words("one and a half")
+    assert floors.spoken_values("one-and-a-half tablets") == {Decimal("1.5")}
+    assert _inv(strength="0.5 mg")("one-and-a-half tablets")["count"] == 2
+
+
+def test_r5_nul_inside_a_replayed_value_does_not_split_a_run():
+    assert floors._invented_core({"medicines": [{"name": "Paracetamol", "strength": "5\x0000"}]}, _syn("Medication: Paracetamol", [_prov("Paracetamol")]),
+                                 _consult("five hundred"))["count"] == 1
+    assert floors._invented_core({"medicines": [{"name": "Paracetamol", "strength": "5\x0000"}]}, _syn("Medication: Paracetamol", [_prov("Paracetamol")]),
+                                 _consult("500"))["count"] == 0

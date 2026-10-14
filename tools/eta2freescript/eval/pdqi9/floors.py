@@ -275,6 +275,7 @@ _UNITS = {w: i for i, w in enumerate("zero one two three four five six seven eig
                                      "sixteen seventeen eighteen nineteen".split())}
 _TENS = {w: 10 * i for i, w in enumerate("_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()) if w != "_"}
 _SPOKEN_TOKEN = re.compile(r"[a-z]+|\d+|[^a-z\d \t]")  # only spaces and tabs separate tokens silently; any other character is a break token
+_HYPHEN_HALF = re.compile(r"\b([a-z]+)-and-a-half\b")  # "one-and-a-half" is "one and a half"
 _TENS_UNIT = re.compile(r"\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)-(one|two|three|four|five|six|seven|eight|nine)\b")
 
 
@@ -324,7 +325,7 @@ def _integer_at(toks: list[str], j: int):
 def _scan_numbers(text: str):
     """(tokens, spans): every number the text speaks, as (value, start, end, kind) over token indexes; kind is "num", "digit" (a bare
     digit token), "half" or "lead_point" ("point five" with no number before it)."""
-    toks = _SPOKEN_TOKEN.findall(_TENS_UNIT.sub(r"\1 \2", (text or "").lower()))
+    toks = _SPOKEN_TOKEN.findall(_TENS_UNIT.sub(r"\1 \2", _HYPHEN_HALF.sub(r"\1 and a half", (text or "").lower())))
     out: list[tuple[Decimal, int, int, str]] = []
     i, n = 0, len(toks)
     while i < n:
@@ -361,47 +362,60 @@ def parse_number_words(text: str) -> list[Decimal]:
     return [v for v, _, _, _ in _scan_numbers(text)[1]]
 
 
-# Safety floor: a number word is "heard" only when it is plainly a quantity: the next token (past one a/an/of) is a quantity word in the same sentence.
-# Clock-time units (hour, minute) are deliberately absent: "fifteen minutes in the waiting room" is not a 15 mg strength.
-_TIME_UNITS = frozenset("day week month year".split())
-_DOSAGE_UNITS = frozenset(
-    "mg g gm gms gram milligram mcg microgram kg ml millilitre milliliter l litre liter iu unit tablet tab capsule cap spoon teaspoon "
-    "tablespoon drop puff sachet sachets patch lozenge ampoule vial injection dose".split())
-_FREQ_WORDS = frozenset("time dose daily twice thrice".split())
-_QUANTITY = _TIME_UNITS | _DOSAGE_UNITS | _FREQ_WORDS
+# Safety floor: a number word is "heard" only when it is plainly a quantity: the next token (past one a/an/of) is a quantity word in the same sentence,
+# and the quantity word's UNIT equals the unit of the replayed value (mg for mg, day for days). Clock-time units (hour, minute) are deliberately absent.
+_UNIT_WORDS = {
+    "mg": "mg", "milligram": "mg", "g": "g", "gm": "g", "gms": "g", "gram": "g", "mcg": "mcg", "ug": "mcg", "microgram": "mcg",
+    "ml": "ml", "millilitre": "ml", "milliliter": "ml", "l": "l", "litre": "l", "liter": "l", "iu": "iu", "unit": "iu", "kg": "kg",
+    "day": "day", "week": "week", "month": "month", "year": "year",
+    "time": "freq", "dose": "freq", "daily": "freq", "twice": "freq", "thrice": "freq",
+}
+_FORM_WORDS = frozenset("tablet tab capsule cap spoon teaspoon tablespoon drop puff sachet patch lozenge ampoule vial injection".split())
+# a dosage form, "dose" and a body unit (kg) never excuse a strength: they name no strength unit
+_STRENGTH_UNITS = frozenset("mg g mcg ml l iu".split())
+_TIME_UNIT_SET = frozenset("day week month year".split())
+_KIND_UNITS = {"strength": _STRENGTH_UNITS, "duration": _TIME_UNIT_SET, "frequency": frozenset({"freq"})}
 
 
-def _quantity_base(tok: str) -> str | None:
+def _unit_of(tok: str) -> str | None:
+    """Canonical unit of a quantity word ("milligrams" -> "mg"), "form" for a dosage form, None for any other word."""
     for b in (tok, tok[:-1] if tok.endswith("s") else None, tok[:-2] if tok.endswith("es") else None):
-        if b and b in _QUANTITY:
-            return b
+        if b in _UNIT_WORDS:
+            return _UNIT_WORDS[b]
+        if b in _FORM_WORDS:
+            return "form"
     return None
 
 
-def _quantity_kinds(tok: str, after_a: bool = False) -> frozenset:
-    """The replayed field kinds a quantity word can excuse: strength <- mass, volume, unit, dosage form; duration <- day/week/month/year;
-    frequency <- "times", a dosing word, or "N a day"."""
-    b = _quantity_base(tok)
-    if b is None:
-        return frozenset()
-    k = set()
-    if b in _DOSAGE_UNITS:
-        k.add("strength")
-    if b in _TIME_UNITS:
-        k.add("duration")
-        if after_a:
-            k.add("frequency")
-    if b in _FREQ_WORDS:
-        k.add("frequency")
-    return frozenset(k)
+def _unit_at(toks: list[str], n: int, after_a: bool = False) -> str | None:
+    """The unit of the quantity word at toks[n] ("international units" -> "iu"); "N a day" is a frequency."""
+    if n >= len(toks):
+        return None
+    if toks[n] == "international" and n + 1 < len(toks) and _unit_of(toks[n + 1]) == "iu":
+        return "iu"
+    u = _unit_of(toks[n])
+    return "freq" if after_a and u in _TIME_UNIT_SET else u
 
 
-def spoken_values(text: str, field: str | None = None) -> set[Decimal]:
-    """The numbers the text plainly speaks as a quantity, whole (0.5 stays 0.5, never the runs 0 and 5), whatever their words: single
-    words, compounds, decimals, "N and a half". ONE check at the exit: a value counts only if the next token, after an optional "a",
-    "an" or "of", is a quantity word. So every value returned is immediately followed by a quantity word in the source text, with only spaces or tabs (and that one a/an/of)
-    between them: any other character is a break. With `field` ("strength", "duration", "frequency") only values whose quantity word suits
-    that kind come back. A bare "point" counts only after a number. Bare digit tokens are the digit-run path's business, not this one's."""
+_REPLAYED_UNIT = re.compile(r"(\d+(?:\.\d+)?)[ \t]*(?:international[ \t]+)?([a-z\u00b5\u03bc]+)")
+
+
+def replayed_units(value: str) -> dict[Decimal, set[str]]:
+    """The unit each number of a replayed value carries ("500 mg" -> {500: {mg}}); a number with no unit word is absent."""
+    out: dict[Decimal, set[str]] = {}
+    for m in _REPLAYED_UNIT.finditer((value or "").lower().replace(_CUT, "")):
+        w = re.sub(r"^[\u00b5\u03bc]", "mc", m.group(2))  # µg = mcg
+        u = _unit_of(w) or ("iu" if "international" in m.group(0) and w.rstrip("s") == "unit" else None)
+        if u:
+            out.setdefault(Decimal(m.group(1)), set()).add(u)
+    return out
+
+
+def spoken_units(text: str) -> set[tuple[Decimal, str]]:
+    """(value, unit) for every number the text plainly speaks as a quantity, whole (0.5 stays 0.5, never the runs 0 and 5), whatever its
+    words: single words, compounds, decimals, "N and a half" (also hyphenated). ONE check at the exit: a value counts only if the next
+    token, after an optional "a", "an" or "of", is a quantity word, with only spaces or tabs (and that one a/an/of) between them: any other
+    character is a break. The unit is the canonical unit of that word ("form" for a dosage form). A bare "point" counts only after a number."""
     toks, spans = _scan_numbers(text)
     cands: list[tuple[Decimal, int]] = []  # (value, index after its last token)
     k = 0
@@ -416,20 +430,34 @@ def spoken_values(text: str, field: str | None = None) -> set[Decimal]:
         if kind not in ("lead_point", "digit"):
             cands.append((v, j))
         k += 1
-    out: set[Decimal] = set()
+    out: set[tuple[Decimal, str]] = set()
     for v, j in cands:  # the ONE quantity-context check
         skip = bool(toks[j:j + 1]) and toks[j] in ("a", "an", "of")
-        n = j + 1 if skip else j
-        if n < len(toks):
-            ks = _quantity_kinds(toks[n], skip and toks[j] == "a")
-            if ks and (field is None or field in ks):
-                out.add(v)
+        u = _unit_at(toks, j + 1 if skip else j, skip and toks[j] == "a")
+        if u:
+            out.add((v, u))
     # "1/2" in digits counts as 0.5 only before a quantity word
     for m in _SLASH_HALF.finditer((text or "").lower()):
-        ks = _quantity_kinds(m.group(1))
-        if ks and (field is None or field in ks):
-            out.add(Decimal("0.5"))
+        u = _unit_of(m.group(1))
+        if u:
+            out.add((Decimal("0.5"), u))
     return out
+
+
+def spoken_values(text: str, field: str | None = None) -> set[Decimal]:
+    """The values spoken_units() finds. With `field` ("strength", "duration", "frequency") only those whose unit suits that kind (a
+    strength unit, a time unit, "freq"); a dosage form suits no kind. Without it, every value."""
+    ok = _KIND_UNITS.get(field) if field else None
+    return {v for v, u in spoken_units(text) if ok is None or u in ok}
+
+
+def excused(spoken: set[tuple[Decimal, str]], field: str, value: str, tok: str) -> bool:
+    """Does a spoken quantity excuse the number `tok` of the replayed `value`? Only if its unit EQUALS the replayed number's unit
+    (frequency: the "freq" unit). A replayed number with no unit is excused by nothing."""
+    d = Decimal(tok)
+    if field == "frequency":
+        return (d, "freq") in spoken
+    return any((d, u) in spoken for u in replayed_units(value).get(d, ()) if u in _KIND_UNITS[field])
 
 
 _SLASH_HALF = re.compile(r"(?<![\d/.])1[ \t]*/[ \t]*2(?![\d/])[ \t]+(?:(?:a|an|of)[ \t]+)?([a-z]+)")
@@ -648,7 +676,8 @@ def _invented_core(rx: dict, art: dict | None, consult: Consult, scope: str | No
     offending = unmatched = no_digits = 0
     sources: list[str] = []
     for m in rx.get("medicines") or []:
-        runs = [(k, r) for k in ("strength", "frequency", "duration") for r in _DIGITS.findall(m.get(k) or "")]
+        val = {k: _s(m.get(k)).replace(_CUT, "") for k in ("strength", "frequency", "duration")}
+        runs = [(k, r) for k in val for r in _DIGITS.findall(val[k])]
         match = next((p for p in prov if _names_match(_rx_names(m), _prov_names(p))), None)
         if match is None:
             if not runs:
@@ -657,16 +686,15 @@ def _invented_core(rx: dict, art: dict | None, consult: Consult, scope: str | No
             unmatched += 1
             sources.append(_worst(_run_source(m, k, r, art, None, scope) for k, r in runs))
             continue
-        heard, spoken = set(), {k: set() for k in ("strength", "frequency", "duration")}
+        heard, spoken = set(), set()
         for t in _cited_turns(match):
             if 0 <= t < len(consult.turns):
                 said = f"{consult.turns[t].text} {consult.turns[t].native_text or ''}"
                 heard |= set(_DIGITS.findall(said))
-                for k in spoken:
-                    spoken[k] |= spoken_values(said, k)
+                spoken |= spoken_units(said)
         # a number spoken in words is heard only as a whole value: an rx number equals a spoken value or it is not heard that way
-        bad = [(k, r) for k in ("strength", "frequency", "duration") for tok in _NUMBER.findall(m.get(k) or "")
-               if Decimal(tok) not in spoken[k] for r in _DIGITS.findall(tok) if r not in heard]
+        bad = [(k, r) for k in val for tok in _NUMBER.findall(val[k])
+               if not excused(spoken, k, val[k], tok) for r in _DIGITS.findall(tok) if r not in heard]
         offending += len(bad)
         sources += [_run_source(m, k, r, art, match, scope) for k, r in bad]
     return {"offending_runs": offending, "unmatched_medicines": unmatched, "count": offending + unmatched,
