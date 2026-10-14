@@ -15,3 +15,8 @@
   - policy-nested-gitignore: 1
 
 Scrub-withheld files: 84 (see WITHHELD.md).
+
+## Withheld by identity guard (14 Oct 2026)
+Test files that hard-code a person (name, Dr title, doctor slug or email). Path and rule only.
+
+- lib/__tests__/case-ask-core.test.ts (email)
