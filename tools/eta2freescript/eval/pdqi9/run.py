@@ -222,16 +222,17 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
     tolerated_cells = sum(1 for v in scores.values() if v and v.get("tolerated"))
 
     stamp = {"frozen_hashes": frozen.hashes, "render_version": render.RENDER_VERSION, "split_sha": frozen.hashes["split-v1.json"]}
+    scope = floors.floor_scope()
     fl = {"Bn": [], "B0": []}
     for u in uids:
         for kind, art in (("Bn", art_bn[u]), ("B0", art_b0[u])):
             fl[kind].append(stamp | floors.consult_floors(client, frozen, uid=u, arm_kind=kind, rx=arms[kind][u]["rx"], signed_rx=arms["A"][u]["rx"],
-                                                  art=art, consult=consult[u], transcript=transcript[u], cache_dir=cache / "floors", shape_log=shape_log))
+                                                  art=art, consult=consult[u], transcript=transcript[u], cache_dir=cache / "floors", shape_log=shape_log, scope=scope))
     floor_judged = [c for rows in fl.values() for x in rows for c in (x, x["completion"])]
     floor_rows_unparsed = sum(1 for c in floor_judged if c.get("parse_failure"))
     floor_rows_tolerated = sum(1 for c in floor_judged if c.get("tolerated"))
     basis = floors.floor_basis()
-    table = floors.aggregate(fl["Bn"], fl["B0"], basis)
+    table = floors.aggregate(fl["Bn"], fl["B0"], basis, scope)
 
     jev_res = {u: jev_lines.check_lines((art_bn[u] or {}).get("note_text") or "", transcript[u], jev_client) for u in uids}
     ok = [v for v in jev_res.values() if v["status"] == "ok"]
@@ -274,7 +275,7 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
         "thorough_bn_minus_b0": thorough,
         "total_bn_minus_a": total_a, "total_bn_minus_b0": compare_family(scores, uids, combos, "Bn", "B0"),
         "total_family_primary": fam, "target_12_7": target_check(gt, fam, thorough, total_a),
-        "floors": table, "floor_basis": basis, "floor_header": table["header"], "jev": jev, "replay_drops": sum(arms["Bn"][u]["drops"] for u in uids),
+        "floors": table, "floor_basis": basis, "floor_scope": scope, "floor_header": table["header"], "jev": jev, "replay_drops": sum(arms["Bn"][u]["drops"] for u in uids),
         "rendered_chars_mean": {arm: statistics.fmean(len(texts[(u, arm)]) for u in uids) for arm in ARMS},
         "cost_usd": cost, "verdict": "PENDING (freescript-lead)",
     }
