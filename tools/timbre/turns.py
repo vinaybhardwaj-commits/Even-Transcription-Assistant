@@ -585,18 +585,19 @@ def cmd_score(args):
 
     t_start = time.time()
     n_turns = 0
+    meta = {
+        "kind": "meta",
+        "models": {
+            s: {"model_id": ex.spec.model_id, "pinned_rev": MODEL_PINS.get(ex.spec.model_id), "model_rev": cached_hub_revision(ex.spec.model_id)}
+            for s, ex in exs.items()
+        },
+        "pins": MODEL_PINS,
+        "git_sha": git_sha,
+        "overlap_exclude_frac": OVERLAP_EXCLUDE_FRAC,
+    }
+    check_revisions(meta["models"])
+    # the revision check runs before the output file exists, so an abort leaves no file
     with open(out, "w", opener=lambda p, f: os.open(p, f, 0o600)) as fh:
-        meta = {
-            "kind": "meta",
-            "models": {
-                s: {"model_id": ex.spec.model_id, "pinned_rev": MODEL_PINS.get(ex.spec.model_id), "model_rev": cached_hub_revision(ex.spec.model_id)}
-                for s, ex in exs.items()
-            },
-            "pins": MODEL_PINS,
-            "git_sha": git_sha,
-            "overlap_exclude_frac": OVERLAP_EXCLUDE_FRAC,
-        }
-        check_revisions(meta["models"])
         fh.write(json.dumps(meta) + "\n")
         for rec in plan:
             if only and rec["bench_id"] not in only:

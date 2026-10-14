@@ -475,7 +475,7 @@ def test_cmd_score_aborts_when_loaded_revision_differs_from_pin(tmp_path, monkey
     out = tmp_path / "out.jsonl"
     with pytest.raises(SystemExit):
         T.main(["score", "--plan", str(plan), "--out", str(out), "--workdir", str(tmp_path / "w"), "--device", "cpu"])
-    assert out.read_text() == ""  # nothing was written after the mismatch
+    assert not out.exists()  # the check runs before the output file is opened
 
 
 def test_hf_cache_dir_honours_hub_cache_then_hf_home(monkeypatch, tmp_path):
@@ -572,3 +572,104 @@ def test_feature_rows_and_turn_rows_carry_role_source_and_overlap_frac():
     rows = [_row(2.0, 0.0, **{"odyssey.arousal": 0.5})]
     out = T.feature_rows("c", person, rows, ["odyssey.arousal"], {}, "r", "g")
     assert out[0]["role_source"] == "overlap:role.llm-roles" and out[0]["role_overlap_frac"] == 0.8
+
+
+def _stub_extractor_modules(monkeypatch, rev_of):
+    import sys
+    import types
+
+    class Spec:
+        def __init__(self, mid):
+            self.model_id = mid
+
+    class FakeEx:
+        def __init__(self, mid, names):
+            self.spec = Spec(mid)
+            self.revision = T.MODEL_PINS[mid]
+            self.names = names
+
+        def extract(self, crop, sr):
+            return {"status": "ok", "reason": None, "features": {n: 0.5 for n in self.names}}
+
+    table = {
+        "odyssey_wavlm_dim.v1": ("3loi/SER-Odyssey-Baseline-WavLM-Multi-Attributes", ("arousal", "valence", "dominance")),
+        "audeering_msp_dim.v1": ("audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim", ("arousal", "valence", "dominance")),
+        "emotion2vec_plus_large.v1": ("emotion2vec/emotion2vec_plus_large", ("score_happy", "score_sad")),
+    }
+    base = types.ModuleType("tools.timbre.extractors.base")
+    base.build_extractor = lambda name, device: FakeEx(*table[name])
+    base.cached_hub_revision = rev_of
+    pkg = types.ModuleType("tools.timbre.extractors")
+    pkg.base = base
+    monkeypatch.setitem(sys.modules, "tools.timbre.extractors", pkg)
+    monkeypatch.setitem(sys.modules, "tools.timbre.extractors.base", base)
+    monkeypatch.setattr(T, "pin_models", lambda pins=None: None)
+
+
+def test_cmd_score_turn_rows_carry_role_source_and_overlap_frac(tmp_path, monkeypatch):
+    _stub_extractor_modules(monkeypatch, lambda repo: T.MODEL_PINS[repo])
+    monkeypatch.setattr(T, "_load_audio_16k", lambda path: [0.1] * (16000 * 60))
+    persons = {
+        "speaker_0": {"role": "doctor", "role_source": "overlap:role.llm-roles", "role_overlap_frac": 0.75},
+        "speaker_1": {"role": "unknown", "role_source": None, "role_overlap_frac": None},
+        "speaker_2": {"role": "patient", "role_source": "silver-labels", "role_overlap_frac": 1.0},
+    }
+    turns = [
+        {"turn": 0, "speaker": "speaker_0", "t0_s": 0.0, "t1_s": 5.0, "dur_s": 5.0, "overlap_frac": 0.0},
+        {"turn": 1, "speaker": "speaker_1", "t0_s": 6.0, "t1_s": 9.0, "dur_s": 3.0, "overlap_frac": 0.1},
+        {"turn": 2, "speaker": "speaker_2", "t0_s": 10.0, "t1_s": 20.0, "dur_s": 10.0, "overlap_frac": 0.0},
+    ]
+    plan = tmp_path / "plan.jsonl"
+    plan.write_text(json.dumps({"bench_id": "b01", "audio_r2_key": "consult-clips/x/consult.flac", "persons": persons, "turns": turns}) + "\n")
+    out = tmp_path / "out.jsonl"
+    T.main(["score", "--plan", str(plan), "--out", str(out), "--workdir", str(tmp_path / "w"), "--audio-dir", str(tmp_path), "--device", "cpu"])
+    lines = [json.loads(l) for l in out.read_text().splitlines()]
+    assert lines[0]["kind"] == "meta" and lines[-1]["kind"] == "meta_end"
+    rows = [l for l in lines if l["kind"] == "turn"]
+    assert len(rows) == 3
+    for r in rows:
+        p = persons[r["speaker"]]
+        assert r["role"] == p["role"] and r["role_source"] == p["role_source"] and r["role_overlap_frac"] == p["role_overlap_frac"]
+    assert rows[0]["scores"]["odyssey.arousal"] == 0.5 and rows[0]["scores"]["e2v.happy"] == 0.5
+    assert oct(out.stat().st_mode & 0o777) == "0o600"
+
+
+def test_cmd_score_mismatch_leaves_no_output_file(tmp_path, monkeypatch):
+    _stub_extractor_modules(monkeypatch, lambda repo: "0" * 40)
+    plan = tmp_path / "plan.jsonl"
+    plan.write_text("")
+    out = tmp_path / "sub" / "out.jsonl"
+    with pytest.raises(SystemExit):
+        T.main(["score", "--plan", str(plan), "--out", str(out), "--workdir", str(tmp_path / "w"), "--device", "cpu"])
+    assert not out.exists()
+
+
+def _real_cached_hub_revision():
+    """Compile cached_hub_revision from extractors/base.py without importing that module (it needs numpy)."""
+    import ast
+    from pathlib import Path
+
+    src = (Path(T.__file__).parent / "extractors" / "base.py").read_text()
+    fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "cached_hub_revision")
+    ns = {}
+    exec(compile(ast.Module([fn], []), "base.py", "exec"), ns)
+    return ns["cached_hub_revision"]
+
+
+def test_pin_models_and_cached_hub_revision_use_one_cache_dir_with_only_hf_home(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hfhome"))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")  # restored by monkeypatch after pin_models sets it to 1
+    calls = []
+    stub = types.ModuleType("huggingface_hub")
+    stub.snapshot_download = lambda repo, revision=None, allow_patterns=None: calls.append((repo, revision))
+    monkeypatch.setitem(sys.modules, "huggingface_hub", stub)
+    T.pin_models()
+    assert [c[0] for c in calls] == list(T.MODEL_PINS)
+    cached = _real_cached_hub_revision()
+    for repo, sha in T.MODEL_PINS.items():
+        assert cached(repo) == sha
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)  # leave no trace for later tests
