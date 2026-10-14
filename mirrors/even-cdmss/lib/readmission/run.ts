@@ -43,11 +43,8 @@ import { assembleThreeSource } from './assemble';
 import type { CaseSource, ThreeSourceInputs } from './assemble';
 import { composeCaseArtefacts } from './narrative';
 import { probeReachable } from '../lab-override';
-import { bedrockLive } from '../bedrock';
-import { classifyBedrockError, classifyNarrativeFailure } from './health';
-import type { NarrativeErrorCode } from './health';
 import {
-  saveDetection, saveAuditResult, recordAuditError, recordNarrativeError, clearNarrativeError, pairToDetectionRow, oonToDetectionRow,
+  saveDetection, saveAuditResult, recordAuditError, pairToDetectionRow, oonToDetectionRow,
   READMIT_ENGINE_VERSION,
 } from './store';
 import type { PendingRow } from './store';
@@ -415,10 +412,9 @@ export async function assembleForRow(row: PendingRow): Promise<AssembledPair | {
 // The worker box arithmetic for this mode is in app/api/readmission/worker/route.ts (worst case
 // ≈ 790,000 of 800,000 ms — a thin margin BY THE 200 s-per-leg WORST CASE; measured actuals are
 // ~35 s for leg + join). Budget: NARRATIVE_BUDGET_MS (80 s × 1 try) on NARRATIVE_MODEL only.
-export async function narrativeInlineEnabled(): Promise<boolean> {
+export function narrativeInlineEnabled(): boolean {
   if (process.env.READMIT_NARRATIVE_INLINE === '0') return false;
-  if (!probeReachable('bedrock')) return false;
-  return (await bedrockLive()).ok;
+  return probeReachable('bedrock');
 }
 
 // ── R4.1: the recon sequence, transport-agnostic (CDMSS-READMISSIONS-R4.1-PRD v1.0 R41-4) ─────
@@ -551,23 +547,14 @@ export async function runReadmissionAudit(row: PendingRow): Promise<ReadmitAudit
       // stored, so a narrative fault can never cost the finding; its ledger is the very catalog
       // the recon legs read (source 'audit').
       let narrative: 'stored' | 'invalid' | 'skipped' | 'failed' = 'skipped';
-      if (await narrativeInlineEnabled()) {
-        let narrativeCode: NarrativeErrorCode = 'narrative_failed';
+      if (narrativeInlineEnabled()) {
         try {
           const n = await composeCaseArtefacts({
             row, finding, catalog: inputs.catalog, identity: assembled.identity,
             ledgerSource: 'audit', narrativeSource: 'audit', traceId,
           });
           narrative = n.ok ? (n.valid ? 'stored' : 'invalid') : 'failed';
-          if (!n.ok) narrativeCode = classifyNarrativeFailure((n as { reason?: string }).reason);
-        } catch (e) { narrative = 'failed'; narrativeCode = classifyNarrativeFailure(String((e as Error)?.message ?? e)); }
-        // Observability only (best-effort, never changes the audit outcome).
-        if (narrative === 'failed') await recordNarrativeError(row.dedup_key, narrativeCode);
-        else await clearNarrativeError(row.dedup_key);
-      } else if (process.env.READMIT_NARRATIVE_INLINE !== '0' && probeReachable('bedrock')) {
-        // Skipped because bedrockLive is not ok (the kill switch and missing env are deliberate, not faults).
-        const live = await bedrockLive();
-        await recordNarrativeError(row.dedup_key, classifyBedrockError(live) ?? 'error');
+        } catch { narrative = 'failed'; }
       }
       await finishTrace(traceId, 'success');
       return {
