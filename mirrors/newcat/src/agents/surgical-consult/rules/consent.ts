@@ -5,12 +5,12 @@ import { basis, type GatedFacts, type RuleOutcome } from './types.js'
 export const CONSENT_ELEMENTS = ['risks', 'alternatives', 'no_surgery_option', 'recovery', 'cost', 'second_opinion_offered'] as const
 
 const CLAIM: Record<(typeof CONSENT_ELEMENTS)[number], string> = {
-  risks: 'The doctor recommended a procedure without stating its risks.',
-  alternatives: 'The doctor recommended a procedure without stating alternatives.',
-  no_surgery_option: 'The doctor recommended a procedure without stating that not operating is an option.',
-  recovery: 'The doctor recommended a procedure without describing recovery.',
-  cost: 'The doctor recommended a procedure without discussing cost.',
-  second_opinion_offered: 'The doctor recommended a procedure without offering a second opinion.',
+  risks: 'The risks of the recommended procedure were not heard in the consult recording.',
+  alternatives: 'Alternatives to the recommended procedure were not heard in the consult recording.',
+  no_surgery_option: 'That not operating is an option was not heard in the consult recording.',
+  recovery: 'Recovery from the recommended procedure was not heard in the consult recording.',
+  cost: 'The cost of the recommended procedure was not heard in the consult recording.',
+  second_opinion_offered: 'An offer of a second opinion was not heard in the consult recording.',
 }
 
 // One candidate per (recommendation, missing element). A consent fact counts for a recommendation when it links to it

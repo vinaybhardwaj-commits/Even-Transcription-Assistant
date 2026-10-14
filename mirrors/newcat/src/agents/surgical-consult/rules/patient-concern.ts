@@ -26,7 +26,7 @@ export function patientConcernRules(facts: GatedFacts): RuleOutcome[] {
       procedure_group: procedureGroup(recommendationFor(facts, f.rec_ref)?.procedure_text),
       rule_id: 'concern.unaddressed',
       rule_version: RULES_VERSION,
-      claim: 'The doctor did not address this patient concern in the consult.',
+      claim: 'A response to this patient concern was not heard in the consult recording.',
       ...basis(f, ...replies),
       needs_judge: true,
       doctor_visible: false,

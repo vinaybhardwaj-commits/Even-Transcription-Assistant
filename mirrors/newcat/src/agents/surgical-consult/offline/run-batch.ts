@@ -15,13 +15,15 @@ import { runAgent } from '../../../platform/agent/run.js'
 import { jevJudge } from '../../../platform/jev/judge.js'
 import type { SecondJudge } from '../../../platform/judge/second.js'
 import { buildJev, buildModelClient } from '../../../runtime.js'
-import { surgicalConsult } from '../definition.js'
+import { ABSENCE_QUESTION_SET, CONSULT_AGENT_ID, surgicalConsult } from '../definition.js'
 import { findingTypeOf } from '../governance/f7.js'
 import { prepass } from '../prepass.js'
-import { MAX_CANDIDATES } from '../rules/index.js'
+import { MAX_CANDIDATES, RULE_SPECS } from '../rules/index.js'
 import { loadConsults, type LoadedConsult, type LoadResult } from './input.js'
 import { geminiConfigOf, missingGeminiEnv, secondFactory, type SecondFactory } from './second.js'
-import { buildReport, busSafeSummary, renderMarkdown, type Entry, type HeldDetail, type RunRecord } from './report.js'
+import { appendBench, BenchRecorder, prepareBenchFile } from './bench.js'
+import { reportFailure } from './safe-error.js'
+import { buildReport, busSafeSummary, emptyExtraction, renderMarkdown, type Entry, type ExtractionRecord, type HeldDetail, type JudgePairRecord, type RunRecord } from './report.js'
 
 /**
  * S6 offline runner: the platform's agent run path over a JSONL of consults, on an in-process pglite (never a DB URL),
@@ -37,6 +39,8 @@ export interface BatchOptions {
   concurrency: number
   maxLlmCalls?: number | undefined
   maxJevCalls?: number | undefined
+  /** Record each judged candidate's claim and window for the bench export (Entry.bench). Off by default. */
+  bench?: boolean | undefined
 }
 
 export interface BatchWiring {
@@ -84,12 +88,20 @@ class MeteredModels implements ModelClient {
   }
 }
 
+/** The platform's cut for a rule: safety rules use the safety bar (run.ts: def.judge.thresholds). */
+export function thresholdFor(ruleId: string): number {
+  const safety = RULE_SPECS.find((spec) => spec.id === ruleId)?.safety_class === true
+  return safety ? surgicalConsult.judge.thresholds.safety : surgicalConsult.judge.thresholds.nonSafety
+}
+
 /** Counts the primary judge's asks, enforces the cap and records p per (state) for the Jev-Gemini pairs. */
 export class MeteredJudge {
   readonly primary = new Map<string, number>()
   readonly secondary = new Map<string, number>()
   readonly rules = new Map<string, string>()
-  constructor(private readonly inner: JudgePort, private readonly second: SecondJudge | null, private readonly meter: Meter) {}
+  /** One entry per judged candidate, in ask order (a consult's judge asks run one after another). */
+  readonly judged: JudgePairRecord[] = []
+  constructor(private readonly inner: JudgePort, private readonly second: SecondJudge | null, private readonly meter: Meter, private readonly bench: BenchRecorder | null = null) {}
 
   port(): JudgePort {
     return {
@@ -99,10 +111,16 @@ export class MeteredJudge {
           throw new JudgeUnavailable('budget_exhausted')
         }
         this.meter.jev += 1
+        const rule = String((state as { rule?: unknown }).rule ?? '')
+        const entry: JudgePairRecord = { rule_id: rule, question_set: set.id, polarity: set.id === ABSENCE_QUESTION_SET.id ? 'absence' : 'presence', primary_p: null, second_p: null, primary_yes: null, second_yes: null, outcome: 'unavailable' }
+        this.judged.push(entry)
+        this.bench?.begin(state, set, entry.polarity, entry)
         const answer = await this.inner.askValidity(state, question, set)
         const key = JSON.stringify(state)
         this.primary.set(key, answer.p_yes)
-        this.rules.set(key, String((state as { rule?: unknown }).rule ?? ''))
+        this.rules.set(key, rule)
+        entry.primary_p = answer.p_yes
+        entry.primary_yes = answer.p_yes >= thresholdFor(rule)
         return answer
       },
     }
@@ -121,6 +139,12 @@ export class MeteredJudge {
         this.meter.second += 1
         const answer = await second.askValidity(state, question, set)
         this.secondary.set(JSON.stringify(state), answer.p_yes)
+        const entry = this.judged[this.judged.length - 1]
+        if (entry && entry.primary_p !== null && entry.second_p === null) {
+          entry.second_p = answer.p_yes
+          entry.second_yes = answer.p_yes >= thresholdFor(entry.rule_id)
+          entry.outcome = entry.primary_yes && entry.second_yes ? 'agree' : !entry.primary_yes && !entry.second_yes ? 'dropped' : 'disagree'
+        }
         return answer
       },
     }
@@ -145,11 +169,12 @@ interface Done {
   entry: Entry
 }
 
-async function runOne(sql: Sql, wiring: BatchWiring, models: ModelClient, meter: Meter, consult: LoadedConsult, n: number): Promise<Done> {
+async function runOne(sql: Sql, wiring: BatchWiring, models: ModelClient, meter: Meter, consult: LoadedConsult, n: number, benchOn: boolean): Promise<Done> {
   const traceId = traceIdFor(n)
   const input = consult.input
-  const metered = new MeteredJudge(wiring.judge(traceId, sql), wiring.second(traceId, sql), meter)
-  const base: Omit<RunRecord, 'status' | 'reason' | 'findings_kept' | 'held' | 'abstentions' | 'counts' | 'versions' | 'pairs' | 'error'> = {
+  const recorder = benchOn ? new BenchRecorder(input) : null
+  const metered = new MeteredJudge(wiring.judge(traceId, sql), wiring.second(traceId, sql), meter, recorder)
+  const base: Omit<RunRecord, 'status' | 'reason' | 'findings_kept' | 'held' | 'abstentions' | 'counts' | 'versions' | 'extraction' | 'judge_pairs' | 'pairs' | 'error'> = {
     n,
     encounter_id: input.encounter_id,
     doctor_uid: input.doctor_uid,
@@ -160,7 +185,7 @@ async function runOne(sql: Sql, wiring: BatchWiring, models: ModelClient, meter:
   }
   const failed = (error: RunRecord['error']): Done => ({
     entry: {
-      record: { ...base, status: 'failed', reason: error, findings_kept: 0, held: [], abstentions: {}, counts: emptyCounts(), versions: {}, pairs: [], error },
+      record: { ...base, status: 'failed', reason: error, findings_kept: 0, held: [], abstentions: {}, counts: emptyCounts(), versions: {}, extraction: emptyExtraction(), judge_pairs: [], pairs: [], error },
       body: null,
       held: [],
     },
@@ -168,7 +193,7 @@ async function runOne(sql: Sql, wiring: BatchWiring, models: ModelClient, meter:
   let audit
   try {
     audit = await runAgent(
-      surgicalConsult,
+      recorder ? recorder.wrap(surgicalConsult) : surgicalConsult,
       {
         sql,
         models,
@@ -210,10 +235,31 @@ async function runOne(sql: Sql, wiring: BatchWiring, models: ModelClient, meter:
     abstentions: (body.abstentions ?? {}) as Record<string, number>,
     counts,
     versions: stringVersions(body.versions),
+    extraction: await extractionFor(sql, traceId),
+    judge_pairs: metered.judged.map((p) => ({ ...p })),
     pairs: metered.pairs(),
     error: null,
   }
-  return { entry: { record, body: body as unknown as Entry['body'], held } }
+  return { entry: { record, body: body as unknown as Entry['body'], held, ...(recorder ? { bench: recorder.lines() } : {}) } }
+}
+
+/**
+ * The run's extraction calls from the model_calls ledger (by trace id and the agent's extract purposes, so Gemini rows are out):
+ * ids and codes only. served_verified is false when any call has no served id (the global inference profile does not resolve one).
+ */
+export async function extractionFor(sql: Sql, traceId: string): Promise<ExtractionRecord> {
+  const rows = await sql.query<{ intended_model_id: string; served_model_id: string | null; status: string; error_type: string | null }>(
+    `select intended_model_id, served_model_id, status, error_type from model_calls
+     where trace_id = $1 and purpose like $2 and provider <> 'vertex' order by created_at, id`,
+    [traceId, `${CONSULT_AGENT_ID}:extract%`],
+  )
+  if (rows.rows.length === 0) return emptyExtraction()
+  const intended = [...new Set(rows.rows.map((r) => r.intended_model_id))]
+  const served = [...new Set(rows.rows.flatMap((r) => (r.served_model_id === null ? [] : [r.served_model_id])))]
+  const errors: Record<string, number> = {}
+  for (const r of rows.rows) if (r.status !== 'ok') errors[r.error_type ?? r.status] = (errors[r.error_type ?? r.status] ?? 0) + 1
+  const verified = rows.rows.every((r) => r.served_model_id !== null)
+  return { intended: intended.join(','), served: verified ? served.join(',') : null, served_verified: verified, calls: rows.rows.length, errors_by_type: errors }
 }
 
 function emptyCounts(): RunRecord['counts'] {
@@ -270,7 +316,7 @@ export async function runBatch(consults: LoadedConsult[], wiring: BatchWiring, o
           skipped += 1
           continue
         }
-        const { entry } = await runOne(sql, wiring, models, meter, selected[i]!, i + 1)
+        const { entry } = await runOne(sql, wiring, models, meter, selected[i]!, i + 1, options.bench === true)
         entries.push(entry)
         sink?.(entry)
       }
@@ -314,6 +360,7 @@ export interface CliArgs {
   fake: boolean
   maxLlmCalls?: number
   maxJevCalls?: number
+  benchOut?: string
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -333,12 +380,14 @@ export function parseArgs(argv: string[]): CliArgs {
       case '--concurrency': args.concurrency = int(a, value); i++; break
       case '--max-llm-calls': args.maxLlmCalls = int(a, value); i++; break
       case '--max-jev-calls': args.maxJevCalls = int(a, value); i++; break
+      case '--bench-out': args.benchOut = value ?? ''; i++; break
       case '--dry-run': args.dryRun = true; break
       case '--fake': args.fake = true; break
       default: throw new Error(`unknown argument ${String(a)}`)
     }
   }
   if (!args.in) throw new Error('--in is required')
+  if (args.benchOut !== undefined && !args.benchOut) throw new Error('--bench-out needs a path')
   if (!args.dryRun && !args.out) throw new Error('--out is required')
   return args
 }
@@ -351,13 +400,10 @@ export function scrubbedEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return copy
 }
 
-/** Env names (never values) a live run still needs, including the auth names for the Bedrock mode that resolves. */
-export function missingLiveEnv(env: Env, source: NodeJS.ProcessEnv = process.env): string[] {
+/** Env names (never values) the Bedrock sender needs: region and the credentials for the auth mode that resolves. */
+export function missingBedrockEnv(env: Env, source: NodeJS.ProcessEnv = process.env): string[] {
   const missing: string[] = []
-  if (env.NEWCAT_LLM !== 'bedrock') missing.push('NEWCAT_LLM=bedrock')
-  if (env.NEWCAT_JEV !== 'live') missing.push('NEWCAT_JEV=live')
   if (!env.BEDROCK_REGION) missing.push('BEDROCK_REGION')
-  if (!env.BEDROCK_MODEL_SONNET) missing.push('BEDROCK_MODEL_SONNET')
   const auth = resolveBedrockAuth(env, { vercelOidcToken: source.VERCEL_OIDC_TOKEN })
   const has = (name: string): boolean => (source[name] ?? '').trim() !== ''
   if (auth === 'gcp-federation') {
@@ -370,6 +416,16 @@ export function missingLiveEnv(env: Env, source: NodeJS.ProcessEnv = process.env
     // default-chain: the SDK would fail every call with no credentials, so stop before spending anything.
     missing.push('AWS_ACCESS_KEY_ID+AWS_SECRET_ACCESS_KEY or AWS_PROFILE (BEDROCK_AUTH=default-chain)')
   }
+  return missing
+}
+
+/** Env names (never values) a live run still needs, including the auth names for the Bedrock mode that resolves. */
+export function missingLiveEnv(env: Env, source: NodeJS.ProcessEnv = process.env): string[] {
+  const missing: string[] = []
+  if (env.NEWCAT_LLM !== 'bedrock') missing.push('NEWCAT_LLM=bedrock')
+  if (env.NEWCAT_JEV !== 'live') missing.push('NEWCAT_JEV=live')
+  if (!env.BEDROCK_MODEL_SONNET) missing.push('BEDROCK_MODEL_SONNET')
+  missing.push(...missingBedrockEnv(env, source))
   if (jevReadiness(env) === 'unavailable') {
     const jev = jevConfig(env)
     if (!jev.baseUrl) missing.push('JEV_BASE_URL')
@@ -420,7 +476,7 @@ export function dryRunSummary(load: LoadResult, options: BatchOptions): Record<s
 
 export async function main(argv: string[], source: NodeJS.ProcessEnv = process.env): Promise<number> {
   const args = parseArgs(argv)
-  const options: BatchOptions = { limit: args.limit, concurrency: args.concurrency, maxLlmCalls: args.maxLlmCalls, maxJevCalls: args.maxJevCalls }
+  const options: BatchOptions = { limit: args.limit, concurrency: args.concurrency, maxLlmCalls: args.maxLlmCalls, maxJevCalls: args.maxJevCalls, bench: args.benchOut !== undefined }
   const load = loadConsults(args.in)
   const log = (line: string): void => void process.stdout.write(`${line}\n`)
   if (args.dryRun) {
@@ -447,8 +503,18 @@ export async function main(argv: string[], source: NodeJS.ProcessEnv = process.e
     if (notes.length > 0) log(`second judge off: NEWCAT_GEMINI=live needs these env names set: ${notes.join(', ')}`)
     if (gemini && gemini.budgetMax < caps.jev) log(`warning: GEMINI_BUDGET_MAX is below the second-judge cap ${caps.jev}; asks past the budget hold (budget_exhausted)`)
   }
+  // Both paths are checked before either is created, and the bench file is created only once the out dir exists, so a refusal leaves nothing behind.
+  if (args.benchOut !== undefined && existsSync(args.benchOut)) throw new Error('bench_path_exists')
   prepareOutDir(args.out)
-  const result = await runBatch(load.consults, wiring, options, (entry) => writeEntry(args.out, entry))
+  if (args.benchOut !== undefined) prepareBenchFile(args.benchOut)
+  let benchLines = 0
+  const result = await runBatch(load.consults, wiring, options, (entry) => {
+    writeEntry(args.out, entry)
+    if (args.benchOut !== undefined && entry.bench) {
+      appendBench(args.benchOut, entry.bench)
+      benchLines += entry.bench.length
+    }
+  })
   const report = buildReport(result.entries, {
     lines_read: load.lines,
     rejects: load.rejects,
@@ -461,6 +527,7 @@ export async function main(argv: string[], source: NodeJS.ProcessEnv = process.e
   writeJson(path.join(args.out, 'report.json'), report)
   writeFileSync(path.join(args.out, 'report.md'), renderMarkdown(report, result.entries), { mode: OUT_FILE_MODE })
   log(busSafeSummary(report, result.entries))
+  if (args.benchOut !== undefined) log(`bench_lines=${benchLines}`)
   return 0
 }
 
@@ -469,7 +536,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     (code) => process.exit(code),
     (error: unknown) => {
       // The message is a code or a fixed string, never record text.
-      process.stderr.write(`run-batch failed: ${error instanceof Error ? error.message : 'unknown'}\n`)
+      reportFailure('run-batch', error)
       process.exit(1)
     },
   )
