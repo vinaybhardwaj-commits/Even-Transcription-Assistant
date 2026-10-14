@@ -12,7 +12,7 @@
  * CLIP. The audio key comes from the row's clip.r2_key, never built here. It must start with the consult-clips prefix (keys.ts) and hold no "..". The URL is presigned for 900 s, GET only.
  * Nothing here writes. Nothing logs a key, a URL or text: codes and counts only.
  */
-import { signGetUrl } from "@/lib/r2";
+import { getObjectRange, headObject, signGetUrl } from "@/lib/r2";
 import { ENCOUNTER_CATALOG_KEY, labReader, REB_CONSULT_KEY } from "@/lib/sarvam-lab";
 import { CONSULT_CLIPS_PREFIX, REB_PREFIX } from "@/lib/room-access/keys";
 import { isRebRole, speakerRoleMap } from "@/lib/room-access/readers/reb-consult";
@@ -417,4 +417,30 @@ export function clipKeyOf(row: Row): string | null {
 export async function presignClip(key: string, now: number = Date.now()): Promise<{ url: string; expires_at: string }> {
   const url = await signGetUrl({ key, expiresInSeconds: CLIP_URL_TTL_S });
   return { url, expires_at: new Date(now + CLIP_URL_TTL_S * 1000).toISOString() };
+}
+
+// --- clip bytes (CATALOG-7) ---------------------------------------------------------------------------------------------------------------------------
+export const CLIP_CHUNK_MAX = 1_048_576;
+export type ClipChunk =
+  | { ok: true; bytes: Uint8Array; total_bytes: number }
+  | { ok: false; error: "bad_range"; total_bytes: number }
+  | { ok: false; error: "clip_not_found" | "read_failed" };
+
+/** One byte range of the (already row-bound) clip key: no transcoding, the stored bytes. Range header is exactly bytes=offset-(offset+length-1). Never logs a key or a byte. */
+export async function readClipChunk(key: string, offset: number, length: number): Promise<ClipChunk> {
+  let got: Awaited<ReturnType<typeof getObjectRange>>;
+  try {
+    got = await getObjectRange(key, offset, offset + length - 1);
+  } catch {
+    return { ok: false, error: "read_failed" };
+  }
+  if (got === null) return { ok: false, error: "clip_not_found" };
+  let total: number | null = "outOfRange" in got ? null : got.totalBytes;
+  if (total === null) {
+    const h = await headObject(key); // the Content-Range header was absent, or the start was past the end
+    total = h.size;
+  }
+  if (total === null) return { ok: false, error: "read_failed" };
+  if ("outOfRange" in got || offset >= total) return { ok: false, error: "bad_range", total_bytes: total };
+  return { ok: true, bytes: got.bytes, total_bytes: total };
 }
