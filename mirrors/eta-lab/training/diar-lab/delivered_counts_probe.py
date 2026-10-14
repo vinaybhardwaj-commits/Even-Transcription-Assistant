@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """No-training probe (refuter C1 follow-up): what speaker counts does the training dataloader actually deliver under different sampling settings?
 Builds the train manifest (with crops, no oversampling) from a dataset manifest, restores the base model on CPU only to reuse NeMo's own train dataset
-class, iterates one epoch (129 items) per setting and prints the histogram of ACTIVE speakers per item next to the teacher counts of the entries.
+class, iterates ~240 items per setting and prints the histogram of ACTIVE speakers per item next to the teacher counts of the entries.
 usage (box, NeMo venv): delivered_counts_probe.py <dataset_manifest.json> <out.json>"""
 import json, os, sys, tempfile, time
 import torch
