@@ -11,7 +11,7 @@ let commands: Array<{ roomId: string; kind: string; args: string | null; source:
 let installs: Array<{ room_id: string; hostname: string; app_version: string | null }> = [];
 let throwOn: RegExp | null = null;
 let hang = false;
-let fetchImpl: (url: string, init: RequestInit) => Promise<Response> = async () => new Response(JSON.stringify({ window: true }), { status: 200 });
+let fetchImpl: (url: string, init: RequestInit) => Promise<Response> = async () => new Response(JSON.stringify({ window: true, live: true, reason_code: "ok" }), { status: 200 });
 const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
 let releaseHang: (() => void) | null = null;
 const writes: string[] = [];
@@ -58,7 +58,7 @@ vi.mock("@/lib/db", () => ({
 }));
 
 import { POST } from "../../app/api/presence/route";
-import { relayInserted, RELAY_TIMEOUT_MS, DECIDE_PATH } from "@/lib/buddy/relay";
+import { relayInserted, RELAY_TIMEOUT_MS, DECIDE_PATH, DOCTOR_RESOLVE_TIMEOUT_MS, DECIDE_TIMEOUT_MS } from "@/lib/buddy/relay";
 import { COMMAND_KINDS } from "@/lib/bench-commands";
 
 const TOKEN = "test-presence-token";
@@ -84,7 +84,7 @@ beforeEach(() => {
   process.env.NEWCAT_BASE_URL = "https://newcat.example.test";
   process.env.NEWCAT_RELAY_KEY = "test-relay-key-value";
   fetchCalls.length = 0;
-  fetchImpl = async () => new Response(JSON.stringify({ window: true }), { status: 200 });
+  fetchImpl = async () => new Response(JSON.stringify({ window: true, live: true, reason_code: "ok" }), { status: 200 });
   vi.stubGlobal("fetch", (url: string, init: RequestInit) => { fetchCalls.push({ url, init }); return fetchImpl(url, init); });
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "info").mockImplementation(() => {});
@@ -255,12 +255,12 @@ describe("Encounter Buddy L1 relay", () => {
     const h = fetchCalls[0]!.init.headers as Record<string, string>;
     expect(h.authorization).toBe("Bearer test-relay-key-value");
     const body = JSON.parse(fetchCalls[0]!.init.body as string);
-    expect(Object.keys(body).sort()).toEqual(["consult_uid", "doctor_uid", "opaque_id", "room_id"]);
-    expect(body).toMatchObject({ consult_uid: UID, room_id: "room_fix_1", doctor_uid: "doc-fixture-1", opaque_id: refs[0]!.opaque_id });
+    expect(Object.keys(body).sort()).toEqual(["consult_uid", "doctor_uid", "opaque_id", "room"]);
+    expect(body).toMatchObject({ consult_uid: UID, room: "room_fix_1", doctor_uid: "doc-fixture-1", opaque_id: refs[0]!.opaque_id });
   });
 
   it("decide false: nothing is written", async () => {
-    fetchImpl = async () => new Response(JSON.stringify({ window: false }), { status: 200 });
+    fetchImpl = async () => new Response(JSON.stringify({ window: false, live: false, reason_code: "no" }), { status: 200 });
     await post([open()]);
     expect(writes).toEqual([]);
     expect(refs).toHaveLength(0);
@@ -276,6 +276,10 @@ describe("Encounter Buddy L1 relay", () => {
       async () => new Response("not json at all", { status: 200 }),
       async () => new Response(JSON.stringify({ window: "yes" }), { status: 200 }),
       async () => new Response(JSON.stringify({}), { status: 200 }),
+      async () => new Response(JSON.stringify({ window: true }), { status: 200 }),
+      async () => new Response(JSON.stringify({ window: true, live: "yes", reason_code: "ok" }), { status: 200 }),
+      async () => new Response(JSON.stringify({ window: true, live: true }), { status: 200 }),
+      async () => new Response(JSON.stringify({ reason_code: "conflict" }), { status: 409 }),
       async () => { throw new Error("network down secret-value"); },
     ];
     for (const f of faults) {
@@ -322,7 +326,7 @@ describe("Encounter Buddy L1 relay", () => {
   it("decide resolving after the budget writes nothing", async () => {
     vi.useFakeTimers();
     let release!: () => void;
-    fetchImpl = () => new Promise<Response>((res) => { release = () => res(new Response(JSON.stringify({ window: true }), { status: 200 })); });
+    fetchImpl = () => new Promise<Response>((res) => { release = () => res(new Response(JSON.stringify({ window: true, live: true, reason_code: "ok" }), { status: 200 })); });
     const p = relayInserted([rowOf()]);
     await vi.advanceTimersByTimeAsync(RELAY_TIMEOUT_MS + 1);
     await expect(p).resolves.toBeUndefined();
@@ -339,7 +343,7 @@ describe("Encounter Buddy L1 relay", () => {
   });
 
   it("close never calls newcat; a close after a false decision writes nothing", async () => {
-    fetchImpl = async () => new Response(JSON.stringify({ window: false }), { status: 200 });
+    fetchImpl = async () => new Response(JSON.stringify({ window: false, live: false, reason_code: "no" }), { status: 200 });
     await post([open()]);
     const callsAfterOpen = fetchCalls.length;
     await post([close()]);
@@ -354,6 +358,144 @@ describe("Encounter Buddy L1 relay", () => {
     const all = logs();
     expect(all).toContain("[buddy-relay]");
     for (const bad of [UID, "u-2", "doc-fixture-1", refs[0]!.opaque_id, "room_fix_1", "test-relay-key-value", "newcat.example.test"]) expect(all).not.toContain(bad);
+  });
+});
+
+const logs = () => [console.warn, console.info].flatMap((f) => (f as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]))).join("\n");
+
+describe("Encounter Buddy: server-side doctor resolve", () => {
+  const CU = "abcdefghij0123456789abcd"; // 24 chars, passes ^[a-z0-9]{20,32}$
+  const MB = "https://mb.example.test";
+  const mbCalls: Array<{ body: { database: number; type: string; native: { query: string } }; key: string }> = [];
+  let mbImpl: () => Promise<Response> = async () => mbRows([]);
+  const mbRows = (docs: unknown[]) => new Response(JSON.stringify({ data: { cols: [{ name: "doctor_uid" }], rows: docs.map((d) => [d]) } }), { status: 200 });
+  const decideBodies = () => fetchCalls.filter((c) => c.url.includes(DECIDE_PATH)).map((c) => JSON.parse(c.init.body as string));
+  beforeEach(() => {
+    mbCalls.length = 0;
+    mbImpl = async () => mbRows([]);
+    process.env.METABASE_URL = MB;
+    process.env.METABASE_API_KEY = "mb-key-value";
+    fetchImpl = async (url, init) => {
+      if (url.startsWith(MB)) {
+        mbCalls.push({ body: JSON.parse(init.body as string), key: (init.headers as Record<string, string>)["x-api-key"]! });
+        return mbImpl();
+      }
+      return new Response(JSON.stringify({ window: true, live: true, reason_code: "ok" }), { status: 200 });
+    };
+  });
+  afterEach(() => { delete process.env.METABASE_URL; delete process.env.METABASE_API_KEY; });
+  const openCU = (extra: Record<string, unknown> = {}) => ext({ event: "encounter_open", encounter_id: CU, ...extra });
+
+  it("an exact single resolve is used and sent to newcat; the query is the db13 SELECT", async () => {
+    mbImpl = async () => mbRows(["doc-res-1", "doc-res-1"]);
+    await post([openCU()]);
+    expect(mbCalls).toHaveLength(1);
+    expect(mbCalls[0]!.body.database).toBe(13);
+    expect(mbCalls[0]!.body.native.query).toBe(`SELECT doctor_uid FROM "individuals-prescriptions" WHERE consult_uid = '${CU}'`);
+    expect(mbCalls[0]!.key).toBe("mb-key-value");
+    expect(decideBodies()[0].doctor_uid).toBe("doc-res-1");
+    expect(refs).toHaveLength(1);
+  });
+
+  it("a payload doctor_uid is kept and no resolve is made", async () => {
+    await post([openCU({ doctor_uid: "doc-pay-1" })]);
+    expect(mbCalls).toHaveLength(0);
+    expect(decideBodies()[0].doctor_uid).toBe("doc-pay-1");
+  });
+
+  it("zero rows and several distinct rows give null", async () => {
+    await post([openCU()]);
+    mbImpl = async () => mbRows(["doc-a", "doc-b"]);
+    await post([openCU({ encounter_id: "zyxwvutsrq9876543210abcd" })]);
+    expect(decideBodies().map((b) => b.doctor_uid)).toEqual([null, null]);
+  });
+
+  it("a consult_uid outside ^[a-z0-9]{20,32}$ is never sent to Metabase", async () => {
+    await post([openCU({ encounter_id: "x' OR '1'='1" })]);
+    expect(mbCalls).toHaveLength(0);
+    expect(decideBodies()[0].doctor_uid).toBeNull();
+  });
+
+  it("the last_doctor_uid hint is never used; its count is logged when the resolve found nothing", async () => {
+    await post([openCU({ last_doctor_uid: "doc-hint-1" })]);
+    expect(decideBodies()[0].doctor_uid).toBeNull();
+    expect(logs()).toContain("doctor_hint_would_help=1");
+    expect(logs()).not.toContain("doc-hint-1");
+  });
+
+  it("a timeout, a 500 or garbage gives null; the ingest reply is byte-identical; fault counted", async () => {
+    delete process.env.METABASE_URL;
+    const baseline = await raw(await post([openCU()]));
+    process.env.METABASE_URL = MB;
+    refs = []; commands = [];
+    const faults: Array<() => Promise<Response>> = [
+      async () => new Response("{}", { status: 500 }),
+      async () => new Response("garbage", { status: 200 }),
+      async () => { throw new Error("net secret-value"); },
+    ];
+    for (const f of faults) {
+      mbImpl = f;
+      expect(await raw(await post([openCU()]))).toEqual(baseline);
+      refs = []; commands = [];
+    }
+    expect(decideBodies().slice(1).map((b) => b.doctor_uid)).toEqual([null, null, null]);
+    expect(logs()).toContain("doctor_resolve_fault=1");
+    expect(logs()).not.toContain("secret-value");
+  });
+
+  it("a hanging resolve is cut at 700 ms and decide still runs inside the 2 s budget", async () => {
+    mbImpl = () => new Promise<Response>(() => {});
+    const t0 = Date.now();
+    await post([openCU()]);
+    const took = Date.now() - t0;
+    expect(took).toBeGreaterThanOrEqual(DOCTOR_RESOLVE_TIMEOUT_MS - 50);
+    expect(took).toBeLessThan(RELAY_TIMEOUT_MS + 300);
+    expect(DOCTOR_RESOLVE_TIMEOUT_MS + DECIDE_TIMEOUT_MS).toBeLessThanOrEqual(RELAY_TIMEOUT_MS);
+    expect(decideBodies()).toHaveLength(1);
+    expect(decideBodies()[0].doctor_uid).toBeNull();
+    expect(logs()).toContain("doctor_resolve_fault=1");
+  });
+
+  it("METABASE env unset: no Metabase call, doctor_resolve_off counted, fail-closed null", async () => {
+    delete process.env.METABASE_API_KEY;
+    await post([openCU()]);
+    expect(mbCalls).toHaveLength(0);
+    expect(fetchCalls.filter((c) => c.url.startsWith(MB))).toHaveLength(0);
+    expect(decideBodies()[0].doctor_uid).toBeNull();
+    expect(logs()).toContain("doctor_resolve_off=1");
+  });
+
+  it("no uid appears in any log line", async () => {
+    mbImpl = async () => mbRows(["doc-res-1"]);
+    await post([openCU({ last_doctor_uid: "doc-hint-1" })]);
+    mbImpl = async () => new Response("{}", { status: 500 });
+    await post([openCU({ encounter_id: "zyxwvutsrq9876543210abcd", last_doctor_uid: "doc-hint-1" })]);
+    const all = logs();
+    for (const bad of [CU, "zyxwvutsrq9876543210abcd", "doc-res-1", "doc-hint-1", "mb.example.test", "mb-key-value"]) expect(all).not.toContain(bad);
+  });
+});
+
+describe("Encounter Buddy: newcat consult-started route", () => {
+  it("posts to /v1/buddy/consult-started; a 409 conflict is a fault and writes nothing", async () => {
+    expect(DECIDE_PATH).toBe("/v1/buddy/consult-started");
+    fetchImpl = async () => new Response(JSON.stringify({ window: true, live: true, reason_code: "dup" }), { status: 409 });
+    await post([open()]);
+    expect(refs).toHaveLength(0);
+    expect(commands).toHaveLength(0);
+    expect(logs()).toContain("decide_fault=1");
+  });
+
+  it("window true with live false still writes; live is only counted", async () => {
+    fetchImpl = async () => new Response(JSON.stringify({ window: true, live: false, reason_code: "shadow" }), { status: 200 });
+    await post([open()]);
+    expect(refs).toHaveLength(1);
+    expect(logs()).toContain("decide_live=0");
+  });
+
+  it("window true and live true writes and counts live", async () => {
+    await post([open()]);
+    expect(refs).toHaveLength(1);
+    expect(logs()).toContain("decide_live=1");
   });
 });
 
