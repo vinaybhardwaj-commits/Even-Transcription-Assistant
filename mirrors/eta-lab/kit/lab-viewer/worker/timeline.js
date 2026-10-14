@@ -7,7 +7,6 @@
 // does not apply to them. Everything else (tiles, pills, legend swatches, dots) uses fixed CSS classes from the small named palette.
 import { turnsOf, coverageOf, validRoomDate } from "./encounters.js";
 import { isBlind, BLIND_MSG } from "./blind.js";
-import { whyText } from "./consults.js";
 
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const rstr = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
@@ -36,10 +35,9 @@ const FLEET_KINDS = new Set(["mic_missing", "kiosk_offline", "recorder_restarted
 // whitelists shape, never recomputes anything. A lane not in the doc yet (older/pre-REB room-days) = empty, not an error.
 const KOYAL_LANGS = ["hi", "kn", "ml", "te"];   // KOYAL-LANE-SPEC f1f57dc3: one koyal track per prompt language, all four run on every window
 const KOYAL_LANES = KOYAL_LANGS.map((l) => `koyal_${l}`);
-const SARVAM_LANES = ["sarvam", "sarvam_translate", "sarvam_diar"];   // 6V: the Sarvam lanes (stt, English, speaker turns)
-const TEXT_LANES = new Set(["whisper", "medmodel", "indic", "sravaani", "medasr", "translate", "router", "sarvam", "sarvam_translate", ...KOYAL_LANES]);   // every REB lane that carries transcript words
-const REB_LANES = ["whisper", "medmodel", "indic", "sravaani", "medasr", "translate", ...KOYAL_LANES, "diar", "acoustic", "tone", "router", ...SARVAM_LANES, "encounter"];
-const NULL_IF_ABSENT = new Set(["medmodel", "translate", ...KOYAL_LANES, "router", ...SARVAM_LANES, "encounter"]);   // null = the seed predates this lane; [] = looked, none
+const TEXT_LANES = new Set(["whisper", "medmodel", "indic", "sravaani", "medasr", "translate", ...KOYAL_LANES]);   // every REB lane that carries transcript words
+const REB_LANES = ["whisper", "medmodel", "indic", "sravaani", "medasr", "translate", ...KOYAL_LANES, "diar", "acoustic", "tone"];
+const NULL_IF_ABSENT = new Set(["medmodel", "translate", ...KOYAL_LANES]);   // null = the seed predates this lane; [] = looked, none
 function rebLaneSpans(list) { return rebLaneSpansAll((Array.isArray(list) ? list : []).slice(0, 2000)); }
 function rebLaneSpansAll(list) {
   let eos = 0;
@@ -116,7 +114,7 @@ export function applyWindow(m, laneDocs, win) {
   return m;
 }
 
-export function roomDayModel(consult, doc, consults = null) {
+export function roomDayModel(consult, doc) {
   const windows = (consult.windows || []).map((w) => ({ k: w.k, t0: w.t0, t1: w.t1, s: w.s, e: w.e, status: w.status, n_words: w.n_words, run_id: w.run_id }));
   const turns = turnsOf(consult.segments || []);
   const cov = coverageOf(windows, consult.hidden);
@@ -125,21 +123,10 @@ export function roomDayModel(consult, doc, consults = null) {
   if (blind) for (const k of REB_LANES) if (Array.isArray(d.reb[k])) d.reb[k] = TEXT_LANES.has(k) ? [] : d.reb[k].map((x) => ({ ...x, text: "" }));   // the text lanes are replaced by the notice; no other lane carries words
   const wordWindows = windows.filter((w) => (w.n_words ?? 0) > 0);
   const talkMs = wordWindows.reduce((n, w) => n + Math.max(0, w.e - w.s), 0);
-  // 6V: the day's consult clips (worker/consults.js consultsDocOf). Never carried for a blind room-day: no band, no list, no link.
-  return { room_id: consult.room_id, room_name: consult.room_name, date: consult.date, blind, windows, hidden: consult.hidden || [], turns, cov, talkMs, d, consults: blind || !consults ? { loaded: false, list: [] } : consults };
+  return { room_id: consult.room_id, room_name: consult.room_name, date: consult.date, blind, windows, hidden: consult.hidden || [], turns, cov, talkMs, d };
 }
 
 const CSS = `
-.cb a{cursor:pointer}.cb a:hover rect{stroke:#1B1C1E;stroke-width:2}
-.crow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 16px;border-top:1px solid var(--line2);font-size:14px}.crow .t{width:130px;flex-shrink:0}
-.chip{display:inline-block;border-radius:99px;padding:0 8px;font-size:11px;border:1px solid var(--line);color:var(--dim)}.chip.ok{border-color:#0F6B6B;color:var(--acc)}.chip.bad{border-color:#B4471A;color:#B4471A}.chip.empty{color:var(--mut)}
-.btn{display:inline-block;background:var(--fg);color:var(--bg);border-radius:8px;padding:6px 12px;text-decoration:none;font-weight:600;font-size:13px}
-.drawer{border:2px solid var(--acc)}.drawer .close{float:right;font-size:13px;font-weight:400}.drawer .dbody{padding:4px 16px 16px}.drawer h3{font-size:14px;margin:18px 0 6px}
-.facts{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0 0 12px}.facts dt{color:var(--mut);font-size:13px}.facts dd{margin:0}
-.drawer audio{width:100%;max-width:560px;display:block;margin:8px 0}
-table.turns{width:100%;border-collapse:collapse;font-size:13px;margin:6px 0}table.turns th,table.turns td{padding:4px 8px;text-align:left;border-top:1px solid var(--line2);vertical-align:top}
-details.dl{border-top:1px solid var(--line2);padding:6px 0}details.dl summary{cursor:pointer}details.dl h4{margin:8px 0 2px;font-size:13px}
-
 :root{--bg:#F4F2EE;--fg:#1B1C1E;--mut:#5E6168;--dim:#33363B;--line:#E2DED6;--line2:#ECE8E0;--card:#FFFFFF;--acc:#0F6B6B}
 @media (prefers-color-scheme:dark){:root{--bg:#1B1C1E;--fg:#F4F2EE;--mut:#A7A39A;--dim:#D9D4CA;--line:#3A3A38;--line2:#2E2E2C;--card:#242422;--acc:#3FA7A0}}
 *{box-sizing:border-box}body{overflow-wrap:anywhere;margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 'IBM Plex Sans',system-ui,sans-serif}
@@ -237,33 +224,6 @@ ${roomRows}</div>
 function todayIst(nowMs) { return new Date(nowMs + IST_MS).toISOString().slice(0, 10); }
 
 // ---------------------------------------------------------------- Level 2: one room, whole day
-// 6V: the consult lane: one band per consult, each an ordinary link to ?consult=<id> (server-rendered drawer, no client script).
-const bandClass = (c) => (c.status === "cut" ? C.consult : "#8A7F6E");
-function consultLane(m, dayStart, dayEnd) {
-  const list = m.consults?.list ?? [];
-  if (m.blind) return laneEmpty("Consult clips", "Each consult, from the cutter", BLIND_MSG);
-  if (!m.consults?.loaded) return laneEmpty("Consult clips", "Each consult, from the cutter", "not processed yet for this day");
-  const inView = list.filter((c) => c.e > dayStart && c.s < dayEnd);
-  if (!inView.length) return laneEmpty("Consult clips", "Each consult, from the cutter", "No consult detected.");
-  const span = Math.max(1, dayEnd - dayStart), x = (t) => (100 * (Math.max(t, dayStart) - dayStart)) / span, w = (a, b) => Math.max(0.3, (100 * (Math.min(b, dayEnd) - Math.max(a, dayStart))) / span);
-  const href = (c) => `/timeline/${encodeURIComponent(m.room_id)}/${encodeURIComponent(m.date)}?consult=${encodeURIComponent(c.id)}#consult`;
-  const bands = inView.map((c) => {
-    const tip = `${c.doctor || "Consult"} ${hm2(c.s)}–${hm2(c.e)} IST, ${c.minutes} min` + (c.status === "cut" ? " · clip ready" : ` · not cut: ${whyText(c)}`);
-    const sel = m.drawerId === c.id;
-    return `<a href="${esc(href(c))}" aria-label="${esc(tip)}"><rect x="${x(c.s).toFixed(3)}" y="3" width="${w(c.s, c.e).toFixed(3)}" height="94" rx="1.5" ${c.status === "cut" ? `fill="${bandClass(c)}"` : `fill="none" stroke="${bandClass(c)}" stroke-width="2" stroke-dasharray="4 3"`}${sel ? ` stroke="#1B1C1E" stroke-width="3"` : ""}><title>${esc(tip)}</title></rect></a>`;
-  }).join("");
-  return laneRow("Consult clips", "Each consult. Solid = clip ready, dashed = not cut. Click one to open it.",
-    `<svg class="cb" viewBox="0 0 100 100" preserveAspectRatio="none" width="100%" height="34" role="group" aria-label="Consult clips">${bands}</svg>`);
-}
-const hm2 = (ms) => new Date(ms + IST_MS).toISOString().slice(11, 16);
-function consultList(m) {
-  if (m.blind || !m.consults?.loaded || !m.consults.list.length) return "";
-  const rows = m.consults.list.map((c) => `<div class="crow"><span class="t mono">${hm2(c.s)}–${hm2(c.e)}</span><b>${esc(c.doctor || "Doctor not recorded")}</b><span class="mut">${esc(c.minutes)} min</span>
-<span class="chip ${c.status === "cut" ? "ok" : "empty"}">${c.status === "cut" ? "Clip ready" : "Not cut"}</span>${c.status === "cut" ? "" : `<span class="mut">${esc(whyText(c))}</span>`}
-<a href="/timeline/${esc(encodeURIComponent(m.room_id))}/${esc(encodeURIComponent(m.date))}?consult=${esc(encodeURIComponent(c.id))}#consult">${c.status === "cut" ? "Open, play and download" : "Open"}</a></div>`).join("");
-  return `<div class="card"><h2>Consults <span class="h2s">— ${m.consults.list.length} on this day; click one to hear it and see everything held for that time</span></h2>${rows}</div>`;
-}
-
 export function roomDayPage(m) {
   if (!m) return page("Room", "", `<p class="mut">This room-day has no data.</p>`);
   const dayStart0 = Date.parse(`${m.date}T00:00:00+05:30`);
@@ -323,17 +283,11 @@ export function roomDayPage(m) {
   const koyalLanes = KOYAL_LANGS.map((l) => rebLane(`Koyal · ${koyalNames[l]}`, `REB stt layer, koyal engine, ${l}-IN prompt (every window is run under all four prompts; a wrong-language prompt gives noise)`, `koyal_${l}`, "#b5533c")).join("");
   const diarLane = rebLane("Diar (REB)", "REB diar layer (pyannote/Nemotron) - distinct from Who spoke above", "diar", "#f0b98f");
   const acousticRebLane = rebLane("Acoustic (REB)", "REB acoustics layer (vad_segments, frame stats) - distinct from Speech missed above", "acoustic", "#9ec5f0");
-  const routerLane = rebLane("Production router (twin)", "REB stt layer, router-twin-* engines (a copy of what the live router chose)", "router", "#6b8f3a", "Not yet produced: no router-twin tracks exist for this room-day.");
-  const sarvamLane = rebLane("Sarvam transcript", "REB stt layer, sarvam-saaras-v3", "sarvam", "#b0446e", "Sarvam not run yet for this room-day.");
-  const sarvamTrLane = rebLane("Sarvam English", "REB translate layer, sarvam-saaras-v3", "sarvam_translate", "#d98cb0", "Sarvam not run yet for this room-day.");
-  const sarvamDiarLane = rebLane("Sarvam speaker turns", "REB diar layer, sarvam-saaras-v3", "sarvam_diar", "#c9718f", "Sarvam not run yet for this room-day.");
-  const encounterLane = rebLane("Visit record", "REB encounter layer (pulse-presence): the doctor and prescription for each consult", "encounter", "#3a6f8f", "Not yet produced: no encounter tracks exist for this room-day.");
   const toneLane = rebLane("Tone", "REB emotion layer (wavlm)", "tone", "#e6d77c");
   const winRows = m.windows.slice().sort((a, b) => a.s - b.s).map((w) => `<tr><td class="mono">${esc(w.t0)}–${esc(w.t1)}</td><td><a href="/#/win/${esc(w.k)}">${esc(w.status)}</a></td><td>${m.blind ? "–" : (w.n_words ?? 0)}</td></tr>`).join("") || `<tr><td colspan="3" class="mut">No windows.</td></tr>`;
   return page(m.room_name, `<span class="sub">Room · whole day · ${esc(m.date)}</span>`, `
 <div class="tiles">${tiles.map((t) => `<div class="tile${t.attn ? " attn" : ""}"><div class="l">${esc(t.l)}</div><div class="v">${esc(t.v)}</div><div class="s">${esc(t.s)}</div></div>`).join("")}</div>
-${m.drawerHtml ?? ""}${consultList(m)}
-<div class="card"><h2>Room timeline layers</h2>${winChips}${consultLane(m, dayStart, dayEnd)}${sttLane}${missedLane}${spkLane}${queueLane}${rxLane}${detLane}${whisperLane}${medmodelLane}${indicLane}${sravaaniLane}${medasrLane}${translateLane}${koyalLanes}${diarLane}${acousticRebLane}${toneLane}${routerLane}${sarvamLane}${sarvamTrLane}${sarvamDiarLane}${encounterLane}
+<div class="card"><h2>Room timeline layers</h2>${winChips}${sttLane}${missedLane}${spkLane}${queueLane}${rxLane}${detLane}${whisperLane}${medmodelLane}${indicLane}${sravaaniLane}${medasrLane}${translateLane}${koyalLanes}${diarLane}${acousticRebLane}${toneLane}
 <div class="legend"><span class="k"><span class="sw sw-consult"></span>Speech / consult</span><span class="k"><span class="sw sw-quiet"></span>Quiet</span><span class="k"><span class="sw sw-missed"></span>Missed speech</span><span class="k"><span class="sw sw-queue"></span>Queue consult</span></div></div>
 <div class="card"><h2>STT windows <span class="h2s">— click one to open its transcript</span></h2><table><tr><th>Time</th><th>Status</th><th>Words</th></tr>${winRows}</table></div>`);
 }
