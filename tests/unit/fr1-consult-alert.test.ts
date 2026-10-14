@@ -71,6 +71,14 @@ describe("consult rule", () => {
     expect(mine).toHaveLength(2);
     expect(new Set(mine.map((p) => A.composeOpsAlert(p).dedupe_key))).toEqual(new Set(["recorder_off", "recorder_off_consult"]));
   });
+  it("two open windows (30 and 2 min), recorder dead 20 min -> alert now: the map carries the OLDEST t_open", () => {
+    const plan = consultOnly(S.planOpsAlerts({ ...base, last_chunk_ms: new Map([[OPD4, NOW - 20 * MIN]]), open_windows: new Map([[OPD4, NOW - 30 * MIN]]) }));
+    expect(plan).toHaveLength(1);
+    expect(plan[0]).toMatchObject({ minutes: 20, consult_open: { window_open_min: 30 } });
+  });
+  it("a future-dated window: the SQL drops it (t_open <= now()); if one ever reached the planner it would not page (negative open age)", () => {
+    expect(consultOnly(S.planOpsAlerts({ ...base, last_chunk_ms: new Map(), open_windows: new Map([[OPD4, NOW + 10 * MIN]]) }))).toEqual([]);
+  });
   it("the constant is 5", () => {
     expect(H.CONSULT_RECORDER_OFF_MINUTES).toBe(5);
   });
@@ -106,5 +114,20 @@ describe("runOpsSweep: a failed windows read degrades only that rule", () => {
     expect(r.degraded).toEqual(["encounter_windows"]);
     expect(r.ok).toBe(false);
     expect(calls.some((c) => c.includes("FROM eta_encounter_windows") && c.includes("t_close IS NULL"))).toBe(true);
+  });
+});
+
+describe("openEncounterWindowsByRoom SQL shape", () => {
+  it("reads the OLDEST open, non-future window within 90 min, no names", async () => {
+    calls.length = 0;
+    responses = [[]];
+    const { openEncounterWindowsByRoom } = await import("@/lib/room-access/tool-reads");
+    await openEncounterWindowsByRoom([OPD4]);
+    const q = calls[0]!;
+    expect(q).toContain("min(w.t_open)");
+    expect(q).toContain("w.t_close IS NULL");
+    expect(q).toContain("w.t_open > now() - interval '90 minutes'");
+    expect(q).toContain("w.t_open <= now()");
+    expect(q).not.toMatch(/doctor|display_name|consult_key|consult_uid/);
   });
 });

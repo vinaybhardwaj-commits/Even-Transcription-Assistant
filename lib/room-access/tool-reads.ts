@@ -415,16 +415,17 @@ export async function lastChunkByRoom(roomIds: readonly string[]): Promise<Array
 }
 
 /**
- * FR1-A (guardian/consult-alert) — the newest OPEN consult window start per roster room: t_close IS NULL and opened within the last 90 minutes. METADATA ONLY: a room id and one timestamp,
+ * FR1-A (guardian/consult-alert) — the OLDEST still-open consult window start per roster room: t_close IS NULL, opened within the last 90 minutes and not in the future (audio has been expected since the oldest open window). METADATA ONLY: a room id and one timestamp,
  * no doctor, no consult key. Read by lib/alerts/ops-sweep.ts, which asks "is a consult open and is audio arriving", never "who". Rides eta_encounter_windows (room_id, t_open).
  */
 export async function openEncounterWindowsByRoom(roomIds: readonly string[]): Promise<Array<{ room_id: string; t_open: unknown }>> {
   return (await sql`
-    SELECT w.room_id, max(w.t_open) AS t_open
+    SELECT w.room_id, min(w.t_open) AS t_open
       FROM eta_encounter_windows w
      WHERE w.room_id = ANY(${roomIds as string[]}::text[])
        AND w.t_close IS NULL
        AND w.t_open > now() - interval '90 minutes'
+       AND w.t_open <= now()
      GROUP BY w.room_id
   `) as Array<{ room_id: string; t_open: unknown }>;
 }

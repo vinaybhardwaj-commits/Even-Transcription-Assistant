@@ -33,7 +33,7 @@ export type SweepInputs = {
   retired_installs?: ReadonlyMap<string, { mic_state: string | null }> | null;
   /** room_id -> slug, for the message; a room missing from it is named by its id */
   slugs?: ReadonlyMap<string, string>;
-  /** FR1-A: room_id -> t_open (ms) of each room's open consult window (newest when several). null/absent = the source was not read (consult rule skipped). */
+  /** FR1-A: room_id -> t_open (ms) of each room's open consult window (the OLDEST open one when several). null/absent = the source was not read (consult rule skipped). */
   open_windows?: ReadonlyMap<string, number> | null;
   /** room_id -> room.name, carried in the body beside the slug */
   names?: ReadonlyMap<string, string>;
