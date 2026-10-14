@@ -2,11 +2,6 @@
 
 Build and event log, newest first. Owner: scribe (build/deploy) + minibot (Mini monitor). This project was named new on 26 Sep.
 
-## 27-28 Sep -- signature_mismatch CLOSED; self_test parked on write-scope
-Session: sig-debug, sig-research, scribe, eta-refuter.
-Root cause: every failure traced to old app build 0.1.8, not a new bug (see ROOMS log). W37 closed, SIG-ROOT-CAUSE.md + SIG-FACTS.md final. A 0.1.26 fix spec written (codesign-stderr logging, ISO-UTC log lines). Home Office's live self_test is parked: minibot's MCP token lacks write scope, the same class of gap SHIP fixed generally for room commands; scribe designing the least-privilege fix for this specific path.
-Refs: #4334-4375, #4350, #5016-5033.
-
 ## 27 Sep ~09:5x-10:3x IST — 0.1.25 PASS 1da7232; self-test hook + server command built
 Session: scribe, eta-refuter, diar-lab.
 Swift gate PASS at 1da7232 on the Air (637 tests, 2 pre-existing flakes also on 0.1.24, not a regression, #4276) after 3 FAIL/fix rounds. New self_test bench command (plays a fixed stimulus, records into a separate segment, uploads with a manifest) built into the app; a separate server-side self-test-server (d82ef4c) is NOT yet pushable (eta-refuter FAIL: no self_test variant in the MCP tool group, #4281/#4284). Fable's GO: signed test build to Home Office only, auto-start left on.
@@ -49,4 +44,3 @@ Refs: orders/RULING-MINI-NIGHT-LAB.md.
 
 ## Release process (to confirm)
 R3 self-update proven 10 Sep (**UNVERIFIED exact date**). Gates + rollout plan still to be written once scope + owner are confirmed.
-- 29 Sep ~23:10 IST (rev 27): T-RECORDER-2 done (two Macs dropped off Tailscale); T-RECORDER-3 on-site check 30 Sep (person UNVERIFIED); T-RECORDER-1 parked to morning.
