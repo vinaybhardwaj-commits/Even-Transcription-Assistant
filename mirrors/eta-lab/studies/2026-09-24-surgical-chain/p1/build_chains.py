@@ -897,40 +897,6 @@ def stage_l():
     print(json.dumps(report, indent=1)); print(f"L: done  [{time.time()-t:.0f}s]")
 
 
-
-# ---------------------------------------------------------------- stage T: near-identical same-day neighbours, from the prescription side alone (v7.3a; no transcript)
-def stage_t():
-    """Upper bound on margin ties: the share of coded visits whose same doctor has another hospital-type Rx the same IST day with an IDENTICAL
-    diagnosis-code set. Medicines can still differ, so this is an upper bound on near-identical; visits with no diagnosis code are not judged."""
-    t = time.time()
-    visits = load("visits_links.json"); surg = set(load("surgical_docs.json"))
-    key = load("link3_key.json") if os.path.exists(OUT + "link3_key.json") else {}
-    rx_day = collections.defaultdict(list)
-    for a, b in days(D0, D1, 1):
-        for uid, doc, icd in pull(f"""SELECT uid, doctor_uid, diagnosis_icd_codes::text FROM "individuals-prescriptions" WHERE type_of_prescription LIKE 'HOSPITAL%'
-              AND "timestamp" >= '{a}T00:00:00+05:30' AND "timestamp" < '{b}T00:00:00+05:30'"""):
-            codes = tuple(sorted(x.strip() for x in (icd or "").strip("{}[]").replace('"', "").split(",") if x.strip()))
-            rx_day[(doc, str(a))].append((uid, codes))
-    idx = {u: (d, day, c) for (d, day), lst in rx_day.items() for u, c in lst}
-    def share(uids, label):
-        n = coded = same = 0
-        for u in uids:
-            if u not in idx:
-                continue
-            n += 1; d, day, c = idx[u]
-            if c:
-                coded += 1
-                same += any(uu != u and cc == c for uu, cc in rx_day[(d, day)])
-        print(f"T: {label}: {n} Rx; coded {coded} ({100*coded/max(n,1):.0f}%); identical-diagnosis same-day neighbour {same} = {100*same/max(coded,1):.0f}% of the coded")
-    q = [v for v in visits if v.get("rx") and v["tier"] in ("A", "B")]
-    share([v["rx"] for v in q], "all queue visits with an Rx")
-    share([v["rx"] for v in q if v["doc"] in surg], "queue visits of surgical-clinic doctors")
-    share([v["rx"] for v in q if v["doc"] not in surg], "queue visits of all other doctors")
-    share([k["rx"] for k in key.values()], "the 37 blind link-3 items (class-blind, together)")
-    nb = sorted(len(rx_day[(idx[v["rx"]][0], idx[v["rx"]][1])]) - 1 for v in q if v["rx"] in idx)
-    print(f"T: other same-doctor same-day hospital Rx per visit: median {nb[len(nb)//2]}, p90 {nb[int(len(nb)*.9)]}; none at all {sum(x == 0 for x in nb)} of {len(nb)}  [{time.time()-t:.0f}s]")
-
-
 if __name__ == "__main__":
     stage = sys.argv[1] if len(sys.argv) > 1 else ""
-    {"A": stage_a, "B": stage_b, "C": stage_c, "D": stage_d, "drift": stage_drift, "F": stage_f, "E": stage_e, "R": stage_r, "W": stage_w, "L": stage_l, "T": stage_t}.get(stage, lambda: sys.exit(__doc__))()
+    {"A": stage_a, "B": stage_b, "C": stage_c, "D": stage_d, "drift": stage_drift, "F": stage_f, "E": stage_e, "R": stage_r, "W": stage_w, "L": stage_l}.get(stage, lambda: sys.exit(__doc__))()

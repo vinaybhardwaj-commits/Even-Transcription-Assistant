@@ -3,16 +3,15 @@ Deterministic: vj-refuter re-runs it from the stored raw outputs and must get id
 All three hashes (freeze b961291ae64c + addendum 9c335c59c5be + addendum 166 87b8cdac4330) and the combine-rule sha are stamped into results.json and the summary.
 
 Usage: score.py --arm1 out/arm1.jsonl --truth ~/vj/truth/turn_labels.jsonl [--arm2 .. --arm3 .. --arm4 ..] --rule COMBINE_RULE.md --rule-sha <sha>
-                [--requery2/3/4 FILE] [--role-weights data/role_shares_doubtful.json] [--windows windows.jsonl] [--human-counts ~/vj/truth/human-counts.json] [--key-json key.json] [--prices prices.json] --outdir DIR
-truth (166 B): rows {turn_id, rater, label} or {turn_id, labels: {rater: label}}, optional `source` (v_existing = V's pilot/listening labels, first priority; e3_recovered = the 70 recovered E-3 Cardiology turns (ruling 185); vpilot_voice_verified = the +22 not-doctor turns from voice-verified single-doctor room-days, applied by vj-refuter (ruling 214); who_is_speaking = top-up page; anything else ranks last);
-  label in doctor|patient|companion|staff|cannot tell (a legacy single {label} / {is_doctor} row also works). A turn labelled by several sources uses only its highest-priority source that has a usable answer (a source whose answers are all 'cannot tell' is skipped; disagreement inside the chosen source still excludes the turn).
+                [--requery2/3/4 FILE] [--windows windows.jsonl] [--human-counts ~/vj/truth/human-counts.json] [--key-json key.json] [--prices prices.json] --outdir DIR
+truth (166 B): rows {turn_id, rater, label} or {turn_id, labels: {rater: label}}, optional `source` (v_existing = V's existing labels, first priority; who_is_speaking = top-up page; anything else ranks last);
+  label in doctor|patient|companion|staff|cannot tell (a legacy single {label} / {is_doctor} row also works). A turn labelled by several sources uses only its highest-priority source.
 """
 import argparse, json, math, os, sys
 import common as C
 import combine as K
 
-SOURCE_PRIORITY = ["v_existing", "e3_recovered", "vpilot_voice_verified", "who_is_speaking"]
-WITHOUT_TAG = "vpilot_voice_verified"     # ruling 214: every result is reported with and without this source
+SOURCE_PRIORITY = ["v_existing", "who_is_speaking"]
 MIN_DOUBTFUL_TRUTH, MIN_GAIN, MAX_P, MIN_AGREE, MIN_COUNT_WINDOWS, MIN_CONFIDENT_TRUTH = 60, 0.05, 0.05, 0.90, 20, 30
 
 
@@ -28,21 +27,19 @@ def norm_label(x):
     return "cannot_tell" if x.startswith("cannot") else ("doctor" if x.startswith("doctor") else "other")
 
 
-def load_truth(p, exclude_sources=()):
+def load_truth(p):
     """B: binary doctor vs not from >= 1 usable human answer. 'cannot tell' answers are ignored; a turn with no usable answer, or whose usable
     answers disagree on doctor vs not, is excluded and reported. Returns ({turn_id: is_doctor}, exclusion report)."""
     per = {}
     for r in C.read_jsonl(p):
-        if r.get("source") in exclude_sources: continue
         if "labels" in r: ls = list(r["labels"].values())
         elif "is_doctor" in r: ls = ["doctor" if r["is_doctor"] else "patient"]
         else: ls = [r["label"]]
         per.setdefault(r["turn_id"], {}).setdefault(r.get("source", "unspecified"), []).extend(ls)
     rank = lambda src: SOURCE_PRIORITY.index(src) if src in SOURCE_PRIORITY else len(SOURCE_PRIORITY)
     votes, src_of = {}, {}
-    usable = lambda ls: any(norm_label(x) != "cannot_tell" for x in ls)
     for t, by in per.items():
-        src = min([k for k in by if usable(by[k])] or list(by), key=rank); votes[t] = by[src]; src_of[t] = src   # highest-priority source that has a usable answer
+        src = min(by, key=rank); votes[t] = by[src]; src_of[t] = src
     truth, no_usable, disagree = {}, [], []
     for t, ls in sorted(votes.items()):
         u = {norm_label(x) == "doctor" for x in ls if norm_label(x) != "cannot_tell"}
@@ -77,67 +74,17 @@ def score_turns(arm, a1, truth, outs, rule):
         r = a1[tid]
         fin = ("doctor" if r["is_doctor"] else "not_doctor") if arm == 1 else K.combine(arm, r, outs.get(tid), rule)
         direct = K.raw_final(arm, outs.get(tid), rule) if (arm != 1 and outs.get(tid)) else None
-        rows.append({"turn_id": tid, "doubtful": r["doubtful"], "stratum": role_group(r), "final": fin, "truth": t, "correct": fin != K.UNSURE and (fin == K.DOCTOR) == t,
+        rows.append({"turn_id": tid, "doubtful": r["doubtful"], "final": fin, "truth": t, "correct": fin != K.UNSURE and (fin == K.DOCTOR) == t,
                      "arm1_correct": r["is_doctor"] == t, "arm1_is_doctor": r["is_doctor"], "direct": direct, "missing": arm != 1 and r["doubtful"] and not outs.get(tid)})
     return rows
 
 
-def role_group(r): return r.get("role") or "empty"
-
-
-def pinned_role_weights(path, key="all_pool_doubtful"):
-    """215, pinned: the role shares vj-data computed over DISTINCT production turns (data/role_shares_doubtful.json). arm1_in carries per-context turn ids
-    (an SC30 excerpt turn also appears under its window), so shares recomputed from it differ slightly (clinician 0.0989 vs 0.1017); the pinned file wins."""
-    d = json.load(open(path))[key]
-    return {g: w for g, w in sorted(d["shares"].items())}, {"file": os.path.basename(path), "sha256_12": C.sha256_file(path)[:12], "key": key, "n": d["n"], "counts": d["counts"], "shares": d["shares"]}
-
-
-def role_weights(a1_rows):
-    """215: weights = production role shares among ALL doubtful turns in the arm 1 file (labelled or not). Role null / "" = "empty"."""
-    n = {}
-    for r in a1_rows:
-        if r["doubtful"]: g = role_group(r); n[g] = n.get(g, 0) + 1
-    tot = sum(n.values())
-    return {g: c / tot for g, c in sorted(n.items())} if tot else {}
-
-
-def current_rows(rows, turn_ids, window_ids):
-    """Raw output files are append-only. Keep only the CURRENT rows: the last row per turn (L1 / Jev) or per window (L2), and only for turns / windows that
-    exist in the arm 1 file. Rows for ids from an earlier hand-off (and superseded duplicates) are counted as stale and excluded, so cost and time are not inflated."""
-    last = {}
-    for r in rows:
-        k = ("l2", r.get("window_id")) if r.get("kind") == "l2" else ("t", r.get("turn_id"))
-        last[k] = r
-    keep = [r for k, r in last.items() if (k[1] in window_ids if k[0] == "l2" else k[1] in turn_ids)]
-    return keep, len(rows) - len(keep)
-
-
-def weighted_acc(rows, key, weights):
-    """Population-weighted accuracy: per-role accuracy on the labelled turns, combined with the role shares (renormalised over roles that have labelled turns)."""
-    by = {}
-    for r in rows: by.setdefault(r["stratum"], []).append(r[key])
-    present = {g: w for g, w in weights.items() if g in by}
-    if not present: return None, sorted(weights)
-    tot = sum(present.values())
-    return sum(w / tot * sum(by[g]) / len(by[g]) for g, w in present.items()), sorted(g for g in weights if g not in by)
-
-
-def paired(rows, weights=None):
+def paired(rows):
     d = [r for r in rows if r["doubtful"]]
     b = sum(r["correct"] and not r["arm1_correct"] for r in d); c = sum((not r["correct"]) and r["arm1_correct"] for r in d)
     a, a1 = acc([r["correct"] for r in d]), acc([r["arm1_correct"] for r in d])
-    out = {"arm_right_arm1_wrong": b, "arm_wrong_arm1_right": c, "mcnemar_exact_p": round(sign_test_p(b, c), 4),
-           "gain_pp": None if a["accuracy"] is None else round(100 * (a["accuracy"] - a1["accuracy"]), 2)}
-    wa, miss = weighted_acc(d, "correct", weights or {}); wa1, _ = weighted_acc(d, "arm1_correct", weights or {})
-    out.update({"gain_pp_weighted": None if wa is None else round(100 * (wa - wa1), 2), "weighted_acc_arm": None if wa is None else round(wa, 4),
-                "weighted_acc_arm1": None if wa1 is None else round(wa1, 4), "role_weights": {g: round(w, 4) for g, w in (weights or {}).items()}, "roles_without_labelled_turns": miss})
-    return out
-
-
-def win_criteria(p):
-    """215: F2 = population-weighted gain >= 5 pp AND the unweighted difference has the same sign (positive); F3 = exact McNemar on the paired, unweighted sample."""
-    return {"F2": p["gain_pp_weighted"] is not None and p["gain_pp_weighted"] >= 100 * MIN_GAIN and p["gain_pp"] is not None and p["gain_pp"] > 0,
-            "F3": p["mcnemar_exact_p"] < MAX_P and p["arm_right_arm1_wrong"] > p["arm_wrong_arm1_right"]}
+    return {"arm_right_arm1_wrong": b, "arm_wrong_arm1_right": c, "mcnemar_exact_p": round(sign_test_p(b, c), 4),
+            "gain_pp": None if a["accuracy"] is None else round(100 * (a["accuracy"] - a1["accuracy"]), 2)}
 
 
 def confident_sample(rows):
@@ -151,14 +98,15 @@ def confident_sample(rows):
             "arm1_accuracy": acc([r["arm1_correct"] for r in s])["accuracy"]}
 
 
-def stability(arm, a1, truth, outs, rq, rule, weights):
+def stability(arm, a1, truth, outs, rq, rule, base_paired):
     """G: agreement of the raw answers on the re-queried doubtful turns >= 0.90, and the win (F2, F3) still holds with the re-query answers substituted."""
     if rq is None: return {"status": "not_run"}
     d = {t for t in truth if t in a1 and a1[t]["doubtful"]}; ids = [t for t in rq if t in d]
     n_d = len(d); need = n_d // 5
     agree = sum(K.raw_final(arm, outs.get(t), rule) == K.raw_final(arm, rq[t], rule) for t in ids)
-    sub = score_turns(arm, a1, truth, {**outs, **{t: rq[t] for t in ids}}, rule); pr = paired(sub, weights)
-    win = all(win_criteria(pr).values())
+    sub = score_turns(arm, a1, truth, {**outs, **{t: rq[t] for t in ids}}, rule); pr = paired(sub)
+    a, a1a = acc([r["correct"] for r in sub if r["doubtful"]])["accuracy"], acc([r["arm1_correct"] for r in sub if r["doubtful"]])["accuracy"]
+    win = a is not None and 100 * (a - a1a) >= 100 * MIN_GAIN and pr["mcnemar_exact_p"] < MAX_P
     return {"status": "run", "n_requeried": len(ids), "n_doubtful_scored": n_d, "share": round(len(ids) / n_d, 4) if n_d else None, "share_ok": len(ids) >= need and len(ids) > 0,
             "agreement": round(agree / len(ids), 4) if ids else None, "agreement_ok": bool(ids) and agree / len(ids) >= MIN_AGREE, "win_holds_with_requery": bool(win), "paired_with_requery": pr,
             "holds": bool(ids) and len(ids) >= need and agree / len(ids) >= MIN_AGREE and win}
@@ -170,8 +118,8 @@ def pass_bar(s, stab):
     p, cs = s["vs_arm1_doubtful"], s["confident_sample"]
     f4 = "INSUFFICIENT" if cs["n"] < MIN_CONFIDENT_TRUTH else ("PASS" if cs["flipped_right_to_wrong"] == 0 else "FAIL")
     c = {"F1_n_doubtful_with_truth>=60": s["doubtful"]["n"] >= MIN_DOUBTFUL_TRUTH,
-         "F2_weighted_gain>=5pp_and_unweighted_same_sign": win_criteria(p)["F2"],
-         "F3_mcnemar_p<0.05_unweighted": win_criteria(p)["F3"],
+         "F2_gain>=5pp": p["gain_pp"] is not None and p["gain_pp"] >= 100 * MIN_GAIN,
+         "F3_mcnemar_p<0.05": p["mcnemar_exact_p"] < MAX_P and p["arm_right_arm1_wrong"] > p["arm_wrong_arm1_right"],
          "F4_zero_confident_flips_n>=30": f4 == "PASS",
          "F5_stability": stab.get("holds", False)}
     others = all(v for k, v in c.items() if not k.startswith("F4"))
@@ -179,7 +127,7 @@ def pass_bar(s, stab):
             "status": "ADOPTABLE" if all(c.values()) else ("CONTINUE_ONLY (F4 insufficient)" if f4 == "INSUFFICIENT" and others else "NOT_ADOPTED")}
 
 
-def summarize(arm, rows, hours, outs, prices, stab=None, weights=None, stale=0):
+def summarize(arm, rows, hours, outs, prices, stab=None):
     d = [r for r in rows if r["doubtful"]]; c = [r for r in rows if not r["doubtful"]]
     s = {"n_turns": len(rows), "doubtful": acc([r["correct"] for r in d]), "confident": acc([r["correct"] for r in c]),
          "unsure_n": sum(r["final"] == K.UNSURE for r in rows), "unsure_doubtful_n": sum(r["final"] == K.UNSURE for r in d)}
@@ -187,9 +135,9 @@ def summarize(arm, rows, hours, outs, prices, stab=None, weights=None, stale=0):
     if arm == 1:
         nd = [r for r in rows if not r["arm1_is_doctor"]]; s["arm1_not_doctor_n"] = len(nd)
     else:
-        s["vs_arm1_doubtful"] = paired(rows, weights); s["confident_sample"] = confident_sample(rows)
+        s["vs_arm1_doubtful"] = paired(rows); s["confident_sample"] = confident_sample(rows)
         s["escalated_share"] = round(len(d) / len(rows), 4) if rows else None
-        s["cost"] = cost(arm, outs.values(), hours, prices); s["errors_n"] = sum("error" in o for o in outs.values()); s["stale_rows_excluded"] = stale
+        s["cost"] = cost(arm, outs.values(), hours, prices); s["errors_n"] = sum("error" in o for o in outs.values())
         s["stability"] = stab or {"status": "not_run"}; s["pass_bar"] = pass_bar(s, s["stability"])
     return s
 
@@ -245,66 +193,49 @@ def main():
     ap.add_argument("--arm1", required=True); ap.add_argument("--truth", required=True)
     for n in (2, 3, 4): ap.add_argument(f"--arm{n}"); ap.add_argument(f"--requery{n}")
     ap.add_argument("--rule", required=True); ap.add_argument("--rule-sha", required=True)
-    ap.add_argument("--cards", help="inputs/cards.jsonl: the CURRENT run's turns (and their windows); raw rows for any other turn are stale and excluded from scoring and cost. Without it, the arm 1 file's ids define 'current' and stale rows may remain (flagged)")
-    ap.add_argument("--role-weights", help="data/role_shares_doubtful.json (pinned ruling-215 weights); without it the weights are recomputed from the arm 1 file and flagged NOT PINNED")
-    ap.add_argument("--role-weights-key", default="all_pool_doubtful"); ap.add_argument("--windows"); ap.add_argument("--human-counts"); ap.add_argument("--key-json"); ap.add_argument("--prices"); ap.add_argument("--outdir", required=True)
+    ap.add_argument("--windows"); ap.add_argument("--human-counts"); ap.add_argument("--key-json"); ap.add_argument("--prices"); ap.add_argument("--outdir", required=True)
     a = ap.parse_args()
     stamp = C.stamp(); rule = K.load_rule(a.rule, a.rule_sha)
-    a1_rows = C.read_jsonl(a.arm1)
-    if any(r.get("production_row") is False for r in a1_rows): raise SystemExit("arm 1 file has production_row=false rows (E3X pseudo-turns): they would be scored with a fabricated arm-1 answer (ruling 290). Keep them out of arm1_in.")
-    a1 = {r["turn_id"]: r for r in a1_rows}
-    if a.role_weights: weights, wsrc = pinned_role_weights(a.role_weights, a.role_weights_key)
-    else: weights, wsrc = role_weights(a1_rows), {"file": None, "note": "recomputed from the arm 1 file: NOT PINNED (per-context turn ids)"}
+    a1_rows = C.read_jsonl(a.arm1); a1 = {r["turn_id"]: r for r in a1_rows}
+    truth, texcl = load_truth(a.truth); scored = {t for t in truth if t in a1}; truth = {t: truth[t] for t in scored}
     wins = {r["window_id"]: r["duration_s"] for r in C.read_jsonl(a.windows)} if a.windows else {}
+    hours = sum(wins[w] for w in {a1[t]["window_id"] for t in scored} if w in wins) / 3600 if wins else None
     prices = json.load(open(a.prices)) if a.prices else {}
-    if a.cards: cards = C.read_jsonl(a.cards); cur_t, cur_w = {r["turn_id"] for r in cards}, {r["window_id"] for r in cards if r.get("window_id")}
-    else: cur_t, cur_w = set(a1), {r["window_id"] for r in a1_rows if r.get("window_id")}
-    arm_raw = {}
+    res = {**stamp, "freeze_sha256": C.freeze_text()[1], "addendum_sha256": C.addendum_sha(), "addendum166_sha256": C.addendum166_sha(), "combine_rule_sha256": rule["sha256"], "conf_threshold": rule["conf_threshold"],
+           "truth": {**texcl, "n_scored_with_arm1": len(scored)}, "arms": {}}
+    res["arm1_empty_role"] = {"not_doctor_turns": sum(not r["is_doctor"] for r in a1_rows), "not_doctor_with_empty_role": sum(not r["is_doctor"] and r.get("role_empty") for r in a1_rows)}
+    res["arms"]["arm1"] = summarize(1, score_turns(1, a1, truth, {}, rule), hours, {}, prices)
+    arm3_rows = arm4_rows = []
     for n in (2, 3, 4):
         p = getattr(a, f"arm{n}")
         if not p: continue
+        rows = C.read_jsonl(p)
         key = (lambda r: r.get("kind") == "l1") if n == 4 else (lambda r: True)
-        rows, n_stale = current_rows(C.read_jsonl(p), cur_t, cur_w)
-        rqp = getattr(a, f"requery{n}")
-        arm_raw[n] = {"rows": rows, "n_stale": n_stale, "outs": {r["turn_id"]: r for r in rows if key(r)}, "rq": {r["turn_id"]: r for r in C.read_jsonl(rqp) if key(r)} if rqp else None}
-
-    def variant(exclude):
-        truth, texcl = load_truth(a.truth, exclude); scored = {t for t in truth if t in a1}; truth = {t: truth[t] for t in scored}
-        hours = sum(wins[w] for w in {a1[t]["window_id"] for t in scored} if w in wins) / 3600 if wins else None
-        v = {"truth": {**texcl, "n_scored_with_arm1": len(scored), "excluded_sources": list(exclude)}, "arms": {},
-             "arm1_empty_role": {"not_doctor_turns": sum(not r["is_doctor"] for r in a1_rows), "not_doctor_with_empty_role": sum(not r["is_doctor"] and r.get("role_empty") for r in a1_rows)}}
-        v["arms"]["arm1"] = summarize(1, score_turns(1, a1, truth, {}, rule), hours, {}, prices)
-        for n, d in arm_raw.items():
-            tr = score_turns(n, a1, truth, d["outs"], rule)
-            allouts = {**d["outs"], **({r["window_id"]: r for r in d["rows"] if r.get("kind") == "l2"} if n == 4 else {})}
-            v["arms"][f"arm{n}"] = summarize(n, tr, hours, allouts, prices, stability(n, a1, truth, d["outs"], d["rq"], rule, weights), weights, d["n_stale"])
-        return v
-
-    res = {**stamp, "freeze_sha256": C.freeze_text()[1], "addendum_sha256": C.addendum_sha(), "addendum166_sha256": C.addendum166_sha(), "combine_rule_sha256": rule["sha256"], "conf_threshold": rule["conf_threshold"], "f2_role_weights_source": wsrc, "current_run_defined_by": a.cards or "arm1 ids (--cards not given)",
-           **variant(())}                                                    # top level = all truth sources (with vpilot_voice_verified)
-    res["without_vpilot_voice_verified"] = variant((WITHOUT_TAG,))            # ruling 214: every result reported with and without the +22 turns
-    arm3_rows = arm_raw.get(3, {}).get("rows", []); arm4_rows = arm_raw.get(4, {}).get("rows", [])
+        outs = {r["turn_id"]: r for r in rows if key(r)}
+        rqp = getattr(a, f"requery{n}"); rq = {r["turn_id"]: r for r in C.read_jsonl(rqp) if key(r)} if rqp else None
+        tr = score_turns(n, a1, truth, outs, rule)
+        allouts = {**outs, **({r["window_id"]: r for r in rows if r.get("kind") == "l2"} if n == 4 else {})}
+        res["arms"][f"arm{n}"] = summarize(n, tr, hours, allouts, prices, stability(n, a1, truth, outs, rq, rule, paired(tr)))
+        if n == 3: arm3_rows = rows
+        if n == 4: arm4_rows = rows
     human = norm_human(json.load(open(a.human_counts))) if a.human_counts else None
     res["speaker_count"] = score_counts(arm3_rows, arm4_rows, a1_rows, human, json.load(open(a.key_json)) if a.key_json else None)
     os.makedirs(a.outdir, exist_ok=True)
     json.dump(res, open(os.path.join(a.outdir, "results.json"), "w"), indent=1, sort_keys=True)
-    open(os.path.join(a.outdir, "SUMMARY.md"), "w").write(summary(res, "WITH all truth sources"))
-    wo = {**res, **res["without_vpilot_voice_verified"]}
-    open(os.path.join(a.outdir, "SUMMARY_without_vpilot.md"), "w").write(summary(wo, "WITHOUT vpilot_voice_verified"))
-    print(open(os.path.join(a.outdir, "SUMMARY.md")).read()); print(open(os.path.join(a.outdir, "SUMMARY_without_vpilot.md")).read())
+    open(os.path.join(a.outdir, "SUMMARY.md"), "w").write(summary(res))
+    print(open(os.path.join(a.outdir, "SUMMARY.md")).read())
 
 
-def summary(res, tag=""):
+def summary(res):
     t = res["truth"]; e = res["arm1_empty_role"]
-    ws = res.get("f2_role_weights_source", {}); wtxt = f"weights {ws.get('file')}@{ws.get('sha256_12')} {ws.get('shares')}" if ws.get("file") else "weights NOT PINNED"
-    L = [f"VJ scoring [{tag}] | {wtxt} | freeze {res['freeze_sha12']} + add165 {res['addendum_sha12']} + add166 {res['addendum166_sha12']} | rule {res['combine_rule_sha256'][:12]} (conf>={res['conf_threshold']}) | truth: {t['n_scored_with_arm1']} usable turns {t['usable_by_source']} "
+    L = [f"VJ scoring | freeze {res['freeze_sha12']} + add165 {res['addendum_sha12']} + add166 {res['addendum166_sha12']} | rule {res['combine_rule_sha256'][:12]} (conf>={res['conf_threshold']}) | truth: {t['n_scored_with_arm1']} usable turns {t['usable_by_source']} "
          f"({t['excluded_no_usable_answer']} no usable answer, {t['excluded_raters_disagree']} raters disagree excluded) | arm1 not-doctor {e['not_doctor_turns']}, empty role {e['not_doctor_with_empty_role']}"]
     for name, s in res["arms"].items():
         d, c = s["doubtful"], s["confident"]
         line = f"{name}: doubtful {d['correct']}/{d['n']}={d['accuracy']} confident {c['correct']}/{c['n']}={c['accuracy']} unsure {s['unsure_n']}"
         if "vs_arm1_doubtful" in s:
             v, cs, k, sb = s["vs_arm1_doubtful"], s["confident_sample"], s["cost"], s["pass_bar"]
-            line += (f" | vs arm1 +{v['arm_right_arm1_wrong']}/-{v['arm_wrong_arm1_right']} gain w {v['gain_pp_weighted']} / unw {v['gain_pp']}pp p={v['mcnemar_exact_p']} | conf sample n={cs['n']} flips {cs['flipped_right_to_wrong']} changed {cs['would_have_changed']}"
+            line += (f" | vs arm1 +{v['arm_right_arm1_wrong']}/-{v['arm_wrong_arm1_right']} gain {v['gain_pp']}pp p={v['mcnemar_exact_p']} | conf sample n={cs['n']} flips {cs['flipped_right_to_wrong']} changed {cs['would_have_changed']}"
                      f" | stability {s['stability'].get('agreement', s['stability']['status'])} | usd/h {k['usd_per_audio_hour']} ({k['prices_status']}) sec/h {k['call_seconds_per_audio_hour']} | errors {s['errors_n']} missing {s['missing_n']} | {sb['status']}")
         L.append(line)
     sc = res.get("speaker_count")

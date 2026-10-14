@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""v5.py — SURGERY-REVIEW-V5 wording, FROZEN (Fable ruling 199, 24 Sep 2026; V5-WORDING-FROZEN.md). Rulings 164/171/172/181: a CT scan (plain or with contrast, angiography included) is a procedure; MRI, X-ray,
-ultrasound, echo, ECG, treadmill, calcium score and blood tests are OUT (MRI is referred out, never a negative); status gains `conditional`; category gains `imaging_ct`; a stage-a0 patient-present gate holds staff
-case talk as `not_a_consult`. It is v4 (named / described, b2ebc86f5a74) plus those changes. check_frozen() refuses any changed question, cut or version. v4 stays frozen for the v4 set (Sandhya's weekend set, f388a8a);
-v3 stays frozen (a29f22245670) for the 12 consults V rated. Scoring goes on a FRESH set only (leakage rule: the shipped 12 steered the wording).
+"""v4.py — SURGERY-REVIEW-V5 wording DRAFT (ruling 164: V includes PLAIN CT as a procedure proposal; MRI, X-ray, echo stay out). It is v4 (named / described, frozen) plus an explicit IMAGING SCOPE in both questions. NOT FROZEN: FROZEN_SHA256 is None, so check_frozen() refuses to score until Fable OKs the
+freeze and a freeze record (V4-WORDING-FROZEN.md) sets it. v3 stays frozen (a29f22245670) for the study already seeded; nothing here touches it.
 
 Change from v3: the single recall question (name AND description, both required) becomes TWO independent noul questions:
   NAMED     — the doctor SAYS the name of a specific procedure (generic words alone are not a name), whatever its status;
@@ -12,10 +10,10 @@ ones, unchanged, and are shown when EITHER is yes (>= 0.5). Keys that do not app
 """
 import copy
 import v3
-from jevconfig import RECALL_CUT, GATE_CUT  # W41 F4: moved, not changed (still 0.25 / 0.5)
 
-WORDING_VERSION = "u9-v5.0"
-FROZEN_SHA256 = "4830ae152bf4167e8117fd150c28f9ed3e36de690b625333114e6417a7b17dec"  # V5-WORDING-FROZEN.md (Fable ruling 199); check_frozen() refuses a changed wording
+WORDING_VERSION = "u9-v5.0-draft6"
+FROZEN_SHA256 = None  # set by the freeze record after Fable's OK
+RECALL_CUT = 0.25
 
 A = {
     "named": {"type": "noul", "instructions":
@@ -39,38 +37,29 @@ B["status"]["criteria"]["mentioned_only"] = B["status"]["criteria"]["mentioned_o
 C_PROPOSED, C_DESCRIBED = v3.C_PROPOSED, v3.C_DESCRIBED
 CATEGORIES = ("operation", "intervention", "minor", "imaging_ct")
 
-# STAGE a0 (eta-refuter-2 #652, trial in V5-IMAGING-SCOPE-TRIAL.md): is a doctor talking WITH a present patient? Staff case talk / pre-op handovers about an ABSENT patient are held BEFORE any status question,
-# so they are never counted as proposals (CT02). Not a rater-facing question: only the recall score and the hold reason are recorded.
-A0 = {"present": {"type": "noul", "instructions":
-    "Is this a consultation in which a doctor is talking WITH a patient (or the patient's family or attender) who is present in the room, about that patient's own problem? "
-    "Answer NO if it is clinicians or staff talking among themselves about a patient who is not present (a case presentation, a pre-operative or ward handover, a discussion of a booking or theatre list, staff chat) "
-    "even if it mentions operations, tests or scans."}}
-
 
 def canonical_hash():
     import hashlib, json
-    return hashlib.sha256(json.dumps({"version": WORDING_VERSION, "recall_cut": RECALL_CUT, "gate_cut": GATE_CUT, "A0": A0, "A": A, "B": B, "C_PROPOSED": C_PROPOSED, "C_DESCRIBED": C_DESCRIBED}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return hashlib.sha256(json.dumps({"version": WORDING_VERSION, "recall_cut": RECALL_CUT, "A": A, "B": B, "C_PROPOSED": C_PROPOSED, "C_DESCRIBED": C_DESCRIBED}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def check_frozen():
+    if FROZEN_SHA256 is None:
+        raise SystemExit("REFUSED: the v4 wording is a DRAFT (no freeze record yet); Fable's OK and V4-WORDING-FROZEN.md are required before scoring")
     if canonical_hash() != FROZEN_SHA256:
-        raise SystemExit("REFUSED: the v5 wording differs from the frozen text (V5-WORDING-FROZEN.md); write a new freeze record before scoring")
+        raise SystemExit("REFUSED: the v4 wording differs from the frozen text (V4-WORDING-FROZEN.md); write a new freeze record before scoring")
 
 
 def scan(state, ask=None):
-    """Stage a0 + (a) in ONE call (present-patient gate, named, described); stage (b) only if max(named, described) >= RECALL_CUT AND the gate >= GATE_CUT.
-    Returns {"named_p", "described_p", "present_p", "passed", "held", "b"}; held = 'not_a_consult' when the gate refuses (staff case talk), 'below_recall' otherwise."""
+    """Stage (a): both questions in one call; stage (b) only if max(named, described) >= RECALL_CUT. Returns {"named_p", "described_p", "passed", "b"}."""
     check_frozen()
     ask = ask or v3.u9.ask
-    a = ask(state, {**A, **A0})["answers"]
-    n, d, g = a["named"]["noul"], a["described"]["noul"], a["present"]["noul"]
-    out = {"named_p": n, "described_p": d, "present_p": g}
-    if g < GATE_CUT:
-        return {**out, "passed": False, "held": "not_a_consult", "b": None}
+    a = ask(state, A)["answers"]
+    n, d = a["named"]["noul"], a["described"]["noul"]
     if max(n, d) < RECALL_CUT:
-        return {**out, "passed": False, "held": "below_recall", "b": None}
+        return {"named_p": n, "described_p": d, "passed": False, "b": None}
     rb = ask(state, B)["answers"]
-    return {**out, "passed": True, "held": None, "b": {k: v3._val(rb[k]) for k in B}}
+    return {"named_p": n, "described_p": d, "passed": True, "b": {k: v3._val(rb[k]) for k in B}}
 
 
 def block(a, b=None, c=None, phrase=None, ev=None):
@@ -126,66 +115,28 @@ def selftest():
     assert o["status"]["answer"] == "already_done" and o["raised_by"]["answer"] == "unclear" and o["raised_by"]["derived"] is True and "firmness" not in o
     # evidence only on the key that is yes
     o = block({"named_p": 0.9, "described_p": 0.2}, lb, C_, {"phrase": "x", "named": True}, ev); assert o["named"]["evidence"] == [3] and o["described"]["evidence"] == []
-    # freeze: the shipped wording IS the frozen wording (a changed question, gate or cut is refused further down); scan: gate on max(named, described)
-    check_frozen()
+    # scan: gate on max(named, described); the draft refuses to score
+    try:
+        scan("s", ask=lambda s, q: {"answers": {}}); raise AssertionError("an unfrozen v4 must refuse to score")
+    except SystemExit:
+        pass
     global FROZEN_SHA256
     saved = FROZEN_SHA256; FROZEN_SHA256 = canonical_hash()
     try:
         calls = []
 
-        def fake(nv, dv, gv=0.9):
+        def fake(nv, dv):
             def f(state, q):
                 calls.append(tuple(q))
                 if "named" in q:
-                    return {"answers": {"named": {"type": "noul", "noul": nv}, "described": {"type": "noul", "noul": dv}, "present": {"type": "noul", "noul": gv}}}
+                    return {"answers": {"named": {"type": "noul", "noul": nv}, "described": {"type": "noul", "noul": dv}}}
                 return {"answers": {"status": {"type": "choice", "choice": "proposed_now", "confidence": 0.9, "probabilities": {}}, "raised_by": {"type": "choice", "choice": "this_doctor", "confidence": 0.9, "probabilities": {}},
                                     "category": {"type": "choice", "choice": "operation", "confidence": 0.9, "probabilities": {}}}}
             return f
-        r = scan("s", ask=fake(0.1, 0.1)); assert not r["passed"] and r["held"] == "below_recall" and calls == [("named", "described", "present")], "below the cut on both: stage (b) never runs"
+        r = scan("s", ask=fake(0.1, 0.1)); assert not r["passed"] and calls == [("named", "described")], "below the cut on both: stage (b) never runs"
         calls.clear(); r = scan("s", ask=fake(0.06, 0.3)); assert r["passed"] and calls[-1] == ("status", "raised_by", "category"), "described alone above the cut passes"
         calls.clear(); r = scan("s", ask=fake(0.3, 0.05)); assert r["passed"], "named alone above the cut passes"
         calls.clear(); r = scan("s", ask=fake(0.24, 0.24)); assert not r["passed"], "just below the cut on both"
-        calls.clear(); r = scan("s", ask=fake(0.95, 0.95, gv=0.10)); assert not r["passed"] and r["held"] == "not_a_consult" and calls == [("named", "described", "present")], "staff case talk: held before stage (b) whatever named/described say (CT02)"
-        calls.clear(); r = scan("s", ask=fake(0.9, 0.9, gv=0.5)); assert r["passed"], "exactly at the gate cut passes"
-        calls.clear(); r = scan("s", ask=fake(0.9, 0.9, gv=0.49)); assert not r["passed"] and r["held"] == "not_a_consult", "just below the gate cut is held"
-        calls.clear(); r = scan("s", ask=fake(0.05, 0.05, gv=0.10)); assert r["held"] == "not_a_consult", "when both fail, the gate reason wins (a staff chat without any procedure is 'not a consult', not 'below recall')"
-        global GATE_CUT
-        gc_saved = GATE_CUT; GATE_CUT = 0.6
-        try:
-            scan("s", ask=fake(0.9, 0.9)); raise AssertionError("a changed gate cut must be refused by the freeze")
-        except SystemExit:
-            pass
-        finally:
-            GATE_CUT = gc_saved
-        global RECALL_CUT
-        rc_saved = RECALL_CUT; RECALL_CUT = 0.3
-        try:
-            scan("s", ask=fake(0.9, 0.9)); raise AssertionError("a changed recall cut must be refused by the freeze")
-        except SystemExit:
-            pass
-        finally:
-            RECALL_CUT = rc_saved
-        cd_saved = B["status"]["criteria"]["conditional"]; B["status"]["criteria"]["conditional"] += " (edited)"
-        try:
-            scan("s", ask=fake(0.9, 0.9)); raise AssertionError("a changed status criterion (conditional) must be refused by the freeze")
-        except SystemExit:
-            pass
-        finally:
-            B["status"]["criteria"]["conditional"] = cd_saved
-        ic_saved = B["category"]["criteria"]["imaging_ct"]; B["category"]["criteria"]["imaging_ct"] += " (edited)"
-        try:
-            scan("s", ask=fake(0.9, 0.9)); raise AssertionError("a changed category criterion (imaging_ct) must be refused by the freeze")
-        except SystemExit:
-            pass
-        finally:
-            B["category"]["criteria"]["imaging_ct"] = ic_saved
-        gsaved = A0["present"]["instructions"]; A0["present"]["instructions"] += " (edited)"
-        try:
-            scan("s", ask=fake(0.9, 0.9)); raise AssertionError("a changed gate question must be refused")
-        except SystemExit:
-            pass
-        finally:
-            A0["present"]["instructions"] = gsaved
         v3_saved = A["named"]["instructions"]; A["named"]["instructions"] += " (edited)"
         try:
             scan("s", ask=fake(0.9, 0.9)); raise AssertionError("a changed question must be refused")
@@ -197,9 +148,9 @@ def selftest():
         FROZEN_SHA256 = saved
     pc = block({"named_p": 0.9, "described_p": 0.8}, {"status": ("proposed_now", 0.9), "raised_by": ("this_doctor", 0.9), "category": ("imaging_ct", 0.9)}, {"cost": ("no", 0.9), "second_opinion": ("no", 0.9),
                                                                                                                                  "firmness": ("advised", 0.8), "patient_response": ("agreed", 0.9)}, {"phrase": "CT scan", "named": True}, {"procedure": [2]})
-    assert pc["named"]["category"] == "imaging_ct", "the new category reaches the block (page label: Imaging: CT)"
+    assert pc["named"]["category"] == "imaging_ct", "the new category reaches the block (page label: imaging: plain CT)"
     assert "imaging_ct" in B["category"]["criteria"] and "imaging_ct" in CATEGORIES and "conditional" in B["status"]["criteria"]
-    print("v5 selftest OK: named/described independent, described-not-named keeps dependents, named-not-described shows status, history rule, gate on max, patient-present gate, freeze enforced (changed question, gate or cut refused)")
+    print("v4 selftest OK: named/described independent, described-not-named keeps dependents, named-not-described shows status, history rule, gate on max, refuses while unfrozen")
 
 
 if __name__ == "__main__":

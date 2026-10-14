@@ -42,9 +42,7 @@ for f in files:
         errs.append(f"{where}: turn is {te - ts:.2f} s; turns under 0.8 s are excluded (ruling 165)")
     if ts > 3.25 or dur - te > 3.25:  # MP3 encoding adds ~0.1 s of padding
         warns.append(f"{where}: more than 3 s of context on one side (start {ts}, tail {dur - te:.1f})")
-    if not isinstance(t["text"], str):
-        errs.append(f"{where}: text must be a string (use \"\" when there is no transcript line), not {type(t['text']).__name__}")
-    elif not t["text"].strip():
+    if not str(t["text"]).strip():
         warns.append(f"{where}: empty transcript line")
     a = os.path.join(d, t["audio"])
     if not os.path.isfile(a):

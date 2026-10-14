@@ -25,7 +25,7 @@ def main(out="fixture"):
             margin = round(rnd.uniform(0.0, 0.09), 3) if doubtful else round(rnd.uniform(0.12, 0.5), 3)
             lab = "doctor" if is_doc else rnd.choice(["patient", "companion", "staff"]); x = rnd.random()   # two raters: mostly agree, sometimes 'cannot tell', rarely disagree
             truth.append({"turn_id": tid, "labels": {"V": lab, "Sandhya": "cannot tell" if x < 0.08 else ("patient" if (x < 0.12 and is_doc) else lab)}})
-            arm1.append({"turn_id": tid, "window_id": wid, "role": "clinician" if label == "doctor" else rnd.choice(["", "patient", None]), "margin": margin, "best": round(rnd.uniform(0.3, 0.6), 3) if doubtful else round(rnd.uniform(0.55, 0.9), 3), "speaker_basis": "voice_match",
+            arm1.append({"turn_id": tid, "window_id": wid, "role": "clinician" if label == "doctor" else rnd.choice(["", "patient", None]), "margin": margin, "speaker_basis": "voice_match",
                          "nemotron_n": n_true if rnd.random() < 0.8 else n_true + 1, "pyannote_n": n_true, "doctor_name": "Dr Test"})
             card = (f"Turn: {t:.1f}-{t + dur:.1f} s ({dur} s) in a synthetic consultation.\nVoice match: best candidate Dr Test {margin + 0.5:.2f}; runner-up speaker cluster 2 0.50; margin {margin}.\n"
                     f"Transcript (guarded):\n[previous turn, speaker A] \"synthetic previous line {k}\"\n[THIS TURN] \"synthetic line {k} for {tid}\"\n[next turn, speaker B] \"synthetic next line\"\n\n"
@@ -42,7 +42,7 @@ def main(out="fixture"):
         with open(f"{out}/{name}.jsonl", "w") as f:
             for r in rows: f.write(json.dumps(r) + "\n")
     json.dump(human, open(f"{out}/human-counts.json", "w"), indent=1)
-    conf = sorted(a["turn_id"] for a in arm1 if a["margin"] >= 0.10 and a["best"] >= 0.50)          # stand-in for the page's 40 confident items (ruling 169)
+    conf = sorted(a["turn_id"] for a in arm1 if a["margin"] >= 0.10)          # stand-in for the page's 40 confident items (ruling 169)
     open(f"{out}/page_confident.txt", "w").write("\n".join(rnd.sample(conf, min(40, len(conf)))) + "\n")
     print(f"fixture: {len(cards)} turns, {len(wins)} windows in {out}/")
 

@@ -19,9 +19,7 @@ Every change below is marked `eta-lab fork` in the source. Upstream files not li
    - `lib/daemon.js`: no managed-block variant rewrite, no tab-bar line, no theme sync (`followAppearance` forced off in `lib/config.js`).
    Set `variant` explicitly with it (`auto` asks whether this host has the icon font; a server has none).
 
-5. `tools/check.js`: two added checks. `cadenceFallsBack` (below) and, from change 6, the four row tokens. `cadenceFallsBack` runs the real config parser on ten `poll_ms` / `frame_floor_ms` inputs, including 0, NaN, a quoted string, 2147483648 and 60001.
-
-6. `lib/managed-config.js` (ruling 237): the managed agent rows gain two rows of Herdr's built-in tokens, `machine · workspace · tab` and `agent`, in the palette's `subtle` colour. Herdr's default agent rows are `state_icon, machine, workspace, tab` and `agent`; the managed block replaced them. The state mark is not repeated (the state-coloured logo and title carry it). Applies only where the block is installed (never headless). `tools/check.js` fails if the agent rows stop naming those four tokens (dark and light).
+5. `tools/check.js`: one added check, `cadenceFallsBack`, runs the real config parser on ten `poll_ms` / `frame_floor_ms` inputs, including 0, NaN, a quoted string, 2147483648 and 60001.
 
 ## Not changed
 

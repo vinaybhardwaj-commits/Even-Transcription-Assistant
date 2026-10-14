@@ -1,4 +1,4 @@
-# SURGICAL-CHAIN-LINKER P1: pre-registration v2 (linker, 24 Sep 2026; the git commit time is the timestamp): amendments to v1
+# SURGICAL-CHAIN-LINKER P1: pre-registration v2 (linker, 24 Sep 2026 17:20 IST): amendments to v1
 
 v1 (`P1-PREREG.md`, commit 564d934) stays frozen; nothing in it is edited. This file adds four amendments, each with its reason and whether the amendment was decided before or after seeing the numbers it touches. No link-3 (recording) scoring has run. v1's margin rule, floors and the circularity rule are unchanged.
 

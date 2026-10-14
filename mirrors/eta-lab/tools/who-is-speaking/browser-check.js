@@ -3,12 +3,11 @@
 const {chromium}=require("playwright");
 const {spawn}=require("child_process");
 const fs=require("fs"),path=require("path");
-const out=process.argv[2],port=20000+Math.floor(Math.random()*30000);
+const out=process.argv[2],port=8784;
 fs.mkdirSync(path.join(out,"shots"),{recursive:true});
 (async()=>{
  // a plain server WITHOUT Range support: the page must not depend on it
  const srv=spawn("python3",["-m","http.server",String(port),"--bind","127.0.0.1"],{cwd:out,stdio:"ignore"});
- process.on('exit',()=>{try{srv.kill()}catch(e){}});
  await new Promise(r=>setTimeout(r,900));
  const br=await chromium.launch({args:["--autoplay-policy=no-user-gesture-required"]});
  const settings=[

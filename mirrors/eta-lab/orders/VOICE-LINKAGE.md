@@ -54,8 +54,3 @@ For each room-day with recordings (start: 1 Aug–24 Sep, the rooms with the mos
 - PHI stays in eta-lab, the box and voice-lab-1 (private).
 - LQ wording is frozen by hash before any real run.
 - Never two builders on the same files: vj-link owns `studies/2026-09-24-voice-jev/link/` only.
-
-## Addendum 18:50 (V)
-- V can rate MORE than 40. The first batch is **60 cards** (30 HIGH, 18 MED, 12 LOW), then rolling batches of 40 as new links are proposed.
-- HIGH auto-accept needs >= 95% agreement on >= 30 rated HIGH cards.
-- Data residency: V says patient data may be stored in any region. The R2 buckets stay where they are.

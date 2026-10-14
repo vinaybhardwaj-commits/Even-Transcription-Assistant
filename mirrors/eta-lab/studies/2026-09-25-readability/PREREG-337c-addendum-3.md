@@ -1,8 +1,0 @@
-# Ruling 337c: PRE-REGISTRATION ADDENDUM 3 (split-speaker, 25 Sep 2026, ~09:35 IST; BEFORE any label exists)
-Origin: eta-refuter #2030 (scorer PASS-WITH-FIXES). No label has arrived; the code is `score_labels.py` (14 tests on invented labels; the 3 mutants eta-refuter left alive and a 4th are now killed).
-1. **Overall figures are never printed alone.** Only 94 of 39,387 unflagged segments are labelled (30 of 26,102 in whisper/en), so with zero misses the point recall is 1.00 while the data still allow about 0.48. Every overall precision and recall carries (a) PROPAGATED Clopper-Pearson bounds (per-cell 95 % bounds pushed through the frozen estimator; conservative, not a joint 95 %) and (b) a STRATIFIED BOOTSTRAP 95 % interval (rows resampled with replacement within each cell x flagged stratum, 2,000 resamples, seed 20260937). The report quotes the interval first when it reads the result.
-2. **Covered shares.** Cells with no labelled flagged (or unflagged) rows drop out of the weights, so the share of sum F over cells with >= 1 labelled flagged row and of sum U over cells with >= 1 labelled unflagged row are printed next to the overall figures.
-3. **Two raters, one label.** A row labelled by only ONE of the two raters becomes `unsure` and is counted (`labelled_by_one_rater_only`); disagreements become `unsure` and are counted, as in addendum 2.
-4. **Typos.** A label that is not one of the five is ignored and COUNTED (`unknown_labels`).
-5. **Integrity.** `run()` refuses to score unless the key's ids, cells and flags equal the frozen sample rows.
-The cell-level floor (n >= 10, precision >= 0.80, romanised <= 0.20, inclusive at 0.20) and the true-positive definition are unchanged.

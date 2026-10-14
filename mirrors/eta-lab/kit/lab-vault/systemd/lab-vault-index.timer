@@ -1,9 +1,0 @@
-[Unit]
-Description=Nightly index snapshot just after midnight IST
-
-[Timer]
-OnCalendar=*-*-* 00:05:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target

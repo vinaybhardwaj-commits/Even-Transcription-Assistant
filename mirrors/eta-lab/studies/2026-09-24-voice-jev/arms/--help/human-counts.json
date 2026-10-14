@@ -1,30 +1,30 @@
 {
  "fxw00": {
   "V": 3,
-  "Sandhya": 3
+  "Sandhya": 4
  },
  "fxw01": {
   "V": 3,
   "Sandhya": 4
  },
  "fxw02": {
+  "V": 3,
+  "Sandhya": 3
+ },
+ "fxw03": {
+  "V": 2,
+  "Sandhya": 2
+ },
+ "fxw04": {
   "V": 4,
   "Sandhya": 5
  },
- "fxw03": {
-  "V": 4,
-  "Sandhya": 4
- },
- "fxw04": {
-  "V": 2,
-  "Sandhya": 3
- },
  "fxw05": {
-  "V": 2,
+  "V": 3,
   "Sandhya": 3
  },
  "fxw06": {
-  "V": 3,
+  "V": 4,
   "Sandhya": 4
  },
  "fxw07": {
@@ -32,44 +32,44 @@
   "Sandhya": 2
  },
  "fxw08": {
-  "V": 2,
-  "Sandhya": 3
- },
- "fxw09": {
-  "V": 2,
-  "Sandhya": 2
- },
- "fxw10": {
-  "V": 4,
-  "Sandhya": 4
- },
- "fxw11": {
   "V": 4,
   "Sandhya": 5
  },
- "fxw12": {
-  "V": 2,
-  "Sandhya": 2
- },
- "fxw13": {
-  "V": 2,
-  "Sandhya": 3
- },
- "fxw14": {
-  "V": 3,
-  "Sandhya": 3
- },
- "fxw15": {
-  "V": 2,
-  "Sandhya": 2
- },
- "fxw16": {
+ "fxw09": {
   "V": 4,
   "Sandhya": 4
  },
+ "fxw10": {
+  "V": 2,
+  "Sandhya": 2
+ },
+ "fxw11": {
+  "V": 2,
+  "Sandhya": 2
+ },
+ "fxw12": {
+  "V": 4,
+  "Sandhya": 5
+ },
+ "fxw13": {
+  "V": 2,
+  "Sandhya": 2
+ },
+ "fxw14": {
+  "V": 2,
+  "Sandhya": 2
+ },
+ "fxw15": {
+  "V": 3,
+  "Sandhya": 3
+ },
+ "fxw16": {
+  "V": 2,
+  "Sandhya": 2
+ },
  "fxw17": {
   "V": 2,
-  "Sandhya": 3
+  "Sandhya": 2
  },
  "fxw18": {
   "V": 2,
@@ -80,19 +80,19 @@
   "Sandhya": 4
  },
  "fxw20": {
-  "V": 2,
-  "Sandhya": 2
+  "V": 3,
+  "Sandhya": 3
  },
  "fxw21": {
-  "V": 2,
-  "Sandhya": 2
- },
- "fxw22": {
   "V": 3,
   "Sandhya": 4
  },
+ "fxw22": {
+  "V": 2,
+  "Sandhya": 3
+ },
  "fxw23": {
-  "V": 4,
-  "Sandhya": 5
+  "V": 3,
+  "Sandhya": 3
  }
 }
