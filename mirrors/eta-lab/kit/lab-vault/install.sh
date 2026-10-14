@@ -9,6 +9,6 @@ install -m 0755 "$here/../vault-push.py" "$here/backfill.py" "$here/build-index.
 [ -x "$share/venv/bin/python" ] || { python3 -m venv "$share/venv" && "$share/venv/bin/pip" install -q pyarrow; }
 install -m 0644 "$here"/systemd/lab-vault-*.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now lab-vault-push.timer lab-vault-index.timer lab-vault-check.timer lab-vault-view.timer
+systemctl --user enable --now lab-vault-push.timer lab-vault-index.timer lab-vault-check.timer
 loginctl enable-linger "$USER" 2>/dev/null || echo "WARN: could not enable linger; timers only run while a login session exists" >&2
 systemctl --user list-timers 'lab-vault-*' --no-pager

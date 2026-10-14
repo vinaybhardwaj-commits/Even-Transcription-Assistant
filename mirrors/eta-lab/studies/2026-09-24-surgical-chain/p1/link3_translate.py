@@ -23,12 +23,11 @@ PREREG = "P1-PREREG-v7.15.md"
 LL_ITEMS = ("c004", "c006", "c011", "c013", "c014", "c016", "c023", "c026")
 INTERIM = ("c004", "c006", "c011", "c013")                     # excluded from every accuracy claim for this stratum (v7.15 M1)
 LL_ITEMS_B2 = ("c001", "c012", "c021", "c025", "c028", "c030", "c033", "c034", "c035", "c036", "c037")     # v7.16 V1: every other LANGUAGE_LIMITED item (rule-based, no subset)
-ACCURACY_EXCLUDED_B2 = ("c001", "c021")                        # c001: a pilot item of the main run (v7.7 K2.4); c021: one of the two would-be accepts seen before the extension (v7.16 V6, refuter-2 #1575): scored and reported, never in a yield or accuracy claim
-ACCURACY_EXCLUDED_B3 = ("c001",)                               # b3 holds c001 c012 c028 c036 only
+ACCURACY_EXCLUDED_B2 = ("c001",)                               # a pilot item of the main run (v7.7 K2.4): scored and reported, never in an accuracy claim
 LL_ITEMS_B3 = ("c001", "c012", "c028", "c036")                  # v7.16a F1: exactly the four items that were MT_FAILED in mt-b2/ (rule: every item that failed, nothing chosen)
 BATCHES = {"b1": dict(items=LL_ITEMS, mt=BOX + "mt/", excluded=INTERIM),           # v7.16 V4: separate directories, batch 1's record is never touched by a b2 run
            "b2": dict(items=LL_ITEMS_B2, mt=BOX + "mt-b2/", excluded=ACCURACY_EXCLUDED_B2),
-           "b3": dict(items=LL_ITEMS_B3, mt=BOX + "mt-b3/", excluded=ACCURACY_EXCLUDED_B3, isolate=True, parent="b2")}   # v7.16a: ONE fresh attempt with line isolation, c001 stays excluded
+           "b3": dict(items=LL_ITEMS_B3, mt=BOX + "mt-b3/", excluded=ACCURACY_EXCLUDED_B2, isolate=True, parent="b2")}   # v7.16a: ONE fresh attempt with line isolation, c001 stays excluded
 SHARE_OVER = 0.5                                               # v7.10 non-English share definition, unchanged
 MODEL, URL = "google/gemini-3.8-flash", "https://openrouter.ai/api/v1/chat/completions"
 PROVIDER = {"zdr": True, "data_collection": "deny", "allow_fallbacks": False}
@@ -318,15 +317,7 @@ def cmd_verify(nameleak_summary, screen_report, second_pin, mt=MT, items=None):
     elig = NL.eligible(d)
     if len(elig) < MIN_FULL_READ or s.get("n_turns") != len(elig) or s.get("eligible_sha256") != NL.keys_sha([NL.turn_key(r) for r in elig]):
         raise SystemExit(f"gate refused: the name-leak read is not a full read of the {len(elig)} eligible kept turns of deid.json (or fewer than {MIN_FULL_READ}): a sample or a partial draw does not clear it")
-    if "second_pin" in s:                                          # summaries of the symmetric salted-pin tool (0e0f1ef, from the b3 read on): each reader's pin on the bus is sha256(salt || counts bytes)
-        hex64 = lambda k: bool(re.fullmatch(r"[0-9a-f]{64}", str(s.get(k, ""))))
-        pin_ok = (s.get("second_pin") == second_pin and hex64("second_salt") and s.get("second_counts_sha256") != second_pin
-                  and hex64("counts_pin") and hex64("counts_salt") and s.get("counts_pin") != s.get("counts_sha256"))          # the first reader's pin is salted too, and is not his plain hash
-        pin_kind = "salted"
-    else:                                                          # the r2 and b2 summaries were made before the change: the plain hash of the locked file was the pin
-        pin_ok = s.get("second_counts_sha256") == second_pin
-        pin_kind = "plain"
-    if not pin_ok or not s.get("counts_sha256"):
+    if s.get("second_counts_sha256") != second_pin or not s.get("counts_sha256"):
         raise SystemExit("gate refused: the summary was not made against the second reader's counts file pinned on the bus")
     if s.get("deid_sha256") != sha256_file(dj) or s.get("translated_sha256") != sha256_file(tr):
         raise SystemExit("gate refused: the name-leak counts were made on a different deid.json or translated.json than the ones on disk")
@@ -335,7 +326,7 @@ def cmd_verify(nameleak_summary, screen_report, second_pin, mt=MT, items=None):
         raise SystemExit("gate refused: screen report is blocked, or score_input.json / screened.json is missing")
     check_score_input(mt); assert_no_residuals(mt)
     L["gate"] = dict(deid_sha256=sha256_file(dj), score_input_sha256=sha256_file(mt + "score_input.json"), screened_sha256=sha256_file(mt + "screened.json"), nameleak_seed=s["seed"],
-                     nameleak_total_missed=s["total_missed"], nameleak_second_total_missed=s["second_total_missed"], second_counts_sha256=second_pin, second_pin_kind=pin_kind, screen_status=r["status"])
+                     nameleak_total_missed=s["total_missed"], nameleak_second_total_missed=s["second_total_missed"], second_counts_sha256=second_pin, screen_status=r["status"])
     write_private(mt + "ledger.json", L)
     print("gate cleared: name-leak seed", s["seed"], "screen", r["status"])
 

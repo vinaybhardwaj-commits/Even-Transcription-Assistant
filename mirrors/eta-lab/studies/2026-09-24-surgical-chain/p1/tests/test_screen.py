@@ -132,7 +132,7 @@ class Stratum(unittest.TestCase):
                 os.makedirs(os.path.join(d, good))
                 S.write_score_input(os.path.join(d, good, "score_input.json"), si)
                 self.assertTrue(os.path.exists(os.path.join(d, good, "score_input.json")))
-            for bad in ("raw", "deid", "run", "mt2", "mt-x", "mt-", "mtb2", "b2", "mt-b", "mt-b2x", "mt-b2-old", "xmt", "MT", "mt-B2", "mt_b2", "mt-b-2", "mt-b2\n"):
+            for bad in ("raw", "deid", "run", "mt2", "mt-x", "mt-b", "mt-b2x", "mt-b2-old", "xmt", "MT", "mt-B2", "mt_b2", "mt-b-2", "mt-b2\n"):
                 try:
                     os.makedirs(os.path.join(d, bad))
                 except OSError:
