@@ -77,7 +77,8 @@ def spearman_brown(r):
     return None if r is None else (2 * r / (1 + r) if r > -1 else None)
 
 
-def b1_split_half(rows, features=None):
+def b1_split_half(rows, features=None, overlap_frac=T.OVERLAP_EXCLUDE_FRAC):
+    """overlap_frac=1.0 keeps every turn (no overlap cut): is_overlapped needs a fraction above it."""
     feats = features or features_in(rows)
     ppl = persons(rows)
     res = {}
@@ -87,7 +88,7 @@ def b1_split_half(rows, features=None):
             for (b, sp), tr in ppl.items():
                 if not _in_group(_role_of(tr), group):
                     continue
-                sh = T.split_half_person(tr, feat)
+                sh = T.split_half_person(tr, feat, overlap_frac)
                 if sh is not None:
                     pairs.append(sh)
             rho = T.spearman([p[0] for p in pairs], [p[1] for p in pairs])
@@ -198,6 +199,19 @@ def b4_role_separation(rows, features=None):
     return res
 
 
+def overlap_summary(rows):
+    """Seconds and turns removed by the overlap cut, per role."""
+    out = {}
+    for r in rows:
+        o = out.setdefault(r.get("role", "unknown"), {"turns": 0, "seconds": 0.0, "overlap_excluded_turns": 0, "overlap_excluded_s": 0.0})
+        o["turns"] += 1
+        o["seconds"] += float(r["dur_s"])
+        if T.is_overlapped(r):
+            o["overlap_excluded_turns"] += 1
+            o["overlap_excluded_s"] += float(r["dur_s"])
+    return out
+
+
 def run_all(scores_path, window_map=None):
     meta, rows = load_scores(scores_path)
     status = {}
@@ -212,6 +226,8 @@ def run_all(scores_path, window_map=None):
         "n_persons": len(persons(rows)),
         "status_counts": status,
         "b1_split_half": b1_split_half(rows),
+        "b1_split_half_no_overlap_cut": b1_split_half(rows, overlap_frac=1.0),
+        "overlap_excluded_by_role": overlap_summary(rows),
         "b2_cross_model": b2_cross_model(rows),
         "b3_gold": b3_gold(rows, window_map) if window_map else None,
         "b4_role_separation": b4_role_separation(rows),

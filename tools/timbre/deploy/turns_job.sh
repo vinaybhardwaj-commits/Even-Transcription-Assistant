@@ -13,9 +13,13 @@ export PYTHONPATH="$PWD" PYTHONUNBUFFERED=1 HF_HUB_DISABLE_TELEMETRY=1
 if ! command -v ffmpeg >/dev/null 2>&1; then :; fi
 (apt-get update -qq && apt-get install -y -qq libsndfile1 >/dev/null) 2>/dev/null || true
 log "pip install"
+TORCH_BEFORE=$(python -c "import torch;print(torch.__version__)")
 pip install -q --no-cache-dir -r tools/timbre/requirements-turns.txt
+[ "$(python -c 'import torch;print(torch.__version__)')" = "$TORCH_BEFORE" ] || { echo "torch changed by pip install: abort" >&2; exit 3; }
+pip check || log "pip check reported conflicts (see above)"
 python - <<'PY'
-import torch
+import torch, torchaudio
+print("torchaudio", torchaudio.__version__)
 print("torch", torch.__version__, "cuda", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else "-")
 PY
 umask 077

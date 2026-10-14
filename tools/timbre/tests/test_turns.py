@@ -85,7 +85,9 @@ def test_roles_by_most_overlap_else_unknown():
     raw = [(0.0, 10.0, "n0"), (10.0, 20.0, "n1"), (30.0, 40.0, "n2")]
     roles = [(0.0, 9.0, "doctor"), (9.0, 12.0, "patient"), (12.0, 20.0, "patient")]
     got = T.assign_roles(raw, roles)
-    assert got == {"n0": "doctor", "n1": "patient", "n2": "unknown"}
+    assert got == {"n0": "doctor", "n1": "patient", "n2": None}
+    layered = T.assign_roles_layered(raw, [("text-judge", roles)])
+    assert layered["n2"] == ("unknown", None) and layered["n0"] == ("doctor", "text-judge")
 
 
 def test_norm_role_maps_attender_variants_and_rejects_unknown_labels():
@@ -239,3 +241,150 @@ def test_plan_clip_roles_and_sha_check(tmp_path):
     clip["tracks"]["diar_nemotron"]["sha256"] = "0" * 64
     with pytest.raises(ValueError):
         T.plan_clip(clip, tmp_path)
+
+
+# ---- round 2: role precedence per speaker, thresholds, null rules -------------------------
+
+def _plan_fixture(tmp_path, layers, silver=None, nem_segs=None):
+    """layers: {prefix: [(speaker_in_role_layer, role, a_s, b_s)]}. Returns (clip, label)."""
+    import hashlib
+
+    scope = "reb/2026-09-10/room_x/_consults/c1"
+    d = tmp_path / scope
+    (d / "tracks").mkdir(parents=True)
+    (d / "manifest.json").write_text(json.dumps({"t0_ms": T0}))
+    nem = {"version": "v", "config_hash": "abc", "model": "m", "status": "ok",
+           "segments": nem_segs or [seg("speaker_0", 0, 20), seg("speaker_1", 21, 40)]}
+    text = json.dumps(nem)
+    rel = f"{scope}/tracks/diar.nemotron__v__abc.json"
+    (tmp_path / rel).write_text(text)
+    for prefix, items in layers.items():
+        segs = [{"speaker": sp, "role": r, "t0_ms": T0 + int(a * 1000), "t1_ms": T0 + int(b * 1000)} for sp, r, a, b in items]
+        (d / "tracks" / f"{prefix}__v1__x.json").write_text(json.dumps({"status": "ok", "segments": segs}))
+    clip = {"bench_id": "b01", "consult_uid": "c1", "scope": scope, "clip_t0_ms": T0, "audio_duration_ms": 60_000,
+            "audio_r2_key": "consult-clips/x/consult.flac",
+            "tracks": {"diar_nemotron": {"key": rel, "sha256": hashlib.sha256(text.encode()).hexdigest()}}}
+    label = None
+    if silver is not None:
+        sar_rel = f"{scope}/tracks/diar.sarvam__v__y.json"
+        sar = {"segments": [seg("0", 0, 20), seg("1", 21, 40)]}
+        (tmp_path / sar_rel).write_text(json.dumps(sar))
+        clip["tracks"]["diar_sarvam"] = {"key": sar_rel}
+        label = {"speaker_roles": silver}
+    return clip, label
+
+
+def test_precedence_llm_over_text_judge_over_caa_with_all_three_present(tmp_path):
+    cover0 = [("a", "doctor", 0, 20)]
+    layers = {
+        "role.llm-roles": [("a", "patient", 0, 20)],
+        "role.text-judge": cover0,
+        "role.caa-labels": [("a", "other", 0, 20)],
+    }
+    clip, _ = _plan_fixture(tmp_path, layers)
+    rec = T.plan_clip(clip, tmp_path)
+    assert rec["persons"]["speaker_0"] == {"role": "patient", "role_source": "llm-roles"}
+
+
+def test_precedence_falls_back_per_speaker_not_per_consult(tmp_path):
+    # llm-roles covers speaker_0 only; text-judge covers both; caa covers speaker_1 with another role
+    layers = {
+        "role.llm-roles": [("a", "doctor", 0, 20)],
+        "role.text-judge": [("a", "other", 0, 20), ("b", "patient", 21, 40)],
+        "role.caa-labels": [("b", "doctor", 21, 40)],
+    }
+    clip, _ = _plan_fixture(tmp_path, layers)
+    p = T.plan_clip(clip, tmp_path)["persons"]
+    assert p["speaker_0"] == {"role": "doctor", "role_source": "llm-roles"}
+    assert p["speaker_1"] == {"role": "patient", "role_source": "text-judge"}
+
+
+def test_text_judge_beats_caa_and_caa_used_last(tmp_path):
+    clip, _ = _plan_fixture(tmp_path, {"role.text-judge": [("a", "doctor", 0, 20)], "role.caa-labels": [("a", "patient", 0, 20), ("b", "other", 21, 40)]})
+    p = T.plan_clip(clip, tmp_path)["persons"]
+    assert p["speaker_0"]["role_source"] == "text-judge" and p["speaker_0"]["role"] == "doctor"
+    assert p["speaker_1"] == {"role": "other", "role_source": "caa-labels"}
+
+
+def test_silver_only_when_no_role_layer_track_exists(tmp_path):
+    silver = {"0": "doctor", "1": "patient"}
+    clip, label = _plan_fixture(tmp_path, {}, silver=silver)
+    p = T.plan_clip(clip, tmp_path, label)["persons"]
+    assert p["speaker_0"] == {"role": "doctor", "role_source": "silver-labels"}
+    # a role-layer track exists (even if it covers only one speaker): silver is not consulted
+    clip, label = _plan_fixture(tmp_path / "two", {"role.text-judge": [("a", "other", 0, 20)]}, silver=silver)
+    p = T.plan_clip(clip, tmp_path / "two", label)["persons"]
+    assert p["speaker_0"] == {"role": "other", "role_source": "text-judge"}
+    assert p["speaker_1"] == {"role": "unknown", "role_source": None}
+
+
+def test_role_source_is_none_when_role_unknown(tmp_path):
+    clip, _ = _plan_fixture(tmp_path, {"role.llm-roles": [("a", "doctor", 0, 20)]})
+    p = T.plan_clip(clip, tmp_path)["persons"]
+    assert p["speaker_1"]["role"] == "unknown" and p["speaker_1"]["role_source"] is None
+    clip, _ = _plan_fixture(tmp_path / "none", {})
+    p = T.plan_clip(clip, tmp_path / "none")["persons"]
+    assert all(v == {"role": "unknown", "role_source": None} for v in p.values())
+
+
+def test_overlap_threshold_025_excluded_and_020_kept():
+    assert T.OVERLAP_EXCLUDE_FRAC == 0.2
+    assert T.is_overlapped({"overlap_frac": 0.25}) is True
+    assert T.is_overlapped({"overlap_frac": 0.2}) is False
+    assert T.is_overlapped({"overlap_frac": 0.2001}) is True
+    rows = [_row(2.0, 0.25, **{"odyssey.arousal": 0.9}), _row(2.0, 0.2, **{"odyssey.arousal": 0.5})]
+    agg = T.aggregate_person(rows, "odyssey.arousal")
+    assert agg["n_turns"] == 1 and agg["value"] == 0.5 and agg["overlap_excluded_s"] == 2.0
+
+
+def test_split_half_person_applies_overlap_exclusion():
+    tr = _person_turns([1, 2, 3, 4, 5, 6])
+    tr[2]["overlap_frac"] = 0.9  # value 3 is dropped: usable 1,2,4,5,6 -> odd 1,4,6 even 2,5
+    assert T.split_half_person(tr, "odyssey.arousal") == (4, 3.5)
+    # with the cut switched off (overlap_frac=1.0) the turn stays
+    assert T.split_half_person(tr, "odyssey.arousal", overlap_frac=1.0) == (3, 4)
+
+
+def test_bool_reliability_rejected_and_bool_score_ignored():
+    assert T.reliability_lookup({"f|r": True}, "f", "r") is None
+    assert T.reliability_lookup({"f|r": False}, "f", "r") is None
+    assert T.reliability_lookup({"f|r": 1}, "f", "r") == 1.0
+    assert T._val({"scores": {"x": True}}, "x") is None
+
+
+def test_nan_and_inf_scores_become_none():
+    for bad in (float("nan"), float("inf"), "0.5", None):
+        assert T._val({"scores": {"x": bad}}, "x") is None
+    assert T._val({"scores": {"x": 0.25}}, "x") == 0.25
+
+    class FakeEx:
+        def extract(self, crop, sr):
+            return {"status": "ok", "features": {"arousal": float("nan"), "valence": 0.3, "dominance": float("inf")}}
+
+    scores, status = T.score_turn({"odyssey": FakeEx()}, b"")
+    assert scores["odyssey.arousal"] is None and scores["odyssey.dominance"] is None and scores["odyssey.valence"] == 0.3
+    assert status == {"odyssey": "ok"}
+
+
+def test_b1_reported_with_and_without_overlap_cut(tmp_path):
+    rows = []
+    for i in range(8):
+        lvl = i / 10.0
+        trs = _person_turns([lvl] * 12, bench=f"b{i:02d}")
+        # three overlapped turns sit in the odd half and carry a value that reverses the ordering
+        for k in (0, 2, 4):
+            trs[k]["overlap_frac"] = 0.9
+            trs[k]["scores"]["odyssey.arousal"] = 9.0 - lvl * 10
+        rows += trs
+    cut = B.b1_split_half(rows, ["odyssey.arousal"])["odyssey.arousal|patient"]
+    nocut = B.b1_split_half(rows, ["odyssey.arousal"], overlap_frac=1.0)["odyssey.arousal|patient"]
+    assert cut["n_persons"] == 8 and nocut["n_persons"] == 8
+    assert cut["spearman"] == pytest.approx(1.0)
+    assert nocut["spearman"] is None or nocut["spearman"] < cut["spearman"]
+    summ = B.overlap_summary(rows)["patient"]
+    assert summ["overlap_excluded_turns"] == 24 and summ["overlap_excluded_s"] == 120.0
+    f = tmp_path / "scores.jsonl"
+    f.write_text("\n".join(json.dumps(r) for r in [{"kind": "meta"}] + rows))
+    res = B.run_all(f)
+    assert "b1_split_half" in res and "b1_split_half_no_overlap_cut" in res
+    assert res["overlap_excluded_by_role"]["patient"]["overlap_excluded_s"] == 120.0

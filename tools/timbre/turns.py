@@ -191,23 +191,44 @@ def role_segments_to_clip(role_track_segments, manifest_t0_ms):
 
 
 def assign_roles(raw_segs, role_segs):
-    """Role per Nemotron speaker by most overlap with role-layer segments.
+    """Role per Nemotron speaker by most overlap with one set of role segments.
 
-    raw_segs: [(a, b, speaker)], role_segs: [(a, b, role)]. Returns {speaker: role or "unknown"}.
+    raw_segs: [(a, b, speaker)], role_segs: [(a, b, role)]. Returns {speaker: role or None}
+    (None = this layer has no overlap with the speaker).
     """
     out = {}
     for sp in {s for _, _, s in raw_segs}:
-        mine = [(a, b) for a, b, s in raw_segs if s == sp]
+        mine = _union([(a, b) for a, b, s in raw_segs if s == sp])
         tot = {}
         for r in {r for _, _, r in role_segs}:
-            theirs = [(a, b) for a, b, rr in role_segs if rr == r]
+            theirs = _union([(a, b) for a, b, rr in role_segs if rr == r])
             ov = 0.0
-            for x in _union(mine):
-                for y in _union(theirs):
+            for x in mine:
+                for y in theirs:
                     ov += max(0.0, min(x[1], y[1]) - max(x[0], y[0]))
             if ov > 0:
                 tot[r] = ov
-        out[sp] = max(tot, key=tot.get) if tot else "unknown"
+        out[sp] = max(tot, key=tot.get) if tot else None
+    return out
+
+
+def assign_roles_layered(raw_segs, layers):
+    """Per speaker: the first layer, in order, that overlaps the speaker decides.
+
+    Read contract v0.2 section 5 (eta-lab docs/ETA-PALIMPSEST-ARTEFACT-READ-CONTRACT-13-OCT-2026.md,
+    rule 5): role = llm-roles by most overlap, else text-judge, else caa-labels, else unknown. The
+    fallback is per turn there, so here it is per speaker. ``layers`` = [(source, role_segs)] in
+    priority order; the labelled silver map goes last. Returns {speaker: (role, source)} with
+    ("unknown", None) when no layer overlaps.
+    """
+    out = {sp: ("unknown", None) for sp in {s for _, _, s in raw_segs}}
+    for source, role_segs in layers:
+        if not role_segs:
+            continue
+        got = assign_roles(raw_segs, role_segs)
+        for sp, role in got.items():
+            if role is not None and out[sp][0] == "unknown":
+                out[sp] = (role, source)
     return out
 
 
@@ -274,7 +295,7 @@ def is_overlapped(turn_row, frac=OVERLAP_EXCLUDE_FRAC):
 
 def _val(row, feature):
     v = (row.get("scores") or {}).get(feature)
-    if v is None or not isinstance(v, (int, float)) or not math.isfinite(v):
+    if v is None or isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
         return None
     return float(v)
 
@@ -399,28 +420,24 @@ def plan_clip(clip, reb_root, label=None):
     raw = segments_to_clip(nem.get("segments"), t0, dur)
     turns = build_turns(nem.get("segments"), t0, dur)
 
-    role_segs, source = [], None
+    layers = []
     for prefix, src in (("role.llm-roles", "llm-roles"), ("role.text-judge", "text-judge"), ("role.caa-labels", "caa-labels")):
         d, _ = _canonical(scope, prefix)
         if d:
-            rs = role_segments_to_clip(d.get("segments"), t0)
-            if rs:
-                role_segs, source = rs, src
-                break
-    if source is None and label and label.get("speaker_roles"):
+            layers.append((src, role_segments_to_clip(d.get("segments"), t0)))
+    if not any(rs for _, rs in layers) and label and label.get("speaker_roles"):
+        # silver labels only when no role-layer track gave any role segment
         sar = clip["tracks"].get("diar_sarvam")
         if sar:
             sd = json.loads((Path(reb_root) / sar["key"]).read_text())
             smap = {k: norm_role(v) for k, v in label["speaker_roles"].items() if norm_role(v)}
-            for a, b, sp in segments_to_clip(sd.get("segments"), t0, dur):
-                if smap.get(sp):
-                    role_segs.append((a, b, smap[sp]))
-            if role_segs:
-                source = "silver-labels"
-    roles = assign_roles(raw, role_segs) if source else {}
+            silver = [(a, b, smap[sp]) for a, b, sp in segments_to_clip(sd.get("segments"), t0, dur) if smap.get(sp)]
+            layers.append(("silver-labels", silver))
+    got = assign_roles_layered(raw, layers)
     persons = {}
     for sp in sorted({t["speaker"] for t in turns}):
-        persons[sp] = {"role": roles.get(sp, "unknown"), "role_source": source if roles.get(sp, "unknown") != "unknown" else None}
+        role, source = got.get(sp, ("unknown", None))
+        persons[sp] = {"role": role, "role_source": source if role != "unknown" else None}
     return {
         "bench_id": clip["bench_id"],
         "consult_uid": clip["consult_uid"],
@@ -523,7 +540,7 @@ def score_turn(extractors, crop, sr=16000):
 
 def cmd_score(args):
     pin_models()
-    from tools.timbre.extractors.base import build_extractor
+    from tools.timbre.extractors.base import build_extractor, cached_hub_revision
 
     exs = {short: build_extractor(name, args.device) for short, name in MODEL_NAMES.items()}
     plan = [json.loads(l) for l in Path(args.plan).read_text().splitlines() if l.strip()]
@@ -540,11 +557,17 @@ def cmd_score(args):
     with open(out, "w", opener=lambda p, f: os.open(p, f, 0o600)) as fh:
         meta = {
             "kind": "meta",
-            "models": {s: {"model_id": ex.spec.model_id, "model_rev": MODEL_PINS.get(ex.spec.model_id)} for s, ex in exs.items()},
+            "models": {
+                s: {"model_id": ex.spec.model_id, "pinned_rev": MODEL_PINS.get(ex.spec.model_id), "model_rev": cached_hub_revision(ex.spec.model_id)}
+                for s, ex in exs.items()
+            },
             "pins": MODEL_PINS,
             "git_sha": git_sha,
             "overlap_exclude_frac": OVERLAP_EXCLUDE_FRAC,
         }
+        for s_, m_ in meta["models"].items():
+            if m_["model_rev"] != m_["pinned_rev"]:
+                raise SystemExit(f"{s_}: loaded revision {m_['model_rev']} differs from the pin {m_['pinned_rev']}")
         fh.write(json.dumps(meta) + "\n")
         for rec in plan:
             if only and rec["bench_id"] not in only:
@@ -574,6 +597,8 @@ def cmd_score(args):
                 n_turns += 1
             fh.flush()
             print(f"scored {rec['bench_id']} turns={len(rec['turns'])} elapsed={time.time() - t_start:.0f}s", flush=True)
+        # revision each extractor reported while scoring (set by the extractor itself)
+        fh.write(json.dumps({"kind": "meta_end", "extractor_revisions": {s_: ex.revision for s_, ex in exs.items()}}) + "\n")
     print(f"done turns={n_turns} elapsed={time.time() - t_start:.0f}s", flush=True)
 
 
