@@ -4,7 +4,7 @@
 
 const EUTILS = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils';
 const ICITE = 'https://icite.od.nih.gov/api/pubs';
-const UA = 'Even-CDMSS/0.7 (+vinay.bhardwaj@even.in)';
+const UA = 'Even-CDMSS/0.7 (staff-redacted@even.in)';
 const KEY = process.env.NCBI_API_KEY || '';
 
 // Evidence-tier publication-type gate (locked decision: tier first).

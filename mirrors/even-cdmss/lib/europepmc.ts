@@ -8,8 +8,8 @@
 // Polite use: identify with a UA + email param; no API key required.
 
 const EPMC = 'https://www.ebi.ac.uk/europepmc/webservices/rest';
-const UA = 'Even-CDMSS/0.7 (+vinay.bhardwaj@even.in)';
-const EMAIL = 'vinay.bhardwaj@even.in';
+const UA = 'Even-CDMSS/0.7 (staff-redacted@even.in)';
+const EMAIL = 'staff-redacted@even.in';
 
 export type EpmcRecord = {
   epmcId: string;

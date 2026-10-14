@@ -20,3 +20,6 @@ Scrub-withheld files: 84 (see WITHHELD.md).
 Test files that hard-code a person (name, Dr title, doctor slug or email). Path and rule only.
 
 - lib/__tests__/case-ask-core.test.ts (email)
+
+## Redacted in place (14 Oct 2026)
+Staff work email addresses replaced with `staff-redacted@even.in`; the GCP project number in a comment in lib/gcp-auth.ts replaced with `<gcp-project-number>`. Sources are unchanged.
