@@ -76,21 +76,21 @@ d("encounter_catalog on postgres:16", () => {
   it("inserts new rows (times from UTC ms, json objects as sent) and a repeat of the same batch updates, not duplicates", async () => {
     const batch = [mk("synth-cat-a"), mk("synth-cat-b", { ist_date: "2026-10-13", doctor_uid: "DOC99999", room_id: "room_xyz" }), mk("synth-cat-c", { ist_date: "2026-10-11", source: "caa" })];
     const res = await ingestCatalogRows(batch);
-    expect(res).toEqual({ updated: 0, inserted: 3 });
+    expect(res).toEqual({ updated: 0, inserted: 3, stale: 0 });
     const r = await rowOf("synth-cat-a");
     expect(new Date(r.t_open as string).toISOString()).toBe(new Date(T_OPEN).toISOString());
     expect(new Date(r.t_close as string).getTime() - new Date(r.t_open as string).getTime()).toBe(600_000);
     expect(r.clip).toEqual({ r2_key: "consult-clips/x/consult.flac", minutes: 10 });
     expect((r.layers as { parts: unknown }).parts).toBeNull();
     expect([r.source, r.first_gap, r.catalog_version, r.prescription]).toEqual(["cutter", "freescript:none_yet", 1, null]);
-    expect(await ingestCatalogRows(batch)).toEqual({ updated: 3, inserted: 0 });
+    expect(await ingestCatalogRows(batch)).toEqual({ updated: 3, inserted: 0, stale: 0 });
     expect(await one("SELECT count(*)::int FROM encounter_catalog")).toBe(3);
   });
 
   it("is field-level: the prescription join sends only {consult_uid, prescription} and nothing else changes; the box's next row keeps the prescription; an explicit null clears it", async () => {
     const before = await rowOf("synth-cat-a");
     await new Promise((r) => setTimeout(r, 30));
-    expect(await ingestCatalogRows([{ consult_uid: "synth-cat-a", prescription: { prescription_uid: "rx-1", presc_state: "final" } }])).toEqual({ updated: 1, inserted: 0 });
+    expect(await ingestCatalogRows([{ consult_uid: "synth-cat-a", prescription: { prescription_uid: "rx-1", presc_state: "final" } }])).toEqual({ updated: 1, inserted: 0, stale: 0 });
     const withRx = await rowOf("synth-cat-a");
     expect(withRx.prescription).toEqual({ prescription_uid: "rx-1", presc_state: "final" });
     for (const k of ["ist_date", "doctor_uid", "room_id", "t_open", "t_close", "source", "clip", "layers", "freescript", "stages", "first_gap", "allowance", "catalog_version", "generated_at"])
@@ -108,7 +108,7 @@ d("encounter_catalog on postgres:16", () => {
 
   it("the C3 join fills the identity columns by the same field-level upsert; the box row never blanks them; the (admin-only) search returns them", async () => {
     const c3 = { consult_uid: "synth-cat-a", doctor_name: DOC_NAME, patient_name: PAT_NAME, individual_uid: "ind_fake0001", prescription_uid: "rx_fake0001", presc_state: "final" };
-    expect(await ingestCatalogRows([c3])).toEqual({ updated: 1, inserted: 0 });
+    expect(await ingestCatalogRows([c3])).toEqual({ updated: 1, inserted: 0, stale: 0 });
     const r = await rowOf("synth-cat-a");
     expect([r.doctor_name, r.patient_name, r.individual_uid, r.prescription_uid, r.presc_state]).toEqual([DOC_NAME, PAT_NAME, "ind_fake0001", "rx_fake0001", "final"]);
     expect(r.room_id).toBe("room_abc");
@@ -132,7 +132,7 @@ d("encounter_catalog on postgres:16", () => {
   });
 
   it("a prescription-only row for a consult the box has not sent yet inserts a thin row that the box row later fills", async () => {
-    expect(await ingestCatalogRows([{ consult_uid: "synth-cat-early", prescription: { prescription_uid: "rx-9" } }])).toEqual({ updated: 0, inserted: 1 });
+    expect(await ingestCatalogRows([{ consult_uid: "synth-cat-early", prescription: { prescription_uid: "rx-9" } }])).toEqual({ updated: 0, inserted: 1, stale: 0 });
     expect((await rowOf("synth-cat-early")).ist_date).toBeNull();
     await ingestCatalogRows([mk("synth-cat-early", { ist_date: "2026-10-10" })]);
     const r = await rowOf("synth-cat-early");
@@ -189,6 +189,53 @@ d("encounter_catalog on postgres:16", () => {
     }
   });
 
+  it("C3 stale-write guard: an older generated_at never overwrites a newer row, an equal or newer one does, a row without generated_at is not guarded, and the skips are counted", async () => {
+    const at = (iso: string, over: Record<string, unknown> = {}) => mk("synth-cat-g3", { generated_at: iso, ...over });
+    expect(await ingestCatalogRows([at("2026-10-14T10:00:00Z", { first_gap: "from_10" })])).toEqual({ updated: 0, inserted: 1, stale: 0 });
+    expect(await ingestCatalogRows([at("2026-10-14T09:00:00Z", { first_gap: "from_09" })])).toEqual({ updated: 0, inserted: 0, stale: 1 });      // a replayed old batch
+    expect((await rowOf("synth-cat-g3")).first_gap).toBe("from_10");
+    expect(await ingestCatalogRows([at("2026-10-14T10:00:00Z", { first_gap: "from_10b" })])).toEqual({ updated: 1, inserted: 0, stale: 0 });         // equal is not older
+    expect(await ingestCatalogRows([at("2026-10-14T11:00:00Z", { first_gap: "from_11" })])).toEqual({ updated: 1, inserted: 0, stale: 0 });
+    expect((await rowOf("synth-cat-g3")).first_gap).toBe("from_11");
+    // C3's partial row has no generated_at: never guarded, and it leaves generated_at alone
+    expect(await ingestCatalogRows([{ consult_uid: "synth-cat-g3", prescription_uid: "rx_fake0003" }])).toEqual({ updated: 1, inserted: 0, stale: 0 });
+    const r = await rowOf("synth-cat-g3");
+    expect([r.prescription_uid, r.first_gap, new Date(r.generated_at as string).toISOString()]).toEqual(["rx_fake0003", "from_11", "2026-10-14T11:00:00.000Z"]);
+    // a null generated_at on the stored row (a thin row from C3) is filled by the box's row
+    await ingestCatalogRows([{ consult_uid: "synth-cat-g3b", prescription_uid: "rx_fake0004" }]);
+    expect(await ingestCatalogRows([at("2026-10-14T08:00:00Z", { consult_uid: "synth-cat-g3b" })])).toEqual({ updated: 1, inserted: 0, stale: 0 });
+    // a mixed batch: the stale row is skipped and counted, the rest is applied, nothing is 409
+    const mix = await ingestCatalogRows([at("2026-10-14T01:00:00Z", { first_gap: "old" }), mk("synth-cat-g3c", { generated_at: "2026-10-14T01:00:00Z" })]);
+    expect(mix).toEqual({ updated: 0, inserted: 1, stale: 1 });
+    expect((await rowOf("synth-cat-g3")).first_gap).toBe("from_11");
+  });
+
+  it("C3 RACE: a stale row that only loses on the lock re-check is skipped, not applied: the statement alone says 0/0/0, the rerun counts it stale and the newer data stands", async () => {
+    await ingestCatalogRows([mk("synth-cat-g3r", { generated_at: "2026-10-14T10:00:00Z", first_gap: "base" })]);
+    // Session A commits a NEWER generated_at (12:00) after 3 s; the ingest of an OLDER one (11:00) starts inside that window: its snapshot still sees 10:00 (not stale), its UPDATE waits for A, and the re-check
+    // against the committed row skips it.
+    const a = spawn("docker", ["exec", "-i", pg.name, "psql", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"], { stdio: ["pipe", "pipe", "pipe"] });
+    a.stdin.write("BEGIN; UPDATE encounter_catalog SET generated_at = '2026-10-14T12:00:00Z', first_gap = 'from_A' WHERE consult_uid = 'synth-cat-g3r'; SELECT pg_sleep(3); COMMIT;\n");
+    a.stdin.end();
+    const done = new Promise<void>((res) => a.on("close", () => res()));
+    await new Promise((r) => setTimeout(r, 1000));
+    const bare = (await H.sqlText!(INGEST_SQL, [JSON.stringify([mk("synth-cat-g3r", { generated_at: "2026-10-14T11:00:00Z", first_gap: "from_B_old" })])])) as Array<{ updated: number; inserted: number; stale: number }>;
+    await done;
+    expect(bare[0]).toEqual({ updated: 0, inserted: 0, stale: 0 });                    // skipped on the re-check, invisible to the snapshot count
+    const r0 = await rowOf("synth-cat-g3r");
+    expect([r0.first_gap, new Date(r0.generated_at as string).toISOString()]).toEqual(["from_A", "2026-10-14T12:00:00.000Z"]);
+    // through the app the same overlap ends as a counted stale skip, never a 409 and never a lost newer write
+    const b = spawn("docker", ["exec", "-i", pg.name, "psql", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"], { stdio: ["pipe", "pipe", "pipe"] });
+    b.stdin.write("BEGIN; UPDATE encounter_catalog SET generated_at = '2026-10-14T14:00:00Z', first_gap = 'from_A2' WHERE consult_uid = 'synth-cat-g3r'; SELECT pg_sleep(3); COMMIT;\n");
+    b.stdin.end();
+    const done2 = new Promise<void>((res) => b.on("close", () => res()));
+    await new Promise((r) => setTimeout(r, 1000));
+    const res = await ingestCatalogRows([mk("synth-cat-g3r", { generated_at: "2026-10-14T13:00:00Z", first_gap: "from_B_old2" })]);
+    await done2;
+    expect(res).toEqual({ updated: 0, inserted: 0, stale: 1, retried: true });
+    expect((await rowOf("synth-cat-g3r")).first_gap).toBe("from_A2");
+  });
+
   it("RACE: a post for a new consult_uid that overlaps another post's insert is not lost: the statement alone drops it (updated 0, inserted 0), the rerun updates it", async () => {
     const SQL = readFileSync("lib/encounter-catalog/ingest-sql.ts", "utf8");
     expect(SQL).toContain("ON CONFLICT (consult_uid) DO NOTHING");
@@ -202,7 +249,7 @@ d("encounter_catalog on postgres:16", () => {
     const rows = JSON.stringify([{ consult_uid: "synth-cat-race", room_id: "room_from_b" }]);
     const bare = (await H.sqlText!(INGEST_SQL, [rows])) as Array<{ updated: number; inserted: number }>;
     await done;
-    expect(bare[0]).toEqual({ updated: 0, inserted: 0 });                     // the lost write
+    expect(bare[0]).toEqual({ updated: 0, inserted: 0, stale: 0 });                     // the lost write
     expect((await rowOf("synth-cat-race")).room_id).toBeNull();
     // the app: the same overlap again with a new uid, through ingestCatalogRows
     const b = spawn("docker", ["exec", "-i", pg.name, "psql", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"], { stdio: ["pipe", "pipe", "pipe"] });
@@ -212,7 +259,7 @@ d("encounter_catalog on postgres:16", () => {
     await new Promise((r) => setTimeout(r, 1000));
     const res = await ingestCatalogRows([{ consult_uid: "synth-cat-race2", room_id: "room_from_b" }]);
     await done2;
-    expect(res).toEqual({ updated: 1, inserted: 0, retried: true });
+    expect(res).toEqual({ updated: 1, inserted: 0, stale: 0, retried: true });
     const r2 = await rowOf("synth-cat-race2");
     expect([r2.doctor_uid, r2.room_id]).toEqual(["DOC_FROM_A", "room_from_b"]);   // A's column kept, B's write applied: nothing lost
   });

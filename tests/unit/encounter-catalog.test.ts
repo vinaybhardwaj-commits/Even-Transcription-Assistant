@@ -136,7 +136,8 @@ describe("validateBatch", () => {
     expect(err({ rows: [row({ ist_date: "2026-13-45" })] })).toBe("bad_date");
     expect(err({ rows: [row({ ist_date: "12 Oct" })] })).toBe("bad_date");
     expect(err({ rows: [row({ ist_date: "2026-02-30" })] })).toBe("bad_date");
-    expect(err({ rows: [row({ ist_date: "2026-02-28" })] })).toBeUndefined();
+    expect(err({ rows: [row({ ist_date: "2026-02-28" })] })).toBe("before_floor");              // a real date, but before the catalog starts
+    expect(err({ rows: [row({ ist_date: "2026-09-30" })] })).toBeUndefined();
     expect(err({ rows: [row({ source: "other" })] })).toBe("bad_source");
     expect(err({ rows: [row({ t_open: -5 })] })).toBe("bad_time");
     expect(err({ rows: [row({ t_open: 1.5 })] })).toBe("bad_time");
@@ -192,6 +193,93 @@ describe("search parameters", () => {
   });
 });
 
+describe("23D follow-up G1-G3", () => {
+  it("G1: a token query key in ANY letter case, or percent-encoded, is refused even with a valid bearer", async () => {
+    process.env.ADMIN_TOKEN = "adm";
+    for (const qs of ["?TOKEN=adm", "?Token=adm", "?tOkEn=x", "?doctor_uid=DOC12345&TOKEN=", "?%74oken=adm", "?TOKEN"]) {
+      expect((await search(get(qs, "adm"))).status, qs).toBe(401);
+      expect((await search(get(qs))).status, qs).toBe(401);
+    }
+    expect(H.calls).toEqual([]);
+    expect((await search(get("?doctor_uid=DOC12345&tokens=1&mytoken=2", "adm"))).status).toBe(200);          // other keys that merely contain the word are not the token key
+  });
+  it("G2: \"generated_at\": null is refused (it would clear the column and let an older replay overwrite); omitting the key is fine", async () => {
+    expect(validateBatch({ rows: [row({ generated_at: null })] })).toEqual({ ok: false, error: "bad_generated_at" });
+    const { generated_at: _drop, ...noGen } = row();
+    expect(validateBatch({ rows: [noGen] }).ok).toBe(true);
+    process.env.ENCOUNTER_CATALOG_INGEST_SECRET = SECRET;
+    const b = JSON.stringify({ rows: [row({ generated_at: null })] });
+    const res = await ingest(post(b, signed(b, Math.floor(Date.now() / 1000))));
+    expect([res.status, await res.json(), H.calls.length]).toEqual([400, { ok: false, error: "bad_generated_at" }, 0]);
+  });
+  it("G3: generated_at (and t_open / t_close as strings) must be a strict ISO-8601 instant: malformed values are a 400, never a 503 batch failure", async () => {
+    const bad = ["2026-10-14", "yesterday", "2026-10-14 06:00:00", "2026-10-14T06:00:00", "2026-13-01T00:00:00Z", "2026-10-14T25:00:00Z", "2026-02-30T00:00:00Z", "2026-10-14T06:00:60Z", "Wed, 14 Oct 2026 06:00:00 GMT",
+                 "2026-10-14T06:00:00+0530", "2026-10-14T06:00Z", "1760000000", "", " 2026-10-14T06:00:00Z", "2026-10-14T06:00:00Z\n", 5, true, {}, []];
+    for (const v of bad) {
+      expect((validateBatch({ rows: [row({ generated_at: v })] }) as { error?: string }).error, JSON.stringify(v)).toBe("bad_generated_at");
+      if (typeof v === "string") expect((validateBatch({ rows: [row({ t_open: v })] }) as { error?: string }).error, "t_open " + JSON.stringify(v)).toBe("bad_time");
+    }
+    for (const v of ["2026-10-14T06:00:00Z", "2026-10-14T06:00:00.123Z", "2026-10-14T06:00:00.123456789Z", "2026-10-14T11:30:00+05:30", "2026-10-14T06:00:00-00:00", "2024-02-29T00:00:00Z"]) {
+      expect(validateBatch({ rows: [row({ generated_at: v })] }).ok, v).toBe(true);
+    }
+    process.env.ENCOUNTER_CATALOG_INGEST_SECRET = SECRET;
+    const b = JSON.stringify({ rows: [row({ generated_at: "2026-02-30T00:00:00Z" })] });
+    const res = await ingest(post(b, signed(b, Math.floor(Date.now() / 1000))));
+    expect([res.status, await res.json(), H.calls.length]).toEqual([400, { ok: false, error: "bad_generated_at" }, 0]);
+  });
+});
+
+describe("fable gate conditions (C1 bearer-only, C2 date floor, C3 stale guard, C4 README)", () => {
+  it("C1: search is BEARER ONLY: a ?token= parameter is refused even with a valid bearer, and as the only credential", async () => {
+    process.env.ADMIN_TOKEN = "adm";
+    expect((await search(get("?token=adm"))).status).toBe(401);                       // the old requireAdmin would have accepted this
+    expect((await search(get("?token=adm", "adm"))).status).toBe(401);                // a valid bearer does not rescue a request that carries the parameter
+    expect((await search(get("?token=", "adm"))).status).toBe(401);
+    expect((await search(get("?doctor_uid=DOC12345&token=wrong", "adm"))).status).toBe(401);
+    expect(H.calls).toEqual([]);
+    expect((await search(get("", "adm"))).status).toBe(200);
+    const mixed = new NextRequest("https://t.example/api/encounter-catalog/search", { headers: { authorization: "bEaReR adm" } });
+    expect((await search(mixed)).status).toBe(200);                                   // the scheme is case-insensitive, the token is not
+    expect((await search(get("", "ADM"))).status).toBe(401);
+    delete process.env.ADMIN_TOKEN;
+    expect((await search(get("", "adm"))).status).toBe(401);
+    const src = readFileSync("app/api/encounter-catalog/search/route.ts", "utf8");
+    expect(src).toContain("requireAdminBearer");
+    expect(src).not.toMatch(/requireAdmin\(/);                                        // the ?token= accepting helper is not used by this route
+  });
+  it("C2: the validator refuses ist_date before 2026-09-09 (a code, 400), and the floor day itself is fine", async () => {
+    const err = (d: string) => (validateBatch({ rows: [row({ ist_date: d })] }) as { error?: string }).error;
+    expect(err("2026-09-08")).toBe("before_floor");
+    expect(err("2026-08-20")).toBe("before_floor");
+    expect(err("2025-12-31")).toBe("before_floor");
+    expect(err("2026-09-09")).toBeUndefined();
+    expect(err("2026-09-10")).toBeUndefined();
+    expect(err("2026-02-30")).toBe("bad_date");
+    expect(validateBatch({ rows: [{ consult_uid: "synth-cat-2", prescription_uid: "rx_fake0001" }] }).ok).toBe(true);        // a row without ist_date (C3's partial row) has nothing to floor
+    expect(validateBatch({ rows: [row({ ist_date: null })] }).ok).toBe(true);
+    process.env.ENCOUNTER_CATALOG_INGEST_SECRET = SECRET;
+    const b = JSON.stringify({ rows: [row({ ist_date: "2026-09-01" })] });
+    const res = await ingest(post(b, signed(b, Math.floor(Date.now() / 1000))));
+    expect([res.status, await res.json(), H.calls.length]).toEqual([400, { ok: false, error: "before_floor" }, 0]);
+  });
+  it("C3: the UPDATE carries the stale guard in its own WHERE, a stale count comes back, and stale rows count as accounted (no rerun, no 409)", async () => {
+    expect(INGEST_SQL).toMatch(/AND NOT \(NULLIF\(p\.j->>'generated_at', ''\) IS NOT NULL AND e\.generated_at IS NOT NULL AND e\.generated_at > \(p\.j->>'generated_at'\)::timestamptz\)\s+RETURNING e\.consult_uid/);
+    expect(INGEST_SQL).toMatch(/\(SELECT count\(\*\) FROM stale\)::integer AS stale/);
+    process.env.ENCOUNTER_CATALOG_INGEST_SECRET = SECRET;
+    const b = JSON.stringify({ rows: [row(), row({ consult_uid: "synth-cat-2" })] });
+    H.script = () => [{ updated: 1, inserted: 0, stale: 1 }];
+    const res = await ingest(post(b, signed(b, Math.floor(Date.now() / 1000))));
+    expect([res.status, await res.json(), H.calls.length]).toEqual([200, { ok: true, updated: 1, inserted: 0, stale: 1 }, 1]);
+  });
+  it("C4: the README states that individual_uid / prescription_uid search params are in Vercel logs by design, and that ?token= is refused", () => {
+    const md = readFileSync("lib/encounter-catalog/README.md", "utf8");
+    expect(md).toMatch(/individual_uid.*prescription_uid.*Vercel request logs/s);
+    expect(md).toMatch(/by design/i);
+    expect(md).toMatch(/token.*query parameter.*refused/is);
+    expect(md).toMatch(/2026-09-09/);
+  });
+});
+
 describe("POST /api/encounter-catalog/ingest", () => {
   const body = () => JSON.stringify({ rows: [row(), row({ consult_uid: "synth-cat-2" })] });
   it("503 when the secret is unset, 401 on a bad signature, nothing written either way", async () => {
@@ -217,10 +305,10 @@ describe("POST /api/encounter-catalog/ingest", () => {
   it("200 upserts through one statement with the rows as $1 and returns the counts; a db error is 503 db:<sqlstate>", async () => {
     process.env.ENCOUNTER_CATALOG_INGEST_SECRET = SECRET;
     const b = body();
-    H.result = [{ updated: 1, inserted: 1 }];
+    H.result = [{ updated: 1, inserted: 1, stale: 0 }];
     const res = await ingest(post(b, signed(b, Math.floor(Date.now() / 1000))));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, updated: 1, inserted: 1 });
+    expect(await res.json()).toEqual({ ok: true, updated: 1, inserted: 1, stale: 0 });
     expect(H.calls).toHaveLength(1);
     expect(H.calls[0][0]).toBe(INGEST_SQL);
     expect(JSON.parse(H.calls[0][1][0] as string)).toHaveLength(2);
@@ -235,14 +323,14 @@ describe("POST /api/encounter-catalog/ingest", () => {
     const script = (...rs: Array<{ updated: number; inserted: number }>) => { let n = 0; H.script = () => [rs[Math.min(n++, rs.length - 1)]]; H.calls.length = 0; };
     script({ updated: 0, inserted: 1 }, { updated: 1, inserted: 1 });
     const res = await post2();
-    expect([res.status, await res.json(), H.calls.length]).toEqual([200, { ok: true, updated: 1, inserted: 1, retried: true }, 2]);
+    expect([res.status, await res.json(), H.calls.length]).toEqual([200, { ok: true, updated: 1, inserted: 1, stale: 0, retried: true }, 2]);
     script({ updated: 0, inserted: 1 }, { updated: 0, inserted: 1 });
     const res2 = await post2();
     expect([res2.status, await res2.json(), H.calls.length]).toEqual([409, { ok: false, error: "concurrent_insert", missing: 1 }, 2]);
     script({ updated: 1, inserted: 1 });
     const res3 = await post2();
     expect([res3.status, H.calls.length]).toEqual([200, 1]);
-    expect(await ingestCatalogRows([row(), row({ consult_uid: "synth-cat-2" })] as never)).toEqual({ updated: 1, inserted: 1 });
+    expect(await ingestCatalogRows([row(), row({ consult_uid: "synth-cat-2" })] as never)).toEqual({ updated: 1, inserted: 1, stale: 0 });
     expect(new ConcurrentIngestError(1).message).toBe("concurrent_insert");
   });
   it("413 over the body limit, 400 on bad json", async () => {
