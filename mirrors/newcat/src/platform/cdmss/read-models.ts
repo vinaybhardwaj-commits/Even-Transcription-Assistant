@@ -10,8 +10,7 @@ import type { CdmssQuery } from './client.js'
  */
 
 const ts = z.union([z.date(), z.string()]).transform((v) => new Date(v).toISOString())
-// DATE columns are cast to text in SQL (note_day::text, surgery_date::text); ORDER BY names the table
-// column (ot_note_audits.note_day), not the text alias, so the date indexes can serve the sort. The Date branch is the
+// DATE columns are cast to text in SQL (note_day::text, surgery_date::text). The Date branch is the
 // second wall: the Neon driver parses oid 1082 as local midnight, so read it back in local time.
 const pad = (n: number) => String(n).padStart(2, '0')
 const day = z
@@ -182,7 +181,7 @@ function clampLimit(limit: number | undefined): number {
   return Math.max(1, Math.min(MAX_LIMIT, Math.floor(limit)))
 }
 
-export type CdmssReadErrorCode = 'query_failed' | 'bad_row' | 'sql_not_registered'
+export type CdmssReadErrorCode = 'query_failed' | 'bad_row'
 
 /** Carries a code only: no driver text, no zod issues, no caller-supplied values. */
 export class CdmssReadError extends Error {
@@ -226,11 +225,11 @@ export const CDMSS_SQL = {
   opdByDoctorUid: `SELECT ${OPD_COLS} FROM opd_note_audits WHERE doctor_uid = $1 ORDER BY note_date DESC NULLS LAST LIMIT $2`,
   opdByWindow: `SELECT ${OPD_COLS} FROM opd_note_audits WHERE note_date >= $1::timestamptz AND note_date < $2::timestamptz ORDER BY note_date DESC LIMIT $3`,
   otByUid: `SELECT ${OT_COLS} FROM ot_note_audits WHERE uid = $1 ORDER BY audited_at DESC LIMIT $2`,
-  otByDoctorUid: `SELECT ${OT_COLS} FROM ot_note_audits WHERE doctor_uid = $1 ORDER BY ot_note_audits.note_day DESC LIMIT $2`,
-  otByWindow: `SELECT ${OT_COLS} FROM ot_note_audits WHERE note_day >= $1::date AND note_day < $2::date ORDER BY ot_note_audits.note_day DESC LIMIT $3`,
+  otByDoctorUid: `SELECT ${OT_COLS} FROM ot_note_audits WHERE doctor_uid = $1 ORDER BY note_day DESC LIMIT $2`,
+  otByWindow: `SELECT ${OT_COLS} FROM ot_note_audits WHERE note_day >= $1::date AND note_day < $2::date ORDER BY note_day DESC LIMIT $3`,
   preopByEpisodeKey: `SELECT ${PREOP_COLS} FROM preop_findings WHERE episode_key = $1 ORDER BY updated_at DESC LIMIT $2`,
-  preopByIndividualUid: `SELECT ${PREOP_COLS} FROM preop_findings WHERE individual_uid = $1 ORDER BY preop_findings.surgery_date DESC NULLS LAST LIMIT $2`,
-  preopByWindow: `SELECT ${PREOP_COLS} FROM preop_findings WHERE surgery_date >= $1::date AND surgery_date < $2::date ORDER BY preop_findings.surgery_date DESC LIMIT $3`,
+  preopByIndividualUid: `SELECT ${PREOP_COLS} FROM preop_findings WHERE individual_uid = $1 ORDER BY surgery_date DESC NULLS LAST LIMIT $2`,
+  preopByWindow: `SELECT ${PREOP_COLS} FROM preop_findings WHERE surgery_date >= $1::date AND surgery_date < $2::date ORDER BY surgery_date DESC LIMIT $3`,
   statesBySourceUid: `SELECT ${STATE_COLS} FROM clinical_states WHERE source_uid = $1 AND ($3::boolean OR superseded_by IS NULL) ORDER BY created_at DESC LIMIT $2`,
   statesByEncounterRef: `SELECT ${STATE_COLS} FROM clinical_states WHERE encounter_ref = $1 AND ($3::boolean OR superseded_by IS NULL) ORDER BY created_at DESC LIMIT $2`,
   statesByWindow: `SELECT ${STATE_COLS} FROM clinical_states WHERE created_at >= $1::timestamptz AND created_at < $2::timestamptz AND ($4::boolean OR superseded_by IS NULL) ORDER BY created_at DESC LIMIT $3`,

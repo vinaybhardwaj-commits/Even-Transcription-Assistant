@@ -20,7 +20,7 @@ describe('DATE columns keep their calendar day on a non-UTC host (Fable C1)', ()
     expect(OtAuditRow.parse({ ...otBase, note_day: new Date(2026, 9, 2) }).note_day).toBe('2026-10-02')
   })
 
-  it('a text DATE passes through, a local-midnight Date reads back in local time', () => {
+  it('a text DATE passes through, a UTC-midnight Date (PGlite) reads back in local time', () => {
     expect(OtAuditRow.parse({ ...otBase, note_day: '2026-10-02' }).note_day).toBe('2026-10-02')
     expect(OtAuditRow.parse({ ...otBase, note_day: new Date(2026, 11, 31) }).note_day).toBe('2026-12-31')
   })

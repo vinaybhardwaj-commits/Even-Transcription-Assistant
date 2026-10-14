@@ -4,11 +4,8 @@ import type { FactGroup, GatedFact } from '../../../../src/agents/surgical-consu
 import { ConsultAuditInput } from '../../../../src/agents/surgical-consult/input.js'
 import { prepass } from '../../../../src/agents/surgical-consult/prepass.js'
 import { segmentId } from '../../../../src/agents/surgical-consult/definition.js'
-import type { RuleOutput } from '../../../../src/platform/agent/types.js'
-import { consultContext } from '../../../../src/agents/surgical-consult/segments.js'
 import { INDICATION_RULES, dedupeKey, runRules, RULE_CAPS, RULE_SPECS, MAX_CANDIDATES, type GatedFacts } from '../../../../src/agents/surgical-consult/rules/index.js'
 import { effectiveFirmness, saidVsWrittenRules } from '../../../../src/agents/surgical-consult/rules/said-vs-written.js'
-import { procedureGroup } from '../../../../src/agents/surgical-consult/procedure-groups.js'
 import { RULES_VERSION } from '../../../../src/agents/surgical-consult/versions.js'
 
 const load = (name: string) => ConsultAuditInput.parse(JSON.parse(readFileSync(`fixtures/surgical-consult/${name}.json`, 'utf8')))
@@ -138,7 +135,7 @@ describe('pressure', () => {
   })
 })
 
-// svw rules read rx from the rule context in the definition; here they are exercised with rx passed in directly.
+// svw rules are not wired into the definition (the F7 rule shape cannot reach rx); they are exercised with rx passed in.
 const runSvw = (input: Input, f: GatedFacts) => runRules(f, input.rx ?? null, true)
 describe('said-vs-written', () => {
   it('abstains with no_rx', () => {
@@ -203,24 +200,24 @@ describe('patient concern', () => {
     const f = herniaFacts(input, true)
     f.recommendation = []
     f.patient_response.push(resp(input, '2', { question_asked: true }))
-    const c = only(run(input, f), 'concern_unaddressed')
+    const c = only(run(input, f), 'patient_concern_unaddressed')
     expect(c).toHaveLength(1)
     expect(c[0]!.evidence.map((e) => e.segment_id)).toEqual(['seg-0002', 'seg-0003', 'seg-0004', 'seg-0005'])
     expect(c[0]!.fact_refs).toHaveLength(4)
-    expect(c[0]!.claim).toBe('The doctor did not address this patient concern in the consult.')
+    expect(c[0]!.claim).toBe('No later doctor statement in the extracted facts addresses this patient concern.')
     const g = empty()
     g.patient_response.push(resp(input, '6', { concern_stated: true }))
-    const r = only(run(input, g), 'concern_unaddressed')
+    const r = only(run(input, g), 'patient_concern_unaddressed')
     expect(r).toHaveLength(1)
     expect(r[0]!.evidence).toHaveLength(1)
-    expect(r[0]).toMatchObject({ finding_type: 'concern_unaddressed', needs_judge: true, doctor_visible: false })
+    expect(r[0]).toMatchObject({ finding_type: 'patient_concern_unaddressed', needs_judge: true, doctor_visible: false })
   })
 
   it('agreement alone is not a concern', () => {
     const input = load('hernia-full-consent')
     const f = empty()
     f.patient_response.push(resp(input, '6', { agreement_stated: true }))
-    expect(only(run(input, f), 'concern_unaddressed')).toEqual([])
+    expect(only(run(input, f), 'patient_concern_unaddressed')).toEqual([])
   })
 })
 
@@ -243,7 +240,7 @@ describe('indication rules (predicates unwritten, I2c)', () => {
   const gaps = (r: ReturnType<typeof run>) => r.findings.filter((x) => x.finding_type === 'indication_gap')
 
   it('all rules ship disabled, unwritten and unchecked; disabled rules yield only not_discussed counts', () => {
-    expect(INDICATION_RULES).toHaveLength(6)
+    expect(INDICATION_RULES).toHaveLength(5)
     for (const r of INDICATION_RULES) {
       expect(r.enabled).toBe(false)
       expect(r.predicate_status).toBe('unwritten')
@@ -253,7 +250,7 @@ describe('indication rules (predicates unwritten, I2c)', () => {
     const r = run(input, f)
     expect(gaps(r)).toEqual([])
     expect(r.not_discussed_counts['indication.circumcision.v0']).toBe(1)
-    expect(Object.keys(r.not_discussed_counts).filter((k) => k.startsWith('indication.'))).toHaveLength(6)
+    expect(Object.keys(r.not_discussed_counts).filter((k) => k.startsWith('indication.'))).toHaveLength(5)
   })
 
   it('(a) enabled + verbatim_checked but predicate_status unwritten: counted only', () => {
@@ -291,7 +288,7 @@ describe('indication rules (predicates unwritten, I2c)', () => {
       f.indication.push(...c.facts(input))
       const r = runRules(f, input.rx, true, INDICATION_RULES.map(forceSigned))
       expect(gaps(r), c.name).toEqual([])
-      expect(Object.keys(r.not_discussed_counts).filter((k) => k.startsWith('indication.')), c.name).toHaveLength(6)
+      expect(Object.keys(r.not_discussed_counts).filter((k) => k.startsWith('indication.')), c.name).toHaveLength(5)
     }
   })
 
@@ -310,42 +307,9 @@ describe('indication rules (predicates unwritten, I2c)', () => {
     expect(c.supporting[0]).toMatchObject({ section: '3.3', url: c.primary.url, quoted_passage: 'Simple ballooning of the foreskin during micturition is not an indication for surgery per se.' })
   })
 
-  it('knee degenerative rule: unwritten, carries AAOS primary; acl_ligament never reaches it', () => {
-    const k = INDICATION_RULES.find((r) => r.group === 'B_knee_arthroscopy_degenerative')!
-    expect(k).toMatchObject({ rule_id: 'indication.knee_arthroscopy_degenerative.v0', enabled: false, predicate_status: 'unwritten' })
-    expect(k.citation!.primary.url).toMatch(/^https:\/\/www\.aaos\.org\//)
-    let called = 0
-    const spied = INDICATION_RULES.map((r) => ({ ...forceSigned(r), check: () => (called++, r.check(empty())) }))
-    const input = load('hernia-full-consent')
-    const f = empty()
-    f.recommendation.push(rec(input, '1', 'acl reconstruction with meniscal repair'))
-    const r = runRules(f, input.rx, true, spied)
-    expect(called).toBe(0)
-    expect(r.not_discussed_counts['indication.knee_arthroscopy_degenerative.v0']).toBe(1)
-    const g = empty()
-    g.recommendation.push(rec(input, '1', 'arthroscopic partial meniscectomy'))
-    runRules(g, input.rx, true, spied)
-    expect(called).toBe(1)
-  })
-
-  it('consent and said-vs-written run unchanged for both knee groups', () => {
-    for (const name of ['arthroscopic partial meniscectomy', 'acl reconstruction with meniscal repair']) {
-      const input = load('hernia-full-consent')
-      const f = empty()
-      f.recommendation.push(rec(input, '1', name))
-      f.consent.push(consent(input, '3', { risks: false, alternatives: true }))
-      f.consent.push(consent(input, '4', { recovery: true, second_opinion_offered: true, no_surgery_option: true }))
-      f.consent.push(consent(input, '5', { cost: true }))
-      const r = run(input, f)
-      // The fixture's rx is a hernia, so said-vs-written also reports a group mismatch; both rule families ran.
-      expect(ids(r), name).toEqual(['consent.risks', 'svw.group_differs'])
-      for (const x of r.findings) expect(x.procedure_group, name).toBe(procedureGroup(name))
-    }
-  })
-
   it('records which rules have no fetched citation', () => {
     expect(INDICATION_RULES.filter((r) => r.citation === null).map((r) => r.group).sort()).toEqual(['anorectal', 'hernia_repair', 'joint_replacement'])
-    for (const r of INDICATION_RULES) if (r.citation && r.group === 'circumcision') expect(r.citation.primary.url).toMatch(/^https:\/\/uroweb\.org\//)
+    for (const r of INDICATION_RULES) if (r.citation) expect(r.citation.primary.url).toMatch(/^https:\/\/uroweb\.org\//)
   })
 })
 
@@ -419,14 +383,12 @@ describe('carry-over 4 and F6 links', () => {
   })
 
   it('F7 specs: enabled consent, pressure and concern rules respect their caps; the cap total is the jev budget basis', () => {
-    expect(MAX_CANDIDATES).toBe(54)
+    expect(MAX_CANDIDATES).toBe(53)
     const input = load('hernia-full-consent')
     const f = empty()
     for (let i = 0; i < 5; i++) f.recommendation.push({ ...rec(input, '1', 'hernia repair'), id: `rec-${i}`, rec_id: `r${i + 1}` })
     const risks = RULE_SPECS.find((s) => s.id === 'consent.risks')!
-    const out = risks.evaluate(Object.values(f).flat() as never, consultContext(input)) as RuleOutput
-    expect(out.candidates).toHaveLength(RULE_CAPS.consent)
-    expect(out.counts).toMatchObject({ over_cap: 5 - RULE_CAPS.consent })
+    expect(risks.evaluate(Object.values(f).flat() as never)).toHaveLength(RULE_CAPS.consent)
   })
 })
 

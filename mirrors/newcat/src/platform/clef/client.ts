@@ -8,7 +8,6 @@ import {
   MODEL_NAME,
   STATE_TEXT,
   parseAnswers,
-  usageTokens,
   questionsPayload,
   type ClefAnswers,
 } from './questions.js'
@@ -80,17 +79,6 @@ export function scrub(text: string, secret?: string): string {
   out = out.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').replace(/data:audio\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+/gi, '[audio]')
   out = out.replace(/https?:\/\/\S+/gi, '[url]').replace(/[A-Za-z0-9+/=_-]{40,}/g, '[redacted]')
   return out.slice(0, 180)
-}
-
-/** Tokens a 200 response reports even when its answers do not parse; billed either way. Never throws. */
-function billedUsage(body: string): { input: number; output: number } {
-  try {
-    const p = JSON.parse(body) as { result?: unknown; usage?: unknown }
-    const inner = p.result && typeof p.result === 'object' && !Array.isArray(p.result) ? (p.result as Record<string, unknown>) : (p as Record<string, unknown>)
-    return usageTokens(inner)
-  } catch {
-    return { input: 0, output: 0 }
-  }
 }
 
 function errorDetail(body: string, secret: string): string {
@@ -189,9 +177,6 @@ export class ClefClient {
   static async create(deps: ClefDeps): Promise<ClefClient> {
     const env = deps.env ?? process.env
     const mode = clefMode(env)
-    if (mode === 'fake' && (process.env.NEWCAT_ENV ?? '').trim().toLowerCase() === 'production') {
-      throw new ClefConfigError('NEWCAT_CLEF=fake is refused when NEWCAT_ENV=production')
-    }
     if (mode === 'off') throw new ClefDisabled('Clef is off. Set NEWCAT_CLEF=live (or fake for offline runs).')
     let account = ''
     let token = ''
@@ -235,7 +220,7 @@ export class ClefClient {
       if (result.status === 200) {
         try {
           const parsed = parseAnswers(JSON.parse(result.body) as unknown)
-          const cost = this.mode === 'fake' ? 0 : inputCostUsd(parsed.inputTokens)
+          const cost = inputCostUsd(parsed.inputTokens)
           await this.record('ok', started, parsed.inputTokens, parsed.outputTokens, null)
           return {
             answers: parsed.answers,
@@ -249,8 +234,7 @@ export class ClefClient {
             clips: wavs.length,
           }
         } catch (cause) {
-          const kept = billedUsage(result.body)
-          await this.record('failed', started, kept.input, kept.output, 'parse')
+          await this.record('failed', started, 0, 0, 'parse')
           if (cause instanceof ClefError) throw cause
           throw new ClefParseError('clef response was not json')
         }
@@ -277,14 +261,14 @@ export class ClefClient {
   private async record(status: 'ok' | 'unavailable' | 'failed', started: number, input: number, output: number, errorType: string | null): Promise<void> {
     await recordModelCall(this.deps.sql, {
       traceId: this.deps.traceId,
-      provider: this.mode === 'fake' ? 'fake' : 'cloudflare',
+      provider: this.mode === 'fake' ? 'fake' : 'typesafe',
       tier: 'clef',
       intendedModelId: MODEL_ID,
       servedModelId: null,
       inputTokens: input,
       outputTokens: output,
       latencyMs: Date.now() - started,
-      costUsd: this.mode === 'fake' ? 0 : inputCostUsd(input),
+      costUsd: inputCostUsd(input),
       status,
       stopReason: null,
       errorType,
@@ -310,13 +294,7 @@ export async function downloadClip(url: string, fetchImpl: typeof fetch = fetch)
   const chunks: Uint8Array[] = []
   let total = 0
   for (;;) {
-    let chunk: ReadableStreamReadResult<Uint8Array>
-    try {
-      chunk = await reader.read()
-    } catch {
-      throw new ClefHttpError(0, 'clip download failed', 1)
-    }
-    const { done, value } = chunk
+    const { done, value } = await reader.read()
     if (done) break
     total += value.byteLength
     if (total > MAX_WAV_BYTES) {

@@ -16,8 +16,6 @@ const ALLOWED = new Set([
   'path',
   'method',
   'role',
-  'agent_id',
-  'swept',
   'downgrade',
 ])
 

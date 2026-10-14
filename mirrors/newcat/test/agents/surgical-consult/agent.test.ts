@@ -48,7 +48,7 @@ describe('definition', () => {
     expect(CONSULT_QUESTION_SET.sha).toBe(sha256(`consult-finding-validity|${CONSULT_QUESTION_SET.question}`))
     expect(JEV_CALLS).toBe(2 * MAX_CANDIDATES)
     expect(JEV_CALLS).toBeGreaterThanOrEqual(2 * MAX_CANDIDATES)
-    expect(JEV_CALLS).toBe(108)
+    expect(JEV_CALLS).toBe(106)
     expect(surgicalConsultCapability.id).toBe('audit.consult')
   })
 
@@ -60,7 +60,7 @@ describe('definition', () => {
 
   it('indication rules are registered disabled and counted, never run', async () => {
     const indication = RULE_SPECS.filter((r) => r.id.startsWith('indication.'))
-    expect(indication).toHaveLength(6)
+    expect(indication).toHaveLength(5)
     for (const spec of indication) expect(spec.enabled).toBe(false)
     const r = await rig()
     await r.run(hernia())
@@ -192,11 +192,12 @@ describe('quote gate through the platform', () => {
 })
 
 describe('envelope', () => {
-  
+  it.todo('G8: consent.* absence findings need their own judge question and whole-segment evidence (platform work); judge wiring unchanged here')
+
   it('empty when no recommendation survives', async () => {
     const r = await rig(() => reply([]))
     const audit = await r.run(load('no-surgery-recommended'))
-    expect(audit).toMatchObject({ status: 'empty', reason: 'no_surgical_recommendation', findings: [] })
+    expect(audit).toMatchObject({ status: 'empty', reason: 'no_candidate_findings', findings: [] })
   })
 
   it('a missing consent element becomes a judged finding with both judges', async () => {
@@ -284,8 +285,7 @@ describe('governance body', () => {
     }
     const first = body.findings.find((f: GovFinding) => f.rule_id === 'consent.risks')
     expect(first!.evidence[0]).toMatchObject({ segment_id: 'seg-0001', role: 'doctor', t0: 0, t1: 7 })
-    expect(JSON.stringify(body)).not.toMatch(/text_native|"prompt"|tool_input/)
-    expect(body).toMatchObject({ doctor_uid: knee().doctor_uid, encounter_id: knee().encounter_id })
+    expect(JSON.stringify(body)).not.toMatch(/text_native|doctor_uid|"prompt"|tool_input/)
   })
 
   it('counts abstentions by reason and never lists them as findings', async () => {
@@ -329,9 +329,9 @@ describe('governance body', () => {
   it('a finding the serializer cannot fully evidence is withheld and counted', async () => {
     const r = await rig()
     const audit = await r.run(knee())
-    const broken = { ...audit, findings: audit.findings.map((f) => ({ ...f, judge: undefined })) }
+    const broken = { ...audit, findings: audit.findings.map((f) => ({ ...f, summary: 'no trailer here' })) }
     const body = surgicalConsult.serializers!.governance!(broken) as GovBody
     expect(body.findings).toEqual([])
-    expect(body.abstentions.judge_missing).toBe(audit.findings.length)
+    expect(body.abstentions.evidence_unmapped).toBe(audit.findings.length)
   })
 })

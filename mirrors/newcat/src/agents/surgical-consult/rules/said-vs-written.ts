@@ -36,8 +36,9 @@ export function effectiveFirmness(f: Pick<GatedFact<'recommendation'>, 'firmness
 export type Rx = ConsultAuditInput['rx']
 
 // procedureGroup runs on the extracted English procedure_text, never raw native text (I1 refute R4).
-// Pure in (facts, rx). The svw.* RuleSpecs are enabled (rules/index.ts): the platform hands each rule the per-run context
-// (ctx.rx is the written side). Completeness is not an argument: the F7 completeness hook abstains an incomplete window first.
+// FLAG (S1): the F7 rule shape is facts -> candidates, so a rule cannot see the request's rx. This function is therefore
+// pure in (facts, rx) and NOT wired into the definition: the svw.* RuleSpecs are enabled:false until the platform gives
+// rules a per-run context. Completeness is no longer an argument: the F7 completeness hook abstains an incomplete window first.
 export function saidVsWrittenRules(facts: GatedFacts, rx: Rx, complete = true): RuleOutcome[] {
   if (!rx) return [{ abstain: 'no_rx', rule_id: 'svw.all' }]
   const recs = facts.recommendation.filter((f) => f.role === 'doctor')

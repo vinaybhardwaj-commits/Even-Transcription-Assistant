@@ -15,7 +15,7 @@ export async function chargeBudget(sql: Sql, budgetId: string): Promise<{ ok: tr
 
 export interface ModelCallDraft {
   traceId: string
-  provider: 'bedrock' | 'typesafe' | 'fake' | 'cloudflare' | 'vertex'
+  provider: 'bedrock' | 'typesafe' | 'fake'
   tier: string
   intendedModelId: string
   servedModelId: string | null

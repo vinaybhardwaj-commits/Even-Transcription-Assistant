@@ -3,7 +3,7 @@ import { BedrockRuntimeClient, ConverseCommand, type ToolConfiguration } from '@
 import type { AwsCredentialIdentityProvider } from '@smithy/types'
 import type { Sql } from '../db/sql.js'
 import type { StageOutcome } from '../outcome.js'
-import { acceptsTemperature, supportsForcedToolChoice } from './allowlist.js'
+import { acceptsTemperature } from './allowlist.js'
 import { chargeBudget, recordModelCall } from './ledger.js'
 import { estimateCost } from './prices.js'
 import { type ModelClient, type ModelCompletion, type ModelRequest, type ModelTier, type ModelToolSpec, type ServedSource } from './types.js'
@@ -98,17 +98,11 @@ export interface BedrockSender {
   send(modelId: string, input: BedrockTurn): Promise<BedrockRaw>
 }
 
-type ToolConfigTools = { toolSpec: { name: string; description: string; inputSchema: { json: Record<string, unknown> } } }[]
-type ForcedToolConfig = { tools: ToolConfigTools; toolChoice: { tool: { name: string } } }
-type AnyToolConfig = { tools: ToolConfigTools; toolChoice: { tool: { name: string } } | { auto: Record<string, never> } }
-
-/**
- * Forced tool choice, or `auto` for models that reject a forced choice (Claude 5.5 ids; the tool is still offered).
- * Without a modelId the choice is forced. The input schema is the caller's JSON Schema object.
- */
-export function converseToolConfig(tool: ModelToolSpec): ForcedToolConfig
-export function converseToolConfig(tool: ModelToolSpec, modelId: string): AnyToolConfig
-export function converseToolConfig(tool: ModelToolSpec, modelId?: string): AnyToolConfig {
+/** Forced tool choice. The input schema is the caller's JSON Schema object. */
+export function converseToolConfig(tool: ModelToolSpec): {
+  tools: { toolSpec: { name: string; description: string; inputSchema: { json: Record<string, unknown> } } }[]
+  toolChoice: { tool: { name: string } }
+} {
   return {
     tools: [
       {
@@ -119,7 +113,7 @@ export function converseToolConfig(tool: ModelToolSpec, modelId?: string): AnyTo
         },
       },
     ],
-    toolChoice: modelId !== undefined && !supportsForcedToolChoice(modelId) ? { auto: {} } : { tool: { name: tool.name } },
+    toolChoice: { tool: { name: tool.name } },
   }
 }
 
@@ -140,7 +134,7 @@ export function sdkSender(
           system: [{ text: input.system }],
           messages: [{ role: 'user', content: [{ text: input.user }] }],
           inferenceConfig: { maxTokens: input.maxTokens, ...(acceptsTemperature(modelId) ? { temperature: 0 } : {}) },
-          ...(input.tool ? { toolConfig: converseToolConfig(input.tool, modelId) as ToolConfiguration } : {}),
+          ...(input.tool ? { toolConfig: converseToolConfig(input.tool) as ToolConfiguration } : {}),
         }),
       )
       const blocks = response.output?.message?.content ?? []
@@ -238,28 +232,6 @@ export class BedrockModelClient implements ModelClient {
           purpose: request.purpose,
         })
         return { status: 'refused', error: { type: 'model_refused', message: 'The model refused the request.' } }
-      }
-      if (request.tool && raw.toolInput === null) {
-        // Models on tool_choice auto may answer in text. No retry and no fallback model: the caller decides.
-        await recordModelCall(this.sql, {
-          traceId: request.traceId,
-          provider: 'bedrock',
-          tier: request.tier,
-          intendedModelId: intended,
-          servedModelId: raw.servedModelId,
-          inputTokens: raw.inputTokens,
-          outputTokens: raw.outputTokens,
-          latencyMs,
-          costUsd,
-          status: 'unavailable',
-          stopReason: raw.stopReason,
-          errorType: 'no_tool_use',
-          purpose: request.purpose,
-        })
-        return {
-          status: 'unavailable',
-          error: { type: 'no_tool_use', message: 'The model replied without calling the requested tool.' },
-        }
       }
       const callId = await recordModelCall(this.sql, {
         traceId: request.traceId,

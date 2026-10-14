@@ -8,16 +8,6 @@ import { HttpUbusTransport, type UbusTransport } from './transport.js'
 
 /** Handles whose requests are obeyed. Everyone else gets a refusal reply. */
 export const ALLOWLIST: readonly string[] = ['gating-lead', 'newcat-lead', 'newcat-orch', 'consult-audit-lead', 'cc-air-work-local']
-/**
- * State-changing verbs (pause, resume, rerun) are off: ubus is a notification channel. Turning them on is this one-line change,
- * and they then still need a verified, allowlisted sender machine (below).
- */
-export const UBUS_STATE_VERBS_ENABLED = false
-/**
- * Machine labels allowed to drive state-changing verbs. INFERRED strings: Mini, c3, t4 labels and their hostnames.
- * Matched exactly, case-insensitively, against from.machine; from.machine_verified must also be strictly true.
- */
-export const STATE_VERB_MACHINES: readonly string[] = ['vinays-mac-mini-3', 'eta-ci-c3', 'eta-lab-t4', 'e2e-147-28', 'e2e-80-13']
 export const NOTIFY_TO: readonly string[] = ['newcat-lead']
 export const SEND_CAP_PER_HOUR = 20
 export const REPLY_CAP_PER_HOUR = 20
@@ -35,7 +25,6 @@ export interface BridgeStats {
   suppressed: number
   rejected: Record<string, number>
   refused: number
-  refusedUnverified: number
 }
 
 export interface BridgeOptions {
@@ -46,8 +35,6 @@ export interface BridgeOptions {
   now?: () => number
   allowlist?: readonly string[]
   notifyTo?: readonly string[]
-  stateVerbsEnabled?: boolean
-  stateVerbMachines?: readonly string[]
 }
 
 interface RunRow {
@@ -88,7 +75,7 @@ export function numericCounts(value: unknown, depth = 0): Record<string, unknown
 }
 
 export class UbusBridge {
-  readonly stats: BridgeStats = { sent: 0, replied: 0, errors: 0, suppressed: 0, rejected: {}, refused: 0, refusedUnverified: 0 }
+  readonly stats: BridgeStats = { sent: 0, replied: 0, errors: 0, suppressed: 0, rejected: {}, refused: 0 }
   private readonly sql: Sql
   private readonly transport: UbusTransport
   private readonly handle: string
@@ -96,8 +83,6 @@ export class UbusBridge {
   private readonly now: () => number
   private readonly allowlist: readonly string[]
   private readonly notifyTo: readonly string[]
-  private readonly stateVerbsEnabled: boolean
-  private readonly stateVerbMachines: readonly string[]
   private registered = false
   private isPaused = false
   private cursor: number
@@ -118,8 +103,6 @@ export class UbusBridge {
     this.now = options.now ?? Date.now
     this.allowlist = options.allowlist ?? ALLOWLIST
     this.notifyTo = options.notifyTo ?? NOTIFY_TO
-    this.stateVerbsEnabled = options.stateVerbsEnabled ?? UBUS_STATE_VERBS_ENABLED
-    this.stateVerbMachines = (options.stateVerbMachines ?? STATE_VERB_MACHINES).map((m) => m.toLowerCase())
     this.cursor = this.now()
     this.windowStart = this.now()
   }
@@ -288,7 +271,7 @@ export class UbusBridge {
   async handleMessage(message: Record<string, unknown>): Promise<void> {
     const id = typeof message.id === 'string' ? message.id : ''
     if (!id) return
-    const from = message.from as { handle?: unknown; machine?: unknown; machine_verified?: unknown } | undefined
+    const from = message.from as { handle?: unknown } | undefined
     const sender = typeof from?.handle === 'string' ? from.handle : ''
     const corr = message.corr as { corr_id?: unknown } | null | undefined
     const corrId = typeof corr?.corr_id === 'string' ? corr.corr_id : undefined
@@ -299,14 +282,7 @@ export class UbusBridge {
         await reply({ ok: false, refused: 'not_allowed' }, true)
         return
       }
-      const text = String(message.body ?? '').trim() || String(message.subject ?? '').trim()
-      const verb = text.split(/\s+/)[0]?.toLowerCase()
-      if ((verb === 'pause' || verb === 'resume' || verb === 'rerun') && !this.stateVerbPermitted(from)) {
-        this.stats.refusedUnverified += 1
-        await reply({ ok: false, refused: 'refused_unverified' }, true)
-        return
-      }
-      await reply(await this.runVerb(text))
+      await reply(await this.runVerb(String(message.body ?? '').trim() || String(message.subject ?? '').trim()))
     } finally {
       try {
         await this.transport.call('ubus_ack', { ids: [id] })
@@ -314,13 +290,6 @@ export class UbusBridge {
         this.stats.errors += 1
       }
     }
-  }
-
-  /** Constant on, machine_verified strictly true, and from.machine on the code allowlist. Anything else is refused. */
-  private stateVerbPermitted(from: { machine?: unknown; machine_verified?: unknown } | undefined): boolean {
-    if (!this.stateVerbsEnabled) return false
-    if (from?.machine_verified !== true) return false
-    return typeof from.machine === 'string' && this.stateVerbMachines.includes(from.machine.toLowerCase())
   }
 
   private async runVerb(text: string): Promise<Record<string, unknown>> {

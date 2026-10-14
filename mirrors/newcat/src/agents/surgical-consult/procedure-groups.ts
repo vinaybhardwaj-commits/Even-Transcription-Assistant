@@ -1,11 +1,11 @@
 // Ported from the CASE expression in P0-3-GROUPED-SQL.md. First match wins.
 // I1b/I1c rulings: short tokens are word-bounded (the SQL's bare `thr` matched inside "arthroscopy"), and
 // joint_replacement stays ahead of the knee-arthroscopy group so "knee replacement with meniscectomy" is a replacement.
-// I4: the knee group is split; acl_ligament is matched first and is not list B. The SQL runs on lower(trim(name)); procedureGroup does the same.
+// The SQL runs on lower(trim(name)); procedureGroup does the same.
 export const LIST_A = ['anorectal', 'joint_replacement', 'urology_endoscopic', 'hernia_repair', 'circumcision'] as const
 export const LIST_B = [
   'B_cholecystectomy',
-  'B_knee_arthroscopy_degenerative',
+  'B_knee_arthroscopy_acl_meniscus',
   'B_spine',
   'B_hysterectomy',
   'B_tonsil_grommet',
@@ -13,8 +13,7 @@ export const LIST_B = [
   'B_carpal_tunnel',
 ] as const
 export const EXCLUDED_GROUPS = ['x_chemotherapy', 'x_obstetric'] as const
-// acl_ligament is not list B: ligament reconstruction is a different indication family from degenerative knee arthroscopy (I4, C11).
-export const OTHER_GROUPS = ['nasal_sinus', 'ear', 'lump_excision', 'appendicectomy', 'acl_ligament'] as const
+export const OTHER_GROUPS = ['nasal_sinus', 'ear', 'lump_excision', 'appendicectomy'] as const
 
 export type Group =
   | (typeof LIST_A)[number]
@@ -30,12 +29,7 @@ const RULES: [RegExp, Group][] = [
   [/(hernia|hernio)/, 'hernia_repair'],
   [/(cholecyst|\bchole\b)/, 'B_cholecystectomy'],
   [/(knee replacement|\btkr\b|\btka\b|\btha\b|hip replacement|\bthr\b|hemiarthroplasty|arthroplasty)/, 'joint_replacement'],
-  // I4b R3: endoscopic urology text ("arthroscopic URS") must not reach the knee group.
-  [/(\burs(l)?\b|ureteroscop|cystoscop|\bturp\b|\bturbt\b)/, 'urology_endoscopic'],
-  // I4b R4: ligament reconstruction is acl_ligament only with a knee; other joints fall to 'other'.
-  [/(\bacl(r)?\b|cruciate|\bpcl\b|\bmpfl\b|^(?=.*ligament)(?=.*\bknees?\b))/, 'acl_ligament'],
-  // I4b R1/R2: debridement/chondroplasty count only in a knee context; other joints are excluded. Bare `arthroscop` stays degenerative (S6: count unknown).
-  [/^(?!.*(\bacl(r)?\b|cruciate|ligament|\bpcl\b|\bmpfl\b|shoulder|\bhip\b|rotator|bankart|labr|ankle|wrist|elbow|\bsubacromial))(?=.*(arthroscop|menisc|((debridement|chondroplasty).*\bknees?\b)|(\bknees?\b.*(debridement|chondroplasty))))/, 'B_knee_arthroscopy_degenerative'],
+  [/(\bacl(r)?\b|menisc|arthroscop)/, 'B_knee_arthroscopy_acl_meniscus'],
   [/(fusion|tlif|plif|laminectomy|discectomy|\bdisc\b|spine|spinal)/, 'B_spine'],
   [/hysterectomy/, 'B_hysterectomy'],
   [/(tonsil|adenoid|grommet|myringotomy)/, 'B_tonsil_grommet'],
@@ -43,7 +37,7 @@ const RULES: [RegExp, Group][] = [
   [/carpal/, 'B_carpal_tunnel'],
   [/(septoplasty|turbinoplasty|\bfess\b|sinus surgery)/, 'nasal_sinus'],
   [/(tympanoplasty|mastoid)/, 'ear'],
-  [/(stent removal|dj stent|cystoscopy|\brirs\b|\bursl?\b|ureteroscop|\bturp\b|\bturbt\b|\bpcnl\b|lithotripsy)/, 'urology_endoscopic'],
+  [/(stent removal|dj stent|cystoscopy|\brirs\b|\bursl?\b|\bturp\b|\bturbt\b|\bpcnl\b|lithotripsy)/, 'urology_endoscopic'],
   [/(lipoma|cyst excision|wide local excision|sebaceous)/, 'lump_excision'],
   [/append/, 'appendicectomy'],
 ]

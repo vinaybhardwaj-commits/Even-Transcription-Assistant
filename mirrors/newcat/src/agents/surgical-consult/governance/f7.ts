@@ -2,52 +2,74 @@ import type { InternalAudit, InternalFinding } from '../../../pipeline/types.js'
 import { sortedCounts } from './serialize.js'
 
 // The F7 governance serializer: InternalAudit -> body. The platform (assertGovernanceSafe) checks the result and refuses,
-// never repairs. Since F7.3/F7.4 the audit carries everything this needs: evidence with segment id, role and times, the
-// per-judge probabilities, the finding's meta (procedure_group), agent counts and the opaque ids. Summaries are claim
-// constants (no trailer to strip).
+// never repairs. FLAG (template gaps this works around, see the S1 report):
+//  1. InternalFinding.evidence is {quote, start, end}: no segment id, and a serializer sees the audit, not the input. The
+//     rules therefore append a trailer to the finding summary, `[[g=<group>;e=<factid>:<segment>:<role>:<t0>:<t1>,...]]`,
+//     and this serializer reads it back and strips it. The trailer also reaches the judges' claim text.
+//  2. The audit keeps one probability per decision (the min of the two judges for a kept finding), not primary and second
+//     separately, so judge.primary_p carries that combined value and judge.basis says so.
+//  3. Rule-level abstentions and not_discussed counts never reach the audit; abstentions here are the run reason plus queue reasons.
+
+export interface EvidenceTag {
+  fact_id: string
+  segment_id: string
+  role: string
+  t0: number
+  t1: number
+}
+
+const TRAILER = /\s\[\[g=([a-z_A-Z]+);e=([^\]]*)\]\]$/
+
+export function buildTrailer(group: string, tags: EvidenceTag[]): string {
+  return ` [[g=${group};e=${tags.map((t) => `${t.fact_id}:${t.segment_id}:${t.role}:${t.t0}:${t.t1}`).join(',')}]]`
+}
+
+export function parseTrailer(summary: string): { claim: string; group: string; tags: Map<string, EvidenceTag> } | null {
+  const m = TRAILER.exec(summary)
+  if (!m) return null
+  const tags = new Map<string, EvidenceTag>()
+  for (const part of (m[2] ?? '').split(',').filter(Boolean)) {
+    const [fact_id, segment_id, role, t0, t1] = part.split(':')
+    if (!fact_id || !segment_id || !role || t0 === undefined || t1 === undefined) return null
+    tags.set(fact_id, { fact_id, segment_id, role, t0: Number(t0), t1: Number(t1) })
+  }
+  return { claim: summary.slice(0, m.index), group: m[1] ?? 'other', tags }
+}
 
 const TYPE_BY_PREFIX: Array<[string, string]> = [
   ['consent.', 'consent_incomplete'],
   ['pressure.', 'pressure_signal'],
   ['svw.', 'said_vs_written'],
-  ['concern.', 'concern_unaddressed'],
+  ['concern.', 'patient_concern_unaddressed'],
   ['indication.', 'indication_gap'],
 ]
 export const findingTypeOf = (ruleId: string): string => TYPE_BY_PREFIX.find(([p]) => ruleId.startsWith(p))?.[1] ?? 'unknown'
 
-function governanceFinding(finding: InternalFinding): Record<string, unknown> | null {
-  const judge = finding.judge
-  // A valid agent finding always has both. A finding without them is withheld and counted, never emitted half-formed.
-  if (!judge || judge.primary_p === null || finding.evidence.length === 0) return null
+function governanceFinding(audit: InternalAudit, finding: InternalFinding): Record<string, unknown> | null {
+  const parsed = parseTrailer(finding.summary)
+  const decision = audit.decisions.find((d) => d.finding_id === finding.id)
+  if (!parsed || !decision) return null
+  const evidence = finding.evidence_fact_refs.map((ref, i) => {
+    const tag = parsed.tags.get(ref)
+    const quote = finding.evidence[i]?.quote
+    if (!tag || quote === undefined) return null
+    return { segment_id: tag.segment_id, role: tag.role, t0: tag.t0, t1: tag.t1, quote }
+  })
+  if (evidence.some((e) => e === null)) return null
   return {
     id: finding.id,
     finding_type: findingTypeOf(finding.rule_id),
     rule_id: finding.rule_id,
     rule_version: finding.rule_version,
     severity: finding.severity,
-    procedure_group: String(finding.meta?.procedure_group ?? 'other'),
-    summary: finding.summary,
-    evidence: finding.evidence.map((e) => ({
-      segment_id: e.segment_id ?? '',
-      role: e.role ?? '',
-      ...(e.t0 !== undefined ? { t0: e.t0 } : {}),
-      ...(e.t1 !== undefined ? { t1: e.t1 } : {}),
-      quote: e.quote,
-    })),
-    judge: { primary_p: judge.primary_p, second_p: judge.second_p, agree: judge.agree ?? false, served_model_ids: judge.served_model_ids },
+    procedure_group: parsed.group,
+    summary: parsed.claim,
+    evidence,
+    judge: { primary_p: decision.top_probability, basis: 'min_of_primary_and_second', agree: true },
     doctor_visible: false,
     action: finding.action,
   }
 }
-
-// versions.models is a list in the audit; the governance body wants strings. question_sets (platform-stamped) stays a record of strings.
-const versionsOf = (versions: InternalAudit['versions']): Record<string, string | Record<string, string>> =>
-  Object.fromEntries(
-    Object.entries(versions as unknown as Record<string, unknown>).map(([k, v]) => [
-      k,
-      Array.isArray(v) ? v.join(',') : v !== null && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([n, x]) => [n, String(x)])) : String(v),
-    ]),
-  )
 
 export function governanceBody(audit: InternalAudit): Record<string, unknown> {
   const counts = new Map<string, number>()
@@ -59,10 +81,10 @@ export function governanceBody(audit: InternalAudit): Record<string, unknown> {
   const findings: Record<string, unknown>[] = []
   for (const finding of audit.findings) {
     if (finding.action !== 'valid') continue // abstain and hold are counted through the queue, never listed
-    const body = governanceFinding(finding)
+    const body = governanceFinding(audit, finding)
     // A kept finding the serializer cannot fully evidence is withheld and counted, never emitted half-formed.
     if (body) findings.push(body)
-    else bump('judge_missing')
+    else bump('evidence_unmapped')
   }
   const byType = new Map<string, number>()
   for (const f of findings) byType.set(String(f.finding_type), (byType.get(String(f.finding_type)) ?? 0) + 1)
@@ -76,11 +98,7 @@ export function governanceBody(audit: InternalAudit): Record<string, unknown> {
     ...(reason ? { reason } : {}),
     findings,
     abstentions: sortedCounts(counts),
-    versions: versionsOf(audit.versions),
-    ...(audit.doctor_uid !== undefined ? { doctor_uid: audit.doctor_uid } : {}),
-    ...(audit.encounter_id !== undefined ? { encounter_id: audit.encounter_id } : {}),
-    ...(audit.agent_counts !== undefined ? { agent_counts: audit.agent_counts } : {}),
-    // The platform wants a string here: counts as `key=n` pairs built from code constants.
-    summary: [`findings=${findings.length}`, ...Object.entries(sortedCounts(byType)).map(([type, n]) => `${type}=${n}`)].join('; '),
+    versions: audit.versions,
+    summary: { findings: findings.length, by_type: sortedCounts(byType) },
   }
 }

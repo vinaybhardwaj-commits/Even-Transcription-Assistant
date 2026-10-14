@@ -27,18 +27,8 @@ export interface JudgeEvidence {
   group?: string
 }
 
-export interface JudgeContextSegment {
-  source_id: string
-  segment_id: string
-  role: string
-  text: string
-}
-
-/**
- * The one place the state sent to a judge is shaped. run.ts and the planted-claim eval both use it.
- * `contextSegments` (whole segments, for absence claims) go under their own key, never into the evidence quotes.
- */
-export function buildJudgeState(ruleId: string, claim: string, evidence: JudgeEvidence[], contextSegments: JudgeContextSegment[] = []) {
+/** The one place the state sent to a judge is shaped. run.ts and the planted-claim eval both use it. */
+export function buildJudgeState(ruleId: string, claim: string, evidence: JudgeEvidence[]) {
   return {
     rule: ruleId,
     claim,
@@ -47,7 +37,6 @@ export function buildJudgeState(ruleId: string, claim: string, evidence: JudgeEv
       ...(item.group !== undefined ? { group: item.group } : {}),
       quote: item.quote,
     })),
-    ...(contextSegments.length > 0 ? { context_segments: contextSegments.map((segment) => ({ ...segment })) } : {}),
   }
 }
 

@@ -1,14 +1,10 @@
 import { openDatabase } from '../../db/open.js'
 import type { Sql } from '../../db/sql.js'
-import { CDMSS_SQL, CdmssReadError } from './read-models.js'
 
 /** Env var NAME for the read-only CDMSS Neon URL (role newcat_ro). Read only inside this module. */
 export const CDMSS_URL_ENV = 'CDMSS_DATABASE_URL_RO'
 
-/**
- * The only surface consumers get: parameterised reads of the registered CDMSS_SQL texts. No exec, no
- * transactions, no close. Any other text is refused with CdmssReadError 'sql_not_registered'.
- */
+/** The only surface consumers get: parameterised reads. No exec, no transactions, no close. */
 export type CdmssQuery = Pick<Sql, 'query'>
 
 export type CdmssErrorCode = 'not_configured' | 'writable_role' | 'probe_failed'
@@ -54,35 +50,15 @@ export async function assertReadOnly(sql: Sql): Promise<void> {
   throw new CdmssClientError('writable_role')
 }
 
-const REGISTERED_SQL: ReadonlySet<string> = new Set(Object.values(CDMSS_SQL))
-
-/** Allowlist by string equality: no trimming, no prefix match, so multi-statement text cannot pass. */
-function allowlistedQuery(sql: Pick<Sql, 'query'>): CdmssQuery {
-  // A fresh object with only `query`: even a cast cannot reach exec, withTx or close.
-  return {
-    query: async (text, params) => {
-      if (!REGISTERED_SQL.has(text)) throw new CdmssReadError('sql_not_registered')
-      return sql.query(text, params)
-    },
-  }
-}
-
-export interface CdmssConnection {
-  /** The query-only handle for capabilities. */
-  query: CdmssQuery
-  /** Owner close, for shutdown. Never handed to consumers. */
-  close: () => Promise<void>
-}
-
 /**
  * Opens the CDMSS read-only connection and proves the role cannot write. With no URL it refuses:
  * `openDatabase(undefined)` would hand back an empty in-memory database, which must never stand in
- * for CDMSS. The caller keeps `close` for shutdown.
+ * for CDMSS.
  */
-export async function openCdmssConnection(
+export async function openCdmssReadOnly(
   env: Record<string, string | undefined> = process.env,
   open: (url: string | undefined) => Promise<Sql> = openDatabase,
-): Promise<CdmssConnection> {
+): Promise<CdmssQuery> {
   const url = env[CDMSS_URL_ENV]
   if (!url) throw new CdmssClientError('not_configured')
   const sql = await open(url)
@@ -92,13 +68,6 @@ export async function openCdmssConnection(
     await sql.close().catch(() => undefined)
     throw error
   }
-  return { query: allowlistedQuery(sql), close: () => sql.close() }
-}
-
-/** As openCdmssConnection, for callers that never close (tests, one-shot scripts). */
-export async function openCdmssReadOnly(
-  env: Record<string, string | undefined> = process.env,
-  open: (url: string | undefined) => Promise<Sql> = openDatabase,
-): Promise<CdmssQuery> {
-  return (await openCdmssConnection(env, open)).query
+  // A fresh object with only `query`: even a cast cannot reach exec, withTx or close.
+  return { query: (text, params) => sql.query(text, params) }
 }

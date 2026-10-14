@@ -5,7 +5,6 @@ import type { Env } from '../config.js'
 import type { Sql } from '../db/sql.js'
 import type { JevTransport } from '../decide/transport.js'
 import type { Embedder } from '../evidence/embed.js'
-import type { CdmssQuery } from '../platform/cdmss/client.js'
 import { retrieveEvidence, type RetrievalOutcome } from '../evidence/retrieve.js'
 import type { ModelClient } from '../llm/types.js'
 import { AGENTS } from '../agents/index.js'
@@ -36,8 +35,6 @@ export interface CapabilityContext {
   models: ModelClient
   jev: JevTransport
   embedder: Embedder
-  /** Query-only CDMSS handle. Absent when CDMSS_DATABASE_URL_RO is unset, outside production, or when the boot probe failed. Consumers must treat undefined as `unavailable`; no dev or test path may assume CDMSS reads. Nothing uses it yet. */
-  cdmss?: CdmssQuery | undefined
   env: Env
   traceId: string
   /** The request envelope's idempotency_key. Absent on async jobs and internal callers. */

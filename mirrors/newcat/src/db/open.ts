@@ -101,15 +101,9 @@ export function wrapPool(pool: PoolLike): Sql {
 }
 
 /** In-memory Postgres when no URL is set. Neon serverless driver when DATABASE_URL is set. */
-export async function openDatabase(
-  url: string | undefined,
-  options: { connectionTimeoutMillis?: number } = {},
-): Promise<Sql> {
+export async function openDatabase(url: string | undefined): Promise<Sql> {
   if (!url) return wrapPglite(new PGlite({ extensions: { vector } }))
   if (!globalThis.WebSocket) neonConfig.webSocketConstructor = ws
-  const pool = new Pool({
-    connectionString: url,
-    ...(options.connectionTimeoutMillis === undefined ? {} : { connectionTimeoutMillis: options.connectionTimeoutMillis }),
-  })
+  const pool = new Pool({ connectionString: url })
   return wrapPool(pool as unknown as PoolLike)
 }

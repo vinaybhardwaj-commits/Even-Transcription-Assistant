@@ -1,5 +1,5 @@
 import { findQuote } from '../../facts/quote.js'
-import { sha256, stableStringify } from '../../hash.js'
+import { sha256 } from '../../hash.js'
 import type { GatedFact, RawFact, Segment, Source } from './types.js'
 
 export const DROP_REASONS = [
@@ -10,7 +10,6 @@ export const DROP_REASONS = [
   'quote_not_in_segment',
   'quote_in_other_segment',
   'role_not_allowed',
-  'duplicate_span_different_fields',
 ] as const
 export type DropReason = (typeof DROP_REASONS)[number]
 
@@ -96,7 +95,6 @@ export function gateFacts<F>(
   const dropped = emptyDrops()
   const kept: GatedFact<F>[] = []
   const cursors = new Map<string, { at: number }>()
-  const keptFields = new Map<string, string>()
 
   for (const raw of rawFacts) {
     if (!isRaw(raw)) {
@@ -138,14 +136,7 @@ export function gateFacts<F>(
       continue
     }
     const id = sha256(`${entry.source.id}|${entry.segment.id}|${raw.group}|${span.start}|${span.end}`).slice(0, 16)
-    const fields = stableStringify(parsed.value)
-    const earlier = keptFields.get(id)
-    if (earlier !== undefined) {
-      // An identical repeat is deduped silently. The same span with other fields is counted, and the first fact stands.
-      if (earlier !== fields) dropped.duplicate_span_different_fields += 1
-      continue
-    }
-    keptFields.set(id, fields)
+    if (kept.some((fact) => fact.id === id)) continue
     kept.push({
       ...parsed.value,
       id,

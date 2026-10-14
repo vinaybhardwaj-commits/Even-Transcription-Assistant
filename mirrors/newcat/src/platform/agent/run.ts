@@ -1,28 +1,22 @@
-import { EmitRefusal, isOpaqueId } from '../../audience/serialize.js'
-import { log } from '../../log.js'
+import { EmitRefusal } from '../../audience/serialize.js'
 import type { Sql } from '../../db/sql.js'
 import { parseModelJson } from '../../extract/parse.js'
 import type { Audience } from '../../facts/schema.js'
 import { sha256, stableStringify } from '../../hash.js'
 import type { ModelClient, ModelCompletion, ModelTier } from '../../llm/types.js'
-import type { FindingJudge, FindingMeta, InternalAudit, InternalDecision, InternalFinding, QueueItem } from '../../pipeline/types.js'
+import type { InternalAudit, InternalDecision, InternalFinding, QueueItem } from '../../pipeline/types.js'
 import { ENGINE_VERSION } from '../../version.js'
 import type { SecondJudge } from '../judge/second.js'
 import { RunBudget, ledgerHasHeadroom } from './budget.js'
-import { buildJudgeState, JudgeUnavailable, type JudgeContextSegment, type JudgePort } from './judge-port.js'
+import { buildJudgeState, JudgeUnavailable, type JudgePort } from './judge-port.js'
 import { gateFacts, type GateResult } from './quote-gate.js'
 import {
   PLATFORM_ABSTENTIONS,
   PLATFORM_EMPTY_REASONS,
-  candidatesOf,
   type AgentDefinition,
-  type ContextRange,
   type GatedFact,
-  type PersistFact,
-  type QuestionSetRef,
   type RawFact,
   type RuleSpec,
-  type Source,
 } from './types.js'
 
 export interface AgentDeps {
@@ -45,8 +39,6 @@ export interface AgentCounts {
   drops: Record<string, number>
   extract_attempts: number
   served_unverified: number
-  /** Present only when a declared second judge answered with an empty servedModelIds; counted per answer. */
-  served_unverified_second?: number
   rules_fired: number
   rules_disabled: number
   candidates: number
@@ -56,21 +48,12 @@ export interface AgentCounts {
   judge_unavailable: number
   llm_calls: number
   jev_calls: number
-  /** Present (as 1) only when the agent's persist hook threw. */
-  persist_failed?: number
-  /** Sums of rule-reported counts, keyed by the agent's declared countReasons. Present only when a rule reported some. */
-  agent_counts?: Record<string, number>
-  /** Present only when the agent's identity() gave a malformed id or threw; by field. The id is left off the audit. */
-  identity_invalid?: { doctor_uid?: number; encounter_id?: number; threw?: number }
 }
 
 const ERR = {
   budget: { type: 'budget_exhausted', message: 'The per-run call budget is exhausted.' },
   judge: { type: 'judge_unavailable', message: 'The judge could not answer.' },
   reason: { type: 'invalid_abstention_reason', message: 'The agent produced a reason outside its closed list.' },
-  context: { type: 'invalid_rule_context', message: 'The agent rule context could not be built.' },
-  meta: { type: 'invalid_meta_key', message: 'A rule used a meta key outside the agent declared metaKeys.' },
-  count: { type: 'invalid_agent_count', message: 'A rule reported a count outside the agent declared reasons.' },
 } as const
 
 function newCounts(): AgentCounts {
@@ -95,7 +78,7 @@ function newCounts(): AgentCounts {
 
 interface TrailRow {
   findingId: string
-  judge: FindingJudge
+  judge: { primary_p: number | null; second_p: number | null; agree: boolean | null; served_model_ids: string[] }
   evidenceRefs: Array<{ source_id: string; segment_id: string; start: number; end: number }>
 }
 
@@ -131,14 +114,7 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
   const budget = new RunBudget(def.budget)
   const trail: TrailRow[] = []
   const allowedReasons = new Set<string>([...def.abstention.reasons, ...PLATFORM_ABSTENTIONS])
-  const allowedCounts = new Set<string>(def.countReasons ?? [])
-  const allowedMeta = new Set<string>(def.metaKeys ?? [])
   const allowedEmpty = new Set<string>([...def.abstention.emptyReasons, ...PLATFORM_EMPTY_REASONS])
-
-  const opaqueIds = buildOpaqueIds(def, input, counts)
-  const questionSets = questionSetStamp(def)
-  // The facts that survived the quote gate of the accepted extraction; stays empty when the run ended before or without one.
-  let persistFacts: PersistFact[] = []
 
   const stamp = () => ({
     engine: ENGINE_VERSION,
@@ -146,7 +122,6 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
     extractor: def.versions.extractor ?? `${def.id}/${def.version}`,
     models: [...models],
     question_set_sha: def.judge.questionSet.sha,
-    ...(questionSets ? { question_sets: questionSets } : {}),
   })
 
   const finish = async (partial: Partial<InternalAudit> & { status: InternalAudit['status'] }): Promise<InternalAudit> => {
@@ -158,13 +133,11 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
       decisions: [],
       queue: [],
       versions: stamp(),
-      ...opaqueIds,
       ...partial,
     }
     counts.llm_calls = budget.snapshot().llm
     counts.jev_calls = budget.snapshot().jev
-    const runId = await persistRun(deps.sql, def, deps, inputSha, audit, counts, trail)
-    await runPersistHook(def, deps, runId, input, audit, counts, persistFacts)
+    await persistRun(deps.sql, def, deps, inputSha, audit, counts, trail)
     return audit
   }
 
@@ -230,49 +203,18 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
 
     // 6. rules
     const facts = gate.kept
-    persistFacts = facts.map(toPersistFact)
-    const agentCounts: Record<string, number> = Object.create(null) as Record<string, number>
-    let agentEmptyReason: string | undefined
-    const ruleContext = buildRuleContext(def, input)
-    const candidates: Array<{ rule: RuleSpec<F, unknown>; summary: string; factRefs: string[]; key: string; meta?: FindingMeta; context: JudgeContextSegment[] }> = []
+    const candidates: Array<{ rule: RuleSpec<F>; summary: string; factRefs: string[]; key: string }> = []
     for (const rule of def.rules) {
       if (!rule.enabled) {
         counts.rules_disabled += 1
         continue
       }
-      const output = rule.evaluate(facts, structuredClone(ruleContext))
-      const list = candidatesOf(output)
-      if (!Array.isArray(output)) {
-        for (const [reason, n] of Object.entries(output.counts ?? {})) {
-          if (!allowedCounts.has(reason) || !Number.isInteger(n) || n < 0) throw new Stop({ status: 'failed', error: ERR.count })
-          if (n > 0) agentCounts[reason] = (agentCounts[reason] ?? 0) + n
-        }
-        if (output.empty_reason !== undefined) {
-          if (!def.abstention.emptyReasons.includes(output.empty_reason)) throw new Stop({ status: 'failed', error: ERR.reason })
-          agentEmptyReason ??= output.empty_reason
-        }
-      }
-      for (const candidate of list) {
-        if (candidate.meta !== undefined && Object.keys(candidate.meta).some((key) => !allowedMeta.has(key))) throw new Stop({ status: 'failed', error: ERR.meta })
-        const context = resolveContext(candidate.contextRanges, sources)
-        if (context === null) {
-          counts.drops.context_out_of_range = (counts.drops.context_out_of_range ?? 0) + 1
-          continue
-        }
-        candidates.push({
-          context,
-          rule,
-          summary: candidate.summary,
-          factRefs: candidate.factRefs,
-          key: candidate.key ?? '',
-          ...(candidate.meta !== undefined ? { meta: candidate.meta } : {}),
-        })
+      for (const candidate of rule.evaluate(facts)) {
+        candidates.push({ rule, summary: candidate.summary, factRefs: candidate.factRefs, key: candidate.key ?? '' })
       }
       counts.rules_fired += 1
     }
     counts.candidates = candidates.length
-    if (Object.keys(agentCounts).length > 0) counts.agent_counts = { ...agentCounts }
-    const counted = Object.keys(agentCounts).length > 0 ? { agent_counts: { ...agentCounts } } : {}
 
     // 7. judge
     const findings: InternalFinding[] = []
@@ -293,11 +235,9 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
         rule.id,
         candidate.summary,
         evidenceFacts.map((fact) => ({ role: fact.role, group: fact.group, quote: fact.quote })),
-        candidate.context,
       )
       const servedIds = new Set<string>()
-      const set = def.judge.questionSets?.[rule.id] ?? def.judge.questionSet
-      const verdict = await judgeOne(deps, def.judge.second, budget, state, threshold, servedIds, set, counts)
+      const verdict = await judgeOne(def, deps, budget, state, threshold, servedIds)
       for (const served of servedIds) models.add(served)
       if (verdict.kind === 'drop') {
         counts.judge_dropped += 1
@@ -308,12 +248,6 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
       if (verdict.kind === 'valid') counts.judge_agree += 1
       else if (verdict.kind === 'disagree') counts.judge_disagree += 1
       else counts.judge_unavailable += 1
-      const judge: FindingJudge = {
-        primary_p: verdict.primary,
-        second_p: verdict.second,
-        agree: verdict.kind === 'valid' ? true : verdict.kind === 'disagree' ? false : null,
-        served_model_ids: [...servedIds],
-      }
       const doctorVisible = def.doctorVisible === 'policy' && action === 'valid' && rule.doctorSentence !== undefined
       findings.push({
         id,
@@ -323,24 +257,14 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
         safety_class: safety,
         summary: doctorVisible ? (rule.doctorSentence ?? candidate.summary) : candidate.summary,
         evidence_fact_refs: refs,
-        evidence: evidenceFacts.map((fact) => ({
-          quote: fact.quote,
-          start: fact.start,
-          end: fact.end,
-          segment_id: fact.segment_id,
-          role: fact.role,
-          ...(fact.t0 !== null ? { t0: fact.t0 } : {}),
-          ...(fact.t1 !== null ? { t1: fact.t1 } : {}),
-        })),
+        evidence: evidenceFacts.map((fact) => ({ quote: fact.quote, start: fact.start, end: fact.end })),
         doctor_visible: doctorVisible,
-        judge,
-        ...(candidate.meta !== undefined ? { meta: { ...candidate.meta } } : {}),
         action,
       })
       decisions.push({
-        id: sha256(`${id}|${set.id}`).slice(0, 16),
+        id: sha256(`${id}|${def.judge.questionSet.id}`).slice(0, 16),
         finding_id: id,
-        question_id: set.id,
+        question_id: def.judge.questionSet.id,
         probabilities: verdict.kind === 'unavailable' ? {} : { yes: verdict.p },
         top_label: verdict.kind === 'unavailable' ? 'unavailable' : verdict.kind === 'valid' ? 'yes' : 'unresolved',
         top_probability: verdict.kind === 'unavailable' ? 0 : verdict.p,
@@ -352,7 +276,12 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
       })
       trail.push({
         findingId: id,
-        judge,
+        judge: {
+          primary_p: verdict.primary,
+          second_p: verdict.second,
+          agree: verdict.kind === 'valid' ? true : verdict.kind === 'disagree' ? false : null,
+          served_model_ids: [...servedIds],
+        },
         evidenceRefs: evidenceFacts.map((fact) => ({ source_id: fact.source_id, segment_id: fact.segment_id, start: fact.start, end: fact.end })),
       })
       if (action === 'abstain') queue.push({ finding_id: id, rule_id: rule.id, reason: 'judge_disagree' })
@@ -360,108 +289,14 @@ export async function runAgent<I, F>(def: AgentDefinition<I, F>, deps: AgentDeps
     }
 
     // 8. abstention policy
-    if (findings.some((finding) => finding.action === 'valid')) return await finish({ status: 'ok', findings, decisions, queue, ...counted })
-    if (counts.judge_disagree > 0) return await finish({ status: 'abstained', reason: 'judge_disagree', findings, decisions, queue, ...counted })
-    if (counts.judge_unavailable > 0) return await finish({ status: 'unavailable', error: ERR.judge, findings, decisions, queue, ...counted })
-    const emptyReason = candidates.length === 0 ? (agentEmptyReason ?? 'no_candidate_findings') : 'judge_dropped_all'
-    return await finish({ status: 'empty', reason: allowedEmpty.has(emptyReason) ? emptyReason : 'no_candidate_findings', ...counted })
+    if (findings.some((finding) => finding.action === 'valid')) return await finish({ status: 'ok', findings, decisions, queue })
+    if (counts.judge_disagree > 0) return await finish({ status: 'abstained', reason: 'judge_disagree', findings, decisions, queue })
+    if (counts.judge_unavailable > 0) return await finish({ status: 'unavailable', error: ERR.judge, findings, decisions, queue })
+    const emptyReason = candidates.length === 0 ? 'no_candidate_findings' : 'judge_dropped_all'
+    return await finish({ status: 'empty', reason: allowedEmpty.has(emptyReason) ? emptyReason : 'no_candidate_findings' })
   } catch (error) {
     if (error instanceof Stop) return finish({ ...error.audit, status: error.audit.status ?? 'failed' })
     throw error
-  }
-}
-
-const PERSIST_STATUSES = new Set<InternalAudit['status']>(['ok', 'empty', 'abstained'])
-
-const DEFAULT_PERSIST_TIMEOUT_MS = 10_000
-const MAX_PERSIST_TIMEOUT_MS = 60_000
-
-/**
- * Calls the agent's persist hook with a deep copy of the audit and the input, so nothing it does (mutate, throw, reject,
- * hang past `persistTimeoutMs`) reaches the caller or changes the audit.
- */
-async function runPersistHook<I, F>(
-  def: AgentDefinition<I, F>,
-  deps: AgentDeps,
-  runId: string,
-  input: I,
-  audit: InternalAudit,
-  counts: AgentCounts,
-  facts: PersistFact[],
-): Promise<void> {
-  if (!def.persist || !PERSIST_STATUSES.has(audit.status)) return
-  const wanted = def.persistTimeoutMs
-  const limit = typeof wanted === 'number' && Number.isFinite(wanted) ? Math.min(Math.max(wanted, 1), MAX_PERSIST_TIMEOUT_MS) : DEFAULT_PERSIST_TIMEOUT_MS
-  let timer: NodeJS.Timeout | undefined
-  try {
-    // Promise.resolve: a hook that returns a plain value (not a promise) is awaited normally.
-    const hook = Promise.resolve(def.persist({ sql: deps.sql, runId, traceId: deps.traceId, input: structuredClone(input), audit: structuredClone(audit), facts: structuredClone(facts), drops: structuredClone(counts.drops) }))
-    const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('persist_timeout')), limit)
-    })
-    // A hook that settles late must not raise an unhandled rejection.
-    hook.catch(() => undefined)
-    await Promise.race([hook, deadline])
-  } catch {
-    counts.persist_failed = 1
-    log('warn', 'agent.persist', { capability: def.id, trace_id: deps.traceId, error_type: 'persist_failed' })
-    try {
-      await deps.sql.query('update agent_runs set counts = $1::jsonb where run_id = $2 and trace_id = $3', [JSON.stringify(counts), runId, deps.traceId])
-    } catch {
-      // The count is best effort: the log line above is the record.
-    }
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-}
-
-/** `rule id -> id@sha` for the per-rule sets; undefined (key absent) for a default-set-only agent. One value for audit.versions and agent_runs.versions. */
-function questionSetStamp<I, F>(def: AgentDefinition<I, F>): Record<string, string> | undefined {
-  const sets = def.judge.questionSets
-  if (!sets || Object.keys(sets).length === 0) return undefined
-  return Object.fromEntries(Object.entries(sets).map(([rule, set]) => [rule, `${set.id}@${set.sha}`]))
-}
-
-const PLATFORM_FACT_KEYS = new Set(['id', 'group', 'quote', 'source_id', 'segment_id', 'role', 't0', 't1', 'start', 'end'])
-
-/** A gated fact as the persist hook sees it: platform-stamped location plus the agent's own fields. */
-function toPersistFact<F>(fact: GatedFact<F>): PersistFact {
-  const fields = Object.fromEntries(Object.entries(fact).filter(([key]) => !PLATFORM_FACT_KEYS.has(key)))
-  return { group: fact.group, fields, segment_id: fact.segment_id, role: fact.role, t0: fact.t0, t1: fact.t1, quote: fact.quote }
-}
-
-function bumpIdentityInvalid(counts: AgentCounts, field: 'doctor_uid' | 'encounter_id' | 'threw'): void {
-  const by = (counts.identity_invalid ??= {})
-  by[field] = (by[field] ?? 0) + 1
-}
-
-/** Only the agent sets these, from its parsed input. A throw or a malformed value leaves the id off. */
-function buildOpaqueIds<I, F>(def: AgentDefinition<I, F, unknown>, input: I, counts: AgentCounts): { doctor_uid?: string; encounter_id?: string } {
-  if (!def.identity) return {}
-  try {
-    const raw = def.identity(structuredClone(input))
-    const out: { doctor_uid?: string; encounter_id?: string } = {}
-    for (const key of ['doctor_uid', 'encounter_id'] as const) {
-      const value = raw[key]
-      if (value === undefined) continue
-      if (isOpaqueId(value)) out[key] = value as string
-      else bumpIdentityInvalid(counts, key)
-    }
-    return out
-  } catch {
-    bumpIdentityInvalid(counts, 'threw')
-    return {}
-  }
-}
-
-/** The context is plain JSON by contract: anything else (a throw, a function, a cycle, undefined) fails the run with a fixed error. */
-function buildRuleContext<I, F>(def: AgentDefinition<I, F, unknown>, input: I): unknown {
-  if (!def.context) return undefined
-  try {
-    const built = def.context(structuredClone(input))
-    return built === undefined ? undefined : JSON.parse(JSON.stringify(built))
-  } catch {
-    throw new Stop({ status: 'failed', error: ERR.context })
   }
 }
 
@@ -477,34 +312,13 @@ type Verdict = { primary: number | null; second: number | null; p: number } & (
   | { kind: 'unavailable' }
 )
 
-/** Resolves context ranges to whole segments of their source. Null when any range is outside the sources. */
-function resolveContext(ranges: ContextRange[] | undefined, sources: Source[]): JudgeContextSegment[] | null {
-  const out: JudgeContextSegment[] = []
-  for (const range of ranges ?? []) {
-    const source = sources.filter((candidate) => candidate.id === range.source_id)
-    if (source.length !== 1) return null
-    const segments = source[0]!.segments
-    const from = segments.findIndex((segment) => segment.id === range.segment_from)
-    const to = segments.findIndex((segment) => segment.id === range.segment_to)
-    if (from < 0 || to < 0 || from > to) return null
-    for (const segment of segments.slice(from, to + 1)) {
-      if (!out.some((seen) => seen.source_id === range.source_id && seen.segment_id === segment.id)) {
-        out.push({ source_id: range.source_id, segment_id: segment.id, role: segment.role, text: segment.text })
-      }
-    }
-  }
-  return out
-}
-
-async function judgeOne(
+async function judgeOne<I, F>(
+  def: AgentDefinition<I, F>,
   deps: AgentDeps,
-  secondDeclared: 'gemini' | null,
   budget: RunBudget,
   state: unknown,
   threshold: number,
   models: Set<string>,
-  set: QuestionSetRef,
-  counts: AgentCounts,
 ): Promise<Verdict> {
   const result = (kind: 'valid' | 'drop' | 'disagree' | 'unavailable', primary: number | null, second: number | null, p: number): Verdict => ({
     kind,
@@ -512,12 +326,12 @@ async function judgeOne(
     second,
     p,
   })
-  const ask = async (call: () => Promise<{ p_yes: number; servedModelIds: string[] }>, isSecond = false): Promise<number | null> => {
+  const set = def.judge.questionSet
+  const ask = async (call: () => Promise<{ p_yes: number; servedModelIds: string[] }>): Promise<number | null> => {
     if (!budget.take('jev')) throw new Stop({ status: 'failed', error: ERR.budget })
     try {
       const answer = await call()
       for (const id of answer.servedModelIds) models.add(id)
-      if (isSecond && answer.servedModelIds.length === 0) counts.served_unverified_second = (counts.served_unverified_second ?? 0) + 1
       return answer.p_yes
     } catch (error) {
       if (error instanceof JudgeUnavailable && error.kind === 'budget_exhausted') throw new Stop({ status: 'failed', error: ERR.budget })
@@ -527,11 +341,11 @@ async function judgeOne(
 
   const primary = await ask(() => deps.judge.askValidity(state, set.question, set))
   if (primary === null) return result('unavailable', null, null, 0)
-  if (secondDeclared === null) return result(primary >= threshold ? 'valid' : 'drop', primary, null, primary)
+  if (def.judge.second === null) return result(primary >= threshold ? 'valid' : 'drop', primary, null, primary)
 
   const second = deps.second
   if (!second) return result('unavailable', primary, null, 0)
-  const other = await ask(() => second.askValidity(state, set.question, set), true)
+  const other = await ask(() => second.askValidity(state, set.question, set))
   if (other === null) return result('unavailable', primary, null, 0)
   const yes = [primary >= threshold, other >= threshold]
   if (yes[0] && yes[1]) return result('valid', primary, other, Math.min(primary, other))
@@ -548,7 +362,7 @@ async function persistRun<I, F>(
   audit: InternalAudit,
   counts: AgentCounts,
   trail: TrailRow[],
-): Promise<string> {
+): Promise<void> {
   const versions = {
     ...def.versions,
     agent: `${def.id}/${def.version}`,
@@ -556,7 +370,6 @@ async function persistRun<I, F>(
     models: audit.versions.models,
     question_set_id: def.judge.questionSet.id,
     question_set_sha: audit.versions.question_set_sha,
-    ...(audit.versions.question_sets ? { question_sets: audit.versions.question_sets } : {}),
   }
   const key = deps.idempotencyKey ?? deps.traceId
   const runId = sha256(`${def.id}|${key}`).slice(0, 32)
@@ -602,5 +415,4 @@ async function persistRun<I, F>(
       )
     }
   })
-  return runId
 }
