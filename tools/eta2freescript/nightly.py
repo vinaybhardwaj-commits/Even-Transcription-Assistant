@@ -336,6 +336,23 @@ def read_ledger(out_root: str) -> dict[str, dict] | None:
     return last
 
 
+def open_invalidations(out_root: str) -> set[str] | None:
+    """Uids whose operator ``invalidated`` line is still open: no LATER line for the uid with state written, rejected or
+    attempts_exhausted. Lines in between (started, post_failed, failed:*, bundle_failed, skipped_existing) keep it open.
+    A missing file is an empty set; an unreadable one is None."""
+    open_: set[str] = set()
+    try:
+        for row in _scan_ledger(out_root):
+            uid, st = row["consult_uid"], row.get("state")
+            if st == "invalidated":
+                open_.add(uid)
+            elif st in ("written", "rejected", "attempts_exhausted"):
+                open_.discard(uid)
+    except (OSError, UnicodeDecodeError):
+        return None
+    return open_
+
+
 def existing_uids(rows: list[dict]) -> dict[str, str | None]:
     """Uid -> stored run id, for uids with a stored artifact whose state is not ``rejected``."""
     out: dict[str, str | None] = {}
@@ -638,20 +655,27 @@ def _sealed_uids(cfg: dict, day: str, sealed, reb_token: str) -> list[str] | Non
     return None
 
 
-def _skip_map(cfg: dict, day: str, secret: str, day_read, code_sha: str) -> tuple[dict[str, tuple[str, str | None]], dict] | None:
+def _skip_map(cfg: dict, day: str, secret: str, day_read, code_sha: str, bundle: bool = True) -> tuple[dict[str, tuple[str, str | None]], dict] | None:
     """uid -> (ledger state to record, artifact id) for every uid to skip, plus {day_read_partial, day_read_failed}.
 
     The box's ledger comes first: a last line of ``written`` or ``skipped_existing`` skips, and so does ``rejected`` with this
     run's code sha (a rejected uid is retried only when the code changed). The day read adds every uid it lists with a state other
-    than ``rejected``, except a uid whose LAST ledger line is ``invalidated`` (the operator's re-run lever): that uid is not skipped,
-    and ``info["_invalidated"]`` holds those uids so the caller can count ``invalidated_rerun``. Any later ledger line (started,
-    written, ...) ends the invalidation, so a re-run and written uid is skipped again. An ``invalidated`` line is not an attempt:
-    the per-(uid, code sha) cap still applies. A truncated or blind-withholding read is partial, a failed read is ledger-only. None only when the ledger is
-    unreadable AND the day read fails: the caller aborts.
+    than ``rejected``. Bundle mode only: a uid with an OPEN ``invalidated`` line (the operator's re-run lever) is never skipped,
+    by the ledger or the day read, and ``info["_invalidated"]`` holds those uids so the caller can count ``invalidated_rerun``.
+    The invalidation stays open from the ``invalidated`` line until a later line for the uid with state written, rejected or
+    attempts_exhausted; started, post_failed, failed:*, bundle_failed and skipped_existing keep it open, so the re-post path and
+    the per-(uid, code sha) cap handle it as for any uid. An ``invalidated`` line is not an attempt. Folder mode (``bundle`` False)
+    ignores the lever: it has no ledger writes and no cap, so ``info["_invalidated"]`` holds the open uids only for the
+    ``invalidated_ignored_folder`` count. A truncated or blind-withholding read is partial, a failed read is ledger-only. None only
+    when the ledger is unreadable AND the day read fails: the caller aborts.
     """
     ledger = read_ledger(cfg["out"])
+    opened = (open_invalidations(cfg["out"]) or set()) if ledger is not None else set()
+    honoured = opened if bundle else set()
     skips: dict[str, tuple[str, str | None]] = {}
     for uid, row in (ledger or {}).items():
+        if uid in honoured:
+            continue
         aid = row.get("artifact_id") if isinstance(row.get("artifact_id"), str) else None
         st = row.get("state")
         if st in ("written", "skipped_existing"):
@@ -659,8 +683,8 @@ def _skip_map(cfg: dict, day: str, secret: str, day_read, code_sha: str) -> tupl
         elif st == "rejected" and row.get("code_sha256") == code_sha:
             skips[uid] = ("rejected", aid)  # still rejected at this code: the line keeps saying so, so a code change retries it
     info: dict = {"day_read_partial": False, "day_read_failed": False}
-    invalidated = {u for u, row in (ledger or {}).items() if row.get("state") == "invalidated"}
-    info["_invalidated"] = invalidated
+    info["_invalidated"] = opened
+    invalidated = honoured
     try:
         if not cfg.get("app_url") or not secret:
             raise NightlyError("no app url or secret for the day read")
@@ -1223,7 +1247,7 @@ def _run_day(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=N
     skipped_existing = 0
     flags: dict = {}
     if skip_existing:
-        got = _skip_map(cfg, day, secret, day_read, current_code_sha())
+        got = _skip_map(cfg, day, secret, day_read, current_code_sha(), bundle=False)
         if got is None:
             print(json.dumps({"date": day, "mode": "folder", "day_read_failed": True, "ledger_unreadable": True}))
             if out is not None:
@@ -1231,9 +1255,10 @@ def _run_day(cfg: dict, day: str, *, dry_run: bool = False, run_one=None, post=N
             return 1
         have, flags = got
         invalidated = flags.pop("_invalidated", set())
+        ignored = sum(1 for r in rows if r["uid"] in invalidated)
         kept = [r for r in rows if r["uid"] not in have]
         skipped_existing, rows = len(rows) - len(kept), kept
-        flags["invalidated_rerun"] = sum(1 for r in rows if r["uid"] in invalidated)
+        print(f"invalidated_ignored_folder: {ignored}")
     if not rows and not missing and not sealed_missing:
         print("nothing", day)
         return 0

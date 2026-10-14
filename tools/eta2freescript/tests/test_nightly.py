@@ -1349,3 +1349,132 @@ def test_other_ledger_states_still_skip_with_the_day_read_listing_them(tmp_path,
     assert _call(cfg, "2026-10-05", run_one, ["w", "s", "d"], lambda *_: stored) == 0
     assert ran == []
     assert _last_summary(capsys)["invalidated_rerun"] == 0
+
+
+# ---- fix round 1: an invalidation is open until written / rejected / attempts_exhausted ----
+
+def _keeping(cfg, run_one):
+    def keeping(uid):  # the real runner keeps the artifact under out/<uid>
+        log = run_one(uid)
+        d = Path(cfg["out"]) / uid
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "artifact.json").write_text(json.dumps(log["artifact"]))
+        (d / "artifact.validation.json").write_text(json.dumps({"final_valid": True, "final_errors": [], "cost_usd": 0.5}))
+        return log
+    return keeping
+
+
+def _open_setup(tmp_path, monkeypatch):
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    nightly.append_states(cfg["out"], [{"consult_uid": "x", "state": "written", "code_sha256": "old-sha", "artifact_id": "9"}])
+    _invalidate(cfg, "x")
+    return cfg, [{"consult_uid": "x", "state": "ok", "run_id": 9}]  # the OLD artifact stays listed by the day read
+
+
+def test_case_a_post_failed_after_invalidation_is_reposted_with_no_bedrock(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    cfg, stored = _open_setup(tmp_path, monkeypatch)
+    keeping = _keeping(cfg, run_one)
+
+    def down(_b):
+        raise ConnectionError("down")
+
+    assert run(cfg, "2026-10-05", run_one=keeping, post=down, pending=False, sealed=["x"], skip_existing=True, day_read=lambda *_: stored) == 1
+    assert ran == ["x"] and _states(cfg, "x")[-1] == "post_failed"
+    capsys.readouterr()
+    assert run(cfg, "2026-10-05", run_one=keeping, post=lambda b: {"ok": True, "inserted": 1, "run_id": 31}, pending=False,
+               sealed=["x"], skip_existing=True, day_read=lambda *_: stored) == 0
+    assert ran == ["x"]  # no second Bedrock run
+    last = _lines(cfg)[-1]
+    assert last["state"] == "written" and last["reposted"] is True and last["artifact_id"] == "31"
+    assert "skipped_existing" not in _states(cfg, "x")[2:]
+    assert run(cfg, "2026-10-05", run_one=keeping, post=lambda b: {"ok": True}, pending=False, sealed=["x"], skip_existing=True,
+               day_read=lambda *_: stored) == 0
+    assert ran == ["x"] and _states(cfg, "x")[-1] == "skipped_existing"  # written closed it: skipped now
+
+
+def test_case_b_a_crash_in_the_post_is_reposted(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg, stored = _open_setup(tmp_path, monkeypatch)
+    keeping = _keeping(cfg, run_one)
+
+    def crash(_b):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run(cfg, "2026-10-05", run_one=keeping, post=crash, pending=False, sealed=["x"], skip_existing=True, day_read=lambda *_: stored)
+    assert ran == ["x"] and [l["state"] for l in _lines(cfg, started=True) if l["consult_uid"] == "x"][-1] == "started"
+    posts = []
+    assert run(cfg, "2026-10-05", run_one=keeping, post=lambda b: posts.append(b["consult_uid"]) or {"ok": True, "inserted": 1, "run_id": 32},
+               pending=False, sealed=["x"], skip_existing=True, day_read=lambda *_: stored) == 0
+    assert ran == ["x"] and posts == ["x"] and _states(cfg, "x")[-1] == "written"
+
+
+def test_case_c_failed_after_invalidation_is_retried_until_the_cap(tmp_path, bundle_env, monkeypatch, capsys):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _invalidate(cfg, "boom")
+    stored = [{"consult_uid": "boom", "state": "ok", "run_id": 9}]
+    for _ in range(3):
+        _call(cfg, "2026-10-05", run_one, ["boom"], lambda *_: stored)
+    assert ran == ["boom", "boom"]  # retried (not skipped by the day read) up to the cap, then no more
+    states = _states(cfg, "boom")
+    assert "skipped_existing" not in states and states[-1] == "attempts_exhausted"
+
+
+def test_case_d_bundle_failed_after_invalidation_is_retried(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _invalidate(cfg, "bf")
+    stored = [{"consult_uid": "bf", "state": "ok", "run_id": 9}]
+    for _ in range(3):
+        _call(cfg, "2026-10-05", run_one, ["bf"], lambda *_: stored)
+    assert _states(cfg, "bf")[1:] == ["bundle_failed"] * 3  # never skipped, and no Bedrock call
+    assert ran == []
+
+
+def test_the_cap_holds_when_invalidated_is_re_appended_before_each_run(tmp_path, bundle_env, monkeypatch):
+    ran, run_one = bundle_env
+    cfg = _bcfg(tmp_path)
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    stored = [{"consult_uid": "x", "state": "ok", "run_id": 9}]
+    for _ in range(6):
+        _invalidate(cfg, "x", "sha-A")
+        _call(cfg, "2026-10-05", run_one, ["x"], lambda *_: stored)
+    assert ran == ["x", "x"] and _states(cfg, "x")[-1] == "attempts_exhausted"
+
+
+def test_open_invalidations_closes_only_on_written_rejected_or_exhausted(tmp_path):
+    cfg = _bcfg(tmp_path)
+    for uid, closer in (("w", "written"), ("r", "rejected"), ("e", "attempts_exhausted")):
+        _invalidate(cfg, uid)
+        nightly.append_states(cfg["out"], [{"consult_uid": uid, "state": closer, "code_sha256": "s"}])
+    for uid, mid in (("s", "started"), ("p", "post_failed"), ("f", "failed:RuntimeError"), ("b", "bundle_failed"), ("k", "skipped_existing")):
+        _invalidate(cfg, uid)
+        nightly.append_states(cfg["out"], [{"consult_uid": uid, "state": mid, "code_sha256": "s"}])
+    assert nightly.open_invalidations(cfg["out"]) == {"s", "p", "f", "b", "k"}
+
+
+def test_folder_mode_ignores_invalidated_and_bills_nothing_extra(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FREESCRIPT_INGEST_SECRET", "s3cret")
+    monkeypatch.setenv("REB_INDEX_READ_TOKEN", "")
+    monkeypatch.setattr(nightly, "current_code_sha", lambda: "sha-A")
+    _folder(tmp_path, "synth-a")
+    cfg = {"enabled": True, "data": str(tmp_path), "app_url": "https://app.test", "max_consults": 40, "out": str(tmp_path / "keep")}
+    _invalidate(cfg, "synth-a")
+    ran = []
+
+    def run_one(uid):
+        ran.append(uid)
+        raise AssertionError("must not run")
+
+    stored = [{"consult_uid": "synth-a", "state": "ok", "run_id": 9}]
+    capsys.readouterr()
+    for _ in range(4):
+        assert run(cfg, "2026-10-05", run_one=run_one, post=lambda b: {"ok": True}, pending=False, sealed=False,
+                   skip_existing=True, day_read=lambda *_: stored) == 0
+    out = capsys.readouterr().out
+    assert ran == [] and out.count("invalidated_ignored_folder: 1") == 4
