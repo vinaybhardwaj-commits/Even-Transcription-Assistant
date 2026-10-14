@@ -2,11 +2,6 @@
 
 Build and event log, newest first. Owner panes: scribe (deploy train), eta-refuter (checker), minibot (Mini monitor).
 
-## 27-28 Sep -- D4 shipped; deploy lesson learned; room-scope security fix PASSed
-Session: scribe, eta-refuter, Fable.
-cac6c29 found already live from 07:17 (a push to vinay/s1-auto-drain auto-deploys -- now a standing rule). Fable applied migrations 0119 (21:14) + 0121 (21:22), pinned ETA_JEV_MODEL, forced a fresh redeploy (dpl_3s2o, smoke green). Post-D4 train 4d7d8e0 live 21:48. A real MCP security bug found+fixed: minibot's self_test call exposed a general write-scope gap (session_id bypass, reproduced); scribe re-architected to default-deny at the call boundary. PASSed, merged onto post-D4, full gate green -- not yet pushed, awaiting Fable's GO.
-Refs: #4113-4145, #5012-5034, #5114-5126.
-
 ## 27 Sep ~06:2x-07:2x IST — D4 cac6c29 gate PASS, then postponed to 21:00
 Session: scribe, eta-refuter.
 eta-refuter PASS on cac6c29 06:30 (#4083); scribe pushed the preview (fast-forward 1e75667..cac6c29, #4113) but could not promote (no Vercel access, #4115) and the env preconditions were unverifiable before the 07:45 hard stop, so Fable postponed the whole deploy to 21:00 (#4120); production stays 1e75667, migration 0119 NOT applied. Home Office pre-check ran read-only 07:45, PASS (#4145).
@@ -49,5 +44,3 @@ Refs: r339, r357.
 
 ## Production rules
 Production runs from branch vinay/s1-auto-drain (not main). Migrations only via authenticated POST /api/run-migrations. Room live-transcription switches OFF (V r370).
-- 29 Sep ~19:27 IST (rev 26): scribe bb62494 push at 20:30 IST; 30 Sep train F3 3d49523 + F4-prod df61b3f after verification.
-- 29 Sep ~23:10 IST (rev 27): F3/F4 live at dfb7034 (scribe #7283).
