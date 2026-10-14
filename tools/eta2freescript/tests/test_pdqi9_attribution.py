@@ -74,9 +74,10 @@ def test_printable_duplicates_are_marked_check_not_dropped(fever):
     assert pa["check"] >= 1 and pa["dedup"] == pa["raw"] - pa["check"] and sum(pa["sources"].values()) == pa["raw"]
 
 
-def test_printable_catalogue_line_error_survives_blanking_extraction_fields():
+def test_printable_finding_on_an_entity_resolved_medicine_line_is_pulse_catalogue():
     rx = {"medicines": [{**CAT, "strength": "5 mg", "instructions": "tbd"}]}
-    assert floors.printable_attribution(rx, None)["sources"]["pulse_extraction"] >= 1
+    assert floors.printable_attribution(rx, None)["sources"]["pulse_catalogue"] >= 1
+    assert floors.printable_attribution({"general_advice": ["tbd?"]}, None)["sources"]["pulse_extraction"] >= 1
     rx = {"medicines": [{**CAT, "name": "Paracetamol [x]", "strength": "5 mg"}]}
     assert floors.printable_attribution(rx, None)["sources"]["pulse_catalogue"] >= 1
 
@@ -171,18 +172,18 @@ def test_d1_distinct_lines_with_the_same_finding_are_distinct():
 
 
 def test_d1_no_field_identity_means_no_dedup():
-    # two bracketed lines: the whole-text checks coalesce, so per-line counts exceed the whole-text count -> check 0
+    # two bracketed lines: the whole-text checks coalesce; only the one double emission is a repeat
     pa = floors.printable_attribution({"general_advice": ["[a] x", "[b] y"]}, None)
-    assert pa["check"] == 0 and pa["dedup"] == pa["raw"]
+    assert pa["check"] == 1 and pa["dedup"] == pa["raw"] - 1
 
 
 def test_d2_replayed_finding_whose_text_is_in_etas_note_is_eta():
     art = _syn("Presenting Complaint: Fever (3 days). Body pain?")
     pa = floors.printable_attribution({"symptoms": "Fever (3 days). Body pain?"}, art)
     assert pa["sources"]["eta"] == 2 and pa["sources"]["pulse_extraction"] == 0 and pa["raw"] == 2
-    # text ETA never wrote stays Pulse's
-    pa = floors.printable_attribution({"symptoms": "Cough since a week?"}, art)
-    assert pa["sources"]["pulse_extraction"] == 1 and pa["sources"]["eta"] == 1
+    # a rule ETA's note never trips stays Pulse's
+    pa = floors.printable_attribution({"symptoms": "Cough since a week {x}"}, art)
+    assert pa["sources"]["pulse_extraction"] >= 1 and pa["sources"]["eta"] == 1
 
 
 def test_d3_strength_anywhere_in_etas_note_or_provenance_is_eta(fever):
@@ -233,6 +234,45 @@ def test_d5_structured_provenance_strength_is_etas(fever):
 # ---- D4: floor totals pinned to the pre-change module --------------------------------------------------------------
 # Frozen reference: the base (25da5f0a) functions, copied verbatim. Only the digitless-unmatched medicine changed on purpose (item 2).
 
+_FORM_REF = re.compile(r"\b(tab(?:let)?s?|cap(?:sule)?s?|syp|syrup|inj(?:ection)?|oint(?:ment)?|drops?|gel|cream)\b\.?", re.I)
+_DIGITS_REF = re.compile(r"\d+")
+
+
+def _ref_s(v):
+    return re.sub(r"\s+", " ", v).strip() if isinstance(v, str) else ""
+
+
+def _ref_norm_name(s):
+    s = _FORM_REF.sub(" ", (s or "").lower())
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z ]", " ", _DIGITS_REF.sub(" ", s)).replace("mg", " ")).strip()
+
+
+def _ref_names_match(a, b):
+    a, b = {x for x in a if len(x) >= 3}, {x for x in b if len(x) >= 3}
+    return any(x == y or x in y or y in x for x in a for y in b)
+
+
+def _ref_rx_names(m):
+    return {_ref_norm_name(m.get(k, "")) for k in ("name", "brand_name", "generic")} - {""}
+
+
+def _ref_prov_medicines(art):
+    return [p for p in (art or {}).get("provenance") or [] if isinstance(p, dict) and p.get("kind") == "medicine" and p.get("json_pointer")]
+
+
+def _ref_prov_names(p):
+    return {_ref_norm_name(x) for x in list(p.get("names") or []) + [p.get("text") or ""]} - {""}
+
+
+def _ref_cited_turns(p):
+    out = []
+    for e in p.get("evidence") or []:
+        ref = str((e or {}).get("segment_ref") or "")
+        if ":" in ref and ref.rsplit(":", 1)[1].isdigit():
+            out.append(int(ref.rsplit(":", 1)[1]))
+    return out
+
+
 _STRENGTH_REF = re.compile(r"(\d+(?:\.\d+)?)\s*(mg|g|ml|mcg|iu|%)", re.I)
 
 
@@ -242,32 +282,32 @@ def _ref_strength(s):
 
 
 def _ref_invented_numbers(rx, art, consult):
-    prov = floors._prov_medicines(art)
+    prov = _ref_prov_medicines(art)
     offending = unmatched = 0
     for m in rx.get("medicines") or []:
-        runs = [r for k in ("strength", "frequency", "duration") for r in floors._DIGITS.findall(m.get(k) or "")]
-        match = next((p for p in prov if floors._names_match(floors._rx_names(m), floors._prov_names(p))), None)
+        runs = [r for k in ("strength", "frequency", "duration") for r in _DIGITS_REF.findall(m.get(k) or "")]
+        match = next((p for p in prov if _ref_names_match(_ref_rx_names(m), _ref_prov_names(p))), None)
         if match is None:
             unmatched += 1
             continue
         heard = set()
-        for t in floors._cited_turns(match):
+        for t in _ref_cited_turns(match):
             if 0 <= t < len(consult.turns):
-                heard |= set(floors._DIGITS.findall(f"{consult.turns[t].text} {consult.turns[t].native_text or ''}"))
+                heard |= set(_DIGITS_REF.findall(f"{consult.turns[t].text} {consult.turns[t].native_text or ''}"))
         offending += sum(1 for r in runs if r not in heard)
     return offending + unmatched
 
 
 def _ref_dose_precedence(rx, art):
     errs = 0
-    for p in floors._prov_medicines(art):
+    for p in _ref_prov_medicines(art):
         if "doctor_dose_precedence" not in (p.get("flags") or []):
             continue
         ds = floors.validate._doctor_strength(p)
         want = (float(ds[0]), ds[1].lower()) if ds else _ref_strength(p.get("text") or "")
         if want is None:
             continue
-        m = next((m for m in rx.get("medicines") or [] if floors._names_match(floors._rx_names(m), floors._prov_names(p))), None)
+        m = next((m for m in rx.get("medicines") or [] if _ref_names_match(_ref_rx_names(m), _ref_prov_names(p))), None)
         if m is None or _ref_strength(m.get("strength") or "") != want:
             errs += 1
     return errs
@@ -276,7 +316,7 @@ def _ref_dose_precedence(rx, art):
 def _ref_printable_text(rx):
     sec = {h: [] for h in ("Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses", "Plan of Management",
                            "Surgery or Procedure", "Medication", "Further Investigation", "Follow up", "Refer to", "General Advice")}
-    s = floors._s
+    s = _ref_s
 
     def add(head, *parts):
         line = " ".join(p for p in (s(x) for x in parts) if p)
@@ -341,3 +381,81 @@ def test_d4_basis_all_floor_totals_equal_the_pre_change_module(uid, frozen, tmp_
             assert sum(rec["attribution"]["printable_errors"].values()) == pd["raw"]
             for key in ("invented_numbers", "dose_precedence_det"):
                 assert sum(rec["attribution"][key].values()) == rec[key]
+
+
+# ---- fix round 2 (14 Oct 2026): simpler rules, verdict R2 inputs (1a)-(1c), (2), (3a), (3b), (4), (5), (6) -----------
+
+def test_r2_1_printable_source_is_decided_by_the_same_rule_not_text():
+    # (1a) the rx paraphrase carries ETA's own '?'
+    art = _syn("Presenting Complaint: Fever (3 days). Body pain?")
+    pa = floors.printable_attribution({"symptoms": "Fever for 3 days, body pain?"}, art)
+    assert pa["sources"]["eta"] == 2 and pa["sources"]["pulse_extraction"] == 0
+    # (1b) ETA's note has a bracket; the catalogue name carries one too: eta, not pulse_catalogue
+    art = _syn("Medication: Calpol [P] 500 mg 1-0-1")
+    rx = {"medicines": [{"uid": "c", "name": "Calpol [P]", "other": False, "strength": "500 mg", "frequency": "1-0-1", "duration": "5 days"}]}
+    pa = floors.printable_attribution(rx, art)
+    assert pa["sources"]["eta"] == 2 and pa["sources"]["pulse_catalogue"] == 0 and pa["check"] == 2  # one double emission in ETA's note, one in the replay
+    # (1c) an underscore blank in both
+    art = _syn("General Advice: Come back on ___ for a review")
+    pa = floors.printable_attribution({"general_advice": ["Return on ___ for review"]}, art)
+    assert pa["sources"]["eta"] == 2 and pa["sources"]["pulse_extraction"] == 0
+    # a rule ETA never trips: catalogue line -> pulse_catalogue, anything else -> pulse_extraction
+    clean = _syn("Medication: Dolo 500 mg")
+    assert floors.printable_attribution(rx, clean)["sources"]["pulse_catalogue"] >= 1
+    assert floors.printable_attribution({"general_advice": ["Return on ___"]}, clean)["sources"]["pulse_extraction"] == 1
+
+
+def test_r2_2_only_the_bracket_double_emission_is_a_repeat():
+    # (2) the verdict's note: 2 bracket findings (one bracket per line -> one double emission each on the whole text) plus others
+    note = ("Plan of Management: start [A] today\nGeneral Advice: avoid [B] foods\nFollow up: confirm the dose with pharmacy\n"
+            "Examination: recheck the blood pressure please")
+    art = {**_syn(note), "completion_required": [{"prompt": "confirm the dose with pharmacy"}, {"prompt": "recheck the blood pressure please"}]}
+    pa = floors.printable_attribution({}, art)
+    whole = floors.validate.printable_errors(note, [c["prompt"] for c in art["completion_required"]])
+    assert pa["raw"] == len(whole) == 5 and pa["check"] == 1 and pa["dedup"] == 4 and pa["sources"]["eta"] == 4
+    # two distinct matches on one line are two findings
+    for ins in ("dose not mentioned; duration not mentioned", "please confirm the dose, please confirm the duration"):
+        pa = floors.printable_attribution({"medicines": [{"name": "Alpha", "instructions": ins}]}, None)
+        assert pa["check"] == 0 and pa["dedup"] == pa["raw"] == floors.printable_count({"medicines": [{"name": "Alpha", "instructions": ins}]}, None)
+
+
+def test_r2_3_dose_precedence_on_non_medicine_items_matches_raw_values():
+    # (3a) differential '?Dengue' in the note, rx value 'Dengue'
+    art = _syn("Diagnoses: ?Dengue")
+    rx = {"diagnoses": [{"name": "Dengue", "is_differential": True}]}
+    its = floors.numbered_items(rx)
+    out = floors._judge_attribution([item(1, dose_precedence_error=True)], its, art)
+    assert out["dose_precedence_errors"] == floors._tally(["eta"])
+    # (3b) follow-up type and instructions
+    art = _syn("Follow up: review after one week")
+    rx = {"follow_up": {"type": "review", "instructions": "after one week"}}
+    out = floors._judge_attribution([item(1, dose_precedence_error=True)], floors.numbered_items(rx), art)
+    assert out["dose_precedence_errors"] == floors._tally(["eta"])
+    # a value ETA never wrote is Pulse's
+    out = floors._judge_attribution([item(1, dose_precedence_error=True)], floors.numbered_items({"follow_up": {"type": "surgery"}}), art)
+    assert out["dose_precedence_errors"] == floors._tally(["pulse_extraction"])
+
+
+def test_r2_4_number_words_are_normalised(fever):
+    c, _ = fever
+    art = _syn("Medication: Amoxicillin 500 mg three times a day for five days", [{"text": "Amoxicillin", "names": ["Amoxicillin"]}])
+    rx = {"medicines": [{"name": "Amoxicillin", "strength": "500 mg", "frequency": "3 times a day", "duration": "5 days"}]}
+    assert set(floors._invented_core(rx, art, c)["sources"]) <= {"eta"}
+    out = floors._judge_attribution([item(1, invented=["frequency", "duration"])], floors.numbered_items(rx), art)
+    assert out["invented_fields"] == floors._tally(["eta"])
+    for words, digits in (("once daily", "1 a day"), ("twice a day", "2 daily"), ("thrice a day", "3 a day"), ("twenty days", "20 days")):
+        assert floors._in_text(digits, words) and floors._in_text(words, digits)
+    assert not floors._in_text("4 days", "three days")
+
+
+def test_r2_5_empty_judge_invented_field_is_eta_and_provenance_leaves_are_read(fever):
+    rx = {"medicines": [{"uid": "c", "name": "Dolo", "other": False, "strength": "", "frequency": "twice a day"}]}
+    out = floors._judge_attribution([item(1, invented=["strength"])], floors.numbered_items(rx), _syn("Medication: Dolo"))
+    assert out["invented_fields"] == floors._tally(["eta"])
+    # (6) every string leaf of the structured provenance objects
+    p = {"text": "x", "diagnosis": {"icd10": {"code": "A90"}}, "follow_up": {"when": "next Tuesday"}, "investigation": {"panel": "CBC"},
+         "procedure": {"site": "left knee"}, "medicine": {"strength": {"text": "650 mg"}}}
+    t = floors._prov_text(p)
+    for leaf in ("A90", "next Tuesday", "CBC", "left knee", "650 mg"):
+        assert leaf in t
+    assert "quote" not in floors._prov_text({"text": "x", "evidence": [{"quote": "secret"}]})

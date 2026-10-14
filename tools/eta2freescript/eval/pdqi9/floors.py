@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 from pathlib import Path
 
 from ... import validate
@@ -36,32 +37,37 @@ def numbered_items(rx: dict) -> list[dict]:
     validate_prescription(rx)
     out: list[dict] = []
 
-    def add(kind, text, **extra):
+    def add(kind, text, vals=(), **extra):
+        """`vals` are the raw rx field values behind a non-medicine item (matching uses these, never the labelled text)."""
         if text:
-            out.append({"n": len(out) + 1, "kind": kind, "text": text, **extra})
+            out.append({"n": len(out) + 1, "kind": kind, "text": text, "vals": [v for v in (_s(x) for x in vals) if v], **extra})
 
     for m in rx.get("medicines") or []:
         parts = [f"{lab}: {_s(m.get(k))}" for lab, k in (("brand", "brand_name"), ("generic", "generic"), ("strength", "strength"),
                  ("frequency", "frequency"), ("duration", "duration"), ("instructions", "instructions")) if _s(m.get(k))]
         add("medicine", "; ".join([_s(m.get("name"))] + parts) if _s(m.get("name")) else "", med=m)
     for d in rx.get("diagnoses") or []:
-        add("diagnosis", ("differential: " if d.get("is_differential") else "") + _s(d.get("name")))
+        add("diagnosis", ("differential: " if d.get("is_differential") else "") + _s(d.get("name")), [d.get("name")])
     for c in rx.get("comorbidities") or []:
-        add("comorbidity", _s(c.get("name")) + (f" ({_s(c.get('duration'))})" if _s(c.get("duration")) else ""))
+        add("comorbidity", _s(c.get("name")) + (f" ({_s(c.get('duration'))})" if _s(c.get("duration")) else ""),
+            [c.get("name"), c.get("duration")])
     for i in rx.get("investigations") or []:
-        add("investigation", _s(i.get("name")) + (" (urgent)" if i.get("urgent") else "") + (f": {_s(i.get('instruction'))}" if _s(i.get("instruction")) else ""))
+        add("investigation", _s(i.get("name")) + (" (urgent)" if i.get("urgent") else "") + (f": {_s(i.get('instruction'))}" if _s(i.get("instruction")) else ""),
+            [i.get("name"), i.get("instruction")])
     for s in rx.get("surgeries") or []:
         add("procedure", _s(s.get("name")) + (f" on {_s(s.get('scheduled_date'))}" if _s(s.get("scheduled_date")) else "")
-            + (f": {_s(s.get('notes'))}" if _s(s.get("notes")) else ""))
+            + (f": {_s(s.get('notes'))}" if _s(s.get("notes")) else ""), [s.get("name"), s.get("scheduled_date"), s.get("notes")])
     for r in rx.get("referrals") or []:
-        add("referral", _s(r.get("speciality")) + (f": {_s(r.get('notes'))}" if _s(r.get("notes")) else ""))
+        add("referral", _s(r.get("speciality")) + (f": {_s(r.get('notes'))}" if _s(r.get("notes")) else ""),
+            [r.get("speciality"), r.get("notes")])
     for a in rx.get("general_advice") or []:
-        add("advice", _s(a))
+        add("advice", _s(a), [a])
     fu = rx.get("follow_up") or {}
     add("follow_up", "; ".join(([] if not fu.get("no_follow_up_needed") else ["no follow-up needed"])
-                                + [f"{k}: {_s(fu.get(k))}" for k in ("type", "date", "instructions") if _s(fu.get(k))]))
+                                + [f"{k}: {_s(fu.get(k))}" for k in ("type", "date", "instructions") if _s(fu.get(k))]),
+        [fu.get(k) for k in ("type", "date", "instructions")])
     for k, kind in (("symptoms", "symptoms"), ("examination", "examination"), ("management_plan", "plan")):
-        add(kind, _s(rx.get(k)))
+        add(kind, _s(rx.get(k)), [rx.get(k)])
     return out
 
 
@@ -168,7 +174,7 @@ def _judge_attribution(res: list[dict], items: list[dict], art: dict | None) -> 
             invented.append(_worst(_field_source(m, f, art, prov) for f in x["invented"]))
         if x["dose_precedence_error"]:
             if m is None:
-                dose.append("eta" if _in_text(it["text"], _eta_output(art)) else "pulse_extraction")
+                dose.append("eta" if any(_in_text(v, _eta_output(art)) for v in it.get("vals") or []) else "pulse_extraction")
             elif _s(m.get("strength")) and _in_text(_s(m.get("strength")), _eta_text(art, prov)):
                 dose.append("eta")
             else:
@@ -324,42 +330,54 @@ def _prov_values(node, out: list[str]) -> None:
 def _prov_text(p: dict | None) -> str:
     out: list[str] = []
     if isinstance(p, dict):
-        for k in ("text", "names", "medicine"):
+        for k in ("text", "names", "diagnosis", "follow_up", "investigation", "procedure", "medicine"):
             _prov_values(p.get(k), out)
     return "\n".join(out)
 
 
+_NUMWORDS = {w: str(i) for i, w in enumerate("one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+                                              "sixteen seventeen eighteen nineteen twenty".split(), 1)}
+_NUMWORDS.update({"once": "1", "twice": "2", "thrice": "3"})
+_NUMWORD_RE = re.compile(r"\b(" + "|".join(_NUMWORDS) + r")\b")
+
+
+def _numnorm(s: str) -> str:
+    """Number words one..twenty and once/twice/thrice become digits, "a day" becomes "daily" (lower-cased)."""
+    return _NUMWORD_RE.sub(lambda m: _NUMWORDS[m.group(1)], re.sub(r"\ba day\b", "daily", (s or "").lower()))
+
+
 def _eta_output(art: dict | None) -> str:
-    """ETA's whole output for the consult: note_text, every provenance item's text/names and structured values."""
+    """ETA's whole output for the consult: note_text, every provenance item's text/names and structured values (number words normalised)."""
     a = art or {}
     note = a.get("note_text") if isinstance(a.get("note_text"), str) else ""
-    return "\n".join([note] + [_prov_text(p) for p in a.get("provenance") or [] if isinstance(p, dict)])
+    return _numnorm("\n".join([note] + [_prov_text(p) for p in a.get("provenance") or [] if isinstance(p, dict)]))
 
 
 def _eta_text(art: dict | None, prov: dict | None) -> str:
     """Lead rule: a value is ETA's when it appears anywhere in ETA's output (drug-line matching may only move a hit toward eta)."""
-    return _eta_output(art) + "\n" + _prov_text(prov)
+    return _eta_output(art) + "\n" + _numnorm(_prov_text(prov))
 
 
 def _text_in(value: str, text: str) -> bool:
     """Normalised, case-folded substring (no digit-run shortcut)."""
-    v = re.sub(r"\s+", " ", (value or "").lower()).strip()
-    return bool(v) and v in re.sub(r"\s+", " ", (text or "").lower())
+    v = re.sub(r"\s+", " ", _numnorm(value)).strip()
+    return bool(v) and v in re.sub(r"\s+", " ", _numnorm(text))
 
 
 def _in_text(value: str, text: str) -> bool:
     """Digits: every digit run of value occurs among the digit runs of text. No digits: normalised substring."""
-    runs = _DIGITS.findall(value or "")
+    value, text = _numnorm(value), _numnorm(text)
+    runs = _DIGITS.findall(value)
     if runs:
-        have = set(_DIGITS.findall(text or ""))
+        have = set(_DIGITS.findall(text))
         return all(r in have for r in runs)
-    v = re.sub(r"\s+", " ", (value or "").lower()).strip()
-    return bool(v) and v in re.sub(r"\s+", " ", (text or "").lower())
+    v = re.sub(r"\s+", " ", value).strip()
+    return bool(v) and v in re.sub(r"\s+", " ", text)
 
 
 def _run_source(m: dict, field: str, run: str, art: dict | None, prov: dict | None) -> str:
     """Source of one digit run found in field of replayed medicine m."""
-    if run in _DIGITS.findall(_eta_text(art, prov)):
+    if run in _DIGITS.findall(_eta_text(art, prov)):  # _eta_text is number-word normalised
         return "eta"
     if field == "strength":
         return "pulse_catalogue" if _is_catalogue(m) else "eta"
@@ -369,8 +387,8 @@ def _run_source(m: dict, field: str, run: str, art: dict | None, prov: dict | No
 def _field_source(m: dict, field: str, art: dict | None, prov: dict | None) -> str:
     """Source of a whole replayed medicine field (judge floors, which flag a field, not a digit run)."""
     value = _s(m.get(field))
-    if not value:
-        return "check"
+    if not value:  # a field the judge invented that the rx leaves empty: in doubt, ETA's
+        return "eta"
     if _in_text(value, _eta_text(art, prov)):
         return "eta"
     if field == "strength":
@@ -509,62 +527,65 @@ def _note_chunks(note: str) -> list[str]:
     return out
 
 
-def _printable_source(e: str, h: str, line: str, med: dict | None, eta_out: str) -> str:
-    """Source of one finding in a replayed field. Lead rule: eta when the matched text (or, for a finding with no matched text, the
-    whole field text) occurs anywhere in ETA's output."""
-    for q in re.findall(r"'([^']*)'", e):
-        if len(q) >= 3 and re.search(r"[A-Za-z]", q) and _text_in(q, eta_out):
-            return "eta"
-    if len(line) >= 3 and re.search(r"[A-Za-z]", line) and _text_in(line, eta_out):
-        return "eta"
-    if med is not None and _is_catalogue(med):
-        bare = {**med, "frequency": "", "duration": "", "instructions": ""}
-        bare_line = " ".join(x for x in (_s(bare.get(k)) for k in ("name", "brand_name", "generic", "strength")) if x)
-        if e in validate.printable_errors(f"{h}:\n{bare_line}", []):
-            return "pulse_catalogue"
-    return "pulse_extraction"
+def _rule(e: str) -> str:
+    """The rule of one printable finding: the finding without its quoted match and its (heading) suffix. No text matching."""
+    return re.sub(r"\s*\([^()]*\)\s*$", "", re.sub(r"'[^']*'", "''", e)).strip()
+
+
+def _bracket_hits(text: str) -> tuple[int, int]:
+    """(hits of the `[` rule, hits of the Ps/Pe rule) of printable_errors on text: validate.py:860-869 emits the same finding twice for one bracket."""
+    note = unicodedata.normalize("NFKC", text or "")
+    return (int("[" in note or "]" in note),
+            int(any(unicodedata.category(c) in ("Ps", "Pe") and c not in "()" for c in note)))
+
+
+def _bracket_check(whole_text: str, line_texts: list[str]) -> int:
+    """Validator double-emissions of one bracket: per rendered line min(`[` hits, Ps/Pe hits), capped by the whole text's own count."""
+    per_line = sum(min(*_bracket_hits(t)) for t in line_texts)
+    return min(per_line, min(*_bracket_hits(whole_text)))
+
+
+_BRACKET_RULE = _rule("FRX-N1 note_text contains a bracket")
 
 
 def printable_attribution(rx: dict, art: dict | None) -> dict:
-    """{"raw", "dedup", "check", "sources": {...}}. raw is printable_count. Only a finding identical in rule AND matched text AND from
-    the same rendered line is a repeat (validate reports one bracket twice); the removed repeats are `check`. Distinct lines with the
-    same finding are distinct findings. When the per-line findings do not add up to the whole-text findings (the field identity is
-    not available), nothing is de-duplicated."""
-    eta_out = _eta_output(art)
+    """{"raw", "dedup", "check", "sources": {...}}. raw is printable_count. Findings in ETA's own note_text are eta. A replayed finding is
+    eta when ETA's note_text yields a finding of the SAME rule (no text matching); otherwise pulse_catalogue when it lies on an
+    entity-resolved medicine line, else pulse_extraction. The only thing removed is the validator's double emission of one bracket (the
+    `[` rule plus the Ps/Pe rule), counted as `check`; nothing else is de-duplicated."""
     sources: list[str] = []
     raw = check = 0
-
-    def take(whole: list[str], units: list[tuple[list[str], tuple | None]], fallback_src):
-        """units: (findings of one rendered line, line identity). Appends sources; returns the check count."""
-        nonlocal raw
-        raw += len(whole)
-        n_units = sum(len(f) for f, _ in units)
-        if n_units > len(whole):  # whole-text checks coalesced: no field identity, no de-duplication
-            sources.extend(fallback_src(e) for e in whole)
-            return 0
-        rep = 0
-        for found, ident in units:
-            uniq = list(dict.fromkeys(found))
-            rep += len(found) - len(uniq)
-            sources.extend(fallback_src(e) if ident is None else _printable_source(e, *ident, eta_out) for e in uniq)
-        sources.extend("eta" for _ in range(len(whole) - n_units))  # findings with no line of their own: in doubt, ETA's
-        return rep
-
+    eta_rules: set[str] = set()
     if art is not None and isinstance(art.get("note_text"), str):
+        note = art["note_text"]
         prompts = [c.get("prompt") for c in art.get("completion_required") or [] if isinstance(c, dict)]
-        units = [(validate.printable_errors(c, []), None) for c in _note_chunks(art["note_text"])]
-        check += take(validate.printable_errors(art["note_text"], prompts), units, lambda e: "eta")
+        whole = validate.printable_errors(note, prompts)
+        eta_rules = {_rule(e) for e in whole}
+        n = min(_bracket_check(note, _note_chunks(note)), sum(1 for e in whole if _rule(e) == _BRACKET_RULE) - 1) if whole else 0
+        n = max(n, 0)
+        raw += len(whole)
+        check += n
+        sources.extend(["eta"] * (len(whole) - n))
     lines = _printable_lines(rx)
-    whole = validate.printable_errors(printable_text(rx), [])
-    units = [(validate.printable_errors(f"{h}:\n{line}", []), (h, line, med)) for h, line, med in lines]
-
-    def locate(e):
-        for (found, ident) in units:
-            if e in found:
-                return _printable_source(e, *ident, eta_out)
-        return "eta"
-
-    check += take(whole, units, locate)
+    text = printable_text(rx)
+    whole = validate.printable_errors(text, [])
+    cat_rules: set[str] = set()
+    for h, line, med in lines:
+        if med is not None and _is_catalogue(med):
+            cat_rules |= {_rule(e) for e in validate.printable_errors(f"{h}:\n{line}", [])}
+    srcs = [e for e in whole]
+    n = _bracket_check(text, [f"{h}:\n{line}" for h, line, _ in lines])
+    n = max(min(n, sum(1 for e in whole if _rule(e) == _BRACKET_RULE) - 1), 0) if whole else 0
+    raw += len(whole)
+    check += n
+    drop = n
+    for e in srcs:
+        r = _rule(e)
+        src = "eta" if r in eta_rules else "pulse_catalogue" if r in cat_rules else "pulse_extraction"
+        if r == _BRACKET_RULE and drop:
+            drop -= 1
+            continue
+        sources.append(src)
     return {"raw": raw, "dedup": len(sources), "check": check, "sources": {**_tally(sources), "check": check}}
 
 
