@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SETS = {"label200": ("tools/segment-label/page.html", "rows", "labels"), "rate20": ("tools/readability-rate/page.html", "excerpts", "ratings"),
-        "ba106": ("tools/pair-label/page.html", "rows", "labels"), "calib30": ("tools/calib30/page.html", "rows", "labels"), "pitch25": ("tools/pitch-review/page.html", "rows", "labels")}
+        "ba106": ("tools/pair-label/page.html", "rows", "labels")}
 SHIM = r"""(()=>{const C=window.__RATE,J=async(u,o)=>{const r=await fetch(u,o);if(!r.ok){const e=new Error("http "+r.status);e.code=r.status===422?"invalid_argument":"http";throw e}return r.json()};
 const snap=rows=>({docs:rows.map(x=>({exists:true,id:x.id,data:()=>x}))});
 const db={collection:n=>({onSnapshot:(cb,err)=>{if(n!==C.rows)return()=>{};J("/api/rate/"+C.set+"/rows").then(j=>cb(snap(j.rows)),e=>err&&err(e));return()=>{}}}),
