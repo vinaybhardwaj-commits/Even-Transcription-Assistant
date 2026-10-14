@@ -49,11 +49,14 @@ loop_init() {
 
 # 0 while main is alive and is still this loop's parent (a reused main pid does not pass: the parent link is checked, not just kill -0).
 # An empty ps read (a failed fork) is not "main gone": it counts as a miss and the loop leaves only after 3 misses in a row.
+# After a 3-strike exit nothing restarts the loop: this fails safe (no control messages = stale = shadow, never heal). GUARDIAN_PS (a fake ps) is honoured only with GUARDIAN_TESTMODE=1.
 loop_parent_ok() {
-  local info
+  local info ps_cmd
   [ -n "$MAIN_PID" ] || return 1
   kill -0 "$MAIN_PID" 2>/dev/null || return 1
-  info="$("${GUARDIAN_PS:-/bin/ps}" -o ppid= -p "$LOOP_ME" 2>/dev/null | tr -d ' ')"
+  ps_cmd=/bin/ps
+  [ "${GUARDIAN_TESTMODE:-}" = 1 ] && [ -n "${GUARDIAN_PS:-}" ] && ps_cmd="$GUARDIAN_PS"
+  info="$("$ps_cmd" -o ppid= -p "$LOOP_ME" 2>/dev/null | tr -d ' ')"
   if [ -z "$info" ]; then
     LOOP_MISS=$((LOOP_MISS + 1))
     if [ "$LOOP_MISS" -ge 3 ]; then audit "loop exits: 3 empty ps reads in a row"; return 1; fi

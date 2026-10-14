@@ -17,7 +17,7 @@ control_top_keys() {
   BEGIN { RS = "\001" }
   { s = $0 }
   END {
-    n = length(s); depth = 0; instr = 0; esc = 0; mode = "O"; err = 0; done = 0; key = ""; val = ""; cur = ""
+    n = length(s); depth = 0; instr = 0; esc = 0; mode = "O"; err = 0; done = 0; key = ""; val = ""; cur = ""; comma = 0; vend = 0
     for (i = 1; i <= n && !err; i++) {
       c = substr(s, i, 1)
       if (done) { if (c !~ /[ \t\r\n]/) err = 1; continue }
@@ -28,35 +28,46 @@ control_top_keys() {
         else if (c == "\"") {
           instr = 0
           if (depth == 1 && mode == "K") { key = cur; mode = "C" }
+          else if (depth == 1 && mode == "V") vend = 1
         } else cur = cur c
         continue
       }
       if (mode == "O") {
         if (c ~ /[ \t\r\n]/) continue
-        if (c == "{") { depth = 1; mode = "K"; continue }
+        if (c == "{") { depth = 1; mode = "K"; comma = 0; continue }
         err = 1; continue
       }
-      if (c == "\"") { instr = 1; cur = ""; if (mode == "V") val = val c; continue }
+      if (c == "\"") {
+        # a string may start only where a key (mode K) or a value (mode V, not right after another value) is legal
+        if (mode == "C") { err = 1; continue }
+        if (mode == "V" && depth == 1 && vend) { err = 1; continue }
+        instr = 1; cur = ""; if (mode == "K") comma = 0; if (mode == "V") val = val c; continue
+      }
       if (depth == 1 && mode == "K") {
         if (c ~ /[ \t\r\n]/) continue
-        if (c == "}") { depth = 0; done = 1; continue }
+        if (c == "}" && !comma) { depth = 0; done = 1; continue }
         err = 1; continue
       }
       if (depth == 1 && mode == "C") {
         if (c ~ /[ \t\r\n]/) continue
-        if (c == ":") { mode = "V"; val = ""; continue }
+        if (c == ":") { mode = "V"; val = ""; vend = 0; continue }
         err = 1; continue
       }
-      # mode V (value of a top-level key)
-      if (c == "{" || c == "[") { depth++; val = val c; continue }
+      # mode V (value of a top-level key). After a value only "," or "}" is legal at depth 1.
+      if (c ~ /[ \t\r\n]/) { val = val c; if (depth == 1 && val !~ /^[ \t\r\n]*$/) vend = 1; continue }
+      if (c == "{" || c == "[") { if (depth == 1 && vend) { err = 1; continue } depth++; val = val c; continue }
       if (c == "}" || c == "]") {
         if (depth == 1) {
-          if (c == "]") { err = 1; continue }
+          if (c == "]" || val ~ /^[ \t\r\n]*$/) { err = 1; continue }
           emit(key, val); depth = 0; done = 1; continue
         }
-        depth--; val = val c; continue
+        depth--; val = val c; if (depth == 1) vend = 1; continue
       }
-      if (c == "," && depth == 1) { emit(key, val); mode = "K"; continue }
+      if (c == "," && depth == 1) {
+        if (val ~ /^[ \t\r\n]*$/) { err = 1; continue }
+        emit(key, val); mode = "K"; comma = 1; vend = 0; continue
+      }
+      if (depth == 1 && vend) { err = 1; continue }
       val = val c
     }
     if (err || instr || depth != 0 || !done) exit 1

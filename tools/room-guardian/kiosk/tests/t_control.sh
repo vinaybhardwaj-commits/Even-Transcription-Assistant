@@ -511,13 +511,13 @@ test_loop_with_empty_main_pid_does_not_run() {
 test_run_falls_back_to_dollar_dollar_when_main_pid_is_empty() {
   load_libs
   set_subs 4621 4622
-  printf '#!/bin/bash\nn=$(cat "%s/shcount" 2>/dev/null || echo 0); echo $((n + 1)) >"%s/shcount"\n[ "$n" = 0 ] && exit 0\nexec /bin/sh "$@"\n' "$T" "$T" >"$T/bin/sh"
+  printf '#!/bin/bash\necho x >>"%s/shcalls"\nmkdir "%s/first" 2>/dev/null && exit 0\nexec /bin/sh "$@"\n' "$T" "$T" >"$T/bin/sh"
   chmod +x "$T/bin/sh"
   start_guardian
   wait_alive ctl 1; wait_alive sub 1
   sleep 4
   assert_eq "$(alive_of ctl)$(alive_of sub)" "11" "loops still running with the \$\$ fallback"
-  assert_eq "$(cat "$T/shcount")" "3" "fake sh was used for main (empty) and for the two loops"
+  assert_eq "$(wc -l <"$T/shcalls" | tr -d " ")" "3" "fake sh was used for main (empty) and for the two loops"
   kill -TERM "$GP"; wait "$GP" 2>/dev/null
   wait_alive ctl 0 24; wait_alive sub 0 24
   assert_eq "$(alive_of ctl)$(alive_of sub)" "00" "loops stop after TERM"
@@ -544,7 +544,7 @@ test_two_empty_ps_reads_in_a_row_do_not_end_the_loop() {
   load_libs
   set_subs 4631 4632
   mk_fake_ps; echo flaky >"$T/psmode"
-  export GUARDIAN_PS="$T/psfake"
+  export GUARDIAN_TESTMODE=1 GUARDIAN_PS="$T/psfake"
   start_loops control_loop
   local i=0
   while [ "$i" -lt 60 ] && [ "$(cat "$T/pscount" 2>/dev/null || echo 0)" -lt 8 ]; do sleep 0.25; i=$((i + 1)); done
@@ -558,7 +558,7 @@ test_three_empty_ps_reads_in_a_row_end_the_loop_with_an_audit_line() {
   load_libs
   set_subs 4641 4642
   mk_fake_ps; echo dead >"$T/psmode"
-  export GUARDIAN_PS="$T/psfake"
+  export GUARDIAN_TESTMODE=1 GUARDIAN_PS="$T/psfake"
   start_loops control_loop
   wait_alive ctl 1 20
   wait_alive ctl 0 40
@@ -567,4 +567,43 @@ test_three_empty_ps_reads_in_a_row_end_the_loop_with_an_audit_line() {
   assert_eq "$([ "$(cat "$T/pscount")" -ge 3 ] && echo yes)" "yes" "at least 3 reads were made"
   assert_eq "$([ "$(cat "$T/pscount")" -le 5 ] && echo yes)" "yes" "it did not read forever"
   kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
+}
+
+# GUARDIAN_PS is honoured only in test mode; outside it a fake ps is ignored and /bin/ps is used
+test_ps_override_is_ignored_outside_test_mode() {
+  load_libs
+  set_subs 4651 4652
+  mk_fake_ps; echo dead >"$T/psmode"
+  unset GUARDIAN_TESTMODE
+  export GUARDIAN_PS="$T/psfake"
+  start_loops control_loop
+  wait_alive ctl 1 20
+  sleep 5
+  assert_eq "$(alive_of ctl)" "1" "loop still running: the always-empty fake ps was not used"
+  assert_eq "$(cat "$T/pscount" 2>/dev/null || echo 0)" "0" "fake ps never called"
+  assert_not "$(cat "$AUDIT_LOG" 2>/dev/null)" "empty ps reads" "no exit audit line"
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
+}
+
+# ---- R6: after a key only ":", after a value only "," or "}" ----
+test_scanner_token_order_is_strict() {
+  use_ctl
+  ctl_engaged 1 '{"kill" "junk": false, "modes": {"opd9": "heal"}, "ts": '"$GUARDIAN_FAKE_NOW"'}'; assert_rc $? 0 "missing colon then an extra string (the C3 payload)"
+  assert_eq "$(current_mode)" "shadow" "that payload gives no heal"
+  ctl_engaged 1 '{"kill" "kill": false, "modes": {}}'; assert_rc $? 0 "key key colon"
+  ctl_engaged 1 '{"kill": false, "a" "b": 1, "modes": {}}'; assert_rc $? 0 "key key colon on another key"
+  ctl_engaged 1 '{"kill": false, "note": "a" "b", "modes": {}}'; assert_rc $? 0 "string string"
+  ctl_engaged 1 '{"kill": false, "n": 1 2, "modes": {}}'; assert_rc $? 0 "number number"
+  ctl_engaged 1 '{"kill": false, "m": {} {}, "modes": {}}'; assert_rc $? 0 "object object"
+  ctl_engaged 1 '{"kill": false, "m": "x" {}, "modes": {}}'; assert_rc $? 0 "string then object"
+  ctl_engaged 1 '{"kill": false, "modes": {},}'; assert_rc $? 0 "trailing comma"
+  ctl_engaged 1 '{"kill": false,, "modes": {}}'; assert_rc $? 0 "double comma"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "x": }'; assert_rc $? 0 "colon without a value before the closing brace"
+  ctl_engaged 1 '{"kill": false, "x":, "modes": {}}'; assert_rc $? 0 "colon without a value before a comma"
+  ctl_engaged 1 '{"kill":, "modes": {}}'; assert_rc $? 0 "kill with no value"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "x": 1 }'; assert_rc $? 1 "spaces before the closing brace are fine"
+  ctl_engaged 1 '{ "kill" : false , "modes" : { "opd9" : "heal" } , "ts" : '"$GUARDIAN_FAKE_NOW"' }'; assert_rc $? 1 "generous whitespace is fine"
+  assert_eq "$(current_mode)" "heal" "heal for the generous-whitespace live shape"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": '"$GUARDIAN_FAKE_NOW"'}'; assert_rc $? 1 "live shape is clear"
+  assert_eq "$(current_mode)" "heal" "live shape gives heal"
 }
