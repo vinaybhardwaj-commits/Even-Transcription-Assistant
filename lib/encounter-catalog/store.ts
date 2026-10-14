@@ -40,7 +40,9 @@ export function hasTextKey(v: unknown): boolean {
 /** A real calendar date (YYYY-MM-DD): 2026-02-30 is not one. */
 export const realDate = (s: string) => DATE.test(s) && !Number.isNaN(Date.parse(s)) && new Date(s).toISOString().slice(0, 10) === s;
 const okMs = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v < 4e12;
-const okIso = (v: unknown) => typeof v === "string" && v.length <= 40 && !Number.isNaN(Date.parse(v));
+/** A strict ISO-8601 instant Postgres will cast: YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM). Date.parse alone is lenient (it accepts 2026-02-30), so the calendar date is checked too. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+const okIso = (v: unknown) => typeof v === "string" && v.length <= 40 && ISO_INSTANT.test(v) && !Number.isNaN(Date.parse(v)) && realDate(v.slice(0, 10));
 
 export function validateBatch(body: unknown): Validation {
   if (!isObj(body) || !Array.isArray(body.rows)) return { ok: false, error: "body_not_rows" };
@@ -63,7 +65,8 @@ export function validateBatch(body: unknown): Validation {
     if ("source" in r && r.source !== null && r.source !== "cutter" && r.source !== "caa") return { ok: false, error: "bad_source" };
     if ("first_gap" in r && r.first_gap !== null && (typeof r.first_gap !== "string" || !GAP.test(r.first_gap))) return { ok: false, error: "bad_first_gap" };
     if ("catalog_version" in r && r.catalog_version !== null && !(Number.isInteger(r.catalog_version) && (r.catalog_version as number) >= 1 && (r.catalog_version as number) <= 1000)) return { ok: false, error: "bad_version" };
-    if ("generated_at" in r && r.generated_at !== null && !okIso(r.generated_at)) return { ok: false, error: "bad_generated_at" };
+    // generated_at, when the key is present, must be a valid instant: null is refused (it would clear the column and let an older replay overwrite a newer row); omit the key instead
+    if ("generated_at" in r && !okIso(r.generated_at)) return { ok: false, error: "bad_generated_at" };
     for (const f of IDENTITY_UIDS) if (f in r && r[f] !== null && (typeof r[f] !== "string" || !DOCTOR.test(r[f] as string))) return { ok: false, error: "bad_" + f };
     if ("presc_state" in r && r.presc_state !== null && (typeof r.presc_state !== "string" || !STATE.test(r.presc_state))) return { ok: false, error: "bad_presc_state" };
     for (const f of NAME_FIELDS) {   // PHI: the value is never echoed, logged or put in an error

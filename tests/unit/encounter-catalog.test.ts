@@ -193,6 +193,42 @@ describe("search parameters", () => {
   });
 });
 
+describe("23D follow-up G1-G3", () => {
+  it("G1: a token query key in ANY letter case, or percent-encoded, is refused even with a valid bearer", async () => {
+    process.env.ADMIN_TOKEN = "adm";
+    for (const qs of ["?TOKEN=adm", "?Token=adm", "?tOkEn=x", "?doctor_uid=DOC12345&TOKEN=", "?%74oken=adm", "?TOKEN"]) {
+      expect((await search(get(qs, "adm"))).status, qs).toBe(401);
+      expect((await search(get(qs))).status, qs).toBe(401);
+    }
+    expect(H.calls).toEqual([]);
+    expect((await search(get("?doctor_uid=DOC12345&tokens=1&mytoken=2", "adm"))).status).toBe(200);          // other keys that merely contain the word are not the token key
+  });
+  it("G2: \"generated_at\": null is refused (it would clear the column and let an older replay overwrite); omitting the key is fine", async () => {
+    expect(validateBatch({ rows: [row({ generated_at: null })] })).toEqual({ ok: false, error: "bad_generated_at" });
+    const { generated_at: _drop, ...noGen } = row();
+    expect(validateBatch({ rows: [noGen] }).ok).toBe(true);
+    process.env.ENCOUNTER_CATALOG_INGEST_SECRET = SECRET;
+    const b = JSON.stringify({ rows: [row({ generated_at: null })] });
+    const res = await ingest(post(b, signed(b, Math.floor(Date.now() / 1000))));
+    expect([res.status, await res.json(), H.calls.length]).toEqual([400, { ok: false, error: "bad_generated_at" }, 0]);
+  });
+  it("G3: generated_at (and t_open / t_close as strings) must be a strict ISO-8601 instant: malformed values are a 400, never a 503 batch failure", async () => {
+    const bad = ["2026-10-14", "yesterday", "2026-10-14 06:00:00", "2026-10-14T06:00:00", "2026-13-01T00:00:00Z", "2026-10-14T25:00:00Z", "2026-02-30T00:00:00Z", "2026-10-14T06:00:60Z", "Wed, 14 Oct 2026 06:00:00 GMT",
+                 "2026-10-14T06:00:00+0530", "2026-10-14T06:00Z", "1760000000", "", " 2026-10-14T06:00:00Z", "2026-10-14T06:00:00Z\n", 5, true, {}, []];
+    for (const v of bad) {
+      expect((validateBatch({ rows: [row({ generated_at: v })] }) as { error?: string }).error, JSON.stringify(v)).toBe("bad_generated_at");
+      if (typeof v === "string") expect((validateBatch({ rows: [row({ t_open: v })] }) as { error?: string }).error, "t_open " + JSON.stringify(v)).toBe("bad_time");
+    }
+    for (const v of ["2026-10-14T06:00:00Z", "2026-10-14T06:00:00.123Z", "2026-10-14T06:00:00.123456789Z", "2026-10-14T11:30:00+05:30", "2026-10-14T06:00:00-00:00", "2024-02-29T00:00:00Z"]) {
+      expect(validateBatch({ rows: [row({ generated_at: v })] }).ok, v).toBe(true);
+    }
+    process.env.ENCOUNTER_CATALOG_INGEST_SECRET = SECRET;
+    const b = JSON.stringify({ rows: [row({ generated_at: "2026-02-30T00:00:00Z" })] });
+    const res = await ingest(post(b, signed(b, Math.floor(Date.now() / 1000))));
+    expect([res.status, await res.json(), H.calls.length]).toEqual([400, { ok: false, error: "bad_generated_at" }, 0]);
+  });
+});
+
 describe("fable gate conditions (C1 bearer-only, C2 date floor, C3 stale guard, C4 README)", () => {
   it("C1: search is BEARER ONLY: a ?token= parameter is refused even with a valid bearer, and as the only credential", async () => {
     process.env.ADMIN_TOKEN = "adm";

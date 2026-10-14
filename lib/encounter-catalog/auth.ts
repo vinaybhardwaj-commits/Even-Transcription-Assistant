@@ -39,14 +39,14 @@ export function checkCatalogHmac(
 
 /**
  * Bearer-ONLY admin check for the search route (fable gate C1, 14 Oct). lib/admin-gate requireAdmin also accepts `?token=`, which would put ADMIN_TOKEN, next to a PHI-bearing URL, in the
- * request logs. Here a request that carries a `token` query parameter at all is refused, whatever its Authorization header says; an unset or blank ADMIN_TOKEN refuses; the bearer is compared
+ * request logs. Here a request that carries a `token` query parameter at all (the key in ANY letter case) is refused, whatever its Authorization header says; an unset or blank ADMIN_TOKEN refuses; the bearer is compared
  * (hashed, constant time) with ADMIN_TOKEN. The refusal is the same 401 in every case, so a caller cannot tell "not configured" from "wrong".
  */
 const sha256 = (s: string): Buffer => createHash("sha256").update(s).digest();
 
 export function requireAdminBearer(req: NextRequest, env: Record<string, string | undefined> = process.env): NextResponse | null {
   const refuse = () => NextResponse.json({ error: "admin bearer token required" }, { status: 401, headers: { "cache-control": "no-store" } });
-  if (req.nextUrl.searchParams.has("token")) return refuse();
+  for (const k of req.nextUrl.searchParams.keys()) if (k.toLowerCase() === "token") return refuse();   // any case: ?TOKEN= and ?Token= would land in the logs as surely as ?token=
   const expected = (env.ADMIN_TOKEN ?? "").trim();
   if (expected === "") return refuse();
   const header = req.headers.get("authorization") || "";
