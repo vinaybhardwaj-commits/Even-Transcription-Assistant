@@ -34,4 +34,3 @@ Refs: r337, r337a-f, r418.
 
 ## Back-fill note
 15–19 Sep: this programme's roots (transcript hygiene, STT stack) predate this log's detail. Earliest clean milestone here is r337 on 25 Sep. Earlier days can be reconstructed from orders/STATE-OF-PLAY-24-SEP.md if needed.
-- 30 Sep 2026 ~06:30 IST (rev 28): Tamil miss root-caused to the router (#7707); router LID fix proposal r5 03bd54a2 PASS; lab-only BUILD GO (#7918); R-A built 301f97e (witnessed #7891); no production change.

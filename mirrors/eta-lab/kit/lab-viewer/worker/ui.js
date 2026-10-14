@@ -61,7 +61,7 @@ const MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","De
 const fmtDate=d=>{const t=new Date(d+"T00:00:00Z");return isNaN(t)?d:DOW[t.getUTCDay()]+" "+t.getUTCDate()+" "+MON[t.getUTCMonth()]+" "+t.getUTCFullYear()};
 const mmss=s=>Math.floor(s/60)+":"+String(Math.floor(s%60)).padStart(2,"0");
 const wkey=r=>r.key.replace(/^runs\//,"").replace(/\.json$/,"");
-const STATUS={held_out:"held out for a validation study",text:"",refused:"transcript discarded as unreliable",no_text:"no speech detected",no_signal:"no sound recorded (microphone silent)",untested:"not transcribed: silence unconfirmed",failed:"transcription failed"};
+const STATUS={text:"",refused:"transcript discarded as unreliable",no_text:"no speech detected",no_signal:"no sound recorded (microphone silent)",untested:"not transcribed: silence unconfirmed",failed:"transcription failed"};
 const SCORE={text:5,refused:4,no_text:3,no_signal:2,untested:2,failed:1};
 
 async function loadRows(){
@@ -83,7 +83,7 @@ function statusChip(x){return x.status==="text"?null:el("span",{class:"chip warn
 function winRow(x){
   const t=(x.t0?x.t0+"–"+(x.t1||"?"):"clip");
   return el("a",{class:"win",href:"#/win/"+wkey(x)},
-    el("div",{},el("span",{class:"t"},t),el("span",{class:"m"}," · "+(x.status==="held_out"?"held out":(x.lang||"language ?"))+(x.status==="text"&&x.n_words!=null?" · "+x.n_words+" words":"")),statusChip(x),x.complete===false?el("span",{class:"chip"},"partial provenance"):null),
+    el("div",{},el("span",{class:"t"},t),el("span",{class:"m"}," · "+(x.lang||"language ?")+(x.status==="text"?" · "+x.n_words+" words":"")),statusChip(x),x.complete===false?el("span",{class:"chip"},"partial provenance"):null),
     x.first_words?el("div",{class:"fw"},x.first_words+(x.n_words>12?" …":"")):null)}
 async function days(){
   setNav("days");show(el("p",{class:"mut"},"Loading…"));
@@ -103,15 +103,15 @@ async function days(){
   const box=el("div",{},dates.length?null:el("p",{class:"mut"},rows.length?"No days with speech match these filters.":"No index has been published yet."));
   for(const d of dates){
     const dr=f.filter(r=>r.ist_date===d),dt=dr.filter(r=>r.status==="text"),dk=(counts.by_date||{})[d]||0,open=state.open[d];
-    const words=dt.reduce((n,r)=>n+(r.n_words||0),0),anyBl=dr.some(r=>r.blind);
-    box.append(el("div",{class:"date"},el("a",{href:"#/days",onclick:e=>{e.preventDefault();state.open[d]=!open;days()}},(open?"▾ ":"▸ ")+fmtDate(d)),el("span",{class:"m"}," · "+words.toLocaleString()+" words"+(anyBl?" (blinded rooms not counted)":""))),
+    const words=dt.reduce((n,r)=>n+(r.n_words||0),0);
+    box.append(el("div",{class:"date"},el("a",{href:"#/days",onclick:e=>{e.preventDefault();state.open[d]=!open;days()}},(open?"▾ ":"▸ ")+fmtDate(d)),el("span",{class:"m"}," · "+words.toLocaleString()+" words")),
       el("div",{class:"dcov"},dr.length+" indexed · "+dt.length+" with text · "+dk+" run files in the vault"+(dk>dr.length?" · "+(dk-dr.length)+" not indexed yet":"")));
     if(!open)continue;
     const list=state.onlyText?dt:dr;
     const byRoom=new Map();for(const r of list){(byRoom.get(r.room_id)||byRoom.set(r.room_id,{name:r.room_name,ws:[]}).get(r.room_id)).ws.push(r)}
     for(const [rid,g] of [...byRoom].sort((a,b)=>a[1].name<b[1].name?-1:1)){
-      const tw=g.ws.filter(r=>r.status==="text"),rw=tw.reduce((n,r)=>n+(r.n_words||0),0),bl=g.ws.some(r=>r.blind),lg=[...new Set(tw.map(r=>r.lang).filter(Boolean))].join(", "),rk=d+"|"+rid,ro=state.open[rk];
-      box.append(el("div",{class:"roomrow"},el("span",{class:"room"},g.name),el("span",{class:"m"},(bl?"held out · "+g.ws.length:rw.toLocaleString()+" words · "+tw.length)+" windows"+(lg?" · "+lg:"")),
+      const tw=g.ws.filter(r=>r.status==="text"),rw=tw.reduce((n,r)=>n+(r.n_words||0),0),lg=[...new Set(tw.map(r=>r.lang).filter(Boolean))].join(", "),rk=d+"|"+rid,ro=state.open[rk];
+      box.append(el("div",{class:"roomrow"},el("span",{class:"room"},g.name),el("span",{class:"m"},rw.toLocaleString()+" words · "+tw.length+" windows"+(lg?" · "+lg:"")),
         el("a",{class:"read",href:"#/consult/"+rid+"/"+d},"Read the consult →"),
         el("a",{href:"#/days",class:"m",onclick:e=>{e.preventDefault();state.open[rk]=!ro;days()}},ro?"hide windows":"windows")));
       if(ro){g.ws.sort((a,b)=>(a.start||a.key)<(b.start||b.key)?-1:1);box.append(...g.ws.map(winRow))}
@@ -301,14 +301,14 @@ async function consult(room,date,at){
   const short=r=>String(r||"another run").replace(/^hist-(bulk|miner)-/,"");
   c.windows.forEach((w,wi)=>{
     const ws=bySeg.get(wi)||[];
-    if(w.partial){items.push({t:w.s,note:w.t0+"–"+w.t1+" · also transcribed by "+short(w.run_id)+" ("+(w.n_words==null?"words withheld":w.n_words+" words")+"); it overlaps windows shown elsewhere, so only its minutes not shown there are listed. Open it",warn:false,k:w.k});}
+    if(w.partial){items.push({t:w.s,note:w.t0+"–"+w.t1+" · also transcribed by "+short(w.run_id)+" ("+w.n_words+" words); it overlaps windows shown elsewhere, so only its minutes not shown there are listed. Open it",warn:false,k:w.k});}
     else if(!ws.length){items.push({t:w.s,note:w.t0+"–"+w.t1+" · "+(WINNOTE[w.status]||"no text."),warn:w.status!=="no_text",k:w.k});return}
     else if(!ws.some(x=>!x.refused&&x.text.trim())){items.push({t:w.s,note:w.t0+"–"+w.t1+" · "+WINNOTE.refused,warn:true,k:w.k});return}
     for(const x of ws){if(!x.refused&&!x.text.trim())continue;items.push({t:x.t,s:x,u:isUnclear(x)})}
   });
   const RXN={CAPTURED:["captured","cap"],MISHEARD:["misheard","mis"],"LOST-IN-TRANSLATION":["lost in translation","lit"],ABSENT:["absent","abs"],"ABSENT-SPEECH-GAP":["absent (audio gap)","gap"]};
   for(const r of (c.rx||[]))items.push({t:r.s,rx:r});
-  for(const w of (c.hidden||[]))items.push({t:w.s,note:w.t0+"–"+w.t1+" · also transcribed by "+short(w.run_id)+" ("+(w.status==="text"?(w.n_words==null?"words withheld":w.n_words+" words"):(WINNOTE[w.status]||"no text").replace(/\.$/,""))+"); hidden here because it overlaps a window shown. Open it",warn:false,k:w.k});
+  for(const w of (c.hidden||[]))items.push({t:w.s,note:w.t0+"–"+w.t1+" · also transcribed by "+short(w.run_id)+" ("+(w.status==="text"?w.n_words+" words":(WINNOTE[w.status]||"no text").replace(/\.$/,""))+"); hidden here because it overlaps a window shown. Open it",warn:false,k:w.k});
   items.sort((a,b)=>a.t-b.t); // stable: notes and lines of the same instant keep their order
   const q=(st.q||"").toLowerCase();
   const matches=[];const out=[];let i=0,gid=0;

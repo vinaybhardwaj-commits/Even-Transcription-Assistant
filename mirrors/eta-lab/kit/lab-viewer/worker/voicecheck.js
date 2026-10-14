@@ -11,7 +11,7 @@ import { isRater, raterHash } from "./rate.js";
 import { rangeOf } from "./g3.js";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-const ANS = ["agree", "disagree", "other_doctor", "unknown", "staff", "patient", "multiple", "not_judgeable"];
+const ANS = ["agree", "disagree", "other_doctor", "unknown", "patient", "multiple", "not_judgeable"];
 const HDRS = { "cache-control": "private, no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "cross-origin-resource-policy": "same-origin", "x-frame-options": "DENY" };
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { ...HDRS, "content-type": "application/json" } });
 const refuse = () => new Response("forbidden", { status: 403, headers: { ...HDRS, "content-type": "text/plain" } });
@@ -39,40 +39,7 @@ export function itemsOf(text) {
     if (!Array.isArray(d.doctors) || d.doctors.length > 400 || !d.doctors.every((x) => name(x, 60))) return null;
     doctors = [...new Set(d.doctors)];
   }
-  // OPTIONAL, backward compatible: references = {doctor name: [clip ids]} and doctor_meta = {doctor name: {display_name?, status?: confirmed|draft, code?}}.
-  // BLINDING: references are known voices, labelled by design (the doctor is named on screen). The unknown cards keep exactly the fields above,
-  // and no answer key or decoy cue ever enters items.json. Clip ids stay unique across cards and references.
-  const references = Object.create(null), doctor_meta = Object.create(null);
-  if (d.references !== undefined) {
-    if (!d.references || typeof d.references !== "object" || Array.isArray(d.references)) return null;
-    const names = Object.keys(d.references);
-    if (names.length > 60) return null;
-    for (const n of names) {
-      const arr = d.references[n];
-      if (!name(n, 60) || n === "__proto__" || !Array.isArray(arr) || arr.length === 0 || arr.length > 8) return null;
-      const ids = [];
-      for (const x of arr) {
-        const id = typeof x === "string" ? x : x?.clip_id;
-        if (typeof id !== "string" || !ID.test(id) || seenClip.has(id)) return null;
-        seenClip.add(id); ids.push(id);
-      }
-      references[n] = ids;
-    }
-  }
-  if (d.doctor_meta !== undefined) {
-    if (!d.doctor_meta || typeof d.doctor_meta !== "object" || Array.isArray(d.doctor_meta)) return null;
-    const names = Object.keys(d.doctor_meta);
-    if (names.length > 400) return null;
-    for (const n of names) {
-      const v = d.doctor_meta[n];
-      if (!name(n, 60) || n === "__proto__" || !v || typeof v !== "object" || Array.isArray(v) || !Object.keys(v).every((k) => ["display_name", "status", "code"].includes(k))) return null;
-      if (v.display_name !== undefined && !name(v.display_name, 60)) return null;
-      if (v.code !== undefined && !name(v.code, 60)) return null;
-      if (v.status !== undefined && v.status !== "confirmed" && v.status !== "draft") return null;
-      doctor_meta[n] = { ...(v.display_name !== undefined ? { display_name: v.display_name } : {}), ...(v.status !== undefined ? { status: v.status } : {}), ...(v.code !== undefined ? { code: v.code } : {}) };
-    }
-  }
-  return { cards, doctors, references: { ...references }, doctor_meta: { ...doctor_meta } };
+  return { cards, doctors };
 }
 
 // one card's answer. ans and conf may each still be missing (a saved draft); a card counts as done only with both plus know (Y/N: does the annotator know this doctor's voice; asked on every card). flags and audible = clip ids of THIS card (audible: a name or role can be heard in that clip; A4 4.8 drop rule).
@@ -120,12 +87,12 @@ export async function voicecheckRoute(request, env, url, who, pageShell) {
   if (part === "items") {
     if (request.method !== "GET") return new Response("method not allowed", { status: 405, headers: { ...HDRS, allow: "GET" } });
     const it = await loadItems(env, run);
-    return it ? json(200, { run_id: run, items_sha: it.sha, download: dlOn(env), doctors: it.doctors, references: it.references, doctor_meta: it.doctor_meta, cards: it.cards }) : json(404, { error: "no items for this run" });
+    return it ? json(200, { run_id: run, items_sha: it.sha, download: dlOn(env), doctors: it.doctors, cards: it.cards }) : json(404, { error: "no items for this run" });
   }
   if (part === "audio") {
     if (request.method !== "GET") return new Response("method not allowed", { status: 405, headers: { ...HDRS, allow: "GET" } });
     const it = await loadItems(env, run);
-    if (!it || !(it.cards.some((c) => c.clips.includes(item)) || Object.values(it.references).some((ids) => ids.includes(item)))) return json(404, { error: "not found" });
+    if (!it || !it.cards.some((c) => c.clips.includes(item))) return json(404, { error: "not found" });
     const key = `voicecheck/${run}/audio/${item}.m4a`, head = await env.RATINGS.head(key);
     if (!head) return json(404, { error: "audio not found" });
     const dq = url.searchParams.get("download");
@@ -217,30 +184,23 @@ h1{font-size:18px;margin:0 0 4px}h2{font-size:18px;margin:0 0 8px}.mut{color:var
 .clip{border-top:1px solid var(--line);padding:8px 0}.clip:first-of-type{border-top:0}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
 button{font:inherit;padding:10px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;min-height:44px}
-button.on{background:var(--acc);color:#fff;border-color:var(--acc);font-weight:700;box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--acc)}button.on::before{content:"\\2713 "}button:disabled,select:disabled,input:disabled{opacity:.55;cursor:default}
+button.on{background:var(--acc);color:#fff;border-color:var(--acc)}button:disabled,select:disabled,input:disabled{opacity:.55;cursor:default}
 audio{width:100%;margin:4px 0}select,input[type=text]{font:inherit;padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);max-width:100%}
 input.wide{width:100%}label.flag{font-size:14px;color:var(--mut)}
 a.btn{font:inherit;padding:10px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);min-height:44px;display:inline-flex;align-items:center;text-decoration:none;font-size:14px}
 .cl{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .bar{height:6px;background:var(--line);border-radius:3px;margin:8px 0}
-.badge{font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid var(--line);color:var(--mut);vertical-align:middle;margin-left:6px}.badge.confirmed{color:var(--acc);border-color:var(--acc)}
-.known{background:var(--card);border:1px solid var(--acc);border-radius:10px;padding:14px;margin:12px 0}h3{font-size:16px;margin:10px 0 4px}
-.refs{display:flex;gap:8px;flex-wrap:wrap}.refs audio{flex:1 1 140px;min-width:0;width:auto}
-.docs button{flex:1 1 130px}.more button{min-height:36px;font-size:14px;padding:6px 10px}
 .st{min-height:1.2em;color:var(--mut);font-size:14px}
 </style></head><body><main>
 <h1>Voice check</h1><div class="mut" id="prog">Loading</div>
 <div class="bar"><svg width="100%" height="6" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect id="barfill" x="0" y="0" width="0" height="6" fill="#0f6b6b"></rect></svg></div>
-<div class="mut">Listen to the known voices at the top, then to each unknown voice below. Tap who it is, then how sure you are (5 = certain) and whether you know that doctor\u0027s voice. Some cards are not the proposed doctor. You can change answers until you submit the batch.</div>
+<div class="mut">Each card is one voice. Listen to its clips, then say who it is and how sure you are (5 = certain). Some cards are not the proposed doctor. You can change answers until you submit the batch.</div>
 <div id="body"></div><div id="msg" class="st" role="status"></div>
 <script nonce="__NONCE__">
 const RUN="__RUN__";
 const $=(t,a,...k)=>{const e=document.createElement(t);for(const[x,y]of Object.entries(a||{}))e.setAttribute(x,y);for(const c of k)e.append(c);return e};
-const MORE=[["staff","Staff (nurse/assistant)"],["patient","Patient"],["multiple","Multiple voices"]];
-let cards=[],canDl=false,doctors=[],refs={},meta={},marks={},submitted=null,q=Promise.resolve();
-const own=(o,k)=>Object.prototype.hasOwnProperty.call(o,k)?o[k]:undefined;
-const label=(n)=>{const m=own(meta,n)||{};return m.display_name||n||m.code||""};
-const badge=(n)=>{const m=own(meta,n)||{};return m.status?$("span",{class:"badge "+m.status},m.status):null};
+const OPTS=[["agree","Agree"],["disagree","Disagree"],["other_doctor","Another doctor"],["unknown","Unknown voice"],["patient","Patient"],["multiple","Multiple voices in the clips"],["not_judgeable","Not judgeable"]];
+let cards=[],canDl=false,doctors=[],marks={},submitted=null,q=Promise.resolve();
 const say=(s)=>{document.getElementById("msg").textContent=s};
 const api=async(p,o)=>{const r=await fetch("/api/voicecheck/"+RUN+"/"+p,o);if(!r.ok)throw new Error(r.status);return r.json()};
 const clipUrl=(id)=>"/api/voicecheck/"+RUN+"/audio/"+encodeURIComponent(id);
@@ -249,18 +209,13 @@ const isDone=(m)=>!!m&&!!m.ans&&!!m.conf&&(m.know==="y"||m.know==="n")&&(m.ans!=
 function progress(){const n=cards.filter((c)=>isDone(marks[c.card_id])).length;document.getElementById("prog").textContent=n+" of "+cards.length+" voices done (answer and confidence)"+(submitted?" \u00b7 submitted":"");document.getElementById("barfill").setAttribute("width",String(cards.length?100*n/cards.length:0));return n}
 function render(){
   const b=document.getElementById("body");b.textContent="";const ro=!!submitted;
-  const rn=Object.keys(refs);
-  if(rn.length){const kv=$("section",{class:"known",id:"known"},$("h2",{},"Known voices"));
-    for(const n of rn){const h=$("h3",{},label(n));const bd=badge(n);if(bd)h.append(" ",bd);const r=$("div",{class:"refs"});for(const id of refs[n])r.append($("audio",{controls:"",preload:"metadata",src:clipUrl(id),"aria-label":label(n)}));kv.append(h,r)}
-    b.append(kv)}
   for(const c of cards){
     const cur=marks[c.card_id]?{...marks[c.card_id],flags:[...(marks[c.card_id].flags||[])],audible:[...(marks[c.card_id].audible||[])]}:{flags:[],audible:[]};
     const st=$("div",{class:"st"},isDone(cur)?"Saved.":"");
-    const hd=$("h2",{},"Proposed: "+label(c.proposed));const hb=badge(c.proposed);if(hb)hd.append(" ",hb);
-    const card=$("div",{class:"card"},hd);
+    const card=$("div",{class:"card"},$("h2",{},"Proposed: "+c.proposed));
     const clipFlags=[];
     c.clips.forEach((id,k)=>{
-      const au=$("audio",{controls:"",preload:"metadata",src:clipUrl(id)});
+      const au=$("audio",{controls:"",preload:"none",src:clipUrl(id)});
       const cl=$("div",{class:"cl"});
       if(canDl){cl.append($("a",{class:"btn",href:clipUrl(id)+"?download=1",download:id+".m4a"},"Download"))}
       if(canDl&&canShare){const sh=$("button",{type:"button"},"Share");sh.onclick=async()=>{try{const r=await fetch(clipUrl(id)+"?download=1&via=share");if(!r.ok)throw new Error(r.status);const f=new File([await r.blob()],id+".m4a",{type:"audio/mp4"});await navigator.share({files:[f]})}catch(e){if(e&&e.name!=="AbortError")say("Could not share ("+e.message+")")}};cl.append(sh)}
@@ -271,27 +226,27 @@ function render(){
       card.append($("div",{class:"clip"},$("div",{class:"mut"},"Clip "+(k+1)),au,$("label",{class:"flag"},fl," this clip is different from the others"),$("label",{class:"flag"},ad," a name or role is audible in this clip"),cl));
     });
     const ansB={},confB={},knowB={};
-    const dl=[...doctors];if(!dl.includes(c.proposed))dl.unshift(c.proposed);if(cur.ans==="other_doctor"&&cur.other&&!dl.includes(cur.other))dl.push(cur.other);
-    const ar=$("div",{class:"row docs"}),mr=$("div",{class:"row more"},$("span",{class:"mut"},"More")),cr=$("div",{class:"row"},$("span",{class:"mut"},"Confidence")),kr=$("div",{class:"row"},$("span",{class:"mut"},"I know this doctor's voice"));
+    const ar=$("div",{class:"row"}),cr=$("div",{class:"row"},$("span",{class:"mut"},"Confidence")),kr=$("div",{class:"row"},$("span",{class:"mut"},"I know this doctor's voice"));
+    const sel=$("select",{"aria-label":"Which doctor"});sel.append($("option",{value:""},"Pick a doctor"));for(const d of doctors)sel.append($("option",{value:d},d));
+    const free=$("input",{type:"text",maxlength:"80",placeholder:"or type a name",class:"wide"});
+    const otherBox=$("div",{class:"row"},sel,free);
     const note=$("input",{type:"text",maxlength:"1000",placeholder:"Note (optional)",class:"wide"});note.value=cur.note||"";
     const second=$("input",{type:"text",maxlength:"500",placeholder:"Second opinion (optional): who, and what they said",class:"wide"});second.value=cur.second||"";
-    note.disabled=second.disabled=ro;
-    const selKey=()=>cur.ans==="agree"?"doc:"+c.proposed:cur.ans==="other_doctor"?"doc:"+cur.other:cur.ans||"";
-    const mark=(x,on)=>{x.className=on?"on":"";x.setAttribute("aria-pressed",on?"true":"false")};
-    const paint=()=>{for(const [k,x] of Object.entries(ansB))mark(x,selKey()===k);for(const [k,x] of Object.entries(confB))mark(x,cur.conf===Number(k));for(const [k,x] of Object.entries(knowB))mark(x,cur.know===k)};
+    sel.disabled=free.disabled=note.disabled=second.disabled=ro;
+    const other=()=>(free.value.trim()||sel.value||"");
+    if(cur.other){if(doctors.includes(cur.other))sel.value=cur.other;else free.value=cur.other}
+    const paint=()=>{for(const [k,x] of Object.entries(ansB))x.className=cur.ans===k?"on":"";for(const [k,x] of Object.entries(confB))x.className=cur.conf===Number(k)?"on":"";for(const [k,x] of Object.entries(knowB))x.className=cur.know===k?"on":"";otherBox.hidden=cur.ans!=="other_doctor"};
     const persist=()=>{
       if(!cur.ans&&!cur.conf&&!cur.know&&!cur.flags.length&&!cur.audible.length&&!note.value&&!second.value)return;
       const mk={ts:new Date().toISOString(),flags:cur.flags,audible:cur.audible};if(cur.ans)mk.ans=cur.ans;if(cur.conf)mk.conf=cur.conf;if(cur.know)mk.know=cur.know;
-      if(cur.ans==="other_doctor"&&cur.other)mk.other=cur.other;
+      if(cur.ans==="other_doctor"&&other())mk.other=other();
       if(note.value)mk.note=note.value;if(second.value)mk.second=second.value;
       q=q.then(async()=>{try{await api("mine",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({card:c.card_id,mark:mk})});marks[c.card_id]={ans:mk.ans||null,conf:mk.conf||null,know:mk.know||null,other:mk.other||"",note:mk.note||"",second:mk.second||"",flags:mk.flags,audible:mk.audible,ts:mk.ts};cur.other=mk.other||"";st.textContent=isDone(marks[c.card_id])?"Saved.":"Saved. Still needs "+(!mk.ans?"an answer":!mk.conf?"a confidence":"the voice-known Yes/No")+(mk.ans==="other_doctor"&&!mk.other?" and a doctor name":"")+".";updateSubmit()}catch(e){st.textContent="Save failed ("+e.message+"). Try again."}})};
-    for(const d of dl){const x=$("button",{type:"button","data-ans":d===c.proposed?"agree":"other_doctor","data-other":d===c.proposed?"":d},label(d));ansB["doc:"+d]=x;x.disabled=ro;x.onclick=()=>{if(d===c.proposed){cur.ans="agree";cur.other=""}else{cur.ans="other_doctor";cur.other=d}paint();persist()};ar.append(x)}
-    for(const [k,l] of [["unknown","None of these"],["not_judgeable","Can't tell"]]){const x=$("button",{type:"button","data-ans":k},l);ansB[k]=x;x.disabled=ro;x.onclick=()=>{cur.ans=k;cur.other="";paint();persist()};ar.append(x)}
-    for(const [k,l] of MORE){const x=$("button",{type:"button","data-ans":k},l);ansB[k]=x;x.disabled=ro;x.onclick=()=>{cur.ans=k;cur.other="";paint();persist()};mr.append(x)}
+    for(const [k,l] of OPTS){const x=$("button",{type:"button"},l);ansB[k]=x;x.disabled=ro;x.onclick=()=>{cur.ans=k;paint();persist()};ar.append(x)}
     for(const n of [1,2,3,4,5]){const x=$("button",{type:"button"},String(n));confB[n]=x;x.disabled=ro;x.onclick=()=>{cur.conf=n;paint();persist()};cr.append(x)}
     for(const [k,l] of [["y","Yes"],["n","No"]]){const x=$("button",{type:"button"},l);knowB[k]=x;x.disabled=ro;x.onclick=()=>{cur.know=k;paint();persist()};kr.append(x)}
-    note.onchange=persist;second.onchange=persist;
-    card.append(ar,mr,cr,kr,note,second,st);paint();b.append(card);
+    sel.onchange=()=>{if(sel.value)free.value="";cur.other=other();persist()};free.onchange=()=>{if(free.value.trim())sel.value="";cur.other=other();persist()};note.onchange=persist;second.onchange=persist;
+    card.append(ar,otherBox,cr,kr,note,second,st);paint();b.append(card);
   }
   const sb=$("button",{type:"button",id:"submit"},"Submit batch");sb.disabled=ro;
   sb.onclick=async()=>{if(!confirm("Submit the batch? Answers become read-only."))return;try{await q;const r=await api("mine",{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({submit:true})});submitted=r.submitted;render();say("Submitted. Thank you.")}catch(e){say("Could not submit ("+e.message+")")}};
@@ -299,6 +254,6 @@ function render(){
   window.updateSubmit=()=>{const n=progress();sb.disabled=!!submitted||n<cards.length};window.updateSubmit();
 }
 (async()=>{try{
-  const [i,m]=await Promise.all([api("items"),api("mine")]);cards=i.cards;canDl=i.download===true;doctors=i.doctors||[];refs=i.references||{};meta=i.doctor_meta||{};marks=m.t||{};submitted=m.submitted||null;render();if(m.stale)say("The clip set was replaced after answers were saved; earlier answers are not shown and new answers are refused. Ask for a new run.");
+  const [i,m]=await Promise.all([api("items"),api("mine")]);cards=i.cards;canDl=i.download===true;doctors=i.doctors||[];marks=m.t||{};submitted=m.submitted||null;render();if(m.stale)say("The clip set was replaced after answers were saved; earlier answers are not shown and new answers are refused. Ask for a new run.");
 }catch(e){document.getElementById("prog").textContent="No voices loaded for this run yet ("+e.message+")."}})();
 </script></main></body></html>`;
