@@ -75,8 +75,6 @@ test('flattenActionQueueItems uses the CM card key after informational drop', ()
   const items = flattenActionQueueItems(doctors);
   assert.equal(items.length, 1);
   assert.equal(items[0].queue_item_ref, actionQueueItemRef('docA', 'drug_interaction'));
-  assert.equal(items[0].note_class, 'opd');
-  assert.equal(items[0].attribution, 'mapped');
   assert.equal(items[0].signal_type, 'drug_interaction');
   assert.ok(!items.some((i) => i.signal_type === 'high_alert_medication'));
 });

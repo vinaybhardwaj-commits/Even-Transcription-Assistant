@@ -2,9 +2,8 @@
  * POST /api/admin/triage/stamp — apply one bot/human disposition to the shared OPD Action queue.
  *
  * Valid/bug/route delegate to insertDecision, the same store used by /care/triage. Consequently a
- * route mints through the existing opd_gov_signal path. Hold and drop_informational call
- * insertQueueDisposition: a type row the Action queue reader treats as triaged, with validity
- * non_clinical and no opd_gov_signal. They do not write valid_signal or audit_bug.
+ * route mints through the existing opd_gov_signal path. Hold and drop_informational are audit-only
+ * dispositions: they deliberately do not manufacture a clinical validity label or doctor signal.
  *
  * A clinical stamp (valid/bug/route) must carry run_id and/or a request id (body client_request_id
  * or the Idempotency-Key header, the same pair doctor-response honors). The same
@@ -34,20 +33,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { requireAdmin } from '@/lib/admin-gate';
 import { sql } from '@/lib/db';
-import { insertDecision, insertQueueDisposition } from '@/lib/opd-triage-store';
+import { insertDecision } from '@/lib/opd-triage-store';
 import { parseActionQueueQuery, flattenActionQueueItems, readActionQueue } from '@/lib/triage/queue-read';
 import {
   clinicalStampRequiresIdentity,
   parseQueueItemRef,
   resolveStampRequestId,
-  sameQueueItem,
-  triageClassMintAllowed,
   triageWriteEnabled,
   validateTriageStamp,
   type NormalizedTriageStamp,
   type TriageStampInput,
 } from '@/lib/triage/stamp-schema';
-import { isUnmappedQueueDoctor, UNMAPPED_DOCTOR_REASON } from '@/lib/triage/note-class';
 
 const run = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 const APP = process.env.APP_SOURCE || 'standalone';
@@ -169,7 +165,6 @@ function stampResponse(row: StampRecord, payload: StampPayload, replayed: boolea
     replayed,
     stamp_id: row.id,
     queue_item_ref: row.queue_item_ref,
-    note_class: parseQueueItemRef(row.queue_item_ref)?.note_class ?? 'opd',
     verb: row.verb,
     outcome: row.outcome,
     client_request_id: row.client_request_id,
@@ -325,24 +320,10 @@ export async function POST(req: NextRequest) {
   const queue = await readActionQueue(
     parseActionQueueQuery(stampQueueInput(req, body as Record<string, unknown>)),
   ).catch(() => null);
-  const item = queue && flattenActionQueueItems(queue.doctors, queue.unmapped)
-    .find((candidate) => sameQueueItem(candidate.queue_item_ref, stamp.queue_item_ref));
+  const item = queue && flattenActionQueueItems(queue.doctors)
+    .find((candidate) => candidate.queue_item_ref === stamp.queue_item_ref);
   if (!queue || !item) {
     return NextResponse.json({ ok: false, error: 'queue item is not present in the current Action queue' }, { status: 404 });
-  }
-
-  if (isUnmappedQueueDoctor(identity.doctor_uid)) {
-    if (stamp.verb !== 'hold' || stamp.reason !== UNMAPPED_DOCTOR_REASON) {
-      return NextResponse.json({
-        ok: false,
-        error: 'unmapped_doctor: unresolved doctor cannot be routed or labelled; stamp hold with reason unmapped_doctor',
-      }, { status: 400 });
-    }
-  } else if ((stamp.verb === 'valid' || stamp.verb === 'bug' || stamp.verb === 'route') && !triageClassMintAllowed(identity.note_class)) {
-    return NextResponse.json({
-      ok: false,
-      error: `TRIAGE_BOT_WRITE_CLASSES does not allow note_class=${identity.note_class} (default allow-list is opd; route mint stays blocked until that class is listed)`,
-    }, { status: 403 });
   }
 
   const requestMetadata = {
@@ -386,46 +367,17 @@ export async function POST(req: NextRequest) {
   const stampId = claim.row.id;
   const recorded: StampRecord = { ...claim.row, outcome: 'accepted' };
 
-  // buildQueue hides a card from status=untriaged once any type decision exists. Record that
-  // decision without a clinical label and without minting a governance signal.
+  // These are intentional non-clinical dispositions. Keeping them out of opd_audit_triage avoids
+  // turning "wait" or an informational drop into a false valid/bug label.
   if (stamp.verb === 'hold' || stamp.verb === 'drop_informational') {
+    const outcome = stamp.verb === 'hold' ? 'held' : 'dropped_informational';
+    const payload: StampPayload = { decision: null, signal: null, signal_error: null };
     try {
-      const applied = await insertQueueDisposition({
-        doctor_uid: identity.doctor_uid,
-        signal_type: identity.signal_type,
-        note_class: identity.note_class,
-        window_from: queue.window.from,
-        window_to: queue.window.to,
-        disposition: stamp.verb,
-        reason: stamp.reason,
-        cm_user: stamp.actor,
-      });
-      const outcome = stamp.verb === 'hold' ? 'held' : 'dropped_informational';
-      const payload: StampPayload = {
-        decision: { id: applied.id, ...applied.decision },
-        signal: null,
-        signal_error: null,
-      };
-      try {
-        await saveOutcome(stampId, outcome, applied.id, null, null, payload);
-      } catch (e) {
-        // The disposition row already exists. Do not mark the stamp failed — a retry would
-        // insert another row. Leave outcome='accepted' so a concurrent retry is a 409.
-        return NextResponse.json({
-          ok: false,
-          stamp_id: stampId,
-          error: `disposition recorded but stamp audit update failed: ${(e as Error).message}`,
-          decision: payload.decision,
-          signal: null,
-        }, { status: 500 });
-      }
-      return stampResponse({ ...recorded, outcome, decision_id: applied.id }, payload, false);
+      await saveOutcome(stampId, outcome, null, null, null, payload);
     } catch (e) {
-      const error = String((e as Error).message);
-      await run(`UPDATE triage_stamp_events SET outcome='failed', error=$2 WHERE id=$1::uuid`, [stampId, error]).catch(() => undefined);
-      const validation = /required|must be|instance scope/.test(error);
-      return NextResponse.json({ ok: false, stamp_id: stampId, error }, { status: validation ? 400 : 500 });
+      return NextResponse.json({ ok: false, stamp_id: stampId, error: String((e as Error).message) }, { status: 500 });
     }
+    return stampResponse({ ...recorded, outcome }, payload, false);
   }
 
   const decision = stamp.verb === 'bug'

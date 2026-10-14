@@ -5,22 +5,12 @@
  * This module never stamps opd_audit_triage and never mints opd_gov_signal.
  */
 
-import { DEFAULT_NOTE_CLASS, type NoteClass } from './note-class';
-
 export const TRIAGE_SHADOW_VERBS = ['valid', 'bug', 'route', 'hold', 'drop_informational'] as const;
 export type TriageShadowVerb = (typeof TRIAGE_SHADOW_VERBS)[number];
 
-/**
- * Class-safe Action-queue card identity: `note_class|doctor_uid|signal_type`.
- * The two-argument form is an OPD card. A legacy `doctor_uid|signal_type` string
- * still parses as opd (see parseQueueItemRef) so in-flight OPD stamps keep working.
- */
-export function actionQueueItemRef(
-  doctorUid: string,
-  signalType: string,
-  noteClass: NoteClass = DEFAULT_NOTE_CLASS,
-): string {
-  return `${noteClass}|${doctorUid}|${signalType}`;
+/** Type-level Action-queue card identity — same key the CM board uses (`doctor_uid|signal_type`). */
+export function actionQueueItemRef(doctorUid: string, signalType: string): string {
+  return `${doctorUid}|${signalType}`;
 }
 
 export interface ShadowProposalInput {
@@ -66,7 +56,7 @@ export function validateShadowProposal(
 ): { ok: true; value: NormalizedShadowProposal } | { ok: false; error: string } {
   const queue_item_ref = dstr(input.queue_item_ref, 200);
   if (!queue_item_ref || !queue_item_ref.includes('|')) {
-    return { ok: false, error: 'queue_item_ref required as note_class|doctor_uid|signal_type' };
+    return { ok: false, error: 'queue_item_ref required as doctor_uid|signal_type' };
   }
   if (!inSet(TRIAGE_SHADOW_VERBS, input.verb)) {
     return { ok: false, error: 'verb must be valid|bug|route|hold|drop_informational' };

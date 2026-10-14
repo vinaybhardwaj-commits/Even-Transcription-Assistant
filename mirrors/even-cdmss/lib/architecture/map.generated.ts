@@ -343,10 +343,6 @@ export const MAP_MODULES: MapModule[] = [
     "plane": "unregistered"
   },
   {
-    "id": "doctor-facing",
-    "plane": "unregistered"
-  },
-  {
     "id": "doctor-metrics-refresh",
     "plane": "unregistered"
   },
@@ -744,10 +740,6 @@ export const MAP_MODULES: MapModule[] = [
   },
   {
     "id": "opd-ingest-core",
-    "plane": "unregistered"
-  },
-  {
-    "id": "opd-lab-write-guard",
     "plane": "unregistered"
   },
   {
@@ -1739,11 +1731,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "app/api",
     "to": "doc-transport-core",
-    "kind": "value"
-  },
-  {
-    "from": "app/api",
-    "to": "doctor-facing",
     "kind": "value"
   },
   {
@@ -3147,11 +3134,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "db",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
-  },
-  {
     "from": "ddi",
     "to": "ddi-tags",
     "kind": "value"
@@ -3327,11 +3309,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "type"
   },
   {
-    "from": "doctor-facing",
-    "to": "opd-gov-signal-core",
-    "kind": "type"
-  },
-  {
     "from": "doctor-metrics-refresh",
     "to": "db",
     "kind": "value"
@@ -3352,11 +3329,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "doctor-metrics-refresh",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
-  },
-  {
     "from": "doctor-metrics-store",
     "to": "db",
     "kind": "value"
@@ -3365,11 +3337,6 @@ export const MAP_EDGES: MapEdge[] = [
     "from": "doctor-metrics-store",
     "to": "doctor-directory-core",
     "kind": "type"
-  },
-  {
-    "from": "doctor-metrics-store",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
   },
   {
     "from": "dose-aggregation-core",
@@ -3994,11 +3961,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "lab-v2",
     "to": "opd-ingest-core",
-    "kind": "value"
-  },
-  {
-    "from": "lab-v2",
-    "to": "opd-lab-write-guard",
     "kind": "value"
   },
   {
@@ -4663,11 +4625,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "opd-audit-store",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
-  },
-  {
-    "from": "opd-audit-store",
     "to": "opd-longitudinal",
     "kind": "value"
   },
@@ -4723,16 +4680,6 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "opd-gov-read",
-    "to": "doctor-facing",
-    "kind": "value"
-  },
-  {
-    "from": "opd-gov-read",
-    "to": "ipd-doctor-hop",
-    "kind": "value"
-  },
-  {
-    "from": "opd-gov-read",
     "to": "opd-audit-ui",
     "kind": "value"
   },
@@ -4747,11 +4694,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "opd-gov-read",
-    "to": "triage",
-    "kind": "value"
-  },
-  {
     "from": "opd-gov-signal-store",
     "to": "db",
     "kind": "value"
@@ -4759,16 +4701,6 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "opd-gov-signal-store",
     "to": "opd-gov-signal-core",
-    "kind": "value"
-  },
-  {
-    "from": "opd-gov-signal-store",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
-  },
-  {
-    "from": "opd-gov-signal-store",
-    "to": "triage",
     "kind": "value"
   },
   {
@@ -4810,11 +4742,6 @@ export const MAP_EDGES: MapEdge[] = [
     "from": "opd-longitudinal",
     "to": "opd-ingest-core",
     "kind": "type"
-  },
-  {
-    "from": "opd-longitudinal",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
   },
   {
     "from": "opd-longitudinal",
@@ -5002,11 +4929,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "type"
   },
   {
-    "from": "opd-triage-core",
-    "to": "triage",
-    "kind": "value"
-  },
-  {
     "from": "opd-triage-store",
     "to": "db",
     "kind": "value"
@@ -5018,17 +4940,7 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "opd-triage-store",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
-  },
-  {
-    "from": "opd-triage-store",
     "to": "opd-triage-core",
-    "kind": "value"
-  },
-  {
-    "from": "opd-triage-store",
-    "to": "triage",
     "kind": "value"
   },
   {
@@ -5642,11 +5554,6 @@ export const MAP_EDGES: MapEdge[] = [
     "kind": "value"
   },
   {
-    "from": "record-audit-link-store",
-    "to": "opd-lab-write-guard",
-    "kind": "value"
-  },
-  {
     "from": "rerank",
     "to": "llm",
     "kind": "value"
@@ -5953,17 +5860,7 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "triage",
-    "to": "doctor-facing",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
     "to": "even-ground-core",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "ipd-doctor-hop",
     "kind": "value"
   },
   {
@@ -5973,23 +5870,8 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "triage",
-    "to": "opd-audit-pdf",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
     "to": "opd-audit-ui",
     "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "opd-gov-signal-core",
-    "kind": "value"
-  },
-  {
-    "from": "triage",
-    "to": "opd-note-audit-core",
-    "kind": "type"
   },
   {
     "from": "triage",
@@ -6343,24 +6225,6 @@ export const VERSION_REGISTRY: VersionRow[] = [
     "constName": "OPD_RECOVERY_ENGINE_VERSION",
     "value": "opd-note-audit/0.81.18",
     "file": "lib/opd-note-audit-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "OT_ENGINE_VERSION",
-    "value": "ot-note-audit/0.1",
-    "file": "lib/triage/ot-audit-core.ts",
-    "derived": false
-  },
-  {
-    "constName": "OT_ENGINE_VERSIONS_CURRENT",
-    "value": "[OT_ENGINE_VERSION]",
-    "file": "lib/triage/ot-audit-core.ts",
-    "derived": true
-  },
-  {
-    "constName": "PAIRED_PROMPT_VERSION",
-    "value": "paired-opd-prompt/1",
-    "file": "lib/lab-v2/paired-audit-core.ts",
     "derived": false
   },
   {

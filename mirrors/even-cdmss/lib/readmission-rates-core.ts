@@ -805,8 +805,6 @@ export interface FreshnessInfo {
   newestReturnAt: string | null;
   lastAuditAt: string | null;
   lastCheckAt: string | null;
-  /** Agent health (narrative leg + pipeline). Absent when the health read faulted. */
-  health?: { status: 'green' | 'red'; reasons: string[]; lastNarrativeAt: string | null };
 }
 export const FRESHNESS_NULL = '—';
 export const FRESHNESS_CADENCE = 'checks every 30 min';

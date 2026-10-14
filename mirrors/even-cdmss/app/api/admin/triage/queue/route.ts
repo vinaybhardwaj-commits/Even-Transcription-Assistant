@@ -27,7 +27,7 @@ async function serve(req: NextRequest, query: ReturnType<typeof parseActionQueue
   const result = await readActionQueue(query);
   return NextResponse.json({
     ...result,
-    items: flattenActionQueueItems(result.doctors, result.unmapped),
+    items: flattenActionQueueItems(result.doctors),
   });
 }
 
