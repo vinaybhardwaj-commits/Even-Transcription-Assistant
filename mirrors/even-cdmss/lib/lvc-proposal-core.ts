@@ -129,89 +129,14 @@ export type ProposalStatus = (typeof PROPOSAL_STATUSES)[number];
 /** The MCP has no user identity, so this default must never be accepted as a ratifier (decision 11). */
 export const DEFAULT_AUTHOR = 'cowork-orchestrator';
 
-/**
- * §17.7 DECISION 94 — the keyword and category gate.
- *
- * ⚠️ A RULE MATCHES THROUGH ITS KEYWORDS AND NOTHING ELSE. `matchRule` in
- * `lib/opd-lvc-classify-core.ts` is explicit — *"zero-keyword / empty-token rules never match"* —
- * so until this parser could carry them, every rule promoted through F14 landed active with
- * `keywords = '{}'` and stamped nothing, for ever. Measured 06 Sep 2026 on production: all 109
- * active rules DO carry keywords, because the seed loader wrote them; the F14 promotion path was
- * the one that dropped them. Found by the Lab MCP v2 C2 build, ratified as decision 94.
- *
- * ⚠️ AND THEY STAY OPTIONAL, DELIBERATELY. An old-shape propose — no keywords, no category — is
- * still accepted and still lands an inert rule. Making them mandatory would have been a second,
- * unratified change to F14's contract, and Lab MCP v2 already refuses inert rules by name at
- * `rule_simulate` and `release_prepare`, which is where that judgement belongs.
- */
-export const MAX_KEYWORDS = 12;
-
-/**
- * The twelve `lvc_category` values, verbatim from `lib/opd-lvc-classify-core.ts`'s `LVC_CATEGORIES`.
- *
- * ⚠️ RESTATED HERE RATHER THAN IMPORTED, AND THE TEST PINS THE TWO TOGETHER. This file's header
- * promises "no db, no Next, no transport imports"; the classifier core is equally pure, so an import
- * would have been legal — but `lvc-proposal-core` is imported by the MCP surface and the classifier
- * pulls in the whole category taxonomy including its regexes. A frozen copy plus an equality
- * assertion is the same guarantee with none of the coupling.
- */
-export const PROPOSAL_CATEGORIES = [
-  'antibiotic', 'imaging', 'supplement_polypharmacy',
-  'therapeutic_duplication', 'systemic_steroid', 'gi_ppi_prokinetic', 'antihistamine_allergy',
-  'nsaid_analgesic', 'cough_cold_fdc', 'cough_expectorant', 'unindicated_investigation',
-  'other',
-] as const;
-export type ProposalCategory = (typeof PROPOSAL_CATEGORIES)[number];
-
-export type KeywordCheck =
-  | { ok: true; keywords: string[]; category: ProposalCategory | null }
-  | { ok: false; error: string };
-
-/**
- * Decision 94's gate. Absent is fine on both. Present and wrong is refused rather than silently
- * repaired, for the same reason the citation gate refuses a mistyped year: a keyword that was
- * quietly dropped produces a rule that quietly never fires, which is the exact failure this
- * decision exists to close.
- */
-export function checkKeywordFields(input: unknown): KeywordCheck {
-  const a: Record<string, unknown> = (input && typeof input === 'object') ? input as Record<string, unknown> : {};
-
-  let keywords: string[] = [];
-  if (a.keywords !== null && a.keywords !== undefined) {
-    if (!Array.isArray(a.keywords)) return { ok: false, error: 'keywords must be an array of phrases' };
-    const cleaned = a.keywords.map((k) => String(k).trim()).filter((k) => k.length > 0);
-    if (cleaned.length !== a.keywords.length) {
-      return { ok: false, error: 'every keyword must be a non-empty phrase; a blank one would never match and would hide that it never matched' };
-    }
-    if (cleaned.length > MAX_KEYWORDS) {
-      return { ok: false, error: `at most ${MAX_KEYWORDS} keywords — a rule with more is describing several rules` };
-    }
-    // De-duped case-insensitively, the same normalisation `matchRule` applies before matching, so
-    // the stored list cannot differ from the list that will actually be used.
-    const seen = new Set<string>();
-    keywords = cleaned.filter((k) => { const key = k.toLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; });
-  }
-
-  let category: ProposalCategory | null = null;
-  if (a.category !== null && a.category !== undefined && String(a.category).trim() !== '') {
-    const c = String(a.category).trim();
-    if (!(PROPOSAL_CATEGORIES as readonly string[]).includes(c)) {
-      return { ok: false, error: `category must be one of ${PROPOSAL_CATEGORIES.join(', ')}` };
-    }
-    category = c as ProposalCategory;
-  }
-  return { ok: true, keywords, category };
-}
-
 export type ProposeParsed =
-  | { ok: true; value: { statement: string; rationale: string | null; evidence_note: string | null; proposed_by: string; supersedes_id: string | null; keywords: string[]; category: ProposalCategory | null; citation: Extract<CitationCheck, { ok: true }>['normalized'] } }
+  | { ok: true; value: { statement: string; rationale: string | null; evidence_note: string | null; proposed_by: string; supersedes_id: string | null; citation: Extract<CitationCheck, { ok: true }>['normalized'] } }
   | { ok: false; error: string; duplicates?: DuplicateHit[] };
 
 /**
- * Validate an lvc_propose call. Three gates, in order:
+ * Validate an lvc_propose call. Two gates, in order:
  *  1. CITATION (F13/F14) — the same checkCitationFields used on ingest, so one rule governs both.
- *  2. KEYWORDS AND CATEGORY (decision 94) — optional, but refused if present and malformed.
- *  3. DEDUPLICATION (A10.4) — refuse a near-duplicate unless supersedes_id is supplied, and return
+ *  2. DEDUPLICATION (A10.4) — refuse a near-duplicate unless supersedes_id is supplied, and return
  *     the offending statements so the caller can supersede deliberately rather than guess.
  * Never writes. Never touches lvc_recommendations.
  */
@@ -224,11 +149,6 @@ export function parseProposeArgs(input: unknown, existing: ExistingStatement[] =
 
   const cit = checkCitationFields(a as CitationFields);
   if (!cit.ok) return { ok: false, error: cit.error };
-
-  // Decision 94. Checked BEFORE the dedup scan: a malformed keyword list is a caller error worth
-  // naming on its own, and reporting it alongside a near-duplicate report would bury it.
-  const kw = checkKeywordFields(a);
-  if (!kw.ok) return { ok: false, error: kw.error };
 
   if (!supersedes_id) {
     const dups = findNearDuplicates(statement, existing);
@@ -244,7 +164,7 @@ export function parseProposeArgs(input: unknown, existing: ExistingStatement[] =
     ok: true,
     value: {
       statement, rationale: st(a.rationale, 4000), evidence_note: st(a.evidence_note, 4000),
-      proposed_by, supersedes_id, keywords: kw.keywords, category: kw.category, citation: cit.normalized,
+      proposed_by, supersedes_id, citation: cit.normalized,
     },
   };
 }

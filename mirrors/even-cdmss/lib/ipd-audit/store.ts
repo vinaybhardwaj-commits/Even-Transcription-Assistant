@@ -53,17 +53,6 @@ async function ipdColumnExists(column: string): Promise<boolean> {
 export const IPD_ENGINE_VERSION = 'ipd-discharge-audit/0.2';
 /** Mini/Qwen backfill rows — same engine, model-swapped; invisible to prod reads. */
 export const IPD_MINI_ENGINE_VERSION = `${IPD_ENGINE_VERSION}-mini`;
-/**
- * CASE-AGENTS-SPINE P3 (O11) — the STAY-level auditor's engine version. A NEW NAME, not a bump:
- * `ipd-discharge-audit/0.2` rows stay exactly as they are, forever, and the stay auditor APPENDS
- * beside them. The composite PK (document_id, engine_version) is what makes that true by
- * construction — saveIpdAudit's ON CONFLICT names both columns, so a stay row cannot collide with,
- * overwrite, or be overwritten by, the discharge-only row for the same document.
- *
- * Re-exported from lib/ipd-audit/stay-material.ts, which owns the string, so the engine version and
- * the material it names cannot drift apart.
- */
-export { IPD_STAY_ENGINE_VERSION } from './stay-material';
 
 export interface IpdAuditRow {
   // link-back keys
@@ -196,30 +185,6 @@ export async function getIpdAudit(id: string): Promise<Record<string, unknown> |
     `SELECT * FROM ipd_discharge_audits WHERE id = $1 LIMIT 1`, [id],
   )) as Array<Record<string, unknown>>;
   return rows[0] ?? null;
-}
-
-/**
- * CASE-AGENTS-SPINE P3 — the SIBLING row for one document at another engine version.
- *
- * The case page opens a row by id (one engine version) and needs to show the other beside it: the
- * parked discharge-only audit and the stay-level one are two READINGS OF THE SAME STAY, and a
- * surface that shows one while the other exists is hiding a disagreement. Null when that version has
- * not been run for this document, which is the normal state until a stay audit is triggered.
- *
- * FAIL-SAFE: any DB fault returns null. A sibling lookup must never take down the report above it.
- * ⚠️ INFERRED SQL: this sandbox has no live Neon.
- */
-export async function getIpdAuditByVersion(documentId: string, engineVersion: string): Promise<Record<string, unknown> | null> {
-  if (!documentId || !engineVersion) return null;
-  try {
-    const rows = (await sql(
-      `SELECT * FROM ipd_discharge_audits WHERE document_id = $1 AND engine_version = $2 LIMIT 1`,
-      [documentId, engineVersion],
-    )) as Array<Record<string, unknown>>;
-    return rows[0] ?? null;
-  } catch {
-    return null;
-  }
 }
 
 // ── recompute-on-read (Scoring policy Phase A, decision §1.1) ────────────────────────────────────

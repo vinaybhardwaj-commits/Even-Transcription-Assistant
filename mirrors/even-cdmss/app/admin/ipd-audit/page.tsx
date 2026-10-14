@@ -110,18 +110,6 @@ export default async function IpdAuditOverview({ searchParams }: {
 
       <IpdTabs active="overview" />
 
-      {/* The IPD EPISODE audit's entry point (PRD §10). Rendered ONLY when
-          IPD_EPISODE_AUDIT_ENABLED is on — with the flag off this link does not exist and the
-          route it points at 404s, so there is no half-open door for a clinician to find. */}
-      {process.env.IPD_EPISODE_AUDIT_ENABLED === '1' ? (
-        <div className="mt-3">
-          <Link href="/admin/ipd-audit/episodes" className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-            Episode audits
-            <span className="text-[10.5px] font-normal text-slate-400">the whole admission, blinded day by day</span>
-          </Link>
-        </div>
-      ) : null}
-
       {total === 0 ? (
         <div className="mt-6 rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">
           No audits for this {period} yet{filedCount > 0 ? <> — <b>{filedCount}</b> discharge summar{filedCount === 1 ? 'y was' : 'ies were'} filed in the period</> : null}.

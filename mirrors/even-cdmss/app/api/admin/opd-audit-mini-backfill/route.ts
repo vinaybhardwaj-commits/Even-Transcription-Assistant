@@ -40,8 +40,7 @@ export const maxDuration = 300;
  * a Bedrock run does not touch.
  *
  * Auth: Vercel cron header / Bearer|?secret=CRON_SECRET / admin session — unchanged.
- *   GET  ?auto=1        → work the active run (the cron tick); with NO active OPD run, the tick
- *                          works the readmission-narrative worker's run instead (R4-8, 18 Aug)
+ *   GET  ?auto=1        → work the active run (the cron tick)
  *   GET  (no args)      → status
  *   POST {action:…}     → start_run | pause | resume | stop | status   (§C3)
  */
@@ -65,8 +64,6 @@ import {
   activeRun, currentRun, createRun, recentRuns, setRunCursor, setRunStatus, addRunProgress,
   usageForTrace, servedCallForAudit,
 } from '@/lib/backfill-runs';
-import { narrativeTick } from '@/lib/readmission/narrative-backfill';
-import { refreshTick } from '@/lib/readmission/refresh';
 
 const WORKER = 'opd' as const;
 
@@ -194,18 +191,7 @@ async function autoTick(): Promise<Record<string, unknown>> {
 
   if (plan.action === 'idle') {
     await logTick({ status: 'paused', note: plan.reason });
-    // R4-8 (18 Aug 2026): with NO active OPD run this cron tick is otherwise wasted, so it works the
-    // readmission-NARRATIVE worker's active run instead (lib/readmission/narrative-backfill.ts) —
-    // same rails, its own run row, its own lock, never while an OPD run is active (serial by
-    // design). vercel.json is untouched: this is how the narrative run gets its cron ticks.
-    const readmission = await narrativeTick().catch((e) => ({ worker: 'readmission' as const, error: String((e as Error).message).slice(0, 300) }));
-    // R4.1 (R41-7): and if the narrative worker had nothing to do either, the template-REFRESH
-    // worker's active run gets the tick (lib/readmission/refresh.ts) — serial by construction:
-    // OPD run > narrative run > refresh run, one worker per cron fire, one case per refresh tick.
-    const refresh = 'idle' in readmission && readmission.idle
-      ? await refreshTick().catch((e) => ({ worker: 'readmission_refresh' as const, error: String((e as Error).message).slice(0, 300) }))
-      : { worker: 'readmission_refresh' as const, skipped: 'narrative worker ticked this fire' };
-    return { auto: true, idle: true, note: plan.reason, readmission, refresh };
+    return { auto: true, idle: true, note: plan.reason };
   }
   if (plan.action === 'skip') {
     await logTick({ status: plan.status === 'done' ? 'finished' : 'paused', note: plan.reason, run_id: run!.id });
