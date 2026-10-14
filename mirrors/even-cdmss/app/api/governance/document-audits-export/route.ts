@@ -25,7 +25,7 @@ import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { govKeyValid } from '@/lib/gov-auth';
 import { triageClassMintAllowed } from '@/lib/triage/stamp-schema';
 import { buildDocumentAuditExport, parseExportQuery } from '@/lib/triage/document-audits-export';
-import { loadDischargeSources, loadDocumentAuditSources } from '@/lib/triage/document-audits-export-read';
+import { loadDocumentAuditSources } from '@/lib/triage/document-audits-export-read';
 
 export async function GET(req: NextRequest) {
   if (!govKeyValid(req) && !(await isAdminUnlocked())) {
@@ -35,7 +35,7 @@ export async function GET(req: NextRequest) {
   if (!parsed.ok) return NextResponse.json({ ok: false, error: parsed.error }, { status: 400 });
 
   const loaded = await loadDocumentAuditSources(parsed.value);
-  const input = {
+  const body = buildDocumentAuditExport({
     from: parsed.value.from,
     to: parsed.value.to,
     doctorUid: parsed.value.doctorUid,
@@ -45,17 +45,7 @@ export async function GET(req: NextRequest) {
     dischargeHop: loaded.dischargeHop,
     progress: loaded.progress,
     signals: loaded.signals,
-    otWriteMint: triageClassMintAllowed('ot') ? 'on' as const : 'off' as const,
-  };
-  const first = buildDocumentAuditExport(input);
-  // Citation titles live in the stored discharge report. Read them only for the discharge audits
-  // that carry a routed finding, then rebuild: the second pass is pure and cheap.
-  const routedDischarge = first.audits
-    .filter((a) => a.note_class === 'discharge_summary' && a.routed_refs.length > 0)
-    .map((a) => a.audit_id);
-  if (!routedDischarge.length) return NextResponse.json(first);
-  const dischargeSources = await loadDischargeSources(routedDischarge);
-  return NextResponse.json(Object.keys(dischargeSources).length
-    ? buildDocumentAuditExport({ ...input, dischargeSources })
-    : first);
+    otWriteMint: triageClassMintAllowed('ot') ? 'on' : 'off',
+  });
+  return NextResponse.json(body);
 }

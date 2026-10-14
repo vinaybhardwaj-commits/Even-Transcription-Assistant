@@ -15,11 +15,13 @@ import { countOtNotesForDay, fetchOtNotesForDay } from '@/lib/triage/ot-db13';
 import { auditOtNote, OT_ENGINE_VERSION } from '@/lib/triage/ot-audit-core';
 import {
   auditedOtUidsAnyVersion,
+  backfillOtNabhScores,
   ensureOtAuditTables,
   saveOtAudit,
   seedOtSurgeonMapFromFile,
   loadOtSurgeonMap,
 } from '@/lib/triage/ot-audit-store';
+import { OT_NABH_ENGINE_VERSION } from '@/lib/triage/ot-nabh';
 import { resolveOtSurgeon } from '@/lib/triage/ot-surgeon-map';
 
 async function authed(req: NextRequest): Promise<boolean> {
@@ -85,6 +87,8 @@ async function processDay(day: string, max: number, map: Map<string, string>) {
       map_status: hop.map_status,
       doctor_uid: hop.doctor_uid,
       n_findings: findings.length,
+      nabh_score_pct: saved.nabh_score_pct ?? null,
+      nabh_engine_version: OT_NABH_ENGINE_VERSION,
     });
   }
 
@@ -107,15 +111,19 @@ export async function GET(req: NextRequest) {
   const lookback = Math.max(1, Math.min(14, Number(p.get('lookback')) || 3));
   const dayParam = (p.get('day') || '').trim();
 
+  const nabh = await backfillOtNabhScores(200);
+
   if (/^\d{4}-\d{2}-\d{2}$/.test(dayParam)) {
     const batch = await processDay(dayParam, max, map);
     return NextResponse.json({
       ok: true,
       engine: OT_ENGINE_VERSION,
+      nabh_engine: OT_NABH_ENGINE_VERSION,
       note_class: 'ot',
       seed,
       map_size: map.size,
       mode: 'day',
+      nabh_backfill: nabh,
       ...batch,
       write_mint: 'blocked — ot absent from TRIAGE_BOT_WRITE_CLASSES',
     });
@@ -135,12 +143,14 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     ok: true,
     engine: OT_ENGINE_VERSION,
+    nabh_engine: OT_NABH_ENGINE_VERSION,
     note_class: 'ot',
     seed,
     map_size: map.size,
     mode: 'sweep',
     lookback,
     window: { from: days[0], to: end },
+    nabh_backfill: nabh,
     batches,
     write_mint: 'blocked — ot absent from TRIAGE_BOT_WRITE_CLASSES',
   });

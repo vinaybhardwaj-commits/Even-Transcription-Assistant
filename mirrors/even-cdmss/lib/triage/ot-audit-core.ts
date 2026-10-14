@@ -2,8 +2,9 @@
  * lib/triage/ot-audit-core.ts — v0 OT note audit findings (pure, deterministic).
  *
  * Minimal rubric: documentation completeness flags shaped like OPD findings so
- * stampFindingIdentity + the Action queue card fields work unchanged. Not a full
- * clinical OT rubric — deepen later under Triage/CAT ratification.
+ * stampFindingIdentity + the Action queue card fields work unchanged.
+ * Not the NABH completeness rubric — that is lib/triage/ot-nabh.ts (ot-nabh/0.1),
+ * persisted on nabh_* columns and never written into `findings`.
  */
 
 import { stampFindingIdentity, type OpdFinding } from '@/lib/opd-note-audit-core';

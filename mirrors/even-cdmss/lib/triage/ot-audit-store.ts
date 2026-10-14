@@ -10,6 +10,7 @@ import { join } from 'path';
 import { sql } from '@/lib/db';
 import { canonicalDistinctOnSql } from '@/lib/audit-canonical';
 import { OT_ENGINE_VERSION } from '@/lib/triage/ot-audit-core';
+import { OT_NABH_ENGINE_VERSION, scoreOtNabhFromStored } from '@/lib/triage/ot-nabh';
 import type { OtMapStatus } from '@/lib/triage/ot-surgeon-map';
 import type { OpdFinding } from '@/lib/opd-note-audit-core';
 import type { OtNoteSourceRow } from '@/lib/triage/ot-db13';
@@ -72,8 +73,20 @@ export async function ensureOtAuditTables(): Promise<void> {
       findings JSONB,
       engine_version TEXT NOT NULL DEFAULT 'ot-note-audit/0.1',
       model TEXT,
-      trace_id TEXT
+      trace_id TEXT,
+      nabh_score_sum INT,
+      nabh_score_max INT,
+      nabh_score_pct NUMERIC(6,2),
+      nabh_criteria JSONB,
+      nabh_engine_version TEXT,
+      nabh_scored_at TIMESTAMPTZ
     )`);
+  await run(`ALTER TABLE ot_note_audits ADD COLUMN IF NOT EXISTS nabh_score_sum INT`);
+  await run(`ALTER TABLE ot_note_audits ADD COLUMN IF NOT EXISTS nabh_score_max INT`);
+  await run(`ALTER TABLE ot_note_audits ADD COLUMN IF NOT EXISTS nabh_score_pct NUMERIC(6,2)`);
+  await run(`ALTER TABLE ot_note_audits ADD COLUMN IF NOT EXISTS nabh_criteria JSONB`);
+  await run(`ALTER TABLE ot_note_audits ADD COLUMN IF NOT EXISTS nabh_engine_version TEXT`);
+  await run(`ALTER TABLE ot_note_audits ADD COLUMN IF NOT EXISTS nabh_scored_at TIMESTAMPTZ`);
   await run(`CREATE UNIQUE INDEX IF NOT EXISTS ot_note_audits_uid_engine_uq ON ot_note_audits (uid, engine_version)`);
   await run(`CREATE INDEX IF NOT EXISTS ot_note_audits_note_day_idx ON ot_note_audits (note_day DESC)`);
   await run(`
@@ -92,19 +105,40 @@ function parseComponentJson(value: unknown): unknown {
   try { return JSON.parse(String(value)); } catch { return { raw: String(value).slice(0, 8000) }; }
 }
 
-export async function saveOtAudit(input: SaveOtAuditInput): Promise<{ status: 'inserted' | 'exists'; id?: string }> {
+/** Backfill writes NABH columns only. Lander findings are not in the SET list. */
+export const OT_NABH_BACKFILL_UPDATE_SQL = `UPDATE ot_note_audits
+   SET nabh_score_sum = $2,
+       nabh_score_max = $3,
+       nabh_score_pct = $4,
+       nabh_criteria = $5::jsonb,
+       nabh_engine_version = $6,
+       nabh_scored_at = NOW()
+   WHERE id = $1::uuid
+     AND (nabh_scored_at IS NULL OR nabh_engine_version IS DISTINCT FROM $6)`;
+
+export async function saveOtAudit(input: SaveOtAuditInput): Promise<{ status: 'inserted' | 'exists'; id?: string; nabh_score_pct?: number }> {
   await ensureOtAuditTables();
   const engine = input.engine_version || OT_ENGINE_VERSION;
   const src = input.source;
   const findings = input.findings ?? [];
+  const component = parseComponentJson(src.component_json);
+  const nabh = scoreOtNabhFromStored({
+    note: src.note,
+    component_json: component,
+    surgery_name: src.surgery_name,
+    surgeon_raw: src.surgeon,
+    note_created_at: src.created_at,
+  });
   const rows = await run(
     `INSERT INTO ot_note_audits (
        app_source, note_class, uid, hospital_uid, facility_id, encounter_id, uhid,
        surgery_name, surgeon_raw, note_day, note_created_at, note_modified_at, scraped_at,
        note, component_json, doctor_uid, map_status, n_findings, findings,
-       engine_version, model, trace_id
+       engine_version, model, trace_id,
+       nabh_score_sum, nabh_score_max, nabh_score_pct, nabh_criteria, nabh_engine_version, nabh_scored_at
      ) VALUES (
-       $1,'ot',$2,$3,$4,$5,$6,$7,$8,$9::date,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18::jsonb,$19,$20,$21
+       $1,'ot',$2,$3,$4,$5,$6,$7,$8,$9::date,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18::jsonb,$19,$20,$21,
+       $22,$23,$24,$25::jsonb,$26,NOW()
      )
      ON CONFLICT (uid, engine_version) DO NOTHING
      RETURNING id::text AS id`,
@@ -122,7 +156,7 @@ export async function saveOtAudit(input: SaveOtAuditInput): Promise<{ status: 'i
       src.modified_at,
       src.fetched_at,
       src.note,
-      JSON.stringify(parseComponentJson(src.component_json)),
+      JSON.stringify(component),
       input.doctor_uid,
       input.map_status,
       findings.length,
@@ -130,10 +164,56 @@ export async function saveOtAudit(input: SaveOtAuditInput): Promise<{ status: 'i
       engine,
       input.model ?? null,
       input.trace_id ?? null,
+      nabh.score_sum,
+      nabh.score_max,
+      nabh.score_pct,
+      JSON.stringify(nabh.criteria),
+      nabh.engine_version,
     ],
   );
-  if (rows[0]?.id) return { status: 'inserted', id: String(rows[0].id) };
+  if (rows[0]?.id) return { status: 'inserted', id: String(rows[0].id), nabh_score_pct: nabh.score_pct };
   return { status: 'exists' };
+}
+
+/**
+ * Persist ot-nabh/0.1 onto rows the lander already wrote. Does not insert notes,
+ * does not change findings, map_status, or doctor_uid.
+ */
+export async function backfillOtNabhScores(limit = 40): Promise<{ scored: number; failed: number; remaining: number }> {
+  await ensureOtAuditTables();
+  const cap = Math.max(1, Math.min(200, Math.floor(limit)));
+  const rows = await run(
+    `SELECT id::text AS id, note, component_json, surgery_name, surgeon_raw, note_created_at
+     FROM ot_note_audits
+     WHERE nabh_scored_at IS NULL OR nabh_engine_version IS DISTINCT FROM $1
+     ORDER BY note_day DESC, audited_at DESC
+     LIMIT $2`,
+    [OT_NABH_ENGINE_VERSION, cap],
+  ).catch(() => []);
+  let scored = 0;
+  let failed = 0;
+  for (const row of rows) {
+    try {
+      const nabh = scoreOtNabhFromStored(row);
+      await run(OT_NABH_BACKFILL_UPDATE_SQL, [
+        String(row.id),
+        nabh.score_sum,
+        nabh.score_max,
+        nabh.score_pct,
+        JSON.stringify(nabh.criteria),
+        OT_NABH_ENGINE_VERSION,
+      ]);
+      scored += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+  const left = await run(
+    `SELECT count(*)::int AS n FROM ot_note_audits
+     WHERE nabh_scored_at IS NULL OR nabh_engine_version IS DISTINCT FROM $1`,
+    [OT_NABH_ENGINE_VERSION],
+  ).catch(() => [{ n: 0 }]);
+  return { scored, failed, remaining: Number(left[0]?.n ?? 0) };
 }
 
 export async function auditedOtUidsAnyVersion(): Promise<Set<string>> {

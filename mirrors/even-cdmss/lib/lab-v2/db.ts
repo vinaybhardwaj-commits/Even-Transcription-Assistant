@@ -38,38 +38,12 @@ export interface Db {
   close(): Promise<void>;
 }
 
-/** Host and database name. User, password and query string are not part of the identity. */
-export function databaseIdentity(url: string): { host: string; database: string } | null {
-  try {
-    const parsed = new URL(url);
-    const database = decodeURIComponent(parsed.pathname.replace(/^\//, '')).split('/')[0].toLowerCase();
-    const host = parsed.host.toLowerCase();
-    if (!host || !database) return null;
-    return { host, database };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Same database when the strings match, or when host and database name match.
- * A different user or `sslmode` is still the same database. Unparseable URLs
- * compare as strings only.
- */
-export function sameDatabase(a: string, b: string): boolean {
-  if (a === b) return true;
-  const left = databaseIdentity(a);
-  const right = databaseIdentity(b);
-  if (!left || !right) return false;
-  return left.host === right.host && left.database === right.database;
-}
-
 /** §13 — the v2 database URL, or a typed refusal. Never falls back to DATABASE_URL. */
 export function labV2Url(): string {
   const url = process.env.LAB_V2_DATABASE_URL;
   if (!url) throw new LabError('NOT_CONFIGURED', 'LAB_V2_DATABASE_URL is not set');
   const prod = process.env.DATABASE_URL;
-  if (prod && sameDatabase(url, prod)) {
+  if (prod && url === prod) {
     throw new LabError('NOT_CONFIGURED', 'LAB_V2_DATABASE_URL must not equal DATABASE_URL — v2 state never shares the production database (decision 8)');
   }
   return url;
@@ -77,8 +51,7 @@ export function labV2Url(): string {
 
 export function labV2Configured(): boolean {
   const url = process.env.LAB_V2_DATABASE_URL;
-  const prod = process.env.DATABASE_URL;
-  return !!url && !(prod && sameDatabase(url, prod));
+  return !!url && url !== process.env.DATABASE_URL;
 }
 
 let _pool: PgPool | null = null;

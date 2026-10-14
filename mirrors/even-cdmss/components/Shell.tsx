@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react';
 import {
   MessagesSquare, Network, Pill, Calculator, ClipboardCheck,
   ClipboardList, BookOpen, GraduationCap, Settings, Menu, X, ChevronLeft, Activity, Lightbulb, BarChart3,
-  PhoneCall, Filter, HardDrive, FlaskConical, Map, FileText, Radar, SlidersHorizontal,
+  PhoneCall, Filter, HardDrive, FlaskConical, Map, FileText, Radar, SlidersHorizontal, Scissors,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -59,8 +59,8 @@ const ADMIN: NavGroup[] = [
       { href: '/admin/observability', label: 'Observability', Icon: Network, match: ['/admin/appropriateness-runs'] },
       { href: '/admin/opd-audit', label: 'OPD Audit', Icon: Activity, match: ['/admin/opd-audit/doctors', '/admin/opd-audit/doctor'] },
       { href: '/admin/ipd-audit', label: 'IPD Discharge Audit', Icon: FileText, match: ['/admin/ipd-audit/search', '/admin/ipd-audit/calendar', '/admin/ipd-audit/episodes'] },
-      // Scoring policy sits immediately after IPD Discharge Audit (PRD §5.1) — it governs how that
-      // audit's completeness is weighted, so it reads as a setting on the thing above it.
+      { href: '/admin/ot-audit', label: 'OT Audit', Icon: Scissors },
+      // Scoring policy governs how IPD completeness is weighted (PRD §5.1).
       { href: '/admin/scoring-policy', label: 'Scoring policy', Icon: SlidersHorizontal },
       { href: '/admin/stewardship', label: 'Stewardship', Icon: BarChart3 },
       { href: '/admin/ccb-funnel', label: 'Care Brief Funnel', Icon: Filter },
