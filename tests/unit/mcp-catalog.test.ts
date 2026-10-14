@@ -11,6 +11,9 @@ const H = vi.hoisted(() => ({
   rooms: [] as Array<{ id: string; slug: string; name: string; disabled_at: null }>,
   freescriptRows: [] as Array<Record<string, unknown>>,
   indexRows: [] as Array<Record<string, unknown>>,
+  identity: [] as Array<Record<string, unknown>>,
+  identityThrows: null as string | null,
+  identityQueries: [] as Array<{ uids: string[]; withRx: boolean }>,
   freescriptThrows: false,
   signCalls: [] as Array<Record<string, unknown>>,
   jev: [] as Array<Record<string, unknown>>,
@@ -26,6 +29,13 @@ vi.mock("@/lib/db", () => {
     if (/FROM room\b/.test(text) && /disabled_at/.test(text)) {
       const want = values.filter((v): v is string => typeof v === "string");
       return Promise.resolve(H.rooms.filter((r) => want.some((w) => w === r.id || w === r.slug || w.toLowerCase() === r.name.toLowerCase())));
+    }
+    if (/FROM encounter_catalog/.test(text)) {
+      if (H.identityThrows) return Promise.reject(Object.assign(new Error("no such table"), { code: H.identityThrows }));
+      const withRx = values[0] === true;
+      const uids = values[1] as string[];
+      H.identityQueries.push({ uids, withRx });
+      return Promise.resolve(H.identity.filter((r) => uids.includes(r.consult_uid as string)).map((r) => ({ ...r, has_prescription: r.prescription !== null && r.prescription !== undefined, prescription: withRx ? r.prescription ?? null : null })));
     }
     if (/FROM reb_track_index/.test(text)) return Promise.resolve(H.indexRows);
     if (/FROM freescript_latest/.test(text)) {
@@ -130,6 +140,9 @@ beforeEach(() => {
   H.rooms = [{ id: "room_a", slug: "opd-a", name: "OPD A", disabled_at: null }, { id: "room_b", slug: "opd-b", name: "OPD B", disabled_at: null }];
   H.freescriptRows = [];
   H.indexRows = [];
+  H.identity = [];
+  H.identityThrows = null;
+  H.identityQueries = [];
   H.freescriptThrows = false;
   H.signCalls = [];
   H.jev = [];
@@ -233,10 +246,6 @@ describe("search", () => {
     resetCatalogCacheForTests();
     expect(uids(await run({ action: "search", limit: 9999 }))).toHaveLength(200);
   });
-  it("has_rx is refused in v1, whatever its value", async () => {
-    setCatalog(many());
-    for (const v of [true, false, "yes"]) expect(await run({ action: "search", has_rx: v })).toEqual({ ok: false, error: "bad_args", detail: "has_rx arrives with catalog C2" });
-  });
   it("bad lines are skipped and counted; unknown keys pass through; layers lose r2_key and layers_present names the non-null ones", async () => {
     setCatalog([crow(UID)], ["{not json", "[1,2]", JSON.stringify({ no_uid: true }), ""]);
     const o = await run({ action: "search" });
@@ -311,10 +320,9 @@ describe("get: arguments and the row", () => {
     expect((o.row as Row).extra_field).toEqual({ keep: "me" });
     expect(((o.row as Row).layers as Row).stt).toMatchObject({ r2_key: tk("stt.sarvam-saaras-v3") });
     const layers = o.layers as Record<string, Row>;
-    expect(Object.keys(layers)).toEqual(["transcript", "parts", "freescript", "rubric", "jev", "cdmss", "rx"]);
+    expect(Object.keys(layers)).toEqual(["transcript", "parts", "freescript", "rubric", "jev", "identity", "cdmss", "rx"]);
     for (const l of Object.values(layers)) expect(Object.keys(l).filter((k) => k !== "error").sort()).toEqual(["data", "source", "status"]);
     expect(layers.cdmss).toEqual({ status: "not_available", source: ["consult-audit S5 (pending)"], data: null });
-    expect(layers.rx).toEqual({ status: "not_available", source: ["catalog C2 (pending)"], data: null });
   });
 });
 
@@ -963,4 +971,188 @@ describe("the door", () => {
     expect(await run({ action: "delete" })).toMatchObject({ ok: false, error: "unknown_action" });
     expect(await run({})).toMatchObject({ ok: false, error: "unknown_action" });
   });
+
+  // --- CATALOG-5 -----------------------------------------------------------------------------------------------------------------------------------
+describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
+  const NAME_D = "Dr Synthetic Doc";
+  const NAME_P = "Synthetic Patient";
+  const IND = "IND-0001";
+  const RX = "RX-0001";
+  const idrow = (uid: string, o: Row = {}): Row => ({ consult_uid: uid, doctor_name: NAME_D, patient_name: NAME_P, individual_uid: IND, prescription_uid: RX, presc_state: "signed", prescription: { meds: ["PARACETAMOL"] }, ...o });
+  const layersOf = async (args: Row = {}) => (await run({ action: "get", consult_uid: UID, ...args })).layers as Record<string, Row>;
+  beforeEach(() => setCatalog([crow(UID)]));
+
+  it("get WITHOUT include_identity: identity data is {present}, rx has only flags; no name, id, URL or prescription anywhere in the JSON", async () => {
+    H.identity = [idrow(UID)];
+    const o = await run({ action: "get", consult_uid: UID, include_text: true });
+    const l = o.layers as Record<string, Row>;
+    expect(l.identity).toEqual({ status: "ok", source: ["encounter_catalog"], data: { present: true } });
+    expect(l.rx).toEqual({ status: "ok", source: ["encounter_catalog"], data: { prescription_uid: null, presc_state: "signed", has_prescription: true, pulse_url: null } });
+    const whole = JSON.stringify(o);
+    for (const needle of [NAME_D, NAME_P, IND, RX, "pulse.even.in", "PARACETAMOL"]) expect(whole, needle).not.toContain(needle);
+    expect(H.identityQueries.at(-1)).toMatchObject({ withRx: false }); // the jsonb is not even selected
+  });
+  it("get WITH include_identity: names, ids, state and pulse_url; rx carries the ids and the link; prescription still withheld without include_text", async () => {
+    H.identity = [idrow(UID)];
+    const l = await layersOf({ include_identity: true });
+    expect(l.identity!.data).toEqual({ doctor_name: NAME_D, patient_name: NAME_P, individual_uid: IND, prescription_uid: RX, presc_state: "signed", pulse_url: `https://pulse.even.in/prescription?prescription_uid=${RX}&individual_uid=${IND}` });
+    expect(l.rx!.data).toEqual({ prescription_uid: RX, presc_state: "signed", has_prescription: true, pulse_url: `https://pulse.even.in/prescription?prescription_uid=${RX}&individual_uid=${IND}` });
+    expect(JSON.stringify(l)).not.toContain("PARACETAMOL");
+  });
+  it("the stored prescription jsonb only with BOTH include_identity and include_text", async () => {
+    H.identity = [idrow(UID)];
+    for (const [a, b] of [[true, false], [false, true], [false, false]] as const) {
+      const l = await layersOf({ include_identity: a, include_text: b });
+      expect(JSON.stringify(l), `${a}/${b}`).not.toContain("PARACETAMOL");
+    }
+    const l = await layersOf({ include_identity: true, include_text: true });
+    expect((l.rx!.data as Row).prescription).toEqual({ meds: ["PARACETAMOL"] });
+    expect(H.identityQueries.at(-1)).toMatchObject({ withRx: true });
+  });
+  it("pulse_url is built with encoded ids and refused (null) when either id fails the id class", async () => {
+    const { pulseUrl } = await import("@/lib/room-access/readers/catalog-identity");
+    expect(pulseUrl("a:b@c.d_e-f", "g@h")).toBe("https://pulse.even.in/prescription?prescription_uid=a%3Ab%40c.d_e-f&individual_uid=g%40h");
+    for (const bad of ["", "a b", "a/b", "a&b=c", "a".repeat(129), "é"]) {
+      expect(pulseUrl(bad, IND), bad).toBeNull();
+      expect(pulseUrl(RX, bad), bad).toBeNull();
+    }
+    expect(pulseUrl(null, IND)).toBeNull();
+    expect(pulseUrl(RX, null)).toBeNull();
+    // a stored id outside the class (not possible under the 0168 check, but the link must not carry it)
+    H.identity = [idrow(UID, { prescription_uid: "bad id&x=1" })];
+    expect(((await layersOf({ include_identity: true })).identity!.data as Row).pulse_url).toBeNull();
+  });
+  it("rx: ok when prescription_uid or prescription is present, else absent; identity absent when no row or every identity column is null; empty table is absent, not an error", async () => {
+    expect((await layersOf()).identity).toMatchObject({ status: "absent", data: { present: false } });
+    expect((await layersOf()).rx).toMatchObject({ status: "absent", data: null });
+    H.identity = [idrow(UID, { doctor_name: null, patient_name: null, individual_uid: null, prescription_uid: null, presc_state: null, prescription: null })];
+    expect((await layersOf({ include_identity: true })).identity).toMatchObject({ status: "absent", data: null });
+    expect((await layersOf()).rx!.status).toBe("absent");
+    H.identity = [idrow(UID, { prescription_uid: null, prescription: { x: 1 } })];
+    expect((await layersOf()).rx).toMatchObject({ status: "ok", data: { has_prescription: true, prescription_uid: null } });
+    H.identity = [idrow(UID, { prescription: null })];
+    expect((await layersOf()).rx).toMatchObject({ status: "ok", data: { has_prescription: false } }); // a prescription_uid alone is enough
+    H.identity = [idrow(UID, { prescription_uid: null, prescription: null, presc_state: null, doctor_name: "Dr X" })];
+    expect((await layersOf()).rx!.status).toBe("absent");
+  });
+  it("a failing encounter_catalog read is an error on identity and rx only; the rest of get answers; cdmss stays not_available", async () => {
+    seedLayers();
+    H.identityThrows = "42P01";
+    const o = await run({ action: "get", consult_uid: UID });
+    const l = o.layers as Record<string, Row>;
+    expect(o.ok).toBe(true);
+    expect(l.identity).toMatchObject({ status: "error", error: "db_error:42P01", data: null });
+    expect(l.rx).toMatchObject({ status: "error", error: "db_error:42P01", data: null });
+    expect(l.transcript!.status).toBe("ok");
+    expect(l.cdmss).toEqual({ status: "not_available", source: ["consult-audit S5 (pending)"], data: null });
+  });
+
+  // --- search ---
+  const trio = () => {
+    setCatalog([crow("CONSULT_AAA1", { t_open: 300 }), crow("CONSULT_BBB2", { t_open: 200 }), crow("CONSULT_CCC3", { t_open: 100 })]);
+    H.identity = [
+      idrow("CONSULT_AAA1", { prescription_uid: "RX-A", individual_uid: "IND-A" }),
+      idrow("CONSULT_BBB2", { prescription_uid: null, individual_uid: "IND-A", prescription: null }),
+      idrow("CONSULT_CCC3", { prescription_uid: "RX-C", individual_uid: "IND-C", prescription: { m: 1 } }),
+    ];
+  };
+  const uidsOf = (o: Row) => (o.rows as Row[]).map((r) => r.consult_uid);
+  it("search without filters: rows carry has_prescription (boolean, or null with no joined row) and identity_rows; no identity block, no names", async () => {
+    setCatalog([crow("CONSULT_AAA1", { t_open: 300 }), crow("CONSULT_ZZZ9", { t_open: 100 })]);
+    H.identity = [idrow("CONSULT_AAA1")];
+    const o = await run({ action: "search" });
+    expect((o.rows as Row[]).map((r) => r.has_prescription)).toEqual([true, null]);
+    expect(o.identity_rows).toBe(1);
+    expect(JSON.stringify(o)).not.toMatch(/Synthetic|IND-0001|RX-0001/);
+    expect((o.rows as Row[])[0]).not.toHaveProperty("identity");
+  });
+  it("include_identity adds identity {names, ids, state, pulse_url} per row (null with no joined row)", async () => {
+    setCatalog([crow("CONSULT_AAA1", { t_open: 300 }), crow("CONSULT_ZZZ9", { t_open: 100 })]);
+    H.identity = [idrow("CONSULT_AAA1")];
+    const r = (await run({ action: "search", include_identity: true })).rows as Row[];
+    expect(r[0]!.identity).toEqual({ doctor_name: NAME_D, patient_name: NAME_P, individual_uid: IND, prescription_uid: RX, presc_state: "signed", pulse_url: `https://pulse.even.in/prescription?prescription_uid=${RX}&individual_uid=${IND}` });
+    expect(r[1]!.identity).toBeNull();
+  });
+  it("filters: has_prescription true/false, prescription_uid, individual_uid, combined; has_rx is an alias; total_matched reflects the filter", async () => {
+    trio();
+    expect(uidsOf(await run({ action: "search", has_prescription: true }))).toEqual(["CONSULT_AAA1", "CONSULT_CCC3"]);
+    expect(uidsOf(await run({ action: "search", has_prescription: false }))).toEqual(["CONSULT_BBB2"]);
+    expect(uidsOf(await run({ action: "search", has_rx: true }))).toEqual(["CONSULT_AAA1", "CONSULT_CCC3"]);
+    expect(uidsOf(await run({ action: "search", has_rx: false }))).toEqual(["CONSULT_BBB2"]);
+    expect(uidsOf(await run({ action: "search", prescription_uid: "RX-C" }))).toEqual(["CONSULT_CCC3"]);
+    expect(uidsOf(await run({ action: "search", individual_uid: "IND-A" }))).toEqual(["CONSULT_AAA1", "CONSULT_BBB2"]);
+    expect(uidsOf(await run({ action: "search", individual_uid: "IND-A", has_prescription: true }))).toEqual(["CONSULT_AAA1"]);
+    const o = await run({ action: "search", has_prescription: true, limit: 1 });
+    expect(o).toMatchObject({ total_matched: 2, identity_rows: 3 });
+    expect(typeof o.next_cursor).toBe("string");
+    expect(uidsOf(await run({ action: "search", prescription_uid: "NOPE" }))).toEqual([]);
+  });
+  it("filter args are validated: ids must match the 0168 id class; has_prescription must be a boolean", async () => {
+    trio();
+    for (const k of ["prescription_uid", "individual_uid"]) for (const bad of ["a b", "x/y", "q&r", "a".repeat(129), 5, {}]) expect(await run({ action: "search", [k]: bad }), `${k} ${String(bad)}`).toMatchObject({ ok: false, error: "bad_args" });
+    for (const bad of ["maybe", 3, {}]) expect(await run({ action: "search", has_prescription: bad })).toMatchObject({ ok: false, error: "bad_args" });
+    expect(H.identityQueries).toEqual([]);
+  });
+  it("the join comes AFTER the date/room/doctor filters and is chunked at 500 uids per query", async () => {
+    const many = Array.from({ length: 1203 }, (_, i) => crow(`CHUNKROW_${String(i).padStart(5, "0")}`, { t_open: 10_000 - i, doctor_uid: i % 2 === 0 ? "docEven" : "docOdd" }));
+    setCatalog(many);
+    H.identity = many.map((r) => idrow(r.consult_uid as string));
+    const o = await run({ action: "search", has_prescription: true, doctor_uid: "docEven", limit: 200 });
+    expect(o.total_matched).toBe(602);
+    expect(H.identityQueries.map((q) => q.uids.length)).toEqual([500, 102]); // only the 602 doctor matches were joined, 500 + 102
+    expect(H.identityQueries.every((q) => q.uids.length <= 500)).toBe(true);
+    // a plain search joins only the returned page (<= 200, one query)
+    H.identityQueries = [];
+    await run({ action: "search", limit: 200 });
+    expect(H.identityQueries.map((q) => q.uids.length)).toEqual([200]);
+  });
+  it("an empty table: filters return rows [] with identity_rows 0 (not 'no prescription'); a plain search says identity_rows 0 and has_prescription null", async () => {
+    trio();
+    H.identity = [];
+    for (const f of [{ has_prescription: false }, { has_prescription: true }, { prescription_uid: "RX-A" }, { individual_uid: "IND-A" }]) {
+      expect(await run({ action: "search", ...f }), JSON.stringify(f)).toMatchObject({ ok: true, rows: [], total_matched: 0, identity_rows: 0 });
+    }
+    const o = await run({ action: "search" });
+    expect(o.identity_rows).toBe(0);
+    expect((o.rows as Row[]).every((r) => r.has_prescription === null)).toBe(true);
+  });
+  it("a SQL error: filters and include_identity answer identity_unavailable; a plain search degrades (has_prescription null, identity_rows null, identity_error)", async () => {
+    trio();
+    H.identityThrows = "42P01";
+    expect(await run({ action: "search", has_prescription: true })).toEqual({ ok: false, error: "identity_unavailable" });
+    expect(await run({ action: "search", include_identity: true })).toEqual({ ok: false, error: "identity_unavailable" });
+    const o = await run({ action: "search" });
+    expect(o).toMatchObject({ ok: true, identity_rows: null, identity_error: true });
+    expect((o.rows as Row[]).every((r) => r.has_prescription === null)).toBe(true);
+  });
+  it("identityFor: >500 uids is an error code (the caller chunks), [] is ok and queries nothing, a missing table is an error not a throw", async () => {
+    const { identityFor } = await import("@/lib/room-access/readers/catalog-identity");
+    expect(await identityFor(Array.from({ length: 501 }, (_, i) => `u${i}`))).toEqual({ status: "error", code: "too_many_uids" });
+    expect(await identityFor([])).toMatchObject({ status: "ok" });
+    expect(H.identityQueries).toEqual([]);
+    H.identityThrows = "42P01";
+    expect(await identityFor(["a"])).toEqual({ status: "error", code: "db_error:42P01" });
+  });
+  it("V4 audit: a search with individual_uid / prescription_uid / has_prescription holds has_prescription (boolean) and neither uid nor any name; a string has_prescription is dropped", async () => {
+    trio();
+    await rpc({ action: "search", individual_uid: "IND-A", prescription_uid: "RX-A", has_prescription: true, include_identity: true });
+    let a = lastAudit().args as Row;
+    expect(a).toEqual({ action: "search", has_prescription: true, include_identity: true });
+    const text = JSON.stringify(auditRows()) + logs.join("\n");
+    for (const needle of ["IND-A", "RX-A", NAME_D, NAME_P, "Synthetic"]) expect(text, needle).not.toContain(needle);
+    await rpc({ action: "search", has_prescription: "Synthetic Patient" });
+    a = lastAudit().args as Row;
+    expect(a).not.toHaveProperty("has_prescription");
+  });
+  it("a room-restricted token is still refused; no PHI reaches the console on get or search with include_identity", async () => {
+    trio();
+    const b = await rpc({ action: "get", consult_uid: UID, include_identity: true }, { rooms: new Set(["room_a"]), scopes: new Set<McpScope>(["read", "invoke", "write"]) });
+    expect(b.error).toMatchObject({ code: -32001 });
+    expect(H.identityQueries).toEqual([]);
+    await rpc({ action: "get", consult_uid: "CONSULT_AAA1", include_identity: true, include_text: true });
+    await rpc({ action: "search", include_identity: true });
+    expect(logs.join("\n")).not.toMatch(/Synthetic|IND-|RX-|PARACETAMOL/);
+  });
+});
+
 });
