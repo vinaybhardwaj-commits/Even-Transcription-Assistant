@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-COLUMNS = ("round", "code", "prompts", "judges", "render", "split sha", "split", "n", "A", "B0", "Bn", "Bn items > A", "Bn-A", "Bn-B0",
+COLUMNS = ("round", "code", "prompts", "judges", "models", "render", "split sha", "split", "n", "A", "B0", "Bn", "Bn items > A", "Bn-A", "Bn-B0",
            "floors", "jev", "replay drops", "rendered chars", "cost USD", "verdict")
 
 
@@ -17,9 +17,14 @@ def _combo_cell(d: dict, key: str) -> str:
     return "<br>".join(f"{c}: {_f(v.get('median'))}/{_f(v.get('mean'))}" if isinstance(v, dict) else f"{c}: {_f(v)}" for c, v in d.items())
 
 
+def _models_cell(r: dict) -> str:
+    ids = r.get("resolved_model_ids") or {}
+    return "; ".join(f"{a}={i}" for a, i in ids.items()) or "-"
+
+
 def md_row(r: dict) -> str:
     floors = "; ".join(f"{t['floor']} {_f(t['bn'], 3)} ({'ok' if t['pass'] else 'FAIL'})" for t in r["floors"]["rows"])
-    cells = [r["round"], r["code_sha"][:12], r["prompt_sha"][:12], r["judge_sha"][:12], r["render"], r["split_sha"][:12], r["split"], r["n"],
+    cells = [r["round"], r["code_sha"][:12], r["prompt_sha"][:12], r["judge_sha"][:12], _models_cell(r), r["render"], r["split_sha"][:12], r["split"], r["n"],
              _combo_cell({c: v["A"] for c, v in r["totals"].items()}, "A"), _combo_cell({c: v["B0"] for c, v in r["totals"].items()}, "B0"),
              _combo_cell({c: v["Bn"] for c, v in r["totals"].items()}, "Bn"),
              "<br>".join(f"{c}: {v}" for c, v in r["items_bn_gt_a"].items()),

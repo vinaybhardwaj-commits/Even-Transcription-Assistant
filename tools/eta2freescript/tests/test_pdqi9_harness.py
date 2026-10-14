@@ -603,6 +603,62 @@ def test_run_refuses_loose_frozen_dir_before_any_call(tmp_path):
     assert not fc.calls
 
 
+def test_row_and_usage_header_carry_resolved_model_ids(tmp_path, monkeypatch):
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    for k in [k for k in os.environ if k.startswith("ETA2FS_BEDROCK_")]:
+        monkeypatch.delenv(k)
+    fdir = make_frozen(tmp_path / "frozen")
+    arts, arms = _write_inputs(tmp_path, UIDS[:1])
+    fc = FakeClient(responder, model_id="anthropic.claude-resolved-test")
+    assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=fc) == 0
+    want = {j: fc.resolve(j)[0] for j in judge.JUDGES}
+    row = json.loads((tmp_path / "SCOREBOARD.R1.json").read_text())
+    assert row["resolved_model_ids"] == want and set(want) == {"opus", "sonnet"}
+    lines = [json.loads(x) for x in (tmp_path / "out" / "usage.jsonl").read_text().splitlines() if x.strip()]
+    assert lines[0] == {"kind": "run_header", "round": "R1", "resolved_model_ids": want, "n": 1}
+
+
+def test_markdown_row_carries_resolved_ids_verbatim(tmp_path, monkeypatch):
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    for k in [k for k in os.environ if k.startswith("ETA2FS_BEDROCK_")]:
+        monkeypatch.delenv(k)
+    fdir = make_frozen(tmp_path / "frozen")
+    arts, arms = _write_inputs(tmp_path, UIDS[:1])
+    fc = FakeClient(responder)
+    ids = {"opus": "anthropic.claude-opus-X", "sonnet": "anthropic.claude-sonnet-Y"}
+    fc.resolve = lambda alias: (ids[alias], "converse")
+    assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=fc) == 0
+    md = (tmp_path / "SCOREBOARD.md").read_text().splitlines()
+    assert " models " in md[0] and "opus=anthropic.claude-opus-X; sonnet=anthropic.claude-sonnet-Y" in md[2]
+    assert len(md[0].split("|")) == len(md[2].split("|"))
+
+
+def test_bedrock_override_aborts_with_zero_calls_and_names_no_value(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    monkeypatch.setenv("ETA2FS_BEDROCK_SONNET", "secret-override-value")
+    fdir = make_frozen(tmp_path / "frozen")
+    arts, arms = _write_inputs(tmp_path, UIDS[:1])
+    fc = FakeClient(responder)
+    assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=fc) == 1
+    out = capsys.readouterr().out
+    assert not fc.calls and "ETA2FS_BEDROCK_SONNET" in out and "secret-override-value" not in out
+    assert not (tmp_path / "SCOREBOARD.md").exists()
+
+
+def test_resolve_failure_aborts_with_zero_calls(tmp_path, monkeypatch):
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    for k in [k for k in os.environ if k.startswith("ETA2FS_BEDROCK_")]:
+        monkeypatch.delenv(k)
+    fdir = make_frozen(tmp_path / "frozen")
+    arts, arms = _write_inputs(tmp_path, UIDS[:1])
+    fc = FakeClient(responder)
+    def boom(alias):
+        raise RuntimeError("no")
+    fc.resolve = boom
+    assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=fc) == 1
+    assert not fc.calls
+
+
 # ---- fix round 3 (D1-D6) ----------------------------------------------------------------------------------------
 
 PROBE = {"medicines": [{"name": "Drug", "strength": "dose not stated", "frequency": "to be confirmed", "duration": "TBD"}],

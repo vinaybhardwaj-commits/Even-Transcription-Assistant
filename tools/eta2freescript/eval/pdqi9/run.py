@@ -140,6 +140,20 @@ def lockbox_guard(uids: list[str], artifacts: Path, is_lockbox: bool, consults: 
     return 0
 
 
+def resolve_judges(client: ModelClient) -> dict[str, str] | None:
+    """Resolve every judge alias through the client's own resolve(). None (after a counts-only abort line naming variables, never values)
+    when any ETA2FS_BEDROCK_* override is set or resolve() fails."""
+    over = sorted(k for k in os.environ if k.startswith("ETA2FS_BEDROCK_"))
+    if over:
+        print(f"resolved_ids: abort override_set vars={','.join(over)}")
+        return None
+    try:
+        return {j: client.resolve(j)[0] for j in judge.JUDGES}
+    except Exception as e:
+        print(f"resolved_ids: abort resolve_failed error={type(e).__name__}")
+        return None
+
+
 def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_client=None) -> int:
     ap = argparse.ArgumentParser(prog="pdqi9.run")
     ap.add_argument("--round", required=True)
@@ -180,6 +194,12 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
     ledger = UsageLedger(out / "usage.jsonl")
     client = client or BedrockClient(ledger)
     cache = out / "cache"
+    resolved = resolve_judges(client)
+    if resolved is None:
+        return 1
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    with open(ledger.path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"kind": "run_header", "round": a.round, "resolved_model_ids": resolved, "n": len(uids)}) + "\n")
 
     consult, transcript, art_bn, art_b0 = {}, {}, {}, {}
     for u in uids:
@@ -236,7 +256,7 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
         "round": a.round, "code_sha": code_sha(), "prompt_sha": frozen.prompt_sha(*[n for n in judge.FROZEN_FILES if n.startswith("pdqi9")]),
         "judge_sha": hashlib.sha256((frozen.prompt_sha("floor-items-v1.system.txt", "floor-missing-v1.system.txt")
                                      + "".join(client.resolve(j)[0] for j in judge.JUDGES)).encode()).hexdigest(),
-        "render": render.RENDER_VERSION, "split_sha": frozen.hashes["split-v1.json"], "split": split_name, "candidate": a.candidate,
+        "render": render.RENDER_VERSION, "resolved_model_ids": resolved, "split_sha": frozen.hashes["split-v1.json"], "split": split_name, "candidate": a.candidate,
         "frozen_hashes": frozen.hashes, "n": len(uids), "uids_dropped_not_in_all_arms": dropped_uids, "parse_failures": parse_failures,
         "totals": totals, "item_means": item_means, "items_bn_gt_a": gt,
         "succinct_bn_minus_a": compare_family(scores, uids, combos, "Bn", "A", SUCCINCT),
