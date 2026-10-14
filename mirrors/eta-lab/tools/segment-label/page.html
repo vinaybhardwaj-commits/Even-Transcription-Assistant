@@ -99,11 +99,6 @@ details summary{cursor:pointer;color:var(--acc)}
 .opt small.d{display:block;font-size:.76rem;font-weight:400;opacity:.8}
 .opt span{flex-direction:column;gap:2px}
 @media (hover:none){.opt kbd{display:none}}
-/* 427L R3: the clip timeline with the judged span shaded, and a playhead */
-.tl{position:relative;height:22px;border:1px solid var(--line);border-radius:6px;background:var(--soft);overflow:hidden}
-.tl .tgt{position:absolute;top:0;bottom:0;background:var(--acc);opacity:.30}
-.tl .ph{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--ok);display:none}
-.judge{font-weight:600;font-size:.95rem;margin:0 0 6px}
 @media (min-width:600px){.opts5{grid-template-columns:repeat(5,1fr)}.opts5 .opt:first-child{grid-column:auto}}
 </style>
 
@@ -122,7 +117,7 @@ details summary{cursor:pointer;color:var(--acc)}
   </header>
 
   <section id="view-rate">
-    <p class="intro">Each item is one line of a transcript, exactly as a reader would see it, with the languages we find in its audio span. <b>Play the highlighted part</b> (&#9654;) hears exactly the span you are judging; <b>Play with 15 s context</b> adds up to 15 s either side where that audio exists. The shaded band on the timeline marks the judged span - everything else in the clip is context, not being rated. Read the text, then choose what kind of text it is. The English button shows a literal machine gloss when one exists - the first judgement is your read of the text. "Can't judge this language" skips the line without counting it. Tick any tags that fit and add a note freely; tags and notes never change your label. You are judging the transcript, not the doctor.</p>
+    <p class="intro">Each item is one line of a transcript, exactly as a reader would see it, with the language the system claims for it. <b>Play the audio</b> (&#9654;) to hear that line (~1 s of padding each side), read the text, then choose what kind of text it is. The English button shows a literal machine gloss when one exists - the first judgement is your read of the text. "Can't judge this language" skips the line without counting it. Tick any tags that fit and add a note freely; tags and notes never change your label. You are judging the transcript, not the doctor.</p>
     <details class="howto"><summary>What the five labels mean</summary>
       <p><b>Readable</b>: the line reads as real speech in the claimed language. <b>Romanised readable</b>: an Indic language written in Latin letters that a fluent reader can follow. <b>Garbled</b>: words that make no sense, endless repeats or invented text. <b>Wrong language</b>: the text is in a different language or script from the one claimed. <b>Unsure</b>: you cannot tell. <b>Can't judge this language (skip)</b>: the line is in a language you cannot assess - it will not count. Your labels save as you go and only you see them here. On a computer, keys 1 to 6 choose the label, N or the right arrow moves on and P or the left arrow goes back.</p></details>
     <div id="panel"><p class="empty">Loading the lines…</p></div>
@@ -164,16 +159,12 @@ const answered=a=>!!a&&(!!ALAB[a.a]||a.a==="cant_judge");
 const curI=()=>items[cur];
 let follow=false;
 try{follow=localStorage.getItem("seglabel-auto")==="1"}catch(e){}
-/* 427L R2: "answered" = a saved "a" on the SERVER (refreshed at click time and at open) or a label this tab
-   made locally and has not synced yet. srv is the server view; mine.t stays the local edit buffer. */
-let srv={},mineGot=false,firstPos=false;
-const answeredOf=it=>answered(mine.t[it.id])||!!srv[it.id];
 function progress(){
-  const n=items.filter(answeredOf).length;
-  $("prog").textContent=items.length?"Item "+(cur+1)+" of "+items.length+" - "+n+" labelled - "+(items.length-n)+" left":"0 / 0 labelled";
+  const n=items.filter(it=>answered(mine.t[it.id])).length;
+  $("prog").textContent=n+" / "+items.length+" labelled";
   $("pfill").style.width=(items.length?100*n/items.length:0)+"%";
   const j=$("jump");
-  if(j){const want=items.map((it,i)=>`<option value="${i}"${i===cur?" selected":""}>${i+1}${answeredOf(it)?" · labelled":""}</option>`).join("");
+  if(j){const want=items.map((it,i)=>`<option value="${i}"${i===cur?" selected":""}>${i+1}${answered(mine.t[it.id])?" · labelled":""}</option>`).join("");
     if(j.dataset.k!==want){j.innerHTML=want;j.dataset.k=want}else j.value=String(cur)}
 }
 function itemHtml(it){
@@ -181,14 +172,11 @@ function itemHtml(it){
   const opts=ANS.concat([SKIP]).slice(0,5).map(([v,l,d],i)=>`<label class="opt"><input type="radio" name="a" id="a-${v}" value="${v}"${a.a===v?" checked":""}><span>${esc(l)}<kbd>${i+1}</kbd><small class="d">${esc(d)}</small></span></label>`).join("");
   return `<div class="card">
     <div class="wh"><h2>Line ${cur+1} of ${items.length}</h2></div>
-    <div class="chips"><span id="langchip">Claimed language: <b>${esc(LANG[it.lang]||it.lang)}</b></span>${it.dur_s?`<span>Length: <b>${Math.round(it.dur_s)} s</b></span>`:""}</div>
-    <div class="tl" id="tl" hidden><span class="tgt" id="tgt"></span><span class="ph" id="ph"></span></div>
-    <div class="exmeta" id="tlab"></div>
+    <div class="chips"><span>Claimed language: <b>${esc(LANG[it.lang]||it.lang)}</b></span>${it.dur_s?`<span>Length: <b>${Math.round(it.dur_s)} s</b></span>`:""}</div>
     <blockquote class="seg" id="seg" tabindex="0">${esc(it.text)}</blockquote>
-    <div class="audiorow"><button class="btn ghost" id="play">${players[it.id]?"&#8635; Hear it again":"&#9654; Play the highlighted part"}</button><button class="btn ghost" id="ctx" hidden>&#9654; Play with 15 s context</button><button class="btn ghost" id="tgl" aria-pressed="false" hidden>English</button></div>
+    <div class="audiorow"><button class="btn ghost" id="play">${players[it.id]?"&#8635; Hear it again":"&#9654; Play this line"}</button><button class="btn ghost" id="tgl" aria-pressed="false" hidden>English</button></div>
     <audio id="au" controls preload="none"></audio>
     <div class="seg gl" id="gl" hidden></div>
-    <p class="judge">Judge only the highlighted part.</p>
     <fieldset><legend>What kind of text is this?</legend><div class="opts5">${opts}<label class="opt"><input type="radio" name="a" id="a-cant_judge" value="cant_judge"${a.a==="cant_judge"?" checked":""}><span>${esc(SKIP[1])}<kbd>6</kbd><small class="d">${esc(SKIP[2])}</small></span></label></div></fieldset>
     <fieldset class="tags"><legend>Tags (optional, any number - never change your label)</legend>${TAGS6.map(([k,l])=>`<label class="topt"><input type="checkbox" name="tags" value="${k}"${(a.tags||[]).includes(k)?" checked":""}><span>${esc(l)}</span></label>`).join("")}</fieldset>
     <div class="foot"><label class="l" for="note">Note (optional)</label><textarea id="note">${esc(a.note||"")}</textarea></div>
@@ -206,24 +194,13 @@ function render(){
   $("nextopen").disabled=false;$("auto").checked=follow;bindMedia(it);progress();
 }
 function go(i){$("status").textContent="";$("done").textContent="";cur=Math.max(0,Math.min(i,items.length-1));render();window.scrollTo({top:0,behavior:"instant"})}
-function positionAtOpen(){   // 427L R2: the page OPENS on the first unlabelled item (once, after rows+mine are both in)
-  if(firstPos||!items.length||!mineGot)return;firstPos=true;
-  const i=items.findIndex(x=>!answeredOf(x));if(i>0){cur=i;render()}
-}
-async function goOpen(){
-  if(!db){const n=items.length;for(let k=1;k<=n;k++){const i=(cur+k)%n;if(!answeredOf(items[i])){go(i);return}}$("done").textContent="All "+items.length+" done";return}
-  let t=null;
-  try{const d=await db.doc("labels/"+meId).get();t=(d.exists&&d.data()&&d.data().t)||{}}
-  catch(e){$("status").textContent="Couldn't check your saved labels just now - nothing moved, try again.";return}
-  Object.keys(t).forEach(k=>{if(t[k]&&t[k].a)srv[k]=true});
-  progress();
-  const n=items.length;
-  for(let k=1;k<=n;k++){const i=(cur+k)%n;if(!answeredOf(items[i])){go(i);return}}
-  $("done").textContent="All "+items.length+" done";
+function goOpen(){
+  const n=items.length;for(let k=1;k<=n;k++){const i=(cur+k)%n;if(!answered(mine.t[items[i].id])){go(i);return}}
+  $("done").textContent="Every line is labelled.";
 }
 function finish(){
   flush();
-  const open=items.map((it,i)=>({it,i})).filter(x=>!answeredOf(x.it));
+  const open=items.map((it,i)=>({it,i})).filter(x=>!answered(mine.t[x.it.id]));
   $("done").innerHTML=open.length
     ?"Not finished yet. Your labels save as you go, so there is nothing to submit. Still open: "+open.slice(0,40).map(x=>`<button class="link" data-go="${x.i}">${x.i+1}</button>`).join(", ")+(open.length>40?" and "+(open.length-40)+" more":"")+"."
     :"All lines are labelled. Your labels are saved automatically; there is nothing to submit. Thank you.";
@@ -232,13 +209,13 @@ function queueSave(){dirty=true;$("status").textContent="Saving…";clearTimeout
 function flush(){
   if(!db||!meId||!dirty||!loaded)return;dirty=false;
   const body=JSON.parse(JSON.stringify({rater:meId,schema:1,t:mine.t,updated:new Date().toISOString()}));
-  saving=saving.then(()=>db.doc("labels/"+meId).set(body)).then(()=>{$("status").textContent="Saved";Object.keys(body.t).forEach(k=>{if(body.t[k]&&body.t[k].a)srv[k]=true})}).catch(e=>{
+  saving=saving.then(()=>db.doc("labels/"+meId).set(body)).then(()=>{$("status").textContent="Saved"}).catch(e=>{
     $("status").textContent=e&&e.code==="invalid_argument"?"Save refused - view-only access, or a refused value (a note over 4,000 characters is never cut off; it stays in the box and must be shortened).":"Couldn't save just now. Your label is still on screen; change it to retry.";dirty=true;
   });
 }
 function choose(v){
   const it=curI();if(!it||!(ALAB[v]||v==="cant_judge"))return;
-  const a=A(it.id);a.a=v;a.mode=players[it.id]?"audio":"text";a.ts=new Date().toISOString();a.ui="l200-v2";
+  const a=A(it.id);a.a=v;a.mode=players[it.id]?"audio":"text";a.ts=new Date().toISOString();
   const r=$("a-"+v);if(r)r.checked=true;
   progress();queueSave();
   if(follow)setTimeout(()=>{if(curI()&&curI().id===it.id){cur<items.length-1?go(cur+1):finish()}},350);
@@ -257,62 +234,35 @@ document.addEventListener("input",e=>{const t=e.target,it=curI();if(it&&t.id==="
 document.addEventListener("change",e=>{const t=e.target,it=curI();if(!it)return;
   if(t.name==="tags"&&t.type==="checkbox"){const a=A(it.id);a.tags=t.checked?[...new Set([...(a.tags||[]),t.value])].sort():(a.tags||[]).filter(x=>x!==t.value).sort();queueSave();return}
   if(t.id==="jump")return;});
-/* ---- audio + gloss (421a, same clip route as calib30; 427L R1/R3: cache the derived plan, play the target span) ---- */
+/* ---- audio + gloss (421a, same clip route as calib30) ---- */
 let players={},clipCache={},winCache={},chunkIdx=null;
 async function chunkPlan(k){if(winCache[k])return winCache[k];
-  const d=await (await fetch("/api/window/"+k)).json();
+  const d=await (await fetch("/api/window/"+k)).json();winCache[k]=d;
   const pd=d.provenance||{};let sc;
   if(Array.isArray(pd.source_chunks)&&pd.source_chunks.length)sc=pd.source_chunks;
   else{const keys=(d.cut&&d.cut.chunk_keys&&d.cut.chunk_keys.length)?d.cut.chunk_keys:(pd.source_audio_keys||[]);
     if(keys.length>1||(keys.length===1&&!isNaN(Date.parse(d.start)))){if(chunkIdx===null){try{chunkIdx=new Map((await (await fetch("/api/chunks-index")).text()).split("\n").filter(Boolean).map(l=>{const r=JSON.parse(l);return[r.r2_key,r]}))}catch(e){chunkIdx=new Map()}}}
     sc=keys.map(kk=>(chunkIdx&&chunkIdx.get(kk))||{r2_key:kk})}
-  const plan=sc.length===1&&isNaN(Date.parse(sc[0].started_at))
-    ?{winStart:0,chunks:sc.map((c,i)=>({n:i,s:0,e:1e13}))}
-    :(()=>{const winStart=Date.parse(d.start);return{winStart,chunks:sc.map((c,i)=>({n:i,s:Date.parse(c.started_at),e:c.ended_at?Date.parse(c.ended_at):Date.parse(c.started_at)+(c.duration_ms||0)}))}})();
-  winCache[k]=plan;return plan;   // 427L R1: cache the DERIVED plan - the old code cached the raw doc and every second call threw
-}
+  if(sc.length===1&&isNaN(Date.parse(sc[0].started_at)))return{winStart:0,chunks:sc.map((c,i)=>({n:i,s:0,e:1e13}))};
+  const winStart=Date.parse(d.start);return{winStart,chunks:sc.map((c,i)=>({n:i,s:Date.parse(c.started_at),e:c.ended_at?Date.parse(c.ended_at):Date.parse(c.started_at)+(c.duration_ms||0)}))}}
 async function fetchClip(id){if(clipCache[id])return clipCache[id];
   const r=await fetch("/api/rate/label200/clip?id="+encodeURIComponent(id));if(!r.ok)throw new Error("clip "+r.status);return clipCache[id]=await r.json()}
 function chunkFor(plan,rel){const ms=plan.winStart+rel*1000;let i=plan.chunks.findIndex(x=>ms>=x.s&&ms<x.e);if(i<0){i=plan.chunks.findIndex(x=>x.s>ms);if(i<0)i=0}return plan.chunks[i].n}
-function spanChunk(plan,t0){const ms=plan.winStart+t0*1000;let i=plan.chunks.findIndex(x=>ms>=x.s&&ms<x.e);if(i<0)i=plan.chunks.findIndex(x=>x.s>ms);return i<0?null:plan.chunks[i]}
-function fmtT(s){s=Math.max(0,Math.round(s));return Math.floor(s/60)+":"+String(s%60).padStart(2,"0")}
-async function playSpan(it,pad){const au=$("au");const c=await fetchClip(it.id);const plan=await chunkPlan(c.k);
-  const ch=spanChunk(plan,c.t0);if(!ch){$("status").textContent="No audio at this time.";return}
-  const startMs=Math.max(plan.winStart+Math.max(0,c.t0-pad)*1000,ch.s),endMs=Math.min(plan.winStart+(c.t1+pad)*1000,ch.e);   // 427L R3: play ONLY the span (pad 0) or span +15 s (pad 15), clamped to the chunk that exists
+async function playLine(it){const au=$("au");const c=await fetchClip(it.id);const plan=await chunkPlan(c.k);
+  const rel0=Math.max(0,c.t0-1),stopMs=plan.winStart+(c.t1+1)*1000,ms0=plan.winStart+rel0*1000;
+  let i=plan.chunks.findIndex(x=>ms0>=x.s&&ms0<x.e);if(i<0){i=plan.chunks.findIndex(x=>x.s>ms0);if(i<0){$("status").textContent="No audio at this time.";return}}
   players[it.id]=1;$("play").innerHTML="&#8635; Hear it again";
-  au.src="/audio/"+c.k+"/"+ch.n;
-  const off=Math.max(0,(startMs-ch.s)/1000);
-  const known=ch.e<1e13;
+  au.src="/audio/"+c.k+"/"+plan.chunks[i].n;
+  const off=Math.max(0,(Math.max(ms0,plan.chunks[i].s)-plan.chunks[i].s)/1000);
   au.addEventListener("loadedmetadata",()=>{au.currentTime=off;au.play().catch(()=>{})},{once:true});au.load();
-  au.ontimeupdate=()=>{
-    if(known&&$("ph")){const w=ch.e-ch.s;$("ph").style.display="block";$("ph").style.left=Math.max(0,Math.min(100,(ch.s+au.currentTime*1000-ch.s)/w*100))+"%"}
-    if(ch.s+au.currentTime*1000>=endMs){au.pause();au.ontimeupdate=null}
-  };
+  au.ontimeupdate=()=>{if(plan.chunks[i].s+au.currentTime*1000>=stopMs){au.pause();au.ontimeupdate=null}};
   const nx=items[cur+1];if(nx)fetchClip(nx.id).then(c2=>chunkPlan(c2.k).then(p=>{const a2=new Audio();a2.preload="auto";a2.src="/audio/"+c2.k+"/"+chunkFor(p,Math.max(0,c2.t0-1));a2.load()})).catch(()=>{});}
-function langChip(c){const el=$("langchip");if(!el)return;
-  const L=c.ld;
-  if(!Array.isArray(L)||!L.length)return;
-  if(L.length===1&&L[0][0]==="und"){el.innerHTML="Speech here: <b>not determined yet</b> - our segment IDs cover none of it";return}
-  if(L.length===1){el.innerHTML="Speech here: <b>"+esc(LANG[L[0][0]]||L[0][0])+"</b> (from segment language IDs)";return}
-  el.innerHTML="Multiple: <b>"+L.map(x=>esc(LANG[x[0]]||x[0])+" ~"+Math.round(x[1])+"%").join(", ")+"</b> (from segment language IDs)";
-}
-function drawTl(c,plan){const tl=$("tl");if(!tl)return;
-  const ch=spanChunk(plan,c.t0);if(!ch||ch.e>=1e13){tl.hidden=true;return}
-  const w=ch.e-ch.s,a=plan.winStart+c.t0*1000,b=Math.min(plan.winStart+c.t1*1000,ch.e);
-  $("tgt").style.left=Math.max(0,(a-ch.s)/w*100)+"%";
-  $("tgt").style.width=Math.max(1,Math.min(100,(b-a)/w*100))+"%";
-  tl.hidden=false;$("ph").style.display="none";
-  $("tlab").textContent="Shaded "+fmtT(c.t0)+"-"+fmtT(c.t1)+" is the part you judge; the rest of this "+Math.round(w/1000)+" s clip is context - not being rated.";
-}
 function bindMedia(it){
-  $("play").onclick=()=>playSpan(it,0).catch(()=>{$("status").textContent="Audio is not available for this line.";});
-  const x=$("ctx");x.hidden=true;x.onclick=()=>playSpan(it,15).catch(()=>{$("status").textContent="Audio is not available for this line.";});
+  $("play").onclick=()=>playLine(it).catch(()=>{$("status").textContent="Audio is not available for this line.";});
   const t=$("tgl"),gl=$("gl");t.hidden=true;gl.hidden=true;
   fetchClip(it.id).then(c=>{   // the gloss shows WITHOUT needing playback; a slow or failed clip just means no toggle
     if(typeof c.gloss==="string"&&c.gloss.length){gl.textContent=c.gloss;t.hidden=false;
       t.onclick=()=>{const on=t.getAttribute("aria-pressed")!=="true";t.setAttribute("aria-pressed",on);gl.hidden=!on;if(on){const a=A(it.id);if(a.g!==true){a.g=true;queueSave();}}};}
-    langChip(c);x.hidden=false;
-    chunkPlan(c.k).then(p=>drawTl(c,p)).catch(()=>{const tl=$("tl");if(tl)tl.hidden=true;});
   }).catch(()=>{});
 }
 document.addEventListener("keydown",e=>{
@@ -359,11 +309,11 @@ render();
       .filter(x=>x.id&&x.text.trim()).sort((a,b)=>a.n-b.n||a.id.localeCompare(b.id)); // the sheet's own shuffled order (n)
     const ns=JSON.stringify(next);if(ns===sig)return;
     const keep=items[cur]&&items[cur].id;sig=ns;items=next;
-    const i=keep?items.findIndex(x=>x.id===keep):-1;cur=i>=0?i:0;render();positionAtOpen();
+    const i=keep?items.findIndex(x=>x.id===keep):-1;cur=i>=0?i:0;render();
   },()=>{});
   if(meId){try{const d=await db.doc("labels/"+meId).get();if(d.exists){const b=d.data()||{},t=b.t||{};
-    Object.keys(t).forEach(k=>{mine.t[k]=Object.assign({},t[k],mine.t[k]||{});if(t[k]&&t[k].a)srv[k]=true});render()}}catch(e){}}
-  mineGot=true;loaded=true;render();positionAtOpen();if(dirty)flush();
+    Object.keys(t).forEach(k=>{mine.t[k]=Object.assign({},t[k],mine.t[k]||{})});render()}}catch(e){}}
+  loaded=true;render();if(dirty)flush();
   if(owner){$("tabs").hidden=false;
     db.collection("labels").onSnapshot(s=>{all=s.docs.filter(d=>d.exists!==false).map(d=>d.data());if(!$("view-res").hidden)renderRes()},()=>{});
   }
