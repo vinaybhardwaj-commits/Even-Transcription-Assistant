@@ -128,38 +128,11 @@ def crowd_lang(base_langs, k, draw):
     return cand[(k + (0 if draw == 1 else 2)) % len(cand)]
 
 
-CONFIRM4_CASES = [   # confirm4 (fresh: no dx/inv shared with clinical1/confirm2/confirm3; drugs avoid babble lines' Metformin/Amlodipine/Montelukast)
-    dict(dx="chickenpox", inv="varicella IgM test", days=4, back=7, drugs=[("Acyclovir", 400, "mg"), ("Calamine lotion", 1, "application")]),
-    dict(dx="tonsillitis", inv="throat swab test", days=3, back=5, drugs=[("Amoxiclav", 625, "mg"), ("Ibuprofen", 400, "mg")]),
-    dict(dx="conjunctivitis", inv="eye examination", days=2, back=4, drugs=[("Moxifloxacin drops", 1, "drop"), ("Ketorolac drops", 1, "drop")]),
-    dict(dx="varicose veins", inv="Doppler scan", days=60, back=30, drugs=[("Diosmin", 500, "mg"), ("Aspirin", 75, "mg")]),
-    dict(dx="fatty liver", inv="liver ultrasound", days=45, back=60, drugs=[("Ursodeoxycholic acid", 300, "mg"), ("Vitamin E", 400, "mg")]),
-    dict(dx="osteoporosis", inv="bone density scan", days=90, back=90, drugs=[("Alendronate", 70, "mg"), ("Calcium", 500, "mg")]),
-    dict(dx="psoriasis", inv="skin biopsy", days=30, back=21, drugs=[("Methotrexate", 10, "mg"), ("Folic acid", 5, "mg")]),
-    dict(dx="epilepsy", inv="EEG test", days=10, back=14, drugs=[("Levetiracetam", 500, "mg"), ("Clobazam", 10, "mg")]),
-]
-
-
-def build_confirm4(lang, k):
-    return build(lang, k, CONFIRM4_CASES, "cf4", skip_pt=True)
-
-
-def build_mixed4(base, j):
-    return build_mixed(base, j, CONFIRM4_CASES, "mx4")
-
-
 def confirm3_canonical():
     return json.dumps({"confirm3_cases": CONFIRM3_CASES, "mix_bases": MIX_BASES, "mix_case": MIX_CASE, "frames": FRAMES}, sort_keys=True, ensure_ascii=False)
 
 
 CONFIRM3_SHA = hashlib.sha256(confirm3_canonical().encode("utf-8")).hexdigest()
-
-
-def confirm4_canonical():
-    return json.dumps({"confirm4_cases": CONFIRM4_CASES, "mix_bases": MIX_BASES, "mix_case": MIX_CASE, "frames": FRAMES}, sort_keys=True, ensure_ascii=False)
-
-
-CONFIRM4_SHA = hashlib.sha256(confirm4_canonical().encode("utf-8")).hexdigest()
 
 
 def confirm_canonical():
