@@ -11,13 +11,9 @@ const KEY_MANIFEST = new RegExp(`^manifests/(${RUN_ID})(\\.start)?\\.json$`);
 const KEY_ADDENDUM = new RegExp(`^manifests/(${RUN_ID})\\.addendum\\.json$`);
 // annotations/<kind>/<room_id>/<ist_date>/<YYYYMMDDHHMM>-<producer>.json : additive overlays on the immutable records
 // (translations, readability flags, re-transcriptions); a new file per batch, never an edit.
-const ANNOT_KINDS = ["translation", "readability", "retranscription", "correction", "selftest", "speaker"];   // r341: four kinds (correction folds in the old corrections/ idea); r375: + selftest (r369 spans) and speaker (337e labels)
+const ANNOT_KINDS = ["translation", "readability", "retranscription", "correction"];   // ruling 341: correction folds the old corrections/ idea into this one key kind
 export const CORRECTION_STATUSES = ["near_silence", "undetermined", "transcribed_unconfirmed"];   // what an owner may correct a NO_SIGNAL (exact-zero) mark to
 const KEY_ANNOT = new RegExp(`^annotations/(${ANNOT_KINDS.join("|")})/(${SEG})/(${DATE})/(\\d{12})-([a-z][a-z0-9-]{1,39})\\.json$`);
-// tapes/<room_id>/<ist_date>/<name>.webm|.opus : the room tape chunks (audio, patient data), a durable second copy of what is in eta-audio (r373).
-// Write-once like everything else; never readable through any route of the viewer (it has none for this prefix).
-const KEY_TAPE = new RegExp(`^tapes/(${SEG})/(${DATE})/(${SEG})\\.(webm|opus)$`);
-export const TAPE_MAX_BYTES = 32 * 1024 * 1024;
 const KEY_INDEX = /^index\/(?:windows-\d{8}\.(?:jsonl|parquet)|search-\d{8}\.jsonl|chunks-\d{8}\.jsonl|view-\d{12}\.jsonl)$/;
 
 // Returns {kind, runId} for a valid key, or null. Any traversal-ish input is a null.
@@ -30,7 +26,6 @@ export function parseKey(key) {
   if ((m = KEY_ANNOT.exec(key))) return { kind: "annotation", runId: null, annotKind: m[1], room: m[2], date: m[3], producer: m[5] };
   if ((m = KEY_ADDENDUM.exec(key))) return { kind: "addendum", runId: m[1] };
   if ((m = KEY_MANIFEST.exec(key))) return { kind: "manifest", runId: m[1] };
-  if ((m = KEY_TAPE.exec(key))) return { kind: "tape", runId: null, room: m[1], date: m[2], ext: m[4] };
   if (KEY_INDEX.test(key)) return { kind: "index", runId: null };
   return null;
 }
@@ -101,10 +96,8 @@ export function annotationProblems(bodyText, parsed) {
   if (!doc.provenance || typeof doc.provenance !== "object" || doc.provenance.producer !== parsed.producer) bad.push("provenance.producer must equal the producer in the key");
   const correction = parsed.annotKind === "correction";
   if (!Array.isArray(doc.items) || doc.items.length === 0 || doc.items.length > 500000) { bad.push("items must be a non-empty list (max 500000)"); return bad; }
-  if (parsed.annotKind === "selftest") return [...bad, ...selftestProblems(doc, parsed)];
   if (doc.items.some((x) => !x || typeof x !== "object" || typeof x.k !== "string" || !x.k || x.k.length > 300 || (correction ? (x.i !== undefined && !(Number.isInteger(x.i) && x.i >= 0)) : !(Number.isInteger(x.i) && x.i >= 0)))) bad.push(correction ? "every item needs k (string); i, if present, an integer >= 0" : "every item needs k (string) and i (integer >= 0)");
   if (correction && doc.items.some((x) => x && typeof x === "object" && (!CORRECTION_STATUSES.includes(x.status) || (x.reason !== undefined && (typeof x.reason !== "string" || x.reason.length > 300))))) bad.push(`every correction item needs status in ${CORRECTION_STATUSES.join("|")} (reason, if present, a string of at most 300 characters)`);
-  if (parsed.annotKind === "speaker") { const w = doc.items.map(speakerItemProblem).find(Boolean); if (w) bad.push(w); }
   if (bad.length) return bad;
   const ks = new Set(doc.items.map((x) => x.k));
   const src = doc.sources;
@@ -120,52 +113,7 @@ export function annotationProblems(bodyText, parsed) {
   if (Object.keys(src).some((k) => !ks.has(k))) bad.push("sources lists a window that no item refers to");
   return bad;
 }
-// kind=speaker (r375, diar-lab's 337e labels; shape agreed with diar-lab #2175 and refuter-2 #2172). Item {k, i, speaker, conf?, seq?, mixed?, speech_s?}:
-// speaker = 'A'..'Z' or 'S<n>' (a letter is WINDOW-LOCAL: 'A' in one window is not 'A' in another; consumers must never join letters across windows)
-// or '?' = unlabeled (under 1.0 s of diarized speech; then no conf/seq/mixed); conf = purity 0..1; mixed = boolean (a second speaker holds a large share);
-// seq = the speaker letters in time order inside the segment, 1..6, present only when mixed is true; speech_s = diarized speech seconds >= 0. No other field, no text.
-const LETTER = /^(?:[A-Z]|S[0-9]{1,3})$/;
-function speakerItemProblem(x) {
-  const bad = "speaker items are {k, i, speaker ('A'..'Z', 'S<n>' or '?'), conf? (0..1), seq? (1..6 letters, only when mixed is true), mixed? (boolean), speech_s? (>= 0)}, nothing else; '?' takes no conf/seq/mixed";
-  if (Object.keys(x).some((k) => !["k", "i", "speaker", "conf", "seq", "mixed", "speech_s"].includes(k))) return bad;
-  if (typeof x.speaker !== "string" || !(x.speaker === "?" || LETTER.test(x.speaker))) return bad;
-  if (x.speaker === "?" && ("conf" in x || "seq" in x || "mixed" in x)) return bad;
-  if ("conf" in x && !(typeof x.conf === "number" && x.conf >= 0 && x.conf <= 1)) return bad;
-  if ("mixed" in x && typeof x.mixed !== "boolean") return bad;
-  if ("speech_s" in x && !(typeof x.speech_s === "number" && x.speech_s >= 0 && Number.isFinite(x.speech_s))) return bad;
-  if ("seq" in x && !(x.mixed === true && Array.isArray(x.seq) && x.seq.length >= 1 && x.seq.length <= 6 && x.seq.every((l) => typeof l === "string" && LETTER.test(l)))) return bad;
-  return null;
-}
-// kind=selftest (r369 item 4): the exact tape intervals of a room's mic self-test runs, so every consumer can drop what overlaps them.
-// Not tied to a run record (the interval is in tape time, whichever windows cover it), so there is no `k`/`sources`; the binding is
-// `source_sha256` = sha256 of the self-test run log line(s) the intervals come from. Items {run_id, t0, t1} with ISO times (offset required),
-// t0 < t1, at most 1 hour long, and t0's IST date equal to the date in the key; a canary text is never stored here.
-const ISO_OFF = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
-function selftestProblems(doc, parsed) {
-  const bad = [];
-  if (typeof doc.source_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(doc.source_sha256)) bad.push("source_sha256 (64 lower-case hex, the sha256 of the self-test run log the intervals come from) is required");
-  if (doc.items.length > 500) bad.push("at most 500 intervals per file");
-  for (const x of doc.items.slice(0, 500)) {
-    const ok = x && typeof x === "object" && typeof x.run_id === "string" && /^[A-Za-z0-9._-]{1,80}$/.test(x.run_id) && ISO_OFF.test(x.t0 ?? "") && ISO_OFF.test(x.t1 ?? "");
-    if (!ok) { bad.push("every interval needs run_id (short id) and t0, t1 as ISO times with an offset"); break; }
-    const a = Date.parse(x.t0), b = Date.parse(x.t1);
-    if (!(a < b) || b - a > 3600000) { bad.push("t0 must be before t1, at most one hour apart"); break; }
-    const ist = new Date(a + 19800000).toISOString().slice(0, 10);
-    if (ist !== parsed.date) { bad.push("t0's IST date must equal the date in the key"); break; }
-    if (Object.keys(x).some((k) => !["run_id", "t0", "t1", "note"].includes(k)) || (x.note !== undefined && (typeof x.note !== "string" || x.note.length > 200))) { bad.push("intervals hold only run_id, t0, t1 and an optional short note"); break; }
-  }
-  return bad;
-}
-export const annotationSources = (bodyText) => JSON.parse(bodyText).sources ?? {};
-
-// Audio body rules for tapes/: an EBML/WebM header (1A 45 DF A3) or an Ogg page ("OggS", for .opus), and not more than TAPE_MAX_BYTES.
-export function tapeProblems(bytes, parsed) {
-  const b = bytes, webm = b.length > 4 && b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3, ogg = b.length > 4 && b[0] === 0x4f && b[1] === 0x67 && b[2] === 0x67 && b[3] === 0x53;
-  const bad = [];
-  if (b.length > TAPE_MAX_BYTES) bad.push(`tape chunks are at most ${TAPE_MAX_BYTES} bytes`);
-  if (parsed.ext === "webm" ? !webm : !(ogg || webm)) bad.push(parsed.ext === "webm" ? "body is not a WebM file (EBML header missing)" : "body is not an Ogg/WebM audio file");
-  return bad;
-}
+export const annotationSources = (bodyText) => JSON.parse(bodyText).sources;
 
 // Returns a list of problems ([] = accept). `runId` is the run_id parsed from the key.
 export function provenanceProblems(bodyText, runId, kind) {

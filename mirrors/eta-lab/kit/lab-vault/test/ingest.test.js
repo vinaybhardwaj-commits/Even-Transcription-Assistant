@@ -304,65 +304,6 @@ test("annotations kind=correction: window-level status, bound to the record sha,
     assert.equal((await put(e, ckey("202609250932"), doc({ items: [bad] }))).status, 422, JSON.stringify(bad));
   assert.equal((await put(e, ckey("202609250933"), doc({ items: [{ k: W, status: "undetermined" }], sources: { [W]: "0".repeat(64) } }))).status, 422); // bound to the record's sha
   assert.equal((await put(e, `annotations/corrections/${ROOM}/${DAY}/202609250930-hist-bulk.json`, doc())).status, 400);   // no separate key kind
-  for (const k of ["notes", "rating", "labels", "Correction", "translation2"]) assert.equal(parseKey(`annotations/${k}/${ROOM}/${DAY}/202609250930-hist-bulk.json`), null, k);   // the kind list is exactly the six of r341 + r375
-  assert.deepEqual(["translation", "readability", "retranscription", "correction", "selftest", "speaker"].map((k) => parseKey(`annotations/${k}/${ROOM}/${DAY}/202609250930-hist-bulk.json`)?.annotKind), ["translation", "readability", "retranscription", "correction", "selftest", "speaker"]);
-});
-
-test("annotations kind=speaker (r375): {k, i, speaker}, bound to the record sha like the others", async () => {
-  const e = env(), ROOM = "room_87frpus9", DAY = "2026-09-11", W = `${RUN}/${ROOM}/${DAY}/w1`;
-  const record = prov(); assert.equal((await put(e, `runs/${W}.json`, record)).status, 201);
-  const key = (st = "202609251100") => `annotations/speaker/${ROOM}/${DAY}/${st}-diar-lab.json`;
-  const doc = (o = {}) => ({ schema: "eta-lab-annotation/1", kind: "speaker", provenance: { producer: "diar-lab" }, sources: { [W]: createHash("sha256").update(JSON.stringify(record)).digest("hex") }, items: [{ k: W, i: 0, speaker: "S1", conf: 0.8 }, { k: W, i: 1, speaker: "S2" }], ...o });
-  assert.equal((await put(e, key(), doc())).status, 201);
-  assert.equal((await put(e, key(), doc())).status, 200);
-  for (const bad of [{ k: W, i: 0 }, { k: W, i: 0, speaker: "" }, { k: W, i: 0, speaker: "x".repeat(41) }, { k: W, i: 0, speaker: "S1", conf: 2 }, { k: W, speaker: "S1" }])
-    assert.equal((await put(e, key("202609251101"), doc({ items: [bad] }))).status, 422, JSON.stringify(bad));
-  assert.equal((await put(e, key("202609251102"), doc({ sources: { [W]: "0".repeat(64) } }))).status, 422);
-  // diar-lab's shape (#2175): window-local letters, '?' = unlabeled, mixed + seq, speech_s; strict, nothing else
-  const good = [{ k: W, i: 2, speaker: "A", conf: 0.9, speech_s: 12.5 }, { k: W, i: 3, speaker: "S27", conf: 0.5, mixed: true, seq: ["A", "B", "A"], speech_s: 20 }, { k: W, i: 4, speaker: "?", speech_s: 0.4 }, { k: W, i: 5, speaker: "B", mixed: false }];
-  assert.equal((await put(e, key("202609251103"), doc({ items: good }))).status, 201);
-  for (const [bad, why] of [[{ speaker: "a" }, "lower-case letter"], [{ speaker: "AB" }, "two letters"], [{ speaker: "?", conf: 0.5 }, "? with conf"], [{ speaker: "?", mixed: false }, "? with mixed"], [{ speaker: "A", seq: ["A"] }, "seq without mixed"],
-    [{ speaker: "A", mixed: false, seq: ["A"] }, "seq with mixed false"], [{ speaker: "A", mixed: true, seq: [] }, "empty seq"], [{ speaker: "A", mixed: true, seq: ["A", "B", "A", "B", "A", "B", "A"] }, "seq over 6"],
-    [{ speaker: "A", mixed: true, seq: ["a"] }, "bad letter in seq"], [{ speaker: "A", mixed: "yes" }, "mixed not boolean"], [{ speaker: "A", speech_s: -1 }, "negative speech_s"], [{ speaker: "A", text: "hello" }, "extra field: no text"], [{ speaker: "A", sq: ["A"] }, "old abbreviation"]])
-    assert.equal((await put(e, key("202609251104"), doc({ items: [{ k: W, i: 6, ...bad }] }))).status, 422, why);
-});
-
-test("annotations kind=selftest (r375, r369 item 4): exact tape intervals, bound to the run log sha, no record needed", async () => {
-  const e = env(), ROOM = "room_87frpus9", DAY = "2026-09-25";
-  const key = (st = "202609251100") => `annotations/selftest/${ROOM}/${DAY}/${st}-radar-kit.json`;
-  const doc = (o = {}) => ({ schema: "eta-lab-annotation/1", kind: "selftest", provenance: { producer: "radar-kit" }, source_sha256: "a".repeat(64),
-    items: [{ run_id: "st-20260925T1100", t0: "2026-09-25T11:00:05+05:30", t1: "2026-09-25T11:00:25+05:30" }], ...o });
-  assert.equal((await put(e, key(), doc())).status, 201);
-  assert.equal((await put(e, key(), doc())).status, 200);
-  const item = (o) => ({ run_id: "st-1", t0: "2026-09-25T11:00:05+05:30", t1: "2026-09-25T11:00:25+05:30", ...o });
-  for (const [bad, why] of [[doc({ source_sha256: undefined }), "no source sha"], [doc({ source_sha256: "xyz" }), "bad source sha"], [doc({ items: [item({ t1: "2026-09-25T11:00:05+05:30" })] }), "t1 not after t0"],
-    [doc({ items: [item({ t1: "2026-09-25T13:00:00+05:30" })] }), "longer than an hour"], [doc({ items: [item({ t0: "2026-09-25T11:00:05" })] }), "no offset"], [doc({ items: [item({ t0: "2026-09-24T11:00:05+05:30", t1: "2026-09-24T11:00:25+05:30" })] }), "wrong IST date"],
-    [doc({ items: [item({ text: "supercali" })] }), "extra field (no text)"], [doc({ items: [item({ run_id: "bad id" })] }), "bad run id"], [doc({ items: [] }), "empty"]])
-    assert.equal((await put(e, key("202609251101"), bad)).status, 422, why);
-  // the IST date is the key's date even when the UTC date differs
-  assert.equal((await put(e, key("202609251102"), doc({ items: [item({ t0: "2026-09-24T19:00:05Z", t1: "2026-09-24T19:00:25Z" })] }))).status, 201);
-});
-
-test("tapes/ (r373): audio chunks, write-once, the client's sha256 must be reproduced, magic bytes and size checked", async () => {
-  const e = env(), key = "tapes/room_87frpus9/2026-09-25/chunk-0001.webm";
-  const webm = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, ...Array.from({ length: 2000 }, (_, i) => (i * 7) & 255)]);
-  const sha = (b) => createHash("sha256").update(b).digest("hex");
-  const h = (o = {}) => ({ "content-type": "audio/webm", "x-content-sha256": sha(webm), ...o });
-  assert.equal(parseKey(key).kind, "tape");
-  const r = await put(e, key, webm, h()); assert.equal(r.status, 201); assert.equal((await r.json()).sha256, sha(webm));
-  assert.equal(e.RESULTS.objs.get(key).bytes.length, webm.length);
-  assert.equal((await put(e, key, webm, h())).status, 200);                                                          // identical: no-op
-  const other = new Uint8Array([...webm, 1]);
-  assert.equal((await put(e, key, other, h({ "x-content-sha256": sha(other) }))).status, 409);                       // write-once
-  const k2 = (n) => `tapes/room_87frpus9/2026-09-25/${n}`;
-  assert.equal((await put(e, k2("a.webm"), webm, h({ "x-content-sha256": undefined }))).status, 400);              // sha header required
-  assert.equal((await put(e, k2("b.webm"), webm, h({ "x-content-sha256": "0".repeat(64) }))).status, 422);         // must match the bytes
-  assert.equal((await put(e, k2("c.webm"), webm, h({ "content-type": "application/json" }))).status, 415);
-  assert.equal((await put(e, k2("d.webm"), new Uint8Array([1, 2, 3, 4, 5, 6]), h({ "x-content-sha256": sha(new Uint8Array([1, 2, 3, 4, 5, 6])) }))).status, 422);   // not WebM
-  const ogg = new Uint8Array([0x4f, 0x67, 0x67, 0x53, 0, 1, 2, 3, 4]);
-  assert.equal((await put(e, k2("e.opus"), ogg, { "content-type": "audio/ogg", "x-content-sha256": sha(ogg) })).status, 201);
-  assert.equal((await put(e, k2("f.webm"), ogg, { "content-type": "audio/webm", "x-content-sha256": sha(ogg) })).status, 422);   // .webm must be WebM
-  for (const bad of ["tapes/room_x/2026-9-25/a.webm", "tapes/room_x/2026-09-25/a.mp3", "tapes/room_x/2026-09-25/../a.webm", "tapes/room_x/a.webm", "tapes/room_x/2026-09-25/sub/a.webm"]) assert.equal(parseKey(bad), null, bad);
-  assert.equal((await put(e, k2("g.webm"), new Uint8Array(33 * 1024 * 1024), h())).status, 413);                     // over the 32 MB cap
-  assert.equal(e.RESULTS.deletes, 0);
+  for (const k of ["notes", "rating", "labels", "Correction", "translation2"]) assert.equal(parseKey(`annotations/${k}/${ROOM}/${DAY}/202609250930-hist-bulk.json`), null, k);   // the kind list is exactly the four of r341
+  assert.deepEqual(["translation", "readability", "retranscription", "correction"].map((k) => parseKey(`annotations/${k}/${ROOM}/${DAY}/202609250930-hist-bulk.json`)?.annotKind), ["translation", "readability", "retranscription", "correction"]);
 });
