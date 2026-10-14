@@ -1,6 +1,6 @@
 """Gemini on Vertex AI, regional host; "global" only under a ruling (VERTEX_LOCATION_OVERRIDE_RULING). Evaluation tooling: it is handed note_text and nothing else.
 
-Env: VERTEX_PROJECT, VERTEX_LOCATION (a region; "global" only with a real VERTEX_LOCATION_OVERRIDE_RULING), VERTEX_SA_KEY_FILE (path to a 0600 JSON key),
+Env: VERTEX_PROJECT, VERTEX_LOCATION (a region; "global" only with an allow-listed VERTEX_LOCATION_OVERRIDE_RULING), VERTEX_SA_KEY_FILE (path to a 0600 JSON key),
 PULSE_EXTRACT_MODEL (default gemini-3.1-pro-preview), PULSE_ADJ_MODEL (default gemini-3.5-flash).
 No fallback model and no other route. Prompt and response text are never logged; only model names and token counts.
 """
@@ -53,6 +53,8 @@ class GenResult:
 
 
 DEFAULT_LOCATION = "asia-northeast1"
+# Exact match, no normalisation: a different id, a look-alike, a trailing space or another case is refused.
+RULING_ALLOWLIST = ("FABLE-REPLAY-EXTRACT-14OCT",)
 
 
 # Lowercase (post-casefold) Cyrillic/Greek look-alikes of Latin t s e n a i v g l h.
@@ -122,14 +124,6 @@ def guard_request(*texts: str) -> None:
                     raise TranscriptGuardError(f"request contains {what}")
 
 
-def _real_ruling(r: str | None) -> bool:
-    """Allow-list: a letter, number, punctuation or symbol (or Mc) that is visible."""
-    def ok(c: str) -> bool:
-        k = unicodedata.category(c)
-        return (k[0] in "LNPS" or k == "Mc") and not _invisible(c) and c != "\u3164"
-    return any(ok(c) for c in (r or ""))
-
-
 def check_key_file(path) -> Path:
     try:
         check_private_file(Path(path), "VERTEX_SA_KEY_FILE")
@@ -180,14 +174,15 @@ class VertexClient:
             raise ReplayUnavailable("VERTEX_PROJECT missing or malformed")
         if location != "global" and not _REGION.fullmatch(location or ""):
             raise ReplayUnavailable("VERTEX_LOCATION must be a region such as asia-northeast1, or global under a ruling")
-        if location != DEFAULT_LOCATION and not _real_ruling(location_ruling):
-            raise ReplayUnavailable(f"VERTEX_LOCATION other than {DEFAULT_LOCATION} needs VERTEX_LOCATION_OVERRIDE_RULING (a fable ruling id)")
+        if location != DEFAULT_LOCATION and location_ruling not in RULING_ALLOWLIST:
+            raise ReplayUnavailable(f"VERTEX_LOCATION other than {DEFAULT_LOCATION} needs VERTEX_LOCATION_OVERRIDE_RULING (an allow-listed ruling id)")
         for m in (extract_model, adj_model):
             if not _MODEL.match(m or ""):
                 raise ReplayUnavailable("model name malformed")
         self.project, self.location = project, location
         self.token_provider, self.transport = token_provider, transport
         self.extract_model, self.adj_model = extract_model, adj_model
+        log.info("vertex client location=%s ruling=%s", location, location_ruling if location_ruling in RULING_ALLOWLIST else "none")
 
     @classmethod
     def from_env(cls, env=None, *, transport=_http_transport, token_provider=None) -> "VertexClient":
