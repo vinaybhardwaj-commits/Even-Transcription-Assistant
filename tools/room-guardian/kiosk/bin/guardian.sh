@@ -30,15 +30,73 @@ tick() {
   heal_cycle
 }
 
+# Loop self-supervision. The Guardian never signals a pid it remembers: under launchd a process-group kill of the job (or a SIGKILL of main)
+# takes main down without running a trap, and the loops sit in groups of their own. So each loop checks, once per second, that main is still
+# its parent. When main is gone the loop signals ONLY its own process group (signal target 0 = the caller's group, which it leads) and exits.
+# MAIN_PID is set by run(). Empty (tests that call a loop on its own) = no check.
+MAIN_PID=""
+LOOP_ME=""
+
+# Run first inside a loop subshell. Job control off, so the loop's pipeline stays in the loop's group; LOOP_ME = this subshell's pid.
+loop_init() {
+  set +m
+  LOOP_ME="$(exec sh -c 'echo $PPID')"
+}
+
+# 0 while main is alive and is still this loop's parent (a reused main pid does not pass: the parent link is checked, not just kill -0).
+loop_parent_ok() {
+  local info
+  [ -n "$MAIN_PID" ] || return 0
+  kill -0 "$MAIN_PID" 2>/dev/null || return 1
+  info="$(/bin/ps -o ppid= -p "$LOOP_ME" 2>/dev/null | tr -d ' ')"
+  [ "$info" = "$MAIN_PID" ]
+}
+
+# Main is gone: stop this loop's own tree and exit. Group signal only when this subshell is provably its group's leader;
+# otherwise only the current background job (a job-table reference, never a bare pid) is signalled.
+loop_orphaned() {
+  local pg
+  pg="$(/bin/ps -o pgid= -p "$LOOP_ME" 2>/dev/null | tr -d ' ')"
+  if [ -n "$LOOP_ME" ] && [ "$pg" = "$LOOP_ME" ]; then
+    trap '' TERM
+    kill -TERM 0 2>/dev/null
+  else
+    kill %% 2>/dev/null
+  fi
+  exit 0
+}
+
+# Sleep $1 s in 1 s slices, leaving as soon as main is gone.
+loop_nap() {
+  local n="$1"
+  while [ "$n" -gt 0 ]; do
+    loop_parent_ok || loop_orphaned
+    sleep 1; n=$((n - 1))
+  done
+}
+
+# Run one pipeline job in the background and watch it: returns when it ends; leaves the loop if main goes away first.
+loop_watch() {
+  local pp="$1"
+  while kill -0 "$pp" 2>/dev/null; do
+    loop_parent_ok || loop_orphaned
+    sleep 1
+  done
+  wait "$pp" 2>/dev/null
+}
+
 subscriber_loop() {
   local topic payload backoff=2
   [ -n "$GUARDIAN_SUBSCRIBE_CMD" ] || return 0
+  loop_init
   while :; do
-    bash -c "$GUARDIAN_SUBSCRIBE_CMD" _ "$GUARDIAN_ROOM" </dev/null 2>/dev/null | while IFS="$(printf '\t')" read -r topic payload; do
+    loop_parent_ok || loop_orphaned
+    { bash -c "$GUARDIAN_SUBSCRIBE_CMD" _ "$GUARDIAN_ROOM" </dev/null 2>/dev/null | while IFS="$(printf '\t')" read -r topic payload; do
       handle_message "$topic" "$payload"
-    done
+    done; } </dev/null &
+    loop_watch $!
     audit "subscriber exited; retry in ${backoff}s"
-    sleep "$backoff"
+    loop_nap "$backoff"
     [ "$backoff" -lt 60 ] && backoff=$((backoff * 2))
   done
 }
@@ -54,42 +112,31 @@ control_store() {
 control_loop() {
   local line backoff=2
   [ -n "$GUARDIAN_CONTROL_SUB_CMD" ] || return 0
+  loop_init
   while :; do
-    bash -c "$GUARDIAN_CONTROL_SUB_CMD" _ "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | while IFS= read -r line; do
+    loop_parent_ok || loop_orphaned
+    { bash -c "$GUARDIAN_CONTROL_SUB_CMD" _ "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | while IFS= read -r line; do
       [ -n "$line" ] && control_store "$line"
-    done
+    done; } </dev/null &
+    loop_watch $!
     audit "control subscriber exited; retry in ${backoff}s"
-    sleep "$backoff"
+    loop_nap "$backoff"
     [ "$backoff" -lt 60 ] && backoff=$((backoff * 2))
   done
 }
 
-# Kill the loops' process groups. Idempotent; runs on TERM/INT/HUP and on every exit of main.
-LOOP_PIDS=""
-WATCHDOG_PID=""
-stop_loops() {
-  local p
-  [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null
-  for p in $LOOP_PIDS; do kill -TERM -- "-$p" 2>/dev/null; kill "$p" 2>/dev/null; done
-  LOOP_PIDS=""
-}
-
 run() {
-  local t0 t1 sub ctl main=$$
+  local t0 t1
   [ -n "$GUARDIAN_ROOM" ] || { echo "GUARDIAN_ROOM not set" >&2; exit 2; }
   audit "guardian start version=$GUARDIAN_VERSION"
-  trap stop_loops EXIT
+  MAIN_PID="$(exec sh -c 'echo $PPID')"
   trap 'exit 0' TERM INT HUP
-  # Job control gives each loop its own process group, so TERM reaches the pipeline children (bash -c, ssh) too.
+  # Job control gives each loop a process group of its own, which the loop signals itself (see loop_orphaned) when main is gone.
+  # Main sends no signal to any pid: after TERM, an exit or a SIGKILL the loops notice within about 2 s and stop on their own.
   set -m
-  subscriber_loop & sub=$!
-  control_loop & ctl=$!
+  subscriber_loop &
+  control_loop &
   set +m
-  LOOP_PIDS="$sub $ctl"
-  # SIGKILL of main cannot run a trap, and the loops are outside the launchd job's group: a watchdog kills them when main is gone.
-  ( while kill -0 "$main" 2>/dev/null; do sleep 1; done
-    kill -TERM -- "-$sub" "-$ctl" 2>/dev/null; kill "$sub" "$ctl" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
-  WATCHDOG_PID=$!
   while :; do
     t0="$(now_epoch)"
     flag_poll

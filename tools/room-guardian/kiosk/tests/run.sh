@@ -10,7 +10,7 @@ for f in t_*.sh; do
   . "./$f"
   for fn in $(grep -o '^test_[a-z0-9_]*' "$f"); do
     ntests=$((ntests + 1))
-    out="$( ( mk_sandbox; PASS=0; FAILS=0; "$fn"; echo "__RESULT $PASS $FAILS"; rm -rf "$T" ) 2>&1 )"
+    out="$( ( mk_sandbox; PASS=0; FAILS=0; "$fn"; echo "__RESULT $PASS $FAILS"; reap_tracked "$T"; rm -rf "$T" ) 2>&1 )"
     res="$(printf '%s\n' "$out" | grep '^__RESULT' | tail -n1)"
     p="$(echo "$res" | awk '{print $2}')"; fl="$(echo "$res" | awk '{print $3}')"
     if [ -z "$res" ]; then echo "  CRASH $fn"; printf '%s\n' "$out" | tail -n 8; total_fail=$((total_fail + 1)); continue; fi

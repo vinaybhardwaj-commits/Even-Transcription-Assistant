@@ -11,7 +11,7 @@ FLAG_CACHE="$STATE_DIR/flags.cache"
 CONTROL_LAST="$STATE_DIR/control.last"
 
 # Print the top-level keys of a JSON object read on stdin, one "key<TAB>raw value" line each (values trimmed).
-# Prints a line starting with ERR when the text is not one balanced object (open string, depth, junk, escaped key).
+# Prints nothing and exits 1 when the text is not exactly one balanced object (open string, bad depth, junk, a missing colon, an escaped key). Output is held until the whole text has been read, so an error anywhere discards every line.
 control_top_keys() {
   awk '
   BEGIN { RS = "\001" }
@@ -59,22 +59,26 @@ control_top_keys() {
       if (c == "," && depth == 1) { emit(key, val); mode = "K"; continue }
       val = val c
     }
-    if (err || instr || depth != 0 || !done) { print "ERR"; exit }
+    if (err || instr || depth != 0 || !done) exit 1
+    printf "%s", out
   }
-  function emit(k, v) { gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", v); gsub(/\t/, " ", k); print k "\t" v }
+  function emit(k, v) { gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", v); gsub(/\t/, " ", k); out = out k "\t" v "\n" }
   '
 }
 
 # Parse $CONTROL_LAST (line 1 = receive epoch, line 2 = payload). Sets CTRL_FLEET (on|unreachable),
 # CTRL_MODE (shadow|heal), CTRL_WHY (ok|missing|unparseable|stale|kill|skew) and CTRL_AGE (receive age, or empty).
-# Pure bash/sed. Fail closed: anything but a fresh payload with exactly one top-level "kill": false means killed.
-# Top-level only: the modes object is stripped first, then "kill" and "ts" must each occur at most once ("kill" exactly once).
+# Bash, sed and awk. Fail closed: anything but a fresh payload with exactly one top-level "kill": false means killed.
+# Top-level only: a structural scan returns the real top-level keys; "kill" must occur exactly once, "modes" and "ts" at most once, and any scanner error anywhere in the text means killed. The file is capped at CONTROL_MAX_BYTES (4096) before any parsing; larger = killed.
 # Optional top-level integer "ts" (publish epoch): stale when now - ts > CONTROL_STALE_S; more than 30 s ahead = killed.
 # Stale latches on the receive epoch: it stays stale until a message arrives with a DIFFERENT receive epoch, even if the clock steps back.
 control_parse() {
-  local opens closes recv payload now room modes top kill ts nk nm nts latch keys
+  local opens closes recv payload now room modes top kill ts nk nm nts latch keys size nr
   CTRL_FLEET=unreachable; CTRL_MODE=shadow; CTRL_WHY=missing; CTRL_AGE=""
   [ -r "$CONTROL_LAST" ] || return 1
+  size="$(wc -c <"$CONTROL_LAST" 2>/dev/null | tr -d " ")"
+  case "$size" in ""|*[!0-9]*) CTRL_WHY=unparseable; return 1 ;; esac
+  if [ "$size" -gt "${CONTROL_MAX_BYTES:-4096}" ]; then CTRL_WHY=unparseable; return 1; fi
   recv="$(sed -n '1p' "$CONTROL_LAST" 2>/dev/null)"
   payload="$(sed -n '2p' "$CONTROL_LAST" 2>/dev/null)"
   now="$(now_epoch)"
@@ -96,8 +100,8 @@ control_parse() {
   nts="$(printf '%s' "$top" | grep -o '"ts"' | wc -l | tr -d ' ')"
   if [ "$nk" != "1" ] || [ "$nts" -gt 1 ]; then CTRL_WHY=unparseable; return 1; fi
   # Structural pass: real top-level keys only (nesting and strings tracked). A missing top-level "kill" = killed, wherever a nested one appears.
-  keys="$(printf '%s' "$payload" | control_top_keys)"
-  case "$keys" in ERR*|'') CTRL_WHY=unparseable; return 1 ;; esac
+  keys="$(printf '%s' "$payload" | control_top_keys)" || { CTRL_WHY=unparseable; return 1; }
+  [ -n "$keys" ] || { CTRL_WHY=unparseable; return 1; }
   nk="$(printf '%s\n' "$keys" | awk -F'\t' '$1=="kill"{n++} END{print n+0}')"
   nm="$(printf '%s\n' "$keys" | awk -F'\t' '$1=="modes"{n++} END{print n+0}')"
   nts="$(printf '%s\n' "$keys" | awk -F'\t' '$1=="ts"{n++} END{print n+0}')"
@@ -116,10 +120,16 @@ control_parse() {
       CTRL_WHY=stale; return 1
     fi
   fi
-  CTRL_FLEET=on; CTRL_WHY=ok
   # shellcheck disable=SC2016
   room="$(printf '%s' "$GUARDIAN_ROOM" | sed 's/[][\.*^$(){}?+|/]/\\&/g')"
   modes="$(printf '%s\n' "$keys" | awk -F'\t' '$1=="modes"{print $2}')"
+  # modes is read at the top level only and must be one flat object of "room": "mode" strings (colon required, no nesting). Room named twice = killed.
+  if [ -n "$modes" ]; then
+    if ! printf '%s' "$modes" | grep -qE '^\{[[:space:]]*(\}|"[^"\\]*"[[:space:]]*:[[:space:]]*"[^"\\]*"([[:space:]]*,[[:space:]]*"[^"\\]*"[[:space:]]*:[[:space:]]*"[^"\\]*")*[[:space:]]*\})$'; then CTRL_WHY=unparseable; return 1; fi
+    nr="$(printf '%s' "$modes" | grep -oE '"'"$room"'"[[:space:]]*:' | wc -l | tr -d ' ')"
+    if [ "$nr" -gt 1 ]; then CTRL_WHY=unparseable; return 1; fi
+  fi
+  CTRL_FLEET=on; CTRL_WHY=ok
   if printf '%s' "$modes" | grep -qE '"'"$room"'"[[:space:]]*:[[:space:]]*"heal"'; then CTRL_MODE=heal; fi
   return 0
 }

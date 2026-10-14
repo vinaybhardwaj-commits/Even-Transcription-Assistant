@@ -124,11 +124,11 @@ test_control_store_is_atomic() {
 
 test_control_loop_writes_control_last() {
   load_libs
-  eval "$(sed -n '/^control_store()/,/^}/p;/^control_loop()/,/^}/p' "$KDIR/bin/guardian.sh")"
-  export GUARDIAN_CONTROL_SUB_CMD='printf "%s\n\n%s\n" "garbage" "{\"kill\": false, \"modes\": {\"$1\": \"heal\"}}"; sleep 30'
-  control_loop & local pid=$! i=0
+  export GUARDIAN_CONTROL_SUB_CMD='printf "%s\n\n%s\n" "garbage" "{\"kill\": false, \"modes\": {\"$1\": \"heal\"}}"; sleep 30 & echo $! >>"$T/ctl.pid"; wait'
+  start_loops control_loop
+  local i=0
   while [ "$i" -lt 40 ] && ! grep -q '"kill": false' "$STATE_DIR/control.last" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
-  pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
   assert_eq "$(sed -n '1p' "$STATE_DIR/control.last")" "$GUARDIAN_FAKE_NOW" "line 1 is the receive epoch"
   assert_has "$(sed -n '2p' "$STATE_DIR/control.last")" '"opd9": "heal"' "line 2 is the last payload, room passed as \$1"
   flag_fetch; killswitch_engaged; assert_rc $? 1 "loop output drives the switch"
@@ -234,22 +234,39 @@ test_rooms_named_ts_and_kill_inside_modes_are_not_read() {
   assert_eq "$(current_mode)" "heal" "room named ts gets its mode"
 }
 
+# ---- process helpers (tests only ever signal pids they started and recorded in $T/*.pid; lib.sh reap_tracked cleans up) ----
+# the loop and helper functions of guardian.sh, for a stand-in main
+guardian_funcs() { sed -n '/^MAIN_PID=""/,/^case "\${1:-run}"/p' "$KDIR/bin/guardian.sh" | sed '$d'; }
+# fake_sub <name> <secs>: a subscriber command that records the pid of its own sleep in $T/<name>.pid
+fake_sub() { printf 'sleep %s & echo $! >>"%s/%s.pid"; wait' "$2" "$T" "$1"; }
+# set_subs <ctl secs> <sub secs>: both subscriber commands, each recording its sleep pid
+set_subs() { GUARDIAN_CONTROL_SUB_CMD="$(fake_sub ctl "$1")"; GUARDIAN_SUBSCRIBE_CMD="$(fake_sub sub "$2")"; export GUARDIAN_CONTROL_SUB_CMD GUARDIAN_SUBSCRIBE_CMD; }
+pid_alive() { local s; s="$(/bin/ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')"; [ -n "$s" ] && [ "${s#Z}" = "$s" ]; }
+# alive_of <name>: how many recorded pids are still running
+alive_of() { local p n=0; for p in $(cat "$T/$1.pid" 2>/dev/null); do pid_alive "$p" && n=$((n + 1)); done; echo "$n"; }
+# wait_alive <name> <count> [tries of 0.25 s]
+wait_alive() { local i=0; while [ "$i" -lt "${3:-40}" ] && [ "$(alive_of "$1")" != "$2" ]; do sleep 0.25; i=$((i + 1)); done; }
+# start_guardian: the real guardian.sh run, in the background; GP = its pid (recorded for cleanup)
+start_guardian() { bash "$KDIR/bin/guardian.sh" run >/dev/null 2>&1 & GP=$!; echo "$GP" >>"$T/main.pid"; }
+# start_loops <fn>...: a stand-in main (subshell) that runs the named loops under job control, as run() does. LM = its pid.
+# LOOP_STDIN = fd to give it as stdin (default 0).
+start_loops() {
+  ( eval "$(guardian_funcs)"; MAIN_PID="$(exec sh -c 'echo $PPID')"; set -m; for f in "$@"; do "$f" & done; set +m; wait ) <&"${LOOP_STDIN:-0}" >/dev/null 2>&1 &
+  LM=$!; echo "$LM" >>"$T/main.pid"
+}
+# a decoy in a process group of its own (stands for a process that reused a pid the Guardian once knew)
+start_decoy() { set -m; sleep 4601 >/dev/null 2>&1 & DECOY=$!; set +m; echo "$DECOY" >>"$T/decoy.pid"; }
+
 # ---- trap ----
 test_term_kills_the_subscriber_pipelines() {
   load_libs
-  local gp i=0 left
-  export GUARDIAN_CONTROL_SUB_CMD='sleep 4243 | cat' GUARDIAN_SUBSCRIBE_CMD='sleep 4244 | cat'
-  bash "$KDIR/bin/guardian.sh" run >/dev/null 2>&1 &
-  gp=$!
-  while [ "$i" -lt 30 ] && [ "$(/bin/ps -axo command | grep -c '^sleep 424[34]$')" -lt 2 ]; do sleep 0.2; i=$((i + 1)); done
-  assert_eq "$(/bin/ps -axo command | grep -c '^sleep 424[34]$')" "2" "both fake subscribers are running"
-  kill -TERM "$gp"; i=0
-  while [ "$i" -lt 50 ] && kill -0 "$gp" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
-  sleep 0.5
-  left="$(/bin/ps -axo command | grep -c '^sleep 424[34]$')"
-  /usr/bin/pkill -f 'sleep 424[34]' 2>/dev/null
-  assert_eq "$left" "0" "no orphan subscriber process after TERM"
-  kill -0 "$gp" 2>/dev/null && { kill -9 "$gp"; fail "guardian did not exit on TERM"; } || ok
+  set_subs 4243 4244
+  start_guardian
+  wait_alive ctl 1; wait_alive sub 1
+  assert_eq "$(alive_of ctl)$(alive_of sub)" "11" "both fake subscribers are running"
+  kill -TERM "$GP"; wait "$GP" 2>/dev/null
+  wait_alive ctl 0 24; wait_alive sub 0 24
+  assert_eq "$(alive_of ctl)$(alive_of sub)" "00" "no orphan subscriber process within 6 s of TERM"
 }
 
 # ---- R3 ----
@@ -310,68 +327,153 @@ test_leading_zero_ts_does_not_crash_and_fails_closed() {
   assert_eq "$(cat "$err")" "" "no arithmetic error from the receive epoch"
 }
 
-# ---- orphans ----
-# count of processes whose command is exactly "sleep <n>"
-sleepers() { /bin/ps -axo command | grep -c "^sleep $1\$"; }
 
+# ---- orphans: the loops stop by themselves when main is gone ----
 test_main_error_exit_leaves_no_subscriber() {
   load_libs
-  export GUARDIAN_CONTROL_SUB_CMD='sleep 4511 | cat' GUARDIAN_SUBSCRIBE_CMD='sleep 4512 | cat'
+  set_subs 4511 4512
   (
-    eval "$(sed -n '/^subscriber_loop()/,/^}/p;/^control_store()/,/^}/p;/^control_loop()/,/^}/p;/^LOOP_PIDS=/,/^}/p;/^run()/,/^}/p' "$KDIR/bin/guardian.sh")"
+    eval "$(guardian_funcs)"
     flag_poll() { :; }
     tick() { sleep 1.5; exit 3; }   # main dies of an error after the loops are up
     run
   ) >/dev/null 2>&1 &
-  local mp=$! i=0
-  while [ "$i" -lt 30 ] && [ "$(sleepers 4511)$(sleepers 4512)" != "11" ]; do sleep 0.2; i=$((i + 1)); done
-  assert_eq "$(sleepers 4511)$(sleepers 4512)" "11" "both fake subscribers are up"
+  local mp=$!
+  echo "$mp" >>"$T/main.pid"
+  wait_alive ctl 1; wait_alive sub 1
+  assert_eq "$(alive_of ctl)$(alive_of sub)" "11" "both fake subscribers are up"
   wait "$mp"; assert_rc $? 3 "main exited through its error path"
-  sleep 0.5
-  assert_eq "$(sleepers 4511)$(sleepers 4512)" "00" "no subscriber left after main's error exit"
-  /usr/bin/pkill -f 'sleep 451[12]' 2>/dev/null
+  wait_alive ctl 0 24; wait_alive sub 0 24
+  assert_eq "$(alive_of ctl)$(alive_of sub)" "00" "no subscriber left within 6 s of main's error exit"
 }
 
 test_sigkill_of_main_leaves_no_subscriber() {
   load_libs
-  local gp i=0 left
-  export GUARDIAN_CONTROL_SUB_CMD='sleep 4521 | cat' GUARDIAN_SUBSCRIBE_CMD='sleep 4522 | cat'
-  bash "$KDIR/bin/guardian.sh" run >/dev/null 2>&1 &
-  gp=$!
-  while [ "$i" -lt 30 ] && [ "$(sleepers 4521)$(sleepers 4522)" != "11" ]; do sleep 0.2; i=$((i + 1)); done
-  assert_eq "$(sleepers 4521)$(sleepers 4522)" "11" "both fake subscribers are up"
-  kill -9 "$gp"; wait "$gp" 2>/dev/null
-  i=0
-  while [ "$i" -lt 40 ] && [ "$(sleepers 4521)$(sleepers 4522)" != "00" ]; do sleep 0.25; i=$((i + 1)); done
-  left="$(sleepers 4521)$(sleepers 4522)"
-  /usr/bin/pkill -f 'sleep 452[12]' 2>/dev/null
-  assert_eq "$left" "00" "no subscriber left within 10 s of SIGKILL of main"
+  set_subs 4521 4522
+  start_guardian
+  wait_alive ctl 1; wait_alive sub 1
+  assert_eq "$(alive_of ctl)$(alive_of sub)" "11" "both fake subscribers are up"
+  # precondition: the loops are NOT in main's process group, so a group kill of main would leave them (the launchd case)
+  local mg lg
+  mg="$(/bin/ps -o pgid= -p "$GP" | tr -d ' ')"; lg="$(/bin/ps -o pgid= -p "$(head -n1 "$T/ctl.pid")" | tr -d ' ')"
+  [ -n "$lg" ] && [ "$mg" != "$lg" ] && ok || fail "loop group [$lg] must differ from main's group [$mg]"
+  kill -9 "$GP"; wait "$GP" 2>/dev/null
+  wait_alive ctl 0 24; wait_alive sub 0 24
+  assert_eq "$(alive_of ctl)$(alive_of sub)" "00" "no subscriber left within 6 s of SIGKILL of main"
 }
 
 test_hup_of_main_leaves_no_subscriber() {
   load_libs
-  local gp i=0
-  export GUARDIAN_CONTROL_SUB_CMD='sleep 4531 | cat' GUARDIAN_SUBSCRIBE_CMD='sleep 4532 | cat'
-  bash "$KDIR/bin/guardian.sh" run >/dev/null 2>&1 &
-  gp=$!
-  while [ "$i" -lt 30 ] && [ "$(sleepers 4531)$(sleepers 4532)" != "11" ]; do sleep 0.2; i=$((i + 1)); done
-  kill -HUP "$gp"; wait "$gp" 2>/dev/null; sleep 0.5
-  assert_eq "$(sleepers 4531)$(sleepers 4532)" "00" "no subscriber left after HUP"
-  /usr/bin/pkill -f 'sleep 453[12]' 2>/dev/null
+  set_subs 4531 4532
+  start_guardian
+  wait_alive ctl 1; wait_alive sub 1
+  kill -HUP "$GP"; wait "$GP" 2>/dev/null
+  wait_alive ctl 0 24; wait_alive sub 0 24
+  assert_eq "$(alive_of ctl)$(alive_of sub)" "00" "no subscriber left within 6 s of HUP"
+}
+
+# A decoy in its own process group stands for any process that reused a pid the Guardian once held. Main sends no signal by pid, and a
+# loop signals only its own group, so the decoy must survive TERM, an error exit and SIGKILL of main.
+test_decoy_is_never_signalled_on_term_exit_or_sigkill() {
+  load_libs
+  set_subs 4541 4542
+  start_decoy
+  start_guardian
+  wait_alive ctl 1; wait_alive sub 1
+  kill -TERM "$GP"; wait "$GP" 2>/dev/null
+  wait_alive ctl 0 24; wait_alive sub 0 24
+  pid_alive "$DECOY" && ok || fail "decoy was signalled on TERM"
+  : >"$T/ctl.pid"; : >"$T/sub.pid"
+  (
+    eval "$(guardian_funcs)"
+    flag_poll() { :; }
+    tick() { sleep 1.5; exit 3; }
+    run
+  ) >/dev/null 2>&1 &
+  local mp=$!; echo "$mp" >>"$T/main.pid"
+  wait_alive ctl 1; wait_alive sub 1
+  wait "$mp"
+  wait_alive ctl 0 24; wait_alive sub 0 24
+  pid_alive "$DECOY" && ok || fail "decoy was signalled on the EXIT path"
+  : >"$T/ctl.pid"; : >"$T/sub.pid"
+  start_guardian
+  wait_alive ctl 1; wait_alive sub 1
+  kill -9 "$GP"; wait "$GP" 2>/dev/null
+  wait_alive ctl 0 24; wait_alive sub 0 24
+  assert_eq "$(alive_of ctl)$(alive_of sub)" "00" "loops stopped after SIGKILL"
+  pid_alive "$DECOY" && ok || fail "decoy was signalled when main was gone"
+}
+
+test_guardian_remembers_no_pid_to_signal() {
+  local g="$KDIR/bin/guardian.sh"
+  assert_eq "$(grep -cE 'LOOP_PIDS|WATCHDOG|pkill|killall|kill -TERM -- "-' "$g")" "0" "no remembered-pid or pattern kill in guardian.sh"
+  assert_eq "$(grep -cE 'kill (-[A-Z]+ )?(-- )?"?\$' "$g")" "0" "no kill of a variable pid or pgid"
 }
 
 # ---- stdin ----
 test_subscribers_read_eof_not_the_terminal() {
   load_libs
-  eval "$(sed -n '/^subscriber_loop()/,/^}/p;/^control_store()/,/^}/p;/^control_loop()/,/^}/p' "$KDIR/bin/guardian.sh")"
-  export GUARDIAN_CONTROL_SUB_CMD='x=unset; read -r x; echo "rc=$? val=[$x]" >"$T/stdin_ctl"; sleep 30'
-  export GUARDIAN_SUBSCRIBE_CMD='x=unset; read -r x; echo "rc=$? val=[$x]" >"$T/stdin_sub"; sleep 30'
-  # a stdin that would block for 20 s and then deliver data, as a terminal would
-  { control_loop & subscriber_loop & wait; } < <(sleep 20; echo typed) >/dev/null 2>&1 &
-  local bg=$! i=0
+  export GUARDIAN_CONTROL_SUB_CMD='x=unset; read -r x; echo "rc=$? val=[$x]" >"$T/stdin_ctl"; sleep 30 & echo $! >>"$T/ctl.pid"; wait'
+  export GUARDIAN_SUBSCRIBE_CMD='x=unset; read -r x; echo "rc=$? val=[$x]" >"$T/stdin_sub"; sleep 30 & echo $! >>"$T/sub.pid"; wait'
+  # a stdin that would block, as a terminal would: a fifo held open read-write by this shell
+  mkfifo "$T/fifo"; exec 9<>"$T/fifo"
+  LOOP_STDIN=9 start_loops control_loop subscriber_loop
+  local i=0
   while [ "$i" -lt 30 ] && { [ ! -s "$T/stdin_ctl" ] || [ ! -s "$T/stdin_sub" ]; }; do sleep 0.2; i=$((i + 1)); done
   assert_eq "$(cat "$T/stdin_ctl" 2>/dev/null)" "rc=1 val=[]" "control subscriber: EOF at once"
   assert_eq "$(cat "$T/stdin_sub" 2>/dev/null)" "rc=1 val=[]" "message subscriber: EOF at once"
-  kill "$bg" 2>/dev/null; /usr/bin/pkill -f 'sleep 30$' 2>/dev/null; /usr/bin/pkill -f 'sleep 20$' 2>/dev/null
-  return 0
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
+  exec 9<&-
+}
+
+# ---- R4: parse ----
+test_scanner_error_anywhere_is_killed() {
+  use_ctl
+  ctl_engaged 1 '{"kill": false, "modes": {}, "kill": true}'; assert_rc $? 0 "duplicate kill after modes"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "note": "unterminated}'; assert_rc $? 0 "unterminated string"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "list": [1, 2}'; assert_rc $? 0 "unbalanced ["
+  ctl_engaged 1 '{"kill": false, "modes": {}, "list": [1, 2]]}'; assert_rc $? 0 "extra ]"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "kill": true}'; assert_rc $? 0 "escaped key after kill"
+  ctl_engaged 1 '{"kill": false, "modes": {}, "kill": false}'; assert_rc $? 0 "escaped key spelling kill"
+  assert_eq "$(current_mode)" "shadow" "shadow after every scanner error"
+}
+
+test_missing_colon_is_killed() {
+  use_ctl
+  ctl_engaged 1 '{"kill" false, "modes": {}}'; assert_rc $? 0 "colon missing after kill"
+  ctl_engaged 1 '{"kill": false, "modes" {"opd9": "heal"}}'; assert_rc $? 0 "colon missing after modes"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9" "heal"}}'; assert_rc $? 0 "colon missing inside modes"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal" "opd2": "shadow"}}'; assert_rc $? 0 "comma missing inside modes"
+  ctl_engaged 1 '{"kill": false "ts": 1}'; assert_rc $? 0 "comma missing between top-level keys"
+  assert_eq "$(current_mode)" "shadow" "shadow in every case"
+}
+
+test_modes_read_only_at_the_top_level_and_flat() {
+  use_ctl
+  ctl_engaged 1 '{"kill": false, "meta": {"modes": {"opd9": "heal"}}}'; assert_rc $? 1 "no top-level modes: clear"
+  assert_eq "$(current_mode)" "shadow" "modes nested in meta is not read"
+  ctl_engaged 1 '{"kill": false, "meta": {"modes": {"opd9": "heal"}}, "modes": {"opd9": "shadow"}}'; assert_rc $? 1 "clear"
+  assert_eq "$(current_mode)" "shadow" "top-level modes wins over a nested one"
+  ctl_engaged 1 '{"kill": false, "modes": {"x": {"opd9": "heal"}}}'; assert_rc $? 0 "room nested one level inside modes"
+  assert_eq "$(current_mode)" "shadow" "nested room never gives heal"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": {"mode": "heal"}}}'; assert_rc $? 0 "object as a mode value"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": ["heal"]}}'; assert_rc $? 0 "array as a mode value"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal", "opd9": "shadow"}}'; assert_rc $? 0 "room named twice"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}}'; assert_rc $? 1 "flat modes still read"
+  assert_eq "$(current_mode)" "heal" "flat heal"
+}
+
+test_payload_cap_4096_bytes_before_awk() {
+  use_ctl
+  local pad t0 t1
+  pad="$(head -c 200000 /dev/zero | tr '\0' x)"
+  t0="$(perl -MTime::HiRes=time -e 'print time')"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {}, \"pad\": \"$pad\"}"; assert_rc $? 0 "200 KB payload"
+  t1="$(perl -MTime::HiRes=time -e 'print time')"
+  assert_eq "$(awk -v a="$t0" -v b="$t1" 'BEGIN{print (b - a < 1) ? "fast" : "slow"}')" "fast" "200 KB payload rejected in under 1 s"
+  assert_eq "$CTRL_WHY" "unparseable" "reason"
+  pad="$(head -c 3000 /dev/zero | tr '\0' x)"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {}, \"pad\": \"$pad\"}"; assert_rc $? 1 "3 KB payload is still read"
+  pad="$(head -c 4200 /dev/zero | tr '\0' x)"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {}, \"pad\": \"$pad\"}"; assert_rc $? 0 "4.2 KB payload is over the cap"
 }
