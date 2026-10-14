@@ -1,1 +1,4 @@
 # steward/scrub-allow.txt: one entry per line: <gitleaks fingerprint> # <one-line reason>. Needs merge-owner review. Empty at start.
+fd82570c07801f030dc9d35be086b5c532b33379:tools/eta2freescript/eval/pdqi9/floors.py:env-secret-assign:274 # regex constant _SPOKEN_TOKEN = re.compile(...) (name contains TOKEN), not a secret; floor-scope merge 764c8469, gating-lead 14 Oct (git-steward reviewed)
+26c5bef0eb7283df5c6ecc4c14d11b779925c4bf:tools/eta2freescript/eval/pdqi9/floors.py:env-secret-assign:277 # same _SPOKEN_TOKEN regex line, earlier branch commit; same merge
+b9e217280948df4cf77e69acfb76267e173f08da:tools/eta2freescript/eval/pdqi9/floors.py:env-secret-assign:277 # same _SPOKEN_TOKEN regex line, earlier branch commit; same merge
