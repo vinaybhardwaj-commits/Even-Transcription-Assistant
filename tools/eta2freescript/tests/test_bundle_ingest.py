@@ -421,3 +421,128 @@ def test_placeholder_program_is_a_config_error(tmp_path):
         parse_bundle_config({"FREESCRIPT_BUNDLE_CMD": '["{uid}", "{out}"]', "FREESCRIPT_BUNDLE_CWD": str(tmp_path)})
     with pytest.raises(NightlyError):
         parse_bundle_config({"FREESCRIPT_BUNDLE_CMD": '["py{uid}", "x", "{out}"]', "FREESCRIPT_BUNDLE_CWD": str(tmp_path)})
+
+
+# ---- epoch segment times (palimpsest read contract v0.2): B2.2 + Amendment 1
+
+M0 = 1_791_643_624_820  # real-shaped manifest start (epoch ms); duration 464_652 ms
+DUR = 464_652
+
+
+def epoch_bundle(segs, cutter_offset=0, role=None):
+    """Synthetic epoch bundle; the cutter span starts `cutter_offset` ms after the manifest (pre-roll)."""
+    b = bundle("synth-epoch")
+    b["tracks"]["translate"]["track"]["segments"] = [dict(s) for s in segs]
+    b["tracks"]["stt"]["track"]["segments"] = [dict(s, lang="hi-IN") for s in segs]
+    b["tracks"].pop("role_llm", None) if role is None else b["tracks"]["role_llm"]["track"].__setitem__("segments", role)
+    return b
+
+
+def eseg(a, b, sp="0", text="SYNTH_MARKER_NOT_A_NAME x"):
+    return {"t0_ms": M0 + a, "t1_ms": M0 + b, "text": text, "speaker": sp}
+
+
+def test_epoch_fixture_keeps_times_and_preroll_segments():
+    c = load_bundle(bundle("synth-epoch"))
+    assert [t.t0_ms - M0 for t in c.turns] == [12_410, 70_000, 150_000]  # distinct, increasing, not collapsed
+    assert c.turns[0].t0_ms < c.clip_t0_ms  # inside the pre-roll: the cutter opens 60 s after the audio start
+    assert c.clock_counts == {"segments_absolute": 9, "segments_relative": 0, "dropped_outside_clip": 0, "malformed_dropped": 0}
+    assert c.clip_t0_ms == M0 + 60_000  # bundle_window (cutter) is unchanged; the lockbox clip date reads it
+    assert [t.role for t in c.turns] == ["doctor", "patient", "doctor"]  # role join by exact key on epoch data
+
+
+def test_epoch_mmss_is_relative_to_clip_t0_and_the_boundary_sees_gaps():
+    from tools.eta2freescript import boundary
+    from tools.eta2freescript.ingest import format_transcript
+    p = 60_000  # the cutter opens 60 s after the audio start, so clip_t0 = M0 + p
+    segs = [eseg(p + 12_000, p + 20_000, "2", "SYNTH_MARKER_NOT_A_NAME stranger"), eseg(p + 100_000, p + 180_000, "0"),
+            eseg(p + 180_000, p + 300_000, "1")]
+    c = load_bundle(epoch_bundle(segs))
+    lines = format_transcript(c).splitlines()
+    assert "(00:12)" in lines[0] and "(01:40)" in lines[1] and "(03:00)" in lines[2]
+    gap = (c.turns[1].t0_ms - c.turns[0].t1_ms) / 1000
+    assert gap == 80.0 and gap >= boundary.GAP_S
+    b = boundary.detect(c)  # an early short side with a speaker the rest of the clip lacks: quarantined, only possible on real times
+    assert b.reasons == ["long_gap"] and b.quarantined == {0}
+    pre = load_bundle(bundle("synth-epoch"))
+    assert "(00:00)" in format_transcript(pre).splitlines()[0]  # pre-roll turn is before clip_t0: floored, not negative
+
+
+def test_epoch_role_join_by_exact_key_and_by_overlap():
+    segs = [eseg(60_000, 70_000), eseg(80_000, 90_000, "1")]
+    exact = [{"t0_ms": s["t0_ms"], "t1_ms": s["t1_ms"], "speaker": s["speaker"], "role": r} for s, r in zip(segs, ("doctor", "patient"))]
+    assert [t.role for t in load_bundle(epoch_bundle(segs, role=exact)).turns] == ["doctor", "patient"]
+    overlap = [dict(e, t0_ms=e["t0_ms"] + 500, t1_ms=e["t1_ms"] - 500) for e in exact]
+    c = load_bundle(epoch_bundle(segs, role=overlap))
+    assert [t.role for t in c.turns] == ["doctor", "patient"] and c.role_track
+
+
+def test_epoch_segment_beyond_the_audio_is_dropped_and_counted():
+    segs = [eseg(10_000, 20_000), eseg(DUR + 5_000, DUR + 9_000), eseg(DUR - 1_000, DUR + 800)]
+    c = load_bundle(epoch_bundle(segs))
+    assert len(c.turns) == 2 and c.turns[-1].t1_ms == M0 + DUR  # overrun clamped to the audio end
+    assert c.clock_counts["dropped_outside_clip"] == 2  # one per text track (translate, stt)
+    assert c.clock_counts["segments_absolute"] == 4 and c.clock_counts["segments_relative"] == 0
+
+
+def test_mixed_track_is_epoch_when_any_segment_is_and_the_other_is_malformed():
+    from tools.eta2freescript.ingest import _shift
+    st = {}
+    out = _shift([eseg(10_000, 20_000), {"t0_ms": 5_000, "t1_ms": 9_000, "text": "r"}], M0, DUR, st)
+    assert [g["t0_ms"] for g in out] == [M0 + 10_000]  # the relative-looking segment is dropped, never read as relative
+    assert (st["segments_absolute"], st["segments_relative"], st["malformed_dropped"]) == (1, 0, 1)
+    st = {}
+    out = _shift([{"t0_ms": 1_000, "t1_ms": 4_000, "text": "r"}, eseg(10_000, 20_000)], M0, DUR, st)  # order does not matter
+    assert [g["t0_ms"] for g in out] == [M0 + 10_000]
+    assert (st["segments_absolute"], st["segments_relative"], st["malformed_dropped"]) == (1, 0, 1)
+    st = {}  # an epoch t0 with a relative t1 is malformed too
+    out = _shift([eseg(10_000, 20_000), {"t0_ms": M0 + 5_000, "t1_ms": 4_000, "text": "r"}], M0, DUR, st)
+    assert len(out) == 1 and st["malformed_dropped"] == 1
+
+
+@pytest.mark.parametrize("junk", [(0, 0), (0, 500), (-1, 0)])
+@pytest.mark.parametrize("where", ["translate", "stt", "both"])
+def test_d1_a_bad_first_segment_does_not_collapse_the_epoch_track(junk, where):
+    segs = [eseg(12_410, 20_000), eseg(70_000, 80_000, "1"), eseg(150_000, 200_000)]
+    b = epoch_bundle(segs)
+    bad = {"t0_ms": junk[0], "t1_ms": junk[1], "text": "SYNTH_MARKER_NOT_A_NAME junk", "speaker": "0"}
+    for name in (("translate", "stt") if where == "both" else (where,)):
+        b["tracks"][name]["track"]["segments"].insert(0, dict(bad))
+    c = load_bundle(b)
+    assert [round((t.t0_ms - M0) / 1000, 1) for t in c.turns] == [12.4, 70.0, 150.0]  # real turns kept, junk gone
+    assert c.clock_counts["malformed_dropped"] == (2 if where == "both" else 1)
+    assert c.clock_counts["segments_relative"] == 0 and c.clock_counts["segments_absolute"] == 6  # both text tracks on one clock
+    assert all(t.native_text for t in c.turns)  # the native-span join is kept
+
+
+def test_d1_the_role_track_follows_the_same_rule_independently():
+    segs = [eseg(60_000, 70_000), eseg(80_000, 90_000, "1")]
+    role = [{"t0_ms": 0, "t1_ms": 0, "speaker": "0", "role": "patient"}] + [
+        {"t0_ms": s["t0_ms"], "t1_ms": s["t1_ms"], "speaker": s["speaker"], "role": r} for s, r in zip(segs, ("doctor", "patient"))]
+    c = load_bundle(epoch_bundle(segs, role=role))
+    assert [t.role for t in c.turns] == ["doctor", "patient"]
+    assert c.clock_counts["malformed_dropped"] == 1  # the role track's junk segment only; text tracks are clean
+
+
+def test_relative_fixture_is_identical_to_the_old_shift():
+    from tools.eta2freescript.ingest import _shift
+    segs = [{"t0_ms": 13000, "t1_ms": 150560, "text": "a"}, {"t0_ms": 0, "t1_ms": 6000, "text": "b"}, {"t0_ms": 999_999, "t1_ms": 1_000_000, "text": "c"}]
+
+    def old(segs, t0, dur):
+        out = []
+        for g in segs:
+            a, b = int(g["t0_ms"]), int(g["t1_ms"])
+            b = min(b, dur)
+            a = min(a, b)
+            out.append({**g, "t0_ms": t0 + a, "t1_ms": t0 + b})
+        out.sort(key=lambda g: (g["t0_ms"], g["t1_ms"]))
+        return out
+    assert _shift(segs, T0, 150_000) == old(segs, T0, 150_000)
+    c = load_bundle(bundle("synth-all"))
+    assert c.clock_counts["segments_relative"] > 0 and c.clock_counts["segments_absolute"] == 0 and c.clock_counts["dropped_outside_clip"] == 0
+
+
+def test_epoch_without_manifest_window_falls_back_to_the_clip():
+    from tools.eta2freescript.ingest import _shift
+    out = _shift([{"t0_ms": T0 + 1000, "t1_ms": T0 + 999_999_999, "text": "a"}, {"t0_ms": T0 - 5, "t1_ms": T0 - 1, "text": "b"}], T0, 150_000)
+    assert len(out) == 1 and out[0]["t1_ms"] == T0 + 150_000

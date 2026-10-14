@@ -1,0 +1,139 @@
+{
+  "consult_uid": "synth-epoch",
+  "scope_path": "2026-10-08/room_aaaaaaaa/_consults/synth-epoch",
+  "manifest": {
+    "window_id": "consult-synth-epoch",
+    "source_kind": "consult_clip",
+    "t0_ms": 1791643624820,
+    "t1_ms": 1791644089472,
+    "tracks": []
+  },
+  "source": "cutter",
+  "unparseable_tracks": 0,
+  "cutter_row": {
+    "consult_uid": "synth-epoch",
+    "ist_date": "2026-10-08",
+    "room_id": "room_aaaaaaaa",
+    "doctor_uid": "DOCSYN01",
+    "status": "cut",
+    "flags": [],
+    "span_start": "2026-10-10 20:18:04.820000",
+    "span_end": "2026-10-10 20:24:49.472000"
+  },
+  "tracks": {
+    "stt": {
+      "path": "tracks/stt.x.json",
+      "status": "ok",
+      "version": "v1",
+      "engine": "sarvam-saaras-v3",
+      "track": {
+        "schema": "reb.track.v1",
+        "layer": "stt",
+        "engine": "sarvam-saaras-v3",
+        "version": "v1",
+        "status": "ok",
+        "config_hash": "abcd1234",
+        "segments": [
+          {
+            "t0_ms": 1791643637230,
+            "t1_ms": 1791643644820,
+            "text": "SYNTH_MARKER_NOT_A_NAME native one",
+            "speaker": "0",
+            "lang": "hi-IN"
+          },
+          {
+            "t0_ms": 1791643694820,
+            "t1_ms": 1791643704820,
+            "text": "SYNTH_MARKER_NOT_A_NAME native two",
+            "speaker": "1",
+            "lang": "hi-IN"
+          },
+          {
+            "t0_ms": 1791643774820,
+            "t1_ms": 1791643824820,
+            "text": "SYNTH_MARKER_NOT_A_NAME native three",
+            "speaker": "0",
+            "lang": "hi-IN"
+          }
+        ],
+        "extras": {}
+      }
+    },
+    "translate": {
+      "path": "tracks/translate.x.json",
+      "status": "ok",
+      "version": "v1",
+      "engine": "sarvam-saaras-v3",
+      "track": {
+        "schema": "reb.track.v1",
+        "layer": "translate",
+        "engine": "sarvam-saaras-v3",
+        "version": "v1",
+        "status": "ok",
+        "config_hash": "abcd1234",
+        "segments": [
+          {
+            "t0_ms": 1791643637230,
+            "t1_ms": 1791643644820,
+            "text": "SYNTH_MARKER_NOT_A_NAME english one",
+            "speaker": "0"
+          },
+          {
+            "t0_ms": 1791643694820,
+            "t1_ms": 1791643704820,
+            "text": "SYNTH_MARKER_NOT_A_NAME english two",
+            "speaker": "1"
+          },
+          {
+            "t0_ms": 1791643774820,
+            "t1_ms": 1791643824820,
+            "text": "SYNTH_MARKER_NOT_A_NAME english three",
+            "speaker": "0"
+          }
+        ],
+        "extras": {}
+      }
+    },
+    "role_llm": {
+      "path": "tracks/role.x.json",
+      "status": "ok",
+      "version": "v1",
+      "engine": "llm-roles",
+      "track": {
+        "schema": "reb.track.v1",
+        "layer": "role",
+        "engine": "llm-roles",
+        "version": "v1",
+        "status": "ok",
+        "config_hash": "abcd1234",
+        "segments": [
+          {
+            "t0_ms": 1791643637230,
+            "t1_ms": 1791643644820,
+            "speaker": "0",
+            "role": "doctor"
+          },
+          {
+            "t0_ms": 1791643694820,
+            "t1_ms": 1791643704820,
+            "speaker": "1",
+            "role": "patient"
+          },
+          {
+            "t0_ms": 1791643774820,
+            "t1_ms": 1791643824820,
+            "speaker": "0",
+            "role": "doctor"
+          }
+        ],
+        "extras": {
+          "map": {
+            "0": "doctor",
+            "1": "patient"
+          }
+        }
+      }
+    },
+    "diar_sarvam": {}
+  }
+}
