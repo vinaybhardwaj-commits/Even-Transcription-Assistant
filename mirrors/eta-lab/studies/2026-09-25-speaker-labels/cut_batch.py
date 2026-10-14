@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """337e full run, stage 1 (box): cut the FULL wall-clock audio of vault windows of ANY length exactly as the transcript saw it (split-speaker's measure.decode + refused_logic.chunk_plan; gaps stay silent),
-then encode each to FLAC (LOSSLESS, ~50 % of wav; an Opus re-encode was tried first and changed labels on a few windows: wav-vs-opus segment agreement mean 0.919, so it is NOT used). Patient audio: 0700 dir, 0600 files; the caller deletes it after the batch.
-usage (their venv): cut_batch.py <windows.json> <out_dir> [--workers 4]   windows.json: {"windows":[{"window_id","path"}...]} ; writes <window_id>.flac"""
+then re-encode each to Opus 32 kbps 16 kHz mono webm for shipping (the source chunks are already 32 kbps Opus; ~8x smaller than wav). Patient audio: 0700 dir, 0600 files; the caller deletes it after the batch.
+usage (their venv): cut_batch.py <windows.json> <out_dir> [--workers 4]   windows.json: {"windows":[{"window_id","path"}...]} ; writes <window_id>.webm"""
 import datetime as dt, json, os, subprocess, sys
 from multiprocessing import Pool
 HERE = os.environ.get("STUDIES_DIR", "/tmp/wt-diarlab/studies")
@@ -23,11 +23,11 @@ def window_audio_full(rec):
         i0 = int(round(a * SR)); n = min(len(x), len(buf) - i0); buf[i0:i0 + n] = x[:n]
     return buf
 def job(args):
-    w, out_dir = args; dst = os.path.join(out_dir, w["window_id"] + ".flac")
+    w, out_dir = args; dst = os.path.join(out_dir, w["window_id"] + ".webm")
     if os.path.exists(dst): return w["window_id"], "exists"
     try:
         rec = M.ensure_timing(R.read_json(os.path.join(R.HOME, w["path"])), KEYMAP); buf = window_audio_full(rec)
-        p = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "s16le", "-ar", str(SR), "-ac", "1", "-i", "-", "-c:a", "flac", "-compression_level", "5", "-f", "flac", dst + ".part"],
+        p = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "s16le", "-ar", str(SR), "-ac", "1", "-i", "-", "-c:a", "libopus", "-b:a", "32k", "-ar", str(SR), "-ac", "1", "-f", "webm", dst + ".part"],
                            input=buf.astype("<i2").tobytes(), capture_output=True)
         if p.returncode: return w["window_id"], "FAIL ffmpeg"
         os.chmod(dst + ".part", 0o600); os.rename(dst + ".part", dst); return w["window_id"], "ok"

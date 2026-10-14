@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""337e full run, stage 2 (eta-lab-l4): for each shipped <window_id>.flac (lossless, 16 kHz mono wall-clock window audio; .webm also accepted) decode with the L4's static ffmpeg, run Nemotron-3-Diarization (base, offline 30.4 s),
+"""337e full run, stage 2 (eta-lab-l4): for each shipped <window_id>.webm (Opus 32k, 16 kHz mono wall-clock window audio) decode with the L4's static ffmpeg, run Nemotron-3-Diarization (base, offline 30.4 s),
 append TURNS ONLY (wall-clock seconds from the window start, speaker id) to a JSONL, delete the webm and the temp wav. Resumable (skips windows already in the JSONL). No text, no audio kept.
 usage (NeMo venv, GPU, under flock ~/gpu.lock): l4_consume.py <inbox_dir> <out.jsonl> [--ffmpeg PATH] [--wav-check]"""
 import glob, json, os, subprocess, sys, tempfile, time
@@ -15,8 +15,8 @@ sm = m.sortformer_modules; sm.spkcache_len, sm.fifo_len, sm.chunk_len, sm.chunk_
 parse = lambda s: (float(s.split()[0]), float(s.split()[1]), s.split()[2]) if isinstance(s, str) else (float(s[0]), float(s[1]), str(s[2]))
 tmp = tempfile.mkdtemp(prefix="l4c-", dir=os.path.expanduser("~/eta-lab-night")); os.chmod(tmp, 0o700)
 t0 = time.time(); n = 0; audio_s = 0.0
-for p in sorted(glob.glob(os.path.join(inbox, "*.flac")) + glob.glob(os.path.join(inbox, "*.webm"))):
-    wid = os.path.basename(p).rsplit(".", 1)[0]
+for p in sorted(glob.glob(os.path.join(inbox, "*.webm"))):
+    wid = os.path.basename(p)[:-5]
     if wid in done: os.unlink(p); continue
     wav = os.path.join(tmp, wid + ".wav")
     r = subprocess.run([ff, "-v", "error", "-y", "-i", p, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav], capture_output=True)

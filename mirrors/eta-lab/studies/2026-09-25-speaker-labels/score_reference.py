@@ -26,7 +26,7 @@ for w in ref:
     plan = R.chunk_plan(rec)                                          # [(name, chunk_start_rel_window, chunk_len)]
     axis = S.chunk_axis([(cs, cs + cl) for _, cs, cl in plan], 0.0, float(R.WINDOW_S))
     pya_closed = [(s["start_ms"] / 1000.0, s["end_ms"] / 1000.0, str(s["speaker_idx"])) for s in segs_by_label[w["prod"][0]["label_id"]]]
-    pya = S.closed_to_wall(pya_closed, axis, 0.0) if not os.environ.get('NOMAP') else sorted(pya_closed)
+    pya = S.closed_to_wall(pya_closed, axis, 0.0)
     seg_t = [(x["start_s"], x["end_s"]) for x in rec["segments"] if not x.get("refused") and x["end_s"] > x["start_s"]]
     if not seg_t: continue
     a = S.assign(seg_t, pya); b = S.assign(seg_t, nemo[w["window_id"]]); dur = [e - s for s, e in seg_t]
