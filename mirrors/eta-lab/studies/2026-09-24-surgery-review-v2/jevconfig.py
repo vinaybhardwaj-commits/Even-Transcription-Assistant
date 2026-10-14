@@ -4,7 +4,9 @@ changed -- each module's own check_frozen()/selftest still verifies the exact sa
 `global NAME` inside those modules rebinds the name in their own namespace regardless of whether
 it started life as a literal or an import.
 
-MODEL (the pinned Jev version, W41 F2) lives here since F4b; u9.py re-imports it, so u9.MODEL is unchanged for callers.
+u9.MODEL (the pinned Jev version, W41 F2) is NOT here yet: F2 and F4 were built on separate
+branches off the same base, so u9.py still defines it locally. Folding it into this module is a
+natural follow-up once F2 merges -- flagged, not silently skipped.
 """
 
 # v3.py / v4.py / v5.py -- stage (a) recall gate on the "named"/"described" nouls. Tuned on V's
@@ -27,11 +29,3 @@ EVIDENCE_MAX = 6
 # finalize.py -- Jev's too_poor probability at or above this marks a consult "poor" (transcript
 # mostly unusable); the raw probability is still kept in the file's own meta block.
 POOR_P = 0.75
-
-# u9.py -- the Jev model version every request pins.
-# W41 F2: every jev_decision row in production (5672/5672, 23-24 Sep) and the Arm D J4 bench
-# (67/67 real rows, jev_window_signal, 22 Sep) came back model="jev-1.13.0" -- pin to what the
-# wording (v2.1-v2.3) and the 18-real-label thresholds were actually tuned against, not the
-# floating alias. response.model is still read back below and threaded through by callers, so a
-# vendor-side change shows up in the data instead of being silently absorbed by the pin.
-MODEL = "jev-1.13.0"
