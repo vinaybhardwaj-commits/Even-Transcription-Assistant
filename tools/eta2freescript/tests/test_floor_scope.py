@@ -121,6 +121,9 @@ def _inv(strength=None, frequency=None, duration=None):
     ("strength", "1 g", "take one gram", 0), ("strength", "5 mg", "take 0.5 mg", 0), ("strength", "0.5 mg", "half a tablet", 0),
     ("strength", "1.5 mg", "one and a half mg", 0), ("strength", "500 mg", "five hundred milligram", 0),
     ("strength", "5 mg", "five hundred milligram", 1), ("strength", "2.5 mg", "two point five milligram", 0),
+    ("strength", "5 mg", "Bed five. Tablets are not helping", 1), ("strength", "5 mg", "Bed five? Tablets are not helping", 1),
+    ("strength", "5 mg", "Bed five! Tablets", 1), ("strength", "5 mg", "Bed five; tablets", 1), ("strength", "5 mg", "Bed five\ntablets", 1),
+    ("strength", "5 mg", "take five tablets. Then rest", 0), ("strength", "5 mg", "five a tablet", 0), ("strength", "5 mg", "five. a tablet", 1),
 ])
 def test_floor_cases(field, value, said, count):
     assert _inv(**{field: value})(said)["count"] == count, (value, said)
@@ -207,12 +210,14 @@ def test_ambiguous_or_missing_pairing_uses_todays_rule():
     assert floors._invented_core(rx, no_line, c, "medicine")["sources"] == ["eta"]
 
 
-def test_gp_entry_and_provenance_quote_belong_to_the_medicine():
+def test_gp_entry_is_not_part_of_the_medicine_text():
     c = _consult("hello")
     rx = {"medicines": [{**CAT, "strength": "500 mg"}]}
     art = _two()
     art["gp_extraction"] = {"medicines": [{"name": "Paracetamol 500 mg"}]}
-    assert floors._invented_core(rx, art, c, "medicine")["sources"] == ["eta"]
+    # global never reads gp_extraction, so neither does medicine mode (R3 D1): the digits sit only in the Amoxicillin line
+    assert floors._invented_core(rx, art, c, "global")["sources"] == ["eta"]
+    assert floors._invented_core(rx, art, c, "medicine")["sources"] == ["pulse_catalogue"]
     # a transcript quote alone is not ETA's output: it gives eta in neither mode (the digits sit only in the Amoxicillin line)
     art2 = _syn(NOTE_TWO, [_prov("Paracetamol", "five hundred, 500"), _prov("Amoxicillin")])
     assert floors._invented_core(rx, art2, c, "medicine")["sources"] == ["pulse_catalogue"]
@@ -297,3 +302,67 @@ def test_medicine_mode_is_never_more_eta_than_global():
                 assert not (b == "eta" and a != "eta"), (art["note_text"], m, g, md)
                 n += 1
     assert n > 10
+
+
+def _gp_art(note, gp, provs):
+    art = _syn(note, provs)
+    art["gp_extraction"] = {"medicines": gp}
+    return art
+
+
+@pytest.mark.parametrize("field,value,gp", [("strength", "777 mg", {"name": "Paracetamol", "strength": "777 mg"}),
+                                            ("duration", "9 days", {"name": "Paracetamol", "duration": "9 days"})])
+def test_d1_a_value_only_in_the_gp_entry_is_pulse_in_both_modes(field, value, gp):
+    art = _gp_art("Medication:\nParacetamol twice a day", [gp], [_prov("Paracetamol")])
+    rx = {"medicines": [{**CAT, field: value}]}
+    for mode in ("global", "medicine"):
+        assert floors._invented_core(rx, art, _consult("hello"), mode)["sources"] == [
+            "pulse_catalogue" if field == "strength" else "pulse_extraction"], mode
+
+
+def test_d1_the_judge_field_path_is_pulse_in_both_modes():
+    art = _gp_art("Medication:\nParacetamol twice a day", [{"name": "Paracetamol", "frequency": "after meals"}], [_prov("Paracetamol")])
+    rx = {"medicines": [{**CAT, "frequency": "after meals"}]}
+    its = floors.numbered_items(rx)
+    row = {"n": 1, "said": "yes", "leak": False, "invented": ["frequency"], "dose_precedence_error": False, "turns": []}
+    for mode in ("global", "medicine"):
+        assert floors._judge_attribution([row], its, art, mode)["invented_fields"] == floors._tally(["pulse_extraction"]), mode
+
+
+def test_d1b_a_removed_line_never_joins_its_neighbours():
+    art = _syn("Medication:\nParacetamol once daily\nAmoxicillin 500 mg\nafter food", [_prov("Paracetamol"), _prov("Amoxicillin")])
+    rx = {"medicines": [{**CAT, "frequency": "daily after food"}]}
+    its = floors.numbered_items(rx)
+    row = {"n": 1, "said": "yes", "leak": False, "invented": ["frequency"], "dose_precedence_error": False, "turns": []}
+    for mode in ("global", "medicine"):
+        assert floors._judge_attribution([row], its, art, mode)["invented_fields"] == floors._tally(["pulse_extraction"]), mode
+
+
+def test_random_differential_medicine_is_never_eta_when_global_is_not():
+    import random
+    rng = random.Random(20261014)
+    notes = ["Medication:\nParacetamol {a} mg twice a day\nAmoxicillin {b} mg three times a day",
+             "Medication:\nParacetamol twice a day\nPantoprazole {a} mg once daily\nReview after {b} days",
+             "Medication:\nParacetamol once daily\nAmoxicillin {a} mg\nafter food\nPan {b} once daily", "Medication: Paracetamol {a} mg"]
+    names = [("Paracetamol", CAT), ("Amoxicillin", CAT_AMOX), ("Pantoprazole", {"name": "Pantoprazole"})]
+    n = 0
+    for _ in range(2500):
+        a, b, g = (rng.choice([5, 40, 500, 650, 777, 9, 250]) for _ in range(3))
+        art = _syn(rng.choice(notes).format(a=a, b=b), [_prov("Paracetamol"), _prov(rng.choice(["Amoxicillin", "Pan 40", "Pantoprazole"]))])
+        gp = [{"name": rng.choice(["Paracetamol", "Amoxicillin"]), "strength": f"{g} mg", "duration": f"{g} days", "frequency": f"{g} times"}
+              for _ in range(rng.randint(0, 2))]  # values that need not be in the note
+        art["gp_extraction"] = {"medicines": gp}
+        _, base = rng.choice(names)
+        m = {**base, rng.choice(["strength", "duration", "frequency"]): rng.choice([f"{rng.choice([5, 40, 500, 650, 777, 9, 250, g])} mg", "daily after food", "after meals"])}
+        c = _consult(rng.choice(["hello", "take five hundred milligram", "Bed five. Tablets"]))
+        gs = floors._invented_core({"medicines": [m]}, art, c, "global")["sources"]
+        ms = floors._invented_core({"medicines": [m]}, art, c, "medicine")["sources"]
+        assert len(gs) == len(ms)
+        for x, y in zip(gs, ms):
+            assert not (y == "eta" and x != "eta"), (art["note_text"], gp, m, gs, ms)
+        for field in ("strength", "duration", "frequency", ""):
+            if m.get(field):
+                assert not (floors._field_source(m, field, art, None, "medicine") == "eta"
+                            and floors._field_source(m, field, art, None, "global") != "eta"), (art["note_text"], m, field)
+        n += 1
+    assert n >= 2000

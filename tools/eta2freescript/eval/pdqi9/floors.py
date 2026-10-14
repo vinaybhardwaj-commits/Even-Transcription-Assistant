@@ -274,7 +274,7 @@ def _cited_turns(p: dict) -> list[int]:
 _UNITS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
                                      "sixteen seventeen eighteen nineteen".split())}
 _TENS = {w: 10 * i for i, w in enumerate("_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()) if w != "_"}
-_SPOKEN_TOKEN = re.compile(r"[a-z]+|\d+")
+_SPOKEN_TOKEN = re.compile(r"[a-z]+|\d+|\.(?=\s|$)|[?!;\n]")  # a sentence break is a token, so no number-quantity link spans one
 
 
 def _digit_word_run(toks: list[str], j: int) -> tuple[str, int]:
@@ -360,7 +360,7 @@ def parse_number_words(text: str) -> list[Decimal]:
     return [v for v, _, _, _ in _scan_numbers(text)[1]]
 
 
-# Safety floor: a number word is "heard" only when it is plainly a quantity: the next token (past one a/an/of) is a quantity word.
+# Safety floor: a number word is "heard" only when it is plainly a quantity: the next token (past one a/an/of) is a quantity word in the same sentence.
 # Clock-time units (hour, minute) are deliberately absent: "fifteen minutes in the waiting room" is not a 15 mg strength.
 _QUANTITY = frozenset(
     "mg g gm gms gram milligram mcg microgram kg ml millilitre milliliter l litre liter iu unit tablet tab capsule cap spoon teaspoon "
@@ -539,14 +539,17 @@ def _line_names(line: str, names: set[str]) -> bool:
     return any(len(n) >= 3 and re.search(r"(?<![a-z0-9])" + re.escape(n) + r"(?![a-z0-9])", low) for n in names)
 
 
+_CUT = "\x00"  # \s does not match it and no field value contains it, so a substring match cannot cross a removed part
+
+
 def _is_other_medicine(p, m: dict) -> bool:
     return isinstance(p, dict) and p.get("kind") == "medicine" and bool(_prov_names(p)) and not _names_match(_rx_names(m), _prov_names(p))
 
 
 def _medicine_output(m: dict, art: dict | None, prov: dict | None) -> str | None:
-    """ETA's output with ONLY the other medicines' parts removed (scope `medicine`): the note lines that name another ETA medicine and
-    not this one, and other medicines' gp_extraction entries and provenance items. Non-medicine lines, follow-up and other provenance
-    stay, so a run found there is ETA's. None when no ETA line pairs with this medicine or 2+ lines could (then the global rule applies)."""
+    """global's ETA text with ONLY the other medicines' parts removed (scope `medicine`): the note lines that name another ETA medicine and
+    not this one, and other medicines' provenance items. It adds nothing global does not read (no gp_extraction text). Non-medicine
+    lines, follow-up and other provenance stay, so a run found there is ETA's. None when no ETA line pairs with this medicine or 2+ lines could (then the global rule applies)."""
     names = _rx_names(m)
     lines = [ln for ln in ((art or {}).get("note_text") or "").split("\n") if ln.strip()]
     if sum(1 for ln in lines if _names_match(names, {_norm_name(ln)})) != 1:
@@ -555,13 +558,10 @@ def _medicine_output(m: dict, art: dict | None, prov: dict | None) -> str | None
     other_names = [_prov_names(p) for p in others]
     gp_all = ((art or {}).get("gp_extraction") or {}).get("medicines")
     gp_all = [g for g in gp_all if isinstance(g, dict)] if isinstance(gp_all, list) else []
-    other_names += [_rx_names(g) for g in gp_all if not _names_match(names, _rx_names(g))]
-    keep = [ln for ln in lines if _names_match(names, {_norm_name(ln)}) or not any(_line_names(ln, o) for o in other_names)]
-    parts = list(keep)
-    for g in gp_all:
-        if _names_match(names, _rx_names(g)):
-            _prov_values(g, parts)
-    parts += [_prov_text(p) for p in (art or {}).get("provenance") or [] if isinstance(p, dict) and not _is_other_medicine(p, m)]
+    other_names += [_rx_names(g) for g in gp_all if not _names_match(names, _rx_names(g))]  # gp entries only decide which lines go
+    # global's ETA text with parts removed, never added to: each removed part becomes _CUT, which no field match can span
+    parts = [ln if _names_match(names, {_norm_name(ln)}) or not any(_line_names(ln, o) for o in other_names) else _CUT for ln in lines]
+    parts += [_CUT if _is_other_medicine(p, m) else _prov_text(p) for p in (art or {}).get("provenance") or [] if isinstance(p, dict)]
     parts += [_prov_text(prov)]  # a transcript quote is not ETA's output
     return _numnorm("\n".join(parts))
 
