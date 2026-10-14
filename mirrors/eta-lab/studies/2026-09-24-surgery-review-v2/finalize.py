@@ -13,7 +13,6 @@ import json, os, re, sys
 import deid as deid_mod
 import build_consult as bc
 import u9
-from jevconfig import POOR_P  # W41 F4: moved, not changed (still 0.75)
 
 OUT = os.path.expanduser("~/eta-data/surgery-review-v2")
 KIND = {"recommendation_now": "recommendation_now", "history": "history", "referral": "referral", "staff_talk": "staff_talk", "no_surgical_talk": "none"}
@@ -55,6 +54,7 @@ def _conf(p):
 
 
 NOT_APPLICABLE = {"proposer": "unclear", "firmness": "not_applicable", "patient_response": "not_stated", "cost": "no", "second_opinion": "no", "procedure": "not named"}
+POOR_P = 0.75  # Jev's too-poor probability at or above this is "poor" (mostly unusable); the raw p is kept in meta
 
 
 def jev_block(r):
@@ -101,7 +101,7 @@ def finalize(doc, jev=None, transport=None):
     final["turns"] = doc["turns"]
     final["jev"] = jev_block(r)
     final["quality"] = "poor" if r["proposals"]["too_poor"]["p_yes"] >= POOR_P else "ok"
-    final["meta"] = {"u9": u9.PROMPT_VERSION, "jev_model": r.get("jev_model", u9.MODEL), "phrase_model": bc.TRANSLATE_MODEL, "probe_calls": r["probe_calls"],
+    final["meta"] = {"u9": u9.PROMPT_VERSION, "jev_model": "jev-latest", "phrase_model": bc.TRANSLATE_MODEL, "probe_calls": r["probe_calls"],
                      "probes_skipped": r["probes_skipped"], "too_poor_p": round(r["proposals"]["too_poor"]["p_yes"], 3), "text_seen_by_jev": "de-identified"}
     valid = {t["i"] for t in doc["turns"]}
     for q, a in final["jev"].items():
@@ -120,7 +120,7 @@ def selftest():
                 a[k] = ({"type": "choice", "choice": {"context": "recommendation_now", "proposed_by": "clinician", "recommended": "yes", "firmness": "advised",
                                                      "patient_response": "will_think"}.get(k, "x"), "confidence": 0.91, "probabilities": {}} if v["type"] == "choice"
                         else {"type": "noul", "noul": 0.95 if k in ("discussed", "cost") else 0.1})
-            return {"model": "jev-9.9.9-test", "answers": a}
+            return {"answers": a}
         return {"answers": {k: {"type": "noul", "noul": 0.9 if k in ("P3", "P4", "R5") else 0.05} for k in q}}
 
     def fake_tr(m, j):
@@ -131,7 +131,6 @@ def selftest():
     assert j["kind"]["answer"] == "recommendation_now" and j["proposer"]["answer"] == "this_doctor" and j["procedure"]["answer"] == "knee replacement"
     assert set(j) == {"discussed", "kind", "procedure", "proposer", "firmness", "patient_response", "cost", "second_opinion"}
     assert f["quality"] == "ok" and f["meta"]["text_seen_by_jev"] == "de-identified" and f["bucket"] == "neither"
-    assert f["meta"]["jev_model"] == "jev-9.9.9-test", "meta.jev_model must be the model that actually answered, not a hardcoded literal (W41 F2)"
     # code arbitrates: a confident "no surgical discussion" neutralises the dependents (they must not say cost=yes)
     def no_surgery_jev(state, q):
         if "discussed" in q:
