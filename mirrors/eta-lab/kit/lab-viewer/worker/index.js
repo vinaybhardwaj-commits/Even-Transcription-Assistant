@@ -7,15 +7,10 @@ import { parseKey } from "../../lab-vault/worker/validate.js";
 import { shell } from "./ui.js";
 import { rateRoute, isRater, logView } from "./rate.js";
 import { roadmapPage } from "./roadmap.js";
-import { g3Route } from "./g3.js";
-import { voicecheckRoute } from "./voicecheck.js";
-import { drtRoute } from "./drt.js";
 import { clarityModel, clarityPage, parseFilters, CLIP_ID } from "./clarity.js";
 import { validRoomDate } from "./encounters.js";
-import { parseWin, applyWindow, FULL_LANE_KEYS, timelineDocOf, roomDayModel, hospitalPage, roomDayPage, dateListOf, DATE_RE as TL_DATE_RE } from "./timeline.js";
+import { timelineDocOf, roomDayModel, hospitalPage, roomDayPage, dateListOf, DATE_RE as TL_DATE_RE } from "./timeline.js";
 import { rebModel } from "./reb.js";
-import { BLIND_CLIPS, isBlind, isBlindKey, withoutBlindLines, blankFirstWords, BLIND_MSG } from "./blind.js";
-import { consultsDocOf, spanBlind, drawerModel, drawerHtml, signClip, verifyClip, clipFileName, CLIP_FILES, CONSULT_ID_RE } from "./consults.js";
 
 const forbidden = () => new Response("forbidden", { status: 403, headers: { "content-type": "text/plain", "cache-control": "private, no-store" } });
 
@@ -124,7 +119,7 @@ async function viewRows(env) {
   if (!key) return { key: null, rows: [] };
   if (viewCache.key === key) { viewCache.at = Date.now(); return viewCache; }
   const obj = await env.RESULTS.get(key);
-  const rows = blankFirstWords(await obj.text()).split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const rows = (await obj.text()).split("\n").filter(Boolean).map((l) => JSON.parse(l));
   viewCache = { at: Date.now(), key, rows };
   return viewCache;
 }
@@ -218,7 +213,7 @@ async function consult(env, room, date) {
   for (let i = 0; i < wins.length; i += 20) loaded.push(...(await Promise.all(wins.slice(i, i + 20).map(async (w) => (w.status === "text" || w.status === "refused" ? loadWindow(env, w.key) : null)))));
   wins.forEach((w, wi) => {
     const k = w.key.replace(/^runs\//, "").replace(/\.json$/, "");
-    windows.push({ k, t0: w.t0, t1: w.t1, s: w.s, e: w.e, status: isBlind(room, date) ? "held_out" : w.status, untested_kind: isBlind(room, date) ? null : (w.untested_kind ?? null), n_words: w.n_words, run_id: w.run_id, partial: !!w.partial });
+    windows.push({ k, t0: w.t0, t1: w.t1, s: w.s, e: w.e, status: w.status, untested_kind: w.untested_kind ?? null, n_words: w.n_words, run_id: w.run_id, partial: !!w.partial });
     const d = loaded[wi];
     if (!d) return;
     const segs = Array.isArray(d.segments) ? d.segments : [];
@@ -241,12 +236,10 @@ async function consult(env, room, date) {
   segments.sort((a, b) => a.t - b.t);
   const words = segments.reduce((n, s) => n + (s.refused ? 0 : s.text.split(/\s+/).filter(Boolean).length), 0);
   const nonEn = segments.filter((s) => !s.refused && s.text.trim() && s.lang && s.lang !== "en");
-  const hiddenOut = hidden.map((h) => ({ k: h.key.replace(/^runs\//, "").replace(/\.json$/, ""), t0: h.t0, t1: h.t1, s: h.s, e: h.e, status: isBlind(room, date) ? "held_out" : h.status, n_words: h.n_words, run_id: h.run_id }));
-  const blind = isBlind(room, date);
-  if (blind) for (const s of segments) Object.assign(s, { lang: null, engine: null, refused: false, text: "", en: null, enq: null, enerr: null, flag: null, re: null, why: null });   // keep timing + speaker turns, never the words
-  const rx = blind ? [] : await prescribe(env, room, date);
-  return { room_id: room, room_name: day[0]?.room_name ?? room, date, blind, view_key: viewKey, windows, hidden: hiddenOut, segments, rx,
-    counts: { windows: windows.length, hidden_windows: hiddenOut.length, segments: segments.length, words: blind ? 0 : words, non_english: blind ? 0 : nonEn.length, with_english: blind ? 0 : nonEn.filter((s) => s.en).length, annotation_files: files, bad_annotation_files: bad } };
+  const hiddenOut = hidden.map((h) => ({ k: h.key.replace(/^runs\//, "").replace(/\.json$/, ""), t0: h.t0, t1: h.t1, s: h.s, e: h.e, status: h.status, n_words: h.n_words, run_id: h.run_id }));
+  const rx = await prescribe(env, room, date);
+  return { room_id: room, room_name: day[0]?.room_name ?? room, date, view_key: viewKey, windows, hidden: hiddenOut, segments, rx,
+    counts: { windows: windows.length, hidden_windows: hiddenOut.length, segments: segments.length, words, non_english: nonEn.length, with_english: nonEn.filter((s) => s.en).length, annotation_files: files, bad_annotation_files: bad } };
 }
 
 // ---------------------------------------------------------------- /timeline (FABLE W49): hospital day + room day
@@ -274,65 +267,17 @@ async function timelineHospitalRooms(env, date) {
   const out = [];
   for (const g of byRoom.values()) {
     const { kept } = splitWindows(g.rows);
-    const windows = kept.map((w) => ({ k: w.key.replace(/^runs\//, "").replace(/\.json$/, ""), t0: w.t0, t1: w.t1, s: w.s, e: w.e, status: isBlind(g.room_id, date) ? "held_out" : w.status, n_words: w.n_words }));
-    const blindDay = isBlind(g.room_id, date);
-    const talkMs = blindDay ? null : windows.filter((w) => (w.n_words ?? 0) > 0).reduce((n, w) => n + Math.max(0, w.e - w.s), 0);
+    const windows = kept.map((w) => ({ k: w.key.replace(/^runs\//, "").replace(/\.json$/, ""), t0: w.t0, t1: w.t1, s: w.s, e: w.e, status: w.status, n_words: w.n_words }));
+    const talkMs = windows.filter((w) => (w.n_words ?? 0) > 0).reduce((n, w) => n + Math.max(0, w.e - w.s), 0);
     const coveredMs = windows.reduce((n, w) => n + Math.max(0, w.e - w.s), 0);   // refuter-2 #4599 L3: total window coverage, not just words>0
-    out.push({ room_id: g.room_id, room_name: g.room_name, n: windows.length, windows, talkMs, blind: blindDay, coveredMs, d: timelineDocOf(await timelineDoc(env, g.room_id, date)) });
+    out.push({ room_id: g.room_id, room_name: g.room_name, n: windows.length, windows, talkMs, coveredMs, d: timelineDocOf(await timelineDoc(env, g.room_id, date)) });
   }
   return out;
 }
 // Level 2: reuse the reviewed consult() for windows/segments/turns, plus the optional timeline file
-// 6V: the day's consult clips (consults/<room>/<date>.json in eta-lab-ratings). A blind room-day never reads it.
-async function consultsDoc(env, room, date) {
-  if (!env.RATINGS || isBlind(room, date)) return { loaded: false, list: [] };
-  try { const o = await env.RATINGS.get(`consults/${room}/${date}.json`); if (!o) return { loaded: false, list: [] }; const d = consultsDocOf(JSON.parse(await o.text())); return { ...d, list: d.list.filter((c) => !spanBlind(room, c.s, c.e)) }; } catch { return { loaded: false, list: [] }; }
-}
-// the drawer for ?consult=<id>: server-rendered, signed links minted here (15 minutes), audio shown only when it is really in storage
-async function consultDrawer(env, m, id) {
-  const c = m.consults.list.find((x) => x.id === id);
-  if (!c || m.blind || spanBlind(m.room_id, c.s, c.e)) return null;
-  const dm = await drawerModel(env, m.room_id, m.date, c);
-  if (!dm) return null;
-  const has = async (f) => { try { return c.prefix && !!(await env.AUDIO?.head(`${c.prefix}/${CLIP_FILES[f]}`)); } catch { return false; } };
-  const audio = { whole: c.whole && (await has("c")), doctor: c.doctorOnly && (await has("d")) };
-  const mk = async (file, dl) => { const t = await signClip(env, { room: m.room_id, date: m.date, id: c.id, file, dl }); return t ? `/clip/${t}` : null; };
-  const links = (await mk("c", false)) ? { play: await mk("c", false), download: await mk("c", true), doctorDownload: audio.doctor ? await mk("d", true) : null } : null;
-  return drawerHtml(dm, links, audio, `/timeline/${m.room_id}/${m.date}`);
-}
-const notFound = () => new Response("not found", { status: 404, headers: baseHeaders({ "content-type": "text/plain" }) });
-// /clip/<token>: only a valid, unexpired HMAC token reaches storage; blind days, uncut consults and missing files are a bare 404 (no detail, no oracle)
-async function serveConsultClip(env, request, token) {
-  const p = await verifyClip(env, token);
-  if (!p || !validRoomDate(p.r, p.d) || !CONSULT_ID_RE.test(p.u) || isBlind(p.r, p.d)) return notFound();
-  const c = (await consultsDoc(env, p.r, p.d)).list.find((x) => x.id === p.u);
-  if (!c || c.status !== "cut" || !c.prefix || spanBlind(p.r, c.s, c.e) || !(p.f === "c" ? c.whole : c.doctorOnly) || !env.AUDIO) return notFound();
-  const key = `${c.prefix}/${CLIP_FILES[p.f]}`;
-  const head = await env.AUDIO.head(key);
-  if (!head) return notFound();
-  const range = parseRange(request.headers.get("range"), head.size);
-  const h = { "content-type": "audio/flac", "accept-ranges": "bytes", "content-disposition": `${p.a ? "attachment" : "inline"}; filename="${clipFileName(p.d, c, p.f)}"` };
-  if (range === "invalid") return new Response(null, { status: 416, headers: baseHeaders({ ...h, "content-range": `bytes */${head.size}` }) });
-  if (range === null) { const obj = await env.AUDIO.get(key); return obj ? new Response(obj.body, { status: 200, headers: baseHeaders({ ...h, "content-length": String(head.size) }) }) : notFound(); }
-  const obj = await env.AUDIO.get(key, { range });
-  return obj ? new Response(obj.body, { status: 206, headers: baseHeaders({ ...h, "content-range": `bytes ${range.offset}-${range.offset + range.length - 1}/${head.size}`, "content-length": String(range.length) }) }) : notFound();
-}
-async function timelineRoomDay(env, room, date, win = null, consultId = null) {
+async function timelineRoomDay(env, room, date) {
   const c = await consult(env, room, date);
-  const m = roomDayModel(c, await timelineDoc(env, room, date), await consultsDoc(env, room, date));
-  if (m && consultId && CONSULT_ID_RE.test(consultId)) {
-    const html = await consultDrawer(env, m, consultId).catch(() => null);
-    if (html) { m.drawerHtml = html; m.drawerId = consultId; }
-  }
-  if (!win || !m) return m;
-  const laneDocs = {};
-  if (!m.blind && env.RATINGS) {   // uncapped lane objects, only for lanes the doc marks full and only on a non-blind room-day
-    for (const k of FULL_LANE_KEYS) {
-      if (!m.d.reb_cap?.[k]?.full) continue;
-      try { const o = await env.RATINGS.get(`timeline-lanes/${room}/${date}/${k}.json`); if (o) laneDocs[k] = JSON.parse(await o.text()); } catch { /* lane stays capped */ }
-    }
-  }
-  return applyWindow(m, laneDocs, win);
+  return roomDayModel(c, await timelineDoc(env, room, date));
 }
 
 // refuter-2 #4691: consult().windows includes hidden "partial" windows from OTHER runs (uncovered minutes shown separately),
@@ -358,7 +303,6 @@ async function inspectData(env, room, date, key, wid, who) {
   // as today") - `loaded: false` (not an error) until the real backfill mirrors a matching manifest, same as every other
   // optional lane in this file.
   const reb = await rebModel(env, date, room, wid).catch(() => ({ loaded: false }));
-  if (reb.loaded && isBlind(room, date)) { for (const t of reb.tracks) { Object.assign(t, { lang: null, status: "held_out", reason: null, superseded_by: null }); for (const sg of t.segments) sg.text = ""; } reb.blinded = true; }
   return { room_id: room, date, window: { k: w.k, t0: w.t0, t1: w.t1, status: w.status, n_words: w.n_words }, rx, speakers, acoustics, reb };
 }
 
@@ -366,7 +310,6 @@ async function serveAudio(env, request, parts) {
   const n = parts.pop();
   const key = windowKey(parts);
   if (!key || !/^\d{1,3}$/.test(n)) return json(404, { error: "not found" });
-  if (isBlindKey(key)) return json(403, { error: BLIND_MSG });   // R3/W51: listening is use (Fable #6872)
   const doc = await loadWindow(env, key);
   const r2 = doc ? windowChunkKeys(doc)[Number(n)] : undefined;
   if (typeof r2 !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._\/-]{0,300}$/.test(r2) || r2.includes("..") || r2.includes("//")) return json(404, { error: "not found" });
@@ -386,7 +329,6 @@ async function serveAudio(env, request, parts) {
 // CLARITY clip audio: clarity/audio/<Lnnn>.webm in eta-lab-ratings (read-only); the id is a fixed pattern, so no other key is reachable
 async function serveClarityAudio(env, request, id) {
   if (!CLIP_ID.test(id) || !env.RATINGS) return json(404, { error: "not found" });
-  if (BLIND_CLIPS.has(id)) return json(403, { error: BLIND_MSG });
   const key = `clarity/audio/${id}.webm`;
   const head = await env.RATINGS.head(key);
   if (!head) return json(404, { error: "audio not found" });
@@ -463,10 +405,9 @@ async function route(request, env, url, who) {
     }
     if (extra !== undefined || !validRoomDate(room, date)) return json(404, { error: "not found" });
     const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
-    return new Response(roomDayPage(await timelineRoomDay(env, room, date, parseWin(url.searchParams.get("from"), url.searchParams.get("to")), url.searchParams.get("consult"))).replaceAll("__NONCE__", nonce), { headers: baseHeaders({
+    return new Response(roomDayPage(await timelineRoomDay(env, room, date)).replaceAll("__NONCE__", nonce), { headers: baseHeaders({
       "content-type": "text/html; charset=utf-8", "content-security-policy": CSP(nonce) }) });
   }
-  if (path.startsWith("/clip/")) return serveConsultClip(env, request, path.slice("/clip/".length));
   if (path.startsWith("/api/inspect/")) {
     const [room, date, runId, wid, extra] = path.slice("/api/inspect/".length).split("/");
     if (extra !== undefined || !validRoomDate(room, date) || !WID_RE.test(runId ?? "") || !WID_RE.test(wid ?? "")) return json(404, { error: "not found" });
@@ -488,8 +429,7 @@ async function route(request, env, url, who) {
   }
   if (path === "/api/index") {
     const key = await newest(env, "index/windows-", ".jsonl");
-    if (key) { const o = await env.RESULTS.get(key); if (o) return new Response(withoutBlindLines(await o.text()), { status: 200, headers: baseHeaders({ "content-type": "application/x-ndjson; charset=utf-8", "x-vault-key": key }) }); }
-    return json(404, { error: "no index yet" });
+    return (key && (await streamObject(env, key))) || json(404, { error: "no index yet" });
   }
   if (path === "/api/chunks-index") {
     const key = await newest(env, "index/chunks-", ".jsonl");
@@ -497,8 +437,7 @@ async function route(request, env, url, who) {
   }
   if (path === "/api/view-index") {
     const key = await newest(env, "index/view-", ".jsonl");
-    if (key) { const o = await env.RESULTS.get(key); if (o) return new Response(blankFirstWords(await o.text(), true), { status: 200, headers: baseHeaders({ "content-type": "application/x-ndjson; charset=utf-8", "x-vault-key": key }) }); }
-    return json(404, { error: "no view index yet" });
+    return (key && (await streamObject(env, key))) || json(404, { error: "no view index yet" });
   }
   if (path === "/api/vault-counts") return json(200, await vaultCounts(env));
   if (path.startsWith("/api/corrections/")) {
@@ -513,13 +452,11 @@ async function route(request, env, url, who) {
   }
   if (path === "/api/search-index") {
     const key = await newest(env, "index/search-", ".jsonl");
-    if (key) { const o = await env.RESULTS.get(key); if (o) return new Response(withoutBlindLines(await o.text()), { status: 200, headers: baseHeaders({ "content-type": "application/x-ndjson; charset=utf-8", "x-vault-key": key }) }); }
-    return json(404, { error: "no search index yet" });
+    return (key && (await streamObject(env, key))) || json(404, { error: "no search index yet" });
   }
   if (path === "/api/manifests") return json(200, { runs: await manifests(env) });
   if (path.startsWith("/api/window/")) {
     const key = windowKey(path.slice("/api/window/".length).split("/"));
-    if (key && isBlindKey(key)) return json(403, { error: BLIND_MSG });
     const doc = key && (await loadWindow(env, key));
     return doc ? json(200, doc) : json(404, { error: "not found" });
   }
@@ -534,11 +471,10 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/api/me" && request.method === "GET") return json(200, { rater: isRater(env, who.email) });
     try {
-      const shell = (html, set) => {
+      const r = await rateRoute(request, env, url, who, (html, set) => {
         const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
         return new Response(html.replaceAll("__NONCE__", nonce), { headers: baseHeaders({ "content-type": "text/html; charset=utf-8", "content-security-policy": CSP(nonce) }) });
-      };
-      const r = (await g3Route(request, env, url, who, shell)) ?? (await voicecheckRoute(request, env, url, who, shell)) ?? (await drtRoute(request, env, url, who, shell)) ?? (await rateRoute(request, env, url, who, shell));
+      });
       if (r) return r;
     } catch (e) { return json(500, { error: "internal" }); }
     if (request.method !== "GET" && request.method !== "HEAD") return new Response("method not allowed", { status: 405, headers: baseHeaders({ allow: "GET, HEAD" }) });
