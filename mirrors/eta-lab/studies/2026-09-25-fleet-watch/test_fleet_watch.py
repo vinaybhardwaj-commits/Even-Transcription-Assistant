@@ -7,6 +7,7 @@ import fleet_watch as fw
 
 def _no_real_model(*a, **k):
     raise AssertionError("a test reached a real model call (run_model must be stubbed or the budget cap must stop it)")
+_REAL_RUN_MODEL = fw.run_model     # kept for the cli-shape test below; every other test must use the stub
 fw.run_model = _no_real_model      # fail fast: a bypassed cap used to hang the suite on a real opencode call (refuter-2 G7 note)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -268,17 +269,31 @@ def replay_with_an_injected_fault_reports_once_then_resolves_with_the_replayed_d
 
 @test
 def a_failed_primary_model_is_retried_once_on_the_fallback_and_both_costs_are_counted():
-    cfg = fw.load_cfg(); sk = FakeSinks(); s = snap([room()]); good = {"rooms": [{"room": "OPD 1", "recording": True, "state": "recording"}]}; orig = fw.run_model; seen = []
-    def fake(cfg_, name=None, variant=None):
-        seen.append(name or cfg_["model"]["name"])
+    cfg = fw.load_cfg(); sk = FakeSinks(); s = snap([room()]); good = {"rooms": [{"room": "OPD 1", "recording": True, "state": "recording"}]}; orig = fw.run_model; seen = []; prov = []
+    def fake(cfg_, name=None, variant=None, provider=None):
+        seen.append(name or cfg_["model"]["name"]); prov.append(provider)
         return {"ok": False, "error": "Model access is disabled", "cost": 0.0, "seconds": 1} if len(seen) == 1 else {"ok": True, "json": good, "cost": 0.004, "seconds": 2}
     fw.run_model = fake
     try:
         st, rec = fw.run_cycle(_door(s, []), cfg, sk, MON_NOON, {}, use_model=True)
     finally:
         fw.run_model = orig
-    assert seen == [cfg["model"]["name"], cfg["model"]["fallback"]] and rec["model"] == cfg["model"]["fallback"] and rec["watcher_fault"] is None and rec["agrees"] is True and rec["cost"] == 0.004
+    assert seen == [cfg["model"]["name"], cfg["model"]["fallback"]] and prov[1] == "opencode", "the fallback keeps its proven Zen route (ORDER 452)"
+    assert rec["model"] == cfg["model"]["fallback"] and rec["watcher_fault"] is None and rec["agrees"] is True and rec["cost"] == 0.004
     if os.path.exists(os.path.join(fw.RT, "cost.jsonl")): os.remove(os.path.join(fw.RT, "cost.jsonl"))
+
+@test
+def run_model_builds_the_cli_model_from_the_configured_provider():
+    orig = fw.subprocess.run; got = []
+    class Out: stdout = ""
+    def fake(cmd, **kw): got.append(list(cmd)); return Out()
+    fw.subprocess.run = fake
+    try:
+        _REAL_RUN_MODEL(fw.load_cfg()); _REAL_RUN_MODEL(fw.load_cfg(), "deepseek-v4.1-flash", "", "opencode")
+    finally:
+        fw.subprocess.run = orig
+    assert got[0][got[0].index("-m") + 1] == "opencode-go/glm-5.3-flash" and "--variant" not in got[0], "primary: Go route, no variant flag"
+    assert got[1][got[1].index("-m") + 1] == "opencode/deepseek-v4.1-flash", "fallback: explicit Zen route"
 
 @test
 def a_replay_with_an_overridden_clock_shifts_every_snapshot_timestamp_so_it_stays_healthy():
@@ -335,8 +350,82 @@ def the_opencode_config_gives_the_agent_only_the_local_proxy_and_never_the_remot
     assert not any("session_tape" in k and v for k, v in list(c["tools"].items()) + list(a.items())), "r402: the agent never gets scribe_session_tape (presigned audio links)"
     assert all(c["permission"][k] == "deny" for k in ("edit", "bash", "webfetch")), "no shell, no edits, no web"
     assert c["agent"]["title"]["disable"] is True, "no hidden title call to another model"
+    assert c["model"] == "opencode-go/glm-5.3-flash" and set(c["provider"]) == {"opencode", "opencode-go"}, "ORDER 452 pin: glm-5.3-flash on the Go route, both providers defined"
+    assert all(p["options"]["apiKey"] == "{file:/home/eta/.claude/secrets/opencode_zen_key}" for p in c["provider"].values()), "both routes on the same key file"
     assert "{file:/home/eta/.claude/secrets/opencode_zen_key}" in raw and not re.search(r"(sk-|Bearer [A-Za-z0-9]{16,}|eyJ[A-Za-z0-9]{10,})", raw), "the Zen key only by file reference"
 
+
+@test
+def the_model_fires_only_on_deterministic_change_and_throttles_a_room_class_for_30_min():
+    cfg = fw.load_cfg(); sk = FakeSinks(); orig = fw.run_model; calls = []; cur = {}
+    def fake(cfg_, name=None, variant=None, provider=None):
+        calls.append(1)
+        return {"ok": True, "cost": 0.004, "seconds": 2, "json": {"rooms": [{"room": r["room"]["name"], "recording": bool(r.get("recording")), "state": r.get("room_state", {}).get("state")} for r in cur["s"]["now"]["rooms"]]}}
+    fw.run_model = fake
+    try:
+        t0 = MON_NOON
+        cur["s"] = snap([room(now=t0)], now=t0)
+        st, rec = fw.run_cycle(_door(cur["s"], []), cfg, sk, t0, {}, use_model=True)
+        assert rec["mode"] == "model+deterministic" and rec["agrees"] is True and len(calls) == 1, "cold start: one baseline model pass"
+        st, rec = fw.run_cycle(_door(cur["s"], []), cfg, sk, t0 + dt.timedelta(minutes=5), st, use_model=True)
+        assert rec["mode"] == "deterministic (model gated: no-change)" and rec["cost"] == 0.0 and len(calls) == 1, "unchanged snapshot: the model sleeps, the deterministic cycle runs"
+        cur["s"] = snap([room(now=t0 + dt.timedelta(minutes=10), recording=False, state="ready")], now=t0 + dt.timedelta(minutes=10))
+        st, rec = fw.run_cycle(_door(cur["s"], []), cfg, sk, t0 + dt.timedelta(minutes=10), st, use_model=True)
+        assert len(calls) == 2 and rec["mode"] == "model+deterministic" and rec["agrees"] is True, "a new problem wakes the model"
+        cur["s"] = snap([room(now=t0 + dt.timedelta(minutes=15), recording=False, state="finished")], now=t0 + dt.timedelta(minutes=15))
+        st, rec = fw.run_cycle(_door(cur["s"], []), cfg, sk, t0 + dt.timedelta(minutes=15), st, use_model=True)
+        assert rec["mode"] == "deterministic (model gated: throttled)" and len(calls) == 2 and st["last_model_sig"]["OPD 1"][1] == "ready", "a throttled change stays PENDING: the sig is not advanced on a skip"
+        cur["s"] = snap([room(now=t0 + dt.timedelta(minutes=20))], now=t0 + dt.timedelta(minutes=20))
+        st, rec = fw.run_cycle(_door(cur["s"], []), cfg, sk, t0 + dt.timedelta(minutes=20), st, use_model=True)
+        assert rec["mode"] == "deterministic (model gated: throttled)" and len(calls) == 2, "a recovery inside the window is also gated (same STATE class)"
+        st, rec = fw.run_cycle(_door(cur["s"], []), cfg, sk, t0 + dt.timedelta(minutes=41), st, use_model=True)
+        assert len(calls) == 3 and rec["mode"] == "model+deterministic" and rec["agrees"] is True and st["last_model_sig"]["OPD 1"][0] is True, "past 30 min the pending change fires"
+    finally:
+        fw.run_model = orig
+    if os.path.exists(os.path.join(fw.RT, "cost.jsonl")): os.remove(os.path.join(fw.RT, "cost.jsonl"))
+
+@test
+def the_throttle_is_per_room_and_class_not_global_and_an_appearing_room_counts_as_change():
+    cfg = fw.load_cfg(); sk = FakeSinks(); orig = fw.run_model; calls = []; cur = {}
+    def fake(cfg_, name=None, variant=None, provider=None):
+        calls.append(1)
+        return {"ok": True, "cost": 0.004, "seconds": 2, "json": {"rooms": [{"room": r["room"]["name"], "recording": bool(r.get("recording")), "state": r.get("room_state", {}).get("state")} for r in cur["s"]["now"]["rooms"]]}}
+    fw.run_model = fake
+    try:
+        t0 = MON_NOON
+        cur["s"] = snap([room(now=t0)], now=t0)
+        st, _ = fw.run_cycle(_door(cur["s"], []), cfg, sk, t0, {}, use_model=True)
+        t1 = t0 + dt.timedelta(minutes=10); cur["s"] = snap([room(now=t1), room("OPD 3", "room_b", now=t1)], now=t1)
+        st, rec = fw.run_cycle(_door(cur["s"], []), cfg, sk, t1, st, use_model=True)
+        assert len(calls) == 2 and rec["agrees"] is True, "an appearing room (ROOM class, never modelled) wakes the model"
+        t2 = t0 + dt.timedelta(minutes=15); cur["s"] = snap([room(now=t2, recording=False, state="ready"), room("OPD 3", "room_b", now=t2)], now=t2)
+        st, rec = fw.run_cycle(_door(cur["s"], []), cfg, sk, t2, st, use_model=True)
+        assert len(calls) == 3 and rec["mode"] == "model+deterministic", "OPD 1 STATE/NOT_RECORDING were never stamped: the throttle is per room+class, not global"
+    finally:
+        fw.run_model = orig
+    if os.path.exists(os.path.join(fw.RT, "cost.jsonl")): os.remove(os.path.join(fw.RT, "cost.jsonl"))
+
+@test
+def a_failed_model_pass_leaves_the_change_pending_and_the_next_success_clears_it():
+    cfg = fw.load_cfg(); cfg["model"]["fallback"] = ""      # this test is about the PENDING sig, not the retry
+    sk = FakeSinks(); orig = fw.run_model; calls = []
+    def fake(cfg_, name=None, variant=None, provider=None):
+        calls.append(1)
+        if len(calls) == 1: return {"ok": False, "error": "timeout", "cost": 0.0, "seconds": 1}
+        return {"ok": True, "cost": 0.004, "seconds": 1, "json": {"rooms": [{"room": "OPD 1", "recording": True, "state": "recording"}]}}
+    fw.run_model = fake
+    try:
+        s = snap([room()])
+        st, rec = fw.run_cycle(_door(s, []), cfg, sk, MON_NOON, {}, use_model=True)
+        assert rec["watcher_fault"] == "model: timeout" and "last_model_sig" not in st and "model_seen" not in st, "a failed pass stamps NOTHING: the error is not cleared"
+        st, rec = fw.run_cycle(_door(s, []), cfg, sk, MON_NOON + dt.timedelta(minutes=5), st, use_model=True)
+        assert len(calls) == 2 and rec["agrees"] is True and st["last_model_sig"]["OPD 1"][1] == "recording", "the retry fires while the change is pending, and only its success clears it"
+        t3 = MON_NOON + dt.timedelta(minutes=10); s3 = snap([room(now=t3)], now=t3)      # fresh pieces at t3 too: the same HEALTHY sig, not a stale-into-PIECES_STALLED change
+        st, rec = fw.run_cycle(_door(s3, []), cfg, sk, t3, st, use_model=True)
+        assert rec["mode"] == "deterministic (model gated: no-change)" and len(calls) == 2, "an error is cleared only by the success of the operation that failed"
+    finally:
+        fw.run_model = orig
+    if os.path.exists(os.path.join(fw.RT, "cost.jsonl")): os.remove(os.path.join(fw.RT, "cost.jsonl"))
 
 def main():
     bad = 0

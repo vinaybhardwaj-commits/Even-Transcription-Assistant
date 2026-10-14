@@ -2,7 +2,12 @@
   "$schema": "https://opencode.ai/config.json",
   // fleet-watch (rulings 399 + 401): a SEPARATE config for this agent only (OPENCODE_CONFIG). Secrets only by {file:} reference. NO remote Scribe MCP and NO Scribe token reference here:
   // the agent gets the LOCAL stdio proxy "scribe-fleet", which alone reads the token and forwards only 4 allowlisted read tools (r402: NOT scribe_session_tape) (include_* refused, URLs/identity scrubbed).
-  "provider": { "opencode": { "options": { "apiKey": "{file:/home/eta/.claude/secrets/opencode_zen_key}" } } },
+  // ORDER 452 (V's pick, 26 Sep): the watch model moves to opencode-go/glm-5.3-flash — the Go route uses the SAME key file (r438). The wrapper builds `opencode run -m <provider>/<name>` from its cfg; this "model" mirrors it.
+  "model": "opencode-go/glm-5.3-flash",
+  "provider": {
+    "opencode": { "options": { "apiKey": "{file:/home/eta/.claude/secrets/opencode_zen_key}" } },
+    "opencode-go": { "options": { "apiKey": "{file:/home/eta/.claude/secrets/opencode_zen_key}" } }
+  },
   "mcp": {
     "scribe-fleet": { "type": "local", "command": ["python3", "/home/eta/fleet-watch/bin/scribe_fleet_mcp.py"], "enabled": true }
   },

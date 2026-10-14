@@ -17,8 +17,8 @@ DEFAULT_CFG = {
     "known": {},                            # {room name: {CODE: "reason"}} -> INFO instead of PROBLEM (set by conductor/Fable, never guessed here)
     "ignore_rooms": [], "health_every_s": 900, "exact_zero_bps": [707.0, 709.0],   # r343/r376: strict full-chunk 707-709 B/s
 
-    "budget_usd_per_day": 2.0, "interval_s": 300,
-    "model": {"name": "gemini-3.5-flash-lite", "variant": "low", "fallback": "deepseek-v4.1-flash", "fallback_variant": "", "timeout_s": 170},   # PROVISIONAL (r399's deepseek-v4-flash is 403 on V's Zen account): 12-cycle comparison 25 Sep, both agree 12/12, measured $0.0037 vs $0.0054 per cycle
+    "budget_usd_per_day": 2.0, "interval_s": 300, "model_throttle_s": 1800,   # ORDER 453.B.2 (V's ruling): the model is EVENT-GATED — only a deterministic change calls it, and a room+class can wake it at most every 1800 s. The deterministic 5-min cycle is the safety layer and stays exactly as it was.
+    "model": {"name": "glm-5.3-flash", "provider": "opencode-go", "variant": "", "fallback": "deepseek-v4.1-flash", "fallback_provider": "opencode", "fallback_variant": "", "timeout_s": 170},   # ORDER 452 (V's pick): Go route per the r438 map, SAME key file; no variant flag (the old "low" was gemini's reasoning-budget guard). The one retry stays on the PROVEN Zen deepseek-v4.1-flash (Go deepseek ids partly unproven here, r447; Zen = overflow). Before: gemini-3.5-flash-lite low, ~$0.0036/cycle, 12/12 agreement.
     "mini": {"host": "mini", "dir": "/Users/vinaybhardwaj/dev/fleet-watch"},
     "hsend": os.path.expanduser("~/dev/eta-lab/kit/hsend.sh"),
 }
@@ -237,10 +237,11 @@ def cost_today(now):
     return t
 
 
-def run_model(cfg, name=None, variant=None):
+def run_model(cfg, name=None, variant=None, provider=None):
     """One `opencode run` (stdin closed: it hangs otherwise). Returns {ok, json, cost, tokens, seconds, error}."""
     m = cfg["model"]; name = name or m["name"]; variant = m["variant"] if variant is None else variant
-    cmd = [os.path.expanduser("~/.local/bin/opencode"), "run", "--agent", "fleet-watch", "-m", "opencode/" + name, "--format", "json", "--dir", RT] + (["--variant", variant] if variant else []) + ["Run one watch cycle now."]
+    provider = provider or m.get("provider", "opencode")      # a bad "-m" id can silently fall back to a FREE model (r447): the db check after any pin change is mandatory
+    cmd = [os.path.expanduser("~/.local/bin/opencode"), "run", "--agent", "fleet-watch", "-m", provider + "/" + name, "--format", "json", "--dir", RT] + (["--variant", variant] if variant else []) + ["Run one watch cycle now."]
     env = dict(os.environ, OPENCODE_CONFIG=os.path.join(RT, "opencode.jsonc")); t0 = time.time()
     try:
         p = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=m["timeout_s"])
@@ -283,6 +284,45 @@ def agreement(model_json, snap):
     return (not bad), bad
 
 
+# ---------------------------------------------------------------- ORDER 453.B.2: event gate for the model (the deterministic pass decides WHEN it speaks)
+def snapshot_sig(snap, issues):
+    """JSON-stable fingerprint the gate keys on: per room [recording, state, sorted PROBLEM codes]. Info-level moves (levels, known-suppressed codes) never wake the model."""
+    sig = {}
+    for r in snap["now"].get("rooms", []):
+        nm = r["room"]["name"]
+        codes = sorted(i["code"] for i in issues.get(nm, []) if i.get("severity") == "PROBLEM")
+        sig[nm] = [bool(r.get("recording")), r.get("room_state", {}).get("state"), codes]
+    return {k: sig[k] for k in sorted(sig)}
+
+
+def sig_changes(last, now_sig):
+    """[(room, class)] the snapshot moved on since the model last SAW it: STATE flip, a PROBLEM code appearing OR clearing (same class = one 30-min window for that room's event, onset and recovery alike), room appeared/vanished (ROOM). Cold start (last is None) -> every room's STATE + its codes."""
+    pairs = []
+    if last is None:
+        for rm in now_sig: pairs += [(rm, "STATE")] + [(rm, c) for c in now_sig[rm][2]]
+        return sorted(pairs)
+    for rm in sorted(set(last) | set(now_sig)):
+        a, b = last.get(rm), now_sig.get(rm)
+        if a is None or b is None: pairs.append((rm, "ROOM")); continue
+        if a[:2] != b[:2]: pairs.append((rm, "STATE"))
+        pairs += [(rm, c) for c in sorted(set(b[2]) - set(a[2]))]
+        pairs += [(rm, c) for c in sorted(set(a[2]) - set(b[2]))]      # a recovery belongs to the SAME room+class window as the code
+    return pairs
+
+
+def model_gate(state, sig, now, cfg):
+    """-> (call_model?, changed_pairs, skip_reason). Per room+class throttle (onset and recovery of a code share the class); the stamp only moves when a model pass SUCCEEDS (an error is cleared only by the success of the operation that failed), so a failed or skipped-but-eligible pass stays pending."""
+    pairs = sig_changes(state.get("last_model_sig"), sig)
+    if not pairs: return False, [], "no-change"
+    thr = cfg.get("model_throttle_s", 1800)
+    seen = state.get("model_seen", {})
+    def fresh(rm, cl):
+        t = seen.get(rm, {}).get(cl)
+        return t is None or (now - parse_iso(t)).total_seconds() >= thr
+    if not any(fresh(rm, cl) for rm, cl in pairs): return False, pairs, "throttled"
+    return True, pairs, None
+
+
 # ---------------------------------------------------------------- one cycle
 def run_cycle(call, cfg, sinks, now, state, use_model=True, snap=None, label="", heartbeat=True):
     """-> (new_state, record). The record is the jsonl line (room/state/timings only)."""
@@ -298,18 +338,26 @@ def run_cycle(call, cfg, sinks, now, state, use_model=True, snap=None, label="",
     issues, devices, finfo = decide(snap, cfg, now, state.get("devices"))
     st, events = advance(state, issues, now, cfg); st["devices"] = devices
     if use_model and cost_today(now) < cfg["budget_usd_per_day"]:
-        mr = run_model(cfg); used = cfg["model"]["name"]; spent = mr.get("cost", 0) or 0
-        if not mr["ok"] and cfg["model"].get("fallback"):        # the primary failed (403, timeout, non-JSON): one retry on the fallback model
-            mr2 = run_model(cfg, cfg["model"]["fallback"], cfg["model"].get("fallback_variant", "")); spent += mr2.get("cost", 0) or 0
-            if mr2["ok"]:
-                mr, used = mr2, cfg["model"]["fallback"]
-        rec.update(mode="model+deterministic", model=used, cost=round(spent, 5), model_seconds=round(mr.get("seconds", 0), 1))
-        with open(os.path.join(RT, "cost.jsonl"), "a") as f:
-            f.write(json.dumps({"day": now.astimezone(IST).strftime("%Y-%m-%d"), "ts": now.isoformat(), "cost": spent}) + "\n")
-        if mr["ok"]:
-            rec["agrees"], rec["disagreements"] = agreement(mr["json"], snap)
+        sig = snapshot_sig(snap, issues)
+        go, pairs, why = model_gate(st, sig, now, cfg)
+        if not go:      # ORDER 453.B.2: nothing moved — the deterministic pass IS the check, and it is free
+            rec.update(mode="deterministic (model gated: %s)" % why, model_gate=why, cost=0.0)
         else:
-            rec["watcher_fault"] = "model: %s" % mr.get("error")          # a watcher fault, not a room fault
+            mr = run_model(cfg); used = cfg["model"]["name"]; spent = mr.get("cost", 0) or 0
+            if not mr["ok"] and cfg["model"].get("fallback"):        # the primary failed (403, timeout, non-JSON): one retry on the fallback model
+                mr2 = run_model(cfg, cfg["model"]["fallback"], cfg["model"].get("fallback_variant", ""), cfg["model"].get("fallback_provider", "opencode")); spent += mr2.get("cost", 0) or 0
+                if mr2["ok"]:
+                    mr, used = mr2, cfg["model"]["fallback"]
+            rec.update(mode="model+deterministic", model=used, cost=round(spent, 5), model_seconds=round(mr.get("seconds", 0), 1))
+            with open(os.path.join(RT, "cost.jsonl"), "a") as f:
+                f.write(json.dumps({"day": now.astimezone(IST).strftime("%Y-%m-%d"), "ts": now.isoformat(), "cost": spent}) + "\n")
+            if mr["ok"]:
+                rec["agrees"], rec["disagreements"] = agreement(mr["json"], snap)
+                st["last_model_sig"] = sig                            # a SUCCESSFUL pass is the only thing that clears the pending change
+                seen = st.setdefault("model_seen", {})
+                for rm, cl in pairs: seen.setdefault(rm, {})[cl] = now.isoformat()   # the model just SAW every changed class: the 30-min clock starts now
+            else:
+                rec["watcher_fault"] = "model: %s" % mr.get("error")  # a watcher fault, not a room fault
     elif use_model:
         rec["mode"] = "deterministic-only (daily budget reached)"
         if not st.get("budget_told") == now.astimezone(IST).strftime("%Y-%m-%d"):
@@ -335,8 +383,8 @@ def select_models(call, cfg, n, gap_s, candidates):
     rows = []; out = open(os.path.join(RT, "model-selection.jsonl"), "a")
     for i in range(n):
         now = dt.datetime.now(dt.timezone.utc); snap = collect(call, now, {}, cfg)
-        for name, variant in candidates:
-            mr = run_model(cfg, name, variant); row = {"cycle": i + 1, "ts": now.isoformat(), "model": name, "variant": variant, "ok": mr["ok"], "cost": round(mr.get("cost", 0), 5), "seconds": round(mr.get("seconds", 0), 1), "tools": mr.get("tools")}
+        for name, variant, provider in candidates:
+            mr = run_model(cfg, name, variant, provider); row = {"cycle": i + 1, "ts": now.isoformat(), "model": name, "provider": provider, "variant": variant, "ok": mr["ok"], "cost": round(mr.get("cost", 0), 5), "seconds": round(mr.get("seconds", 0), 1), "tools": mr.get("tools")}
             if mr["ok"]:
                 row["agrees"], row["disagreements"] = agreement(mr["json"], snap)
             else:
@@ -415,7 +463,7 @@ def main(argv=None):
         st, rec = run_cycle(None, cfg, Sinks(cfg, dry=a.dry), now, load_state(sp), use_model=False, snap=snap, label=label, heartbeat=False); save_state(sp, st); print(json.dumps(rec["events"])); return 0
     import clip_fetch_mcp
     if a.select:
-        m = cfg["model"]; select_models(clip_fetch_mcp.call, cfg, a.select, a.gap, [(m["name"], m["variant"]), (m["fallback"], m["fallback_variant"])]); return 0
+        m = cfg["model"]; select_models(clip_fetch_mcp.call, cfg, a.select, a.gap, [(m["name"], m["variant"], m.get("provider", "opencode")), (m["fallback"], m["fallback_variant"], m.get("fallback_provider", "opencode"))]); return 0
     lock = open(os.path.join(RT, "lock"), "w")      # only the live loop takes the lock: replay and the model benchmark never touch live state
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
