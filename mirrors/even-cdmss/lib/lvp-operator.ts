@@ -22,6 +22,7 @@
 
 import { assertKnownBedrockModel } from './bedrock-core';
 import { sql } from './db';
+import { isProviderAuthUnavailable } from './bedrock';
 import { loadShelf } from './lvp-store';
 import {
   LVP_OPERATOR_SYSTEM, operatorModel, operatorUserMessage, parseOperatorOutput, rejectionLogLines,
@@ -153,8 +154,10 @@ export async function runPatternOperator(opts: { trigger: 'cron' | 'manual' }): 
   } catch (e) {
     if (traceId) await finishTraceIfRunning(traceId, 'error', String((e as Error).message).slice(0, 200)).catch(() => {});
     // F11: this is the whole failure story. Nothing was served by another provider, nothing is
-    // written, and the shelf keeps stub copy until a later run succeeds.
-    return { ...fail(`bedrock operator call failed: ${String((e as Error).message)}`), considered: head.length };
+    // written, and the shelf keeps stub copy until a later run succeeds. An auth denial is named
+    // as itself so the log is not a truncated STS body, and nothing is retried inside this run.
+    const detail = isProviderAuthUnavailable(e) ? 'provider auth unavailable' : String((e as Error).message);
+    return { ...fail(`bedrock operator call failed: ${detail}`), considered: head.length };
   }
 
   // 3) parse, then screen ROW-WISE before any write (§5)

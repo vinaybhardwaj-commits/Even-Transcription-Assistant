@@ -33,7 +33,7 @@
 // `await import('./trace')`, for a different reason: there it breaks a cycle, here it breaks weight.)
 import type { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { getGcpIdToken, vertexSaEmail } from './gcp-auth';
-import { createWithRetry } from './openrouter-retry';
+import { createWithRetry, isProviderAuthFailure, providerHttpStatus } from './openrouter-retry';
 import {
   beginProviderCall, endProviderCall, providerCallsInFlight, providerErrorPayload,
 } from './provider-error-core';
@@ -49,6 +49,46 @@ export {
   type ChatCompletionLike, type ChatToolCall, type ConverseContentBlock, type ConverseToolConfig,
   type ConverseToolResult, type ConverseToolUse,
 } from './bedrock-core';
+
+/**
+ * Bedrock (or the STS hop in front of it) cannot authenticate. IAM is refusing the web-identity
+ * assumption, or the temporary credentials are expired or rejected. Retrying will not succeed
+ * until that is fixed, and a caller that records the failure as a fact about the case burns a
+ * retry window on an outage that is not about the case.
+ *
+ * Duck-typed via `isProviderAuthUnavailable` so the retry loop can recognise it without importing
+ * this module (that import would cycle: this file already imports the retry loop).
+ */
+export class ProviderAuthUnavailable extends Error {
+  readonly isProviderAuthUnavailable = true as const;
+  readonly provider = 'bedrock' as const;
+  readonly httpStatus: number | null;
+  constructor(message: string, httpStatus: number | null = null, cause?: unknown) {
+    super(message, cause !== undefined ? { cause } : undefined);
+    this.name = 'ProviderAuthUnavailable';
+    this.httpStatus = httpStatus;
+  }
+}
+
+export function isProviderAuthUnavailable(e: unknown): e is ProviderAuthUnavailable {
+  return Boolean(e && typeof e === 'object' && (e as { isProviderAuthUnavailable?: unknown }).isProviderAuthUnavailable === true);
+}
+
+/**
+ * The typed error for an AWS auth/permission failure, or null when `e` is some other fault.
+ * Already-typed errors pass through so a wrap at the STS boundary is not wrapped again.
+ */
+export function providerAuthUnavailableFrom(e: unknown): ProviderAuthUnavailable | null {
+  if (isProviderAuthUnavailable(e)) return e;
+  if (!isProviderAuthFailure(e)) return null;
+  const status = providerHttpStatus(e);
+  const message = e instanceof Error ? e.message : String(e);
+  return new ProviderAuthUnavailable(
+    `bedrock: provider auth unavailable${status != null ? ` (HTTP ${status})` : ''}: ${message}`,
+    status,
+    e,
+  );
+}
 
 /** The role session name AWS records for every assumed session (integration reference §1.1). */
 export const BEDROCK_ROLE_SESSION_NAME = 'bedrock-session';
@@ -101,12 +141,19 @@ export async function bedrockCredentials(): Promise<BedrockCredentials> {
   const webIdentityToken = await getGcpIdToken(audience);
   const { STSClient, AssumeRoleWithWebIdentityCommand } = await import('@aws-sdk/client-sts');
   const sts = new STSClient({ region });
-  const res = await sts.send(new AssumeRoleWithWebIdentityCommand({
-    RoleArn: roleArn,
-    RoleSessionName: BEDROCK_ROLE_SESSION_NAME,
-    WebIdentityToken: webIdentityToken,
-    DurationSeconds: BEDROCK_SESSION_SECONDS,
-  }));
+  let res;
+  try {
+    res = await sts.send(new AssumeRoleWithWebIdentityCommand({
+      RoleArn: roleArn,
+      RoleSessionName: BEDROCK_ROLE_SESSION_NAME,
+      WebIdentityToken: webIdentityToken,
+      DurationSeconds: BEDROCK_SESSION_SECONDS,
+    }));
+  } catch (e) {
+    const auth = providerAuthUnavailableFrom(e);
+    if (auth) throw auth;
+    throw e;
+  }
 
   const c = res.Credentials;
   if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken || !c.Expiration) {
@@ -124,71 +171,6 @@ export async function bedrockCredentials(): Promise<BedrockCredentials> {
   console.info(`[bedrock] assumed ${roleArn} in ${region} as ${vertexSaEmail() ?? 'unknown-sa'} (session ${BEDROCK_ROLE_SESSION_NAME})`);
   return cachedCreds;
 }
-
-/** How long a FAILED liveness result is reused, so a broken role is not hammered. */
-export const BEDROCK_LIVE_FAILURE_TTL_MS = 5 * 60 * 1000;
-/** Longest error text bedrockLive returns. */
-export const BEDROCK_LIVE_ERROR_MAX = 200;
-
-export interface BedrockLiveResult { ok: boolean; checkedAt: string; error: string | null }
-
-/** Longest a liveness attempt may take before it counts as a failure. */
-export const BEDROCK_LIVE_TIMEOUT_MS = 8000;
-
-let inflightLive: Promise<BedrockLiveResult> | null = null;
-let cachedLiveFailure: { at: number; result: BedrockLiveResult } | null = null;
-
-/** Message only (never the error object), secret-shaped runs masked, cut to 200 chars. */
-function liveErrorText(e: unknown): string {
-  const raw = e instanceof Error ? e.message : String(e);
-  return raw
-    .replace(/eyJ[A-Za-z0-9_-]{10,}(\.[A-Za-z0-9_-]+){0,2}/g, '[token]')
-    .replace(/\b(AKIA|ASIA)[A-Z0-9]{12,}\b/g, '[key]')
-    .replace(/[A-Za-z0-9+/=_-]{40,}/g, '[redacted]')
-    .slice(0, BEDROCK_LIVE_ERROR_MAX);
-}
-
-/**
- * Liveness of the Bedrock auth chain: can we get credentials right now? It reuses
- * `bedrockCredentials()` (60-min cache, so a healthy call is cheap) and caches a FAILURE for
- * 5 minutes at module scope. Never throws. `error` is a truncated message, never a credential.
- * `probe` and `now` are test seams; production callers pass nothing.
- */
-export async function bedrockLive(
-  probe: () => Promise<unknown> = bedrockCredentials,
-  now: () => number = Date.now,
-  timeoutMs: number = BEDROCK_LIVE_TIMEOUT_MS,
-): Promise<BedrockLiveResult> {
-  const t = now();
-  if (cachedLiveFailure && t - cachedLiveFailure.at < BEDROCK_LIVE_FAILURE_TTL_MS) return cachedLiveFailure.result;
-  // Concurrent callers share ONE attempt.
-  if (inflightLive) return inflightLive;
-  const attempt = (async (): Promise<BedrockLiveResult> => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        probe(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`timeout after ${timeoutMs} ms`)), timeoutMs);
-        }),
-      ]);
-      cachedLiveFailure = null;
-      return { ok: true, checkedAt: new Date(t).toISOString(), error: null };
-    } catch (e) {
-      const result: BedrockLiveResult = { ok: false, checkedAt: new Date(t).toISOString(), error: liveErrorText(e) };
-      cachedLiveFailure = { at: t, result };
-      return result;
-    } finally {
-      if (timer) clearTimeout(timer);
-      inflightLive = null;
-    }
-  })();
-  inflightLive = attempt;
-  return attempt;
-}
-
-/** TEST SEAM — drop the cached liveness failure. Not used in production code. */
-export function __resetBedrockLiveCache(): void { cachedLiveFailure = null; inflightLive = null; }
 
 /** TEST SEAM — drop the cached credentials. Not used in production code. */
 export function __resetBedrockCredentialCache(): void { cachedCreds = null; }
@@ -239,7 +221,14 @@ export async function bedrockConverse(params: ChatParams, opts: BedrockConverseO
   // alternative is modelling AWS's union inside lib/bedrock-core.ts, which would put an SDK type in
   // the file whose whole point is having none.
   const cmdInput = input as unknown as ConstructorParameters<typeof ConverseCommand>[0];
-  const res = await client.send(new ConverseCommand(cmdInput), { abortSignal: opts.signal });
+  let res;
+  try {
+    res = await client.send(new ConverseCommand(cmdInput), { abortSignal: opts.signal });
+  } catch (e) {
+    const auth = providerAuthUnavailableFrom(e);
+    if (auth) throw auth;
+    throw e;
+  }
   return fromConverseOutput(res as ConverseOutput, opts.model);
 }
 
@@ -340,13 +329,16 @@ export async function bedrockGenerate(params: ChatParams, opts: BedrockGenerateO
     endProviderCall('bedrock');
     return res as ChatCompletionLike;
   } catch (e) {
+    // An STS/Converse auth denial leaves this function as ProviderAuthUnavailable, including when
+    // the retry loop rethrew the raw AWS error because a wrap above it was missed.
+    const thrown = providerAuthUnavailableFrom(e) ?? e;
     // Snapshot in-flight BEFORE decrementing — the failing call counts (403-diagnosis §4.1).
     const inFlightAtError = providerCallsInFlight();
     endProviderCall('bedrock');
-    const payload = bedrockErrorPayload(opts.label ?? null, opts.model, e, inFlightAtError);
-    try { (e as Record<symbol, unknown>)[FAILURE_PAYLOAD] = payload; } catch { /* frozen/primitive throw — the reader rebuilds */ }
+    const payload = bedrockErrorPayload(opts.label ?? null, opts.model, thrown, inFlightAtError);
+    try { (thrown as Record<symbol, unknown>)[FAILURE_PAYLOAD] = payload; } catch { /* frozen/primitive throw — the reader rebuilds */ }
     // Loud, stable prefix, full body. There is no fallback line to write: fellBackTo is 'none'.
     console.error(`[provider-failed] bedrock ${opts.model} → none (F11: never falls back):`, JSON.stringify(payload));
-    throw e;
+    throw thrown;
   }
 }

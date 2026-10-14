@@ -20,6 +20,7 @@
  * asked for, NOTHING IS STORED. A disagreement is a refusal, never a correction.
  */
 
+import { isProviderAuthUnavailable } from '../bedrock';
 import { tracedChat, startTrace, finishTrace } from '../trace';
 import { servedCallForAudit } from '../backfill-runs';
 import { modelsAgree, TEXT_MODEL } from '../llm';
@@ -61,6 +62,8 @@ export interface NarrateResult {
   reason?: string;
   latencyMs: number;
   called: boolean;
+  /** STS/Bedrock refused the call. The sweep must not start another narrative this tick. */
+  authUnavailable?: boolean;
 }
 
 /**
@@ -85,8 +88,14 @@ export async function narrateOne(a: {
   try {
     raw = await (a.call ? a.call(prompt) : opusCall(traceId, prompt));
   } catch (e) {
+    const authUnavailable = isProviderAuthUnavailable(e);
     await finishTrace(traceId, 'error', String((e as Error).message).slice(0, 300));
-    return { ok: false, narrative: null, reason: `narrative leg failed: ${String((e as Error).message).slice(0, 300)}`, latencyMs: Date.now() - t0, called: true };
+    return {
+      ok: false, narrative: null, authUnavailable, called: true, latencyMs: Date.now() - t0,
+      reason: authUnavailable
+        ? 'provider auth unavailable'
+        : `narrative leg failed: ${String((e as Error).message).slice(0, 300)}`,
+    };
   }
 
   // What actually served — read back, never assumed. A disagreement stores nothing.

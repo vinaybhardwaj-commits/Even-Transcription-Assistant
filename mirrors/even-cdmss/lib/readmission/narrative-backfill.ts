@@ -43,7 +43,7 @@ import { activeRun, currentRun, createRun, recentRuns, setRunCursor, setRunStatu
 import { NARRATIVE_MODEL, NARRATIVE_MODEL_ID, NARRATIVE_MAX_PER_TICK, type CaseArtefacts } from '../readmission-narrative-core';
 import type { ReadmissionFinding } from '../readmission-reconcile-core';
 import { assembleForRow } from './run';
-import { composeCaseArtefacts } from './narrative';
+import { composeCaseArtefacts, resetNarrativeAuthGate } from './narrative';
 import { auditedRowsNeedingNarrative, auditedRowForNarrative, narrativePendingCountForDay, narrativeBacklog, READMIT_ENGINE_VERSION, type NarrativeRow } from './store';
 import { asJson } from './surface-row';
 
@@ -166,6 +166,7 @@ export async function narrativeTick(): Promise<NarrativeTickResult> {
 
   await setSetting(NARRATIVE_LOCK_KEY, new Date().toISOString());
   const t0 = Date.now();
+  resetNarrativeAuthGate();
   try {
     let day = plan.day;
     const n = narrativeNPerTick(plan.n);

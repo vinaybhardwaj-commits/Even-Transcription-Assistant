@@ -11,6 +11,7 @@ export const maxDuration = 800;
 import { NextRequest, NextResponse } from 'next/server';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { runDetectionSweep, runReadmissionAudit, readmitAuditModel } from '@/lib/readmission/run';
+import { resetNarrativeAuthGate } from '@/lib/readmission/narrative';
 import { pendingFindings, findingCounts, READMIT_ENGINE_VERSION, AUDITABLE_LANES } from '@/lib/readmission/store';
 
 /**
@@ -60,6 +61,7 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (it: T) => Promise<
 
 export async function GET(req: NextRequest) {
   if (!(await authed(req))) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  resetNarrativeAuthGate();
   const p = req.nextUrl.searchParams;
 
   // ── THE BATCH MUST FIT THE BOX (derived from PROVIDER_BUDGETS, the IPD discipline) ──

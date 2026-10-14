@@ -53,11 +53,28 @@ import { NextRequest, NextResponse } from 'next/server';
 import { isAdminUnlocked } from '@/lib/admin-cookie';
 import { getSettings, setSetting } from '@/lib/mini-backfill';
 import { fetchClosedEpisodes, isEncounterId } from '@/lib/ipd-episode/db13';
+import { resetEpisodeAuthGate } from '@/lib/ipd-episode/model-call';
 import {
   IPD_EPISODE_ENGINE_VERSION, IPD_EPISODE_ENGINE_VERSION_PRIOR, auditedAtByEncounter,
   auditedEncounterIds, skipIsRetryable, skipRows, inProgressIsStale,
 } from '@/lib/ipd-episode/store';
-import { runEpisodeAudit, runEpisodeBatch, MAX_CANDIDATES_EXAMINED } from '@/lib/ipd-episode/run';
+import { runEpisodeAudit, runEpisodeBatch, MAX_CANDIDATES_EXAMINED, type RunEpisodeResult } from '@/lib/ipd-episode/run';
+import { finishTrace, logEvent, startTrace } from '@/lib/trace';
+
+/**
+ * One trace event for the tick when Bedrock auth is down. Not one per checkpoint and not one per
+ * episode: the batch has already stopped, and the episode itself was not skipped. No case
+ * identifier — the outage is about the role, not about a patient.
+ */
+async function recordAuthCircuit(results: RunEpisodeResult[]): Promise<void> {
+  const hit = results.find((r) => r.authUnavailable);
+  if (!hit) return;
+  try {
+    const tid = hit.traceId ?? await startTrace('provider_auth_unavailable', { provider: 'bedrock', feature: 'ipd_episode_audit' });
+    await logEvent(tid, 'provider_auth_unavailable', 'ipd_episode', { provider: 'bedrock', circuit: 'open' });
+    if (!hit.traceId) await finishTrace(tid, 'error', 'provider auth unavailable');
+  } catch { /* the stop must not depend on the trace write */ }
+}
 
 /**
  * The soft lock. `app_settings` key `ipd_episode_lock`, written at the start of a tick and released
@@ -232,6 +249,8 @@ export async function GET(req: NextRequest) {
   await setSetting(LOCK_KEY, new Date().toISOString()).catch(() => {});
 
   try {
+    // A previous tick on this warm instance may have opened the gate. This tick tries once.
+    resetEpisodeAuthGate();
     // ?encounter= — run ONE named episode, whatever the sweep would have chosen. Used for the
     // orchestrator's spot checks. The id is shape-checked and never rewritten.
     if (one) {
@@ -239,7 +258,11 @@ export async function GET(req: NextRequest) {
         return NextResponse.json({ ok: false, error: 'bad encounter id' }, { status: 400 });
       }
       const r = await runEpisodeAudit({ encounterId: one, deadlineAt });
-      return NextResponse.json({ ok: true, mode: 'encounter', engine: IPD_EPISODE_ENGINE_VERSION, processed: 1, results: [r] });
+      await recordAuthCircuit([r]);
+      return NextResponse.json({
+        ok: true, mode: 'encounter', engine: IPD_EPISODE_ENGINE_VERSION, processed: 1, results: [r],
+        ...(r.authUnavailable ? { authUnavailable: true } : {}),
+      });
     }
 
     const queue = await candidateQueue();
@@ -260,11 +283,13 @@ export async function GET(req: NextRequest) {
     const { results, tally } = await runEpisodeBatch(
       queue, max, (i) => runEpisodeAudit({ ...i, deadlineAt }),
     );
+    await recordAuthCircuit(results);
 
     return NextResponse.json({
       ok: true,
       mode: auto ? 'auto' : 'sweep',
       engine: IPD_EPISODE_ENGINE_VERSION,
+      ...(tally.authUnavailable ? { authUnavailable: true } : {}),
       // What this tick actually did, per §5 of the review: how many candidates were looked at, how
       // many were audited, how many were skipped and for exactly which reason, how many errored.
       queueLength: queue.length,

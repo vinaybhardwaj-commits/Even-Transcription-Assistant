@@ -2698,6 +2698,11 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "case-ask",
+    "to": "bedrock",
+    "kind": "value"
+  },
+  {
+    "from": "case-ask",
     "to": "case-ask-core",
     "kind": "type"
   },
@@ -3743,6 +3748,11 @@ export const MAP_EDGES: MapEdge[] = [
   },
   {
     "from": "ipd-episode",
+    "to": "bedrock",
+    "kind": "value"
+  },
+  {
+    "from": "ipd-episode",
     "to": "bedrock-core",
     "kind": "value"
   },
@@ -4269,6 +4279,11 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "lvc-value-core",
     "to": "citations-core",
+    "kind": "value"
+  },
+  {
+    "from": "lvp-operator",
+    "to": "bedrock",
     "kind": "value"
   },
   {
@@ -5159,6 +5174,11 @@ export const MAP_EDGES: MapEdge[] = [
   {
     "from": "preop",
     "to": "backfill-runs",
+    "kind": "value"
+  },
+  {
+    "from": "preop",
+    "to": "bedrock",
     "kind": "value"
   },
   {

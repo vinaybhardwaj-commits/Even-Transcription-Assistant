@@ -17,6 +17,7 @@
  * fallback, and the served model is still READ BACK off the trace (DEC-2): a disagreement is
  * a refusal, not a correction. Provider + model are stamped on the stored narrative.
  */
+import { isProviderAuthUnavailable } from '../bedrock';
 import { tracedChat } from '../trace';
 import { servedCallForAudit, usageForTrace } from '../backfill-runs';
 import { PRICING } from '../llm-cost';
@@ -36,6 +37,15 @@ import {
 } from '../readmission-narrative-core';
 
 export const NARRATIVE_STAGE = 'readmit_narrative';
+
+/**
+ * Set when a narrative call in this process is refused by STS. Later findings in the same tick
+ * return without another assumption attempt. Each entry point resets it, so the next invocation
+ * tries once after the IAM change.
+ */
+let narrativeAuthGate = false;
+
+export function resetNarrativeAuthGate(): void { narrativeAuthGate = false; }
 
 export interface Identity { names: Array<string | null | undefined>; uhids: Array<string | null | undefined> }
 
@@ -183,12 +193,21 @@ export async function composeCaseArtefacts(a: ComposeArgs): Promise<ComposeResul
   }));
   const prompt = buildNarrativePrompt(a.catalog, facts, { audited: join.audited, totalNotes: join.totalNotes, candidates, joinFailed: !join.ok });
 
-  // 4. ONE call, ≤ 80 s, Opus 4.6 on Bedrock, no ladder
+  // 4. ONE call, ≤ 80 s, Opus 4.6 on Bedrock, no ladder.
+  // A test seam (`a.call`) is never gated: the gate is about the live STS hop, not a fixture.
+  if (narrativeAuthGate && !a.call) {
+    return { ok: false, reason: 'provider auth unavailable', ...zero, latencyMs: Date.now() - t0 };
+  }
   let text: string;
   try {
     text = await (a.call ? a.call(prompt) : opusCall(a.traceId, prompt, a.budgetMs ?? NARRATIVE_BUDGET_MS));
   } catch (e) {
-    return { ok: false, reason: `narrative leg failed: ${String((e as Error).message).slice(0, 300)}`, ...zero, latencyMs: Date.now() - t0 };
+    if (isProviderAuthUnavailable(e)) narrativeAuthGate = true;
+    return {
+      ok: false,
+      reason: isProviderAuthUnavailable(e) ? 'provider auth unavailable' : `narrative leg failed: ${String((e as Error).message).slice(0, 300)}`,
+      ...zero, latencyMs: Date.now() - t0,
+    };
   }
   const parsed = parseNarrativeOutput(text);
   if (!parsed) return { ok: false, reason: 'narrative reply unparseable — nothing stored', ...zero, latencyMs: Date.now() - t0 };

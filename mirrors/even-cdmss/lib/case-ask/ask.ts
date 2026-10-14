@@ -18,6 +18,7 @@
  * THIS FILE WRITES NOTHING. The turns are stored by the route through lib/case-ask/store.ts, and
  * there is no score, verdict or feedback write anywhere on this path (§3.3).
  */
+import { isProviderAuthUnavailable } from '../bedrock';
 import { startTrace, finishTrace, tracedChat } from '../trace';
 import { modelsAgree, TEXT_MODEL } from '../llm';
 import { servedCallForAudit, usageForTrace } from '../backfill-runs';
@@ -298,7 +299,11 @@ export async function answerCaseAsk(a: {
     }
   } catch (e) {
     if (!a.call) await finishTrace(traceId, 'error', String((e as Error).message).slice(0, 300)).catch(() => {});
-    return { outcome: 'withheld', verdict: null, reason: 'model_unavailable', cost: null, traceId, latencyMs: Date.now() - t0, ...(a.call ? { prompt } : {}) };
+    return {
+      outcome: 'withheld', verdict: null, cost: null, traceId, latencyMs: Date.now() - t0,
+      reason: isProviderAuthUnavailable(e) ? 'provider_auth_unavailable' : 'model_unavailable',
+      ...(a.call ? { prompt } : {}),
+    };
   }
 
   let cost: CaseAskAnswer['cost'] = null;

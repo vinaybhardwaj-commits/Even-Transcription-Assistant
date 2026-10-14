@@ -48,8 +48,20 @@
  * already paid for that lesson once with the cast gate.
  */
 
+import { isProviderAuthUnavailable, type ProviderAuthUnavailable } from '../bedrock';
 import { governedChat } from '../trace';
 import { PROVIDER_BUDGETS, totalBudgetMs, type CallClass } from '../lab-provider-core';
+
+/**
+ * Set on the first ProviderAuthUnavailable in this process, cleared at the start of each IPD
+ * episode tick. Checkpoints run three at a time; once one of them learns that STS is refusing
+ * the role, the ones that have not started must not each make their own assumption attempt.
+ * The worker resets it so a later tick, possibly on the same warm instance, tries again after
+ * the IAM fix.
+ */
+let episodeAuthGate: ProviderAuthUnavailable | null = null;
+
+export function resetEpisodeAuthGate(): void { episodeAuthGate = null; }
 
 export interface ModelCallInput {
   traceId: string | undefined;
@@ -237,8 +249,10 @@ export function planAttempt(callClass: CallClass, remainingMs: number | null): A
 }
 
 /**
- * Call the model. Never throws — every failure comes back as `error`, because an audit that dies on
- * a provider hiccup is worse than one that records the hiccup.
+ * Call the model. A provider hiccup comes back as `error`, because an audit that dies on one is
+ * worse than one that records it. ProviderAuthUnavailable is the exception: it is rethrown so the
+ * pipeline can stop the tick without recording a skip. A Lab replay divergence is still swallowed
+ * here and rethrown by the adapter after the pipeline returns.
  */
 export async function callModel(input: ModelCallInput): Promise<ModelCallResult> {
   let attempts = 0;
@@ -279,6 +293,7 @@ export async function callModel(input: ModelCallInput): Promise<ModelCallResult>
       attempts++;
       if (attempt > 0) await new Promise((r) => setTimeout(r, 750 * Math.pow(2, attempt - 1)));
       try {
+        if (episodeAuthGate) throw episodeAuthGate;
         const res = await governedChat(input.traceId, input.label, {
           messages: [
             { role: 'system', content: input.system },
@@ -304,6 +319,10 @@ export async function callModel(input: ModelCallInput): Promise<ModelCallResult>
         if (!text.trim()) { lastError = `${input.label}: the response was empty`; continue; }
         return done({ text, finishReason, attempts, truncated: false, error: null });
       } catch (e) {
+        if (isProviderAuthUnavailable(e)) {
+          if (!episodeAuthGate) episodeAuthGate = e;
+          throw e;
+        }
         const msg = String((e as Error).message);
         lastError = msg.slice(0, 400);
         if (isTruncation(msg)) {

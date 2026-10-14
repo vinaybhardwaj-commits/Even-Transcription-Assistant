@@ -339,6 +339,8 @@ export interface PreopRailTally {
   skippedNoText: number;
   /** the LLM box or the per-tick cap stopped the leg before it started */
   skippedBudget: number;
+  /** Bedrock auth failed earlier in this tick; later episodes were not called */
+  skippedAuth: number;
   failed: number;
   ms: number;
   /** B8b: MODEL READS made, three per fresh suggestion — `called` counts episodes, this
@@ -414,7 +416,7 @@ export interface PreopSweepResult {
 }
 
 const emptyTally = (on: boolean): PreopRailTally => ({
-  on, eligible: 0, called: 0, reused: 0, skippedNoText: 0, skippedBudget: 0, failed: 0,
+  on, eligible: 0, called: 0, reused: 0, skippedNoText: 0, skippedBudget: 0, skippedAuth: 0, failed: 0,
   ms: 0, reads: 0, outcomes: {},
 });
 
@@ -592,6 +594,7 @@ export async function runPreopSweep(opts: PreopSweepOptions = {}): Promise<Preop
   };
   const extractTally = emptyTally(rails.extract !== 'off');
   const narrativeTally = emptyTally(rails.narrative);
+  let narrativeAuthDown = false;
   const cases: PreopCaseTrace[] = [];
   let needsReview = 0, pacLinked = 0, bookingOnly = 0, withCreatinine = 0, withIcd = 0;
   let notComputable = 0, pacWorkflowCompleteWithoutReport = 0;
@@ -732,7 +735,10 @@ export async function runPreopSweep(opts: PreopSweepOptions = {}): Promise<Preop
       if (!stale) { narrativeTally.reused++; narrativeTally.outcomes.reused = (narrativeTally.outcomes.reused ?? 0) + 1; }
       else {
         narrativeTally.eligible++;
-        if (narrativeTally.called >= PREOP_NARRATIVE_MAX_PER_TICK || !roomFor(PREOP_NARRATIVE_BUDGET_MS)) {
+        if (narrativeAuthDown) {
+          narrativeTally.skippedAuth++;
+          narrativeTally.outcomes.skipped_auth = (narrativeTally.outcomes.skipped_auth ?? 0) + 1;
+        } else if (narrativeTally.called >= PREOP_NARRATIVE_MAX_PER_TICK || !roomFor(PREOP_NARRATIVE_BUDGET_MS)) {
           narrativeTally.skippedBudget++;
           narrativeTally.outcomes.skipped_budget = (narrativeTally.outcomes.skipped_budget ?? 0) + 1;
         } else {
@@ -740,6 +746,7 @@ export async function runPreopSweep(opts: PreopSweepOptions = {}): Promise<Preop
           const r = await narrateOne({ snapshot: snap, now, call: opts.narrativeCall });
           narrativeTally.ms += Date.now() - t0;
           narrativeTally.called++;
+          if (r.authUnavailable) narrativeAuthDown = true;
           if (!r.ok || !r.narrative) {
             narrativeTally.failed++;
             narrativeTally.outcomes.failed = (narrativeTally.outcomes.failed ?? 0) + 1;

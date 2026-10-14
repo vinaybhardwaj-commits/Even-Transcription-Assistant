@@ -33,6 +33,7 @@
  *    returns a 500 and no path writes a value it did not derive.
  */
 
+import { isProviderAuthUnavailable } from '../bedrock';
 import { assertKnownBedrockModel } from '../bedrock-core';
 import { startTrace, finishTraceIfRunning, logEvent } from '../trace';
 import {
@@ -148,6 +149,11 @@ export interface RunEpisodeResult {
   traceId?: string;
   latencyMs: number;
   notes?: string[];
+  /**
+   * Bedrock/STS refused the call. The episode was not skipped: the in_progress marker is cleared
+   * and the batch must stop. The case stays eligible for the tick after auth works.
+   */
+  authUnavailable?: boolean;
 }
 
 /**
@@ -746,7 +752,20 @@ export async function computeEpisodeAudit(
   } catch (e) {
     // A db13 or transport fault: abort this episode, write NO audit row and NO skip row (§8), and
     // let the next tick try again. A skip would record a fact about the episode that is not true.
+    //
+    // Provider auth is the same shape, with one extra step. The in_progress marker was written
+    // before the model work, and leaving it would count this outage against the 14-day retry
+    // window. Clearing it leaves no skip row, so the episode is eligible again once IAM allows
+    // the assumption. The worker writes the one trace event for the tick.
+    const authDown = isProviderAuthUnavailable(e);
+    if (authDown) await clearSkip(encounterId, engineVersion);
     if (traceId) await finishTraceIfRunning(traceId, 'error', String((e as Error).message));
-    return { encounterId, error: String((e as Error).message), traceId, latencyMs: Date.now() - t0 };
+    return {
+      ...(authDown ? { authUnavailable: true as const } : {}),
+      encounterId,
+      error: String((e as Error).message),
+      traceId,
+      latencyMs: Date.now() - t0,
+    };
   }
 }

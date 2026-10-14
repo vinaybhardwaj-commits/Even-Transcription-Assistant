@@ -56,6 +56,8 @@ export interface EpisodeBatchTally {
   errors: number;
   exhausted: boolean;
   capReached: boolean;
+  /** The tick stopped because Bedrock auth is down. Later candidates were not examined. */
+  authUnavailable: boolean;
 }
 
 export interface EpisodeBatchOutcome {
@@ -83,6 +85,7 @@ export async function runEpisodeBatch(
   let errors = 0;
   let examined = 0;
   let entered = 0;
+  let authUnavailable = false;
 
   for (const c of candidates) {
     if (entered >= max || examined >= examineCap) break;
@@ -96,6 +99,12 @@ export async function runEpisodeBatch(
     if (r.error) errors++;
     if (r.status === 'inserted' || r.status === 'updated') audited++;
     if (countsTowardMax(r)) entered++;
+    // Auth is down for every later candidate too. Stop the tick here so the rest of the queue
+    // keeps its place and its retry window.
+    if (r.authUnavailable) {
+      authUnavailable = true;
+      break;
+    }
   }
 
   return {
@@ -106,8 +115,9 @@ export async function runEpisodeBatch(
       skipped,
       skippedByReason,
       errors,
-      exhausted: examined >= candidates.length,
+      exhausted: examined >= candidates.length && !authUnavailable,
       capReached: examined >= examineCap && entered < max,
+      authUnavailable,
     },
   };
 }

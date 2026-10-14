@@ -4,7 +4,6 @@ export const runtime = 'nodejs';
  * 800 s, matching the IPD episode worker. The tick's own loop stops at 4 items or 500 s
  * elapsed (§5.3.6), so the box is comfortably larger than the work it authorises — the
  * reserve absorbs one long final item rather than being consumed by routine load.
- * The paired slice then uses whatever of that budget is left, several items at a time.
  */
 /** Kept in step with maxDuration. The paired slice is whatever this budget has left. */
 const ROUTE_BUDGET_MS = 800_000;
@@ -33,7 +32,6 @@ import { labV2Configured, postgres } from '@/lib/lab-v2/db';
 import { liveTransport } from '@/lib/lab-v2/transport';
 import { tick } from '@/lib/lab-v2/worker';
 import { defaultPairedDeps, pairedAuditTick } from '@/lib/lab-v2/paired-audit';
-import { pairedAuditConcurrency } from '@/lib/lab-v2/paired-audit-core';
 
 /** Byte-identical in shape to the IPD episode worker's guard. */
 async function authed(req: NextRequest): Promise<boolean> {
@@ -70,11 +68,9 @@ export async function GET(req: NextRequest) {
       if (remaining < 5_000) {
         paired = { skipped: 'no_time' };
       } else {
-        // The slice keeps the route's remaining time. Concurrency is capped inside
-        // the claim, so a cron that overlaps this invocation cannot stack past it.
         paired = await pairedAuditTick(db, defaultPairedDeps(), {
-          concurrency: pairedAuditConcurrency(),
-          deadlineAt: Date.now() + remaining,
+          maxGroups: 2,
+          deadlineAt: Date.now() + Math.min(180_000, remaining),
         });
       }
     } catch (err) {

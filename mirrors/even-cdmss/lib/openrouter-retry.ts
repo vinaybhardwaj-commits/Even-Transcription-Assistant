@@ -43,6 +43,47 @@ export function openRouterBackoffMs(attempt: number, rand: () => number = Math.r
 }
 
 /**
+ * HTTP status off a thrown provider error.
+ *
+ * OpenAI-SDK errors carry `status`. AWS SDK v3 errors do not — they carry
+ * `$metadata.httpStatusCode`. Reading only `status` turns an STS 403 into a
+ * status-less transport error, and the loop below then retries it.
+ */
+export function providerHttpStatus(e: unknown): number | null {
+  if (!e || typeof e !== 'object') return null;
+  const o = e as { status?: unknown; $metadata?: { httpStatusCode?: unknown } };
+  if (typeof o.status === 'number' && Number.isFinite(o.status)) return o.status;
+  const code = o.$metadata?.httpStatusCode;
+  if (typeof code === 'number' && Number.isFinite(code)) return code;
+  return null;
+}
+
+/**
+ * Auth and permission failures. Retrying them spends the budget on a denial that
+ * will not change until someone fixes IAM. The names are the STS / Bedrock ones
+ * (the SDK appends `Exception` to several of the codes). A message that says
+ * "not authorized" covers the same denial when the name was wrapped away.
+ * 401 and 403 are the same class once the status is actually visible.
+ */
+const PROVIDER_AUTH_ERROR_NAME = /^(AccessDenied|AccessDeniedException|ExpiredToken|ExpiredTokenException|InvalidIdentityToken|InvalidIdentityTokenException)$/;
+
+export function isProviderAuthFailure(e: unknown, depth = 0): boolean {
+  if (!e || typeof e !== 'object' || depth > 4) return false;
+  const o = e as {
+    name?: unknown; Code?: unknown; code?: unknown; __type?: unknown;
+    message?: unknown; cause?: unknown; isProviderAuthUnavailable?: unknown;
+  };
+  if (o.isProviderAuthUnavailable === true || o.name === 'ProviderAuthUnavailable') return true;
+  const names = [o.name, o.Code, o.code, o.__type].filter((n): n is string => typeof n === 'string');
+  if (names.some((n) => PROVIDER_AUTH_ERROR_NAME.test(n))) return true;
+  if (typeof o.message === 'string' && /not authorized/i.test(o.message)) return true;
+  const status = providerHttpStatus(e);
+  if (status === 401 || status === 403) return true;
+  if (o.cause && o.cause !== e) return isProviderAuthFailure(o.cause, depth + 1);
+  return false;
+}
+
+/**
  * Per-attempt fetch deadline (PDQI-9 fail-loud PRD D4). With no timeout a hung request never
  * throws and never returns — fail-loud is UNOBSERVABLE if a call can hang forever, so this is a
  * precondition for retry rather than a request-shape variable: it only converts "hangs" into
@@ -242,13 +283,18 @@ export async function createWithRetry(
       // status. Both retry on the SAME bounded budget — an abort that was not retryable would make
       // the deadline strictly worse than no deadline. A non-transient HTTP status (4xx) throws
       // immediately: the call site's existing fallback handling is unchanged for that class.
-      const status = typeof (e as { status?: unknown }).status === 'number' ? (e as { status: number }).status : null;
-      const timedOut = ctrl.signal.aborted;
-      const retryable = timedOut || status === null || openRouterRetryable(status);
+      //
+      // AWS auth denials are in that non-transient class even when `e.status` is absent. They are
+      // checked BEFORE the timeout/transport rule so a 403 cannot be retried just because the
+      // attempt's AbortController also fired, or because the SDK left `status` unset.
+      const status = providerHttpStatus(e);
+      const authDenied = isProviderAuthFailure(e);
+      const timedOut = ctrl.signal.aborted && !authDenied;
+      const retryable = !authDenied && (timedOut || status === null || openRouterRetryable(status));
       const willRetry = retryable && attempt < maxTries;
       report({
         provider, attempt, maxTries, willRetry,
-        kind: timedOut ? 'timeout' : status === null ? 'transport' : 'http',
+        kind: timedOut ? 'timeout' : (status === null && !authDenied) ? 'transport' : 'http',
         status, message: String((e as Error)?.message ?? e).slice(0, 300),
       });
       lastErr = timedOut
