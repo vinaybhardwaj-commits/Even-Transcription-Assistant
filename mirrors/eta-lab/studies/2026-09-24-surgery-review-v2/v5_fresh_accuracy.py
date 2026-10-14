@@ -5,23 +5,15 @@ Conventions from the labels' author: CT angiography = category intervention (sco
 Low-confidence items (J02 J04 J06 J25 J31 J38 J40) and medium alternates (J15 J35) are reported SEPARATELY. These 40 must never be used to adjust v5 (leakage)."""
 import collections, json, os, sys
 V3 = os.path.expanduser("~/eta-data/surgery-review-v3"); LOW = {"J02", "J04", "J06", "J25", "J31", "J38", "J40"}; MED = {"J15", "J35"}
-SHIPPED = {"J11", "J13", "J14", "J16", "J27", "J29", "J30", "J33"}  # the SAME conversation as a consult V rated in v3, confirmed by CONTENT (word-trigram share >= 0.7; eta-refuter-2 #1174, fresh_overlap.py). NOT a time/room_day match: J11 and J29 are invisible to those (ship-key room_day_id is None for wide-placed items)
-
-
-SET = os.environ.get("SET", "K")  # K = judge-K (40, final-v5fresh); L = judge-L (15 from the 24 Sep delta pass, labels sha256 f3c58748..., final-v5delta)
-SETS = {"K": ("judge-K", "final-v5fresh"), "L": ("judge-L", "final-v5delta")}
+SHIPPED = {"J11", "J13", "J14", "J16", "J27", "J29", "J30", "J33"}  # encounter time overlaps a consult in the v3 set V already rated (24 Sep late check): J16 only 0.57 of its span; not fresh
 
 
 def load():
-    jn, fd = SETS[SET]
-    lab = json.load(open(os.path.expanduser(f"~/eta-data/refuter2/{jn}.json")))["labels"]; key = json.load(open(f"{V3}/{jn}-key.json")); pred = {}
-    if SET == "L":
-        global LOW, MED
-        LOW = {j for j, l in lab.items() if str(l["confidence"]).lower().startswith("low")}; MED = {j for j, l in lab.items() if str(l["confidence"]).lower().startswith("medium")}
+    lab = json.load(open(os.path.expanduser("~/eta-data/refuter2/judge-K.json")))["labels"]; key = json.load(open(f"{V3}/judge-K-key.json")); pred = {}
     for jid, k in key.items():
-        d = json.load(open(f"{V3}/{fd}/jev/{k['working_id']}.json")); m = d["meta"]; j = d["jev"] or {}
+        d = json.load(open(f"{V3}/final-v5fresh/jev/{k['working_id']}.json")); m = d["meta"]; j = d["jev"] or {}
         pred[jid] = {"present": m["present_p"], "named": m["named_p"], "described": m["described_p"], "held": m["held"], "status": (j.get("status") or {}).get("answer"), "category": (j.get("named") or {}).get("category"),
-                     "stratum": k.get("stratum", "n/a")}
+                     "stratum": k["stratum"]}
     return lab, pred
 
 
@@ -35,9 +27,6 @@ def show(title, m, cols):
         print(f"{r:>15} " + "".join(f"{v[k]:>15}" for k in cols) + f"   {sum(v.values())}")
 
 
-SHIPPED_FULL = SHIPPED | {"J37"}  # + J37: 100% inside shipped V3-09's FILE (its greyed turns), found by eta-refuter-2 #1275 (full-file content check); J31 shares 0.20 with it (neighbouring talk, checked by hand: see notes)
-
-
 def main(exclude=()):
     lab, pred = load(); ids = [j for j in sorted(lab) if j not in exclude]
     print(f"items scored: {len(ids)} (excluded: {sorted(exclude) or 'none'})")
@@ -45,8 +34,7 @@ def main(exclude=()):
     gate_pred = {j: ("held" if pred[j]["held"] == "not_a_consult" else "kept") for j in ids}; gate_lab = {j: ("staff" if lab[j]["consult"] == "staff_case_talk" else "consult") for j in ids}
     show("A. GATE: v5 (rows = label) vs held / kept", mat([(gate_lab[j], gate_pred[j]) for j in ids], ["consult", "staff"], ["kept", "held"]), ["kept", "held"])
     print("   by sampling stratum, gate-HELD by v5 (n) and how many the label calls consult:", {s: (sum(1 for j in ids if pred[j]["stratum"] == s and gate_pred[j] == "held"), sum(1 for j in ids if pred[j]["stratum"] == s and gate_pred[j] == "held" and gate_lab[j] == "consult")) for s in ("gate_held", "scored_with_status", "below_recall", "borderline_no_status")})
-    if "J03" in pred and SET == "K":
-        print("   J03 (label: conditional, named no, described no) v5 gate:", gate_pred.get("J03"), "present", pred["J03"]["present"])
+    print("   J03 (label: conditional, named no, described no) v5 gate:", gate_pred.get("J03"), "present", pred["J03"]["present"])
     # B. named / described
     for f in ("named", "described"):
         m = mat([(lab[j][f], "yes" if pred[j][f] >= 0.5 else "no") for j in ids], ["yes", "no"], ["yes", "no"]); show(f"B. {f.upper()}: label (rows) vs v5 p>=0.5 (cols), ALL items", m, ["yes", "no"])
@@ -63,18 +51,13 @@ def main(exclude=()):
     # E. CT stratum
     print("\nE. CT stratum (label ct_status not empty): id | label status / category / ct_status | v5 status / category | gate / named / described")
     for j in ids:
-        if lab[j].get("ct_status"):
+        if lab[j]["ct_status"]:
             print(f"   {j} | {lab[j]['status']} / {lab[j]['category']} / {str(lab[j]['ct_status'])[:22]} | {ps[j]} / {pred[j]['category']} | {gate_pred[j]} {pred[j]['named']:.2f} {pred[j]['described']:.2f}")
 
 
 if __name__ == "__main__":
-    if SET == "L" and sys.argv[1:] in ([], ["headline"]):
-        lab, _ = load(); main(exclude=(LOW | MED) if sys.argv[1:] else ())
-        print("\nlow-confidence:", sorted(LOW), "| medium:", sorted(MED))
-    elif sys.argv[1:] == ["notshipped"]:
+    if sys.argv[1:] == ["notshipped"]:
         main(exclude=SHIPPED)
-    elif sys.argv[1:] == ["notshipped-full"]:
-        main(exclude=SHIPPED_FULL)
     elif sys.argv[1:] == ["notshipped-headline"]:
         main(exclude=SHIPPED | LOW | MED)
     elif sys.argv[1:] == ["headline"]:

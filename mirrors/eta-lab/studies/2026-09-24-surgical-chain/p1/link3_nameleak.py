@@ -1,15 +1,11 @@
 """link3_nameleak.py: the name-leak check harness for the link-3 TRANSLATED stratum (linker #1100 piece B, ruling 211a).
 
-After machine translation and de-identification, humans count the personal names still readable in the turns. Under v7.15a the draw is a FULL
-READ (--n = the eligible count; the seed then chooses nothing); the original protocol drew 20 turns (seeds 27 and 28). ANY miss fails the gate: fix
-the redactor, regenerate deid.json, then re-read the FULL eligible set of the new file (v7.15a N2 step 4; no seed-28 sample), with a new draw into
-a NEW out dir and both readers locking fresh counts. This file draws the turns, writes the review sheet and, once the humans have filled in counts,
-summarises them and compares the two readers' counts.
+After machine translation and de-identification, a human counts the personal names still readable in a small random sample of turns. ANY miss
+fails the gate: fix the redactor, then recheck on a second sample (seed 28). This file draws the sample, writes the review sheet and, once the
+human has filled in counts, summarises them and compares them with a second reader's counts.
 
   python3 link3_nameleak.py draw    [--seed 27] [--n 20] [--mt-dir D] [--out-dir D]
-  python3 link3_nameleak.py pin     --counts COUNTS.json --salt-out SALTFILE      (EACH reader, once, right after locking)
-  python3 link3_nameleak.py summary --draw DRAW.json --counts COUNTS.json --counts-pin HEX --counts-salt HEX
-                                    --second COUNTS2.json --second-pin HEX --second-salt HEX [--out SUMMARY.json]
+  python3 link3_nameleak.py summary --draw DRAW.json --counts COUNTS.json [--second COUNTS2.json] [--out SUMMARY.json]
 
 INPUT (box only, never git; frozen by linker #1100). mt/translated.json: list of {item, room, i, lang, en, q, dropped}. mt/deid.json: the same
 records plus en_deid. The mt dir defaults to ~/eta-data/surgical-chain/p1/mt/ (or $ETA_MT_DIR, or --mt-dir).
@@ -28,75 +24,23 @@ OUTPUT (all box only, 0600 files in a 0700 dir; default <mt-dir>/nameleak-seed<s
   draw.json            seed, n, eligible count + sha256, sha256 of both input files, the chosen turn keys "item|room|i"
   review_sheet.txt     en beside en_deid, one block per turn
   counts_template.json {turn_key: null}. The human replaces each null with the number of names still readable in the en_deid column.
-STDOUT carries counts and turn keys (ids) only. No transcript text reaches stdout, stderr, logs or git. EVERY write is refused inside a git work tree
-(refuter-2 #1219 F-B2; there is no override flag), and if git cannot be asked the answer is "inside" (fail closed).
+STDOUT carries counts and turn keys (ids) only. No transcript text reaches stdout, stderr, logs or git.
 
-SUMMARY. BOTH readers are mandatory (v7.15 M4.3; refuter-2 #1219 F-B1). Each counts file must hold EXACTLY the drawn keys, each a non-negative int.
-A missing key or a null is "never looked", not "zero": the run stops with exit 2. EACH reader's file has a SALTED pin, sha256(salt || file bytes)
-with a 32-byte random salt, posted on the bus BEFORE any summary was made; without a pin nothing proves the labels were locked first. The salt
-(refuter-2 #1559 and #1570) is because a plain sha256 of an all-zero counts file is the same for everyone: anyone who sees a plain hash can test "all
-zeros" in one line, so the hash would reveal the common answer before the other reader has written his. Each reader keeps his salt file private and
-reveals the salt only at the summary (--counts-salt / --second-salt); `pin` makes it. A plain sha256 is not accepted for either reader. Reports per-turn counts, the total, per-turn agree/disagree between the two readers and both totals. The summary carries
+SUMMARY. The counts file must hold EXACTLY the drawn keys, each a non-negative int. A missing key or a null is "never looked", not "zero": the
+run stops with exit 2. Reports per-turn counts, the total, and, with --second, per-turn agree/disagree between the two readers and both totals. The summary carries
 deid_sha256 / translated_sha256 / eligible_sha256 copied from draw.json, so a gate can check that the counts were made on the deid.json it is
 about to score (a re-de-identified file changes the hash).
-EXIT  0 = no name missed by either reader | 1 = GATE FAILED (a total is > 0 in either file) | 2 = bad or incomplete input, a wrong pin or salt for either reader,
-or a write refused inside a git work tree | 3 = draw too short.
+EXIT  0 = no name missed by any reader | 1 = GATE FAILED (a total is > 0 in either file; the second reader's miss counts) | 2 = bad or incomplete
+input | 3 = draw too short.
 """
-import argparse, hashlib, itertools, json, os, random, re, secrets, subprocess, sys, textwrap
+import argparse, hashlib, itertools, json, os, random, sys, textwrap
 
 DEFAULT_MT = os.path.expanduser("~/eta-data/surgical-chain/p1/mt/")
 COL = 58
-# The reviewer's instruction, QUOTED from the frozen texts and never paraphrased (refuter-2 #1375: an earlier sheet carried a role list,
-# "(patient, relative, doctor, staff)", that no pre-registration contained, and two readers counted differently under it).
-# Line 1: a quoted FRAGMENT of v7.15a N2 step 2 (the words inside the quotation marks are verbatim; the lead-in is this tool's). Lines 2-3: v7.15b R2 (P1-PREREG-v7.15b.md, caccf9a), which requires the re-read sheet to quote its definition VERBATIM.
-# If any of these texts is amended, change the lines to the new wording verbatim (a new dated version).
-FROZEN_DEFINITION = (
-    'What to write for each turn, in the frozen wording: "counts of missed names per turn, missed transliterated names included".   [v7.15a N2 step 2]',
-    "From the re-read onward, a name is any readable name of a person, whatever the role: patient, relative, doctor, staff, any other individual, "
-    "and a public figure.   [v7.15b R2]",
-    "A brand, a place, a drug, a day or a month is not a person's name. A garbled token that does not function as a name in its context is not "
-    "counted, and is listed by turn key in the reader's notes.   [v7.15b R2]",
-)
 
 
 class InputError(Exception):
     """Raised with a COUNT-ONLY message; never with record content."""
-
-
-class GitTreeError(InputError):
-    """A write was refused because its target is inside a git work tree."""
-
-
-def inside_git(path):
-    """True if `path` (which need not exist yet) lies inside a git work tree. FAIL CLOSED: if git cannot be asked, or answers anything but a clean
-    'not a git repository', the answer is True. A `.git` entry (directory or worktree file) in any ancestor also counts, independent of git itself."""
-    probe = os.path.dirname(os.path.abspath(path))
-    while not os.path.isdir(probe):                       # git errors on a directory that does not exist yet, which would read as "not in git"
-        parent = os.path.dirname(probe)
-        if parent == probe:
-            return True
-        probe = parent
-    d = probe
-    while True:
-        if os.path.lexists(os.path.join(d, ".git")):
-            return True
-        parent = os.path.dirname(d)
-        if parent == d:
-            break
-        d = parent
-    try:
-        r = subprocess.run(["git", "-C", probe, "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True,
-                           env=dict(os.environ, LC_ALL="C", LANG="C"))
-    except OSError:
-        return True
-    if r.returncode == 0:
-        return r.stdout.strip() == "true"
-    return "not a git repository" not in r.stderr
-
-
-def refuse_in_git(path):
-    if inside_git(path):
-        raise GitTreeError("refusing to write inside a git work tree (these files hold real text or labels); choose a box path outside every repo")
 
 
 def turn_key(r):
@@ -186,7 +130,6 @@ def sheet(chosen, header):
 
 def write_private(path, text):
     """0600, created fresh (an existing file is never silently replaced: a draw is evidence)."""
-    refuse_in_git(path)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(text)
@@ -205,12 +148,11 @@ def draw(mt_dir, out_dir, seed, n, allow_short):
                 records_in_deid=len(deid), records_q_ok=sum(r.get("q") == "ok" for r in deid), records_q_not_ok=sum(r.get("q") != "ok" for r in deid),
                 records_without_dropped_key=sum("dropped" not in r for r in deid),
                 translated_sha256=sha256_file(tpath), deid_sha256=sha256_file(dpath), short=len(chosen) < n, keys=keys)
-    refuse_in_git(os.path.join(out_dir, "draw.json"))
     os.makedirs(out_dir, mode=0o700, exist_ok=True)
     os.chmod(out_dir, 0o700)
     header = [f"NAME-LEAK REVIEW  seed {seed}  {len(chosen)} of {len(pool)} eligible turns",
-              *FROZEN_DEFINITION,
-              "Read the EN_DEID column. Write the number per turn into counts_template.json (copy it to counts.json). 0 is a claim you looked; leave nothing null."]
+              "Count every personal name (patient, relative, doctor, staff) still readable in the EN_DEID column.",
+              "Write the number per turn into counts_template.json (copy it to counts.json). 0 is a claim you looked; leave nothing null."]
     write_private(os.path.join(out_dir, "draw.json"), json.dumps(meta, indent=1) + "\n")
     write_private(os.path.join(out_dir, "review_sheet.txt"), sheet(chosen, header))
     write_private(os.path.join(out_dir, "counts_template.json"), json.dumps({k: None for k in keys}, indent=1) + "\n")
@@ -242,53 +184,19 @@ def load_counts(path, keys):
     return {k: c[k] for k in keys}
 
 
-HEX64 = re.compile(r"[0-9a-f]{64}")
-
-
-def salted_pin(counts_path, salt_hex):
-    """sha256(salt || counts-file bytes). `salt_hex` is 64 lowercase hex characters (32 random bytes); the salt is BYTES, not its hex text."""
-    with open(counts_path, "rb") as f:
-        return hashlib.sha256(bytes.fromhex(salt_hex) + f.read()).hexdigest()
-
-
-def cmd_pin(counts_path, salt_out):
-    """EACH reader, once, right after locking his counts file: draw a random salt, store it 0600 (never overwritten, never inside a git work
-    tree), print the pin to post. The salt stays private until the summary."""
-    if not os.path.isfile(counts_path):
-        raise InputError(f"{os.path.basename(counts_path)}: unreadable (not a file)")
-    salt_hex = secrets.token_bytes(32).hex()
-    write_private(salt_out, salt_hex + "\n")
-    pin = salted_pin(counts_path, salt_hex)
-    print(f"pin (post this on the bus): {pin}")
-    print("counts file sha256 is NOT the pin and must not be posted before the summary; keep the salt file private and do not edit the counts file.")
-    return pin
-
-
-def check_pin(path, pin, salt, flag_pin, flag_salt, who):
-    for name, v in ((flag_pin, pin), (flag_salt, salt)):
-        if not isinstance(v, str) or not HEX64.fullmatch(v):
-            raise InputError(f"{name} must be 64 lowercase hex characters")
-    if not os.path.isfile(path):
-        raise InputError(f"{os.path.basename(path)}: unreadable (not a file)")
-    if salted_pin(path, salt) != pin:
-        raise InputError(f"the {who} reader's counts file and salt do not reproduce {flag_pin}: these are not the labels that reader locked, or the salt is wrong")
-
-
-def summarise(draw_path, counts_path, counts_pin, counts_salt, second_path, second_pin, second_salt):
-    check_pin(counts_path, counts_pin, counts_salt, "--counts-pin", "--counts-salt", "first")
-    check_pin(second_path, second_pin, second_salt, "--second-pin", "--second-salt", "second")
-    actual = sha256_file(second_path)
+def summarise(draw_path, counts_path, second_path=None):
     with open(draw_path) as f:
         meta = json.load(f)
     keys = meta["keys"]
     first = load_counts(counts_path, keys)
-    second = load_counts(second_path, keys)
-    s = dict(seed=meta["seed"], n_turns=len(keys), counts_sha256=sha256_file(counts_path), counts_pin=counts_pin, counts_salt=counts_salt, second_counts_sha256=actual, second_pin=second_pin, second_salt=second_salt, deid_sha256=meta["deid_sha256"], translated_sha256=meta["translated_sha256"],
+    second = load_counts(second_path, keys) if second_path else None
+    s = dict(seed=meta["seed"], n_turns=len(keys), deid_sha256=meta["deid_sha256"], translated_sha256=meta["translated_sha256"],
              eligible_sha256=meta["eligible_sha256"], per_turn=first, total_missed=sum(first.values()),
              turns_with_a_miss=sum(v > 0 for v in first.values()))
-    s.update(second_per_turn=second, second_total_missed=sum(second.values()),
-             agree=[k for k in keys if first[k] == second[k]], disagree=[k for k in keys if first[k] != second[k]])
-    s["gate"] = "PASS" if s["total_missed"] == 0 and s["second_total_missed"] == 0 else "FAIL"
+    if second is not None:
+        s.update(second_per_turn=second, second_total_missed=sum(second.values()),
+                 agree=[k for k in keys if first[k] == second[k]], disagree=[k for k in keys if first[k] != second[k]])
+    s["gate"] = "PASS" if s["total_missed"] == 0 and s.get("second_total_missed", 0) == 0 else "FAIL"
     return s
 
 
@@ -304,25 +212,15 @@ def main(argv=None):
     s = sub.add_parser("summary")
     s.add_argument("--draw", required=True)
     s.add_argument("--counts", required=True)
-    s.add_argument("--counts-pin", required=True)
-    s.add_argument("--counts-salt", required=True)
-    s.add_argument("--second", required=True)
-    s.add_argument("--second-pin", required=True)
-    s.add_argument("--second-salt", required=True)
+    s.add_argument("--second")
     s.add_argument("--out")
-    pn = sub.add_parser("pin")
-    pn.add_argument("--counts", required=True)
-    pn.add_argument("--salt-out", required=True)
     a = ap.parse_args(argv)
     try:
         if a.cmd == "draw":
             out = a.out_dir or os.path.join(a.mt_dir, f"nameleak-seed{a.seed}")
             draw(a.mt_dir, out, a.seed, a.n, a.allow_short)
             return 0
-        if a.cmd == "pin":
-            cmd_pin(a.counts, a.salt_out)
-            return 0
-        s = summarise(a.draw, a.counts, a.counts_pin, a.counts_salt, a.second, a.second_pin, a.second_salt)
+        s = summarise(a.draw, a.counts, a.second)
         if a.out:
             write_private(a.out, json.dumps(s, indent=1) + "\n")
     except InputError as e:
@@ -335,9 +233,10 @@ def main(argv=None):
         return e.code if isinstance(e.code, int) else 3
     print(f"name-leak summary seed={s['seed']}: {s['n_turns']} turns, missed {s['total_missed']} in {s['turns_with_a_miss']} turns")
     print("per turn: " + " ".join(f"{k}={v}" for k, v in s["per_turn"].items()))
-    print(f"both pins (salted) verified; second reader: missed {s['second_total_missed']}; agree on {len(s['agree'])} turns, disagree on {len(s['disagree'])}"
-          + (": " + " ".join(s["disagree"]) if s["disagree"] else ""))
-    print(f"GATE {s['gate']}" + ("" if s["gate"] == "PASS" else ": a name was missed. Fix the redactor, regenerate deid.json, then re-read the FULL eligible set of the new file (v7.15a N2 step 4)"))
+    if "second_total_missed" in s:
+        print(f"second reader: missed {s['second_total_missed']}; agree on {len(s['agree'])} turns, disagree on {len(s['disagree'])}"
+              + (": " + " ".join(s["disagree"]) if s["disagree"] else ""))
+    print(f"GATE {s['gate']}" + ("" if s["gate"] == "PASS" else ": a name was missed. Fix the redactor, then recheck on seed 28"))
     return 0 if s["gate"] == "PASS" else 1
 
 

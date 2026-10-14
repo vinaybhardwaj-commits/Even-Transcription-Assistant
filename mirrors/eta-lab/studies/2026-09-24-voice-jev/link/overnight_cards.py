@@ -12,8 +12,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tiering as T
 H = os.path.expanduser(os.environ.get("LINK_H", "~/vj/link")); OUT = f"{H}/overnight/cards"; BATCH = int(sys.argv[1]) if len(sys.argv) > 1 else 1
-SEED, SIM_CLIP, SIM_CONTRAST, CAP, HM_CAP = 24092026, 0.60, 0.30, int(os.environ.get("CAP", "60")), 48
-ONLY_LOW = bool(os.environ.get("ONLY_LOW")); EXCL = json.load(open(os.environ["EXCLUDE_FILE"])) if os.environ.get("EXCLUDE_FILE") else {"gids": [], "voices": [], "room_days": []}
+SEED, SIM_CLIP, SIM_CONTRAST, CAP, HM_CAP = 24092026, 0.60, 0.30, 60, 48
 for d in ("links", "audio"): os.makedirs(f"{OUT}/{d}", exist_ok=True)
 glinks = json.load(open(f"{H}/overnight/glinks.json")); ms = lambda ts: int(datetime.fromisoformat(ts).timestamp() * 1000)
 jev = {}
@@ -27,8 +26,7 @@ def tier(g):
 for g in glinks: g["tier"] = tier(g)
 cnt = collections.Counter(g["tier"] for g in glinks); print("final tiers (all groups):", dict(cnt), "| jev results", len(jev))
 rng = random.Random(SEED)
-def excluded(g): return g["gid"] in EXCL["gids"] or any(list(m) in EXCL["voices"] for m in g["members"]) or g["rep"][0] in EXCL["room_days"]
-high = [g for g in glinks if g["tier"] == "HIGH" and not ONLY_LOW]; med = [g for g in glinks if g["tier"] == "MED" and not ONLY_LOW]; low = [g for g in glinks if g["tier"] == "LOW" and not excluded(g)]
+high = [g for g in glinks if g["tier"] == "HIGH"]; med = [g for g in glinks if g["tier"] == "MED"]; low = [g for g in glinks if g["tier"] == "LOW"]
 rng.shuffle(high); rng.shuffle(med); rng.shuffle(low)
 hm = (high + med)[:HM_CAP]; sel = hm + low   # LOW controls are drawn in seeded order until the page has CAP cards (a LOW pick without enough eligible clips is skipped, not counted)
 print("candidates:", len(hm), "HIGH/MED +", len(low), "LOW available; the page stops at", CAP, "link cards")

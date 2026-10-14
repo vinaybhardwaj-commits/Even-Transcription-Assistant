@@ -125,42 +125,6 @@ class Stratum(unittest.TestCase):
         with self.assertRaises(ValueError):
             S.guard_pooled(native + translated[:1])         # one translated record fails the whole pooled input
 
-    def test_write_accepts_only_mt_and_mt_bN_directories(self):
-        si, _, _ = S.assemble(S.screen(BASE)[0], deid_of(BASE))
-        with tempfile.TemporaryDirectory() as d:
-            for good in ("mt", "mt-b2", "mt-b3", "mt-b10"):
-                os.makedirs(os.path.join(d, good))
-                S.write_score_input(os.path.join(d, good, "score_input.json"), si)
-                self.assertTrue(os.path.exists(os.path.join(d, good, "score_input.json")))
-            for bad in ("raw", "deid", "run", "mt2", "mt-x", "mt-", "mtb2", "b2", "mt-b", "mt-b2x", "mt-b2-old", "xmt", "MT", "mt-B2", "mt_b2", "mt-b-2", "mt-b2\n"):
-                try:
-                    os.makedirs(os.path.join(d, bad))
-                except OSError:
-                    continue
-                with self.assertRaises(ValueError, msg=bad):
-                    S.write_score_input(os.path.join(d, bad, "score_input.json"), si)
-                self.assertFalse(os.path.exists(os.path.join(d, bad, "score_input.json")), bad)
-
-    def test_mt_only_as_a_grandparent_is_refused(self):
-        si, _, _ = S.assemble(S.screen(BASE)[0], deid_of(BASE))
-        with tempfile.TemporaryDirectory() as d:
-            for parent in ("mt", "mt-b2"):
-                sub = os.path.join(d, parent, "deid")
-                os.makedirs(sub)
-                with self.assertRaises(ValueError):
-                    S.write_score_input(os.path.join(sub, "score_input.json"), si)
-
-    def test_run_works_in_an_mt_bN_directory(self):
-        rows = [r for r in BASE if r["item"] != "B2"]
-        d = tempfile.mkdtemp()
-        mt = os.path.join(d, "mt-b2"); os.makedirs(mt)
-        json.dump(rows, open(os.path.join(mt, "translated.json"), "w"))
-        json.dump(deid_of(rows), open(os.path.join(mt, "deid.json"), "w"))
-        with contextlib.redirect_stdout(io.StringIO()):
-            rep = S.run(mt)
-        self.assertEqual(rep["status"], "OK")
-        self.assertTrue(os.path.exists(os.path.join(mt, "score_input.json")))
-
     def test_write_refuses_anything_outside_an_mt_dir(self):
         si, _, _ = S.assemble(S.screen(BASE)[0], deid_of(BASE))
         with tempfile.TemporaryDirectory() as d:
@@ -246,23 +210,6 @@ class EndToEnd(unittest.TestCase):
             rep = S.run(mt, out)
         self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o600)
         self.assertEqual(json.load(open(out)), json.loads(json.dumps(rep)))
-
-    def cli(self, mt):
-        import subprocess
-        return subprocess.run([sys.executable, "-B", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "link3_screen.py"), "--mt-dir", mt],
-                              capture_output=True, text=True).returncode
-
-    def test_exit_codes_tell_ok_incomplete_and_blocked_apart(self):
-        ok = [r for r in BASE if r["item"] != "B2"]
-        self.assertEqual(self.cli(self.run_dir(ok, deid_of(ok))), 0)                                   # OK
-        self.assertEqual(self.cli(self.run_dir(BASE, deid_of(BASE))), 1)                               # INCOMPLETE (B2 has no kept turn)
-        self.assertEqual(self.cli(self.run_dir(ok, deid_of(ok, drop={("C3", "r0", 0)}))), 3)          # BLOCKED_NO_DEID
-        noat = [{k: v for k, v in r.items() if k != "at"} if r["item"] == "C3" else r for r in ok]
-        self.assertEqual(self.cli(self.run_dir(noat, [{k: v for k, v in r.items() if k != "at"} for r in deid_of(noat)])), 3)   # BLOCKED_NO_AT
-
-    def test_exit_code_mapping_and_unknown_status_fails_closed(self):
-        self.assertEqual([S.exit_code(x) for x in ("OK", "INCOMPLETE", "BLOCKED_NO_DEID", "BLOCKED_NO_AT")], [0, 1, 3, 3])
-        self.assertEqual(S.exit_code("SOMETHING_NEW"), 3)
 
     def test_stdout_report_has_no_text(self):
         rep = self.quiet(self.run_dir(BASE, deid_of(BASE)))

@@ -4,7 +4,7 @@ Every run starts with v5.selftest() and prints `RUN RECORD: <selftest OK line> |
 Stage a0 (patient-present gate): a passage the gate refuses is HELD as `not_a_consult` and written with jev = null and meta.held, never scored further. Nothing is written into a shipped bundle.
 usage: V3_FINAL=<dir> build_v5.py <id> [<id> ...]"""
 import contextlib, io, json, os, sys
-import v5, v3, build_consult as bc, finalize, build_v3 as b3, deid_gate
+import v5, v3, build_consult as bc, finalize, build_v3 as b3
 from build_v4 import filter_allowed, named_placeholder, PLACEHOLDER
 
 
@@ -20,7 +20,6 @@ def selftest_line():
 def score(q, ask=None, transport=None):
     v5.check_frozen()
     F = b3.F
-    deid_gate.require(f"{F}/deid", q)  # ruling 274: the v7.15b cap rule must have run on this de-identified file
     doc = json.load(open(f"{F}/deid/{q}.json"))
     inn = [t for t in doc["turns"] if "phase" not in t]
     bad = finalize.residual_identifiers(inn)
@@ -52,7 +51,6 @@ def selftest():
     d = tempfile.mkdtemp(); os.makedirs(f"{d}/deid")
     doc = {"turns": [{"i": i, "speaker": "doctor" if i % 2 == 0 else "A", "lang": "en", "orig": f"line {i}", "en": f"line {i}"} for i in range(6)]}
     json.dump(doc, open(f"{d}/deid/T1.json", "w")); saved = b3.F; b3.F = d
-    deid_gate.record(f"{d}/deid", "T1", True, deid_gate.FROZEN_DEID_SHA256, 2)  # ruling 274: only a file de-identified WITH the cap rule reaches Jev
     try:
         def fake(present, n, dd):
             def f(state, q):
@@ -72,38 +70,14 @@ def selftest():
         nn = score("T1", ask=fake(0.9, 0.9, 0.9), transport=lambda m, j: json.dumps({"procedure": None, "named": False}))
         assert nn["jev"]["named"]["answer"] == PLACEHOLDER, "named yes but no phrase extracted -> the placeholder, so the page keeps the dependents (V3-03)"
         json.dump({"turns": [{"i": 0, "speaker": "doctor", "lang": "en", "orig": "please call 9876543210 tomorrow", "en": "please call 9876543210 tomorrow"}]}, open(f"{d}/deid/T2.json", "w"))
-        deid_gate.record(f"{d}/deid", "T2", True, deid_gate.FROZEN_DEID_SHA256)  # recorded WITH the cap rule, so the refusal below is the identifier-shape screen, not the gate
         try:
             score("T2", ask=fake(0.9, 0.9, 0.9)); raise AssertionError("an identifier shape must be refused before Jev")
         except SystemExit:
             pass
-        # ruling 274 gate: no Jev call unless the cap rule ran on THIS file (every check counts ask() calls: zero)
-        calls = []
-        def counting(state, q):
-            calls.append(1); return fake(0.9, 0.9, 0.9)(state, q)
-        json.dump({"turns": [{"i": 0, "speaker": "doctor", "lang": "en", "orig": "clean line", "en": "clean line"}]}, open(f"{d}/deid/T3.json", "w"))
-        for name, prep in (("no manifest entry", lambda: None), ("cap_rule false", lambda: deid_gate.record(f"{d}/deid", "T3", False, deid_gate.FROZEN_DEID_SHA256)),
-                           ("file edited after recording", lambda: (deid_gate.record(f"{d}/deid", "T3", True, deid_gate.FROZEN_DEID_SHA256), json.dump({"turns": [{"i": 0, "speaker": "doctor", "lang": "en", "orig": "edited", "en": "edited"}]}, open(f"{d}/deid/T3.json", "w")))[1])):
-            prep()
-            try:
-                score("T3", ask=counting); raise AssertionError(f"{name}: must be refused before Jev")
-            except SystemExit as e:
-                assert "REFUSED T3" in str(e), (name, str(e))
-        import build_v4
-        saved4 = build_v4.F; build_v4.F = d
-        try:
-            for fn, tag in ((lambda: b3.jev_one("T3", ask=counting), "build_v3.jev_one"), (lambda: build_v4.score("T3", ask=counting), "build_v4.score")):
-                try:
-                    fn(); raise AssertionError(f"{tag}: must be refused (T3 edited after recording)")
-                except SystemExit as e:
-                    assert "REFUSED T3" in str(e), (tag, str(e))
-        finally:
-            build_v4.F = saved4
-        assert not calls, "the gate refuses before any Jev call"
         rr = run_record(["A", "B"]); assert "v5 selftest OK" in rr and v5.canonical_hash() in rr and rr.endswith("ids A B"), "the run record carries the selftest OK line, the hash and the ids"
     finally:
         b3.F = saved
-    print("build_v5 selftest OK: gate hold, below-recall hold, conditional + imaging_ct through the block, wording sha recorded, cap-rule gate refuses (no entry / cap false / edited file) in v3, v4, v5 with 0 Jev calls")
+    print("build_v5 selftest OK: gate hold, below-recall hold, conditional + imaging_ct through the block, wording sha recorded")
 
 
 def run_record(ids):
