@@ -24,5 +24,6 @@ Runtime dir `~/fleet-watch/` (off git): `bin/` (deployed copies), `opencode.json
 
 ## Known limits / open items
 - The primary model of r399 (`deepseek-v4-flash`) and `gemini-3.5-flash` return 403 "Model access is disabled" on V's Zen account; candidates tested instead: `deepseek-v4.1-flash`, `gemini-3.5-flash-lite` (variant low). Provisional, pending Fable.
+- **ORDER 452 (26 Sep, V's pick): primary is `opencode-go/glm-5.3-flash`, no variant flag, same key file (Go route, r438 map).** The one retry on a failed primary stays on `opencode/deepseek-v4.1-flash` (Zen = overflow; Go deepseek ids partly unproven from this account, r447). After any model-pin change: restart once, then CHECK opencode.db pins providerID/modelID — a bad `-m` id can silently fall back to a FREE model (r447).
 - The model's agreement with the deterministic check covers the room set, `recording` and `state`.
 - Read-only by construction: the agent sees only the proxy's five tools; the wrapper calls only scribe_rooms, scribe_health, scribe_room_levels, scribe_session_tape(manifest).
