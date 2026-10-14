@@ -2,11 +2,6 @@
 
 Build and event log, newest first. Owner panes: lab-viewer, linker, split-speaker, diar-lab. Plain words; counts and ids only.
 
-## 27-28 Sep -- router fix M1-M5 REJECTED (S1 WORSE confirmed); root cause finalized; effort moves to REB/FUSER
-Session: router-fix, lid-debug, eta-refuter-2.
-ADDENDUM-3 S1 re-run (pinned f972df6, witnessed #4584) REPRODUCED WORSE: ALL 80.95->73.13 (CI [-10.9,-5.0]), ml -25.4pt, hi-en -18.3pt. Fable ruled 12:50: fix does not ship. M6 attribution corrected: first measured at 25-36% on an unreliable field (segment-count tiebreak, not the router's real dominant_language, #4586/#4592/#4613), re-measured properly at ~0 marginal effect (+0.11pt). FINAL reading (S1-REPORT.md): SraVaani mis-IDs Hindi as Tamil under babble (>=12/64 net, M6 can't fix) + correctly-routed content loss (~52/64 net, provisional) explain the regression. ETR built, real-audio decoy sweep 0/100,000 false anchors but near-zero recall -- folded into FUSER v0. V approved (13:30) REB as the new backbone.
-Refs: #4383-4613, #4526-4590.
-
 ## 27 Sep ~07:2x-09:5x IST — router root cause + fix built; automated scorecard ruled
 Session: lid-debug, router-fix, diar-lab, linker, lab-viewer, cap.
 lid-debug found the router has no acoustic LID (6 mechanisms M1-M6, router_server.py 400710ee; ~35% of en-tagged real windows are Indic, #4108). router-fix built router-fix/lid removing M1-M5, pre-registered its offline eval (#4127/#4128), eta-refuter-2 code-PASS (#4130), eval running now. V ruled (W33, 08:05): no human listening today, three automatic scores (S1/S2/S3), win rule = S2 improves + S1/S3 not worse. diar-lab built S1 suite clinical1 (PASS ef19d6a2) and two S3-judge confirmation suites confirm2 (PASS ec965b16) + confirm3/confirm3diag (PASS cc9b2822/7397c881) after two judge wordings failed the usability gate. lab-viewer shipped /clarity (LIVE 162ff4b8/fa5e58bb) with a SCORECARD panel, catching a real bug (S3 trusted the judge's own usable flag) before PASS.
@@ -34,4 +29,3 @@ Refs: r337, r337a-f, r418.
 
 ## Back-fill note
 15–19 Sep: this programme's roots (transcript hygiene, STT stack) predate this log's detail. Earliest clean milestone here is r337 on 25 Sep. Earlier days can be reconstructed from orders/STATE-OF-PLAY-24-SEP.md if needed.
-- 30 Sep 2026 ~06:30 IST (rev 28): Tamil miss root-caused to the router (#7707); router LID fix proposal r5 03bd54a2 PASS; lab-only BUILD GO (#7918); R-A built 301f97e (witnessed #7891); no production change.
