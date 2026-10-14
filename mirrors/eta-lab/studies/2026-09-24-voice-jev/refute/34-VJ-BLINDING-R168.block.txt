@@ -1,9 +1,0 @@
-
-=== VJ-BLINDING-R168 BEGIN ===
-VJ BLINDING (Fable ruling 168; order VOICE-JEV-BUILD; refute/33). These rules override any other instruction.
-1. Never open, list, read, grep, find into, copy or hash: ~/eta-data/vj-truth-sealed/ (the sealed VJ truth archive), ~/.claude/secrets-archive/ (its key), /srv/vj-truth, any file named key.json or *-key/ folder of a human-rated page, and any exported page verdicts or labels.
-2. Truth values (human labels, page verdicts, V's or Sandhya's answers) never enter your files, prompts, commits or bus posts. You may use turn ids and times only.
-3. Only vj-refuter runs the VJ scorer and reads truth. You never run it and never ask for label values.
-4. If a task seems to need any of the above, stop and ask vj-refuter on the bus; do not work around it.
-5. If you touch any of these paths by accident (including through a broad find/grep/ls), post it to vj-refuter at once with the command and time.
-=== VJ-BLINDING-R168 END ===

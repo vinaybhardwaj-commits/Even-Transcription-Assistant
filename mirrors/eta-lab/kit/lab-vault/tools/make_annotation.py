@@ -13,7 +13,7 @@ import argparse, hashlib, json, os, re, sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-KINDS = ("translation", "readability", "retranscription", "correction", "speaker")   # selftest is not record-bound: built by its own tool
+KINDS = ("translation", "readability", "retranscription", "correction")
 STATUSES = ("near_silence", "undetermined", "transcribed_unconfirmed")
 LAYOUT = re.compile(r"(?:^|/)runs/((?:hist-bulk|hist-miner|vj|production-export|stt-parity)-(?:\d{8}T\d{4}-[0-9a-f]{7,40}|backfill-\d{8}))/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/(\d{4}-\d{2}-\d{2})/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\.json$")
 IST = timezone(timedelta(hours=5, minutes=30))

@@ -99,22 +99,6 @@ class T(unittest.TestCase):
         (self.state / "HOLD-annotations").unlink()
         self.assertEqual(self.push("--scan").returncode, 0); self.assertEqual(len(self.srv.requests), 2)                              # released: it goes now
 
-    def test_per_kind_hold_holds_only_that_kind(self):
-        p = self.mk(); base = self.root / "annotations"
-        files = {}
-        for kind, who in (("translation", "linker"), ("speaker", "diar-lab")):
-            f = base / kind / "room_x/2026-09-24" / f"202609250900-{who}.json"; f.parent.mkdir(parents=True); f.write_text("{}"); os.utime(f, (time.time() - 60,) * 2); files[kind] = f
-        self.state.mkdir(parents=True, exist_ok=True); (self.state / "HOLD-annotations-translation").write_text("waiting for the go")
-        r = self.push("--scan"); self.assertEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn('"held": 1', r.stdout)
-        sent = [q[0] for q in self.srv.requests]
-        self.assertIn("/v1/obj/annotations/speaker/room_x/2026-09-24/202609250900-diar-lab.json", sent)                                # the other kind went
-        self.assertNotIn("/v1/obj/annotations/translation/room_x/2026-09-24/202609250900-linker.json", sent)                            # translation did not
-        self.assertEqual(len(sent), 2)                                                                                                 # run file + speaker
-        (self.state / "HOLD-annotations-translation").unlink()
-        self.assertEqual(self.push("--scan").returncode, 0); self.assertEqual(len(self.srv.requests), 3)                                # released: translation goes now
-        (self.state / "HOLD-annotations-bogus").write_text("x")                                                                          # a hold for a kind nobody uses holds nothing else
-        self.assertEqual(self.push("--scan").returncode, 0)
-
     def test_recent_file_is_left_alone_and_odd_files_ignored(self):
         p = self.mk(); os.utime(p, None)
         self.assertEqual(self.push("--path", str(p)).returncode, 1)

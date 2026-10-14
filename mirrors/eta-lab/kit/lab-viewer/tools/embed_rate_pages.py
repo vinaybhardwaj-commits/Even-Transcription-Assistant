@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate worker/rate_pages.js from surg-page's tested single-file pages (tools/segment-label/page.html, tools/readability-rate/page.html, tools/pair-label/page.html).
+"""Generate worker/rate_pages.js from surg-page's tested single-file pages (tools/segment-label/page.html, tools/readability-rate/page.html).
 
 The pages are used UNCHANGED except: the Google Fonts <link> tags are dropped (the viewer's CSP allows no external request), <style>/<script>
 get the per-response nonce, and a small shim is inserted before the page script that answers the page's `claude.use("db"|"user")` calls
@@ -8,8 +8,7 @@ import json, re, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-SETS = {"label200": ("tools/segment-label/page.html", "rows", "labels"), "rate20": ("tools/readability-rate/page.html", "excerpts", "ratings"),
-        "ba106": ("tools/pair-label/page.html", "rows", "labels"), "calib30": ("tools/calib30/page.html", "rows", "labels"), "pitch25": ("tools/pitch-review/page.html", "rows", "labels")}
+SETS = {"label200": ("tools/segment-label/page.html", "rows", "labels"), "rate20": ("tools/readability-rate/page.html", "excerpts", "ratings")}
 SHIM = r"""(()=>{const C=window.__RATE,J=async(u,o)=>{const r=await fetch(u,o);if(!r.ok){const e=new Error("http "+r.status);e.code=r.status===422?"invalid_argument":"http";throw e}return r.json()};
 const snap=rows=>({docs:rows.map(x=>({exists:true,id:x.id,data:()=>x}))});
 const db={collection:n=>({onSnapshot:(cb,err)=>{if(n!==C.rows)return()=>{};J("/api/rate/"+C.set+"/rows").then(j=>cb(snap(j.rows)),e=>err&&err(e));return()=>{}}}),

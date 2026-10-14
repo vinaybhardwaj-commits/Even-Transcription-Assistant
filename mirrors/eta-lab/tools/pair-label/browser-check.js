@@ -28,7 +28,7 @@ fs.mkdirSync(path.join(out,"shots"),{recursive:true});
     hdr:getComputedStyle(document.getElementById("hdr")).position,prog:document.getElementById("prog").textContent,h:document.querySelector(".wh h2").textContent}});
   await p.screenshot({path:path.join(out,"shots",name+"-line.png")});
   // click a label, note, saved payload
-  await p.click("#a-B_better",{force:true});await p.fill("#note","test note");await p.waitForTimeout(1000);
+  await p.click("#a-b_better",{force:true});await p.fill("#note","test note");await p.waitForTimeout(1000);
   const saved=await p.evaluate(()=>{const c=window.__labels&&window.__labels.u1;const k=c&&Object.keys(c.t)[0];return{a:c&&c.t[k],prog:document.getElementById("prog").textContent}});
   await p.screenshot({path:path.join(out,"shots",name+"-labelled.png")});
   // desktop: keyboard 1-5 on the next line, and move-on-after-label
@@ -43,7 +43,7 @@ fs.mkdirSync(path.join(out,"shots"),{recursive:true});
   await p.click("#tab-res");await p.waitForTimeout(300);
   const res=await p.evaluate(()=>document.getElementById("res").textContent.replace(/\s+/g," ").slice(0,300));
   await p.screenshot({path:path.join(out,"shots",name+"-results.png")});
-  const ok=m.opts===5&&!m.overflow&&!m.leak&&/0 \/ 4 compared/.test(m.prog)&&saved.a&&saved.a.a==="B_better"&&saved.a.note==="test note"&&/1 \/ 4 compared/.test(saved.prog)
+  const ok=m.opts===5&&!m.overflow&&!m.leak&&/0 \/ 4 compared/.test(m.prog)&&saved.a&&saved.a.a==="b_better"&&saved.a.note==="test note"&&/1 \/ 4 compared/.test(saved.prog)
     &&(phone||kb==="unsure")&&fol===true&&/Raters: 1/.test(res)&&errs.length===0&&m.minOpt>=48&&(!phone||(m.nextH>=44&&m.hdr==="static"));
   if(!ok)bad++;
   lines.push(`${ok?"PASS":"FAIL"} ${name}: ${m.h}, ${m.opts} labels (min ${m.minOpt}px), overflow ${m.overflow}, leak ${m.leak}, saved ${saved.a&&saved.a.a}, progress ${saved.prog}, keyboard ${kb}, move-on ${fol}, errors ${errs.length}${errs.length?" "+errs[0]:""}`);
