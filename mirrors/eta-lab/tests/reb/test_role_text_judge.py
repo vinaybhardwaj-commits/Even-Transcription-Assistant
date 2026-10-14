@@ -439,13 +439,3 @@ def test_a_clip_that_already_has_its_track_makes_no_jev_call_and_is_not_judged_a
     j3.model = "fake-jev-pro"                                                                                                              # another configured judge = another cfg8 = judged
     cnt3 = judge(env, j3)
     assert cnt3["written"] == 1 and len(j3.states) > 0
-
-
-def test_role_track_records_the_text_source():
-    import kit.reb.role_text_judge as rj
-    row = {"consult_uid": "u1", "signature": {"a": 1}}
-    turns = [("A", 0, 0, 0, 1000)]
-    mp = {"A": {"role": "doctor"}}
-    for version, expect in (("v1", "palimpsest"), ("caa", "caa")):
-        t = rj.build_track(row, "p", "sha", {"version": version}, None, mp, turns, "jev-latest", None)
-        assert t["extras"]["derived_from"]["text_source"] == expect

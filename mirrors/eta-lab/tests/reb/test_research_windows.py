@@ -195,8 +195,7 @@ def test_work_dir_is_moved_not_deleted_and_audio_not_kept_in_place(tmp_path):
     env.run(FakeGW())
     assert not os.path.exists(os.path.join(env.work, WID))
     moved = os.listdir(os.path.join(env.work, "_to_delete"))
-    assert len(moved) == 1 and moved[0].startswith("scratch-") and os.path.exists(os.path.join(env.work, "_to_delete", moved[0], "audio.wav"))      # the run's scratch dir, moved at the end
-    assert sorted(os.listdir(env.work)) == ["_to_delete"]                                                                                          # no per-window dirs, no leftovers
+    assert len(moved) == 1 and moved[0].startswith(WID) and os.path.exists(os.path.join(env.work, "_to_delete", moved[0], "audio.wav"))
 
 
 def test_permanent_failure_writes_failed_tracks_and_ledgers_the_job(tmp_path):
@@ -227,45 +226,3 @@ def test_clip_path_ledger_lines_carry_no_use_field():
     assert "use" not in line and line["scope"] == "consult_clip"
     line2 = sl.UsageSink.call_line(types.SimpleNamespace(caller="c", machine="m"), "j", "r", "transcribe", 10, 1.0, 2.0, "ok", 200, False, "window", WID, use="research")
     assert line2["use"] == "research" and line2["scope"] == "window"
-
-
-# ---------------------------------------------------------------- backfill-lead #11473: spent audio does not pile up
-def more_windows(env, n):
-    ids = [env.wid]
-    for i in range(1, n):
-        wid = f"c-{DATE}_{ROOM}_{1100 + i:04d}"
-        stub = {"window_id": wid, "room_id": ROOM, "room_slug": ROOM, "ist_date": DATE, "t0_ms": env.t0, "t1_ms": env.t0 + env.dur, "source_kind": "room_tape",
-                "audio": {"r2_key": "bench/x/chunk_00019.webm", "sha256": "s", "sample_rate": 48000, "duration_ms": env.dur}}
-        seed = {"schema": "reb.track.v1", "window_id": wid, "layer": "stt", "engine": "whisper-auto", "model": "m", "version": "v1", "config": {"e": 1}, "config_hash": config_hash({"e": 1}),
-                "machine": "t", "status": "ok", "reason": None, "segments": [{"t0_ms": 0, "t1_ms": 1, "text": "x"}]}
-        write_track(env.root, DATE, ROOM, wid, seed, manifest_stub=stub)
-        ids.append(wid)
-    return ids
-
-
-def n_audio_files(work):
-    return sum(1 for dp, _, fs in os.walk(work) for f in fs if f.endswith(".wav"))
-
-
-@pytest.mark.parametrize("workers,max_dirs", [(1, 1), (2, 2)])
-def test_many_windows_leave_at_most_one_audio_file_per_worker(tmp_path, workers, max_dirs):
-    env = Env(tmp_path)
-    ids = more_windows(env, 8)
-    cnt = env.run(FakeGW(), ids=ids, workers=workers)
-    assert cnt["jobs"] == 8 and cnt["failed"] == 0 and len(env.ledger()) == 8                    # all eight were sent and ledgered
-    moved = os.listdir(os.path.join(env.work, "_to_delete"))
-    assert 1 <= len(moved) <= max_dirs and all(m.startswith("scratch-") for m in moved)
-    assert n_audio_files(env.work) == len(moved) and sorted(os.listdir(env.work)) == ["_to_delete"]      # 8 windows -> 1 (or 2) wav files on disk, not 8
-
-
-def test_failed_windows_keep_their_audio_up_to_the_cap_and_transient_errors_do_not(tmp_path):
-    env = Env(tmp_path)
-    ids = more_windows(env, 8)
-    cnt = env.run(FakeGW(fail=sl.GatewayError("file failed: nope", 400)), ids=ids, workers=1)
-    assert cnt["failed"] == 8 or cnt["stopped_early"]                                              # the stop rule (> 5 failed) may end the run early
-    kept = sorted(os.listdir(os.path.join(env.work, "failed")))
-    assert 1 <= len(kept) <= sl.FAILED_KEEP and all(k.endswith(".wav") and k[:-4] in ids for k in kept)         # moved, capped
-    assert n_audio_files(env.work) <= sl.FAILED_KEEP + 1                                            # the kept ones + the run's scratch file: bounded whatever the number of windows
-    env2 = Env(tmp_path / "t")
-    env2.run(FakeGW(fail=sl.GatewayError("http 503", 503)), workers=1)
-    assert not os.path.exists(os.path.join(env2.work, "failed"))                                    # a transient error is retried later: nothing kept

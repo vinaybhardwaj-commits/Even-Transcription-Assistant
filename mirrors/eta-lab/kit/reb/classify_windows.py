@@ -25,7 +25,7 @@ Signals (per window; ids, room, date, times and numbers only)
 3. Clinic-wide consult overlap (the warehouse has no room field): from an optional visits file (--visits; JSONL or CSV with called_at, completed_at,
    doctor_uid only; ISO with offset, a naive time is read as IST). Per window: overlap_visits = number of visits whose [called_at, completed_at]
    intersects the window, overlap_min = sum of the intersection minutes. Without the file: consult overlap is NOT AVAILABLE.
-4. Labels. CONSULT-LIKE: overlap_visits > 0 AND longest_turn_taking_s >= the evidence source's threshold (tt_min_for: 90 s on pyannote turns since the architect's 7A ruling #10693, 105 s on diar.nemotron turns since the 13B ruling #11409; the report keeps
+4. Labels. CONSULT-LIKE: overlap_visits > 0 AND longest_turn_taking_s >= TT_MIN_S (90 s since the architect's 7A ruling #10693; the report keeps
    120 s and 180 s as sensitivity rows). STAFF/OTHER: speech_frac >= 0.2 and not CONSULT-LIKE. QUIET: speech_frac < 0.2.
    label_turn_only is the same without the overlap condition (CONSULT-LIKE = longest_turn_taking_s >= TT_MIN_S, 90 s). If the visits file is absent, `label` equals
    label_turn_only and the report says overlap is NOT AVAILABLE.
@@ -58,7 +58,6 @@ RETIRED_STT = ("whisper-auto", "whisper-cap2", "whisper-forced-en", "indic-confo
 OUT = "/home/eta/oc/palimpsest/out"
 IN_DIR = "/home/eta/oc/palimpsest/in"
 GAP_S, CHANGE_S, TT_MIN_S, SPEAKER_MIN_S, QUIET_FRAC = 5.0, 60.0, 90.0, 10.0, 0.2
-TT_MIN_PYANNOTE_S, TT_MIN_NEMOTRON_S = TT_MIN_S, 105.0   # 13B ruling (architect #11409): the 90 s rule was calibrated on pyannote turns; Nemotron turns run ~13% hot on the same 860 windows and T = 105 s matches (count, F1, cue catch)
 SENSITIVITY_S = (90.0, 120.0, 180.0)
 WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 CLINICAL_WORDS = ("pain", "fever", "cough", "cold", "tablet", "tablets", "medicine", "medicines", "medication", "dose", "prescription", "report", "reports", "scan",
@@ -135,11 +134,6 @@ def diar_features(turns, audio_s):
     return {"speech_s": round(speech, 3), "speech_frac": round(speech / audio_s, 4) if audio_s else None,
             "n_speakers_10s": sum(1 for iv in per.values() if covered(merge(iv)) >= SPEAKER_MIN_S),
             "n_speakers": len(per), "longest_turn_taking_s": longest_turn_taking(turns)}
-
-
-def tt_min_for(source):
-    """The CONSULT-LIKE turn-taking threshold for the evidence source: 105 s for diar.nemotron turns, 90 s for pyannote (and for an unknown source: the 7A value)."""
-    return TT_MIN_NEMOTRON_S if source == "nemotron" else TT_MIN_PYANNOTE_S
 
 
 def label_of(speech_frac, tt_s, overlap_visits, tt_min=None):
@@ -226,27 +220,6 @@ def usual_room_hint(table, t0_ms, room_id):
 
 
 # ---------------------------------------------------------------- the run
-def window_turns(w):
-    """-> (source, status, turns) with turns [(t0_s, t1_s, speaker)] in WINDOW-relative seconds, or turns None when there is no usable evidence.
-    Order of evidence (13A B2): a live pyannote-local-twin track (ok -> its turns; empty -> a measured zero) FIRST, since pyannote stays the evidence where it exists;
-    else a live ok diar.nemotron track (its segments are on TAPE time, so the window's t0_ms is subtracted; an empty one is a measured zero); else (None, 'absent', None).
-    A failed / skipped / quarantined track is not evidence."""
-    py = [t for t in w.tracks(layer="diar", engine="pyannote-local-twin") if t.status != "quarantined"]
-    ok = sorted([t for t in py if t.status == "ok"], key=lambda t: t.entry.get("finished_at") or "")
-    if ok:
-        return "pyannote", "ok", [(s["t0_ms"] / 1000.0, s["t1_ms"] / 1000.0, str(s.get("speaker"))) for s in ok[-1].segments]
-    if any(t.status == "empty" for t in py):
-        return "pyannote", "empty", []
-    nem = [t for t in w.tracks(layer="diar", engine="nemotron") if t.status != "quarantined"]
-    okn = sorted([t for t in nem if t.status == "ok"], key=lambda t: t.entry.get("finished_at") or t.entry.get("created_at") or "")
-    if okn:
-        t0 = w.t0_ms
-        return "nemotron", "ok", [((s["t0_ms"] - t0) / 1000.0, (s["t1_ms"] - t0) / 1000.0, str(s.get("speaker"))) for s in okn[-1].segments]
-    if any(t.status == "empty" for t in nem):
-        return "nemotron", "empty", []
-    return None, "absent" if not (py or nem) else sorted({t.status for t in py + nem})[0], None
-
-
 def window_paths(root, dates):
     for d in dates:
         for mp in sorted(glob.glob(os.path.join(root, d, "*", "*", "manifest.json"))):
@@ -278,12 +251,13 @@ def run(root=None, dates=DATES, is_held=None, visits=None, sample_n=150, seed=7,
         audio_s = (w.t1_ms - w.t0_ms) / 1000.0
         row = {"window_id": w.window_id, "room_id": w.room_id, "ist_date": w.ist_date, "t0_ms": w.t0_ms, "t1_ms": w.t1_ms, "audio_s": audio_s,
                "hour_ist": datetime.datetime.fromtimestamp(w.t0_ms / 1000, IST).hour}
-        src, st, turns = window_turns(w)
-        row["diar_status"] = st
-        row["diar_source"] = src
-        if turns is not None and st == "ok":
+        dg = sorted(live.get(("diar", "pyannote-local-twin"), []), key=lambda t: t.entry.get("finished_at") or "")
+        diar_any = sorted([t for t in w.tracks(layer="diar", engine="pyannote-local-twin") if t.status != "quarantined"], key=lambda t: t.entry.get("finished_at") or "")
+        row["diar_status"] = "ok" if dg else (diar_any[-1].status if diar_any else "absent")
+        if dg:
+            turns = [(s["t0_ms"] / 1000.0, s["t1_ms"] / 1000.0, str(s.get("speaker"))) for s in dg[-1].segments]
             row.update(diar_features(turns, audio_s))
-        elif turns is not None:   # a track ran and found no speech: a measured zero, not a missing signal
+        elif row["diar_status"] == "empty":   # pyannote ran and found no speech: a measured zero, not a missing signal
             c["diar_empty"] += 1
             row.update(diar_features([], audio_s))
         else:
@@ -294,9 +268,8 @@ def run(root=None, dates=DATES, is_held=None, visits=None, sample_n=150, seed=7,
             row["overlap_visits"], row["overlap_min"] = visit_overlap(visits, w.t0_ms, w.t1_ms)
         else:
             row["overlap_visits"], row["overlap_min"] = None, None
-        row["tt_min_s"] = tt_min_for(src)   # the threshold this row was labelled with, next to its evidence source (diar_source)
-        row["label"] = label_of(row["speech_frac"], row["longest_turn_taking_s"] or 0, row["overlap_visits"], row["tt_min_s"])
-        row["label_turn_only"] = label_of(row["speech_frac"], row["longest_turn_taking_s"] or 0, None, row["tt_min_s"])
+        row["label"] = label_of(row["speech_frac"], row["longest_turn_taking_s"] or 0, row["overlap_visits"])
+        row["label_turn_only"] = label_of(row["speech_frac"], row["longest_turn_taking_s"] or 0, None)
         if with_text:
             wa = live[("stt", "whisper-auto")][-1]
             row["clinical_score"] = clinical_score(" ".join(s.get("text") or "" for s in wa.segments), audio_s)

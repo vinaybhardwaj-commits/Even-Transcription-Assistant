@@ -257,7 +257,7 @@ def build_track(row, stt_rel, stt_sha, stt, tr_sha, mp, turns, jev_name, reason,
          "config": config, "config_hash": cfg, "machine": "box-role-text-judge", "status": "ok" if segs else "empty", "reason": None if segs else "stt track has no turns",
          "segments": segs,
          "extras": {"rule": RULE["rule"], "rule_params": RULE, "map": mp, "abstain_reason": reason, "judge": {"jev": jev_name, "reported": jev_reported},
-                    "derived_from": {"stt_path": stt_rel, "stt_sha256": stt_sha, "translate_sha256": tr_sha, "text_source": "caa" if (stt or {}).get("version") == "caa" else "palimpsest"}, "consult_uid": uid, "clip_signature": row["signature"]}}
+                    "derived_from": {"stt_path": stt_rel, "stt_sha256": stt_sha, "translate_sha256": tr_sha}, "consult_uid": uid, "clip_signature": row["signature"]}}
     validate_track(t)
     return t
 

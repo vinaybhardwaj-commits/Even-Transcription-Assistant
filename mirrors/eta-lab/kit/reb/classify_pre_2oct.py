@@ -9,9 +9,10 @@ is not verifiably on the box is `audio_missing` / `sha_mismatch`, reported per w
 Weeks: ISO week of the IST date of t0.
 
 Label (7A classifier, kit/reb/classify_windows.py, unchanged): speaker turns from the latest-finished live ok diar.pyannote-local-twin track (EVIDENCE already on
-the box; no new pyannote run). A live pyannote track with status "empty" is a measured zero -> QUIET. Windows with no pyannote track use their live diar.nemotron track when one exists
-(13A; classify_windows.window_turns), else they are UNCLASSIFIED (reason no_turns). The clinic-wide visit overlap is NOT used (as in 7A without --visits), so
-CONSULT-LIKE = longest_turn_taking_s >= the source's threshold (90 s on pyannote turns, 105 s on diar.nemotron turns: 13B ruling, classify_windows.tt_min_for); label == label_turn_only (the 7A rule without visit overlap).
+the box; no new pyannote run). A live pyannote track with status "empty" is a measured zero -> QUIET. Windows with no pyannote track are looked up for a
+diar.nemotron* track; none exist for dates before 2 Oct (the count is reported), so such a window is UNCLASSIFIED (reason no_turns) and, if a nemotron track
+did exist, UNCLASSIFIED (reason nemotron_unsupported) rather than guessed. The clinic-wide visit overlap is NOT used (as in 7A without --visits), so
+CONSULT-LIKE = longest_turn_taking_s >= 90 s and speech_frac not below 0.2 only through the 7A rule: label == label_turn_only.
 
 Estimates (computed from measured inputs, never run):
 - Nemotron on the T4 for UNCLASSIFIED audio: GPU h = hours x rtf (rtf = sum wall_s / sum audio_s over the ok rows of a real 10A nemotron lane log) ;
@@ -70,13 +71,18 @@ def turns_of(track):
 
 
 def classify_window(w):
-    """-> (label, reason). The turns come from classify_windows.window_turns (13A B2): a live pyannote track first (evidence), else a live diar.nemotron track."""
+    """-> (label, reason). Only a live ok/empty diar.pyannote-local-twin track classifies; see the module docstring."""
     audio_s = (w.t1_ms - w.t0_ms) / 1000.0
-    src, st, turns = cw.window_turns(w)
-    if turns is None:
-        return "UNCLASSIFIED", "no_turns"
-    f = cw.diar_features(turns, audio_s)
-    return cw.label_of(f["speech_frac"], f["longest_turn_taking_s"] or 0, None, cw.tt_min_for(src)), src
+    py = [t for t in w.tracks(layer="diar", engine="pyannote-local-twin") if t.status != "quarantined"]
+    ok = sorted([t for t in py if t.status == "ok"], key=lambda t: t.entry.get("finished_at") or "")
+    if ok:
+        f = cw.diar_features(turns_of(ok[-1]), audio_s)
+    elif any(t.status == "empty" for t in py):
+        f = cw.diar_features([], audio_s)
+    else:
+        nem = [t for t in w.tracks(layer="diar") if t.engine.startswith("nemotron") and t.status == "ok"]
+        return "UNCLASSIFIED", ("nemotron_unsupported" if nem else "no_turns")
+    return cw.label_of(f["speech_frac"], f["longest_turn_taking_s"] or 0, None), "pyannote"
 
 
 @contextlib.contextmanager
@@ -91,16 +97,14 @@ def patched_sha(fn):
         sl._file_sha = real
 
 
-def census(root, cutoff=CUTOFF, is_held=None, tapes=sl.TAPES, data=sl.HOME_DATA, sha=None, rows_out=None, progress=None, ivs_out=None, problems_out=None, samples_out=None,
-           units=None, unit_of=None, kinds=None, fallback_tape=False):
-    """-> (weeks, totals). 13A options: `units` (a set of unit names to include; others are skipped before any audio is touched), `unit_of(manifest)` (default: the ISO week),
-    `kinds` (the source_kinds that count as room windows; default: everything except dev_clip / suite_synthetic). weeks[week][bucket] = {"windows": n, "audio_s": s}; bucket is a label, "audio_missing", "sha_mismatch", "sealed" or "blind"."""
+def census(root, cutoff=CUTOFF, is_held=None, tapes=sl.TAPES, data=sl.HOME_DATA, sha=None, rows_out=None, progress=None, ivs_out=None, problems_out=None, samples_out=None):
+    """-> (weeks, totals). weeks[week][bucket] = {"windows": n, "audio_s": s}; bucket is a label, "audio_missing", "sha_mismatch", "sealed" or "blind"."""
     is_held = is_held or load_heldout()   # fail closed
     with patched_sha(sha):
-        return _census(root, cutoff, is_held, tapes, data, rows_out, progress, ivs_out, problems_out, samples_out, units, unit_of, kinds, fallback_tape)
+        return _census(root, cutoff, is_held, tapes, data, rows_out, progress, ivs_out, problems_out, samples_out)
 
 
-def _census(root, cutoff, is_held, tapes, data, rows_out, progress, ivs_out, problems_out=None, samples_out=None, units=None, unit_of=None, kinds=None, fallback_tape=False):
+def _census(root, cutoff, is_held, tapes, data, rows_out, progress, ivs_out, problems_out=None, samples_out=None):
     by_room = sl.load_tapes(os.path.join(tapes, "manifest.jsonl"))
     weeks = collections.defaultdict(lambda: collections.defaultdict(lambda: {"windows": 0, "audio_s": 0.0}))
     tot = collections.Counter()
@@ -111,13 +115,10 @@ def _census(root, cutoff, is_held, tapes, data, rows_out, progress, ivs_out, pro
             continue
         m = json.load(open(mp))
         tot["manifests"] += 1
-        kind = m.get("source_kind") or "room_tape"
-        if (kind not in kinds if kinds is not None else m.get("source_kind") in SKIP_KINDS) or not str(m.get("room_id", "")).startswith("room_"):
+        if m.get("source_kind") in SKIP_KINDS or not str(m.get("room_id", "")).startswith("room_"):
             tot["not_room_window"] += 1
             continue
-        wk, dur = (unit_of(m) if unit_of else iso_week(int(m["t0_ms"]))), (int(m["t1_ms"]) - int(m["t0_ms"])) / 1000.0
-        if units is not None and wk not in units:
-            continue
+        wk, dur = iso_week(int(m["t0_ms"])), (int(m["t1_ms"]) - int(m["t0_ms"])) / 1000.0
         tot["room_windows"] += 1
 
         def add(bucket):
@@ -132,7 +133,7 @@ def _census(root, cutoff, is_held, tapes, data, rows_out, progress, ivs_out, pro
             add("blind")
             continue
         try:
-            plan = sl.window_plan(m, by_room, tapes, data, fallback_tape)
+            plan = sl.window_plan(m, by_room, tapes, data)
         except sl.AudioProblem as e:
             add(e.kind)
             if problems_out is not None:
@@ -145,15 +146,11 @@ def _census(root, cutoff, is_held, tapes, data, rows_out, progress, ivs_out, pro
         if samples_out is not None and tot["src_" + plan["source"]] % 250 == 1 and len(samples_out.setdefault(plan["source"], [])) < 8:
             samples_out[plan["source"]].append((m, plan))      # every 250th window of each audio source, up to 8, for the build-cost timing
         tot["covered_short"] += 1 if plan["covered_ms"] < (int(m["t1_ms"]) - int(m["t0_ms"])) * 0.98 else 0
-        win = reb.Window(root, m, mp)
-        label, why = classify_window(win)
+        label, why = classify_window(reb.Window(root, m, mp))
         reasons[(label, why)] += 1
         add(label)
         if rows_out is not None:
-            rows_out.append({"window_id": m["window_id"], "week": wk, "label": label, "reason": why, "audio_s": dur, "room_id": m["room_id"], "source_kind": kind,
-                             "t0_ms": int(m["t0_ms"]), "t1_ms": int(m["t1_ms"]), "tt_min_s": cw.tt_min_for(why),
-                             "coverage": round(min(1.0, plan["covered_ms"] / (dur * 1000)), 4) if dur else 0.0,
-                             "sarvam": any(t.status != "quarantined" for t in win.tracks(layer="stt", engine="sarvam-saaras-v3"))})
+            rows_out.append({"window_id": m["window_id"], "week": wk, "label": label, "reason": why, "audio_s": dur})
         if progress and tot["audio_ok"] % 500 == 0:
             progress(tot["audio_ok"])
     return {k: {b: dict(v) for b, v in d.items()} for k, d in weeks.items()}, tot, reasons
