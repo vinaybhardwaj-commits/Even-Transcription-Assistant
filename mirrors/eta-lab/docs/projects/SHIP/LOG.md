@@ -50,4 +50,3 @@ Refs: r339, r357.
 ## Production rules
 Production runs from branch vinay/s1-auto-drain (not main). Migrations only via authenticated POST /api/run-migrations. Room live-transcription switches OFF (V r370).
 - 29 Sep ~19:27 IST (rev 26): scribe bb62494 push at 20:30 IST; 30 Sep train F3 3d49523 + F4-prod df61b3f after verification.
-- 29 Sep ~23:10 IST (rev 27): F3/F4 live at dfb7034 (scribe #7283).

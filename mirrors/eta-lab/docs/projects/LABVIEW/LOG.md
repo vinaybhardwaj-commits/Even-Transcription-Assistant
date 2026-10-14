@@ -55,4 +55,3 @@ Refs: r184, r195.
 ## Open
 Speaker A/B/C chips in consult view; `/roadmap` page rendering docs/ROADMAP.md; calib30 chunkPlan fix (queued, own check).
 - 29 Sep ~19:27 IST (rev 26): viewer blanks status/lang/n_words on blind days; 6f74d573 ready to deploy (deployed: UNVERIFIED).
-- 29 Sep ~23:10 IST (rev 27): Staff button deployed, main e0ef0665, Worker version 11200299, 22:24.
