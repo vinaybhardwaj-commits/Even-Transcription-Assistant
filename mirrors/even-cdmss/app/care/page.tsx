@@ -3,11 +3,10 @@ export const runtime = 'nodejs';
 
 import Link from 'next/link';
 import { redirect, notFound } from 'next/navigation';
-import { ArrowRight, ClipboardCheck, ListChecks, Layers, Repeat, Stethoscope } from 'lucide-react';
+import { ArrowRight, ClipboardCheck, ListChecks, ShieldCheck, Boxes, Repeat } from 'lucide-react';
 import { isCareUnlocked } from '@/lib/care-cookie';
 import { sql } from '@/lib/db';
 import { reviewCountForChooser } from '@/lib/readmission/store';
-import { boardCounts as preopBoardCounts } from '@/lib/preop/store';
 import { OPD_ENGINE_VERSIONS_CURRENT } from '@/lib/opd-note-audit-core';
 import { getSettings } from '@/lib/mini-backfill';
 import { parseGoal, computeReviewStats, FALLBACK_ROSTER, type LabelRow } from '@/lib/review-stats-core';
@@ -38,11 +37,20 @@ export default async function ManagedCareHome() {
   ]);
   const triageCount = Number((triageR as Record<string, unknown>[])[0]?.n ?? 0);
 
-  // Low-value patterns (LVP-L1 kickoff, 20 Aug 2026) — the ONE shelf that destined both LVC rooms
-  // (Concept coder + Even Adjudicated LVC cards removed per §4.1; /care/concepts stays reachable
-  // by direct URL, /care/lvc redirects). Behind LVC_PATTERNS_ENABLED (O2 — a NEW flag). NEVER a
-  // count badge (a count would read as a queue; the shelf is not a queue), so no DB read here.
-  const lvpEnabled = process.env.LVC_PATTERNS_ENABLED === '1';
+  // Even Adjudicated LVC (CDMSS-EVEN-LVC-ADJUDICATION §7) — 4th card, behind LVC_ADJUDICATION_ENABLED.
+  // Badge = pending-candidate count; best-effort (the table may not exist pre-migration → 0).
+  const lvcEnabled = process.env.LVC_ADJUDICATION_ENABLED === '1';
+  let lvcCount = 0;
+  if (lvcEnabled) {
+    const lvcR = await run(`SELECT count(*)::int n FROM even_lvc_assertions WHERE status = 'pending'`).catch(() => []);
+    lvcCount = Number((lvcR as Record<string, unknown>[])[0]?.n ?? 0);
+  }
+
+  // Concept Coder (CDMSS-CONCEPT-CODER-PRD v1.0) — badge = governed-vocabulary size. Best-effort;
+  // the table may not exist pre-migration → 0. The card shows regardless of LVC_CONCEPT_ENABLED,
+  // because the page's whole job when the worker is off is to say so.
+  const conceptR = await run(`SELECT count(*)::int n FROM lvc_concepts`).catch(() => []);
+  const conceptCount = Number((conceptR as Record<string, unknown>[])[0]?.n ?? 0);
 
   // Readmissions (CDMSS-READMISSION-PHASE-2-CARE-SURFACE-PRD §3) — 5th card, behind
   // READMISSIONS_SURFACE_ENABLED (ships OFF). Badge = findings needing review, which is
@@ -50,13 +58,6 @@ export default async function ManagedCareHome() {
   // and the page can never disagree. Best-effort: soft-fails to 0 like its peers.
   const readmissionsEnabled = process.env.READMISSIONS_SURFACE_ENABLED === '1';
   const readmissionCount = readmissionsEnabled ? await reviewCountForChooser().catch(() => 0) : 0;
-
-  // Pre-op Risk (CDMSS-PREOP-RISK-AGENT-PRD v1.1-LOCKED §6; Build Plan B4) — 6th card,
-  // behind PREOP_SURFACE_ENABLED (ships OFF). Badge = the needs-review count from the SAME
-  // predicate the board's own tile uses (lib/preop/store.ts boardCounts), so the badge and
-  // the page can never disagree — the readmissions rule, kept. Soft-fails to 0.
-  const preopEnabled = process.env.PREOP_SURFACE_ENABLED === '1';
-  const preopCount = preopEnabled ? await preopBoardCounts().then((c) => c.needsReview).catch(() => 0) : 0;
 
   // Review Mode team-progress strip (§2.4) — best-effort; omitted entirely on any error. Reuses the
   // gamification core over the same counted-label rows the stats route reads (identical basis).
@@ -101,26 +102,26 @@ export default async function ManagedCareHome() {
       desc: 'Keyboard-first gold-label triage — adjudicate audit findings fast to build the reviewed standard. Pick your reviewer identity to start.',
       count: 0, countLabel: '', tint: 'emerald',
     },
-    ...(lvpEnabled ? [{
-      href: '/care/patterns',
-      icon: Layers,
-      title: 'Low-value patterns',
-      desc: 'What the operator is suggesting, and what you’ve hidden. Not a queue. Nothing here can be routed.',
-      count: 0, countLabel: '', tint: 'amber',
+    ...(lvcEnabled ? [{
+      href: '/care/lvc',
+      icon: ShieldCheck,
+      title: 'Even Adjudicated LVC',
+      desc: 'Ratify the low-value-care patterns Even’s own audits surface — then ground future audits against them. Advisory until you validate.',
+      count: lvcCount, countLabel: 'pending', tint: 'amber',
     }] : []),
+    {
+      href: '/care/concepts',
+      icon: Boxes,
+      title: 'Concept coder',
+      desc: 'Codes each free-text audit finding to a governed clinical concept, the way a diagnosis is coded to ICD. Worker status only — score-invariant.',
+      count: conceptCount, countLabel: 'concepts', tint: 'slate',
+    },
     ...(readmissionsEnabled ? [{
       href: '/care/readmissions',
       icon: Repeat,
       title: 'Readmissions',
       desc: 'Find the unplanned readmissions that did not need to happen — a premature discharge, an admission that missed the threshold. Patient-centric.',
       count: readmissionCount, countLabel: 'to review', tint: 'rose',
-    }] : []),
-    ...(preopEnabled ? [{
-      href: '/care/preop',
-      icon: Stethoscope,
-      title: 'Pre-op Risk',
-      desc: 'Instrument-based surgical risk, recomputed as booking → labs → PAC land. Validated instruments, deterministic arithmetic, visible provenance.',
-      count: preopCount, countLabel: 'need review', tint: 'violet',
     }] : []),
   ];
 
@@ -139,7 +140,7 @@ export default async function ManagedCareHome() {
         <h1 className="text-[20px] font-semibold text-slate-900">Managed Care</h1>
         <span className="rounded-full bg-teal-50 px-2 py-0.5 text-[11px] text-teal-700">Advisory · care management</span>
       </div>
-      <p className="mt-0.5 text-[12.5px] text-slate-500">Last night’s notes. Kill the noise, route the real ones.</p>
+      <p className="mt-0.5 text-[12.5px] text-slate-500">Two rooms, one team. Pick where the work is.</p>
 
       <div className="mt-5 grid gap-3.5 sm:grid-cols-2">
         {cards.map((c) => {
@@ -182,9 +183,6 @@ export default async function ManagedCareHome() {
       )}
 
       <p className="mt-5 text-[11.5px] text-slate-400">
-        Was two rooms: Concept coder + Even Adjudicated LVC. Now one shelf. The work stays in Triage.
-      </p>
-      <p className="mt-1.5 text-[11.5px] text-slate-400">
         Advisory throughout — never a clinician score. Audit signals are a high-sensitivity screen; nothing reaches a doctor until a care manager validates and routes it.
       </p>
     </div>

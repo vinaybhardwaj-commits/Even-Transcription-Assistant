@@ -12,7 +12,6 @@ import type {
   LongitudinalProblem, LongitudinalStatus, ProblemCourse, ProblemOccurrence,
   LongitudinalMedication, MedicationOccurrence, LongitudinalAllergy, AllergyOccurrence,
   LongitudinalInvestigation, InvestigationPoint, Discrepancy, EvidenceRef,
-  LongitudinalProcedure, ProcedureOccurrence, Laterality,
 } from './schema';
 import { MEMBER_STATE_VERSION, NORMALIZATION_VERSION } from './schema';
 import type { MedicationStatus, AllergyStatus, FollowUpAssertion } from '../clinical-state/schema';
@@ -88,7 +87,6 @@ export function buildMemberState(evidence: MemberEvidence, computedAt: string): 
   const medications = buildMedications(encounters, pushConflict);
   const allergies = buildAllergies(encounters, pushConflict);
   const investigations = buildInvestigations(encounters, pushConflict);
-  const procedures = buildProcedures(encounters, pushConflict);   // 1.2 (§6.1)
   detectDemographicConflict(encounters, pushConflict);
   const followUps = buildFollowUps(encounters);   // 1.2 rule 4 — carried, deduped, NO overlay
 
@@ -106,89 +104,10 @@ export function buildMemberState(evidence: MemberEvidence, computedAt: string): 
     medications,
     allergies,
     investigations,
-    procedures,
     conflicts: sortedConflicts,
     followUps,
     sourceEncounterRefs,
   };
-}
-
-/** P2.1 — the closed set the side-conflict detector will compare. Anything else is "no side". */
-const CANONICAL_SIDES: ReadonlySet<Laterality> = new Set<Laterality>(['left', 'right', 'bilateral']);
-
-// ── Procedures (1.2, §6.1) — the LongitudinalProcedure projection ──────────────────────────────
-//
-// A deliberate MIRROR of buildMedications: same grouping by normalized concept, same
-// firstSeen / lastSeen / occurrences shape, same deterministic ordering. What it does NOT mirror is
-// a status: a medication can be current or stopped, whereas a procedure is an EVENT that either
-// happened or was never evidenced. There is no `status` field to get wrong, and none is invented.
-//
-// This core is PURE and stays disinterested about trust: it projects whatever encounters it is
-// given. The decision about what may BECOME an ipd encounter is the fold's (§6.3's trust gate in
-// lib/member-state/ipd-evidence.ts), exactly as the care-call loop keeps its own gating outside.
-//
-// THE ONE CONFLICT IT MAY RAISE (§6.1: "conflicts.domain may add 'procedure' only if two named
-// procedures collide"): the SAME procedure, on the SAME date, recorded with two DIFFERENT sides.
-// That is deliberately the narrowest possible reading, and it is the one worth having — a
-// wrong-side record is a never-event, and two sources disagreeing about which side was operated is
-// something a human must look at rather than something a projection should quietly pick a winner
-// for. Nothing else about procedures raises a conflict.
-function buildProcedures(encounters: EncounterEvidence[], pushConflict: (d: Omit<Discrepancy, 'id'>) => void): LongitudinalProcedure[] {
-  const groups = new Map<string, { concept: NormalizedConcept; occ: ProcedureOccurrence[] }>();
-  for (const e of encounters) {
-    for (const p of e.procedures || []) {
-      const raw = (p?.conceptRaw ?? '').trim();
-      if (!raw) continue;
-      const concept = normalizeConcept(raw, 'procedure');
-      const key = groupingKey(concept);
-      const g = groups.get(key) ?? { concept, occ: [] };
-      g.occ.push({
-        encounterRef: e.encounterRef, date: e.date,
-        laterality: p.laterality ?? null,
-        ...(p.setting ? { setting: p.setting } : {}),
-        provenance: p.provenance,
-      });
-      groups.set(key, g);
-    }
-  }
-  const out: LongitudinalProcedure[] = [];
-  for (const [, g] of groups) {
-    const occ = g.occ.slice().sort(byDateRef);
-    // Side disagreement on one day, and only that.
-    //
-    // P2.1 (addendum A6) — CANONICAL VALUES ONLY. `laterality` is now 'left' | 'right' |
-    // 'bilateral' or nothing, parsed at write time from the source widget, and this comparison
-    // trusts nothing else: an occurrence WITHOUT a canonical side is skipped entirely, so the
-    // detector stays SILENT when either side lacks one. Before P2.1 it compared raw widget strings,
-    // which meant `["on-left"]` and `left` read as a disagreement and two spellings of the same
-    // side could have raised a safety_critical conflict that was not one.
-    const byDay = new Map<string, Set<Laterality>>();
-    for (const o of occ) {
-      const side = o.laterality;
-      if (!side || !CANONICAL_SIDES.has(side)) continue;     // no canonical side ⇒ no opinion
-      const set = byDay.get(o.date) ?? new Set<Laterality>();
-      set.add(side);
-      byDay.set(o.date, set);
-    }
-    for (const [date, sides] of byDay) {
-      if (sides.size < 2) continue;
-      const sameDay = occ.filter((o) => o.date === date && o.laterality && CANONICAL_SIDES.has(o.laterality));
-      pushConflict({
-        domain: 'procedure', type: 'value_conflict', severity: 'safety_critical', resolutionStatus: 'open',
-        assertions: sameDay.map((o) => ({
-          encounterRef: o.encounterRef, date: o.date,
-          detail: `${g.concept.raw}: side recorded as ${o.laterality} [${o.provenance?.trust ?? 'unknown'}]`,
-        })),
-      });
-    }
-    out.push({
-      normalizedConcept: g.concept,
-      firstSeen: occ[0].date,
-      lastSeen: occ[occ.length - 1].date,
-      occurrences: occ,
-    });
-  }
-  return out.sort((a, b) => cmpStr(groupingKey(a.normalizedConcept), groupingKey(b.normalizedConcept)));
 }
 
 // ── Follow-ups (1.2 rule 4) — carried onto the snapshot, deduped by id, deterministically

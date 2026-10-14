@@ -7,8 +7,21 @@
  * Soft-fails. The full PHI record stays in db13; only de-identified content reaches the LLM.
  */
 
+import { randomUUID } from 'node:crypto';
 import { retrieve, resolveNormativeSources, type RetrieveOptions } from './retrieve';
 import { hitsToSources, buildCitedContext, type CiteHit, type Source } from './citations-core';
+// ── Retrieval telemetry (Stage 0a on-path) ──────────────────────────────────────────────────────
+import { createTelemetryCapture, buildRetrievalPayload, errorClassOf, type TelemetryCapture } from './retrieval-capture';
+import {
+  declareRetrievals, writeRetrievalTerminal, attachRetrievalTelemetry,
+  type LifecycleHandle, type PredeclaredTelemetryRuns, type ManifestDefectsByRole,
+} from './retrieval-telemetry-store';
+import { startInvocation } from './retrieval-invocation-store';
+import { routeClassOf, validateManifest } from './retrieval-telemetry-core';
+import type {
+  TelemetryRequestContext, RetrievalRoute, OperationalTelemetry, BackfillActivity,
+} from './retrieval-telemetry-core';
+import { activeRun } from './backfill-runs';
 import { startTrace, logEvent, finishTrace, governedChat, setTraceQuestionPreview } from './trace';
 import { geminiModelFor, geminiUtilityModel, TEXT_MODEL, MINI_MODEL, AUDIT_LLM_SEED, LLM_AUDIT_TIMEOUT_MS } from './llm';
 import { rowToOpdCase, opdCaseText, type OpdKeys, type OpdMed, type DeidOpdCase } from './opd-ingest-core';
@@ -86,10 +99,7 @@ async function getQuietingConfig(): Promise<QuietingConfig> {
 // against that specialty's standards, not GP defaults. Small table → cache the whole map (60s TTL).
 const _dirRun = sql as unknown as (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
 let _specCache: { at: number; map: Record<string, string> } | null = null;
-/** LAB-MCP-V2 §8.1: exported so lib/lab-v2/sources/opd.ts can FREEZE the same value this
- *  audit would have read, by calling the same reader. Duplicating the query in the lab
- *  would fork one fact into two places and fork the rule-governance SQL manifest with it. */
-export async function doctorSpecialtyFor(doctorUid: string | null): Promise<string | null> {
+async function doctorSpecialtyFor(doctorUid: string | null): Promise<string | null> {
   if (!doctorUid) return null;
   const now = Date.now();
   if (!_specCache || now - _specCache.at >= 60_000) {
@@ -115,8 +125,7 @@ function parseKeywords(v: unknown): string[] {
   }
   return [];
 }
-/** LAB-MCP-V2 §8.1: exported for the same reason as doctorSpecialtyFor above. */
-export async function getLvcRules(): Promise<LvcRuleLite[]> {
+async function getLvcRules(): Promise<LvcRuleLite[]> {
   const now = Date.now();
   if (_lvcRulesCache && now - _lvcRulesCache.at < 300_000) return _lvcRulesCache.rules;
   try {
@@ -633,9 +642,9 @@ export function opdRetrieveOpts(mini: boolean, env: Record<string, string | unde
   };
 }
 
-async function defaultRetrieve(q: string, mini = false, evalNormativeLeg?: boolean, rerankBackend?: 'judge' | 'cohere'): Promise<CiteHit[]> {
+async function defaultRetrieve(q: string, mini = false, evalNormativeLeg?: boolean, rerankBackend?: 'judge' | 'cohere', capture?: TelemetryCapture): Promise<CiteHit[]> {
   try {
-    const r = await retrieve(q, opdRetrieveOpts(mini, process.env, evalNormativeLeg, rerankBackend));
+    const r = await retrieve(q, opdRetrieveOpts(mini, process.env, evalNormativeLeg, rerankBackend), capture);
     return r.hits.map((h) => ({
       id: h.id, source: h.source, book: h.book, chapter: h.chapter, section: h.section,
       page_start: h.page_start, page_end: h.page_end, item_number: h.item_number,
@@ -643,6 +652,14 @@ async function defaultRetrieve(q: string, mini = false, evalNormativeLeg?: boole
     }));
   } catch (e) {
     console.warn('[opd-audit] retrieve failed', (e as Error).message);
+    // ONE OF THE FOUR SITES THAT SWALLOW A RETRIEVAL EXCEPTION INTO AN EMPTY HIT LIST. The audit
+    // then proceeds on no evidence and scores a note as if the corpus had nothing to say. That is
+    // survivable and deliberate — but it must not be INVISIBLE, and until now it was: a failed
+    // retrieval and a retrieval that found nothing produced the same `[]`.
+    if (capture) {
+      capture.retrievalOutcome = 'retrieval_failure';
+      capture.retrievalErrorClass = errorClassOf(e);
+    }
     return [];
   }
 }
@@ -670,9 +687,9 @@ export function normativeChannelOpts(env: Record<string, string | undefined> = p
 
 /** Standalone normative retrieve for the channel. Fail-safe: any error ⇒ [] (the audit proceeds on
  *  literature alone — the channel can only ADD, never degrade). */
-async function normativeChannelRetrieve(q: string): Promise<CiteHit[]> {
+async function normativeChannelRetrieve(q: string, capture?: TelemetryCapture): Promise<CiteHit[]> {
   try {
-    const r = await retrieve(q, normativeChannelOpts());
+    const r = await retrieve(q, normativeChannelOpts(), capture);
     return r.hits.map((h) => ({
       id: h.id, source: h.source, book: h.book, chapter: h.chapter, section: h.section,
       page_start: h.page_start, page_end: h.page_end, item_number: h.item_number,
@@ -680,9 +697,138 @@ async function normativeChannelRetrieve(q: string): Promise<CiteHit[]> {
     }));
   } catch (e) {
     console.warn('[opd-audit] normative channel retrieve failed', (e as Error).message);
+    if (capture) {
+      capture.retrievalOutcome = 'retrieval_failure';
+      capture.retrievalErrorClass = errorClassOf(e);
+    }
     return [];
   }
 }
+
+/**
+ * Read the ACTIVE provider-backfill state for the OPD worker, fail-open (D2).
+ *
+ * ⚠️ THE FAIL-OPEN WRAP IS REQUIRED, NOT CAUTIOUS. `activeRun` awaits `ensureRunsTable()` first,
+ * whose `CREATE TABLE IF NOT EXISTS` has NO `.catch` — unlike its two index statements. A throw
+ * from that call would turn an audit that would have completed into one that never ran, which
+ * constraint 1 forbids. All three fields are nullable in D17 for exactly this reason.
+ *
+ * ⚠️ AND IT IS NOT ONE ROUND TRIP. On a cold invocation it issues a CREATE TABLE and two CREATE
+ * INDEX before the SELECT — four statements — and one on every later retrieval. Both are measured
+ * separately in the overhead numbers rather than described as small.
+ *
+ * `lib/backfill-runs.ts` is NOT on this build's edit list, so the guard lives here rather than as
+ * a `.catch` added to that file.
+ */
+async function readBackfillActivity(): Promise<{ runId: string | null; target: string | null; state: BackfillActivity | null }> {
+  try {
+    // 'opd' is required — BackfillWorker is 'opd' | 'ipd', and this is the OPD audit path.
+    const run = await activeRun('opd');
+    // ⚠️ `target` IS THE RUN'S MODEL. `BackfillRun` has no field called `target`; what a backfill
+    // run targets is the `bedrock:<id>` / `vertex:<id>` string it is grading against, and that is
+    // the value an overlap analysis needs — "which backfill was running" is answered by the model,
+    // not by the day cursor. Named as an inference rather than presented as a schema field.
+    return run
+      ? { runId: String(run.id), target: run.model ?? null, state: 'active' }
+      // ⚠️ `idle` IS A MEASUREMENT, NOT AN ABSENCE. §2 forbids twice reporting a cron tick as a
+      // workload; without this value an overlap analysis cannot tell 360 route invocations from
+      // 360 backfills, which is the exact error the evidence boundary names.
+      : { runId: null, target: null, state: 'idle' };
+  } catch {
+    return { runId: null, target: null, state: null };
+  }
+}
+
+/** Write both role terminals in D11's order, publishing the handle after each. Never throws — a
+ *  telemetry write must not fail an audit (constraint 1).
+ *
+ *  Returns the manifest's own validation verdict, which the OWNER needs and cannot compute: D17
+ *  makes a persisted row `persisted_partial` when `validateManifest` returned anything, and the
+ *  manifest never leaves this function. Until this build `validateManifest` had no production
+ *  caller at all, so no row could ever have been classified partial for the reason D17 gives. */
+async function writeRetrievalTerminals(args: {
+  tele: NonNullable<AuditOpdOpts['telemetry']>;
+  handle: LifecycleHandle;
+  /** Trailing optional map (v10 requirement 1). Terminal publications pass a SNAPSHOT; see :792. */
+  publishHandle: (h: LifecycleHandle, manifestDefectsByRole?: ManifestDefectsByRole) => void;
+  traceId: string | null;
+  startedAt: string;
+  citedContext: string;
+  primaryCapture: TelemetryCapture;
+  normativeCapture?: TelemetryCapture;
+}): Promise<ManifestDefectsByRole> {
+  const { tele, publishHandle, traceId, startedAt, citedContext } = args;
+  let handle = args.handle;
+  // ⚠️ KEYED BY ROLE, NOT MERGED (pass 0b). This was one flat array that both roles pushed into,
+  // and `outcomeForOwnedSave` then marked the WHOLE save dirty if it was non-empty — so a
+  // normative-channel defect made the primary row `persisted_partial`, and the reverse held. Each
+  // role's verdict now stays attached to the role that produced it, and settlement applies each
+  // run's own. A role that never ran has no key at all, which is a different statement from a role
+  // whose manifest validated clean.
+  const defectsByRole: { primary?: readonly string[]; normative_channel?: readonly string[] } = {};
+  try {
+    const hmacKey = process.env.CDMSS_TELEMETRY_HMAC_KEY ?? null;
+    const backfill = await readBackfillActivity();
+    const operationalFor = (role: 'primary' | 'normative_channel'): OperationalTelemetry => ({
+      route: tele.route, route_class: routeClassOf(tele.route), retrieval_role: role,
+      invocation_id: tele.ctx.invocationId, trace_id: traceId,
+      deployment_sha: tele.ctx.deploymentSha, started_at: startedAt,
+      completed_at: new Date().toISOString(), routing_flags: tele.ctx.routingFlags,
+      active_backfill_run_id: backfill.runId, active_backfill_target: backfill.target,
+      active_backfill_state: backfill.state,
+      active_lab_experiment_id: tele.ctx.labExperimentId ?? null,
+    });
+
+    // PRIMARY carries the scorer-context HMAC, computed over the EXACT rendered citedContext bytes.
+    // With zero candidates that string is empty, and the HMAC of the empty string is a defined
+    // value — never null because reranking was skipped or failed (A2).
+    const primaryPayload = buildRetrievalPayload(args.primaryCapture, { hmacKey, scorerContext: citedContext });
+    const primaryOperational = operationalFor('primary');
+    defectsByRole.primary = validateManifest({ ...primaryPayload, operational: primaryOperational });
+    handle = await writeRetrievalTerminal(handle, 'primary', {
+      payload: primaryPayload,
+      operational: primaryOperational,
+      traceId, completedAt: new Date().toISOString(),
+    });
+    // ⚠️ A SHALLOW SNAPSHOT, NEVER THE LIVE OBJECT (v10 requirement 3). `defectsByRole` is mutated
+    // below — the normative verdict lands at :803 — and passing the object itself would let an
+    // owner observe a later mutation of something it was told at an earlier moment. What the owner
+    // is handed here is what was known here.
+    publishHandle(handle, { ...defectsByRole });
+
+    if (args.normativeCapture) {
+      // NORMATIVE carries null: the combined-context HMAC lives on the primary row, and duplicating
+      // it here would imply this leg produced a context of its own. Its expansion stage is also
+      // always `skipped` (normativeChannelOpts sets skipExpand unconditionally), which is why the
+      // validator accepts a null served class on a skipped stage — otherwise every one of these
+      // rows would be partial by construction.
+      const normPayload = buildRetrievalPayload(args.normativeCapture, { hmacKey, scorerContext: null });
+      const normOperational = operationalFor('normative_channel');
+      defectsByRole.normative_channel = validateManifest({ ...normPayload, operational: normOperational });
+      handle = await writeRetrievalTerminal(handle, 'normative_channel', {
+        payload: normPayload,
+        operational: normOperational,
+        traceId, completedAt: new Date().toISOString(),
+      });
+      publishHandle(handle, { ...defectsByRole });   // snapshot, as above
+    }
+  } catch (e) {
+    console.warn('[opd-audit] retrieval telemetry terminal write failed', (e as Error).message);
+  }
+  return defectsByRole;
+}
+
+/**
+ * ⚠️ TEST SEAM — NARROW AND DEFAULT-PRESERVING (addendum v26 §3.6; Saul review 37 finding 2; the shape
+ * addendum v11 §8 authorized in principle). `writeRetrievalTerminals` above is module-private and its
+ * only caller, `auditOpdNote`, cannot be driven in-process (it needs a note row, retrieval, embeddings,
+ * a live LLM leg and the audit store). Proof 47 must EXECUTE the terminal-payload path with real
+ * `assembleAuditContext` output, not pin its source. This object hands a test the SAME function —
+ * unchanged, unwrapped, the one production calls at step 13. No production caller consults it,
+ * nothing on the default path reads it, `auditOpdNote` and every call site are byte-identical to
+ * before it existed, and it exists only so a test can drive what production drives.
+ */
+export const retrievalTerminalsSeam: { readonly writeRetrievalTerminals: typeof writeRetrievalTerminals } = { writeRetrievalTerminals };
 
 /** The additive block's framing. Lives in the USER-message context only — OPD_AUDIT_SYSTEM is frozen. */
 export const NORMATIVE_CHANNEL_HEADER =
@@ -1054,23 +1200,6 @@ function opdAuditBudget(provider: 'openrouter' | 'bedrock' = 'openrouter'): { pe
   return b;
 }
 
-/**
- * LAB-MCP-V2 decision 22 — the OPD audit's PER-ATTEMPT transport ceiling, for the lab.
- *
- * The same number `defaultGenerate` passes as `timeoutMs` (its `budget.perAttemptMs`), read from
- * the same PROVIDER_BUDGETS row rather than restated, so the two can never drift. It exists
- * because the lab's gateway had NO ceiling: a stage call inherited the OpenAI client default and
- * a slow note could sit far past the point where the tick's own 500 s budget had given up.
- *
- * ⚠️ NOT A NEW NUMBER, and it must not become one. `opdAuditBudget()` and its call site inside
- * defaultGenerate are unchanged — three existing guards (route-budget-guard, llm-call-bounds,
- * provider-switch-unit-d) assert that call site's exact source text, and the box arithmetic
- * (perAttemptMs x maxTries x legs <= maxDuration) is computed from it.
- */
-export function opdAuditPerAttemptMs(): number {
-  return opdAuditBudget().perAttemptMs;
-}
-
 async function defaultGenerate(traceId: string | undefined, system: string, user: string, mini = false, evalModel?: string, onEnvelope?: (e: LlmEnvelope) => void, deadlineAt?: number, bedrockModel?: string): Promise<string> {
   // EVAL-ONLY (lab): route to OpenRouter when an eval model is named. evalModel unset ⇒ the Gemini/mini
   // path below is byte-identical to today (no production audit ever passes evalModel).
@@ -1167,39 +1296,48 @@ export interface AuditReuse {
   suggestions: OpdSuggestion[];
   sources: Source[];
 }
-/**
- * LAB-MCP-V2 §8.1 — the FIVE live reads a Lab v2 run supplies from its FROZEN dataset
- * instead of performing (decision 10). Each of these normally reaches production IO that
- * §7 seals off inside a lab execution context:
- *   · `lvcRules`      ← getLvcRules(),              production Neon `lvc_recommendations`
- *   · `specialty`     ← doctorSpecialtyFor(),       production Neon `doctor_directory`
- *   · `complexity`    ← fetchPatientHistoryBundle(), db13 via Metabase
- *   · `suppressions`  ← getActiveSuppressions(),    production Neon `audit_suppression`
- *   · `quietingConfig`← getQuietingConfig(),        production Neon `audit_suppression` + `quieting_policy_log`
- *
- * The last two were added by decision 10 after round A1 measured what actually happens
- * without them: both have load-bearing fail-safes (empty list, gen 0) that are correct for
- * a production audit — quieting must never block a note — and WRONG for a research run,
- * which silently scored un-suppressed at gen 0 while production did neither. A lab result
- * is only evidence about production if it saw the same inputs production sees.
- *
- * Supplying them is also what makes a research run reproducible: the same dataset yields
- * the same five inputs on every replay, rather than whatever the live tables say that day.
- * ABSENT ⇒ every existing line runs unchanged and production is byte-identical.
- */
-export interface OpdLabDependencies {
-  lvcRules: LvcRuleLite[];
-  specialty: string | null;
-  complexity: OpdNoteAudit['complexity'];
-  suppressions: Suppression[];
-  quietingConfig: QuietingConfig;
-}
-
 export interface AuditOpdOpts {
+  /**
+   * RETRIEVAL TELEMETRY (D11). Present ⇒ this audit declares, instruments and settles its retrieval
+   * runs. Absent ⇒ `unknown_route` is recorded for nothing at all, because no capture is created
+   * and no telemetry statement executes.
+   */
+  telemetry?: {
+    ctx: TelemetryRequestContext;
+    route: RetrievalRoute;
+    /** Declared UP FRONT, not inferred from the role: the run route's POST arm audits and never
+     *  saves, and no property of `primary` could have told us that. Default `will_persist`. */
+    persistenceIntent?: 'will_persist' | 'never_persists';
+  };
+  /**
+   * Run ids the WORKER allocated before this function was entered (D10). ADOPTED, never
+   * reallocated — a second `started` row for the same execution would double the denominator every
+   * coverage percentage divides by.
+   */
+  predeclaredTelemetry?: PredeclaredTelemetryRuns;
+  /**
+   * Fires after declaration and after every successful lifecycle transition (D11).
+   *
+   * ⚠️ WHY A CALLBACK AND NOT ONLY THE RETURNED AUDIT. `auditOpdNote` can throw after declaration,
+   * after either retrieval, during context assembly, or during audit generation. On every one of
+   * those paths there is no returned audit — so a caller that could only read the handle off the
+   * result would hold nothing, and could not settle the rows it is responsible for.
+   *
+   * ⚠️ THE SECOND ARGUMENT IS THE ROLE-KEYED MANIFEST VERDICT, AND IT IS WHY THIS EXISTS AT ALL
+   * (v10 requirement 1). The success path attaches the map to the audit; every throwing path has no
+   * audit, so before this the deterministic fallback delivered the handle and LOST the map, and the
+   * owner settled clean whatever the manifests said.
+   *
+   * ABSENT ON DECLARATION, PRESENT ON EACH TERMINAL WRITE (requirement 2). A declaration knows no
+   * verdict yet, and passing `{}` there would be a claim — under requirement 6 an empty PROVIDED map
+   * says "every declared role has no verdict". Undefined says "nothing to say", which is the truth.
+   * A receiver must therefore keep the last map it was GIVEN and not overwrite it with undefined.
+   *
+   * The map is a shallow snapshot taken at the moment of the call (requirement 3), never the live
+   * object the producer keeps mutating.
+   */
+  onLifecycleHandleUpdated?: (handle: LifecycleHandle, manifestDefectsByRole?: ManifestDefectsByRole) => void;
   trace?: boolean;
-  /** LAB V2 ONLY (§8.1): frozen substitutes for the three live reads above. Never set by
-   *  any production caller — the OPD adapter in lib/lab-v2/adapters/opd.ts is the only one. */
-  labDependencies?: OpdLabDependencies;
   /** EVAL-ONLY (PDQI-9 fail-loud Phase 1). Fires on every OpenRouter attempt with the response
    *  envelope. Only reached when `evalModel` is set; production never passes it. Never throws. */
   onEnvelope?: (e: LlmEnvelope) => void;
@@ -1308,14 +1446,10 @@ export async function auditOpdNote(row: Record<string, unknown>, opts: AuditOpdO
   // Tier-1 self-heal: apply human-approved active suppressions to the final (identity-stamped)
   // findings — drop, or downgrade to informational (out of the triage queue + score). No-op when
   // none are active. Applied AFTER stampFindingIdentity so it matches on signal_type + subject.
-  // LAB-MCP-V2 §8.1 / decision 10: frozen when the lab supplies them; otherwise today's
-  // cached read. An explicit opts.suppressions still outranks both, exactly as before.
-  const supps = opts.suppressions ?? (opts.labDependencies ? opts.labDependencies.suppressions : await getActiveSuppressions());
-  // LAB-MCP-V2 §8.1: frozen when the lab supplies them; otherwise today's cached read.
-  const lvcRules = opts.labDependencies ? opts.labDependencies.lvcRules : await getLvcRules();   // 0.81.4 matcher input (cached, 2s-timeout fail-safe → [])
+  const supps = opts.suppressions ?? await getActiveSuppressions();
+  const lvcRules = await getLvcRules();   // 0.81.4 matcher input (cached, 2s-timeout fail-safe → [])
   // Quieting config (demote rules + policy gen) — fail-safe to { rules: [], gen: 0 } (never blocks).
-  // LAB-MCP-V2 §8.1 / decision 10: same shape as the suppressions line above.
-  const quietCfg = opts.quieting ?? (opts.labDependencies ? opts.labDependencies.quietingConfig : await getQuietingConfig());
+  const quietCfg = opts.quieting ?? await getQuietingConfig();
   const noMeds = oc.medications.length === 0;
   // Phase 3b — the retrieval hits with their FULL text, set on the generation path only. Empty on
   // the reuse path (which carries stored 600-char previews), which is the explicit guard that keeps
@@ -1369,10 +1503,6 @@ export async function auditOpdNote(row: Record<string, unknown>, opts: AuditOpdO
   // Right Care complexity — computed once per audit from db13 history (0.81.3). Fully guarded: a bad
   // individual_uid, a db13 error, or a 3s timeout yields a null band and NEVER blocks/fails the audit.
   const complexityFor = async (): Promise<OpdNoteAudit['complexity']> => {
-    // LAB-MCP-V2 §8.1: the lab froze this at dataset_create, outside any lab context.
-    // Reaching db13 from inside one would throw LAB_IO_FORBIDDEN (§7) and, worse, would
-    // make the run depend on a source that moves under it between replays.
-    if (opts.labDependencies) return opts.labDependencies.complexity;
     // The note uid resolves the patient (individual_uid) inside the fetcher — "individuals-prescriptions"
     // has no individual_uid (live-validated 8 Jul). keys.noteDate is the as-of hint (index timestamp).
     const noteUid = keys.uid ? String(keys.uid) : '';
@@ -1411,6 +1541,56 @@ export async function auditOpdNote(row: Record<string, unknown>, opts: AuditOpdO
       }).catch(() => undefined as string | undefined)
     : undefined;
 
+  // ══ RETRIEVAL TELEMETRY, STEPS 3-6 OF D11's FOURTEEN ══════════════════════════════════════════
+  // We are past the reuse guard (step 1) and past startTrace (step 2), so `traceId` exists where it
+  // exists at all. Now: determine the expected role set, create or adopt the invocation, declare
+  // the rows, and PUBLISH THE HANDLE — all before any fallible work.
+  const tele = opts.telemetry;
+  const wantsNormative = opts.evalNormativeChannel === true;
+  const primaryCapture = tele ? createTelemetryCapture('primary') : undefined;
+  const normativeCapture = tele && wantsNormative ? createTelemetryCapture('normative_channel') : undefined;
+  const telemetryStartedAt = new Date().toISOString();
+  let handle: LifecycleHandle | null = null;
+  let manifestDefectsByRole: ManifestDefectsByRole = {};
+  const publishHandle = (h: LifecycleHandle, defects?: ManifestDefectsByRole) => {
+    handle = h;
+    opts.onLifecycleHandleUpdated?.(h, defects);
+  };
+  /** D11: the non-enumerable property on the audit object, for the SUCCESS path. The callback above
+   *  is what covers every throwing path, where there is no returned audit to carry anything. */
+  const withHandle = <T extends object>(audit: T): T =>
+    (tele ? attachRetrievalTelemetry(audit, { handle, manifestDefectsByRole }) : audit);
+
+  if (tele) {
+    await startInvocation(tele.ctx);
+    const pre = opts.predeclaredTelemetry;
+    const runs = [
+      { role: 'primary' as const, runId: pre?.primary.runId ?? randomUUID(), uid: keys.uid ?? null, engineVersion },
+      ...(wantsNormative
+        ? [{ role: 'normative_channel' as const, runId: pre?.normativeChannel?.runId ?? randomUUID(), uid: keys.uid ?? null, engineVersion }]
+        : []),
+    ];
+    if (pre) {
+      // ADOPT. The worker already inserted these rows and already counted them onto the invocation;
+      // re-declaring would insert nothing (ON CONFLICT DO NOTHING) but would count them twice.
+      handle = {
+        invocationId: tele.ctx.invocationId,
+        runs: runs.map((r) => ({ role: r.role, runId: r.runId, expectedRevision: 0 })),
+        persistenceIntent: tele.persistenceIntent ?? 'will_persist',
+      };
+      publishHandle(handle);
+    } else {
+      try {
+        publishHandle(await declareRetrievals(tele.ctx, runs, tele.persistenceIntent ?? 'will_persist'));
+      } catch (e) {
+        // Fail-open for a NON-WORKER caller. The worker's own declaration is fail-closed and
+        // happens before this function is entered (D10) — that is the path where a missing durable
+        // start actually matters, and it is guarded there.
+        console.warn('[opd-audit] telemetry declaration failed, continuing uninstrumented', (e as Error).message);
+      }
+    }
+  }
+
   try {
     // Richer retrieval query so the corpus is hit on the actual clinical content (readable dx
     // names + reason + complaints + resolved molecules), not just ICD codes — improves grounding.
@@ -1423,16 +1603,29 @@ export async function auditOpdNote(row: Record<string, unknown>, opts: AuditOpdO
       'outpatient appropriateness rational prescribing evidence-based management guideline',
     ].filter(Boolean).join('. ');
 
-    const hits = await defaultRetrieve(query, mini, opts.evalNormativeLeg, opts.rerankBackend);
+    // STEPS 7 AND 8 — capture both retrievals IN MEMORY. No terminal write yet, deliberately.
+    const hits = await defaultRetrieve(query, mini, opts.evalNormativeLeg, opts.rerankBackend, primaryCapture);
     // R-11 additive channel (lab eval only): a SEPARATE CW-only retrieve appended as [9+] — the 8
     // literature excerpts above are untouched. No channel ⇒ assembleAuditContext is byte-identical
     // to the previous hitsToSources(hits) + buildCitedContext(hits).
-    const normHits = opts.evalNormativeChannel === true ? await normativeChannelRetrieve(query) : [];
+    const normHits = opts.evalNormativeChannel === true ? await normativeChannelRetrieve(query, normativeCapture) : [];
+    // STEP 9 — the combined context. ⚠️ THIS IS WHY THE PRIMARY TERMINAL WRITE CANNOT HAPPEN AT
+    // STEP 7. `assembleAuditContext` runs over BOTH hit sets and is the only place the exact bytes
+    // that reach the scorer exist; inside either retrieval call they do not exist yet, so a
+    // scorer-context HMAC written there would be a hash of something the scorer never saw.
     const { sources, citedContext } = assembleAuditContext(hits, normHits);
+    // STEPS 10-13 — HMAC the combined context, build both payloads, write both terminals, and
+    // publish the handle after each so a throw below still leaves the caller holding the latest.
+    if (tele && handle) {
+      manifestDefectsByRole = await writeRetrievalTerminals({
+        tele, handle, publishHandle, traceId: traceId ?? null,
+        startedAt: telemetryStartedAt, citedContext,
+        primaryCapture: primaryCapture!, normativeCapture,
+      });
+    }
     if (traceId) await logEvent(traceId, 'opd_audit_sources', null, { count: sources.length });
 
-    // LAB-MCP-V2 §8.1: frozen when the lab supplies it; otherwise today's directory read.
-    const specialty = opts.labDependencies ? opts.labDependencies.specialty : await doctorSpecialtyFor(keys.doctorUid);
+    const specialty = await doctorSpecialtyFor(keys.doctorUid);
     // Eval-hardening D5/O2 — keep the last envelope HERE too, so the parse guards below can attach
     // it to their throws. Wrapped ONLY when evalModel is set; absent ⇒ opts.onEnvelope passes
     // through untouched and production is byte-identical.
@@ -1518,7 +1711,7 @@ export async function auditOpdNote(row: Record<string, unknown>, opts: AuditOpdO
       ? buildLongitudinalInput(oc, keys, engineVersion, opdCaseText(oc, { specialty }))
       : null;
 
-    return {
+    return withHandle({
       keys, scorecard, completeness,
       findings, suggestions: parsed?.suggestions ?? [],
       sources, engineVersion: engineVersion, traceId,
@@ -1527,7 +1720,7 @@ export async function auditOpdNote(row: Record<string, unknown>, opts: AuditOpdO
       longitudinalInput,
       // S0 — absent on every successful audit, so the common-path shape is unchanged.
       ...(llmLegFailed ? { llmLegFailed: true } : {}),
-    };
+    });
   } catch (e) {
     if (traceId) await finishTrace(traceId, 'error', String((e as Error).message)).catch(() => {});
     // ═══ FAIL LOUD, EVAL PATH ONLY (D1 + D2) ═══
@@ -1553,6 +1746,13 @@ export async function auditOpdNote(row: Record<string, unknown>, opts: AuditOpdO
     // S0 — EVERY det-only fallback is a failed measurement (pdqi9 was never assessed), whatever
     // threw: LLM leg, retrieval, or anything else inside the try. Marking unconditionally here is
     // what makes the S0 gate ("zero unmarked rows with empty pdqi9") hold for every fallback row.
+    // ⚠️ NO HANDLE IS ATTACHED HERE, AND THAT IS D11's RULE, NOT AN OMISSION. The non-enumerable
+    // property is "for the SUCCESS path"; every throwing path is covered by
+    // `onLifecycleHandleUpdated`, which has already given the owner the latest handle — including
+    // on this one, where the throw happened after declaration. Attaching it here as well would buy
+    // nothing and would rewrite a return statement that three committed tests pin verbatim
+    // (opd-invalid-marking, pdqi9-fail-loud, vertex-primary-ladder), each of them asserting that
+    // the non-eval fallback is byte-identical to what it has always been.
     return { keys, scorecard, completeness, findings: finalize(det), suggestions: [], sources: [], engineVersion: engineVersion, traceId, complexity: await complexityFor(), quietingGen: quietCfg.gen, llmLegFailed: true };
   }
 }

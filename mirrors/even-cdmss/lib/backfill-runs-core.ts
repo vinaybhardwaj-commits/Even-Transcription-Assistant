@@ -14,20 +14,7 @@
  * started. Everything requiring a database lives in lib/backfill-runs.ts.
  */
 
-/** 'readmission' (R4-8, CDMSS-READMISSIONS-R4-PRD v1.0, 18 Aug 2026): the readmission-NARRATIVE run
- *  type on these same rails — one run = Opus 4.6 on Bedrock over a range of audited_at (UTC) days,
- *  writing the narrative / ledger / related-LVC artefacts onto audited findings that lack them.
- *  The row, cursor march, accounting, stop-race rule and progress helpers are shared unchanged;
- *  what differs (Bedrock-only, Opus-only, n ≤ 2, the unit is a FINDING not a note) is enforced by
- *  lib/readmission/narrative-backfill.ts on top of planRunCreate. */
-/** 'readmission_refresh' (R4.1, CDMSS-READMISSIONS-R4.1-PRD v1.0 R41-4/R41-7, 18 Aug 2026): the
- *  TEMPLATE-REFRESH run — re-analyzes audited findings whose stays now carry final OT / PAC /
- *  progress rows on Opus 4.6 (Bedrock), one case per tick, in place. Same rails; the probe gate,
- *  the exact Opus id and n = 1 are enforced by lib/readmission/refresh.ts. */
-export type BackfillWorker = 'opd' | 'ipd' | 'readmission' | 'readmission_refresh';
-export const BACKFILL_WORKERS: readonly BackfillWorker[] = ['opd', 'ipd', 'readmission', 'readmission_refresh'] as const;
-/** The workers whose runs may name Bedrock ONLY (R4-11 / R41-4). */
-export const BEDROCK_ONLY_WORKERS: readonly BackfillWorker[] = ['readmission', 'readmission_refresh'] as const;
+export type BackfillWorker = 'opd' | 'ipd';
 export type RunStatus = 'active' | 'paused' | 'done' | 'stopped' | 'error';
 
 /** One row of `backfill_runs`, as the runner reads it. Mirrors the PRD's DDL. */
@@ -134,19 +121,13 @@ export const RUN_MODEL_PREFIXES = ['bedrock:', 'vertex:'] as const;
  */
 export function planRunCreate(i: RunCreateInput): RunCreatePlan {
   const worker = String(i.worker ?? 'opd').trim().toLowerCase();
-  if (!(BACKFILL_WORKERS as readonly string[]).includes(worker)) return { ok: false, error: `unknown worker '${worker}' — expected ${BACKFILL_WORKERS.map((w) => `'${w}'`).join(' or ')}` };
+  if (worker !== 'opd' && worker !== 'ipd') return { ok: false, error: `unknown worker '${worker}' — expected 'opd' or 'ipd'` };
 
   const model = String(i.model ?? '').trim();
   if (!model) return { ok: false, error: 'model is required — a run must name the model it attributes its rows to' };
   const prefix = RUN_MODEL_PREFIXES.find((p) => model.toLowerCase().startsWith(p));
   if (!prefix) {
     return { ok: false, error: `run model '${model}' names no accepted provider — backfill runs accept ${RUN_MODEL_PREFIXES.map((p) => `'${p}<modelId>'`).join(' or ')} only (qwen is retired from backfill; ollama/openrouter runs are out of scope). Never falls back.` };
-  }
-  // R4-8 / R4-11: the readmission-narrative run type is TYPED TO BEDROCK — a vertex run here would
-  // write a narrative stamped with a model the ruling excludes. The exact Opus id is enforced by
-  // the readmission tick module (this core stays free of that constant).
-  if ((BEDROCK_ONLY_WORKERS as readonly string[]).includes(worker) && prefix !== 'bedrock:') {
-    return { ok: false, error: `worker '${worker}' accepts 'bedrock:<modelId>' only (R4-11 / R41-4: Opus 4.6 on Bedrock, everywhere it is written) — '${model}' refused, never substituted` };
   }
   if (!model.slice(prefix.length).trim()) return { ok: false, error: `model id missing after '${prefix}'` };
 

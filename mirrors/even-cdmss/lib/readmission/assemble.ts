@@ -18,11 +18,6 @@ import type {
 import { labTimingProfile, labAbnormal, canonicalAnalyte, canonicalAnalyteFor, refRangeDisplay, resolveLabTier } from '../readmission-reconcile-core';
 import type { SummaryRecord, LabRow, StructuredLabRow } from './db13';
 import type { ExtractedCase } from '../doc-audit-core';
-import {
-  DOC_OPERATIVE_ID_PREFIX, OT_FACT_LABELS, TEMPLATE_ID_PREFIX, hasUsableText, operativeVerbatimSections,
-  reduceTemplateCoverage,
-  type FlattenedTemplate, type TemplateCoverage, type TemplateFetchOutcomes, type TemplateSource,
-} from '../readmission-template-core';
 
 // ── de-identification ───────────────────────────────────────────────────────────
 
@@ -310,104 +305,11 @@ export function structuredLabItems(labs: StructuredLabRow[], identity: { names: 
   }));
 }
 
-// ═══ R2 — SOURCE 4: KX clinical templates (READMISSIONS-R2 PRD v1.0 §3.3) ═══════════
-//
-// OT / PAC / progress rows arrive here FLATTENED (lib/readmission-template-core.ts) and
-// still carrying whatever the clinician typed — including, possibly, the patient's name.
-// This function is where that stops: EVERY string — narrative, template name, surgery
-// name, and every allowlisted fact value — goes through deidText before it becomes an
-// EvidenceItem. `structuredFacts` (the ADT line) bypasses deid because it is built from
-// department/date columns by construction; template text is free text and MUST NOT
-// follow that precedent.
-
-const deidTemplate = (f: FlattenedTemplate, identity: { names: Array<string | null | undefined>; uhids: Array<string | null | undefined> }): FlattenedTemplate => ({
-  ...f,
-  templateName: f.templateName ? deidText(f.templateName, identity) : null,
-  surgeryName: f.surgeryName ? deidText(f.surgeryName, identity) : null,
-  facts: f.facts.map((x) => ({ name: x.name, value: deidText(x.value, identity) })),
-  narrative: deidText(f.narrative, identity),
-});
-
-const SOURCE_WORD: Readonly<Record<TemplateSource, string>> = { ot_note: 'OT note', pac_note: 'pre-anaesthesia check', progress_note: 'progress note' };
-
-/**
- * Flattened templates → de-identified, citable evidence items. IDs `OT1…`, `PAC1…`,
- * `P1…` (per source, in input order — the caller passes index-side rows before
- * readmit-side rows so ids read chronologically). Rows with NO usable text after deid
- * contribute nothing (they still count toward coverage as `empty`).
- */
-export function templateItems(
-  flattened: FlattenedTemplate[],
-  identity: { names: Array<string | null | undefined>; uhids: Array<string | null | undefined> },
-): { items: EvidenceItem[]; deidentified: FlattenedTemplate[] } {
-  const items: EvidenceItem[] = [];
-  const counters: Record<TemplateSource, number> = { ot_note: 0, pac_note: 0, progress_note: 0 };
-  const deidentified = flattened.map((f) => deidTemplate(f, identity));
-  for (const f of deidentified) {
-    if (!hasUsableText(f)) continue;
-    counters[f.source] += 1;
-    const parts: string[] = [];
-    parts.push(`${SOURCE_WORD[f.source]}${f.templateName ? ` (${f.templateName})` : ''}, ${f.side} stay${f.at ? `, ${f.at}` : ''}`);
-    if (f.source === 'ot_note' && f.surgeryName && !f.facts.some((x) => x.name === 'surgery-name')) parts.push(`surgery: ${f.surgeryName}`);
-    for (const x of f.facts) if (x.value.trim()) parts.push(`${OT_FACT_LABELS[x.name] ?? x.name}: ${x.value.trim()}`);
-    if (f.narrative.trim()) parts.push(`note: ${f.narrative.trim()}`);
-    items.push({
-      id: `${TEMPLATE_ID_PREFIX[f.source]}${counters[f.source]}`,
-      source: f.source,
-      side: f.side,
-      at: f.at,
-      text: parts.join(' · '),
-    });
-  }
-  return { items, deidentified };
-}
-
-// ═══ R10-A — SOURCE 5: operative text printed INSIDE a discharge document ═══════════════════
-//
-// (CDMSS-READMISSIONS-R10-RECORD-REACH PRD §3.1/§3.2, R10-D1 / R10-D10.)
-//
-// The defect this closes, in one sentence: a discharge summary that PRINTS the whole operative note
-// in its body reached the agent as a one-line `procedure` string, db13 had no OT row either, and the
-// agent told a care manager the operative text did not exist. It did exist — nobody had read it.
-//
-// THREE THINGS THIS IS NOT.
-//   · It is not a structured OT note. The item's own text says "printed in the discharge document",
-//     the coverage state says `absent_document_text`, and the refusal line says "no structured OT
-//     row" — three places, one claim, and none of them promotes a printed block to a theatre record.
-//   · It is not a new PHI hole. Every string goes through `deidText` here, in the same choke point
-//     everything else does, and the extractor was told not to copy identifiers in the first place.
-//   · It is not a way to invent an absence. No operative section ⇒ no items, and the coverage state
-//     falls straight back to the plain `absent` that has always been there (T-5 stands).
-export function docOperativeItems(
-  ec: ExtractedCase | null | undefined,
-  side: 'index' | 'readmit',
-  startAt: number,
-  identity: { names: Array<string | null | undefined>; uhids: Array<string | null | undefined> },
-): EvidenceItem[] {
-  const sections = operativeVerbatimSections(ec?.verbatimSections);
-  const out: EvidenceItem[] = [];
-  sections.forEach((sec, i) => {
-    const heading = deidText(sec.heading, identity).trim();
-    const text = deidText(sec.text, identity).trim();
-    if (!text) return;   // a section that is only identifiers contributes nothing
-    out.push({
-      id: `${DOC_OPERATIVE_ID_PREFIX}${startAt + i}`,
-      source: 'doc_operative_text',
-      side,
-      at: null,
-      text: `operative text printed in the ${side === 'readmit' ? 'return' : 'first'} stay's discharge document${heading ? ` under "${heading}"` : ''} — not a structured OT note · ${text}`,
-    });
-  });
-  return out;
-}
-
 export interface ThreeSourceInputs {
   catalog: EvidenceCatalog;
   labProfile: LabTimingProfile;
   labTier: LabTier;
   labSourceProvenance: LabSourceProvenance;
-  /** R2: present ONLY when the template fetches ran (post tier gate). Absent = never looked. */
-  templateCoverage?: TemplateCoverage;
   notAuditableReason?: string;
   indexSentenceCount: number;
   readmitSentenceCount: number;
@@ -433,10 +335,6 @@ export function assembleThreeSource(args: {
   caseSources: { index: CaseSource; readmit: CaseSource };
   documentIds: { index: string | null; readmit: string | null };
   extractionVersion: string;
-  /** R2 source 4 — flattened, NOT yet de-identified (this function does that). Both
-   *  fields absent = the templates were never looked for (no coverage written). */
-  templates?: FlattenedTemplate[];
-  templateFetch?: TemplateFetchOutcomes;
 }): ThreeSourceInputs {
   const items: EvidenceItem[] = [];
 
@@ -449,30 +347,6 @@ export function assembleThreeSource(args: {
   // Source 3 first — a structured value outranks the doctor's transcription of one.
   const structured = structuredLabItems(args.structuredLabs, args.identity);
   items.push(...structured);
-
-  // Source 4 (R2): after structured labs, before the tier-2 case labs — a contemporaneous
-  // team record outranks the discharge summary's retrospective transcription, but not a
-  // machine value. Coverage is judged on the DE-IDENTIFIED rows (constraint 17).
-  let templateCoverage: TemplateCoverage | undefined;
-  // R10-A: the document's own operative blocks, from BOTH documents, minted before the coverage
-  // reduction so the reduction can say whether the document answered what db13 did not.
-  const docOperative = [
-    ...docOperativeItems(args.indexCase, 'index', 1, args.identity),
-  ];
-  docOperative.push(...docOperativeItems(args.readmitCase, 'readmit', docOperative.length + 1, args.identity));
-  if (args.templateFetch) {
-    const t = templateItems(args.templates ?? [], args.identity);
-    items.push(...t.items);
-    templateCoverage = reduceTemplateCoverage(args.templateFetch, t.deidentified, { documentOperativeText: docOperative.length > 0 });
-    // PRD §3.2: the fallback fires when db13 has NO USABLE OT ROW. A real theatre record outranks a
-    // printed block absolutely — where OT coverage reads `present` the DOT items are dropped rather
-    // than shown beside it, so the ledger can never carry two competing accounts of one operation.
-    if (templateCoverage.ot.status !== 'present') items.push(...docOperative);
-  } else {
-    // The templates were never looked for (tier-3 short-circuit / a pre-R2 caller). There is no
-    // db13 answer to outrank, so the document's own text stands on its own.
-    items.push(...docOperative);
-  }
 
   const { tier, notAuditableReason } = resolveLabTier({
     hasIndexCase: !!args.indexCase,
@@ -515,7 +389,6 @@ export function assembleThreeSource(args: {
       indexDocumentId: args.documentIds.index,
       readmitDocumentId: args.documentIds.readmit,
     },
-    ...(templateCoverage ? { templateCoverage } : {}),
     indexSentenceCount: idxSentences.length,
     readmitSentenceCount: rdSentences.length,
   };

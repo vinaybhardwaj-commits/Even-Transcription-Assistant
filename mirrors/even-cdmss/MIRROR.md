@@ -1,22 +1,9 @@
-# Mirror: even-cdmss
+# Mirror branch: even-cdmss / t4a
 
-- Source repo: even-cdmss (working repo; this folder is a read-only copy)
-- Source branch: main
-- Source sha: 9add54697b26de424c9245cf37d7b94b35c15602
-- Mirrored at: 2026-10-14 00:24Z
-- Files mirrored: 1370 (before this MIRROR.md)
-- Bytes mirrored: 14965960
-- Symlinks not mirrored: 0
-- Excluded by policy (not listed per file): 37 files
-  - policy-data-dir: 31
-  - policy-env-example-ignored-by-eta-root: 1
-  - policy-file-type: 2
-  - policy-large-file: 2
-  - policy-nested-gitignore: 1
-
-Scrub-withheld files: 84 (see WITHHELD.md).
-
-## Withheld by identity guard (14 Oct 2026)
-Test files that hard-code a person (name, Dr title, doctor slug or email). Path and rule only.
-
-- lib/__tests__/case-ask-core.test.ts (email)
+- Source repo: even-cdmss (working repo; this is a read-only copy of one unmerged branch)
+- Source branch: t4a
+- Source sha: 59949228b6d0c5e37942cc184d6eaef9ba0cf1d8
+- Compared to the main mirror at source sha 9add54697b26de424c9245cf37d7b94b35c15602: 112 added, 106 modified, 377 deleted
+- Mirrored at: 2026-10-14 02:12Z
+- Scrub-withheld files in this delta: 11 (see WITHHELD.md)
+- Identity-literal test files in the delta are withheld (rules ported from tests/unit/no-identity-literals.test.ts); the clinician-id and E11 guards were not run on branch mirrors.

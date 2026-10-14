@@ -58,7 +58,7 @@ const ADMIN: NavGroup[] = [
     items: [
       { href: '/admin/observability', label: 'Observability', Icon: Network, match: ['/admin/appropriateness-runs'] },
       { href: '/admin/opd-audit', label: 'OPD Audit', Icon: Activity, match: ['/admin/opd-audit/doctors', '/admin/opd-audit/doctor'] },
-      { href: '/admin/ipd-audit', label: 'IPD Discharge Audit', Icon: FileText, match: ['/admin/ipd-audit/search', '/admin/ipd-audit/calendar', '/admin/ipd-audit/episodes'] },
+      { href: '/admin/ipd-audit', label: 'IPD Discharge Audit', Icon: FileText, match: ['/admin/ipd-audit/search', '/admin/ipd-audit/calendar'] },
       // Scoring policy sits immediately after IPD Discharge Audit (PRD §5.1) — it governs how that
       // audit's completeness is weighted, so it reads as a setting on the thing above it.
       { href: '/admin/scoring-policy', label: 'Scoring policy', Icon: SlidersHorizontal },
@@ -167,11 +167,7 @@ function isCareBriefRoute(pathname: string): boolean {
 
 /** The IPD audit REPORT route `/admin/ipd-audit/<id>` — and only it — joins the full-bleed set
  *  (PDF beside findings needs the width). The named children (search, calendar) keep the shell. */
-// 'episodes' joins the named children with the IPD Episode Audit (2 Sep 2026): the episode LIST
-// is a normal shelled page, so it must not be mistaken for `/admin/ipd-audit/<id>` and given the
-// report route's full-bleed treatment. The episode DETAIL page is two segments deep and never
-// matched this predicate at all.
-const IPD_NAMED_CHILDREN = new Set(['search', 'calendar', 'episodes']);
+const IPD_NAMED_CHILDREN = new Set(['search', 'calendar']);
 function isIpdAuditReportRoute(pathname: string): boolean {
   const seg = pathname.match(/^\/admin\/ipd-audit\/([^/]+)\/?$/)?.[1];
   return !!seg && !IPD_NAMED_CHILDREN.has(seg);
