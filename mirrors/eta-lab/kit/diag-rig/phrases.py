@@ -5,7 +5,7 @@ import hashlib
 import json
 
 CANARY = "supercalifragilisticexpialidocious"
-KANGLISH_APPROVED = True    # V approved code-mixed speech (Fable 26 Sep 21:45); gate kept in generate.build_suite. Was: V flips this (the flag is NOT part of PHRASESET_SHA; the phrase list is) once he has read the list
+KANGLISH_APPROVED = False   # V flips this (the flag is NOT part of PHRASESET_SHA; the phrase list is) once he has read the list
 
 PHRASES = {
     "en": [
