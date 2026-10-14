@@ -65,17 +65,3 @@ def energy_series(chunks, workers=8):
     with cf.ThreadPoolExecutor(workers) as ex:
         for s in ex.map(one, chunks): out.extend(s)
     return sorted(out)
-
-
-if __name__ == "__main__":       # ~/.venv-r2/bin/python r2audio.py fetch <room_day_id> <start_ms> <end_ms>
-    import sys
-    if len(sys.argv) == 5 and sys.argv[1] == "fetch":
-        rd, a, b = sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
-        if not all(c.isalnum() or c == "_" for c in rd): raise SystemExit("bad room_day_id")
-        q = (f"SELECT c.r2_key, (extract(epoch from c.started_at)*1000)::bigint AS s, c.duration_ms FROM bench_chunk c "
-             f"WHERE c.session_id IN (SELECT DISTINCT session_id FROM bench_window WHERE room_day_id = '{rd}') "
-             f"AND coalesce(c.source,'primary')='primary' AND c.upload_state='verified' ORDER BY c.started_at")
-        rows = json.loads(subprocess.run(["node", os.path.expanduser("~/dev/eta-lab/kit/neon-select.mjs"), q],
-                                         cwd=os.path.expanduser("~/dev/Even-Transcription-Assistant"), capture_output=True, text=True).stdout)
-        keys = [c["r2_key"] for c in rows if int(c["s"]) < b and int(c["s"]) + int(c["duration_ms"]) > a]
-        fetch(keys); print(f"FETCHED {len(keys)} chunks")

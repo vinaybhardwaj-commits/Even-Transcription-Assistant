@@ -1,100 +1,18 @@
 {
   "_note": "PALIMPSEST lane registry stub (spec v2.3 section 4). 'complete window' = every lane here has an ok/empty/skipped row. Lanes as present in the REB store on 2026-10-08 (from reb/<date>/index.jsonl: layer, engine, versions, distinct config_hash counts, earliest date) plus router-twin. Not authoritative for which versions are current; adding a lane never backfills silently.",
   "lanes": [
-    {
-      "layer": "acoustics",
-      "engine": "room_profile_acoustics",
-      "version": "v1",
-      "cfg8": "writer.config_hash(config)",
-      "since_date": "2026-09-26"
-    },
-    {
-      "layer": "diar",
-      "engine": "pyannote-local-twin",
-      "version": "v1",
-      "cfg8": "writer.config_hash(config) (2 configs seen)",
-      "since_date": "2026-09-26"
-    },
-    {
-      "layer": "stt",
-      "engine": "whisper-auto",
-      "version": "v1",
-      "cfg8": "writer.config_hash(config) (2 configs seen)",
-      "since_date": "2026-08-23"
-    },
-    {
-      "layer": "stt",
-      "engine": "whisper-forced-en",
-      "version": "v1",
-      "cfg8": "writer.config_hash(config) (2 configs seen)",
-      "since_date": "2026-08-23"
-    },
-    {
-      "layer": "stt",
-      "engine": "whisper-cap2",
-      "version": "v1",
-      "cfg8": "writer.config_hash(config) (2 configs seen)",
-      "since_date": "2026-08-23"
-    },
-    {
-      "layer": "stt",
-      "engine": "indic-conformer",
-      "version": "hf-l4-backfill-1|hf-l4-backfill-2",
-      "cfg8": "writer.config_hash(config) (10 configs seen)",
-      "since_date": "2026-09-18"
-    },
-    {
-      "layer": "stt",
-      "engine": "indic-ctc-hi|kn|ml|ta|te",
-      "version": "v1",
-      "cfg8": "writer.config_hash(config)",
-      "since_date": "2026-08-23",
-      "note": "older per-language engine names; superseded by indic-conformer"
-    },
-    {
-      "layer": "stt",
-      "engine": "sravaani",
-      "version": "v1|hf-l4-backfill-1|hf-l4-backfill-2",
-      "cfg8": "writer.config_hash(config) (3 configs seen)",
-      "since_date": "2026-08-23"
-    },
-    {
-      "layer": "stt",
-      "engine": "koyal",
-      "version": "box-t4-koyal-1|hf-l4-koyal-1",
-      "cfg8": "writer.config_hash(config) (8 configs seen; prompt language in config.lang)",
-      "since_date": "2026-09-09"
-    },
-    {
-      "layer": "stt",
-      "engine": "medasr",
-      "version": "hf-l4-medasr-1|hf-l4-medasr-2",
-      "cfg8": "writer.config_hash(config) (2 configs seen)",
-      "since_date": "2026-09-26"
-    },
-    {
-      "layer": "terms",
-      "engine": "medasr",
-      "version": "v1",
-      "cfg8": "writer.config_hash(config)",
-      "since_date": "2026-09-27",
-      "note": "to be aliased as layer medical (spec section 3)"
-    },
-    {
-      "layer": "terms",
-      "engine": "whisper-med-merged",
-      "version": "v1",
-      "cfg8": "writer.config_hash(config)",
-      "since_date": "2026-09-27",
-      "note": "to be aliased as layer medical (spec section 3)"
-    },
-    {
-      "layer": "stt",
-      "engine": "router-twin-<stack>",
-      "version": "pinned_prod_sha[:8]",
-      "cfg8": "cfg8 = sha256(run_id + stack json + routers json)[:8], a run hash, not config_hash(config) (kit/reb/from_hist.py)",
-      "since_date": "2026-10-08",
-      "note": "stack in box|c3s0|c3s1|c4s0|c4s1 (others: mini, node-port); fed by from_hist.py; conf is null when the source gave no score; readers must not rank on null conf"
-    }
+    {"layer": "acoustics", "engine": "room_profile_acoustics", "version": "v1", "cfg8": "writer.config_hash(config)", "since_date": "2026-09-26"},
+    {"layer": "diar", "engine": "pyannote-local-twin", "version": "v1", "cfg8": "writer.config_hash(config) (2 configs seen)", "since_date": "2026-09-26"},
+    {"layer": "stt", "engine": "whisper-auto", "version": "v1", "cfg8": "writer.config_hash(config) (2 configs seen)", "since_date": "2026-08-23"},
+    {"layer": "stt", "engine": "whisper-forced-en", "version": "v1", "cfg8": "writer.config_hash(config) (2 configs seen)", "since_date": "2026-08-23"},
+    {"layer": "stt", "engine": "whisper-cap2", "version": "v1", "cfg8": "writer.config_hash(config) (2 configs seen)", "since_date": "2026-08-23"},
+    {"layer": "stt", "engine": "indic-conformer", "version": "hf-l4-backfill-1|hf-l4-backfill-2", "cfg8": "writer.config_hash(config) (10 configs seen)", "since_date": "2026-09-18"},
+    {"layer": "stt", "engine": "indic-ctc-hi|kn|ml|ta|te", "version": "v1", "cfg8": "writer.config_hash(config)", "since_date": "2026-08-23", "note": "older per-language engine names; superseded by indic-conformer"},
+    {"layer": "stt", "engine": "sravaani", "version": "v1|hf-l4-backfill-1|hf-l4-backfill-2", "cfg8": "writer.config_hash(config) (3 configs seen)", "since_date": "2026-08-23"},
+    {"layer": "stt", "engine": "koyal", "version": "box-t4-koyal-1|hf-l4-koyal-1", "cfg8": "writer.config_hash(config) (8 configs seen; prompt language in config.lang)", "since_date": "2026-09-09"},
+    {"layer": "stt", "engine": "medasr", "version": "hf-l4-medasr-1|hf-l4-medasr-2", "cfg8": "writer.config_hash(config) (2 configs seen)", "since_date": "2026-09-26"},
+    {"layer": "terms", "engine": "medasr", "version": "v1", "cfg8": "writer.config_hash(config)", "since_date": "2026-09-27", "note": "to be aliased as layer medical (spec section 3)"},
+    {"layer": "terms", "engine": "whisper-med-merged", "version": "v1", "cfg8": "writer.config_hash(config)", "since_date": "2026-09-27", "note": "to be aliased as layer medical (spec section 3)"},
+    {"layer": "stt", "engine": "router-twin-<stack>", "version": "pinned_prod_sha[:8]", "cfg8": "sha256(run_id + json.dumps(provenance.stack, sort_keys=True) + json.dumps(routers))[:8] (kit/reb/from_hist.py; NOT writer.config_hash)", "since_date": "2026-10-08", "note": "stack in box|c3s0|c3s1|c4s0|c4s1 (others: mini, node-port); fed by from_hist.py"}
   ]
 }

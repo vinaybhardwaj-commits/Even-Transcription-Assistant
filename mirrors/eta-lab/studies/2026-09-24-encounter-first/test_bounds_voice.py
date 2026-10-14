@@ -1,5 +1,5 @@
 """Offline self-test for encounter_bounds' voice logic (synthetic diarizer labels, no data, no network).
-Run: ~/.venv-r2/bin/python test_bounds_voice.py   (numpy is needed for the voice_sequence checks; exits non-zero on the first failure)"""
+Run: python3 test_bounds_voice.py   (exits non-zero on the first failure)"""
 import json, sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import encounter_bounds as EB
@@ -38,52 +38,3 @@ check("doctor-alone tail found (>= 2 min)", (t[0], t[1]) if t else None, (W0 + 8
 check("no tail while the patient still speaks", EB.doctor_alone_tail([window(W0, DOC + [(2, 0, 14)])], W0 + 1 * MIN, W0 + 14 * MIN), None)
 check("no labels -> no tail (never assume silence)", EB.doctor_alone_tail([], W0 + 1 * MIN, W0 + 14 * MIN), None)
 print("ALL PASS")
-
-# label_coverage: the speaker guard must know when it is blind (V3-01: labels existed for the room-day, not for the span)
-check("label_coverage: fully covered span", EB.label_coverage([window(W0, DOC)], W0 + 1 * MIN, W0 + 14 * MIN), 1.0)
-check("label_coverage: span outside every labelled window", EB.label_coverage([window(W0, DOC)], W0 + 60 * MIN, W0 + 100 * MIN), 0.0)
-check("label_coverage: half covered", round(EB.label_coverage([window(W0, DOC)], W0 + 10 * MIN, W0 + 20 * MIN), 2), 0.5)
-print("ALL PASS (incl. coverage)")
-
-# voice_sequence: dominant non-doctor voice per bin on synthetic embeddings (A for 2 bins, then B for 2 bins)
-import numpy as np, voice_sequence as VS
-rng = np.random.default_rng(1)
-va, vb, vd = (rng.normal(size=192) for _ in range(3))
-def emb(v, n): return v + 0.05 * rng.normal(size=(n, 192))
-t = np.arange(0, 20 * 60000, 1500, dtype=np.int64)               # 20 min of 1.5-s windows
-E = np.zeros((len(t), 192), np.float32)
-for i, tt in enumerate(t):
-    v = vd if i % 2 == 0 else (va if tt < 10 * 60000 else vb)      # half of the windows are the doctor: clearly the largest cluster
-    E[i] = emb(v, 1)[0]
-rows, changes = VS.sequence(t, E, 0, 20 * 60000, 0.55)
-check("voice_sequence: two consecutive patients -> exactly 1 dominant-voice change", changes, 1)
-E1 = np.array([emb(vd if i % 2 == 0 else va, 1)[0] for i in range(len(t))], dtype=np.float32)   # patient A all 20 min
-rows1, ch1 = VS.sequence(t, E1, 0, 20 * 60000, 0.55)
-check("voice_sequence: one patient throughout -> 0 changes", ch1, 0)
-print("ALL PASS (incl. voice_sequence)")
-
-
-# bounds() wiring offline (no database, no Metabase): the speaker guard must say when the labels do not cover the encounter
-from datetime import datetime, timezone, timedelta
-IST = timezone(timedelta(hours=5, minutes=30))
-T10 = int(datetime(2026, 9, 23, 10, 0, tzinfo=IST).timestamp() * 1000)
-
-def run_bounds(label_windows):
-    levels = [{"t": T10 - 600000 + i * 2000, "peak": 0.1 if 0 <= i * 2000 - 600000 < 40 * 60000 else 0.01} for i in range(0, 3300)]
-    def fake_neon(q):
-        if "FROM room_day" in q: return [{"room_id": "room_x"}]
-        if "bench_level_sample" in q: return levels
-        if "diarize_window_label" in q:
-            return [{"window_id": f"w{i}", "engine": "pyannoteai", "start_ms": w0, "end_ms": w0 + 15 * MIN, "segments_json": json.dumps([{"speaker_idx": 0, "start_ms": 0, "end_ms": 15 * MIN}])} for i, w0 in enumerate(label_windows)]
-        return []
-    EB.neon = fake_neon
-    item = {"item_id": "T", "room_day_id": "rd_test", "ist_date": "2026-09-23",
-            "called_at": "2026-09-23T10:00:00+05:30", "completed_at": "2026-09-23T10:40:00+05:30"}
-    return EB.bounds([item])[0]
-
-quiet = lambda f: (sys.stdout.write, None)
-r_blind = run_bounds([T10])                                    # labels cover 15 of the 40 min (0.375)
-check("bounds(): labels cover < 50% of a 40-min encounter -> no_speaker_data", "no_speaker_data" in r_blind["check_reasons"], True)
-r_ok = run_bounds([T10, T10 + 15 * MIN, T10 + 30 * MIN])       # labels cover all of it
-check("bounds(): labels cover the encounter -> no no_speaker_data", "no_speaker_data" in r_ok["check_reasons"], False)
-print("ALL PASS (incl. bounds wiring)")

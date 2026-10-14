@@ -10,19 +10,12 @@ Deliberate deviations/decisions (flagged for review):
   writer.config_hash(config). So write_track() cannot be used (it enforces config_hash == config_hash(config)); this module
   calls writer's manifest/index/lock helpers directly. `routers` = [hist["router"]] (the one router port that served the file).
 * t0/t1: the window's REB manifest if one exists (tape clock, authoritative), else the hist file's start/end.
-* A window with NO REB manifest that BACKFILL plans (any windows-reb/manifest-<day>.jsonl) is deferred, never written (ORDERS-2c).
 * A hist-created manifest has no audio of its own: audio.r2_key = "hist-chunks:<first chunk key>", sha256 "unknown:from_hist",
   sample_rate 0 so validate_manifest passes and other writers can still append; clock "approx".
-* A conflict (same track name, different sha256) is never overwritten; the new body goes to
-  <window>/tracks/_conflicts/<trackname>.conflict-<ts>.json (ORDERS-2b R4), so tracks/*.json holds only real tracks.
-* cfg8 = sha256(run_id + stack json + routers json)[:8], a run hash, not config_hash(config) (ORDERS-2b R1).
-* conf is null when the source gave no score (34k hist segments have neither score nor confidence); null conf means
-  "source gave no score", NOT low confidence. Readers must not rank on null conf (ORDERS-2b R9).
-* extras.mining_only is copied as-is from the hist file's top-level key; omitted if absent (R8).
+* A conflict file (<track>.conflict-<ts>.json) sits in tracks/ beside the original, as ordered; readers globbing tracks/*.json see it.
 """
 import argparse
 import datetime
-import glob
 import hashlib
 import importlib.util
 import json
@@ -39,18 +32,13 @@ IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 HIST_RUNS = os.path.expanduser("~/eta-data/hist/runs")
 REB_ROOT = os.path.expanduser("~/eta-data/reb")
 HELDOUT_PY = os.path.expanduser("~/eta-data/drtpqma/heldout.py")
-HELDOUT_PY_SHA16 = "880404e36fd6b650"
-HELDOUT_PY_SHA16S = (HELDOUT_PY_SHA16,)   # the swapped heldout.py (empty union); the pre-swap f672c1ef046089dd is no longer accepted (BLINDLIFT-1 follow-up, architect #11148 step 5)
-# Clips that stay SEALED although the held-out room-days are lifted (architect #11062/#11071, gating-lead #10998 item 1): the four lid-debug clips. A window
-# with one of these ids is never converted here (and never uploaded by the collector): counted as `sealed`.
-SEALED_WINDOWS = frozenset({"L041", "L057", "L139", "L182"})
-WREB = os.path.expanduser("~/eta-data/hist/windows-reb")   # BACKFILL worklists: WREB/manifest-<day>.jsonl (launch_lane.py:20,103-105)
+HELDOUT_PY_SHA16 = "f672c1ef046089dd"
 ALIAS_FILE = os.path.expanduser("~/eta-data/reb-aliases/REB-ALIAS-45-from-map-9ba4795e.json")
 ALIAS_SHA8 = "09c25ccb"
 OUT_DIR = "/home/eta/oc/palimpsest/out"
 LAYER = "stt"
-COUNTERS = ("seen", "sealed", "written", "empty", "failed", "ok", "degraded", "skipped_existing", "conflicts", "blind_refused",
-            "would_write", "worklist_rows", "start_resolved", "attempts_carried", "deferred_backfill_window", "alias_resolved", "t0_from_manifest", "t0_mismatch", "new_manifest", "errors")
+COUNTERS = ("seen", "written", "empty", "failed", "ok", "degraded", "skipped_existing", "conflicts", "blind_refused",
+            "would_write", "alias_resolved", "t0_from_manifest", "t0_mismatch", "new_manifest", "errors")
 
 
 class GuardUnavailable(SystemExit):
@@ -58,10 +46,10 @@ class GuardUnavailable(SystemExit):
 
 
 def load_heldout(path=HELDOUT_PY):
-    """FAIL-CLOSED: returns is_held(day, room) only if heldout.py has one of the expected sha16s (HELDOUT_PY_SHA16S) and its union loads and verifies."""
+    """FAIL-CLOSED: returns is_held(day, room) only if heldout.py has the expected sha16 and its union loads and verifies."""
     try:
         raw = open(path, "rb").read()
-        if hashlib.sha256(raw).hexdigest()[:16] not in HELDOUT_PY_SHA16S:
+        if hashlib.sha256(raw).hexdigest()[:16] != HELDOUT_PY_SHA16:
             raise ValueError("heldout.py sha16 mismatch")
         spec = importlib.util.spec_from_file_location("heldout", path)
         mod = importlib.util.module_from_spec(spec)
@@ -86,53 +74,6 @@ def load_aliases(path=ALIAS_FILE):
     if hashlib.sha256(raw).hexdigest()[:8] != ALIAS_SHA8:
         raise GuardUnavailable("alias map sha8 mismatch; refusing")
     return json.loads(raw)
-
-
-def load_backfill_windows(wreb=WREB):
-    """Windows BACKFILL plans from windows-reb/manifest-<day>.jsonl (rows: win_id, room, ist_date, start, end). Returns a set of
-    (room, id-without-leading-"c-") and (room, start_ms) keys; hist/REB ids carry a "c-" prefix that the worklists lack."""
-    keys = set()
-    rows = 0
-    for f in sorted(glob.glob(os.path.join(wreb, "manifest-*.jsonl"))):
-        for line in open(f):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                r = json.loads(line)
-                keys.add((r["room"], re.sub(r"^c-", "", r["win_id"])))
-                keys.add((r["room"], parse_iso_ms(r["start"])))
-                rows += 1
-            except (ValueError, KeyError, TypeError):
-                continue
-    if rows == 0:   # FAIL CLOSED: an unreadable/missing/empty worklist dir must never silently mean "nothing to defer"
-        raise GuardUnavailable(f"no BACKFILL worklist rows read from {wreb}/manifest-*.jsonl; refusing (would not defer anything)")
-    return keys, rows
-
-
-def is_backfill_window(keys, room, wid, t0_ms):
-    return (room, re.sub(r"^c-", "", wid)) in keys or (room, t0_ms) in keys
-
-
-ATTEMPT_RE = re.compile(r"\.attempt\d*\.json$")
-
-
-def read_attempts(path):
-    """Superseded tries <window_id>.attemptN.json beside the final <window_id>.json: evidence only, never converted alone and
-    never any transcript text. -> [{n, file, state, ok, error, router_status, created_at, n_segments}] ordered by n."""
-    stem = path[:-5]
-    out = []
-    for f in glob.glob(glob.escape(stem) + ".attempt*.json"):
-        m = re.search(r"\.attempt(\d*)\.json$", f)
-        try:
-            a = json.load(open(f))
-        except (OSError, json.JSONDecodeError):
-            out.append({"n": int(m.group(1) or 0), "file": os.path.basename(f), "unreadable": True})
-            continue
-        out.append({"n": int(m.group(1) or 0), "file": os.path.basename(f), "state": a.get("state"), "ok": a.get("ok"),
-                    "error": a.get("error"), "router_status": a.get("router_status"),
-                    "created_at": (a.get("provenance") or {}).get("created_at"), "n_segments": len(a.get("segments") or [])})
-    return sorted(out, key=lambda x: x["n"])
 
 
 def parse_iso_ms(s):
@@ -178,7 +119,7 @@ def degraded_of(hist, n_segments, n_refused=0):
     return bool(reasons), "; ".join(reasons) or None
 
 
-def build_track(hist, t0_ms, attempts=None):
+def build_track(hist, t0_ms):
     """-> (track dict, status). Pure function of the hist file and t0_ms (no clock reads), so re-running is byte-identical."""
     prov = hist.get("provenance") or {}
     stack = stack_of(hist)
@@ -227,9 +168,7 @@ def build_track(hist, t0_ms, attempts=None):
                     "gap_s": cut.get("gap_s"), "duration_s": cut.get("duration_s"),
                     "chunk_r2_keys": [c.get("r2_key") for c in (cut.get("chunks_used") or [])],
                     "chunks_dropped": cut.get("chunks_dropped")},
-            **({"mining_only": hist["mining_only"]} if "mining_only" in hist else {}),
             "n_segments": len(segs), "n_refused": n_refused, "assembled_collapse": hist.get("assembled_collapse"),
-            **({"attempts": attempts} if attempts else {}),
             "degraded": degraded, "degraded_reason": why,
         },
     }
@@ -273,30 +212,6 @@ def find_window(root, room, wid, hist_t0_ms, hist_date_dir, aliases):
     return dates[0], wid, None, False
 
 
-def index_manifests_by_start(root):
-    """{(room, t0_ms): (ist_date, window_id)} over the REB manifests on disk (one pass per run). Used to resolve a hist window whose
-    id has no manifest but whose room + start already has one under another id (spec section 2)."""
-    idx = {}
-    if not os.path.isdir(root):
-        return idx
-    for date in os.listdir(root):
-        dd = os.path.join(root, date)
-        if not os.path.isdir(dd) or date.startswith("_"):
-            continue
-        for room in os.listdir(dd):
-            rd = os.path.join(dd, room)
-            if not os.path.isdir(rd):
-                continue
-            for wid in os.listdir(rd):
-                p = os.path.join(rd, wid, "manifest.json")
-                try:
-                    m = json.load(open(p))
-                    idx.setdefault((room, int(m["t0_ms"])), (date, wid))
-                except (OSError, ValueError, KeyError, TypeError):
-                    continue
-    return idx
-
-
 def iter_hist(runs_dir, run=None, since=None):
     for r in sorted(os.listdir(runs_dir)):
         if run and r != run:
@@ -313,41 +228,19 @@ def iter_hist(runs_dir, run=None, since=None):
                 dd = os.path.join(rd, room, date)
                 if os.path.isdir(dd):
                     for f in sorted(os.listdir(dd)):
-                        if f.endswith(".json") and not ATTEMPT_RE.search(f):
+                        if f.endswith(".json"):
                             yield os.path.join(dd, f), date
 
 
-def convert_one(path, date_dir, root, is_held, aliases, write, outbox, ts, cnt, backfill=frozenset(), deferred=None, start_index=None):
+def convert_one(path, date_dir, root, is_held, aliases, write, outbox, ts, cnt):
     cnt["seen"] += 1
     hist = json.load(open(path))
     room = hist["room_id"]
     h0, h1 = parse_iso_ms(hist["start"]), parse_iso_ms(hist["end"])
-    if hist.get("window_id") in SEALED_WINDOWS:
-        cnt["sealed"] += 1
-        return
     if window_held(is_held, room, h0, h1):
         cnt["blind_refused"] += 1
         return
     ist_date, wid, manifest, alias_used = find_window(root, room, hist["window_id"], h0, date_dir, aliases)
-    if wid in SEALED_WINDOWS:   # by the id the window resolved to (an existing manifest or an alias); the start-index match is checked below, before its manifest is opened
-        cnt["sealed"] += 1
-        return
-    if manifest is None and start_index:
-        hit = start_index.get((room, h0))
-        if hit:   # same room + same start already has a manifest under another id: write INTO it (never a second manifest)
-            ist_date, wid = hit
-            if wid in SEALED_WINDOWS:   # a start match must not write INTO a sealed window's manifest: checked BEFORE that manifest is opened
-                cnt["sealed"] += 1
-                return
-            manifest = json.load(open(os.path.join(root, ist_date, room, wid, "manifest.json")))
-            cnt["start_resolved"] += 1
-    if manifest is None and is_backfill_window(backfill, room, wid, h0):
-        # BACKFILL will write this window's real manifest (real audio); a placeholder manifest made here would win the race and
-        # write_track would then ignore BACKFILL's stub. Defer: a later per-chunk run writes it once the manifest exists.
-        cnt["deferred_backfill_window"] += 1
-        if deferred is not None:
-            deferred.append({"window_id": wid, "room": room, "date": date_dir, "run_path": path})
-        return
     if alias_used:
         cnt["alias_resolved"] += 1
     if manifest:
@@ -362,10 +255,7 @@ def convert_one(path, date_dir, root, is_held, aliases, write, outbox, ts, cnt, 
         t0, t1 = h0, h1
         cnt["new_manifest"] += 1
     hist = dict(hist, window_id=wid)
-    attempts = read_attempts(path)
-    if attempts:
-        cnt["attempts_carried"] += len(attempts)
-    track, status = build_track(hist, t0, attempts)
+    track, status = build_track(hist, t0)
     cnt[{"ok": "ok", "empty": "empty", "failed": "failed"}[status]] += 1
     if track["extras"]["degraded"]:
         cnt["degraded"] += 1
@@ -384,15 +274,18 @@ def convert_one(path, date_dir, root, is_held, aliases, write, outbox, ts, cnt, 
         else:
             cnt["conflicts"] += 1
             if write:
-                cdir = os.path.join(tdir, "_conflicts")
-                os.makedirs(cdir, exist_ok=True)
-                writer._write_file_atomic_create(os.path.join(cdir, fname[:-5] + f".conflict-{ts}.json"), body)
+                writer._write_file_atomic_create(path_out[:-5] + f".conflict-{ts}.json", body)
         return
     if not write:
         cnt["would_write"] += 1
         return
+    os.makedirs(tdir, exist_ok=True)
+    writer._write_file_atomic_create(path_out, body)
     started = hist.get("started_at") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     finished = (hist.get("provenance") or {}).get("created_at") or started
+    entry = {"layer": track["layer"], "engine": track["engine"], "model": track["model"], "version": track["version"],
+             "config_hash": track["config_hash"], "status": status, "reason": track["reason"], "machine": track["machine"],
+             "started_at": started, "finished_at": finished, "path": os.path.relpath(path_out, root), "sha256": sha}
     cut = hist.get("cut") or {}
     first = ((cut.get("chunk_keys") or [None])[0]) or "none"
     stub = {"window_id": wid, "room_id": room, "room_slug": room, "ist_date": ist_date, "t0_ms": t0, "t1_ms": t1,
@@ -400,27 +293,29 @@ def convert_one(path, date_dir, root, is_held, aliases, write, outbox, ts, cnt, 
             "audio": {"r2_key": f"hist-chunks:{first}", "sha256": "unknown:from_hist", "sample_rate": 0,
                       "duration_ms": int(round(float(cut.get("duration_s") or (t1 - t0) / 1000) * 1000))}}
     try:
-        writer.write_track(root, ist_date, room, wid, track, manifest_stub=stub, started_at=started, finished_at=finished,
-                           config_hash=track["config_hash"])
-    except writer.TrackExistsError:   # lost a create race: same body => skipped, different => conflict (never overwrite)
-        if hashlib.sha256(open(path_out, "rb").read()).hexdigest() == sha:
-            cnt["skipped_existing"] += 1
-        else:
-            cnt["conflicts"] += 1
-        return
-    entry_path = os.path.relpath(path_out, root)
+        writer._write_manifest_entry(root, ist_date, room, wid, stub, entry, path_out)
+    except Exception:
+        try:
+            os.unlink(path_out)   # nothing durable references the track yet: roll back like write_track
+        except OSError:
+            pass
+        raise
+    writer._append_index_line(root, ist_date, {
+        "window_id": wid, "room_id": room, "path": entry["path"], "layer": track["layer"], "engine": track["engine"],
+        "version": track["version"], "config_hash": track["config_hash"], "status": status, "sha256": sha,
+        "source_kind": "room_tape"})
     os.makedirs(os.path.dirname(outbox), exist_ok=True)
     line = {"window_id": wid, "ist_date": ist_date, "room_id": room, "t0_ms": t0, "t1_ms": t1, "layer": track["layer"],
             "engine": track["engine"], "model": track["model"], "version": track["version"],
             "config_hash": track["config_hash"], "shadow": False, "status": status, "reason": track["reason"],
-            "machine": track["machine"], "r2_key": "reb/" + entry_path, "sha256": sha, "bytes": len(body),
+            "machine": track["machine"], "r2_key": "reb/" + entry["path"], "sha256": sha, "bytes": len(body),
             "started_at": started, "finished_at": finished}
     with open(outbox, "a") as f:
         f.write(json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n")
     cnt["written"] += 1
 
 
-def run(args, runs_dir=HIST_RUNS, root=REB_ROOT, is_held=None, aliases=None, outbox=None, log_dir=OUT_DIR, wreb=WREB):
+def run(args, runs_dir=HIST_RUNS, root=REB_ROOT, is_held=None, aliases=None, outbox=None, log_dir=OUT_DIR):
     if args.write and r2_mirror.enabled():
         sys.exit("REB_R2_MIRROR is on: from_hist must not push to R2 in this step; unset it")
     is_held = is_held or load_heldout()
@@ -429,14 +324,11 @@ def run(args, runs_dir=HIST_RUNS, root=REB_ROOT, is_held=None, aliases=None, out
     outbox = outbox or os.path.join(root, "_outbox", "index-pending.jsonl")
     ts = time.strftime("%Y%m%dT%H%M%S")
     cnt = {k: 0 for k in COUNTERS}
-    backfill, cnt["worklist_rows"] = load_backfill_windows(wreb)   # raises (fail closed) if it reads 0 rows
-    start_index = index_manifests_by_start(root)
-    deferred = []
     for i, (p, date_dir) in enumerate(iter_hist(runs_dir, args.run, args.since)):
         if args.limit and i >= args.limit:
             break
         try:
-            convert_one(p, date_dir, root, is_held, aliases, args.write, outbox, ts, cnt, backfill, deferred, start_index)
+            convert_one(p, date_dir, root, is_held, aliases, args.write, outbox, ts, cnt)
         except Exception as e:  # noqa: BLE001 - one bad file never stops the batch; count only, class only
             cnt["errors"] += 1
             cnt.setdefault("error_classes", {})
@@ -447,9 +339,6 @@ def run(args, runs_dir=HIST_RUNS, root=REB_ROOT, is_held=None, aliases=None, out
         os.makedirs(log_dir, exist_ok=True)
         with open(os.path.join(log_dir, f"from_hist-{ts}.log"), "w") as f:
             f.write(summary + "\n")
-        if deferred:
-            with open(os.path.join(log_dir, f"from_hist-deferred-{ts}.jsonl"), "w") as f:
-                f.writelines(json.dumps(d, sort_keys=True) + "\n" for d in deferred)
     print(summary)
     return cnt
 
