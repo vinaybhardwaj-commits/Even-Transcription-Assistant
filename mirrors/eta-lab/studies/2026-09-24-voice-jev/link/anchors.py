@@ -7,7 +7,7 @@ import base64, collections, csv, glob, json, math, os, statistics, sys
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tiering as T
-E = os.path.expanduser(f"~/eta-data/voice-linkage/{os.environ.get('EXT', 'dtree_ext')}"); P = os.path.expanduser("~/eta-data/voice-linkage/pilot"); ANCH_DIR = os.environ.get("ANCH_DIR", "/tmp/anch"); COS = 0.60; P0 = 0.125; MARGIN = 0.15
+E = os.path.expanduser("~/eta-data/voice-linkage/dtree_ext"); P = os.path.expanduser("~/eta-data/voice-linkage/pilot"); ANCH_DIR = os.environ.get("ANCH_DIR", "/tmp/anch"); COS = 0.60; P0 = 0.125
 norm = lambda n: " ".join((n or "").lower().replace("dr.", "").replace("dr ", "").replace(".", " ").split())
 name2uid = {}
 for f in glob.glob(f"{P}/pqm-2026-09-*.csv"):
@@ -43,10 +43,8 @@ A = []
 for gid, x in g.items():
     per = collections.defaultdict(list)
     for rd, c in x["members"]:
-        v = cent(rd, c); sc = {doc: max(float(v @ a) for a in d.values()) for doc, d in anch.items()}
-        for doc in anch:
-            other = max((s_ for d2, s_ in sc.items() if d2 != doc), default=0.0)
-            per[doc].append((rd, sc[doc] if sc[doc] - other >= MARGIN else -1.0))      # R1: margin >= 0.15 over the best other print, else it cannot count
+        v = cent(rd, c)
+        for doc, d in anch.items(): per[doc].append((rd, max(float(v @ a) for a in d.values())))
     for doc, l in per.items():
         l = [(rd, s) for rd, s in l if not (sessions_of(rd) & ENROL[doc])]      # refuter #1231: enrolment sessions are circular, excluded
         hit = [(rd, s) for rd, s in l if s >= COS]

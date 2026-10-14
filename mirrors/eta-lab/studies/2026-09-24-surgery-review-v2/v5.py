@@ -12,10 +12,10 @@ ones, unchanged, and are shown when EITHER is yes (>= 0.5). Keys that do not app
 """
 import copy
 import v3
-from jevconfig import RECALL_CUT, GATE_CUT  # W41 F4: moved, not changed (still 0.25 / 0.5)
 
 WORDING_VERSION = "u9-v5.0"
 FROZEN_SHA256 = "4830ae152bf4167e8117fd150c28f9ed3e36de690b625333114e6417a7b17dec"  # V5-WORDING-FROZEN.md (Fable ruling 199); check_frozen() refuses a changed wording
+RECALL_CUT = 0.25
 
 A = {
     "named": {"type": "noul", "instructions":
@@ -41,6 +41,7 @@ CATEGORIES = ("operation", "intervention", "minor", "imaging_ct")
 
 # STAGE a0 (eta-refuter-2 #652, trial in V5-IMAGING-SCOPE-TRIAL.md): is a doctor talking WITH a present patient? Staff case talk / pre-op handovers about an ABSENT patient are held BEFORE any status question,
 # so they are never counted as proposals (CT02). Not a rater-facing question: only the recall score and the hold reason are recorded.
+GATE_CUT = 0.5
 A0 = {"present": {"type": "noul", "instructions":
     "Is this a consultation in which a doctor is talking WITH a patient (or the patient's family or attender) who is present in the room, about that patient's own problem? "
     "Answer NO if it is clinicians or staff talking among themselves about a patient who is not present (a case presentation, a pre-operative or ward handover, a discussion of a booking or theatre list, staff chat) "

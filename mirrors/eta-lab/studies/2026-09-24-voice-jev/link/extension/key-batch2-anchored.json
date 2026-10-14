@@ -99,36 +99,5 @@
    "216"
   ],
   "clip_days": 3
- },
- {
-  "card_id": "66175d",
-  "gid": "g088",
-  "tier": "ANCHORED",
-  "kind_note": "known-voice check",
-  "doctor_uid": "F092iDIAfwXKtLCqP8HS",
-  "anchor_cos_by_day": [
-   0.625,
-   0.629
-  ],
-  "members_used": [
-   [
-    "rd_j3psyt5q",
-    "38"
-   ],
-   [
-    "rd_w4bajxvt",
-    "116"
-   ]
-  ],
-  "enrolment_sessions_excluded": [
-   "bs_rjf49y3d"
-  ],
-  "n_room_days_group": 2,
-  "tree": "dtree84",
-  "rep": [
-   "rd_j3psyt5q",
-   "38"
-  ],
-  "clip_days": 2
  }
 ]

@@ -37,7 +37,7 @@ CASES = [
     ("en", "I live at 22, 3rd Cross, Jayanagar, Bangalore 560011 near the temple.", [("22, 3rd Cross, Jayanagar", "address")], []),
     ("en", "He was born on 14/03/1952 in Mysore.", [("14/03/1952", "dob")], []),
     ("en", "Date of birth 03-11-1948, please confirm.", [("03-11-1948", "dob")], []),
-    ("en", "Her birthday, 9th November.", [("9th November", "dob")], []),          # partial date of birth (found in LINK3 b3); no year, so the old shapes missed it
+    ("en", "Daily birthday. 6th July.", [("6th July", "dob")], []),          # partial date of birth (found in LINK3 b3); no year, so the old shapes missed it
     ("en", "His birthday is on 14 March, please note.", [("14 March", "dob")], []),
     ("en", "She was born in October, I think.", [("October", "dob")], []),
     ("en", "Her birthday. 12th March. Hello, what is the date? Please tell me a little more about it, thank you. 12th March. Okay. 12th March.", [("12th March", "dob")], []),  # repeats far from the cue
@@ -81,7 +81,7 @@ CLEAN = [
     "We see many Maharashtrian and Bengali patients here, and some Marathi speakers too.",
     "The surgery is planned for the 11th of August if that suits you.",
     "You can share it to my mail.",
-    "Come on 9th November for the surgery, and again on 14 August for the review.",   # dates with no birth cue stay
+    "Come on 6th July for the surgery, and again on 14 August for the review.",   # dates with no birth cue stay
     "Come and see me with the hearing test and the CT scan.",   # capitalised only as the sentence start; tagged as a person before
 ]
 
