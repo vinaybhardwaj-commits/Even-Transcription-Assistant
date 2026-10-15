@@ -1,0 +1,15 @@
+[Unit]
+Description=mcrec multichannel recorder (ORB3 lab)
+After=sound.target local-fs.target
+
+[Service]
+User=orbox3
+SupplementaryGroups=audio
+ExecStart=/usr/bin/python3 /opt/orb3-multichan/mcrec.py run --config /etc/mcrec/mcrec.json
+Restart=always
+RestartSec=2
+Nice=-5
+StateDirectory=mcrec
+
+[Install]
+WantedBy=multi-user.target
