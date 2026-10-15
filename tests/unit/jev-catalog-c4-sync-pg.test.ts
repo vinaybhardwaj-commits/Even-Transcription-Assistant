@@ -303,25 +303,25 @@ suite("CATALOG-C4-SYNC — Jev and Clef into encounter_catalog", () => {
     expect(H.posted).toHaveLength(0);
     expect((await catalogOf("u_0001"))!.jev).toBeNull();
   });
-  it("CS-2: the budget gone mid-paging stops paging and posts what it collected (INFERRED: needs a non-monotonic scripted clock, the ingest check reads in-budget)", async () => {
+  it("CS-2: the budget gone mid-paging stops paging and posts what it collected (plain monotonic clock)", async () => {
     on();
     bulkWins("p", 520, 3); bulkDecisions("p", 520, SHA["chair-affect"]!, "v0", "{}");
     expect(await runCatalogC4Sync()).toMatchObject({ posted: 500 });   // first tick: page 1 fills the batch
     H.posted.length = 0;
     decide("p_1@ma", "chair-affect", "confusion", { type: "choice", choice: "high" });   // page 1 now holds 1 changed row and 499 unchanged, so page 2 would be read
-    // clock calls: start, page-1 check, page-2 check (over), ingest check (in budget)
-    const r = await runCatalogC4Sync(clock(0, 0, OVER, 0));
+    // clock calls: start, page-1 check, page-2 check (over); no ingest check
+    const r = await runCatalogC4Sync(clock(0, 0, OVER));
     expect(r).toMatchObject({ posted: 1, updated: 1, unchanged: 499, budget_hit: true, error_class: null });
     expect(H.posted).toHaveLength(1);
     expect((H.posted[0] as Array<{ consult_uid: string }>).map((x) => x.consult_uid)).toEqual(["pu_0001"]);
   });
-  it("CS-2: the budget gone before the ingest posts nothing and writes nothing", async () => {
+  it("CS-2: the budget gone after the last page still posts the collected rows (paging did not stop early, so budget_hit is false)", async () => {
     on();
     win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
-    const r = await runCatalogC4Sync(clock(0, 0, OVER));   // start, page-1 check, ingest check
-    expect(r).toMatchObject({ posted: 0, updated: 0, budget_hit: true, error_class: null });
-    expect(H.posted).toHaveLength(0);
-    expect((await catalogOf("u_0001"))!.jev).toBeNull();
+    const r = await runCatalogC4Sync(clock(0, 0, OVER, OVER));   // start, page-1 check, then over for any later read
+    expect(r).toMatchObject({ posted: 1, updated: 1, budget_hit: false, error_class: null });
+    expect(H.posted).toHaveLength(1);
+    expect((await catalogOf("u_0001"))!.jev).not.toBeNull();
   });
   it("CS-2: a tick inside the budget leaves budget_hit false", async () => {
     on();

@@ -21,7 +21,7 @@ export const NOUL_YES_THRESHOLD = 0.5;
 export const BATCH_ROWS = 500;          // store MAX_ROWS
 export const MAX_SETS_PER_ROW = 50;     // store MAX_SETS
 export const WINDOW_DAYS = 8;
-/** CS-2: wall-clock budget for one tick, measured from the step's start; checked before each page select and before the ingest. */
+/** CS-2: wall-clock budget for one tick, measured from the step's start; checked before each page select only (FIX1: the collected rows, at most 500, are always posted; one bounded ingest fits the slack under maxDuration). */
 export const CATALOG_SYNC_BUDGET_MS = 20_000;
 const PAGE = 500;
 const MAX_PAGES = 10;
@@ -160,7 +160,6 @@ export async function runCatalogC4Sync(now: () => number = Date.now): Promise<Ca
     }
     if (c.capped > 0) console.warn(`catalog-c4-sync: jev entries over ${MAX_SETS_PER_ROW} dropped (oldest first): ${c.capped}`);
     if (rows.length === 0) return c;
-    if (overBudget()) { c.budget_hit = true; return c; }   // past the deadline before the ingest: post nothing (the next tick redoes the work)
     const v = validateBatch({ rows });
     if (!v.ok) { c.error_class = `validate_${v.error}`; return c; }
     const res = await ingestCatalogRows(v.rows);
