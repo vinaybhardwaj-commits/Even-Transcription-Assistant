@@ -25,7 +25,7 @@ def test_fever_doctor_dose_and_follow_up(replay_out):
     out, logs = replay_out
     art = logs["synth-fever-dose"]["artifact"]
     gx = art["gp_extraction"]
-    assert logs["synth-fever-dose"]["note_source"] == "llm_stageB-v5"
+    assert logs["synth-fever-dose"]["note_source"] == "llm_stageB-v9"
     assert [m["name"] for m in gx["medicines"]] == ["paracetamol 1 g"]
     assert gx["follow_up"]["followup_type"] == "FOLLOW_UP_WITH_REPORTS" and gx["follow_up"]["followup_date"] == "2026-10-12"
     assert [d["diagnosis_or_impression"] for d in gx["presenting_complaints"]["diagnoses"]] == ["Viral fever"]
@@ -64,9 +64,9 @@ def test_native_consult_without_role_track(replay_out):
 
 def test_fake_client_drives_both_stages(tmp_path):
     c = load_consult(CONSULTS, "synth-fever-dose")
-    fake = FakeClient({"stageA-v2": json.dumps(stage_a("synth-fever-dose")), "stageB-v5": (MODEL / "synth-fever-dose" / "stageB.txt").read_text()})
+    fake = FakeClient({"stageA-v2": json.dumps(stage_a("synth-fever-dose")), "stageB-v9": (MODEL / "synth-fever-dose" / "stageB.txt").read_text()})
     lg = run_consult(c, fake, tmp_path)
-    assert lg["final_valid"] and [x["tag"] for x in fake.calls] == ["stageA-v2:synth-fever-dose", "stageB-v5:synth-fever-dose"]
+    assert lg["final_valid"] and [x["tag"] for x in fake.calls] == ["stageA-v2:synth-fever-dose", "stageB-v9:synth-fever-dose"]
     assert "[S0|doctor]" in fake.calls[0]["prompt"] and "{{" not in fake.calls[0]["prompt"]
 
 

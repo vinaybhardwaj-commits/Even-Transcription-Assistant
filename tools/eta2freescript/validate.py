@@ -133,10 +133,74 @@ def _rewrite_years(node) -> None:
             _rewrite_years(v)
 
 
+def _med_units(art: dict, lines: list[str]) -> list[list[int]] | None:
+    """Map Medication note lines to medicine indices when some lines are brand-first combination lines.
+    A group collapses only when its line carries the brand and every component name. None = no collapsed group."""
+    from .note import combination_groups
+    meds = ((art.get("gp_extraction") or {}).get("medicines")) or []
+    starts = {idx[0]: (brand, idx) for brand, idx in combination_groups(art)}
+    units, i, pos = [], 0, 0
+    while i < len(meds) and pos < len(lines):
+        g = starts.get(i)
+        if g and all(x.lower() in lines[pos].lower() for x in [g[0]] + [str(meds[k].get("name") or "") for k in g[1]]):
+            units.append(list(g[1]))
+            i += len(g[1])
+        else:
+            units.append([i])
+            i += 1
+        pos += 1
+    if i != len(meds) or pos != len(lines) or all(len(u) == 1 for u in units):
+        return None
+    return units
+
+
+def _order_entries(art: dict, path: str, lines: list[str]) -> list:
+    """V.list_at, except a collapsed combination line counts as ONE entry that carries every component's names."""
+    entries = V.list_at(art.get("gp_extraction") or {}, path)
+    units = _med_units(art, lines) if path == "/medicines" else None
+    if not units:
+        return entries
+    out = []
+    for u in units:
+        ms = [entries[k] for k in u]
+        out.append(ms[0] if len(ms) == 1 else {"name": ms[0].get("name", ""), "raw_name": ms[0].get("raw_name", ""),
+                                               "aliases": [x for m in ms for x in V.entry_names(m)]})
+    return out
+
+
+def _expanded_note(art: dict) -> str:
+    """note_text with each collapsed combination line repeated once per component, for the vendored one-line-per-entry G6."""
+    note = art.get("note_text") or ""
+    sec = V.note_sections(note)
+    units = _med_units(art, sec.get("Medication", []))
+    if not units:
+        return note
+    out, cur, pos = [], None, 0
+    lines = note.split("\n")
+    for line in lines:
+        head, sep, body = line.partition(":")
+        if sep and head in V.HEADINGS:
+            cur = head
+            body = body.strip()
+            is_item = bool(body)
+        else:
+            is_item = bool(line.strip())
+            body = line.strip()
+        if cur == "Medication" and is_item and pos < len(units):
+            reps = [body] * len(units[pos])
+            pos += 1
+            first = (f"{head}: {reps[0]}" if sep and head in V.HEADINGS else reps[0])
+            out.extend([first] + reps[1:])
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def to_v01(art: dict) -> dict:
     """The v0.1 view of a v0.2 or v0.3 artifact. v0.3-only keys are dropped. New statuses become discussed_only.
     A representable YEARS duration becomes MONTHS x 12 so the vendored validator still passes."""
     a = copy.deepcopy(art)
+    a["note_text"] = _expanded_note(art)  # v0.1 is one line per entry: a brand-first combination line repeats per component
     a["schema_version"] = "eta.freescript.v0.1"
     for key in ("completion_required", "clip_boundary", "slots", "room_facts"):
         a.pop(key, None)
@@ -204,7 +268,8 @@ def _c_rules(art: dict, errs: list[str], *, slots: bool) -> None:
         sec = V.note_sections(art.get("note_text") or "")
         gx = art.get("gp_extraction") or {}
         for kind, (path, heading) in V.ORDER_LISTS.items():
-            entries, lines = V.list_at(gx, path), sec.get(heading, [])
+            lines = sec.get(heading, [])
+            entries = _order_entries(art, path, lines)
             out = [p for p in art.get("provenance") or [] if p.get("kind") == kind and p.get("json_pointer") is None and p.get("names")]
             if len(entries) != len(lines):
                 continue
@@ -774,7 +839,8 @@ def frx(art: dict) -> list[str]:
         for p in prov:
             if isinstance(p, dict) and p.get("kind") in V.ORDER_LISTS and p.get("json_pointer") is None and p.get("names"):
                 path, heading = V.ORDER_LISTS[p["kind"]]
-                entries, lines_h = V.list_at(gx, path), sec.get(heading, [])
+                lines_h = sec.get(heading, [])
+                entries = _order_entries(art, path, lines_h)
                 if len(entries) == len(lines_h):
                     for i, (line, m) in enumerate(zip(lines_h, entries)):
                         if V.same_drug(p["names"], [line]) and not V.same_drug(p["names"], V.entry_names(m)):

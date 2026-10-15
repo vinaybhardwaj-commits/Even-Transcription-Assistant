@@ -2,7 +2,7 @@
 
   ingest (transcript + role track) -> boundary pre-check -> Stage A (prompts/stageA-v2) -> role fallback ->
   boundary post-check (Stage A topic) -> guard (citations, doctor dose precedence, numeric support) -> mapper v2 ->
-  Stage B (prompts/stageB-v4) -> sanitize_note -> validate (v0.2 schema + vendored G1-G6 + C1-C3) -> deterministic note
+  Stage B (prompts/stageB-v9) -> sanitize_note -> validate (v0.2 schema + vendored G1-G6 + C1-C3) -> deterministic note
   fallback. An artifact that is still invalid is not written.
 
 Outputs in <out>/<uid>/ (umask 077): stageA.raw.txt, encounter.json, note_text.llm.txt, artifact.json, artifact.v0.1.json
@@ -24,7 +24,7 @@ from .guard import guard
 from .ingest import Consult, apply_inferred_roles, format_transcript
 from .mapper import build
 from .models import ModelClient, cost_for_uid
-from .note import FILLER, HEADINGS, flags_by_pointer, render_note, repair_note, sanitize_note
+from .note import FILLER, HEADINGS, combination_groups, flags_by_pointer, render_note, repair_note, sanitize_note
 from .prompts import clean_text, code_paths, load_prompt, parse_json, prompt_path, sha
 from .validate import check, to_v01
 
@@ -41,7 +41,7 @@ class Options:
 def _fallback_note(art: dict, flags: dict, banned: list[str]) -> str:
     """Deterministic note. If carried-over free text still names a kept-out order, drop that free text and render again.
     The fallback must not fail C4: a C4 failure used to mean no artifact was written at all."""
-    det = sanitize_note(render_note(art["gp_extraction"], flags, banned))
+    det = sanitize_note(render_note(art["gp_extraction"], flags, banned, combination_groups(art)))
     shadow = dict(art)
     shadow["note_text"] = det
     if not any(e.startswith("C4") for e in check(shadow)):
@@ -53,7 +53,13 @@ def _fallback_note(art: dict, flags: dict, banned: list[str]) -> str:
         inv.pop("instruction", None)
     for ref in gx.get("referrals") or []:
         ref.pop("notes", None)
-    return sanitize_note(render_note(gx, flags))
+    return sanitize_note(render_note(gx, flags, groups=combination_groups(art)))
+
+
+def spoken_brands_text(art: dict) -> str:
+    """The "Spoken combination brands" list for Stage B: brand -> gp_extraction medicine indices, or "none"."""
+    groups = combination_groups(art)
+    return "\n".join(f"{b} -> medicines {idx}" for b, idx in groups) if groups else "none"
 
 
 def role_context(c: Consult) -> str:
@@ -116,14 +122,15 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         sb, ub = load_prompt(opts.stage_b)
         try:
             txt = clean_text(client.chat(opts.model, ub.replace("{{GP_EXTRACTION}}", json.dumps(art["gp_extraction"], indent=1, ensure_ascii=False))
-                                         .replace("{{FLAGS}}", json.dumps(flags, indent=1)), sb, max_tokens=2500, tag=f"{opts.stage_b}:{c.uid}"))
+                                         .replace("{{FLAGS}}", json.dumps(flags, indent=1))
+                                         .replace("{{COMBINATION_BRANDS}}", spoken_brands_text(art)), sb, max_tokens=2500, tag=f"{opts.stage_b}:{c.uid}"))
             (od / "note_text.llm.txt").write_text(txt + "\n", encoding="utf-8")
             log["raw_llm_note_has_filler"] = any(FILLER.match(l.partition(":")[2]) for l in txt.split("\n")
                                                  if l.partition(":")[0] in HEADINGS and l.partition(":")[2].strip())
             art["note_text"] = sanitize_note(txt)
             llm_errs = check(art)
             if llm_errs:
-                art["note_text"] = sanitize_note(repair_note(txt, art["gp_extraction"], flags, banned))
+                art["note_text"] = sanitize_note(repair_note(txt, art["gp_extraction"], flags, banned, combination_groups(art)))
                 repaired = check(art)
                 log["note_repaired"] = not repaired
                 if not repaired:
