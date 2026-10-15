@@ -7,6 +7,7 @@
  */
 import { expandKeys, matchKey } from "@/lib/kiosk-health-read";
 import { machineKeys } from "@/lib/encounter-windows/machine-keys";
+import type { Coverage } from "@/lib/jev/worker/coverage";
 import { raceTimeout } from "@/lib/steward/timeout";
 import { autoClearDue, claimResolved, resolvedStreak, toView, CLEAR_AFTER_POLLS, forgetStreaksExcept, type ClaimView, type ClaimsPort } from "./claims";
 import { ROOMS as ROOMS_DEFAULT, type RoomDef } from "./rooms";
@@ -72,6 +73,8 @@ export type Snapshot = {
   steward_status: StewardStatus;
   /** v1.7 S3: today's Steward changes, newest first, at most 50 */
   changes_today: ChangeRow[];
+  /** JEV-COVERAGE JB-3: today's consult coverage (counts only), added by the route; null = unavailable */
+  coverage?: Coverage | null;
 };
 export const CHANGES_MAX = 50;
 

@@ -38,6 +38,12 @@ const ROOM = { id: "room_yh3etjpf", slug: "opd-1", name: "OPD 1", disabled_at: n
 const ctx = { origin: "x", actor: "a", scopes: new Set(["read"]) } as never;
 const tool = (name: string) => S.CALLABLE_TOOLS.get(name)!;
 const run = async (name: string, args: Row) => (await tool(name).handler(args, ctx)) as Row;
+/** JEV-COVERAGE JB-3: the route adds `coverage` on top of the snapshot; the tool serves the snapshot alone */
+const snapshotOnly = (routeBody: string) => {
+  const b = JSON.parse(routeBody) as Row;
+  delete b.coverage;
+  return JSON.stringify(b);
+};
 
 /** a mocked answer: the room table knows OPD 1 (by id, slug or name) and nothing else */
 function roomTableKnowsOpd1(text: string, values: unknown[]): Row[] | null {
@@ -92,7 +98,7 @@ describe("scribe_now", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-08T12:00:00.000Z"));
     answer = (text) => (/FROM rooms_live_claim/.test(text) ? [{ id: 1, room_id: ROOM.id, claimed_by: "ops", claimed_at: "2026-10-08T11:00:00.000Z", cleared_at: null, cleared_by: null, state_at_claim: null, note: null }] : []);
-    const routeBody = await (await nowRoute(new Request("https://x/api/rooms-live/now"))).text();
+    const routeBody = snapshotOnly(await (await nowRoute(new Request("https://x/api/rooms-live/now"))).text());
     expect(routeBody).toContain('"claim":{"by":"ops"');
     resetMemoForTests();
     resetAutoClearForTests();
@@ -103,7 +109,7 @@ describe("scribe_now", () => {
   it("matches GET /api/rooms-live/now BYTE FOR BYTE for the same instant and data", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-08T12:00:00.000Z"));
-    const routeBody = await (await nowRoute(new Request("https://x/api/rooms-live/now"))).text();
+    const routeBody = snapshotOnly(await (await nowRoute(new Request("https://x/api/rooms-live/now"))).text());
     resetMemoForTests();
     const viaTool = JSON.stringify(await run("scribe_now", {}));
     expect(viaTool).toBe(routeBody);

@@ -10,6 +10,7 @@ import { realClaimsPort } from "@/lib/rooms-live/claims";
 import { ROOMS } from "@/lib/rooms-live/rooms";
 import { loadRoster } from "@/lib/rooms-live/roster";
 import { getSnapshot, type Snapshot } from "@/lib/rooms-live/snapshot";
+import { coverageOrNull } from "@/lib/jev/worker/coverage-view";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,13 +20,16 @@ const NO_STORE = { "cache-control": "no-store" };
 
 export async function GET(req: Request) {
   await roomsLiveGuard(req); // always ok: access is open (owner ruling 8 Oct 2026)
+  const coveragePromise = coverageOrNull({ timeoutMs: 2000 }); // JEV-COVERAGE JB-3: counts only, never throws, own 2 s bound; runs beside the snapshot; a null never enters `degraded` (room faults only)
   try {
-    return NextResponse.json(await getSnapshot({ db: sql, claims: realClaimsPort(sql as never) }), { headers: NO_STORE });
+    const [snapshot, coverage] = await Promise.all([getSnapshot({ db: sql, claims: realClaimsPort(sql as never) }), coveragePromise]);
+    return NextResponse.json({ ...snapshot, coverage }, { headers: NO_STORE });
   } catch (e) {
     console.error("[rooms-live] snapshot failed:", e instanceof Error ? e.message.slice(0, 160) : "error");
     const empty: Snapshot = {
       generated_at: new Date().toISOString(),
       degraded: ["snapshot"],
+      coverage: await coveragePromise,
       steward_status: { state: "unavailable" },
       changes_today: [],
       rooms: (await loadRoster(sql as never).catch(() => ROOMS)).map((r) => ({
