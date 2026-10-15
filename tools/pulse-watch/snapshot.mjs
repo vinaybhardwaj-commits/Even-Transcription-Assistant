@@ -2,6 +2,7 @@
 // One machine-scoped, 10-minute-bounded read of pulse_presence_events (ext + poller rows), cached for CACHE_MS; everything else comes from the resolver rows.
 export const TARGET_EXT = '0.1.1.39';
 export const WINDOW_MIN = 10;          // ext/poller rows older than this are ignored
+export const LAST_EVT_HOURS = 24;      // latest-extension-event lookback (signed-out detection)
 export const CACHE_MS = 30_000;        // the board refreshes every 5 s; this query runs at most every 30 s
 export const POLLER_STALE_S = 180;     // poller silent this long => red
 export const HB_WARN_S = 90;           // heartbeat older than this => yellow
@@ -16,6 +17,24 @@ export function compareVer(a, b) {
 
 // the poller's pre-5-Oct short key for an extension machine id (consul4 for EHRC-CONSUL4s-Mac-mini); same map as occupancy.mjs POLLER_LEGACY_KEYS
 const legacyKey = (machine) => { const m = /^EHRC-([A-Z0-9]+)s-Mac-mini$/.exec(machine); return m ? m[1].toLowerCase() : null; };
+
+export const LAST_EVT_SQL = `select distinct on (machine) machine, event, ts, payload->>'reason' as reason, coalesce(payload->>'doctor_uid', '') as doctor_uid
+      from pulse_presence_events
+      where machine = any($1::text[]) and source = 'ext' and ts > now() - ($2::int * interval '1 hour')
+        and (event in ('login', 'logout') or coalesce(payload->>'doctor_uid', '') <> '')
+      order by machine, ts desc`;
+
+// rows (any order) -> Map<machine, newest meaningful row>; same predicate as the SQL filter above, applied again so the rule is testable
+export const isMeaningfulEvt = (r) => r.event === 'login' || r.event === 'logout' || !!(r.doctor_uid && String(r.doctor_uid).length);
+export function pickLastEvt(rows) {
+  const best = new Map();
+  for (const r of rows) {
+    if (!isMeaningfulEvt(r)) continue;
+    const cur = best.get(r.machine);
+    if (!cur || new Date(r.ts).getTime() > new Date(cur.ts).getTime()) best.set(r.machine, r);
+  }
+  return best;
+}
 
 // -> Map<machine, {ver, hbTs, pollTs, pollEvent, pollIdle}> for the given machine ids, newest row of each kind in the last WINDOW_MIN minutes
 export async function fetchFacts(sql, machines) {
@@ -37,10 +56,20 @@ export async function fetchFacts(sql, machines) {
       if (f.hbTs == null && r.event === 'heartbeat') f.hbTs = r.ts;
     } else if (f.pollTs == null) { f.pollTs = r.ts; f.pollEvent = r.event; f.pollIdle = r.idle; }
   }
+  // latest MEANINGFUL extension event per machine over a longer window (a logout is older than WINDOW_MIN). Meaningful = a login, a logout,
+  // or any event that carries a doctor_uid. The extension sends a doctor-less heartbeat right after most logouts; that does not cancel the logout.
+  // A failed read leaves lastEvt* null (board shows 'no signal' as before).
+  const lastEvt = new Map();
+  try {
+    const q2 = LAST_EVT_SQL;
+    const rows2 = await (sql.query ? sql.query(q2, [[...keys], LAST_EVT_HOURS]) : sql(q2, [[...keys], LAST_EVT_HOURS]));
+    for (const [m, r] of pickLastEvt(rows2)) lastEvt.set(m, r);
+  } catch { /* keep going without it */ }
   const out = new Map();
   for (const m of machines) {
     const a = byKey.get(m), l = legacyKey(m), b = l ? byKey.get(l) : null;
-    const f = { ver: a?.ver ?? null, hbTs: a?.hbTs ?? null, pollTs: a?.pollTs ?? null, pollEvent: a?.pollEvent ?? null, pollIdle: a?.pollIdle ?? null };
+    const f = { ver: a?.ver ?? null, hbTs: a?.hbTs ?? null, pollTs: a?.pollTs ?? null, pollEvent: a?.pollEvent ?? null, pollIdle: a?.pollIdle ?? null,
+      lastEvt: lastEvt.get(m)?.event ?? null, lastEvtTs: lastEvt.get(m)?.ts ?? null, lastEvtReason: lastEvt.get(m)?.reason ?? null };
     if (b && b.pollTs && (!f.pollTs || new Date(b.pollTs) > new Date(f.pollTs))) { f.pollTs = b.pollTs; f.pollEvent = b.pollEvent; f.pollIdle = b.pollIdle; }
     out.set(m, f);
   }
