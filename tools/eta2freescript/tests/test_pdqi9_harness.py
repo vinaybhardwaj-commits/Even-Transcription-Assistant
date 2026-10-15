@@ -115,7 +115,7 @@ def test_input_is_schema_validated():
 
 def test_note_id_is_the_specified_hash():
     import hashlib
-    assert judge.note_id("u1", "Bn") == hashlib.sha256(b"20261012u1Bn").hexdigest()[:10]
+    assert judge.note_id("u1", "a note") == hashlib.sha256(f"20261012u1{hashlib.sha256(b'a note').hexdigest()}".encode()).hexdigest()[:10]
 
 
 def test_shuffling_is_reproducible_and_seed_dependent():
@@ -134,11 +134,11 @@ def test_no_arm_name_reaches_any_judge_input(frozen, tmp_path, fever):
         for ref in judge.REFS:
             judge.score_note(fc, frozen, uid="synth-fever-dose", arm=arm, judge="opus", ref=ref, note=render.render(RX), transcript=tr,
                              cache_dir=tmp_path / "c", render_version=render.RENDER_VERSION)
-    assert len(fc.calls) == 6
+    assert len(fc.calls) == 2  # the three arms hold a byte-identical note, so one call per ref
     for call in fc.calls:
         blob = call["prompt"] + call["system"]
         assert not re.search(r"\bB0\b|\bBn\b|\bA\b arm|arm [AB]", blob)
-        assert any(judge.note_id("synth-fever-dose", arm) in call["prompt"] for arm in ("A", "B0", "Bn"))
+        assert judge.note_id("synth-fever-dose", render.render(RX)) in call["prompt"]
     assert "{{" not in fc.calls[0]["prompt"] + fc.calls[0]["system"]
     assert "rule with transcript" in "".join(x["system"] for x in fc.calls) and tr in fc.calls[0]["prompt"] + fc.calls[1]["prompt"]
 
@@ -533,7 +533,7 @@ def test_end_to_end_tuning_run_writes_row_and_leaks_nothing_private(tmp_path, mo
     fc = FakeClient(responder)
     assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=fc) == 0
     n_calls = len(fc.calls)
-    assert sum(c["tag"].startswith("pdqi9-v3") for c in fc.calls) == 2 * 3 * 4
+    assert sum(c["tag"].startswith("pdqi9-v3") for c in fc.calls) == 2 * 2 * 4  # A and Bn hold one note, B0 another
     row = json.loads((tmp_path / "SCOREBOARD.R1.json").read_text())
     assert row["n"] == 2 and row["split"] == "tuning" and row["render"] == "render-v2" and row["replay_drops"] == 4
     assert set(row["frozen_hashes"]) == set(judge.FROZEN_FILES) and row["verdict"].startswith("PENDING")

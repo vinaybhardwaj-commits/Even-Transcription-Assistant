@@ -137,10 +137,10 @@ def _parse_rows(text: str, key: str, n_expected: int, ok) -> tuple[list[dict] | 
     return rows, info, diff
 
 
-def _judge_json(client: ModelClient, frozen: Frozen, name: str, user: str, parse, cache_dir: Path, uid: str, cache_extra: str,
+def _judge_json(client: ModelClient, frozen: Frozen, name: str, user: str, parse, cache_dir: Path, uid: str,
                 tag: str, arm: str = "", shape_log: Path | None = None) -> tuple[list[dict] | None, bool]:
     """(rows|None, tolerated). One retry per call. Only a parsed result is cached, so a rerun retries every failure."""
-    cp = cache_path(cache_dir, name, uid, frozen.prompt_sha(name), hashlib.sha256(user.encode()).hexdigest(), cache_extra)
+    cp = cache_path(cache_dir, name, uid, frozen.prompt_sha(name), hashlib.sha256(user.encode()).hexdigest())
     if cp.exists():
         c = json.loads(cp.read_text(encoding="utf-8"))
         if c.get("items") is not None and not c.get("parse_failure"):  # an old-format failure record is a miss
@@ -201,7 +201,7 @@ def judge_items(client, frozen, items: list[dict], transcript: str, cache_dir: P
         return {**dict.fromkeys(_ZERO, 0), "parse_failure": False}
     user = f"TRANSCRIPT:\n{transcript}\n\nITEMS:\n{_list(items)}\n"
     res, tolerated = _judge_json(client, frozen, "floor-items-v1.system.txt", user, lambda t: _parse_rows(t, "items", len(items), _item_ok),
-                                 cache_dir, uid, arm_kind, "floor-items-v1", arm_kind, shape_log)
+                                 cache_dir, uid, "floor-items-v1", arm_kind, shape_log)
     if res is None:
         return {**dict.fromkeys(_ZERO), "parse_failure": True}
     if attr_out is not None:
@@ -225,7 +225,7 @@ def completion_counts(client, frozen, signed: list[dict], draft: list[dict], rev
     rv = "\n".join(f"{i}. [{_s(r.get('kind'))}] {_s(r.get('prompt'))} | detail: {_s(r.get('detail'))}" for i, r in enumerate(review, 1)) or "(none)"
     user = f"TRANSCRIPT:\n{transcript}\n\nSIGNED:\n{_list(signed)}\n\nDRAFT:\n{_list(draft)}\n\nREVIEW:\n{rv}\n"
     res, tolerated = _judge_json(client, frozen, "floor-missing-v1.system.txt", user,
-                                 lambda t: _parse_rows(t, "signed", len(signed), lambda x: _signed_ok(x, len(review))), cache_dir, uid, arm_kind,
+                                 lambda t: _parse_rows(t, "signed", len(signed), lambda x: _signed_ok(x, len(review))), cache_dir, uid,
                                  "floor-missing-v1", arm_kind, shape_log)
     if res is None:
         return {"missing": None, "covered": None, "parse_failure": True}

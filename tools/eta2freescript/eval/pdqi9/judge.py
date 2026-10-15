@@ -72,8 +72,9 @@ def load_frozen(root: str | Path) -> Frozen:
     return Frozen(root, text, hashes)
 
 
-def note_id(uid: str, arm: str, seed: int = SEED) -> str:
-    return hashlib.sha256(f"{seed}{uid}{arm}".encode()).hexdigest()[:10]
+def note_id(uid: str, note: str, seed: int = SEED) -> str:
+    """Blinded id from (seed, uid, sha256 of the note). It carries no arm: byte-identical notes for a uid get the same id and so the same prompt."""
+    return hashlib.sha256(f"{seed}{uid}{hashlib.sha256(note.encode()).hexdigest()}".encode()).hexdigest()[:10]
 
 
 def plan_calls(uids: list[str], arms: list[str], judges=JUDGES, refs=REFS, seed: int = SEED) -> list[tuple[str, str, str, str]]:
@@ -258,9 +259,10 @@ def build_prompt(frozen: Frozen, ref: str, nid: str, note: str, transcript: str)
 def score_note(client: ModelClient, frozen: Frozen, *, uid: str, arm: str, judge: str, ref: str, note: str, transcript: str,
                cache_dir: Path, render_version: str, shape_log: Path | None = None) -> dict:
     """One blinded call (plus one retry on a parse failure). Returns {scores|None, parse_failure, tolerated, cached, note_id}.
+    `arm` is for the shape log only; neither the cache key nor the prompt carries it, so identical notes share one judgement.
     Only a parsed result is cached, so a rerun retries every failure."""
-    nid = note_id(uid, arm)
-    key = (uid, arm, judge, ref, frozen.pdqi9_sha(ref), hashlib.sha256(note.encode()).hexdigest(), render_version,
+    nid = note_id(uid, note)
+    key = (uid, judge, ref, frozen.pdqi9_sha(ref), hashlib.sha256(note.encode()).hexdigest(), render_version,
            hashlib.sha256(transcript.encode()).hexdigest() if ref == "transcript" else "")
     cp = cache_path(cache_dir, *key)
     if cp.exists():

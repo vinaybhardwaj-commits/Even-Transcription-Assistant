@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 from conftest import CONSULTS, build_artifact, stage_a
-from test_pdqi9_harness import UIDS, _argv, _lockbox_rule, _write_inputs, make_frozen, responder  # noqa: F401 (autouse fixture)
+from test_pdqi9_harness import RX, UIDS, _argv, _lockbox_rule, _write_inputs, make_frozen, responder  # noqa: F401 (autouse fixture)
 
-from tools.eta2freescript.eval.pdqi9 import floors, judge, run
+from tools.eta2freescript.eval.pdqi9 import floors, judge, render, run
 from tools.eta2freescript.ingest import load_consult
 from tools.eta2freescript.models import FakeClient
 
@@ -109,10 +109,10 @@ def test_a_and_bn_cells_unchanged_when_only_b0_set_differs(tmp_path, monkeypatch
     base_dir.mkdir(), new_dir.mkdir()
     fc_old = go(base_dir, monkeypatch, bn={1, 2}, b0={3}, module=baseline_module())
     fc_new = go(new_dir, monkeypatch, bn={1, 2}, b0={3})
-    nid = lambda arm: judge.note_id(U, arm)
-    a_bn = lambda fc: [c["prompt"] for c in fc.calls if c["tag"].startswith("pdqi9") and (nid("A") in c["prompt"] or nid("Bn") in c["prompt"])]
+    nid = lambda rx: judge.note_id(U, render.render(rx))  # NOTE_ID follows the note, not the arm; A and Bn share RX, B0's note differs
+    a_bn = lambda fc: [c["prompt"] for c in fc.calls if c["tag"].startswith("pdqi9") and nid(RX) in c["prompt"]]
     assert a_bn(fc_old) == a_bn(fc_new) and a_bn(fc_new)
-    b0 = lambda fc: [c["prompt"] for c in fc.calls if c["tag"].startswith("pdqi9") and nid("B0") in c["prompt"]]
+    b0 = lambda fc: [c["prompt"] for c in fc.calls if c["tag"].startswith("pdqi9") and nid({**RX, "examination": "Throat red"}) in c["prompt"]]
     assert b0(fc_old) != b0(fc_new)  # the old code gave B0 the bn transcript; that is the bug
 
 
