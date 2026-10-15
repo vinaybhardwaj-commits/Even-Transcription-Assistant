@@ -5,7 +5,8 @@ import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import { neon } from '@neondatabase/serverless';
 import { resolveMachines } from './occupancy.mjs';
-import { cachedFacts, compareVer } from './snapshot.mjs';
+import { cachedFacts } from './snapshot.mjs';
+import { trackerOf } from './tracker.mjs';
 
 const HOME = os.homedir();
 const REFRESH = Number(process.env.PW_REFRESH || 5) * 1000; // ms
@@ -189,25 +190,13 @@ function docOf(room, byMachine) {
   return { name: drName(occ), tail: ' · signed in', color: 'green', present: true, consulting: false, who: drName(occ) };
 }
 
-function trackerOf(room, byMachine, facts) {
-  if (room.noTracker) return { text: 'n/a', color: 'dim', down: false };
-  const f = facts.get(room.machine), r = byMachine.get(room.machine);
-  const sig = Math.min(ageSec(f && f.hbTs), ageSec(r && r.ts));   // freshest sign of life from the extension
-  if (sig < TRACKER_OK_S) {
-    if (f && f.ver && compareVer(f.ver, MIN_EXT) < 0) return { text: 'old version', color: 'yellow', down: false };
-    return { text: 'ok', color: 'green', down: false };
-  }
-  if (room.trackerHours && !inHours({ hours: room.trackerHours })) return { text: 'after hours', color: 'dim', down: false };
-  return { text: Number.isFinite(sig) ? `no signal ${ageStr(new Date(Date.now() - sig * 1000))}` : 'no signal', color: 'yellow', down: true, secs: sig };
-}
-
 function evalRoom(room, st) {
   const out = { room, problems: [] };
   const hrs = inHours(room);
   const b = st.bench && st.bench.data && Date.now() - st.bench.at < 30000 ? st.bench.data : null;   // bench data older than 30 s is not trusted
   const byMachine = st.byMachine;
   out.doc = docOf(room, byMachine);
-  out.trk = trackerOf(room, byMachine, st.facts);
+  out.trk = trackerOf(room, byMachine, st.facts, { okS: TRACKER_OK_S, minExt: MIN_EXT, inTrackerHours: (rm) => inHours({ hours: rm.trackerHours }) });
 
   // RECORDING
   const Lr = b && b.L.get(room.id), S = b && b.S.get(room.id), I = b && b.I.get(room.id);
