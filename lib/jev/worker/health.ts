@@ -26,7 +26,7 @@ export type UseHealth = {
   error_classes_24h: Record<string, number>;
   drift_alerts: string[];
 };
-export type JevHealth = { ist_date: string; budget: { spent_usd: number; cap_usd: number; soft_usd: number; left_usd: number }; sweeper_last_job_at: string | null; coverage: Coverage; uses: UseHealth[] };
+export type JevHealth = { ist_date: string; budget: { spent_usd: number; cap_usd: number; soft_usd: number; left_usd: number }; sweeper_last_job_at: string | null; coverage: Coverage | { unavailable: true }; uses: UseHealth[] };
 
 export async function jevHealth(): Promise<JevHealth> {
   const [spentRows, sets, calls, lastErr, queue, lastOk, bands, classes, drift, sweeper] = await Promise.all([
@@ -46,7 +46,11 @@ export async function jevHealth(): Promise<JevHealth> {
     sql`SELECT DISTINCT ON (use) use, alerts FROM jev_drift_report WHERE cardinality(alerts) > 0 ORDER BY use, ist_date DESC, created_at DESC`,
     sql`SELECT max(created_at) AS at FROM scribe_job WHERE kind = 'jev_ask' AND actor LIKE 'cron:jev_sweep%'`,
   ]) as unknown as Array<Array<Record<string, unknown>>>;
-  const coverage = await consultCoverage();
+  // L2: coverage is a bonus read; a throw or a 5 s stall must not take the rest of the health result down with it.
+  const coverage: Coverage | { unavailable: true } = await Promise.race([
+    consultCoverage().catch(() => ({ unavailable: true as const })),
+    new Promise<{ unavailable: true }>((res) => { const t = setTimeout(() => res({ unavailable: true }), 5000); t.unref?.(); }),
+  ]);
 
   const spent = n(spentRows[0]?.usd);
   const cap = dailyCapUsd();

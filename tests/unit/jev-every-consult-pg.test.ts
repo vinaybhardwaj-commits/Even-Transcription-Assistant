@@ -240,8 +240,60 @@ suite("JEV-EVERY-CONSULT S1 — every transcribed consult, record-only", () => {
     const c = await consultCoverage();
     expect(c).toMatchObject({ cut: 5, transcribed: 3, jev_done: { "pitch-detect": 2, "chair-affect": 1 }, clef_done: 2 });
     expect(c.ist_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(Object.keys(c).sort()).toEqual(["clef_done", "cut", "ist_date", "jev_done", "transcribed"]);
+    expect(Object.keys(c).sort()).toEqual(["clef_done", "cut", "ist_date", "jev_done", "no_state", "transcribed"]);
     const h = await jevHealth();
     expect(h.coverage).toEqual(c);
+  });
+
+  const setRef = async () => {
+    const set = (await rows`SELECT id, version, content_sha256 AS sha, model_pin FROM jev_question_set WHERE id = 'pitch-detect' AND status = 'shadow'`)[0]!;
+    const q = await rows`SELECT question_id FROM jev_question WHERE question_set_id = 'pitch-detect' AND version = ${set.version}`;
+    return { defs: q.map((r) => ({ question_id: r.question_id })) as never, ref: { id: set.id, version: set.version, sha: set.sha, modelPin: set.model_pin, use: "consult_rubric", subjectType: "consult" } as never };
+  };
+  it("M1 (RF-A1): a transient unbuildable never changes 7 real answered rows; call_id is kept", async () => {
+    win("cx_0001@ma", "u_0001");
+    const { defs, ref } = await setRef();
+    for (let i = 1; i <= 7; i++) pg.exec(`INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, question_set_sha256, order_variant, mode, answer, outcome, call_id) VALUES ('jd_r${i}', 'consult', 'cx_0001@ma', 'q_${i}', 'pv', 'jev-real', '${SHA_PITCH}', 'derived', 'shadow', '{"type":"noul","p":0.5}', 'answered', 'jc_real_1')`);
+    const before = await rows`SELECT id, question_id, outcome, call_id, answer, model FROM jev_decision ORDER BY id`;
+    for (const build of [{ unbuildable: "read_refused" }, null] as const) await askSubject({ jobId: null, set: ref, defs, mode: "shadow", subjectId: "cx_0001@ma", build: build as never });
+    expect(await rows`SELECT id, question_id, outcome, call_id, answer, model FROM jev_decision ORDER BY id`).toEqual(before);
+    expect(before).toHaveLength(7);
+    expect(before.every((r) => r.call_id === "jc_real_1" && r.outcome === "answered")).toBe(true);
+  });
+  it("M1: a marker written twice gives one row per question; another mode / sha is not blocked by the skip", async () => {
+    win("cx_0001@ma", "u_0001");
+    const { defs, ref } = await setRef();
+    for (let i = 0; i < 2; i++) await askSubject({ jobId: null, set: ref, defs, mode: "shadow", subjectId: "cx_0001@ma", build: { unbuildable: "no_data" } });
+    const nq = (defs as unknown[]).length;
+    expect((await rows`SELECT count(*)::int AS c FROM jev_decision WHERE subject_id = 'cx_0001@ma' AND mode = 'shadow'`)[0]!.c).toBe(nq);
+    await askSubject({ jobId: null, set: ref, defs, mode: "live", subjectId: "cx_0001@ma", build: { unbuildable: "no_data" } });
+    expect((await rows`SELECT count(*)::int AS c FROM jev_decision WHERE subject_id = 'cx_0001@ma' AND mode = 'live'`)[0]!.c).toBe(nq);
+  });
+  it("M2 (RF-A5): markers are not jev_done (they are no_state), and an untranscribed consult's decision is not counted", async () => {
+    win("cx_0001@ma", "u_0001"); win("cx_0002@ma", "u_0002", { min: 1, text: false });
+    const { defs, ref } = await setRef();
+    await askSubject({ jobId: null, set: ref, defs, mode: "shadow", subjectId: "cx_0001@ma", build: null });
+    decide("cx_0002@ma", SHA_PITCH);
+    const c = await consultCoverage();
+    expect(c).toMatchObject({ cut: 2, transcribed: 1, jev_done: { "pitch-detect": 0, "chair-affect": 0 }, no_state: { "pitch-detect": 1, "chair-affect": 0 } });
+    decide("cx_0001@mb", SHA_PITCH); // a real row on the sibling key: the consult now counts as done, not no_state
+    win("cx_0001@mb", "u_0001");
+    expect(await consultCoverage()).toMatchObject({ jev_done: { "pitch-detect": 1 }, no_state: { "pitch-detect": 0 } });
+  });
+  it("L2: coverage throwing gives coverage { unavailable: true } and the rest of jevHealth is unchanged", async () => {
+    pg.exec(`ALTER TABLE encounter_catalog RENAME TO encounter_catalog_x`);
+    try {
+      const h = await jevHealth();
+      expect(h.coverage).toEqual({ unavailable: true });
+      expect(h.uses.length).toBeGreaterThan(0);
+      expect(h.budget).toBeDefined();
+    } finally { pg.exec(`ALTER TABLE encounter_catalog_x RENAME TO encounter_catalog`); }
+  });
+  it("L3: an older-cut en row plus a current-cut non-en row, stt only, is excluded; a current-cut en row is included", async () => {
+    win("cx_0001@ma", "u_0001", { layer: "stt" }); win("cx_0002@ma", "u_0002", { min: 1, layer: "stt" });
+    const ins = (uid: string, cv: string, lang: string, at: string) => pg.exec(`INSERT INTO consult_sarvam_result (consult_uid, cut_version, mode, english, job_id, result_r2_key, model_stt, model_translate, model_rev, pipeline_rev, language_code, t0_ms, created_at) VALUES ('${uid}', '${cv}', 'transcribe', false, 'j_${++n}', 'mcp-sarvam/j_${n}.json', 'm', 'm', 'r', 'r', '${lang}', 0, now() - interval '${at}')`);
+    ins("u_0001", "cv_old", "en-IN", "2 hours"); ins("u_0001", "cv_new", "hi-IN", "1 hour");
+    ins("u_0002", "cv_old", "hi-IN", "2 hours"); ins("u_0002", "cv_new", "en-IN", "1 hour");
+    expect(await allTranscribedConsults(50, ctx(SHA_PITCH))).toEqual(["cx_0002@ma"]);
   });
 });
