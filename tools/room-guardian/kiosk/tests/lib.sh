@@ -149,3 +149,16 @@ mk_pcm() { # amplitude seconds
 }
 
 events() { grep "^kiosk/$GUARDIAN_ROOM/heal$(printf '\t')" "$T/pub.log" 2>/dev/null; }
+
+# reap_tracked <sandbox>: kill only the pids a test recorded in <sandbox>/*.pid, and only while they still look like what the test started
+# (a sleep, or a guardian.sh). Never a pattern kill.
+reap_tracked() {
+  local f p c
+  for f in "$1"/*.pid; do
+    [ -e "$f" ] || continue
+    for p in $(cat "$f" 2>/dev/null); do
+      c="$(/bin/ps -o command= -p "$p" 2>/dev/null)"
+      case "$c" in "sleep "*|*guardian.sh*) kill "$p" 2>/dev/null ;; esac
+    done
+  done
+}
