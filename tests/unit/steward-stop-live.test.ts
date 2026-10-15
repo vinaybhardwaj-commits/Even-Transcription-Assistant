@@ -13,7 +13,7 @@ import { ago, healthy, ist } from "../support/steward-fixtures";
 
 const NOW = new Date("2026-10-07T16:00:00Z");
 const MIN = 60_000;
-const dec = (over: { room_id?: string | null; late?: boolean; consult_open?: boolean | null } = {}): Decision =>
+const dec = (over: { room_id?: string | null; late?: boolean; consult_open?: boolean | null; ext_status?: string | null } = {}): Decision =>
   ({
     room_id: over.room_id === undefined ? "room_a" : over.room_id,
     machine: "HOST-A",
@@ -25,7 +25,7 @@ const dec = (over: { room_id?: string | null; late?: boolean; consult_open?: boo
     why_not: null,
     severity: "info",
     inputs_hash: "x",
-    inputs: { consult_open: over.consult_open === undefined ? false : over.consult_open },
+    inputs: { consult_open: over.consult_open === undefined ? false : over.consult_open, ext_status: over.ext_status === undefined ? "ok" : over.ext_status },
   }) as Decision;
 const listening = () => ({ room_id: "room_a", tab_id: "t", last_poll_at: new Date(NOW.getTime() - 2000), recording_session_id: "bs_1", paused: false }) as never;
 const session = { id: "bs_1", status: "recording", started_at: new Date(NOW.getTime() - 3 * 3600_000).toISOString() };
@@ -144,5 +144,66 @@ describe("the executor wiring", () => {
     expect((await dispatch(ex, dec()))?.result).toMatch(/^ok:/);
     expect(calls.insert).toHaveLength(1);
     await expect(Promise.resolve().then(() => ex.scribeRestart(dec()))).rejects.toThrow("live executor not enabled");
+  });
+});
+
+describe("FIX1 M1: the end-of-window stop applies only to a session open ACROSS the window end", () => {
+  const D = (A: number, startedAgoS: number | null, over: Record<string, unknown> = {}) => decideRoom(healthy(A, { recording: { session_started_at: startedAgoS === null ? null : ago(A, startedAgoS) }, ...over } as never), DEFAULT_CONFIG, A, EMPTY_RECENT);
+  const never = (ds: Decision[]) => { expect(ds.some((d) => d.action === "scribe_stop")).toBe(false); expect(ds.some((d) => d.params?.late === true)).toBe(false); };
+  it("07:00 with a session from 06:55, 23:00 with a session from 22:50, and no session_started_at: log_only info, never scribe_stop, never late (consult open or not)", () => {
+    for (const consult of [true, false]) {
+      for (const [t, ago_] of [["07:00", 5 * 60], ["23:00", 10 * 60], ["22:00", null]] as const) {
+        const A = ist(t);
+        const ds = D(A, ago_, { consult_open: consult });
+        never(ds);
+        expect(ds[0], `${t} ${consult}`).toMatchObject({ rule: "end_of_window", action: "log_only", severity: "info" });
+        expect(ds[0]!.why).toBe("session started outside the window; not stopped by the Steward");
+      }
+    }
+  });
+  it("a session from 09:00 with a consult open: 22:05 is the late stop (+ message); 21:35 is none (held)", () => {
+    const late = D(ist("22:05"), 13 * 3600 + 5 * 60, { consult_open: true });
+    expect(late.map((d) => d.action)).toEqual(["scribe_stop", "message"]);
+    expect(late[0]!.params).toEqual({ late: true });
+    expect(D(ist("21:35"), 12 * 3600 + 35 * 60, { consult_open: true })[0]).toMatchObject({ action: "none" });
+  });
+});
+
+describe("FIX1 M2: a non-late stop needs consult_open false AND ext_status ok", () => {
+  it("ext missing / no_tab / null with consult_open false: held at 21:35, the late stop at 22:00+; ext ok + consult false: a stop", () => {
+    for (const status of ["missing", "no_tab", null]) {
+      const mk2 = (A: number) => healthy(A, { consult_open: false, ext: { applicable: true, status, last_event_at: null, last_heartbeat_reason: null, no_tab: status === "no_tab" } } as never);
+      const held = decideRoom(mk2(ist("21:35")), DEFAULT_CONFIG, ist("21:35"), EMPTY_RECENT)[0]!;
+      expect(held, String(status)).toMatchObject({ action: "none" });
+      expect(held.why_not).toContain("consult state unknown (extension");
+      const late = decideRoom(mk2(ist("22:00")), DEFAULT_CONFIG, ist("22:00"), EMPTY_RECENT);
+      expect(late[0], String(status)).toMatchObject({ action: "scribe_stop", params: { late: true } });
+    }
+    const ok = decideRoom(healthy(ist("21:35"), { consult_open: false }), DEFAULT_CONFIG, ist("21:35"), EMPTY_RECENT)[0]!;
+    expect(ok).toMatchObject({ action: "scribe_stop", params: {} });
+  });
+  it("the executor refuses a non-late decision without ext_status ok, before any I/O; a late one still sends", async () => {
+    for (const ext of ["missing", "no_tab", null]) {
+      const { d, calls } = deps();
+      expect((await go(d, dec({ ext_status: ext }))).result, String(ext)).toBe("skipped: consult_unknown_ext");
+      expect(calls.insert).toHaveLength(0);
+      expect(calls.listener + calls.active).toBe(0);
+    }
+    expect((await go(deps().d, dec({ late: true, consult_open: null, ext_status: null }))).result).toMatch(/^ok:/);
+  });
+});
+
+describe("FIX1 L1/L2", () => {
+  it("L1: an open session without started_at -> no send, no IST-midnight fallback", async () => {
+    const { d, calls } = deps({ findActiveSession: async () => ({ id: "bs_1", status: "recording" } as never) });
+    expect((await go(d)).result).toBe("skipped: no_session_start");
+    expect(calls.insert).toHaveLength(0);
+    expect(calls.attempts).toBe(0);
+  });
+  it("L2: the stale steward stops are expired before the FIRST send too (empty ledger)", async () => {
+    const { d, calls } = deps();
+    expect((await go(d)).result).toMatch(/^ok:/);
+    expect(calls.expire).toBe(1);
+    expect(calls.insert).toHaveLength(1);
   });
 });

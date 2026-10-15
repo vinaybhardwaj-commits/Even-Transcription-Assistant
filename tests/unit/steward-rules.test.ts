@@ -159,7 +159,8 @@ describe("windows and the end of the day", () => {
     expect(first(idle(T), T, EMPTY_RECENT, cfg)).toMatchObject({ rule: "closed_day", action: "none" });
     const late = ist("22:30");
     expect(first(idle(late), late, EMPTY_RECENT, cfg)).toMatchObject({ rule: "closed_day", action: "none" });
-    expect(first(healthy(late), late, EMPTY_RECENT, cfg)).toMatchObject({ rule: "end_of_window", action: "scribe_stop" });
+    // FIX1 M1: on a closed day the last window end is the previous day's, so a session started today was not open across it: not the Steward's to stop
+    expect(first(healthy(late), late, EMPTY_RECENT, cfg)).toMatchObject({ rule: "end_of_window", action: "log_only", severity: "info" });
     expect(first(healthy(late), late)).toMatchObject({ rule: "end_of_window", action: "scribe_stop" });
   });
 

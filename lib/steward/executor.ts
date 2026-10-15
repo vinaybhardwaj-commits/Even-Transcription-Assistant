@@ -196,12 +196,15 @@ export async function liveScribeStop(
   if (!roomId) return { result: "skipped: no_room" };
   if (isNeverLiveRoom(roomId)) return { result: "skipped: never_live_room" };
   const late = d.params?.late === true;
+  // R5 + M2: a non-late stop needs positive evidence of no consult: consult_open false AND the extension ok (false from a room whose extension is missing is "never looked")
   if (!late && d.inputs?.consult_open !== false) return { result: `skipped: ${d.inputs?.consult_open === true ? "consult_open" : "consult_unknown"}` };
+  if (!late && d.inputs?.ext_status !== "ok") return { result: "skipped: consult_unknown_ext" };
   const now = (opts.now ?? (() => new Date()))();
   const [listener, active] = await Promise.all([deps.getListener(roomId), deps.findActiveSession(roomId)]);
   if (!active) return { result: "skipped: no_open_session" };
   if (!listener || now.getTime() - new Date(listener.last_poll_at).getTime() > LISTENER_FRESH_MS) return { result: "skipped: kiosk_not_listening" };
-  const sinceIso = active.started_at ?? new Date(istMidnightOf(now.getTime())).toISOString();
+  if (!active.started_at) return { result: "skipped: no_session_start" }; // L1: the ledger is keyed by the session start; no midnight fallback
+  const sinceIso = active.started_at;
   let tried: Awaited<ReturnType<StopDeps["getStewardStopAttempts"]>>;
   try {
     tried = await deps.getStewardStopAttempts(roomId, sinceIso);
@@ -212,7 +215,7 @@ export async function liveScribeStop(
   if (sv.kind === "exhausted") return { result: `skipped: stop_exhausted attempts=${sv.attempts}` };
   if (sv.kind === "pending") return { result: `skipped: stop_pending attempts=${sv.attempts}` };
   if (sv.kind === "backoff") return { result: `skipped: stop_backoff attempts=${sv.attempts} retry_after_s=${sv.retry_after_s}` };
-  if (tried.length > 0 && deps.expireStaleStops) {
+  if (deps.expireStaleStops) { // L2: before the FIRST send too (an unacked steward stop from an earlier session must not be re-delivered)
     try {
       await deps.expireStaleStops(roomId, START_NO_ACK_FAIL_S);
     } catch {

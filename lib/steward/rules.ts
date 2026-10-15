@@ -324,29 +324,30 @@ function outsideWindow(c: Ctx): Decision[] {
       return [mk(c, "end_of_window", "log_only", { wanted: "scribe_stop" }, `stop not acknowledged: ${stopsSent} stops sent and the session is still open`, "scribe_stop held: retries used", "warn", {}, { stops_sent: stopsSent })];
     }
     const sinceTxt = since === null ? "more than 3 days" : `${Math.round(since / MIN)} min`;
-    if (s.consult_open !== false) {
-      if (since !== null && since < lateMax) {
+    const sinceIn = { since_end_min: since === null ? null : Math.round(since / MIN) };
+    // M1: the end-of-window stop applies ONLY to a session that was open ACROSS the window end being measured (it started before win.last_end and now is after it). Any other session
+    // (started after the end or before the start, no started_at, no window end in the last 3 days) is not the Steward's to stop; never late:true for it.
+    const acrossEnd = sessionFrom !== null && win.last_end_ms !== null && since !== null && sessionFrom < win.last_end_ms;
+    if (!acrossEnd) {
+      return [mk(c, "end_of_window", "log_only", { wanted: "scribe_stop" }, "session started outside the window; not stopped by the Steward", "scribe_stop held: session not open across the window end", "info", {}, sinceIn)];
+    }
+    // M2: a non-late stop needs POSITIVE evidence of no consult: consult_open false AND the extension reporting ok. consult_open false with any other ext_status is "never looked", i.e. unknown.
+    const extOk = s.ext.status === "ok";
+    if (s.consult_open !== false || !extOk) {
+      // the hold began at the window end, so both clocks are the same here; both are kept explicit: the late stop needs the window to have ended late_stop_max_min ago AND the hold to have lasted that long
+      const heldMs = since;
+      if (since !== null && since >= lateMax && heldMs !== null && heldMs >= lateMax) {
         return [
-          mk(
-            c,
-            "end_of_window",
-            "none",
-            {},
-            `window ended ${sinceTxt} ago; ${s.consult_open === null ? "consult state unknown" : "a consult is open"}, waiting up to ${c.cfg.schedule[s.kind].late_stop_max_min} min before stopping`,
-            s.consult_open === null ? "scribe_stop held: consult state unknown" : "scribe_stop held: consult open",
-            "info",
-            {},
-            { since_end_min: since === null ? null : Math.round(since / MIN) },
-          ),
+          mk(c, "end_of_window", "scribe_stop", { late: true }, `window ended ${sinceTxt} ago and the consult is still open or unknown: stopping anyway (late stop)`, null, "warn", {}, sinceIn),
+          mk(c, "end_of_window", "message", { kind: "late_stop", text: "late stop: session closed after the window ended with a consult still open" }, `late stop notice (window ended ${sinceTxt} ago)`, null, "warn", {}, sinceIn),
         ];
       }
-      const sinceIn = { since_end_min: since === null ? null : Math.round(since / MIN) };
+      const unknownWhy = s.consult_open === null ? "consult state unknown" : s.consult_open === true ? "consult open" : `consult state unknown (extension ${s.ext.status ?? "none"})`;
       return [
-        mk(c, "end_of_window", "scribe_stop", { late: true }, `window ended ${sinceTxt} ago and the consult is still open: stopping anyway (late stop)`, null, "warn", {}, sinceIn),
-        mk(c, "end_of_window", "message", { kind: "late_stop", text: "late stop: session closed after the window ended with a consult still open" }, `late stop notice (window ended ${sinceTxt} ago)`, null, "warn", {}, sinceIn),
+        mk(c, "end_of_window", "none", {}, `window ended ${sinceTxt} ago; ${unknownWhy}, waiting up to ${c.cfg.schedule[s.kind].late_stop_max_min} min before stopping`, `scribe_stop held: ${unknownWhy}`, "info", {}, sinceIn),
       ];
     }
-    return [mk(c, "end_of_window", "scribe_stop", {}, `window ended ${sinceTxt} ago and no consult is open`, null, "info", {}, { since_end_min: since === null ? null : Math.round(since / MIN) })];
+    return [mk(c, "end_of_window", "scribe_stop", {}, `window ended ${sinceTxt} ago and no consult is open`, null, "info", {}, sinceIn)];
   }
   if (win.closed_day) return [mk(c, "closed_day", "none", {}, "closed day", null, "info")];
   return [mk(c, "outside_window", "none", {}, "outside the schedule window", null, "info")];
