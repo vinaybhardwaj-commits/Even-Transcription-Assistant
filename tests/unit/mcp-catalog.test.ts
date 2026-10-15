@@ -1421,7 +1421,7 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
 describe("CATALOG-8: layers.audio_features", () => {
   const fk = (engine: string, ver = "v1", uid = UID, room = "room_a", day = "2026-10-05", cfg = "ab12cd34") => `reb/${day}/${room}/_consults/${uid}/tracks/features.${engine}__${ver}__${cfg}.json`;
   const ftrack = (features: unknown, o: Row = {}): Row => ({ layer: "features", engine: "x", version: "v1", status: "ok", config: {}, segments: [], extras: { features }, ...o });
-  const GOOD = { speaker: "spk0", role: "doctor", role_source: "llm", feature: "f0_mean", stat: "median", value: 1.5, iqr: 0.2, n_turns: 4, seconds: 12.5, overlap_excluded_s: 0, reliability: 0.9, model_id: "m1", model_rev: "r1" };
+  const GOOD = { speaker: "spk0", role: "doctor", role_source: "llm", feature: "f0_mean", stat: "median", value: 1.5, iqr: 0.2, n_turns: 4, seconds: 12.5, overlap_excluded_s: 0, reliability: 0.9, unit: "s", model: "mdl", model_version: "mv1", model_id: "m1", model_rev: "r1" };
   const withAf = (af: unknown, uid = UID, o: Row = {}) => (resetCatalogCacheForTests(), setCatalog([crow(uid, { layers: { stt: null, translate: null, role: null, parts: null, audio_features: af }, ...o })]));
   const af = async (): Promise<Row> => (((await run({ action: "get", consult_uid: UID })).layers as Record<string, Row>).audio_features)!;
 
@@ -1450,6 +1450,35 @@ describe("CATALOG-8: layers.audio_features", () => {
       expect(d.n_skipped).toBe(0);
       expect(d.tracks[0]).toEqual({ engine: "timbre-e2v", version: "v1", rows: [GOOD], n_rows_dropped: 0 });
     }
+  });
+
+  it("CATALOG-10: a flags track in shape c is read; a near-miss engine is still skipped", async () => {
+    setTrack(fk("flags"), ftrack([{ ...GOOD, feature: "overlap_flag" }]));
+    withAf({ flags: { r2_key: fk("flags"), status: "ok" }, flagz: { r2_key: fk("flagz") } });
+    const l = await af();
+    expect(l.status).toBe("ok");
+    const d = l.data as { tracks: Row[]; n_skipped: number };
+    expect(d.tracks).toEqual([{ engine: "flags", version: "v1", rows: [{ ...GOOD, feature: "overlap_flag" }], n_rows_dropped: 0 }]);
+    expect(d.n_skipped).toBe(1);
+    expect(reads.filter((r) => r.includes("flagz"))).toEqual([]);
+  });
+
+  it("CATALOG-10 C3: a flags row set keeps unit, model and model_version; a boolean value becomes null", async () => {
+    const base = { unit: "s", model: "nemotron-edge", model_version: "v2.1", reliability: 0.8 };
+    setTrack(fk("flags"), ftrack([
+      { ...base, feature: "nemotron_edge_gap_s", value: 1.25, speaker: "spk0" },
+      { ...base, feature: "cut_short_suspect", value: 1, unit: "flag" },
+      { ...base, feature: "edge_gap_threshold_s", value: 2 },
+      { ...base, feature: "cut_short_suspect", value: true, model: "bad model", unit: "x".repeat(81) },
+    ]));
+    withAf({ flags: { r2_key: fk("flags"), status: "ok" } });
+    const rows = ((await af()).data as { tracks: Array<{ rows: Row[] }> }).tracks[0].rows;
+    expect(rows.length).toBe(4);
+    for (const r of rows.slice(0, 3)) expect(r).toMatchObject({ model: "nemotron-edge", model_version: "v2.1", reliability: 0.8 });
+    expect(rows[0]).toMatchObject({ feature: "nemotron_edge_gap_s", value: 1.25, unit: "s", speaker: "spk0" });
+    expect(rows[1]).toMatchObject({ feature: "cut_short_suspect", value: 1, unit: "flag" });
+    expect(rows[2]).toMatchObject({ feature: "edge_gap_threshold_s", value: 2, unit: "s" });
+    expect(rows[3]).toMatchObject({ feature: "cut_short_suspect", value: null, model: null, unit: null, model_version: "v2.1" });
   });
 
   it("an unknown engine is skipped and counted, never read", async () => {
