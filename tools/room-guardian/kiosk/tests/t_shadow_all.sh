@@ -9,7 +9,7 @@ put_ctl() {
 SA_HEAL='{"kill": false, "modes": {"opd9": "heal"}, "ts": 0}'
 SA_SHADOW='{"kill": false, "modes": {"opd9": "shadow"}, "ts": 0}'
 SA_KILL='{"kill": true, "modes": {"opd9": "heal"}, "ts": 0}'
-MUTATING='launchctl boot(out|strap)|^killall|^pkill|^open |tcc-heal|coreaudiod-kill|pmset-baseline|tcc-prune|install-launch-agent'
+MUTATING='launchctl boot(out|strap)|^killall|^pkill|^open |tcc-heal|coreaudiod-kill|pmset-baseline|tcc-prune|install-launch-agent|^afplay '
 
 # sa_ctl <shadow|oldflag|none|stale|kill|heal>
 sa_ctl() {
@@ -43,6 +43,7 @@ sa_prep() {
     chrome) GUARDIAN_FAKE_NOW="$(ist_epoch 23:00)"; write_status capture_open=false; SA_CALL="heal_chrome"; SA_POS="pkill -x Google Chrome" ;;
     pmset) printf 'sleep 10\nautorestart 0\n' >"$T/pmset"; SA_CALL="heal_drift pmset_drift"; SA_POS="pmset-baseline" ;;
     la_missing) rm -f "$RR_PLIST"; SA_CALL="heal_drift launchagent_missing"; SA_POS="install-launch-agent" ;;
+    canary) GUARDIAN_FAKE_NOW="$(ist_epoch 23:00)"; write_status capture_open=false; mk_pcm 100 10; rm -f "$STATE_DIR/canary_night"; SA_CALL="canary_cycle"; SA_POS="afplay" ;;
     cycle) GUARDIAN_FAKE_NOW="$(ist_epoch 23:00)"; mk_tcc 0; write_status mic_state=denied capture_open=false state=mic_denied
            printf 'sleep 10\nautorestart 0\n' >"$T/pmset"; rm -f "$RR_PLIST"; : >"$T/usb.txt"
            SA_CALL="heal_cycle"; SA_POS="tcc-heal" ;;
@@ -53,7 +54,7 @@ sa_prep() {
 test_every_action_is_report_only_unless_heal() {
   load_libs; export CONFIRM_TIMEOUT_S=1
   local a m row0 row1 n=0
-  for a in tcc coreaudiod rec_dead rec_hung rec_enrol chrome pmset la_missing cycle; do
+  for a in tcc coreaudiod rec_dead rec_hung rec_enrol chrome pmset la_missing cycle canary; do
     for m in shadow oldflag none stale kill; do
       sa_prep "$a"; sa_ctl "$m"
       [ "$a" = tcc ] || [ "$a" = cycle ] && row0="$(tcc_val)"
@@ -65,13 +66,13 @@ test_every_action_is_report_only_unless_heal() {
       assert_has "$(events)" 'WOULD-DO' "$a/$m: WOULD-DO reported"
     done
   done
-  assert_eq "$n" "45" "all 45 cases ran"
+  assert_eq "$n" "50" "all 50 cases ran"
 }
 
 test_heal_mode_reaches_every_action_path() {
   load_libs; export CONFIRM_TIMEOUT_S=1
   local a
-  for a in tcc coreaudiod rec_dead rec_hung rec_enrol chrome pmset la_missing cycle; do
+  for a in tcc coreaudiod rec_dead rec_hung rec_enrol chrome pmset la_missing cycle canary; do
     sa_prep "$a"; sa_ctl heal; collect_all
     $SA_CALL >/dev/null 2>&1
     assert_has "$(cat "$CALLS")" "$SA_POS" "$a: HEAL reaches the action"

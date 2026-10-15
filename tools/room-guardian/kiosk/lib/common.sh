@@ -47,6 +47,13 @@ G_MKDIR=/bin/mkdir
 : "${FLAG_FETCH_S:=10}"
 : "${CONTROL_STALE_S:=90}"   # no control message for longer than this = kill (C4)
 : "${PUBLISH_CAP_S:=4}"
+: "${CANARY_ENABLED:=1}"
+: "${CANARY_VOLUME:=0.3}"   # afplay -v; the system volume is never changed
+: "${CANARY_START:=2135}"
+: "${CANARY_END:=0700}"
+: "${CANARY_IDLE_MIN_S:=600}"
+: "${CANARY_PASS_DB:=20}"   # tone window must rise this far above the 5 s before it
+: "${CANARY_SAMPLE_S:=7}"   # seconds after the start at which the tape is read (checkpoint lag)
 
 STATE_DIR="$GUARDIAN_HOME/state"
 AUDIT_LOG="$GUARDIAN_HOME/audit.log"

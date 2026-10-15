@@ -14,3 +14,5 @@ GUARDIAN_SUDO="sudo -n"
 GUARDIAN_ROOT_HELPER="/usr/local/libexec/eta-guardian-root"
 USB_MIC_PATTERN="C270"
 # PRESENCE_FILE="<file whose mtime is the Presence heartbeat>"
+# Nightly canary tone level for afplay -v (0.0 to 1.0). The system volume is never changed. Real playback needs mode heal; in shadow it only reports would_do.
+# CANARY_VOLUME=0.3

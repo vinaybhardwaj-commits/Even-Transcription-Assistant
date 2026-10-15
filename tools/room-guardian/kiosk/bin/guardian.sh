@@ -23,6 +23,8 @@ GUARDIAN_TESTMODE="$_G_TM"; unset _G_TM
 . "$HERE/lib/heal.sh"
 # shellcheck source=../lib/probe.sh
 . "$HERE/lib/probe.sh"
+# shellcheck source=../lib/canary.sh
+[ -r "$HERE/lib/canary.sh" ] && . "$HERE/lib/canary.sh"   # install.sh copies a fixed lib list: an older install has no canary.sh, and the tick then skips it
 
 "$G_MKDIR" -p "$STATE_DIR" "$FLAG_DIR" 2>/dev/null
 
@@ -30,6 +32,7 @@ tick() {
   collect_all
   publish "kiosk/$GUARDIAN_ROOM/health" "$(health_line)"
   heal_cycle
+  if type canary_cycle >/dev/null 2>&1; then canary_cycle; fi
 }
 
 # Loop self-supervision. The Guardian never signals a pid it remembers: under launchd a process-group kill of the job (or a SIGKILL of main)

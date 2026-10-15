@@ -31,6 +31,7 @@ mk_sandbox() { # sets T and the whole environment; PATH gets the fake bin dir fi
   export GUARDIAN_SUDO="$T/bin/fakesudo"
   export GUARDIAN_ROOT_HELPER="$KDIR/bin/guardian-root.sh"
   export GUARDIAN_ROOT_TESTMODE=1 GUARDIAN_ROOT_TEST_DB="$T/TCC.db"
+  export CANARY_AFPLAY="$T/bin/afplay" CANARY_SAMPLE_S=0   # afplay is always faked; no real sound
   export CALLS="$T/calls.log"; : >"$CALLS"
   : >"$T/pub.log"; printf 'fleet=off\n' >"$T/flagout"; echo 0 >"$T/flagrc"
   echo 4242 >"$T/rec_pid"; echo 9999 >"$T/ca_pid"; : >"$T/tapewriters"
@@ -95,9 +96,15 @@ F
   cat >"$b/system_profiler" <<'F'
 #!/bin/bash
 [ -n "$FAKE_SP_SLEEP" ] && sleep "$FAKE_SP_SLEEP"
-echo '{"SPAudioDataType":[{"coreaudio_default_audio_input_device":"yes"}]}'
+if [ -e "$T/sp_no_out" ]; then echo '{"SPAudioDataType":[{"coreaudio_default_audio_input_device":"yes"}]}'; else echo '{"SPAudioDataType":[{"coreaudio_default_audio_input_device":"yes","coreaudio_default_audio_output_device":"yes"}]}'; fi
 F
   printf '#!/bin/bash\necho "line from log"\n' >"$b/log"
+  cat >"$b/afplay" <<'F'
+#!/bin/bash
+echo "afplay $*" >>"$CALLS"
+if [ -s "$T/afplay_amp" ]; then perl -e 'print pack("s<*", ($ARGV[0]) x 40000)' "$(cat "$T/afplay_amp")" >>"$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"; fi
+exit "$(cat "$T/afplay_rc" 2>/dev/null || echo 0)"
+F
   printf '#!/bin/bash\necho "room-recorder $*" >>"$CALLS"; exit 0\n' >"$T/app/Contents/MacOS/room-recorder"
   chmod +x "$b"/* "$T/app/Contents/MacOS/room-recorder"
 }
@@ -138,6 +145,7 @@ load_libs() {
   . "$KDIR/lib/faulttree.sh"
   . "$KDIR/lib/heal.sh"
   . "$KDIR/lib/probe.sh"
+  . "$KDIR/lib/canary.sh"
   mkdir -p "$STATE_DIR" "$FLAG_DIR"
 }
 
