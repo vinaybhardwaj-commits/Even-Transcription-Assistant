@@ -21,6 +21,14 @@ Run: `python -m cutter.run --once [--since YYYY-MM-DD] [--only CONSULT_UID] [--d
 
 R2 mirror: intended `eta-audio` bucket (the tape bucket), prefix `consult-clips/<same path>`, private. The tape mirror key (a separate read credential) is READ-ONLY, so the upload needs a write credential file `~/.config/consult-cutter/r2_clips_write` (lines: access key, secret, endpoint [, bucket]); until it exists every index row carries `r2.status = pending_no_credential` and every later run uploads the pending rows once the credential exists (`mirror_pending`).
 
+## Watchdog (m3-23)
+`tools/cutter_watchdog.py --check` runs once a minute (`units/cutter-watchdog.timer`). With no argument it prints usage. `--status` is read-only and prints one JSON line (active, stop_file, holder, alerted_last_hour).
+It raises an incident when `cutter.lock` is held over 3000 s (50 min) by one process, when the lock is held with no holder file, or when one consult uid is re-cut more than 3 times in an IST day. A re-cut is a cut after the first.
+On a new incident it touches `recut.stop` and appends one row to `ALERTS.jsonl`. It never re-creates `recut.stop` for an incident it already stopped for. The operator resumes the re-cut worker by removing `recut.stop`, and that removal sticks until a new incident. It has no bus client: the operator reads `ALERTS.jsonl`. Never run `--check` against the live HOME by hand; tests use a temp HOME.
+
+## Daily recon: why a visit has no clip (m3-24)
+`tools/daily_recon.py` is read-only. For each placed visit with no cut clip it names the reason from the planner's own rules: `not_planned:<why>`, `dead:<why>` (the backfill's dead_reason), `window_other_room` (a Pulse window covers the visit only in another room), `window_<status>` (a window exists but its clip did not cut) or `no_cut_clip` (nothing is known). The report-only coverage rule accepts a short visit inside a longer clip (overlap of at least 50 percent of the shorter of the two). The R2 export keeps the stricter rule, so a loose match never binds a visit to another consult's clip.
+
 ## Local config (env, nothing real is in this repo)
 - `CONSULT_DIARIZE_PKG_DIR` and `CONSULT_DIARIZE_MODULE`: directory and module name of the diarize package that `cutter/diar_worker.py` imports. No default; the worker exits with a clear message if either is unset (set them in the cutter unit or shell).
 - `CONSULT_R2_WRITE_FILE`: path of the R2 write credential file. Without it (and without the default file) every clip stays `r2.status = pending_no_credential`.

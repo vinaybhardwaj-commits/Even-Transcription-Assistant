@@ -11,6 +11,8 @@ def W(i, o, c, reason="url_clear", doc=D, room="r1", slug="opd-1", q="clean"):
     return dict(id=i, consult_uid=f"cons{i}", machine="m", room_id=room, room_slug=slug, t_open=T0 + o, t_close=None if c is None else T0 + c, close_reason=reason, quality=q, resolver_version="v1",
                 computed_at="2026-10-07T10:00:00+00:00", doctor_uid=doc, doctor_name=DOC_NAME, doctor_source="warehouse_doctor_uid")
 
+NEEDS_DIARIZE = unittest.skipUnless(os.environ.get("CONSULT_DIARIZE_PKG_DIR") and os.environ.get("CONSULT_DIARIZE_MODULE"), "needs the diarize package: set CONSULT_DIARIZE_PKG_DIR and CONSULT_DIARIZE_MODULE")
+
 class Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -132,6 +134,7 @@ class GPUGate(Base):                                                            
         from cutter import gpu as G, speak as SP
         g = G.gate(self.at(22, 0), 15); self.assertEqual(g["hard_stop"], self.at(22, 50)); cmds = []
         SP.run_job(dict(id="x", audio="a", out="o"), g, runner=lambda cmd, stdin: cmds.append(cmd) or 0); self.assertIn("--hard-stop", cmds[0]); self.assertEqual(cmds[0][cmds[0].index("--hard-stop") + 1], f"{self.at(22, 50):.0f}")
+    @NEEDS_DIARIZE
     def test_worker_refuses_to_start_after_the_latest_start(self):
         import subprocess as sp
         r = sp.run([C.DIAR_PY, os.path.join(os.path.dirname(R.__file__), "diar_worker.py"), "--not-after", "1"], input='{"jobs": []}', capture_output=True, text=True); self.assertEqual(r.returncode, 75)
@@ -296,7 +299,7 @@ class Horizon(Base):                                                            
         def fetch(since): seen["since"] = since; return []
         def run_once(windows, ctx, only=None, d_from=None, d_to=None, dry=False, index_path=None, min_open=None, recut=False): seen["min_open"] = min_open; return dict(eligible=0), []
         C.RUN_LOCK = f"{self.out}/l.lock"
-        with mock.patch.object(R.Wn, "fetch", fetch), mock.patch.object(R, "make_ctx", lambda now, **kw: dict(now=now)), mock.patch.object(R, "run_once", run_once): R.main(["--once", "--since", "2026-10-05", "--dry-run"])
+        with mock.patch.object(R.SP, "load_prints", lambda strict=False: {}), mock.patch.object(R.Wn, "fetch", fetch), mock.patch.object(R, "make_ctx", lambda now, **kw: dict(now=now)), mock.patch.object(R, "run_once", run_once): R.main(["--once", "--since", "2026-10-05", "--dry-run"])
         s0 = dt.datetime(2026, 10, 5, tzinfo=R.IST).timestamp(); self.assertEqual(seen["since"], s0 - 86400); self.assertEqual(seen["min_open"], s0)
     def test_a_doctor_who_gets_a_print_later_has_the_clip_cut_again_with_the_split(self):                         # N4
         w = W(1, 200, 235, "idle_timeout", doc="LATE")
@@ -444,6 +447,7 @@ class DoctorSplitFailed(Base):                                                  
         import time as _t
         base = f"{C.CLIPS}/2026-10-03/opd-3/u9"; os.makedirs(base); os.makedirs(f"{base}.old"); os.utime(f"{base}.old", (1, 1))
         self.assertEqual(SO.sweep_tmp(C.CLIPS, _t.time()), 1); self.assertTrue(os.path.isdir(base)); self.assertFalse(os.path.exists(f"{base}.old"))
+    @NEEDS_DIARIZE
     def test_worker_guards_each_segment_inside_the_cluster_average(self):
         import types, numpy as _np
         from cutter import diar_worker as DW
@@ -567,6 +571,7 @@ class Throughput(Base):                                                         
     def test_dry_run_names_the_long_window(self):
         summ, rows = R.run_once([W(1, 100, 100 + 50 * 60)], self.ctx(now_off=9000), dry=True); self.assertTrue(rows[0]["would_skip"].startswith("deferred_long"))
 
+@NEEDS_DIARIZE
 class WorkerEcapa(unittest.TestCase):
     def test_ecapa_stays_on_cpu_without_cuda_and_leaves_the_module_alone(self):
         import types, os as _os

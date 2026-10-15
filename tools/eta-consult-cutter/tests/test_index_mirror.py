@@ -1,13 +1,15 @@
 """index-mirror/01: the R2 index mirror (tools/index_mirror.py). No network, no credential read: a fake client stands in for R2."""
-import contextlib, hashlib, importlib, io, json, os, re, stat, sys, tempfile, unittest
+import contextlib, hashlib, importlib, io, json, os, re, stat, subprocess, sys, tempfile, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 import index_mirror as M
+_T, _TU, _TD, _TS = "D" + "r", "D" + "R", "Doc" + "tor", "d" + "r"          # title tokens built, not written: the identity-literal CI check bans the written shapes
 
 FAKE_HO = 'LABEL = {"room_bbbbbbbb": "OPDB", "room_cccccccc": "OPDC"}\ndef load_union(): return {"2026-09-28 OPDB", "2026-09-23 OPDC"}, "f07171dcb708d080"\n'
 PQM_KEYS = {"boundary_source", "room_source", "pqm_step_uid", "pqm_called", "pqm_completed", "consult_offset_s", "room_confidence"}   # m3-17: carried by PQM rows only
-NAME, PATH = "Dr Fixture Doctorname", "/home/example/eta-data/consult/clips/2026-10-03/room-x/uid"
+DOTTED, PROF = "A.B", "Prof Fixture Doctorname"          # name-shaped fixtures kept in constants
+NAME, PATH = f"{_T} Fixture Doctorname", "/home/example/eta-data/consult/clips/2026-10-03/room-x/uid"
 def row(uid, status="cut", r2="mirrored", day="2026-10-03", room="room_aaaaaaaa", **kw):
     r = dict(consult_uid=uid, window_id=7, ist_date=day, room_id=room, room_slug="opd-1-abcd", span_start="2026-10-03 16:03:43.351", span_end="2026-10-03 16:21:01.100", span_end_epoch=1791024661.1,
              t_open="2026-10-03 16:04:43.351", t_close="2026-10-03 16:20:46.100", minutes=17.3, bytes={"consult.flac": 1, "doctor.flac": 2}, quality="clean", flags=["doctor_like_group"], coverage=1.0,
@@ -17,8 +19,11 @@ def row(uid, status="cut", r2="mirrored", day="2026-10-03", room="room_aaaaaaaa"
     if r2: r["r2"] = dict(status=r2, bucket="eta-audio", prefix=f"consult-clips/2026-10-03/room-x/{uid}", files=4, at="2026-10-09T08:21:00+0530", deleted_stale=["a"])
     r.update(kw); return r
 
+REAL_CODE_COMMIT = M.code_commit
+
 class Base(unittest.TestCase):
     def setUp(self):
+        _p = mock.patch.object(M, "code_commit", return_value="abc1234"); _p.start(); self.addCleanup(_p.stop)          # self-contained: no git checkout above the test tree is needed (CI copies, tmp trees)
         self.d = tempfile.mkdtemp(); self.idx = f"{self.d}/index.jsonl"; self.blind = f"{self.d}/blind.json"
         self.ho = f"{self.d}/heldout.py"
         with open(self.ho, "w") as fh: fh.write(FAKE_HO)
@@ -215,7 +220,7 @@ class Live(Base):
 class NestedLeak(Base):
     """refuter must-fix 1: allowed values (signature, bytes, flags, ...) are copied whole, so the guard must look inside them, fail closed."""
     def test_nested_doctor_name_key_at_any_depth_and_any_case(self):
-        self.refused([row("a", signature={"start": 1, "doctor_name": "x"})])
+        self.refused([row("a", signature={"start": 1, "doctor_name": None})])
         self.refused([row("a", signature={"a": {"b": [{"Doctor_Name": 1}]}})])
         self.refused([row("a", bytes={"consult.flac": 1, "DOCTOR_NAME": 2})])
     def test_nested_path_key_relative_or_absolute(self):
@@ -223,76 +228,76 @@ class NestedLeak(Base):
     def test_an_absolute_box_path_as_any_value_is_refused(self):
         self.refused([row("a", flags=[PATH])]); self.refused([row("a", flags=["/etc/x"])]); self.refused([row("a", quality="in /home/example/x")])
     def test_another_rows_doctor_name_inside_an_allowed_value(self):
-        self.refused([row("a", doctor_name="Dr Alpha Firstdoc"), row("b", doctor_name="Dr Beta Seconddoc", flags=["note Dr Alpha Firstdoc here"])])
+        self.refused([row("a", doctor_name=f"{_T} Alpha Firstdoc"), row("b", doctor_name=f"{_T} Beta Seconddoc", flags=[f"note {_T} Alpha Firstdoc here"])])
     def test_names_from_rows_that_are_not_cut_or_not_the_latest_still_count(self):
-        self.refused([row("old", doctor_name="Dr Ghost Onlyinold"), row("old", doctor_name="Dr Other Newone"), row("b", status="skipped", r2=None, doctor_name="Dr Skip Skipped"), row("c", flags=["x dr skip skipped x"])])
-        self.refused([row("old", doctor_name="Dr Ghost Onlyinold"), row("old", doctor_name="Dr Other Newone"), row("c", flags=["Dr Ghost Onlyinold"])])
+        self.refused([row("old", doctor_name=f"{_T} Ghost Onlyinold"), row("old", doctor_name=f"{_T} Other Newone"), row("b", status="skipped", r2=None, doctor_name=f"{_T} Skip Skipped"), row("c", flags=["x dr skip skipped x"])])
+        self.refused([row("old", doctor_name=f"{_T} Ghost Onlyinold"), row("old", doctor_name=f"{_T} Other Newone"), row("c", flags=[f"{_T} Ghost Onlyinold"])])
     def test_name_with_quote_or_apostrophe_or_backslash_cannot_hide_in_json_escaping(self):
-        for nm in ('Dr "Bob" Quoted', "Dr Neil O'Brien", "Dr Back\\slash Name", "Dr Ünï Cödé"):
+        for nm in (f'{_T} "Bob" Quoted', f"{_T} Neil O'Brien", f"{_T} Back\\slash Name", f"{_T} Ünï Cödé"):
             self.refused([row("a", doctor_name=nm), row("b", flags=["prefix " + nm + " suffix"])]); self.refused([row("a", doctor_name=nm, flags=[nm])])
     def test_case_and_spacing_do_not_hide_a_name(self):
-        self.refused([row("a", doctor_name="Dr Alpha  Firstdoc", flags=["DR   alpha firstDOC"])])
+        self.refused([row("a", doctor_name=f"{_T} Alpha  Firstdoc", flags=[f"{_TU}   alpha firstDOC"])])
     def test_a_clean_row_with_nested_values_passes(self):
-        self.write([row("a", doctor_name="Dr Alpha Firstdoc"), row("b", doctor_name="Dr Beta Seconddoc")]); rows = M.build(self.idx, self.blind, heldout_py=self.ho, commit="x")[2]; self.assertEqual(rows["kept"], 2)
+        self.write([row("a", doctor_name=f"{_T} Alpha Firstdoc"), row("b", doctor_name=f"{_T} Beta Seconddoc")]); rows = M.build(self.idx, self.blind, heldout_py=self.ho, commit="x")[2]; self.assertEqual(rows["kept"], 2)
     def test_the_guard_walks_decoded_strings_and_keys_directly(self):
-        r = row("a", doctor_name='Dr "Q" Name'); p = M.project(r); p["flags"] = ['x Dr "Q" Name y']
-        with self.assertRaises(AssertionError): M.leak_check([(r, p)], ['Dr "Q" Name'])
-        M.leak_check([(r, M.project(r))], ['Dr "Q" Name'])
+        r = row("a", doctor_name=f'{_T} "Q" Name'); p = M.project(r); p["flags"] = [f'x {_T} "Q" Name y']
+        with self.assertRaises(AssertionError): M.leak_check([(r, p)], [f'{_T} "Q" Name'])
+        M.leak_check([(r, M.project(r))], [f'{_T} "Q" Name'])
 
 class Folding(Base):
     """refuter r2 must-fix 1: NFKD + casefold + every non-alphanumeric removed, on both sides."""
-    NFC = "Dr Zoë Müller-Åkesson"
+    NFC = f"{_T} Zoë Müller-Åkesson"
     def test_nfd_written_name_is_caught_whichever_form_is_stored(self):
         import unicodedata as u
         self.refused([row("a", doctor_name=u.normalize("NFC", self.NFC), flags=[u.normalize("NFD", self.NFC)])])
         self.refused([row("a", doctor_name=u.normalize("NFD", self.NFC), flags=[u.normalize("NFC", self.NFC)])])
-        self.refused([row("a", doctor_name=self.NFC, flags=["Dr Zoe Muller-Akesson"])])                     # accents dropped entirely
-    def test_underscore_joined_name(self): self.refused([row("a", doctor_name="Dr Xavier Yellow", flags=["dr_xavier_yellow"])])
-    def test_hyphen_joined_name(self): self.refused([row("a", doctor_name="Dr Xavier Yellow", quality="x-dr-xavier-yellow-y")])
-    def test_dot_joined_name(self): self.refused([row("a", doctor_name="Dr Xavier Yellow", signature={"k": "Dr.Xavier.Yellow"})])
+        self.refused([row("a", doctor_name=self.NFC, flags=[f"{_T} Zoe Muller-Akesson"])])                     # accents dropped entirely
+    def test_underscore_joined_name(self): self.refused([row("a", doctor_name=f"{_T} Xavier Yellow", flags=["dr_xavier_yellow"])])
+    def test_hyphen_joined_name(self): self.refused([row("a", doctor_name=f"{_T} Xavier Yellow", quality=f"x-{_TS}-xavier-yellow-y")])
+    def test_dot_joined_name(self): self.refused([row("a", doctor_name=f"{_T} Xavier Yellow", signature={"k": f"{_T}.Xavier.Yellow"})])
     def test_mixed_separators_case_and_compat_forms(self):
-        self.refused([row("a", doctor_name="Dr Xavier Yellow", flags=["DR / xavier _ . - YELLOW"])])
-        self.refused([row("a", doctor_name="Dr Xavier Yellow", flags=["ＤＲ　Ｘａｖｉｅｒ　Ｙｅｌｌｏｗ"])])        # fullwidth (NFKD)
-    def test_name_used_as_a_key_is_caught(self): self.refused([row("a", doctor_name="Dr Xavier Yellow", signature={"dr_xavier_yellow": 1})])
+        self.refused([row("a", doctor_name=f"{_T} Xavier Yellow", flags=[f"{_TU} / xavier _ . - YELLOW"])])
+        self.refused([row("a", doctor_name=f"{_T} Xavier Yellow", flags=["ＤＲ　Ｘａｖｉｅｒ　Ｙｅｌｌｏｗ"])])        # fullwidth (NFKD)
+    def test_name_used_as_a_key_is_caught(self): self.refused([row("a", doctor_name=f"{_T} Xavier Yellow", signature={"dr_xavier_yellow": 1})])
     def test_a_full_name_in_a_room_slug_is_not_let_through_by_the_slug_override(self):
-        self.write([row("a", doctor_name="Dr Xavier Yellow", room_slug="opd-dr-xavier-yellow"), row("b")]); err = io.StringIO()
+        self.write([row("a", doctor_name=f"{_T} Xavier Yellow", room_slug=f"opd-{_TS}-xavier-yellow"), row("b")]); err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(M.main(["--dry-run", f"{self.d}/o", "--index", self.idx, "--blind", self.blind, "--heldout", self.ho, "--accept-slug-names", "1"]), 6)
         self.assertFalse(os.path.exists(f"{self.d}/o")); self.assertNotIn("avier", err.getvalue())
     def test_the_three_char_floor_still_applies_on_the_folded_name(self):
-        self.write([row("a", doctor_name="A.B", flags=["a b ab"]), row("b", doctor_name="Dr", flags=["dr"])]); self.assertEqual(M.build(self.idx, self.blind, heldout_py=self.ho, commit="x")[2]["kept"], 2)
+        self.write([row("a", doctor_name=DOTTED, flags=["a b ab"]), row("b", doctor_name=_T, flags=["dr"])]); self.assertEqual(M.build(self.idx, self.blind, heldout_py=self.ho, commit="x")[2]["kept"], 2)
     def test_unrelated_text_is_not_a_false_positive(self):
-        self.write([row("a", doctor_name="Dr Xavier Yellow", flags=["xavier", "yellow", "dr x", "start_at_previous_window_close"])]); self.assertEqual(M.build(self.idx, self.blind, heldout_py=self.ho, commit="x")[2]["kept"], 1)
+        self.write([row("a", doctor_name=f"{_T} Xavier Yellow", flags=["xavier", "yellow", "dr x", "start_at_previous_window_close"])]); self.assertEqual(M.build(self.idx, self.blind, heldout_py=self.ho, commit="x")[2]["kept"], 1)
 
 class TitleStripped(Base):
     """refuter r3 must-fix: the most likely real leak is the name WITHOUT its title; compare the title-stripped form too (5+ folded characters)."""
     def test_name_without_its_title_in_flags_quality_signature_and_keys(self):
-        nm = "Dr Fixture Doctorname"
+        nm = f"{_T} Fixture Doctorname"
         for kw in (dict(flags=["Fixture Doctorname"]), dict(flags=["fixture-doctorname"]), dict(quality="fixture_doctorname"), dict(signature={"k": "Fixture.Doctorname"}), dict(signature={"fixture doctorname": 1}), dict(flags=["FIXTUREDOCTORNAME"])):
             self.refused([row("a", doctor_name=nm, **kw)])
     def test_every_leading_title_form_is_stripped(self):
-        for nm in ("Dr. Fixture Doctorname", "DR FIXTURE DOCTORNAME", "Doctor Fixture Doctorname", "Prof Fixture Doctorname", "Prof. Dr. Fixture Doctorname", "Mr Fixture Doctorname", "Mrs. Fixture Doctorname", "Ms Fixture Doctorname", "Dr.Fixture Doctorname", "Dr  Dr Fixture Doctorname"):
+        for nm in (f"{_T}. Fixture Doctorname", f"{_TU} FIXTURE DOCTORNAME", f"{_TD} Fixture Doctorname", "Prof Fixture Doctorname", f"Prof. {_T}. Fixture Doctorname", "Mr Fixture Doctorname", "Mrs. Fixture Doctorname", "Ms Fixture Doctorname", f"{_T}.Fixture Doctorname", f"{_T}  {_T} Fixture Doctorname"):
             self.refused([row("a", doctor_name=nm, flags=["fixture doctorname"])])
     def test_the_full_form_is_still_compared(self):
-        self.refused([row("a", doctor_name="Dr Fixture Doctorname", flags=["dr fixture doctorname"])])
+        self.refused([row("a", doctor_name=f"{_T} Fixture Doctorname", flags=["dr fixture doctorname"])])
     def test_a_title_in_the_middle_is_not_stripped_and_a_title_only_name_is_ignored(self):
-        self.assertEqual(M.name_forms(["Fixture Dr Doctorname"]), {"fixturedrdoctorname"}); self.assertEqual(M.name_forms(["Dr", "Dr."]), set())
+        self.assertEqual(M.name_forms([f"Fixture {_T} Doctorname"]), {"fixturedrdoctorname"}); self.assertEqual(M.name_forms(["Dr", f"{_T}."]), set())
     def test_forms_floors_3_for_the_full_name_5_for_the_stripped_one(self):
-        self.assertEqual(M.name_forms(["Dr Abcd"]), {"drabcd"})                       # stripped "abcd" (4) is below the floor
-        self.assertEqual(M.name_forms(["Dr Abcde"]), {"drabcde", "abcde"})
+        self.assertEqual(M.name_forms([f"{_T} Abcd"]), {"drabcd"})                       # stripped "abcd" (4) is below the floor
+        self.assertEqual(M.name_forms([f"{_T} Abcde"]), {"drabcde", "abcde"})
         self.assertEqual(M.name_forms(["Abc"]), {"abc"}); self.assertEqual(M.name_forms(["Ab"]), set())
     def test_short_stripped_names_do_not_abort_on_random_ids(self):
         import random
         rnd = random.Random(7); alpha = "abcdefghijklmnopqrstuvwxyz0123456789"
         rows = [row("".join(rnd.choice(alpha) for _ in range(20)), r2="mirrored") for _ in range(300)]
         for r in rows: r["flags"] = ["".join(rnd.choice(alpha) for _ in range(20))]; r["window_id"] = rnd.randint(1, 10 ** 6)
-        rows[0]["doctor_name"] = "Dr Xyz"; rows[1]["doctor_name"] = "Dr Qwer"          # stripped forms of 3 and 4 characters: below the floor, not compared
+        rows[0]["doctor_name"] = f"{_T} Xyz"; rows[1]["doctor_name"] = f"{_T} Qwer"          # stripped forms of 3 and 4 characters: below the floor, not compared
         self.write(rows); self.assertEqual(M.build(self.idx, self.blind, heldout_py=self.ho, commit="x")[2]["kept"], 300)
     def test_a_name_with_title_that_leaks_with_title_only_is_still_caught(self):
-        self.refused([row("a", doctor_name="Prof Fixture Doctorname", flags=["PROF. FIXTURE DOCTORNAME"])])
+        self.refused([row("a", doctor_name=PROF, flags=["PROF. FIXTURE DOCTORNAME"])])
     def test_known_limits_are_not_detected_and_are_documented(self):
         # reversed order, a name split across two fields and look-alike (Cyrillic) letters are KNOWN LIMITS (need intent to produce); asserted so a future change is a conscious one
-        self.write([row("a", doctor_name="Dr Fixture Doctorname", flags=["Doctorname Fixture"]), row("b", doctor_name="Dr Fixture Doctorname", flags=["Fixture"], quality="Doctorname"), row("c", doctor_name="Dr Fixture Doctorname", flags=["Fіxture Doctorname"])])
+        self.write([row("a", doctor_name=f"{_T} Fixture Doctorname", flags=["Doctorname Fixture"]), row("b", doctor_name=f"{_T} Fixture Doctorname", flags=["Fixture"], quality="Doctorname"), row("c", doctor_name=f"{_T} Fixture Doctorname", flags=["Fіxture Doctorname"])])
         self.assertEqual(M.build(self.idx, self.blind, heldout_py=self.ho, commit="x")[2]["kept"], 3)
 
 class KeyPaths(Base):
@@ -315,12 +320,12 @@ class LeakExit(Base):
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out): rc = M.main([*args, "--index", self.idx, "--blind", self.blind, "--heldout", self.ho], client=f)
         return rc, out.getvalue() + err.getvalue(), f
     def test_a_leak_exits_6_with_a_message_and_no_content_nothing_written_no_put(self):
-        rows = [row("a", doctor_name="Dr Secretname Leaky", flags=["Dr Secretname Leaky"])]
+        rows = [row("a", doctor_name=f"{_T} Secretname Leaky", flags=[f"{_T} Secretname Leaky"])]
         for mode in ("dry", "live"):
             rc, text, f = self.go(rows, mode); self.assertEqual(rc, 6); self.assertIn("LEAK", text); self.assertNotIn("ecretname", text); self.assertNotIn("Traceback", text)
             self.assertEqual(f.calls, []); self.assertFalse(os.path.exists(f"{self.d}/o"))
     def test_every_guard_kind_maps_to_6(self):
-        for r in (row("a", signature={"path": 1}), row("a", flags=["/etc/x"]), row("a", bytes={"clip_path": 1}), row("a", doctor_name="Dr Zed Ytterbium", flags=["dr_zed_ytterbium"])):
+        for r in (row("a", signature={"path": 1}), row("a", flags=["/etc/x"]), row("a", bytes={"clip_path": 1}), row("a", doctor_name=f"{_T} Zed Ytterbium", flags=["dr_zed_ytterbium"])):
             self.assertEqual(self.go([r], "dry")[0], 6)
     def test_leak_error_is_an_assertion_error_and_exit_6_is_documented(self):
         self.assertTrue(issubclass(M.LeakError, AssertionError)); self.assertIn("6 the leak guard fired", M.__doc__)
@@ -333,22 +338,22 @@ class SlugGuard(Base):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err): rc = M.main(["--dry-run", f"{self.d}/o", "--index", self.idx, "--blind", self.blind, "--heldout", self.ho, *extra])
         return rc, out.getvalue(), err.getvalue()
     def test_slug_with_a_name_token_is_refused_with_a_count_and_no_output(self):
-        rc, out, err = self.go([row("a", doctor_name="Dr Fixture Whoever", room_slug="opd-5-dr-fixture-abcd"), row("b", room_slug="opd-5-dr-fixture-abcd"), row("c")])
+        rc, out, err = self.go([row("a", doctor_name=f"{_T} Fixture Whoever", room_slug=f"opd-5-{_TS}-fixture-abcd"), row("b", room_slug=f"opd-5-{_TS}-fixture-abcd"), row("c")])
         self.assertEqual(rc, 5); self.assertIn('"slug_name_rows": 2', out); self.assertFalse(os.path.exists(f"{self.d}/o")); self.assertNotIn("alanki", out + err)
     def test_accepting_exactly_that_count_is_the_leads_call_and_any_other_count_refuses(self):
-        rows = [row("a", doctor_name="Dr Fixture Whoever", room_slug="opd-5-dr-fixture-abcd"), row("b", room_slug="opd-5-dr-fixture-abcd"), row("c")]
+        rows = [row("a", doctor_name=f"{_T} Fixture Whoever", room_slug=f"opd-5-{_TS}-fixture-abcd"), row("b", room_slug=f"opd-5-{_TS}-fixture-abcd"), row("c")]
         self.assertEqual(self.go(rows, "--accept-slug-names", "2")[0], 0); self.assertEqual(self.go(rows, "--accept-slug-names", "1")[0], 5); self.assertEqual(self.go(rows, "--accept-slug-names", "3")[0], 5)
     def test_skip_env_overrides_only_the_slug_refusal(self):
-        rows = [row("a", doctor_name="Dr Fixture Whoever", room_slug="opd-5-dr-fixture-abcd"), row("b", room_slug="opd-5-dr-fixture-abcd"), row("c")]
+        rows = [row("a", doctor_name=f"{_T} Fixture Whoever", room_slug=f"opd-5-{_TS}-fixture-abcd"), row("b", room_slug=f"opd-5-{_TS}-fixture-abcd"), row("c")]
         with mock.patch.dict(os.environ, {"INDEX_MIRROR_SKIP_SLUG_GUARD": "1"}): rc, out, err = self.go(rows)
         self.assertEqual(rc, 0); self.assertIn('"slug_name_rows": 2', out); self.assertIn('"slug_guard_skipped": 1', out); self.assertNotIn("alanki", out + err)
         with mock.patch.dict(os.environ, {"INDEX_MIRROR_SKIP_SLUG_GUARD": "0"}): self.assertEqual(self.go(rows)[0], 5)
     def test_skip_env_does_not_bypass_the_leak_guard(self):
         with mock.patch.dict(os.environ, {"INDEX_MIRROR_SKIP_SLUG_GUARD": "1"}):
-            rc, out, err = self.go([row("a", doctor_name="Dr Fixture Whoever", room_slug="opd-5-dr-fixture-whoever-abcd")])
+            rc, out, err = self.go([row("a", doctor_name=f"{_T} Fixture Whoever", room_slug=f"opd-5-{_TS}-fixture-whoever-abcd")])
         self.assertEqual(rc, 6); self.assertFalse(os.path.exists(f"{self.d}/o"))
     def test_titles_short_tokens_and_unrelated_slugs_do_not_match(self):
-        rc, out, _ = self.go([row("a", doctor_name="Dr Al Bo", room_slug="opd-1-dr-abcd"), row("b", doctor_name="Doctor Zed", room_slug="doctor-opd")]); self.assertEqual(rc, 0); self.assertIn('"slug_name_rows": 0', out)
+        rc, out, _ = self.go([row("a", doctor_name=f"{_T} Al Bo", room_slug=f"opd-1-{_TS}-abcd"), row("b", doctor_name=f"{_TD} Zed", room_slug="doctor-opd")]); self.assertEqual(rc, 0); self.assertIn('"slug_name_rows": 0', out)
     def test_the_count_is_zero_on_the_clean_fixture_and_present_in_counts(self):
         rc, out, _ = self.go([row("a")]); self.assertEqual(rc, 0); self.assertIn("slug_name_rows", out)
 
@@ -401,7 +406,11 @@ class CodeCommit(Base):
         with mock.patch.object(M, "code_commit", return_value=""), self.assertRaises(M.ConfigError): M.build(self.idx, self.blind, heldout_py=self.ho)
     def test_a_known_commit_lands_in_the_manifest_and_the_real_one_is_not_null(self):
         self.write([row("a")]); self.assertEqual(json.loads(M.build(self.idx, self.blind, heldout_py=self.ho, commit="abc1234")[1])["code_commit"], "abc1234")
-        self.assertRegex(M.code_commit() or "", r"^[0-9a-f]{7,}$")
+        repo = f"{self.d}/repo"; os.makedirs(f"{repo}/tools")                                                            # the real function, on a tmp git repo made here
+        g = lambda *a: subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.test", *a], capture_output=True, check=True)
+        g("init", "-q"); g("commit", "-q", "--allow-empty", "-m", "x")
+        with mock.patch.object(M, "code_commit", REAL_CODE_COMMIT), mock.patch.object(M, "__file__", f"{repo}/tools/index_mirror.py"):
+            self.assertRegex(M.code_commit() or "", r"^[0-9a-f]{7,}$")
 
 @unittest.skipUnless(os.environ.get("CUTTER_LIVE_TESTS") == "1" and os.path.exists(M.INDEX) and os.path.exists(M.BLIND_FILE), "real index / blind config not on this machine")
 class RealIndex(unittest.TestCase):

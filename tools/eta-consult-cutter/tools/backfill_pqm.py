@@ -12,7 +12,7 @@ when no row is planned any more. Log: ~/oc/consult/cutter-logs/backfill-pqm-YYYY
 import argparse, collections, datetime as dt, json, os, subprocess, sys, threading, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import pqm_windows as PW
-from recut_queue import last_json, _json_or_none
+from recut_queue import last_json, _json_or_none, seconds_since_timer, seconds_to_next_timer, MIN_BEFORE_TIMER_S, TIMER_LAUNCH_S, hourly_waiting
 H = os.path.expanduser("~"); E = f"{H}/eta-data"; CLIPS = f"{E}/consult/clips"; STOP = f"{E}/consult/pqm.stop"; WFILE = f"{E}/consult/pqm-windows.jsonl"; LOGDIR = f"{H}/oc/consult/cutter-logs"
 PY = f"{H}/oc/consult/cutter-venv/bin/python"; CUTTER = os.environ.get("BACKFILL_PQM_CUTTER", f"{H}/oc/consult/cutter-deploy"); LOCK_WAIT_S = 60
 PLANNED = os.environ.get("BACKFILL_PQM_PLANNED", f"{H}/oc/palimpsest/in/consult-sep/planned-clips.csv"); PLANNED_EVERY_S = 1200; REFRESH_CHECK_S = 60
@@ -39,6 +39,12 @@ def allowed_now(now):
     """minor 4: a job starts only between :46 and :25 past the (IST) hour, so it never touches the :35 slot."""
     m = dt.datetime.fromtimestamp(now, IST).minute
     return m >= 46 or m <= 25
+
+TIMER_WAIT_S = 30
+
+def timer_gap_ok(now):
+    """m3-21c: the recut_queue rule (shared helpers): no cut starts when the next :35 firing is < 12 min away (:23-:35) or the last one was < 180 s ago (:35-:38), so a job never holds cutter.lock when the timer fires."""
+    return seconds_to_next_timer(now) >= MIN_BEFORE_TIMER_S and seconds_since_timer(now) >= TIMER_LAUNCH_S
 
 def run_cutter(args, timeout):
     try: p = subprocess.run(["nice", "-n", "19", PY, "-m", "cutter.run"] + args, cwd=CUTTER, capture_output=True, text=True, timeout=timeout)
@@ -164,7 +170,10 @@ def drive(uids, wfile, log, runner=run_cutter, now=time.time, sleep=time.sleep, 
         while True:
             tick()
             if stop(): log("stop file present: exiting, resume with the next invocation"); tick(True); return out
-            if not allowed_now(now()): sleep(60); continue
+            n_ = now()
+            if not allowed_now(n_): sleep(60); continue
+            if hourly_waiting(): sleep(TIMER_WAIT_S); continue                                                          # m3-21c F1: the hourly run waits for the lock: start no cut
+            if not timer_gap_ok(n_): sleep(TIMER_WAIT_S); continue                                                  # m3-21c: loops back to the stop-file check above
             rc, s = runner(["--once", "--windows-file", wfile, "--only", uid], 5400); o = classify(rc, s)
             if o == "busy": sleep(LOCK_WAIT_S); continue
             break

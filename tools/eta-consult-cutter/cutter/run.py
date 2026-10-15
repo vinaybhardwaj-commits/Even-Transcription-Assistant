@@ -4,7 +4,7 @@
   python -m cutter.run --backfill 2026-10-02 2026-10-07 [--execute]      (dry-run unless --execute; NOT to be executed before the review PASS)
 Eligible = window closed >= 15 min ago, not a blind room-day, with tape (else the skip reason from room_audio_state), not already cut with the same signature (t_close, close_reason, doctor).
 GPU work (pyannote 3.1 on the T4) runs in ONE worker under flock ~/gpu.lock and, only while config.GPU_WINDOW_ENABLED is True, never starts between 22:30 and 06:00 (off since 08 Oct 2026: per-job gpu.lock sharing instead). Patient audio stays under ~/eta-data (0700) and private R2."""
-import argparse, datetime as dt, json, logging, os, shutil, subprocess, sys, time
+import argparse, atexit, datetime as dt, json, logging, os, shutil, signal, subprocess, sys, time
 from . import config as C, spanrule as S, windows as Wn, tape as T, state as ST, speak as SP, store as SO, gpu as G
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 log = logging.getLogger("cutter")
@@ -342,8 +342,72 @@ def acquire_run_lock(path=None):
     """R8: one cutter run at a time (timer and manual --backfill --execute can no longer interleave). -> the open lock file (keep it referenced) or None when another run holds it."""
     import fcntl
     p = path or C.RUN_LOCK; os.makedirs(os.path.dirname(p), exist_ok=True); f = open(p, "a")
-    try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); return f
+    try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError: f.close(); return None
+    _write_holder(p); return f
+
+def _write_holder(lock_path):
+    """m3-23: <lock>.holder = {pid, mode, start, ticks} for tools/cutter_watchdog.py; removed at exit / release_run_lock. Never raises (a failed write must not cost the lock)."""
+    hp = lock_path + ".holder"; tmp = f"{hp}.tmp.{os.getpid()}"
+    try:
+        ticks = None
+        try: ticks = int(open("/proc/self/stat").read().rsplit(")", 1)[1].split()[19])
+        except (OSError, IndexError, ValueError): pass
+        with open(tmp, "w") as fh: json.dump(dict(pid=os.getpid(), mode=" ".join(x for x in sys.argv[1:] if x.startswith("--")) or "run", start=time.time(), ticks=ticks), fh)
+        os.replace(tmp, hp)
+        atexit.register(_drop_holder, hp, os.getpid())
+        try: signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))                      # SIGTERM while holding: SystemExit runs atexit, which removes the holder
+        except (ValueError, OSError): pass
+    except OSError:
+        try: os.remove(tmp)
+        except OSError: pass
+
+def _drop_holder(hp, pid):
+    try:
+        if json.load(open(hp)).get("pid") == pid: os.remove(hp)
+    except (OSError, ValueError, AttributeError): pass
+
+def release_run_lock(f):
+    """m3-23: drop the holder file, then the lock."""
+    _drop_holder(f.name + ".holder", os.getpid()); f.close()
+
+DEFAULT_LOCK_WAIT_S = 900.0; LOCK_POLL_S = 5.0
+
+def lock_wait_s():
+    """m3-21c: env CUTTER_LOCK_WAIT_S (seconds, >= 0), else 900; an unreadable or negative value -> the default."""
+    try: v = float(os.environ.get("CUTTER_LOCK_WAIT_S", ""))
+    except ValueError: return DEFAULT_LOCK_WAIT_S
+    return v if v >= 0 and v == v and v != float("inf") else DEFAULT_LOCK_WAIT_S
+
+def waiting_marker_path(): return os.path.join(os.path.dirname(C.RUN_LOCK), "hourly-waiting")
+
+def _write_waiting_marker(path):
+    """m3-21c F1: atomic marker {pid, start} so recut_queue and backfill_pqm do not start a cut while the hourly run waits for the lock."""
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w") as fh: json.dump(dict(pid=os.getpid(), start=time.strftime("%Y-%m-%dT%H:%M:%S%z")), fh)
+        os.replace(tmp, path)
+    except OSError: log.warning("could not write %s", path)
+
+def acquire_run_lock_wait(wait_s, path=None, sleep=time.sleep, clock=time.monotonic, poll_s=LOCK_POLL_S, marker=None):
+    """m3-21c: like acquire_run_lock, but polls every poll_s for up to wait_s seconds. -> (lock file or None, seconds waited). While it waits it keeps `marker` (default waiting_marker_path()) and removes it on acquire or exit."""
+    take = (lambda: acquire_run_lock(path)) if path else (lambda: acquire_run_lock())
+    t0 = clock(); f = take()
+    if f is not None or wait_s <= 0: return f, round(clock() - t0, 1)
+    mk = marker or waiting_marker_path(); _write_waiting_marker(mk)
+    old_term = None
+    try: old_term = signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))                   # m3-21c F4: systemctl stop / the unit timeout send SIGTERM; SystemExit runs the finally below like Ctrl-C does
+    except (ValueError, OSError): pass                                                                           # not the main thread: no handler
+    try:
+        while f is None and clock() - t0 < wait_s:
+            sleep(min(poll_s, max(0.0, wait_s - (clock() - t0)))); f = take()
+    finally:
+        if old_term is not None and f is None:                                                                   # m3-23: after an acquire the holder's SIGTERM handler stays
+            try: signal.signal(signal.SIGTERM, old_term)
+            except (ValueError, OSError): pass
+        try: os.remove(mk)
+        except OSError: pass
+    return f, round(clock() - t0, 1)
 
 def default_since(now=None):
     """m3-07: the hourly run's range start = the floor date (2 Oct), not now - 2 days: a window that was deferred (GPU gate) or had no row yet is cut whatever its age; select() skips every window that already has a final row."""
@@ -369,9 +433,14 @@ def main(argv=None):
     try: prints = SP.load_prints(strict=True)                                                                      # vp-auto-05b F2: bad prints abort the run BEFORE any cutting, loudly, no fallback; the SAME dict is used for the run (05c N3: no second read)
     except SP.PrintsError as e:
         msg = f"ALERT cutter prints invalid, run aborted before cutting: {e}"; log.error(msg); alert(msg); print(json.dumps({"aborted": "prints_invalid", "alert": msg})); return 3
-    lock = acquire_run_lock()
-    if lock is None: log.info("another cutter run holds %s: exiting 0", C.RUN_LOCK); print(json.dumps({"locked": True})); return 0
-    t_run = time.time(); now = t_run; d_from = d_to = None; dry = a.dry_run
+    waits = a.once and not (a.only or a.backfill or a.windows_file or a.dry_run)                                        # m3-21c: only the hourly path waits for a busy lock; every other mode exits at once
+    if waits:
+        lock, waited = acquire_run_lock_wait(lock_wait_s())
+        if lock is None: log.info("another cutter run still holds %s after %.0f s: exiting 0", C.RUN_LOCK, waited); print(json.dumps({"locked": True, "lock_waited_s": waited})); return 0
+    else:
+        lock = acquire_run_lock(); waited = None
+        if lock is None: log.info("another cutter run holds %s: exiting 0", C.RUN_LOCK); print(json.dumps({"locked": True})); return 0
+    t_run = time.time(); now = t_run; d_from = d_to = None; dry = a.dry_run                                          # m3-21c: the run budget clock (t_run) starts HERE, after the lock is held; the wait does not spend it
     if a.backfill: d_from, d_to = a.backfill; dry = not a.execute; since = dt.datetime.strptime(d_from, "%Y-%m-%d").replace(tzinfo=IST).timestamp()
     else: since = dt.datetime.strptime(a.since, "%Y-%m-%d").replace(tzinfo=IST).timestamp() if a.since else default_since(now)
     if not (a.once or a.backfill): ap.error("--once or --backfill")
@@ -388,6 +457,7 @@ def main(argv=None):
     if not dry and not a.only: summary["mirrored_pending"] = mirrored_first + mirror_pending(ctx, budget_s=C.MIRROR_BUDGET_S)                # m3-16 L1: a single-consult (--only / --recut) run never spends time on the backlog
     if dry:
         for r in rows: print(json.dumps(r))
+    if waits: summary["lock_waited_s"] = waited
     print(json.dumps(summary, default=str)); return 0
 
 if __name__ == "__main__": sys.exit(main())

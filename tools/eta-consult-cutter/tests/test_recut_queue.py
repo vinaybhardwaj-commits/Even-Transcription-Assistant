@@ -100,3 +100,27 @@ def test_missing_summary_or_locked_still_waits_and_run_cutter_parses_the_window_
     with mock.patch.object(RQ.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, out, "")):
         rc, s = RQ.run_cutter(["--once", "--dry-run"], 5)
     assert s["eligible"] == 2 and [d["consult_uid"] for d in s["_windows"]] == ["a", "b"] and RQ.hourly_has_work(lambda a, t: (rc, s)) is True
+
+
+def test_hourly_waiting_marker_live_pid_blocks_step_and_stale_is_ignored(tmp_path, monkeypatch):
+    import json as _j, subprocess as _sp, datetime as dt
+    mk = str(tmp_path / "hourly-waiting"); monkeypatch.setattr(RQ, "HOURLY_WAITING", mk)
+    assert RQ.hourly_waiting() is False
+    open(mk, "w").write(_j.dumps(dict(pid=os.getpid(), start="x"))); assert RQ.hourly_waiting() is True
+    ran = []; runner = lambda a, t: (ran.append(a), (0, {"cut": 1}))[1]
+    now = dt.datetime(2026, 10, 14, 12, 40, tzinfo=dt.timezone(dt.timedelta(hours=5, minutes=30))).timestamp()   # outside the timer gap
+    assert RQ.step("u", {}, runner, lambda: now, str(tmp_path / "mk"), check_hourly=False) == "wait:hourly run waiting for the lock" and ran == []
+    p = _sp.Popen(["true"]); p.wait(); open(mk, "w").write(_j.dumps(dict(pid=p.pid, start="x")))             # dead pid
+    assert RQ.hourly_waiting() is False
+    open(mk, "w").write("not json"); assert RQ.hourly_waiting() is False
+    os.remove(mk); assert RQ.step("u", {}, runner, lambda: now, str(tmp_path / "mk"), check_hourly=False) == "done" and len(ran) == 1
+
+
+def test_hourly_waiting_ignores_an_old_marker_even_with_a_live_pid(tmp_path, monkeypatch):
+    import json as _j, time as _t
+    mk = str(tmp_path / "hw"); monkeypatch.setattr(RQ, "HOURLY_WAITING", mk); monkeypatch.delenv("CUTTER_LOCK_WAIT_S", raising=False)
+    open(mk, "w").write(_j.dumps(dict(pid=os.getpid(), start="x")))
+    assert RQ.hourly_waiting() is True
+    old = _t.time() - 1201; os.utime(mk, (old, old)); assert RQ.hourly_waiting() is False         # > 900 + 300
+    ok = _t.time() - 1190; os.utime(mk, (ok, ok)); assert RQ.hourly_waiting() is True
+    monkeypatch.setenv("CUTTER_LOCK_WAIT_S", "60"); assert RQ.hourly_waiting() is False             # 1190 s > 60 + 300

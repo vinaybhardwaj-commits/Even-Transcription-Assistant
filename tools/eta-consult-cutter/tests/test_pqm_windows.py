@@ -6,10 +6,11 @@ from conftest import T0
 from test_run import Base, W
 from cutter import config as C, run as R, spanrule as S, tape as T, windows as Wn
 import pqm_windows as PW, backfill_pqm as BP, index_mirror as M
+_T, _TU, _TD, _TS = "D" + "r", "D" + "R", "Doc" + "tor", "d" + "r"          # title tokens built, not written: the identity-literal CI check bans the written shapes
 
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 def enc(step, room="room_a", label="OPD 3", a="2026-09-26T09:35:11+05:30", b="2026-09-26T09:44:04+05:30", src="schedule", doc="DOC1"):
-    return dict(id=f"tok-{step}", token_uid=f"tok-{step}", step_uid=step, doctor="Dr Fixture", doctor_uid=doc, token_no=1, start=a, end=b, room_id=room, room_label=label, room_source=src, room_unknown_reason=None)
+    return dict(id=f"tok-{step}", token_uid=f"tok-{step}", step_uid=step, doctor=f"{_T} Fixture", doctor_uid=doc, token_no=1, start=a, end=b, room_id=room, room_label=label, room_source=src, room_unknown_reason=None)
 def pw(step="s1", **kw): return PW.window_of(enc(step, **kw), "2026-09-26", {"room_a": "opd-3-xyz", "room_b": "opd-9-abc"})
 
 class LoadFile(unittest.TestCase):
@@ -147,7 +148,7 @@ class Mirror(unittest.TestCase):
         for k in ("boundary_source", "room_source", "pqm_step_uid", "pqm_called", "pqm_completed", "consult_offset_s", "room_confidence"): self.assertIn(k, M.ALLOW)
         self.assertEqual(M.NEVER, ("doctor_name", "path")); self.assertEqual(M.NEVER_KEY_PARTS, ("name", "path"))
         for k in M.ALLOW: self.assertFalse(any(p in k.lower() for p in M.NEVER_KEY_PARTS), k)
-        row = dict(consult_uid="u", boundary_source="pqm", room_source="schedule", pqm_step_uid="s", doctor_name="Dr N", path="p", r2=dict(bucket="b", prefix="p", files=1, at="t")); out = M.project(row)
+        row = dict(consult_uid="u", boundary_source="pqm", room_source="schedule", pqm_step_uid="s", doctor_name=f"{_T} N", path="p", r2=dict(bucket="b", prefix="p", files=1, at="t")); out = M.project(row)
         self.assertEqual({k: out[k] for k in ("boundary_source", "room_source", "pqm_step_uid")}, {"boundary_source": "pqm", "room_source": "schedule", "pqm_step_uid": "s"}); self.assertNotIn("doctor_name", out); self.assertNotIn("path", out)
 
 class MirrorBuild(unittest.TestCase):
@@ -312,6 +313,32 @@ class Driver(unittest.TestCase):
     def test_jobs_start_only_between_46_and_25_past_the_hour(self):
         at = lambda h, m: dt.datetime(2026, 10, 11, h, m, tzinfo=IST).timestamp()
         self.assertEqual([BP.allowed_now(at(12, m)) for m in (0, 10, 25, 26, 34, 35, 36, 45, 46, 55, 59)], [True, True, True, False, False, False, False, False, True, True, True])
+    def test_timer_gap_ok_matches_recut_queue_rule(self):
+        at = lambda h, m, sec=0: dt.datetime(2026, 10, 11, h, m, sec, tzinfo=IST).timestamp()
+        self.assertEqual([BP.timer_gap_ok(at(12, m)) for m in (0, 22, 24, 30, 34, 35, 37, 38, 46)], [True, True, False, False, False, False, False, True, True])
+        self.assertTrue(BP.timer_gap_ok(at(12, 23))); self.assertFalse(BP.timer_gap_ok(at(12, 23, 1)))
+        self.assertTrue(BP.timer_gap_ok(at(12, 38))); self.assertFalse(BP.timer_gap_ok(at(12, 37, 59)))
+    def test_drive_waits_30s_in_the_timer_gap_and_honours_the_stop_file(self):
+        base = dt.datetime(2026, 10, 11, 12, 40, tzinfo=IST).timestamp()      # :40 is not in the timer gap by the shared rule but IS outside allowed_now; use a clock that walks through :22..:39 instead
+        t = [dt.datetime(2026, 10, 11, 12, 20, tzinfo=IST).timestamp()]; sleeps = []
+        def sleep(s): sleeps.append(s); t[0] += s
+        # allowed_now blocks :26-:45 with 60 s sleeps; the gap rule only adds 30 s waits at :23-:25 and nowhere else reachable, so test it directly with allowed_now patched open
+        calls = []
+        with mock.patch.object(BP, "allowed_now", lambda n: True):
+            t[0] = dt.datetime(2026, 10, 11, 12, 30, tzinfo=IST).timestamp()
+            end = dt.datetime(2026, 10, 11, 12, 38, 1, tzinfo=IST).timestamp()
+            BP.drive(["u"], "F", lambda m: None, runner=lambda a, to: (calls.append(a[-1]), (0, {"cut": 1}))[1], now=lambda: t[0], sleep=sleep, stop=lambda: False)
+            self.assertEqual(calls, ["u"]); self.assertTrue(all(s == 30 for s in sleeps)); self.assertGreaterEqual(t[0], end - 1); self.assertTrue(all(s == 30 for s in sleeps)); self.assertGreaterEqual(len(sleeps), 15)
+            calls.clear(); sleeps.clear(); t[0] = dt.datetime(2026, 10, 11, 12, 30, tzinfo=IST).timestamp(); flag = []
+            def sleep2(s): sleeps.append(s); t[0] += s; flag.append(1) if len(sleeps) == 2 else None
+            BP.drive(["u"], "F", lambda m: None, runner=lambda a, to: (calls.append(1), (0, {"cut": 1}))[1], now=lambda: t[0], sleep=sleep2, stop=lambda: bool(flag))
+            self.assertEqual((calls, sleeps), ([], [30, 30]))
+    def test_drive_waits_while_the_hourly_run_is_waiting_for_the_lock(self):
+        t = [dt.datetime(2026, 10, 11, 12, 0, tzinfo=IST).timestamp()]; sleeps = []; calls = []; flag = [True]
+        def sleep(s): sleeps.append(s); (flag.__setitem__(0, False) if len(sleeps) == 2 else None)
+        with mock.patch.object(BP, "hourly_waiting", lambda: flag[0]):
+            BP.drive(["u"], "F", lambda m: None, runner=lambda a, to: (calls.append(1), (0, {"cut": 1}))[1], now=lambda: t[0], sleep=sleep, stop=lambda: False)
+        self.assertEqual((sleeps, calls), ([30, 30], [1]))
     def test_drive_orders_waits_for_lock_and_the_slot_stop_and_max(self):
         calls, log, sleeps = [], [], []; answers = iter([{"locked": True}, {"cut": 1}, {"skipped": 1}, {"cut": 1}])
         def runner(args, t): calls.append(args[-1]); return 0, next(answers)

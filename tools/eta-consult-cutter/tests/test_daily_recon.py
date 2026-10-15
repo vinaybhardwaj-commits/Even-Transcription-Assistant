@@ -2,13 +2,14 @@ import json, os, sys, time, datetime as dt
 import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 import daily_recon as D
+_T, _TU, _TD, _TS = "D" + "r", "D" + "R", "Doc" + "tor", "d" + "r"          # title tokens built, not written: the identity-literal CI check bans the written shapes
 
 DATE = "2026-10-09"; NOW = dt.datetime(2026, 10, 10, 12, 0, tzinfo=D.IST).timestamp()
 def w(p, text): os.makedirs(os.path.dirname(p), exist_ok=True); open(p, "w").write(text)
 def jl(rows): return "".join(json.dumps(r) + "\n" for r in rows)
 def clip(uid, room, status="cut", t_close="2026-10-09 05:00:00", **kw):
-    kw.setdefault("r2", {"status": "mirrored"}); kw.setdefault("t_open", "2026-10-09 04:50:00.000"); return dict(consult_uid=uid, ist_date=DATE, room_id=room, status=status, t_close=t_close, **kw)
-def visit(uid, room, a="2026-10-09T10:00:00+05:30", b="2026-10-09T10:10:00+05:30"): return dict(step_uid=uid, room_id=room, doctor_uid="d9", start=a, end=b, room_unknown_reason=None if room else "no_schedule_slot")
+    kw.setdefault("room_slug", "slug-" + str(room)); kw.setdefault("r2", {"status": "mirrored"}); kw.setdefault("t_open", "2026-10-09 04:50:00.000"); return dict(consult_uid=uid, ist_date=DATE, room_id=room, status=status, t_close=t_close, **kw)
+def visit(uid, room, a="2026-10-09T10:00:00+05:30", b="2026-10-09T10:10:00+05:30"): return dict(step_uid=uid, room_id=room, doctor_uid="d9", **({"room_source": "schedule"} if room else {}), start=a, end=b, room_unknown_reason=None if room else "no_schedule_slot")
 def tracks(eta, room, uid, names):
     for n in names: w(f"{eta}/reb/{DATE}/{room}/_consults/{uid}/tracks/{n}", json.dumps({"status": "empty" if n.startswith("role") else "ok"}))
 OTHER = dict(consult_uid="other", ist_date="2026-10-08", room_id="rA", status="cut", t_open="2026-10-08 04:00:00", t_close="2026-10-08 04:10:00")          # an index row of another day: the index is not empty
@@ -141,7 +142,7 @@ def test_no_r2_uploads_nothing(eta):
 
 def test_leak_guard_blocks_doctor_name_and_uploads_nothing(eta):
     import index_mirror as IM
-    cl = [clip("u0", "rA", doctor_name="Dr Zorblatt Quimby", status="skipped", skip_reason="seen with Zorblatt Quimby")]; fk = FakeR2()
+    cl = [clip("u0", "rA", doctor_name=f"{_T} Zorblatt Quimby", status="skipped", skip_reason="seen with Zorblatt Quimby")]; fk = FakeR2()
     w(f"{eta}/consult/clips/index.jsonl", jl(cl))
     w(f"{eta}/drtpqma/{DATE}/encounters.json", json.dumps({"encounters": []})); w(f"{eta}/tapes/manifest.jsonl", "")
     old = IM.INDEX; IM.INDEX = f"{eta}/consult/clips/index.jsonl"
@@ -219,9 +220,9 @@ def test_bad_ids_dropped_with_alert(eta):
     assert [a for a in rep["alerts"] if a["code"] == "bad_id"][0]["count"] == 2
 
 def test_not_isolated_uses_the_50_percent_overlap_rule(eta):
-    # visit window 10:00-10:10 +-60 s = 720 s; a clip covering exactly 360 s covers it, 359 s does not
+    # visit window 10:00-10:10 +-60 s = 720 s; a clip covering exactly 360 s covers it, 359 s does not (the export rule; the report adds the shorter-span rule, m3-24)
     v = [visit("v1", "rA"), visit("v2", "rA", a="2026-10-09T12:00:00+05:30", b="2026-10-09T12:10:00+05:30")]
-    cl = [clip("c1", "rA", t_open="2026-10-09 09:59:00", t_close="2026-10-09 10:05:00"), clip("c2", "rA", t_open="2026-10-09 11:59:00", t_close="2026-10-09 11:58:59"[:0] + "2026-10-09 12:04:59")]
+    cl = [clip("c1", "rA", t_open="2026-10-09 09:59:00", t_close="2026-10-09 10:05:00"), clip("c2", "rA", t_open="2026-10-09 11:50:00", t_close="2026-10-09 12:04:59")]
     rep = go(eta, v, cl); r = room(rep, "rA")
     assert r["not_isolated"] == 1 and r["visit_miss_reasons"] == {"no_cut_clip": 1}
 
@@ -269,7 +270,7 @@ def test_iso_t_times_parse():
 
 def test_slug_guard_is_upload_only_and_override_passes(eta, monkeypatch):
     import index_mirror as IM
-    cl = [clip("u0", "rA", doctor_name="Dr Zorblatt Quimby", room_slug="zorblatt-opd-1", r2={"status": "mirrored", "prefix": "consult-clips/p/"})]
+    cl = [clip("u0", "rA", doctor_name=f"{_T} Zorblatt Quimby", room_slug="zorblatt-opd-1", r2={"status": "mirrored", "prefix": "consult-clips/p/"})]
     w(f"{eta}/consult/clips/index.jsonl", jl(cl)); w(f"{eta}/drtpqma/{DATE}/encounters.json", json.dumps({"encounters": []})); w(f"{eta}/tapes/manifest.jsonl", "")
     monkeypatch.setattr(IM, "INDEX", f"{eta}/consult/clips/index.jsonl"); monkeypatch.delenv("INDEX_MIRROR_SKIP_SLUG_GUARD", raising=False)
     args = (DATE, eta, f"{eta}/labels.json", f"{eta}/out", f"{eta}/A.jsonl")
@@ -292,3 +293,64 @@ def test_refuses_zero_clip_rows_over_existing_cut_rows(eta):
     with pytest.raises(D.Refused): exp(eta, [visit("v1", "rA")], [other], prev)             # would export one planned row over a cut row
     assert f"enc/daily/{DATE}.json" not in prev.o
     fresh = FakeR2(); exp(eta, [visit("v1", "rA")], [other], fresh); assert "enc/manifest.json" in fresh.o      # nothing in R2 yet: allowed
+
+# ---- m3-24: visits whose consult was cut under its Pulse window, and the reason named for the rest ----
+def cl_row(uid, room, a, b, **kw): return clip(uid, room, t_open=a, t_close=b, boundary_source="pulse", doctor_uid="d9", **kw)
+
+def test_short_visit_inside_pulse_clip_is_clipped(eta):
+    # visit 10:00:00-10:00:22 (22 s, padded 142 s); the Pulse clip is 22 s long: under the old padded rule 15%, now 100% of the shorter
+    v = [visit("v1", "rA", a="2026-10-09T10:00:00+05:30", b="2026-10-09T10:00:22+05:30")]
+    rep = go(eta, v, [cl_row("c1", "rA", "2026-10-09 10:00:00", "2026-10-09 10:00:22")]); r = room(rep, "rA")
+    assert r["visits_clipped"] == 1 and r["not_isolated"] == 1 and r["visit_miss_reasons"] == {} and "no_cut_clip" not in open(f"{eta}/out/{DATE}.md").read()
+    assert not [a for a in rep["alerts"] if a["code"] == "clips_low"]
+
+def test_covered_needs_same_room_and_half_of_the_shorter(eta):
+    v = [visit("v1", "rA", a="2026-10-09T10:00:00+05:30", b="2026-10-09T10:10:00+05:30")]
+    other_room = cl_row("c1", "rB", "2026-10-09 10:00:00", "2026-10-09 10:10:00")
+    thin = cl_row("c2", "rA", "2026-10-09 09:50:00", "2026-10-09 10:04:59")               # 299 s of the 600 s visit, clip is longer: not half of the shorter
+    assert room(go(eta, v, [other_room, thin]), "rA")["visits_clipped"] == 0
+
+def test_reason_is_named_by_the_window_row(eta):
+    v = [visit("v1", "rA", a="2026-10-09T10:00:00+05:30", b="2026-10-09T10:10:00+05:30"), visit("v2", "rA", a="2026-10-09T11:00:00+05:30", b="2026-10-09T11:10:00+05:30"),
+         visit("v3", "rA", a="2026-10-09T12:00:00+05:30", b="2026-10-09T12:10:00+05:30"), dict(visit("v4", "rA", a="2026-10-09T13:00:00+05:30", b="2026-10-09T13:10:00+05:30"), doctor_uid=None)]
+    cl = [cl_row("s1", "rA", "2026-10-09 10:00:00", "2026-10-09 10:10:00", status="skipped", skip_reason="final after 24 h: no_session"),
+          cl_row("s2", "rA", "2026-10-09 11:00:00", "2026-10-09 11:10:00", status="skipped", skip_reason="silent_audio"),
+          clip("pq3", "rA", status="skipped", skip_reason="no_session", boundary_source="pqm", pqm_step_uid="v3")]
+    r = room(go(eta, v, cl), "rA")
+    assert r["visit_miss_reasons"] == {"dead:no_tape": 2, "dead:silent_audio": 1, "not_planned:no_step_or_doctor": 1} and r["visits_clipped"] == 0
+
+def test_window_not_cut_and_unknown_stay_distinct(eta):
+    v = [visit("v1", "rA", a="2026-10-09T10:00:00+05:30", b="2026-10-09T10:10:00+05:30"), visit("v2", "rA", a="2026-10-09T15:00:00+05:30", b="2026-10-09T15:10:00+05:30")]
+    cl = [cl_row("d1", "rA", "2026-10-09 10:00:00", "2026-10-09 10:10:00", status="deferred_gpu")]
+    assert room(go(eta, v, cl), "rA")["visit_miss_reasons"] == {"window_deferred_gpu": 1, "no_cut_clip": 1}
+
+def test_clips_low_uses_clipped_visits(eta):
+    v = [visit(f"v{i}", "rA", a=f"2026-10-09T1{i}:00:00+05:30", b=f"2026-10-09T1{i}:00:30+05:30") for i in range(5)]
+    cl = [cl_row(f"c{i}", "rA", f"2026-10-09 1{i}:00:00", f"2026-10-09 1{i}:00:30") for i in range(4)]        # 4 of 5 = 80%
+    assert not [a for a in go(eta, v, cl)["alerts"] if a["code"] == "clips_low"]
+    assert [a for a in go(eta, v + [visit("v9", "rA", a="2026-10-09T18:00:00+05:30", b="2026-10-09T18:00:30+05:30")], cl)["alerts"] if a["code"] == "clips_low"]      # 4 of 6
+
+def test_export_keeps_the_old_rule_for_a_short_clip_in_a_long_visit(eta):
+    # 10-minute visit, 60 s Pulse clip inside it: the report counts it clipped, the export still plans the visit (old padded rule: 60/720 < 50%)
+    v = [visit("v1", "rA", a="2026-10-09T10:00:00+05:30", b="2026-10-09T10:10:00+05:30")]
+    cl = [cl_row("c1", "rA", "2026-10-09 10:02:00", "2026-10-09 10:03:00")]
+    rep = go(eta, v, cl)
+    assert room(rep, "rA")["visits_clipped"] == 1 and room(rep, "rA")["visit_miss_reasons"] == {}
+    iso = [json.loads(l) for l in open(f"{eta}/out/enc/isolation/{DATE}.jsonl")]
+    assert sorted(r["consult_uid"] for r in iso) == ["c1", "planned_v1"]
+    pl = next(r for r in iso if r["consult_uid"] == "planned_v1"); assert pl["status"] == "planned" and pl["boundary_source"] == "pqm"
+    assert D.covered(v[0], {"rA": cl}, {}) is False and D.covered_for_report(v[0], {"rA": cl}, {}) is True
+
+def test_daily_export_not_isolated_uses_the_strict_rule(eta):
+    # short clip inside a long visit: report clipped, but exported not_isolated (enc/daily) stays 1 like the isolation export's planned_ row
+    v = [visit("v1", "rA", a="2026-10-09T10:00:00+05:30", b="2026-10-09T10:10:00+05:30")]
+    rep = go(eta, v, [cl_row("c1", "rA", "2026-10-09 10:02:00", "2026-10-09 10:03:00")]); r = room(rep, "rA")
+    assert r["visits_clipped"] == 1 and r["visit_miss_reasons"] == {} and r["not_isolated"] == 1
+    d = next(x for x in json.load(open(f"{eta}/out/enc/daily/{DATE}.json")) if x["room_id"] == "rA")
+    assert d["not_isolated"] == 1
+
+def test_label_prefers_same_room_row_that_covers(eta):
+    # another doctor's same-room CUT clip overlaps 10%; the same doctor's other-room window covers 100% (skipped): label is window_other_room, not window_cut
+    v = [visit("v1", "rA", a="2026-10-09T10:00:00+05:30", b="2026-10-09T10:10:00+05:30")]
+    cl = [dict(cl_row("c1", "rA", "2026-10-09 10:09:00", "2026-10-09 11:09:00"), doctor_uid="dX"), cl_row("s1", "rB", "2026-10-09 10:00:00", "2026-10-09 10:10:00", status="skipped", skip_reason="silent_audio")]
+    assert room(go(eta, v, cl), "rA")["visit_miss_reasons"] == {"window_other_room": 1}

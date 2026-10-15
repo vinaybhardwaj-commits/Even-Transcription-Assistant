@@ -7,6 +7,7 @@ Exit 0 even when alerts fire or encounters.json is missing (status nodata + aler
 import argparse, collections, hashlib, re, datetime as dt, json, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))          # tools/index_mirror.py: R2 client and leak guards are reused
+import pqm_windows as PW, backfill_pqm as BP          # m3-24: the planner's own rules (window_of, covered_by_pulse) and the backfill's dead_reason are reused, not copied
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 H = os.path.expanduser("~")
 LABELS = f"{H}/oc/palimpsest/in/room-labels.json"
@@ -124,6 +125,36 @@ def covered(e, cut_by_room, pq):
         if o is not None and cl is not None and (min(hi, cl) - max(lo, o)) >= COVER_MIN * (hi - lo): return True
     return False
 
+def covered_for_report(e, cut_by_room, pq):
+    """m3-24: REPORT ONLY (room table, visits_clipped, miss reasons, clips_low). covered() (the export's rule) or: a cut clip in the same room overlapping >= 50% of the SHORTER of visit and clip
+    (a short visit inside the clip of its Pulse window). Never used by the R2 export: a loose match there could bind a visit to another consult's clip."""
+    if covered(e, cut_by_room, pq): return True
+    a, b = parse_ts(e.get("start")), parse_ts(e.get("end"))
+    if a is None or b is None or b <= a: return False
+    for k in cut_by_room.get(e.get("room_id"), ()):
+        o, cl = parse_ts(k.get("t_open")), parse_ts(k.get("t_close"))
+        if o is not None and cl is not None and cl > o and (min(b, cl) - max(a, o)) >= COVER_MIN * min(b - a, cl - o): return True
+    return False
+
+def explain_miss(e, date, rows_by_room, pq_row, slugs):
+    """m3-24: why a placed visit has no cut clip, named by what the planner decided. pq_row = the PQM index row of the visit, if any. Uses pqm_windows.window_of (not_planned:<why>), pqm_windows.covered_by_pulse
+    (is a Pulse window on it) and backfill_pqm.dead_reason (dead:<why>). 'no_cut_clip' only when nothing is known."""
+    if pq_row:
+        dr = BP.dead_reason(pq_row)
+        return ("dead:" + dr) if dr else ("pqm_clip_" + str(pq_row.get("skip_reason") or pq_row.get("status")))
+    w, why = PW.window_of(e, date, slugs)
+    if w is None: return "not_planned:" + why
+    a, b = w["pqm_called"], w["pqm_completed"]; rows = []
+    for c in (r for rs in rows_by_room.values() for r in rs):
+        o, cl = parse_ts(c.get("t_open")), parse_ts(c.get("t_close"))
+        if o is not None and cl is not None and cl > o: rows.append(dict(room_id=c.get("room_id"), doctor_uid=c.get("doctor_uid"), t_open=o, t_close=cl, _row=c))
+    if not PW.covered_by_pulse(w, dict(windows=rows)): return "no_cut_clip"
+    same = [r for r in rows if r["room_id"] == w["room_id"] and PW.covered_by_pulse(w, dict(windows=[r]))]          # same-room rows that themselves cover the visit by the planner's rule
+    best = max(same, key=lambda r: min(b, r["t_close"]) - max(a, r["t_open"]), default=None)
+    if best is None: return "window_other_room"
+    c = best["_row"]; dr = BP.dead_reason(c)
+    return ("dead:" + dr) if dr else ("window_" + str(c.get("status") or "unknown"))
+
 def build(date, rooms, visits, clips, tape, windows, eta, now=None, bad=0):
     """pure given its inputs (lane tracks are read from disk under eta). now = epoch seconds."""
     now = time.time() if now is None else now
@@ -135,6 +166,10 @@ def build(date, rooms, visits, clips, tape, windows, eta, now=None, bad=0):
     for c in clips:
         if c.get("status") == "cut": cut_by_room[c.get("room_id")].append(c)
     pq = {c.get("pqm_step_uid"): c for c in clips if c.get("boundary_source") == "pqm"}
+    rows_by_room = collections.defaultdict(list)                       # m3-24: Pulse-window rows of every status (the PQM rows are in pq)
+    for c in clips:
+        if c.get("boundary_source") != "pqm": rows_by_room[c.get("room_id")].append(c)
+    slugs = PW.room_slugs(index=f"{eta}/consult/clips/index.jsonl", tapes=f"{eta}/tapes/manifest.jsonl")
     unplaced = collections.Counter(str(e.get("room_unknown_reason") or "unknown").split(":")[0] for e in visits if not e.get("room_id"))
     day = dict(pqm_visits=len(visits), placed=sum(1 for e in visits if e.get("room_id")), unplaced=sum(unplaced.values()), unplaced_reasons=dict(unplaced))
     out = []
@@ -151,14 +186,13 @@ def build(date, rooms, visits, clips, tape, windows, eta, now=None, bad=0):
                 if k in ls:
                     lanes[k] += 1
                     if old: graced[k] += 1
-        miss = collections.Counter()
+        miss = collections.Counter(); nclipped = 0; n_strict = sum(1 for e in rv if not covered(e, cut_by_room, pq))          # n_strict: the export rule (covered), exported as not_isolated
         for e in rv:
-            if covered(e, cut_by_room, pq): continue
-            c = pq.get(e["step_uid"])
-            miss[("pqm_clip_" + str(c.get("skip_reason") or c.get("status"))) if c else "no_cut_clip"] += 1
+            if covered_for_report(e, cut_by_room, pq): nclipped += 1; continue
+            miss[explain_miss(e, date, rows_by_room, pq.get(e["step_uid"]), slugs)] += 1
         out.append(dict(room_id=rid, room=label[rid], pqm_visits=len(rv), placed=len(rv), pulse_windows=pulse_n, clips_cut=len(cut),
                         clips_pulse=sum(1 for c in cut if c.get("boundary_source") != "pqm"), clips_pqm=sum(1 for c in cut if c.get("boundary_source") == "pqm"),
-                        clips_not_cut=sum(nocut.values()), not_cut_reasons=dict(nocut), not_isolated=sum(miss.values()), visit_miss_reasons=dict(miss),
+                        clips_not_cut=sum(nocut.values()), not_cut_reasons=dict(nocut), visits_clipped=nclipped, not_isolated=n_strict, visit_miss_reasons=dict(miss),
                         processed=proc, lanes=lanes, lane_graced_clips=ngrace, lane_graced=graced, r2_mirrored=sum(1 for c in cut if (c.get("r2") or {}).get("status") == "mirrored"),
                         r2_pending=sum(1 for c in cut if (c.get("r2") or {}).get("status") != "mirrored"), tape_h=round(tape.get(rid, 0.0), 1)))
     missing = placed_raw is None
@@ -168,7 +202,8 @@ def build(date, rooms, visits, clips, tape, windows, eta, now=None, bad=0):
         codes = []
         if missing: r["status"] = "nodata"; continue
         if r["tape_h"] >= TAPE_MIN_H and r["clips_cut"] == 0: al(r["room"], "tape_no_clips", round(r["tape_h"]), f"{r['tape_h']} h of tape and 0 clips"); codes.append("alert")
-        if r["placed"] and r["clips_cut"] / r["placed"] < CLIP_RATIO_MIN: al(r["room"], "clips_low", r["clips_cut"], f"{r['clips_cut']} clips for {r['placed']} placed visits ({100 * r['clips_cut'] // r['placed']}%, under {int(CLIP_RATIO_MIN * 100)}%)"); codes.append("alert")
+        n_clipped = max(r["clips_cut"], r["visits_clipped"])          # m3-24: a visit covered by the clip of its Pulse window counts as clipped
+        if r["placed"] and n_clipped / r["placed"] < CLIP_RATIO_MIN: al(r["room"], "clips_low", n_clipped, f"{n_clipped} clips for {r['placed']} placed visits ({100 * n_clipped // r['placed']}%, under {int(CLIP_RATIO_MIN * 100)}%)"); codes.append("alert")
         for k in LANES:
             if r["lane_graced_clips"] and r["lane_graced"][k] / r["lane_graced_clips"] < LANE_MIN: al(r["room"], f"lane_{k}_low", r["lane_graced_clips"] - r["lane_graced"][k], f"lane {k} on {r['lane_graced'][k]} of {r['lane_graced_clips']} clips older than 3 h (under {int(LANE_MIN * 100)}%)"); codes.append("warn")
         if r["r2_pending"]: al(r["room"], "r2_pending", r["r2_pending"], f"{r['r2_pending']} clips not yet mirrored to R2"); codes.append("warn")
@@ -186,8 +221,8 @@ def render_md(rep):
     d = rep["day"]; L = [f"# Daily reconciliation {rep['date']}", "",
         f"{len(rep['alerts'])} alert(s). {d['pqm_visits']} PQM visits, {d['placed']} placed in a room, {d['unplaced']} with no room. Pulse windows counted from {rep['windows_source']}. Generated {rep['generated_at']}.", ""]
     if rep["alerts"]: L += ["## Alerts", ""] + [f"- {a['room'] or 'whole day'}: {a['message']}" for a in rep["alerts"]] + [""]
-    L += ["## Rooms", "", "| room | PQM visits placed | Pulse windows | clips cut | not cut | processed | sarvam | nemotron | role | acoustics | R2 mirrored | R2 pending | tape h |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
-    for r in rep["rooms"]: L.append(f"| {r['room']} | {r['placed']} | {r['pulse_windows']} | {r['clips_cut']} | {r['clips_not_cut']} | {r['processed']} | " + " | ".join(str(r["lanes"][k]) for k in LANES) + f" | {r['r2_mirrored']} | {r['r2_pending']} | {r['tape_h']} |")
+    L += ["## Rooms", "", "| room | PQM visits placed | visits clipped | Pulse windows | clips cut | not cut | processed | sarvam | nemotron | role | acoustics | R2 mirrored | R2 pending | tape h |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in rep["rooms"]: L.append(f"| {r['room']} | {r['placed']} | {r['visits_clipped']} | {r['pulse_windows']} | {r['clips_cut']} | {r['clips_not_cut']} | {r['processed']} | " + " | ".join(str(r["lanes"][k]) for k in LANES) + f" | {r['r2_mirrored']} | {r['r2_pending']} | {r['tape_h']} |")
     L += ["", "## Why clips are missing", ""]
     for r in rep["rooms"]:
         bits = [f"{n} {k}" for k, n in {**r["not_cut_reasons"], **{"visit:" + k: v for k, v in r["visit_miss_reasons"].items()}}.items()]

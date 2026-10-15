@@ -11,8 +11,8 @@ Outcomes of one call: cut 1 -> done; errors / skipped (no tape, silent) -> a FAI
 m3-21 (standing worker): --loop never exits on an empty queue; every pass re-reads the index and ~/eta-data/consult/recut-missed.jsonl (one JSON per line: {"kind":"uid","consult_uid":...[,"ist_date":...]}; missed consults come BEFORE the embedding re-cuts; {"kind":"window","window_id":...} is read but NOT cut: run.py cannot target a window id, only --only <consult_uid>),
 sleeps 120 s when there is nothing to do or it must wait, and does not use the "hourly run has work" dry run (the hourly run now has a 35 min budget and always leaves old tape, so that guard would starve the worker); the lock (a busy lock is a wait, not a deferral), the timer gap, the single instance, the stop file (waits, does not exit) and parking all stay."""
 import argparse, datetime as dt, json, os, re, signal, subprocess, sys, time
-H = os.path.expanduser("~"); E = f"{H}/eta-data"; CLIPS = f"{E}/consult/clips"; MARKERS = f"{E}/consult/vp-acc/reembed"; PROGRESS = f"{E}/consult/recut-progress.jsonl"; STOP = f"{E}/consult/recut.stop"; STATE = f"{E}/consult/recut-state.json"; MISSED = f"{E}/consult/recut-missed.jsonl"; LOCK = f"{E}/consult/recut-queue.lock"; MAX_DEFERS_PER_DAY = 3
-HOLDOUT_FROM = "2026-10-07"; MAX_ATTEMPTS = 2; MIN_BEFORE_TIMER_S = 720; TIMER_MINUTE = 35; TIMER_LAUNCH_S = 180; LOOP_SLEEP_S = 120      # MIN_BEFORE_TIMER_S unchanged (m3-21): it is the longest observed single re-cut job (12 min), which does not depend on the hourly budget; the hourly run now ends by ~:15, so the :23-:35 margin only guards the timer firing against a re-cut still holding the lock
+H = os.path.expanduser("~"); E = f"{H}/eta-data"; CLIPS = f"{E}/consult/clips"; MARKERS = f"{E}/consult/vp-acc/reembed"; PROGRESS = f"{E}/consult/recut-progress.jsonl"; STOP = f"{E}/consult/recut.stop"; STATE = f"{E}/consult/recut-state.json"; MISSED = f"{E}/consult/recut-missed.jsonl"; LOCK = f"{E}/consult/recut-queue.lock"; HOURLY_WAITING = f"{E}/consult/hourly-waiting"; MAX_DEFERS_PER_DAY = 3
+HOLDOUT_FROM = "2026-10-07"; MAX_ATTEMPTS = 2; MIN_BEFORE_TIMER_S = 720; TIMER_MINUTE = 35; TIMER_LAUNCH_S = 180; LOOP_SLEEP_S = 120      # MIN_BEFORE_TIMER_S unchanged (m3-21): it is the longest observed single re-cut job (12 min), which does not depend on the hourly budget; the hourly run ends by ~:15 when it did not wait; m3-21c: it may wait up to 15 min for the lock and then run to ~:37, which only the lock and the hourly-waiting marker cover, so the :23-:35 margin only guards the timer firing against a re-cut still holding the lock
 PY = f"{H}/oc/consult/cutter-venv/bin/python"; CUTTER = f"{H}/oc/consult/cutter-deploy"
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 
@@ -85,6 +85,19 @@ def full_queue(index, timeline_of, st, markers=MARKERS, missed_path=None, stats=
     q = [(m["consult_uid"], m["ist_date"] or (index.get(m["consult_uid"]) or {}).get("ist_date"), True) for m in missed if m["consult_uid"] not in done and marker_attempts(m["consult_uid"], markers) < MAX_ATTEMPTS]
     return q + [(u, index[u]["ist_date"], False) for u in queue(index, timeline_of, markers) if u not in mset]
 
+def hourly_waiting(path=None):
+    """m3-21c F1: True while the hourly run is waiting for cutter.lock (marker file with a live pid). A marker whose pid is dead, or whose mtime is older than CUTTER_LOCK_WAIT_S + 300 s, or that is unreadable, is stale and ignored. Shared with backfill_pqm."""
+    p = path or HOURLY_WAITING
+    try: pid = int(json.load(open(p))["pid"]); age = time.time() - os.stat(p).st_mtime
+    except (OSError, ValueError, KeyError, TypeError): return False
+    try: lw = float(os.environ.get("CUTTER_LOCK_WAIT_S", "")); lw = lw if lw >= 0 and lw == lw and lw != float("inf") else 900.0
+    except ValueError: lw = 900.0
+    if age > lw + 300: return False                                                                                  # m3-21c M2: older than the longest wait + 5 min: stale whatever the pid says (reuse, SIGKILL)
+    try: os.kill(pid, 0)
+    except ProcessLookupError: return False
+    except PermissionError: return True
+    return True
+
 def seconds_since_timer(now):
     """m3-21b: seconds since the last :35 firing. The hourly run takes cutter.lock a few seconds after :35:00; a re-cut started in that gap holds the lock and the run exits {"locked": true} (11:35 on 14 Oct)."""
     t = dt.datetime.fromtimestamp(now, IST); last = t.replace(minute=TIMER_MINUTE, second=0, microsecond=0)
@@ -134,6 +147,7 @@ def hourly_has_work(runner):
 def step(uid, index, runner=run_cutter, now=time.time, markers=MARKERS, check_hourly=True, ist_date=None):
     """one consult. -> outcome string. Waits are the caller's business (returns "wait:<why>" when it must not start now). check_hourly=False (--loop): no dry run; the cutter lock alone says whether the hourly run is busy."""
     n0 = now()
+    if hourly_waiting(): return "wait:hourly run waiting for the lock"                                               # m3-21c F1: let it take the lock first
     if seconds_to_next_timer(n0) < MIN_BEFORE_TIMER_S or seconds_since_timer(n0) < TIMER_LAUNCH_S: return "wait:timer firing soon"
     if check_hourly and hourly_has_work(runner): return "wait:hourly run has work or the lock is busy"
     if seconds_to_next_timer(now()) < MIN_BEFORE_TIMER_S: return "wait:timer firing soon"                              # the dry run took time: re-check the margin right before the cut
