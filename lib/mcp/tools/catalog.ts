@@ -13,6 +13,7 @@ import { listResults } from "@/lib/rubrics/store";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { fetchManifest, clipKeyOf, CLIP_CHUNK_MAX, readClipChunk, decodeCursor, encodeCursor, layerAbsent, layerError, layerNotAvailable, layerOk, loadCatalog, presignClip, readAudioFeaturesLayer, readPartsLayer, readTranscriptLayer, searchView, CATALOG_MIN_DATE, type Layer, type Row } from "@/lib/room-access/readers/catalog-consult";
 import { consultsByIdentity, hasAnyIdentity, IDENTITY_CHUNK, IDENTITY_ID, identityFor, identityView, pulseUrl, type IdentityRow } from "@/lib/room-access/readers/catalog-identity";
+import { c4For, c4View, type C4Row } from "@/lib/room-access/readers/catalog-c4";
 import { ADMIN_ACTOR_PREFIX } from "../auth";
 import { argBool, argInt, argStr, failSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 import { AmbiguousRoomError, resolveRoom } from "./brain";
@@ -30,8 +31,8 @@ const DAY_MS = 86_400_000;
 
 const HELP = [
   "Read-only; touches no room. Times UTC; from/to are IST dates. Encounter Explorer catalog (palimpsest C1) of consults since 2026-09-09. Internal admins only; NO PHI removal: include_text=true returns transcript text; include_identity=true and the prescription_uid / individual_uid filters need the admin scope; they return names, ids and the Pulse link (rx.prescription only with include_text too).",
-  "action=search {doctor_uid?, room?, from?, to? (span <= 92 days, clamped to 2026-09-09), source? cutter|caa, limit<=200 (default 50), cursor?}: newest first, layers without keys plus layers_present, next_cursor, total_matched, n_bad_lines, n_blind_excluded. Filters has_prescription (alias has_rx), prescription_uid, individual_uid join encounter_catalog (identity_rows says how many consults had a row; an empty table returns no rows, never a false has_prescription=false). include_identity=true adds identity per row.",
-  "action=get {consult_uid, include_text?, include_identity?}: the full row and layers {transcript, parts, audio_features (timbre/talktime/clef rows), freescript, rubric, jev, identity, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call.",
+  "action=search {doctor_uid?, room?, from?, to? (span <= 92 days, clamped to 2026-09-09), source? cutter|caa, limit<=200 (default 50), cursor?}: newest first, layers without keys plus layers_present, next_cursor, total_matched, n_bad_lines, n_blind_excluded. Filters has_prescription (alias has_rx), prescription_uid, individual_uid join encounter_catalog (identity_rows says how many consults had a row; an empty table returns no rows, never a false has_prescription=false). include_identity=true adds identity per row. Admin callers also get catalog_c4 per row: {jev, clef_affect, presence} (ids, tokens, scores and UTC ms from migration 0169; null when unset).",
+  "action=get {consult_uid, include_text?, include_identity?}: the full row and layers {transcript, parts, audio_features (timbre/talktime/clef rows), freescript, rubric, jev, identity, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call. Admin callers also get layers.catalog_c4 (the same {jev, clef_affect, presence}).",
   "action=clip_audio_url {consult_uid}: presigned GET of the clip, 900 s, {url, expires_at, bytes, minutes, audio_sha256, cut_signature_sha256}; audio_sha256 is the hash of the FLAC bytes (null when absent), cut_signature_sha256 hashes the cut metadata, not the audio. The URL is never audited or logged.",
   "action=clip_audio_chunk {consult_uid, offset?, length? <= 1 MiB}: the stored FLAC bytes as base64, {offset, length, total_bytes, content_type, base64, done, audio_sha256 (FLAC bytes hash, null when absent), cut_signature_sha256 (cut metadata, not the audio)}; bad_range past the end.",
   "Held-out room-days are refused blind_room_day on get, clip_audio_url and clip_audio_chunk and left out of search.",
@@ -45,7 +46,7 @@ const rowDay = (r: Row): string => (typeof r.ist_date === "string" ? r.ist_date.
 const blind = (r: Row): boolean => isBlindRoomDay(rowDay(r), rowRoom(r));
 const tOpen = (r: Row): number => (typeof r.t_open === "number" && Number.isFinite(r.t_open) ? r.t_open : Number.NEGATIVE_INFINITY);
 
-async function search(args: ToolArgs): Promise<Row> {
+async function search(args: ToolArgs, isAdmin = false): Promise<Row> {
   // V3: has_rx is an alias of has_prescription
   const rawHas = args.has_prescription !== undefined && args.has_prescription !== null && args.has_prescription !== "" ? args.has_prescription : args.has_rx;
   let hasPresc: boolean | null = null;
@@ -172,9 +173,17 @@ async function search(args: ToolArgs): Promise<Row> {
     if (!ok) identityErr = true;
   }
   if (!identityErr) identityRows = joined.size;
+  // 23N-2: jev, clef_affect and presence (migration 0169) of the returned page, to admin callers only (ids, tokens and numbers); a read failure is c4_error, never the call's failure
+  let c4: Map<string, C4Row> | null = null;
+  let c4Err = false;
+  if (isAdmin && page.length > 0) {
+    const got = await c4For(page.map((r) => String(r.consult_uid)));
+    if (got.status === "ok") c4 = got.rows;
+    else c4Err = true;
+  }
   const view = (r: Row): Row => {
     const j = joined.get(String(r.consult_uid));
-    return { ...searchView(r), has_prescription: j ? j.has_prescription : null, ...(includeIdentity ? { identity: j ? identityView(j) : null } : {}) };
+    return { ...searchView(r), has_prescription: j ? j.has_prescription : null, ...(includeIdentity ? { identity: j ? identityView(j) : null } : {}), ...(c4 ? { catalog_c4: c4View(c4.get(String(r.consult_uid))) } : {}) };
   };
   return {
     ok: true,
@@ -185,6 +194,7 @@ async function search(args: ToolArgs): Promise<Row> {
     total_matched: candidates.length,
     identity_rows: identityRows,
     ...(identityErr ? { identity_error: true } : {}),
+    ...(c4Err ? { c4_error: true } : {}),
     n_blind_excluded: nBlind,
     catalog_generated_at: cat.generated_at,
     n_bad_lines: cat.n_bad_lines,
@@ -269,7 +279,17 @@ async function identityLayers(uid: string, includeIdentity: boolean, includeText
   return { identity, rx };
 }
 
-async function get(args: ToolArgs): Promise<Row> {
+/** 23N-2: the jev, clef_affect and presence columns of ONE consult (admin callers only): ids, tokens and numbers. A consult with no catalog row, or none of the three set, is absent. */
+async function c4Layer(uid: string): Promise<Layer> {
+  const source = ["encounter_catalog"];
+  const got = await c4For([uid]);
+  if (got.status === "error") return layerError(source, got.code);
+  const r = got.rows.get(uid);
+  if (!r || (r.jev === null && r.clef_affect === null && r.presence === null)) return layerAbsent(source);
+  return layerOk(source, c4View(r));
+}
+
+async function get(args: ToolArgs, isAdmin = false): Promise<Row> {
   const uid = argStr(args, "consult_uid", 64);
   if (!uid || !UID.test(uid)) return badArgs("consult_uid must match [A-Za-z0-9_-]{6,64}");
   const includeText = argBool(args, "include_text");
@@ -289,10 +309,11 @@ async function get(args: ToolArgs): Promise<Row> {
     guard(["jev_decision"], () => jevLayer(uid)),
     identityLayers(uid, includeIdentity, includeText).catch(() => ({ identity: layerError(["encounter_catalog"], "read_failed"), rx: layerError(["encounter_catalog"], "read_failed") })),
   ]);
+  const c4layer = isAdmin ? await guard(["encounter_catalog"], () => c4Layer(uid)) : null;
   return {
     ok: true,
     row,
-    layers: { transcript, parts, audio_features: audioFeatures, freescript, rubric, jev, identity: idl.identity, cdmss: layerNotAvailable(["consult-audit S5 (pending)"]), rx: idl.rx },
+    layers: { transcript, parts, audio_features: audioFeatures, freescript, rubric, jev, identity: idl.identity, cdmss: layerNotAvailable(["consult-audit S5 (pending)"]), rx: idl.rx, ...(c4layer ? { catalog_c4: c4layer } : {}) },
   };
 }
 
@@ -386,7 +407,8 @@ export const catalogTool: McpTool = {
     if ((action === "get" || action === "search") && (argBool(args, "include_identity") || present("prescription_uid") || present("individual_uid"))) {
       if (!ctx.scopes.has("admin") || !ctx.actor.replace(/^mcp:/, "").startsWith(ADMIN_ACTOR_PREFIX)) throw new ToolScopeError("admin", { action });
     }
-    return failSafe({ ok: false, error: "catalog_unavailable" }, async () => (action === "search" ? search(args) : action === "get" ? get(args) : action === "clip_audio_chunk" ? clipAudioChunk(args) : clipAudioUrl(args)));
+    const isAdmin = ctx.scopes.has("admin") && ctx.actor.replace(/^mcp:/, "").startsWith(ADMIN_ACTOR_PREFIX);      // 23N-2: the C4 columns go to admin callers only
+    return failSafe({ ok: false, error: "catalog_unavailable" }, async () => (action === "search" ? search(args, isAdmin) : action === "get" ? get(args, isAdmin) : action === "clip_audio_chunk" ? clipAudioChunk(args) : clipAudioUrl(args)));
   },
 };
 

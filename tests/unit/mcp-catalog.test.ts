@@ -13,6 +13,9 @@ const H = vi.hoisted(() => ({
   indexRows: [] as Array<Record<string, unknown>>,
   identity: [] as Array<Record<string, unknown>>,
   identityThrows: null as string | null,
+  c4: [] as Array<Record<string, unknown>>,
+  c4Throws: null as string | null,
+  c4Queries: [] as string[][],
   identityQueries: [] as Array<{ uids: string[]; withRx: boolean }>,
   clip: null as Uint8Array | null,
   clipRangeHeader: true,
@@ -47,6 +50,12 @@ vi.mock("@/lib/db", () => {
       return Promise.resolve(H.identity
         .filter((r) => (q.individual === null || r.individual_uid === q.individual) && (q.prescription === null || r.prescription_uid === q.prescription) && String(r.ist_date ?? "2026-10-05") >= q.from && String(r.ist_date ?? "2026-10-05") <= q.to)
         .slice(0, q.cap).map((r) => ({ consult_uid: r.consult_uid })));
+    }
+    if (/SELECT consult_uid, jev, clef_affect, presence FROM encounter_catalog/.test(text)) {
+      if (H.c4Throws) return Promise.reject(Object.assign(new Error("no column"), { code: H.c4Throws }));
+      const uids = values[0] as string[];
+      H.c4Queries.push(uids);
+      return Promise.resolve(H.c4.filter((r) => uids.includes(r.consult_uid as string)));
     }
     if (/FROM encounter_catalog/.test(text)) {
       if (H.identityThrows) return Promise.reject(Object.assign(new Error("no such table"), { code: H.identityThrows }));
@@ -175,6 +184,9 @@ beforeEach(() => {
   H.identity = [];
   H.identityThrows = null;
   H.identityQueries = [];
+  H.c4 = [];
+  H.c4Throws = null;
+  H.c4Queries = [];
   H.matchQueries = [];
   H.clip = null;
   H.clipRangeHeader = true;
@@ -1676,5 +1688,91 @@ describe("CATALOG-11: clip replies carry the audio bytes hash", () => {
     await run({ action: "clip_audio_chunk", consult_uid: UID });
     await run({ action: "clip_audio_url", consult_uid: UID });
     expect([...logs].join("\n")).not.toMatch(/a{64}|c{64}/);
+  });
+});
+
+describe("23N-2: catalog_c4 (jev, clef_affect, presence) for admin callers", () => {
+  const AT = "2026-10-15T09:00:00Z";
+  const JEV = { sets: [{ set_id: "consult_rubric", set_sha: "ab12cd34ef56", band: "high", label: "complete", model: "jev-model-1", at: AT }] };
+  const CLEF = { lanes: [{ lane: "affect", scores: { calm: 0.8 }, model_rev: "rev3", at: AT }] };
+  const PRES = { encounter_open: 1_760_243_000_000, encounter_close: 1_760_243_600_000, boundary_source: "caa_cut+pqm", close_reason: "idle_timeout" };
+  const c4row = (uid: string, o: Row = {}): Row => ({ consult_uid: uid, jev: JEV, clef_affect: CLEF, presence: PRES, ...o });
+  const trio = () => setCatalog([crow("CONSULT_AAA1", { t_open: 300 }), crow("CONSULT_BBB2", { t_open: 200 }), crow("CONSULT_CCC3", { t_open: 100 })]);
+  const byUid = (o: Row) => Object.fromEntries((o.rows as Row[]).map((r) => [r.consult_uid, r]));
+
+  it("search, admin: catalog_c4 per row as stored, null for a consult with no row or no value; one query for the page", async () => {
+    trio();
+    H.c4 = [c4row("CONSULT_AAA1"), c4row("CONSULT_BBB2", { jev: null, clef_affect: null })];
+    const o = await runA({ action: "search" });
+    const r = byUid(o);
+    expect(r.CONSULT_AAA1.catalog_c4).toEqual({ jev: JEV, clef_affect: CLEF, presence: PRES });
+    expect(r.CONSULT_BBB2.catalog_c4).toEqual({ jev: null, clef_affect: null, presence: PRES });
+    expect(r.CONSULT_CCC3.catalog_c4).toEqual({ jev: null, clef_affect: null, presence: null });
+    expect(H.c4Queries).toHaveLength(1);
+    expect(o).not.toHaveProperty("c4_error");
+  });
+  it("search, non-admin: no catalog_c4 key anywhere, and the table is not even queried", async () => {
+    trio();
+    H.c4 = [c4row("CONSULT_AAA1")];
+    const o = await run({ action: "search" });
+    expect(JSON.stringify(o)).not.toMatch(/catalog_c4|consult_rubric|jev-model-1|idle_timeout/);
+    expect(H.c4Queries).toEqual([]);
+  });
+  it("search, admin scope without an admin: actor is treated as non-admin (same rule as include_identity)", async () => {
+    trio();
+    H.c4 = [c4row("CONSULT_AAA1")];
+    const o = (await catalogTool.handler({ action: "search" }, { actor: "mcp:someone", origin: "https://example.test", scopes: new Set<McpScope>(["read", "admin"]) })) as Row;
+    expect(JSON.stringify(o)).not.toContain("catalog_c4");
+    expect(H.c4Queries).toEqual([]);
+  });
+  it("search, admin: only the returned page is read (limit 2 -> 2 uids)", async () => {
+    trio();
+    H.c4 = [c4row("CONSULT_AAA1"), c4row("CONSULT_BBB2"), c4row("CONSULT_CCC3")];
+    await runA({ action: "search", limit: 2 });
+    expect(H.c4Queries[0]).toEqual(["CONSULT_AAA1", "CONSULT_BBB2"]);
+  });
+  it("search, admin, SQL error (0169 not applied): the call still succeeds with c4_error and no catalog_c4; the error carries a code, never a value", async () => {
+    trio();
+    H.c4Throws = "42703";
+    const o = await runA({ action: "search" });
+    expect(o).toMatchObject({ ok: true, c4_error: true });
+    expect((o.rows as Row[]).every((r) => !("catalog_c4" in r))).toBe(true);
+  });
+  it("a stored column holding a text-like key is returned as null, not passed through", async () => {
+    trio();
+    H.c4 = [c4row("CONSULT_AAA1", { jev: { sets: [], note: "free words" }, clef_affect: { lanes: [{ scores: { text: 1 } }] } })];
+    const r = byUid(await runA({ action: "search" })).CONSULT_AAA1.catalog_c4 as Row;
+    expect(r).toEqual({ jev: null, clef_affect: null, presence: PRES });
+  });
+  it("get, admin: layers.catalog_c4 ok with the three blocks; absent when none is set or there is no row; error layer on SQL error without failing the call", async () => {
+    setCatalog([crow(UID)]);
+    H.c4 = [c4row(UID)];
+    let l = (await runA({ action: "get", consult_uid: UID })).layers as Record<string, Row>;
+    expect(l.catalog_c4).toEqual({ status: "ok", source: ["encounter_catalog"], data: { jev: JEV, clef_affect: CLEF, presence: PRES } });
+    H.c4 = [c4row(UID, { jev: null, clef_affect: null, presence: null })];
+    l = (await runA({ action: "get", consult_uid: UID })).layers as Record<string, Row>;
+    expect(l.catalog_c4).toMatchObject({ status: "absent" });
+    H.c4 = [];
+    expect(((await runA({ action: "get", consult_uid: UID })).layers as Record<string, Row>).catalog_c4).toMatchObject({ status: "absent" });
+    H.c4Throws = "42703";
+    const o = await runA({ action: "get", consult_uid: UID });
+    expect(o.ok).toBe(true);
+    expect((o.layers as Record<string, Row>).catalog_c4).toMatchObject({ status: "error" });
+    expect(JSON.stringify((o.layers as Record<string, Row>).catalog_c4)).not.toContain("no column");
+    expect((o.layers as Record<string, Row>).transcript).toBeDefined();
+  });
+  it("get, non-admin: no catalog_c4 layer and no query", async () => {
+    setCatalog([crow(UID)]);
+    H.c4 = [c4row(UID)];
+    const o = await run({ action: "get", consult_uid: UID });
+    expect(Object.keys(o.layers as Row)).not.toContain("catalog_c4");
+    expect(H.c4Queries).toEqual([]);
+  });
+  it("the tool description names the new field, and nothing else about the contract changed (a search row still has its old keys)", async () => {
+    expect(JSON.stringify(catalogTool.description ?? "")).toContain("catalog_c4");
+    trio();
+    const base = Object.keys(byUid(await run({ action: "search" })).CONSULT_AAA1).sort();
+    const adm = Object.keys(byUid(await runA({ action: "search" })).CONSULT_AAA1).filter((k) => k !== "catalog_c4").sort();
+    expect(adm).toEqual(base);
   });
 });
