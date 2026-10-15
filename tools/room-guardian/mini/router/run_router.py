@@ -8,6 +8,7 @@ import alert_router, ubus_bus
 
 HOME = os.environ.get("GUARDIAN_HOME", os.path.expanduser("~/oc/fleet-access/guardian"))
 TICK_S = 30
+alert_router.Router.inbox_path = os.environ.get("GUARDIAN_GATING_INBOX", "~/oc/fable/INBOX-FROM-GATING.md")      # CA-C6: HEAL action lines are appended here
 
 
 def log(msg):
@@ -43,7 +44,7 @@ def main():
         return 2
     store = alert_router.default_store(HOME)
     router = alert_router.Router(store, ubus_bus.UbusBus, time.time, os.path.join(HOME, "data", "router-local.json"),
-                                 lambda: alert_router.folder_size_line(os.path.join(HOME, "backup", "_to_delete")))
+                                 lambda: alert_router.guardian_size_lines(HOME))
     log(f"router started pid={os.getpid()}")
     while True:
         try:

@@ -3,7 +3,20 @@
 * Streams kiosk/<room>/health, heal, probe-reply -> JSONL under <data>/<YYYY-MM-DD>/<room>.<stream>.jsonl; days older than KEEP_DAYS are pruned.
 * Quiet detection is HERE, not pipe `monitor` (R4): a room with no health line for QUIET_AFTER_S raises guardian_quiet once (edge), and a
   line after that closes it. A room is counted from process start, so a room that never speaks is quiet too.
-* A heal line with result "escalated" raises heal_escalated through the same sink (inferred shape).
+* Strict validation (validate_heal) applies ONLY to heal messages that carry `kind` (coreaudio_scope). Any other heal message (today's R9 shape, including its
+  layer "coreaudio" lines, no kind) is stored and handled as before: result escalated -> heal_escalated, ok/healed -> closes it, nothing else, never an invalid case.
+  An in-scope line has a kind in HEAL_KINDS (capture_dead, capture_muted, coreaudio_heal_failed, recorder_disturbed; recorder_changed is an alias). It opens that
+  kind's case ONLY when result is failed or escalated, or when result is absent (fail closed). result healed or would_do: stored, no case, no page. EXCEPT
+  recorder_disturbed (and its alias recorder_changed): CA-C5 makes any recorder pid change top severity even if audio is back, so it opens its case for ANY
+  result (healed, would_do, unknown, none) and even when the line fails validation (which then also opens heal_message_invalid). An unknown
+  result (including the older "ok") fails validation: one heal_message_invalid case. Results healed / failed / escalated are also queued for the gating INBOX,
+  whatever the action; would_do never is.
+  An in-scope line (it has a kind) that fails the check (unknown kind or result, neither kind nor result, a contract field of the wrong type) is stored and opens ONE
+  heal_message_invalid case per room. A line that is not JSON is logged to <room>.heal-invalid.jsonl only (it cannot be attributed to the coreaudio rule): no case.
+* RECOVERY_LINES (4) consecutive health lines with a numeric zero_ratio < 0.05, all after the alert, close the room's open capture_dead, capture_muted and
+  coreaudio_heal_failed cases. recorder_disturbed and heal_message_invalid close only on ACK.
+* Every kind line with result healed / failed / escalated is queued as one record for INBOX-FROM-GATING.md (inbox_line);
+  the router job appends it and raises heal_inbox_stuck if that has not happened within 5 min.
 * Serves control: control_snapshot() = {"kill": bool, "modes": {room: "shadow"|"heal"}} from files; publish_control() sends it on topic
   guardian/control. Anything not exactly "heal" is "shadow". An unreadable or missing kill file is kill=true (fail safe).
 Health/heal/probe lines are stored as received. Nothing here prints line content.
@@ -14,6 +27,111 @@ from datetime import datetime, timedelta, timezone
 IST = timezone(timedelta(hours=5, minutes=30))
 STREAMS = ("health", "heal", "probe-reply")
 QUIET_AFTER_S, KEEP_DAYS = 120, 30
+HEAL_KINDS = ("capture_dead", "capture_muted", "coreaudio_heal_failed", "recorder_disturbed")
+KIND_ALIASES = {"recorder_changed": "recorder_disturbed"}        # accepted for now; the canonical name is the gate's (CA-C5)
+RECOVERY_LINES = 4                                               # consecutive health lines under ZERO_RATIO_OK (CA-C5)
+HEAL_ACTION = "coreaudiod_restart"
+ALWAYS_OPEN_KIND = "recorder_disturbed"                         # opens its case whatever the result (CA-C5); recorder_changed is its alias
+HEAL_RESULTS = ("healed", "failed", "escalated", "would_do")      # the contract set for a kind line; the older "ok" is NOT one of them
+OPEN_RESULTS = ("failed", "escalated")                            # a kind line opens its case only on these (or when `result` is absent)
+INBOX_RESULTS = ("healed", "failed", "escalated")                 # and is queued for the gating INBOX on these, whatever the action (never would_do)
+ZERO_RATIO_OK = 0.05
+RAW_CAP = 2000
+
+
+def coreaudio_scope(obj):
+    """Strict validation applies ONLY to heal messages that carry a `kind` (the new coreaudio contract field). Every other heal message, including today's R9
+    kiosk lines (heal.sh: {room_id, ts, action, layer, reason, before, after, result, shadow, target, severity}, which already use layer "coreaudio" with no kind),
+    is stored and handled as before, never invalid. The layer alone decides nothing."""
+    return isinstance(obj, dict) and "kind" in obj
+
+
+def _is_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v
+
+
+def _is_ratio_or_null(v):
+    return v is None or (_is_num(v) and 0 <= v <= 1)
+
+
+def _is_pid_or_null(v):
+    return v is None or (isinstance(v, int) and not isinstance(v, bool) and v >= 0)
+
+
+def validate_heal(obj):
+    """Strict heal-line check for a coreaudio-scope message (see coreaudio_scope). Returns (True, None) or (False, reason); the reason is from a fixed set and
+    never echoes line content. Contract fields (guardian-lead, 15 Oct): kind, result, mode, kill, control_age_s, guards, zero_ratio_before/after,
+    coreaudiod_pid_before/after, recorder_pid_before/after. A field that is present must have the right type; none is required (the kiosk build is not out yet)."""
+    if not isinstance(obj, dict):
+        return False, "not_an_object"
+    kind, res = obj.get("kind"), obj.get("result")
+    if "kind" not in obj and "result" not in obj:
+        return False, "no_kind_or_result"
+    if "kind" in obj and (not isinstance(kind, str) or (kind not in HEAL_KINDS and kind not in KIND_ALIASES)):
+        return False, "unknown_kind"
+    if "result" in obj and (not isinstance(res, str) or res.lower() not in HEAL_RESULTS):
+        return False, "unknown_result"
+    if "mode" in obj and obj["mode"] not in ("shadow", "heal"):
+        return False, "bad_mode"
+    if "kill" in obj and not isinstance(obj["kill"], bool):
+        return False, "bad_kill"
+    if "control_age_s" in obj and not (obj["control_age_s"] is None or (_is_num(obj["control_age_s"]) and obj["control_age_s"] >= 0)):
+        return False, "bad_control_age_s"
+    if "guards" in obj and not isinstance(obj["guards"], dict):
+        return False, "bad_guards"
+    if any(k in obj and not _is_ratio_or_null(obj[k]) for k in ("zero_ratio_before", "zero_ratio_after")):
+        return False, "bad_zero_ratio"
+    if any(k in obj and not _is_pid_or_null(obj[k]) for k in ("coreaudiod_pid_before", "coreaudiod_pid_after", "recorder_pid_before", "recorder_pid_after")):
+        return False, "bad_pid"
+    return True, None
+
+
+def _num(v):
+    return f"{v:.4f}" if _is_num(v) and 0 <= v <= 1 else "?"
+
+
+def inbox_line(room, obj, now):
+    """CA-C6: the one-line HEAL record for INBOX-FROM-GATING.md, or None. Called for a valid kind line; queued when the result is healed / failed / escalated,
+    WHATEVER the action (the contract names coreaudiod_restart for a restart attempt and escalate for escalate-only results; the action is not trusted as the
+    gate, so a drifted action word cannot hide a heal). Never would_do, never a line without a result. Built only from the room slug, a fixed result word and numbers:
+    no free text from the kiosk."""
+    if not isinstance(obj, dict) or str(obj.get("result", "")).lower() not in INBOX_RESULTS:
+        return None
+    if obj.get("mode") == "shadow" or obj.get("shadow") is True:      # S6: a SHADOW kind line logs and opens its case as before but never queues an INBOX line
+        return None
+    pb, pa = obj.get("recorder_pid_before"), obj.get("recorder_pid_after")
+    if isinstance(pb, int) and isinstance(pa, int) and not isinstance(pb, bool) and not isinstance(pa, bool):
+        same = "y" if pb == pa else "n"
+    else:
+        same = obj.get("recorder_pid_same")
+        same = "y" if same is True else "n" if same is False else "?"
+    when = datetime.fromtimestamp(now, IST).strftime("%d %b %H:%M")
+    return (f"- {when} IST pico-router HEAL: room={room} result={str(obj['result']).lower()} "
+            f"zero_ratio_before={_num(obj.get('zero_ratio_before'))} zero_ratio_after={_num(obj.get('zero_ratio_after'))} recorder_pid_same={same}")
+
+
+def r9_inbox_line(room, obj, now):
+    """CA-C6 for the kiosk's R9 coreaudio heal (heal.sh, no `kind`): a message with layer "coreaudio" AND action "heal" that is not a WOULD-DO / shadow line, so a
+    real restart attempt (results ok, no_restart_seen). Same record as inbox_line; the numbers R9 does not send print `?`. The result is one lowercase word from the
+    line ([a-z0-9_], at most 32) or `other`, and coreaudiod_pid_changed is read from the `after` text, so no free text from the kiosk reaches the file."""
+    if not isinstance(obj, dict) or obj.get("layer") != "coreaudio" or obj.get("action") != "heal" or obj.get("shadow") is True:
+        return None
+    res = obj.get("result")
+    if not isinstance(res, str) or res.upper().startswith("WOULD"):
+        return None
+    word = res.lower() if re.fullmatch(r"[a-z0-9_]{1,32}", res, re.I) else "other"
+    after = obj.get("after") if isinstance(obj.get("after"), str) else ""
+    changed = "y" if "coreaudiod_pid_changed=true" in after else "n" if "coreaudiod_pid_changed=false" in after else "?"
+    when = datetime.fromtimestamp(now, IST).strftime("%d %b %H:%M")
+    return (f"- {when} IST pico-router HEAL: room={room} result={word} zero_ratio_before=? zero_ratio_after=? recorder_pid_same=? coreaudiod_pid_changed={changed}")
+
+
+def zero_ratio(obj):
+    """The health line's zero_ratio (INFERRED field name) as a float in [0, 1], else None."""
+    v = obj.get("zero_ratio") if isinstance(obj, dict) else None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or v < 0 or v > 1:
+        return None
+    return float(v)
 CONTROL_TOPIC = "guardian/control"
 # FROZEN CONTRACT (see etc/README.md "Control topic contract"): the kiosk accepts only this exact form; anything else kills every kiosk.
 # Changing any of it needs a coordinated kiosk release (guardian-lead) FIRST. Regex is the kiosk's, verbatim from FR1-C1-CONTROL-CC-KICKOFF "## R7".
@@ -89,6 +207,21 @@ class RouterSink:
     def heal_resolved(self, room, now):
         self.router.close_room(None, room, "recovery", kind="heal_escalated")
 
+    def heal_kind(self, room, kind, now):
+        self._open(room, kind, now)
+
+    def heal_action(self, room, line, now):
+        self.router.store.add_inbox(line, now)          # durable queue; the router job appends it to the gating INBOX and alarms if it cannot
+
+    def heal_invalid(self, room, now):
+        self._open(room, "heal_message_invalid", now)
+
+    def capture_recovered(self, room, now):
+        """Health zero_ratio back under 0.05: close the audio cases of this room. recorder_changed is NOT closed here (audio back says nothing about the recorder)."""
+        kinds = {"capture_dead", "capture_muted", "coreaudio_heal_failed"}
+        for k in {c["kind"] for c in self.router.store.list_open() if c["room_id"] == room and c["kind"] in kinds}:
+            self.router.close_room(None, room, "recovery", kind=k)
+
 
 class Subscriber:
     def __init__(self, data_dir, control_dir, rooms, sink, clock=time.time, quiet_after_s=QUIET_AFTER_S, quiet_seed=()):
@@ -96,6 +229,7 @@ class Subscriber:
         os.makedirs(data_dir, exist_ok=True)
         t0 = clock()
         self.last_seen = {r: t0 for r in self.rooms}
+        self.ok_streak = {}                                # room -> consecutive health lines with zero_ratio < ZERO_RATIO_OK
         self.quiet = set(quiet_seed) & set(self.rooms)   # rooms whose guardian_quiet case is still open (R3): a restart must not forget them
 
     # ---- ingest
@@ -105,9 +239,11 @@ class Subscriber:
             return False
         room, stream = pt
         try:
-            json.loads(raw)
+            obj = json.loads(raw)
         except (TypeError, ValueError):
-            return False                      # not JSON: dropped, never stored
+            if stream == "heal":              # a non-JSON heal line is logged only (own file, capped, JSON-quoted): no case
+                self._log_invalid_heal(room, raw)
+            return False                      # not JSON: never stored in the stream file
         now = self.clock()
         day = datetime.fromtimestamp(now, IST).strftime("%Y-%m-%d")
         d = os.path.join(self.data, day)
@@ -115,24 +251,57 @@ class Subscriber:
         with open(os.path.join(d, f"{room}.{stream}.jsonl"), "a") as f:
             f.write(raw.rstrip("\n") + "\n")
         if stream == "heal":
-            self._on_heal(room, raw, now)
+            self._on_heal(room, obj, now)
         if stream == "health":
+            zr = zero_ratio(obj)
+            if zr is not None and zr < ZERO_RATIO_OK:
+                self.ok_streak[room] = self.ok_streak.get(room, 0) + 1
+                if self.ok_streak[room] >= RECOVERY_LINES:
+                    self.sink.capture_recovered(room, now)
+            else:
+                self.ok_streak[room] = 0
             self.last_seen[room] = now
             if room in self.quiet:
                 self.quiet.discard(room)
                 self.sink.guardian_recovered(room, now)
         return True
 
-    # INFERRED heal record shape (FR-1 2.4): {"result": ...}. "escalated" opens heal_escalated; "ok"/"healed" closes it. Unverified against C1.
-    def _on_heal(self, room, raw, now):
-        try:
-            res = str(json.loads(raw).get("result", "")).lower()
-        except (ValueError, AttributeError):
+    def _log_invalid_heal(self, room, raw):
+        now = self.clock()
+        d = os.path.join(self.data, datetime.fromtimestamp(now, IST).strftime("%Y-%m-%d"))
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, f"{room}.heal-invalid.jsonl"), "a") as f:
+            f.write(json.dumps({"ts": int(now), "raw": str(raw)[:RAW_CAP]}) + "\n")
+
+    # INFERRED heal record shape (FR-1 2.4 and SPEC-COREAUDIO-HEAL section 5/6): {"kind"?, "result"?, "action"?, ...}. Unverified against C1.1.
+    def _on_heal(self, room, obj, now):
+        res = str(obj.get("result", "")).lower() if isinstance(obj, dict) else ""
+        if not coreaudio_scope(obj):                       # R9 and every older heal shape: exactly the pre-coreaudio handling, never a new case
+            line = r9_inbox_line(room, obj, now)           # (the one addition: a real R9 coreaudio heal action also goes to the gating INBOX)
+            if line:
+                self.sink.heal_action(room, line, now)
+            if res == "escalated":
+                self.sink.heal_escalated(room, now)
+            elif res in ("ok", "healed"):
+                self.sink.heal_resolved(room, now)
             return
-        if res == "escalated":
-            self.sink.heal_escalated(room, now)
-        elif res in ("ok", "healed"):
-            self.sink.heal_resolved(room, now)
+        kind_raw = obj.get("kind")
+        kind = KIND_ALIASES.get(kind_raw, kind_raw) if isinstance(kind_raw, str) else None
+        always = kind == ALWAYS_OPEN_KIND                  # CA-C5: a recorder pid change is top severity "even if audio is back": its case opens for ANY result
+        ok, _why = validate_heal(obj)
+        if not ok:
+            if always:                                     # the recorder alert is never lost to a shape problem; the shape problem still surfaces as its own case
+                self.ok_streak[room] = 0
+                self.sink.heal_kind(room, kind, now)
+            self.sink.heal_invalid(room, now)
+            return
+        line = inbox_line(room, obj, now)
+        if line:
+            self.sink.heal_action(room, line, now)
+        if always or res in OPEN_RESULTS or not res:       # failed / escalated, or no result at all (cannot show it healed: fail closed to the kind's case)
+            self.ok_streak[room] = 0                       # recovery must be seen AFTER the alert, so a good run before it cannot close it at once
+            self.sink.heal_kind(room, kind, now)
+        # healed / would_do (not recorder_disturbed): stored in the stream file, plus the INBOX line above for a real heal; no case, no page
 
     # ---- quiet detection
     def check_quiet(self):

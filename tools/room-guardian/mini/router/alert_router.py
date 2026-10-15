@@ -28,15 +28,21 @@ from datetime import datetime, timedelta, timezone
 IST = timezone(timedelta(hours=5, minutes=30))
 ACKERS = {"gating-lead", "fleet"}
 REPAGE_CLINIC_S, REPAGE_OFF_S = 600, 1800
-V_KINDS = {"recorder_off", "fleet_outage", "no_machine", "install_retired"}   # patient-impacting (A6 finding 7)
+CA_KINDS = {"capture_dead", "capture_muted", "coreaudio_heal_failed", "recorder_disturbed"}     # coreaudio heal rule alerts (kiosk kiosk/<room>/heal lines)
+CA_WINDOW_MIN = (7 * 60, 21 * 60 + 35)      # gate CA-C3: V flag for the coreaudio kinds inside 07:00-21:35 IST, every day of the week
+INBOX_DEADLINE_S = 300                       # a queued HEAL action line not appended to INBOX-FROM-GATING.md within 5 min raises heal_inbox_stuck
+V_KINDS = {"recorder_off", "fleet_outage", "no_machine", "install_retired"} | CA_KINDS            # patient-impacting (A6 finding 7)
 V_FIRST_S, V_REMINDER_S = 1800, 3600
 CLINIC_START_MIN, CLINIC_END_MIN, CLINIC_DAYS = 7 * 60 + 30, 21 * 60 + 30, (1, 2, 3, 4, 5, 6)   # mirrors lib/alerts/clinic-hours.ts
 DIGEST_HOUR_IST = 21
 ROUTED_KEEP_S = 7 * 86400
 URGENT = {"offline", "degraded", "fleet_outage", "install_retired", "recorder_off", "mic_denied", "no_machine", "room_disabled",
-          "needs_enrol", "capture_stalled", "guardian_quiet", "heal_escalated", "backup_failed"}
-OPEN_KINDS = URGENT          # kinds that open a case; 'recovered' and 'session_reaped' never do
+          "needs_enrol", "capture_stalled", "guardian_quiet", "heal_escalated", "backup_failed", "heal_inbox_stuck"} | CA_KINDS
+OPEN_KINDS = URGENT | {"heal_message_invalid"}          # kinds that open a case; 'recovered' and 'session_reaped' never do
+# An ACK also CLOSES these (order: "closes on recovery or ACK"). recorder_changed and heal_message_invalid have no recovery signal, so ACK is their only close.
+ACK_CLOSE_KINDS = CA_KINDS | {"heal_message_invalid"}
 RECOVERY_KIND = "recovered"
+ACK_ONLY_KINDS = {"recorder_disturbed", "heal_message_invalid"}     # a server `recovered` row never closes these: only an ACK does
 _ACK_RE = re.compile(r"^ACK\s+room-alert-(\d+)\b", re.I)
 _ID_RE = re.compile(r"room-alert-(\d+)\b", re.I)
 _MARK_RE = re.compile(r"room-alert-(\d+) .*\[page (\d+)\]")
@@ -48,6 +54,31 @@ def batch_tid(now):
     return BATCH_PREFIX + datetime.fromtimestamp(now, IST).strftime("%Y-%m-%d")
 
 
+def is_v_window(kind, now):
+    """The window in which a V-kind may raise a V notice: the coreaudio kinds use CA-C3's 07:00-21:35 IST; every other kind the general clinic hours."""
+    if kind in CA_KINDS:
+        ist = datetime.fromtimestamp(now, IST)
+        return CA_WINDOW_MIN[0] <= ist.hour * 60 + ist.minute < CA_WINDOW_MIN[1]
+    return is_clinic(now)
+
+
+def append_inbox_line(path, text):
+    """One O_APPEND write of '- <text>\n' (a leading newline if the file does not end with one). Raises OSError if the file cannot be written."""
+    import os
+    path = os.path.expanduser(path)
+    lead = ""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            if f.tell() > 0:
+                f.seek(-1, 2)
+                lead = "" if f.read(1) == b"\n" else "\n"
+    except FileNotFoundError:
+        pass
+    with open(path, "a") as f:
+        f.write(lead + text.rstrip("\n") + "\n")
+
+
 def is_clinic(now):
     ist = datetime.fromtimestamp(now, IST)
     if (ist.isoweekday() % 7) not in CLINIC_DAYS:     # isoweekday Sun=7 -> 0
@@ -57,6 +88,7 @@ def is_clinic(now):
 
 
 class Router:
+    inbox_path = None        # set by run_router.py: the router job appends queued HEAL action lines there. None (subscriber's router, tests): the queue is only written.
     def __init__(self, store, bus_factory, clock, state_path=None, size_line_fn=None):
         self.store, self.bus_factory, self.clock = store, bus_factory, clock
         self.state_path = state_path
@@ -97,7 +129,7 @@ class Router:
             return
         for room in rooms:
             if kind == RECOVERY_KIND:
-                self.close_room(bus, room, "recovery")
+                self.close_room(bus, room, "recovery", keep=ACK_ONLY_KINDS)
             elif kind in OPEN_KINDS:
                 self._open_or_bump(bus, room, kind, rid, row)
         self.store.mark_routed(rid, self.clock())    # AFTER the work: a crash before this replays the row (a late duplicate), never loses it
@@ -123,9 +155,9 @@ class Router:
         self.store.insert({"first_id": rid, "room_id": room, "kind": kind, "opened_at": now, "last_paged_at": None, "page_count": 0,
                            "suppressed_count": 0, "acked_by": None, "acked_at": None, "closed_at": None, "close_reason": None})
 
-    def close_room(self, bus, room, reason, kind=None):
+    def close_room(self, bus, room, reason, kind=None, keep=()):
         for c in self.store.list_open():
-            if c["room_id"] == room and (kind is None or c["kind"] == kind):
+            if c["room_id"] == room and (kind is None or c["kind"] == kind) and c["kind"] not in keep:
                 self.store.update(c["first_id"], closed_at=self.clock(), close_reason=reason)
                 self.local["v_sent"].pop(str(c["first_id"]), None)
                 self.store.add_note(f"room-alert-{c['first_id']} {c['kind']} in {room} CLOSED ({reason}) after {self._age_min(c)} min. "
@@ -137,7 +169,7 @@ class Router:
         return int((self.clock() - c["opened_at"]) // 60)
 
     def _flush(self, bus, now, pages, vcases, notes, msgs, out, digest=None):
-        """One send for everything due. State is written only after the send succeeded. `digest` is (lines, day, month|None) or None."""
+        """One send for everything due. State is written only after the send succeeded. `digest` is (unacked cases, size lines, day, month|None) or None."""
         tid = batch_tid(now)
         done = set()
         for mt_tid in (tid, batch_tid(now - 86400)):          # yesterday's thread too: a page posted before IST midnight is not repeated after it
@@ -169,9 +201,12 @@ class Router:
             if used + len(text) + 1 <= budget: keep_notes.append((nid, text)); used += len(text) + 1
         keep_digest = None
         if digest:                                            # last in line: pages, V notices and notes come first; the digest is atomic
-            dtext = "\n".join(digest[0])
+            paged_now = {c["first_id"]: n for c, n, _v, _l in keep_pages}
+            paged_now.update({c["first_id"]: n for c, n in already})
+            dlines = self._render_digest(digest[0], digest[1], paged_now)
+            dtext = "\n".join(dlines)
             if used + len(dtext) + 1 <= budget:
-                keep_digest = digest; used += len(dtext) + 1
+                keep_digest = (dlines, digest[2], digest[3]); used += len(dtext) + 1
         if keep_pages or keep_v or keep_notes or keep_digest:
             body = head + "\n".join([l for *_, l in keep_pages] + [l for _, l in keep_v] + [t for _, t in keep_notes]
                                     + (list(keep_digest[0]) if keep_digest else []))
@@ -246,13 +281,37 @@ class Router:
             except Exception as e:
                 out["errors"] += 1; out["error"] = f"prune: {e.__class__.__name__}"
             self._save()
+            self._inbox_stage(now, out)
         finally:
             if own and hasattr(bus, "close"):
                 bus.close()
         return out
 
+    def _inbox_stage(self, now, out):
+        """CA-C6: append every queued HEAL action line to the gating INBOX file; alarm (heal_inbox_stuck) if one waits more than INBOX_DEADLINE_S.
+        At-least-once: a crash between the append and the mark repeats the line. Isolated: a fault here never stops the other stages."""
+        if not self.inbox_path:
+            return
+        try:
+            for iid, text, _created in self.store.list_inbox_pending():
+                try:
+                    append_inbox_line(self.inbox_path, text)
+                except OSError:
+                    break                                       # try again next tick; the deadline below raises the alarm
+                self.store.mark_inbox_written(iid, self.clock())
+                out["inbox"] = out.get("inbox", 0) + 1
+            left = self.store.list_inbox_pending()
+            stuck = [p for p in left if now - p[2] > INBOX_DEADLINE_S]
+            if stuck and not self.store.get_open("mini", "heal_inbox_stuck"):
+                self.on_row(None, {"id": self.store.alloc_local_id(), "kind": "heal_inbox_stuck", "room_ids": ["mini"], "room_name": "mini (heal inbox append)"})
+            elif not left and self.store.get_open("mini", "heal_inbox_stuck"):
+                self.close_room(None, "mini", "inbox drained", kind="heal_inbox_stuck")
+            self.store.prune_inbox(now - ROUTED_KEEP_S)
+        except Exception as e:
+            out["errors"] += 1; out["error"] = f"inbox: {e.__class__.__name__}"
+
     def _v_due(self, c, age, now, mark):
-        if c["kind"] not in V_KINDS or not is_clinic(now) or age < V_FIRST_S:
+        if c["kind"] not in V_KINDS or not is_v_window(c["kind"], now) or age < V_FIRST_S:
             return False
         sent = self.local["v_sent"].setdefault(str(c["first_id"]), [])
         step = 60 if age >= V_REMINDER_S else 30
@@ -282,43 +341,67 @@ class Router:
             for m in msgs(tid):
                 sender = str(m.get("from", ""))
                 if sender in ACKERS and c["first_id"] in self.ack_ids(m):
-                    self.store.update(c["first_id"], acked_by=sender, acked_at=self.clock())
+                    t = self.clock()
+                    self.store.update(c["first_id"], acked_by=sender, acked_at=t)
+                    if c["kind"] in ACK_CLOSE_KINDS:
+                        self.store.update(c["first_id"], closed_at=t, close_reason="acked")
+                        self.local["v_sent"].pop(str(c["first_id"]), None)
+                        self.store.add_note(f"room-alert-{c['first_id']} {c['kind']} in {c['room_id']} CLOSED (acked by {sender}) after {self._age_min(c)} min. "
+                                            f"Pages sent {c['page_count']}, duplicates folded {c['suppressed_count']}.", t)
                     return True
         return False
 
     # ---- end-of-day list
+    def unacked_cases(self):
+        return [c for c in self.store.list_open() if not c["acked_at"]]
+
+    def _unacked_line(self, c, pages=None):
+        return f"room-alert-{c['first_id']} {c['kind']} {c['room_id']} open {self._age_min(c)} min, pages {c['page_count'] if pages is None else pages}"
+
     def unacked_list(self):
-        return [f"room-alert-{c['first_id']} {c['kind']} {c['room_id']} open {self._age_min(c)} min, pages {c['page_count']}"
-                for c in self.store.list_open() if not c["acked_at"]]
+        return [self._unacked_line(c) for c in self.unacked_cases()]
+
+    def _render_digest(self, cases, tail, paged_now):
+        """The digest lines. `paged_now` = {first_id: page_count after this send}: a case paged in the same batch shows the count that batch makes it (S1: it was one behind)."""
+        block = []
+        if cases:
+            block.append(f"ROOM ALERTS unacked at 21:00: {len(cases)}")
+            block.extend(self._unacked_line(c, paged_now.get(c["first_id"])) for c in cases[:self.DIGEST_LINES_CAP])
+            if len(cases) > self.DIGEST_LINES_CAP:
+                block.append(f"... and {len(cases) - self.DIGEST_LINES_CAP} more")
+        return block + list(tail)
 
     DIGEST_LINES_CAP = 30
 
     def _digest_block(self, now):
-        """The 21:00 block for this day, or None (not yet 21:00, already sent today, or nothing to say). Returns (lines, day, month|None); the day and
-        month are recorded only after the batch send succeeded (see _flush). The size line goes out with the first digest run of each calendar month."""
+        """The 21:00 block for this day, or None (not yet 21:00, already sent today, or nothing to say). Returns (unacked cases, size lines, day, month|None);
+        _flush renders it (see _render_digest) and records the day and month only after the batch send succeeded. The size lines (backup, data and logs
+        _to_delete) go out with the first digest run of each calendar month; size_line_fn may return one string or a list of strings."""
         ist = datetime.fromtimestamp(now, IST)
         day, month = ist.strftime("%Y-%m-%d"), ist.strftime("%Y-%m")
         if ist.hour < DIGEST_HOUR_IST or self.local["digest_day"] == day:
             return None
-        lines = self.unacked_list()
-        block = []
-        if lines:
-            block.append(f"ROOM ALERTS unacked at 21:00: {len(lines)}")
-            block.extend(lines[:self.DIGEST_LINES_CAP])
-            if len(lines) > self.DIGEST_LINES_CAP:
-                block.append(f"... and {len(lines) - self.DIGEST_LINES_CAP} more")
+        cases, tail = self.unacked_cases(), []
         size_month = None
         if self.size_line_fn and self.local["size_month"] != month:
             try:
                 sl = self.size_line_fn()
             except Exception:
                 sl = None
-            if sl:
-                block.append(sl); size_month = month
-        if not block:
+            tail = [x for x in ([sl] if isinstance(sl, str) else list(sl or [])) if x]
+            if tail:
+                size_month = month
+        if not cases and not tail:
             self.local["digest_day"] = day          # nothing to say today: do not look again until tomorrow
             return None
-        return block, day, size_month
+        return cases, tail, day, size_month
+
+
+def guardian_size_lines(home):
+    """The three _to_delete size lines the monthly digest carries (backup, data, logs); a folder that is not there is left out."""
+    import os
+    lines = [folder_size_line(os.path.join(home, *sub), f"{'/'.join(sub)}") for sub in (("backup", "_to_delete"), ("data", "_to_delete"), ("logs", "_to_delete"))]
+    return [x for x in lines if x]
 
 
 def folder_size_line(path, label="backup/_to_delete"):
@@ -358,6 +441,7 @@ class SqliteStore:
                         "last_paged_at REAL, page_count INTEGER NOT NULL DEFAULT 0, suppressed_count INTEGER NOT NULL DEFAULT 0, acked_by TEXT, acked_at REAL, closed_at REAL, close_reason TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS routed_ids (row_id INTEGER PRIMARY KEY, routed_at REAL NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS outbox_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, created_at REAL NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS heal_inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, created_at REAL NOT NULL, written_at REAL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS local_seq (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL)")
         self.db.execute("INSERT OR IGNORE INTO local_seq (id, seq) VALUES (1, 0)")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS open_uq ON room_alert_case (room_id, kind) WHERE closed_at IS NULL")
@@ -389,6 +473,18 @@ class SqliteStore:
         for i in ids:
             self.db.execute("DELETE FROM outbox_notes WHERE id=?", (i,))
 
+    def add_inbox(self, text, now):
+        self.db.execute("INSERT INTO heal_inbox (text, created_at) VALUES (?, ?)", (text, now))
+
+    def list_inbox_pending(self):
+        return [(r[0], r[1], r[2]) for r in self.db.execute("SELECT id, text, created_at FROM heal_inbox WHERE written_at IS NULL ORDER BY id")]
+
+    def mark_inbox_written(self, iid, now):
+        self.db.execute("UPDATE heal_inbox SET written_at=? WHERE id=?", (now, iid))
+
+    def prune_inbox(self, before):
+        self.db.execute("DELETE FROM heal_inbox WHERE written_at IS NOT NULL AND written_at < ?", (before,))
+
     def is_routed(self, row_id):
         return self.db.execute("SELECT 1 FROM routed_ids WHERE row_id=?", (row_id,)).fetchone() is not None
 
@@ -412,7 +508,7 @@ class SqliteStore:
         return LOCAL_ID_BASE + seq
 
     def backup_to(self, dest_dir, keep=14, stamp=None):
-        """Online copy via the sqlite backup API (safe with WAL). Keeps the newest `keep` files named cases-YYYYMMDD-HHMMSS.sqlite."""
+        """Online copy via the sqlite backup API (safe with WAL). Keeps the newest `keep` files named cases-YYYYMMDD-HHMMSS.sqlite; older ones are MOVED to _to_delete/."""
         import os, sqlite3
         os.makedirs(dest_dir, exist_ok=True)
         stamp = stamp or datetime.now(IST).strftime("%Y%m%d-%H%M%S")
@@ -423,8 +519,13 @@ class SqliteStore:
         finally:
             out.close()
         files = sorted(f for f in os.listdir(dest_dir) if f.startswith("cases-") and f.endswith(".sqlite"))
-        for f in files[:-keep]:
-            os.remove(os.path.join(dest_dir, f))
+        for f in files[:-keep]:                  # no hard deletes: rotation moves the oldest to <dest_dir>/_to_delete/, a name clash gets a numeric suffix
+            os.makedirs(os.path.join(dest_dir, "_to_delete"), exist_ok=True)
+            target = os.path.join(dest_dir, "_to_delete", f)
+            n = 0
+            while os.path.exists(target):
+                n += 1; target = os.path.join(dest_dir, "_to_delete", f"{f}.{n}")
+            os.rename(os.path.join(dest_dir, f), target)
         return dest
 
 

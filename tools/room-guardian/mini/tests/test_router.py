@@ -127,6 +127,13 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(self.store.get_open("r1", "recorder_off")["first_id"], 105)
         self.assertEqual(len(self.bus.pages("room-alert-105")), 1)
 
+    def test_a_server_recovered_row_does_not_close_the_ack_only_cases(self):
+        for n, kind in enumerate(("recorder_disturbed", "heal_message_invalid")):
+            i = 200 + 10 * n
+            self.r.on_row(self.bus, row(i, kind)); self.r.on_row(self.bus, row(i + 1, "recorder_off")); self.r.on_row(self.bus, row(i + 2, "recovered"))
+            self.assertIsNotNone(self.store.get_open("r1", kind))                # only an ACK closes it
+            self.assertIsNone(self.store.get_open("r1", "recorder_off"))         # an ordinary case still closes
+
     def test_crash_between_post_and_state_write_no_duplicate_no_loss(self):
         store = FlakyStore(); bus = FakeBus(); r = ar.Router(store, lambda: bus, self.clock)
         store.insert({"first_id": 100, "room_id": "r1", "kind": "recorder_off", "opened_at": self.clock(), "last_paged_at": None, "page_count": 0,
@@ -221,8 +228,9 @@ class DurabilityTests(unittest.TestCase):
             st = ar.SqliteStore(os.path.join(t, "cases.sqlite")); r = ar.Router(st, lambda: FakeBus(), Clock(TUE_11)); r.on_row(FakeBus(), row(100))
             for i in range(16):
                 last = st.backup_to(os.path.join(t, "backup"), keep=14, stamp=f"202610{i + 1:02d}-020000")
-            files = sorted(os.listdir(os.path.join(t, "backup")))
+            files = sorted(f for f in os.listdir(os.path.join(t, "backup")) if f.endswith(".sqlite"))
             self.assertEqual((len(files), files[0]), (14, "cases-20261003-020000.sqlite"))
+            self.assertEqual(sorted(os.listdir(os.path.join(t, "backup", "_to_delete"))), ["cases-20261001-020000.sqlite", "cases-20261002-020000.sqlite"])   # moved, never deleted
             self.assertEqual(ar.SqliteStore(last).get_open("r1", "recorder_off")["first_id"], 100)
 
     def test_local_ids_come_from_a_monotonic_counter_not_from_cases(self):
