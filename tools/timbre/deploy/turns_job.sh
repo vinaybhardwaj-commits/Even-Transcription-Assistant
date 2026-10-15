@@ -16,7 +16,14 @@ log "pip install"
 TORCH_BEFORE=$(python -c "import torch;print(torch.__version__)")
 pip install -q --no-cache-dir -r tools/timbre/requirements-turns.txt
 [ "$(python -c 'import torch;print(torch.__version__)')" = "$TORCH_BEFORE" ] || { echo "torch changed by pip install: abort" >&2; exit 3; }
-pip check || { echo "pip check failed: abort" >&2; exit 4; }
+# base image's ninja wheel tag makes pip check emit a known false positive; it is the only allowed reason for a non-zero rc
+NINJA_RE='^ninja [^ ]+ is not supported on this platform$'
+PIP_RC=0; PIP_CHECK_OUT=$(pip check 2>&1) || PIP_RC=$?
+PIP_NINJA_RC=0; grep -q -E "$NINJA_RE" <<<"$PIP_CHECK_OUT" || PIP_NINJA_RC=$?
+PIP_GREP_RC=0; PIP_CHECK_BAD=$(grep -v -E "(${NINJA_RE})|^No broken requirements found\\.\$|^\$" <<<"$PIP_CHECK_OUT") || PIP_GREP_RC=$?
+if [ "$PIP_GREP_RC" -gt 1 ] || [ "$PIP_NINJA_RC" -gt 1 ] || [ -n "$PIP_CHECK_BAD" ] || { [ "$PIP_RC" -ne 0 ] && [ "$PIP_NINJA_RC" -ne 0 ]; }; then
+  echo "pip check failed (rc=$PIP_RC): abort" >&2; printf '%s\n' "$PIP_CHECK_OUT" >&2; exit 4
+fi
 python - <<'PY'
 import torch, torchaudio
 print("torchaudio", torchaudio.__version__)
