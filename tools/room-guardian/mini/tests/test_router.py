@@ -182,8 +182,9 @@ class RouterTests(unittest.TestCase):
         self.r.on_row(self.bus, row(100)); self.r.on_row(self.bus, row(200, "offline", "r2"))
         self.bus.human("fleet", "ACK room-alert-200", "room-alert-200")
         self.clock.t = ist(2026, 10, 13, 21, 1); self.r.tick(self.bus); self.r.tick(self.bus)
-        d = [m for m in self.bus.msgs if m["thread"].startswith("room-alert-digest")]
-        self.assertEqual(len(d), 1); self.assertIn("room-alert-100", d[0]["body"]); self.assertNotIn("room-alert-200", d[0]["body"])
+        d = [m for m in self.bus.real if "unacked at 21:00" in m["body"]]          # SF2: the list rides in the batch send
+        self.assertEqual(len(d), 1); self.assertIn("room-alert-100 recorder_off", d[0]["body"]); self.assertNotIn("room-alert-200 offline", d[0]["body"])
+        self.assertEqual([m for m in self.bus.msgs if m["thread"].startswith("room-alert-digest")], [])
 
     def test_local_state_survives_restart(self):
         with tempfile.TemporaryDirectory() as t:

@@ -1,5 +1,6 @@
 """Phase 0 fix round (R2): MF1 case stored before any bus, MF2 one send per tick + failure isolation, SF1 restart survival over a long silence."""
 import os, sys, tempfile, unittest
+from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "router"))
 from test_router import ar, sb, FakeBus, Clock, row, TUE_11, ist
@@ -94,8 +95,10 @@ class MF2Batching(unittest.TestCase):
         out = self.r.tick(self.bus)
         self.assertEqual(out["errors"], 1)
         self.assertEqual(out["acked"], 1)                                  # ack read ran
-        self.assertEqual(out["digest"], 1)                                 # digest went out despite the failed batch
+        self.assertEqual(out["digest"], 0)                                 # SF2: the digest rides in the failed batch, so it stays due
         self.assertFalse(self.store.is_routed(1))                          # prune ran
+        self.bus.post = real_post; self.clock.adv(30); out = self.r.tick(self.bus)
+        self.assertEqual(out["digest"], 1)                                 # delivered with the next batch
 
     def test_ack_read_from_the_batch_thread(self):
         self.r.on_row(self.bus, row(100)); self.r.tick(self.bus)
@@ -199,6 +202,206 @@ class SF1RestartSurvivesLongSilence(unittest.TestCase):
             self.assertEqual(len(router2.store.list_open()), 1)
             self.assertEqual(router2.store.get_open("r1", "guardian_quiet")["page_count"], 1)
             sub2.on_line("kiosk/r1/health", "{}"); self.assertEqual(router2.store.list_open(), [])
+
+
+def ist_s(y, mo, d, h, mi=0, sec=0):
+    return datetime(y, mo, d, h, mi, sec, tzinfo=ar.IST).timestamp()
+
+
+class SF1Midnight(unittest.TestCase):
+    def test_page_posted_before_ist_midnight_is_not_repeated_after_a_crash(self):
+        clock, bus, store = Clock(ist_s(2026, 10, 13, 23, 59, 40)), FakeBus(), ar.SqliteStore()
+        r = ar.Router(store, lambda: bus, clock)
+        r.on_row(bus, row(100)); r.on_row(bus, row(200, "offline", "r2"))
+        orig = store.update; store.update = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("crash"))
+        r.tick(bus); store.update = orig                                    # posted on the 13 Oct thread, state not written
+        self.assertEqual(bus.sends, 1)
+        clock.adv(40)                                                       # 00:00:20 on 14 Oct: today's thread is empty
+        self.assertNotEqual(ar.batch_tid(clock()), bus.real[0]["thread"])
+        ar.Router(store, lambda: bus, clock).tick(bus)
+        self.assertEqual(bus.sends, 1)                                      # yesterday's marker found: no second page
+        self.assertEqual([c["page_count"] for c in store.list_open()], [1, 1])
+
+    def test_a_marker_two_days_old_does_not_suppress(self):
+        clock, bus, store = Clock(ist_s(2026, 10, 13, 12)), FakeBus(), ar.SqliteStore()
+        r = ar.Router(store, lambda: bus, clock); r.on_row(bus, row(100))
+        orig = store.update; store.update = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("crash"))
+        r.tick(bus); store.update = orig
+        clock.adv(2 * 86400); ar.Router(store, lambda: bus, clock).tick(bus)
+        self.assertEqual(bus.sends, 2)                                      # old marker is out of the window: a real re-page
+
+
+class SF2DigestInBatch(unittest.TestCase):
+    def setUp(self):
+        self.clock, self.bus, self.store = Clock(ist_s(2026, 10, 13, 20, 50)), FakeBus(), ar.SqliteStore()
+        self.r = ar.Router(self.store, lambda: self.bus, self.clock)
+
+    def test_digest_and_due_page_are_one_send_on_the_day_thread(self):
+        self.r.on_row(self.bus, row(100)); self.r.tick(self.bus)
+        self.r.on_row(self.bus, row(200, "offline", "r2"))
+        self.clock.t = ist_s(2026, 10, 13, 21, 1); before = self.bus.sends
+        out = self.r.tick(self.bus)
+        self.assertEqual((self.bus.sends - before, out["digest"], out["paged"]), (1, 1, 2))
+        m = self.bus.real[-1]
+        self.assertEqual(m["thread"], ar.batch_tid(self.clock())); self.assertIn("21:00 list", m["subject"])
+        self.assertIn("ROOM ALERTS unacked at 21:00: 2", m["body"]); self.assertIn("[page 1]", m["body"])
+        self.assertEqual([x for x in self.bus.msgs if x["thread"].startswith("room-alert-digest")], [])
+
+    def test_digest_alone_is_one_send_once_per_day(self):
+        self.r.on_row(self.bus, row(100)); self.r.tick(self.bus)
+        self.clock.t = ist_s(2026, 10, 13, 21, 1); out = self.r.tick(self.bus)
+        self.assertEqual((out["digest"], self.bus.sends), (1, 2))
+        for _ in range(3): self.clock.adv(30); self.assertEqual(self.r.tick(self.bus)["digest"], 0)
+        self.assertEqual(self.bus.sends, 2)
+        self.clock.t = ist_s(2026, 10, 14, 21, 2); self.assertEqual(self.r.tick(self.bus)["digest"], 1)   # next day: again
+
+    def test_failed_send_keeps_the_digest_due(self):
+        self.r.on_row(self.bus, row(100)); self.r.tick(self.bus)
+        self.clock.t = ist_s(2026, 10, 13, 21, 1); self.bus.fail = True
+        out = self.r.tick(self.bus); self.assertEqual((out["digest"], out["errors"]), (0, 1))
+        self.bus.fail = False; self.clock.adv(30); self.assertEqual(self.r.tick(self.bus)["digest"], 1)
+
+    def test_digest_state_survives_restart(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = os.path.join(t, "local.json"); r = ar.Router(self.store, lambda: self.bus, self.clock, p)
+            r.on_row(self.bus, row(100)); r.tick(self.bus)
+            self.clock.t = ist_s(2026, 10, 13, 21, 1); r.tick(self.bus); n = self.bus.sends
+            ar.Router(self.store, lambda: self.bus, self.clock, p).tick(self.bus); self.assertEqual(self.bus.sends, n)
+
+    def test_long_list_is_capped_and_still_fits(self):
+        self.clock.t = ist_s(2026, 10, 13, 20, 58)                          # paged just before 21:00: nothing re-pages at 21:01
+        for i in range(60): self.r.on_row(self.bus, row(1000 + i, "offline", f"room-{i}"))
+        self.r.tick(self.bus)
+        self.clock.t = ist_s(2026, 10, 13, 21, 1); self.r.tick(self.bus)
+        d = [m for m in self.bus.real if "unacked at 21:00" in m["body"]]
+        self.assertEqual(len(d), 1); self.assertIn("ROOM ALERTS unacked at 21:00: 60", d[0]["body"]); self.assertIn("and 30 more", d[0]["body"])
+        self.assertLessEqual(len(d[0]["body"]), ar.BODY_CAP)
+
+    def test_digest_that_does_not_fit_stays_due(self):
+        self.r.on_row(self.bus, row(100)); self.r.tick(self.bus)
+        self.r.size_line_fn = None
+        for i in range(60): self.r.on_row(self.bus, row(2000 + i, "offline", f"room-{i}"))
+        self.clock.t = ist_s(2026, 10, 13, 21, 1)
+        out = self.r.tick(self.bus)                                         # 60 fresh pages fill the body: the block waits
+        self.assertEqual(out["digest"], 0); self.assertEqual(self.r.local["digest_day"], "")
+        self.clock.adv(30); self.assertEqual(self.r.tick(self.bus)["digest"], 1)
+
+
+class SF4SizeLine(unittest.TestCase):
+    def mk(self, fn, t=None):
+        self.clock, self.bus, self.store = Clock(t or ist_s(2026, 10, 13, 21, 1)), FakeBus(), ar.SqliteStore()
+        self.r = ar.Router(self.store, lambda: self.bus, self.clock, size_line_fn=fn)
+
+    def test_size_line_once_per_calendar_month_even_with_nothing_unacked(self):
+        self.mk(lambda: "backup/_to_delete: 3 file(s), 1.0 MB. Reviewer: fleet / herdr-lead.")
+        self.assertEqual(self.r.tick(self.bus)["digest"], 1)
+        self.assertIn("backup/_to_delete: 3 file(s)", self.bus.real[-1]["body"]); self.assertNotIn("unacked", self.bus.real[-1]["body"])
+        self.clock.t = ist_s(2026, 10, 14, 21, 1); self.assertEqual(self.r.tick(self.bus)["digest"], 0)    # same month: no line, nothing unacked
+        self.clock.t = ist_s(2026, 11, 1, 21, 1); self.assertEqual(self.r.tick(self.bus)["digest"], 1)      # new month: again
+
+    def test_size_line_rides_with_the_unacked_list(self):
+        self.mk(lambda: "SIZE-LINE"); self.r.on_row(self.bus, row(100)); self.r.tick(self.bus)
+        self.assertEqual(self.bus.sends, 1)
+        self.assertIn("unacked at 21:00: 1", self.bus.real[-1]["body"]); self.assertIn("SIZE-LINE", self.bus.real[-1]["body"])
+
+    def test_size_line_is_not_marked_sent_when_the_send_fails(self):
+        self.mk(lambda: "SIZE-LINE"); self.bus.fail = True
+        self.assertEqual(self.r.tick(self.bus)["digest"], 0); self.bus.fail = False; self.clock.adv(30)
+        self.assertEqual(self.r.tick(self.bus)["digest"], 1)
+
+    def test_a_failing_size_function_never_blocks_the_list(self):
+        def boom(): raise OSError("disk")
+        self.mk(boom); self.r.on_row(self.bus, row(100)); self.r.tick(self.bus)
+        self.assertIn("unacked at 21:00: 1", self.bus.real[-1]["body"])
+        self.assertEqual(self.r.local["size_month"], "")
+
+    def test_no_size_function_no_line_nothing_unacked_no_send(self):
+        self.mk(None); self.assertEqual(self.r.tick(self.bus)["digest"], 0); self.assertEqual(self.bus.sends, 0)
+
+    def test_folder_size_line(self):
+        with tempfile.TemporaryDirectory() as t:
+            d = os.path.join(t, "_to_delete"); self.assertIsNone(ar.folder_size_line(d))
+            os.makedirs(d); open(os.path.join(d, "a"), "wb").write(b"x" * 1048576); open(os.path.join(d, "b"), "wb").write(b"")
+            line = ar.folder_size_line(d)
+            self.assertIn("backup/_to_delete: 2 file(s), 1.0 MB", line); self.assertIn("fleet / herdr-lead", line)
+
+
+def _pgdump_script():
+    here = os.path.dirname(os.path.abspath(__file__))
+    for rel in ("../ops/pgdump.sh", "../../scripts/pgdump.sh"):
+        p = os.path.join(here, rel)
+        if os.path.exists(p):
+            return os.path.dirname(p)
+    return None
+
+
+@unittest.skipUnless(_pgdump_script() and os.path.exists("/opt/homebrew/bin/python3"), "pgdump.sh or the Mini python is not here")
+class SF3PgdumpSignals(unittest.TestCase):
+    """pgdump.sh against a temp GUARDIAN_HOME and a fake pg_dump / pg_restore (PG_BIN). Never touches the real database."""
+    def setUp(self):
+        import shutil, stat
+        self.tmp = tempfile.TemporaryDirectory(); gh = self.gh = self.tmp.name
+        src = _pgdump_script(); here = os.path.dirname(os.path.abspath(__file__))
+        os.makedirs(os.path.join(gh, "scripts")); os.makedirs(os.path.join(gh, "etc")); os.makedirs(os.path.join(gh, "data"))
+        shutil.copy(os.path.join(src, "pgdump.sh"), os.path.join(gh, "scripts", "pgdump.sh"))
+        shutil.copy(os.path.join(src, "backup-case.py"), os.path.join(gh, "scripts", "backup-case.py"))
+        shutil.copytree(os.path.join(here, "..", "router"), os.path.join(gh, "app", "router"), ignore=shutil.ignore_patterns("__pycache__"))
+        open(os.path.join(gh, "etc", "pg.env"), "w").close()
+        self.bin = os.path.join(gh, "fakebin"); os.makedirs(self.bin)
+        with open(os.path.join(self.bin, "pg_dump"), "w") as f:
+            f.write('#!/bin/sh\nout=""\nwhile [ $# -gt 0 ]; do [ "$1" = -f ] && out="$2"; shift; done\necho partial > "$out"\nsleep "${FAKE_PGDUMP_SLEEP:-0}"\n')
+        with open(os.path.join(self.bin, "pg_restore"), "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        for n in ("pg_dump", "pg_restore"):
+            os.chmod(os.path.join(self.bin, n), 0o755)
+        self.env = dict(os.environ, GUARDIAN_HOME=gh, PG_BIN=self.bin)
+
+    def tearDown(self): self.tmp.cleanup()
+
+    def files(self, sub=""):
+        return sorted(os.listdir(os.path.join(self.gh, "backup", sub) if sub else os.path.join(self.gh, "backup")))
+
+    def start(self, sleep):
+        import subprocess
+        return subprocess.Popen(["/bin/bash", os.path.join(self.gh, "scripts", "pgdump.sh")], env=dict(self.env, FAKE_PGDUMP_SLEEP=str(sleep)),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+
+    def wait_part(self):
+        import time
+        for _ in range(100):
+            if os.path.isdir(os.path.join(self.gh, "backup")) and any(f.endswith(".part") for f in self.files()): return
+            time.sleep(0.1)
+        self.fail("pg_dump never started")
+
+    def case_open(self):
+        st = ar.SqliteStore(os.path.join(self.gh, "data", "cases.sqlite")); return [c["kind"] for c in st.list_open()]
+
+    def test_success_leaves_one_dump_and_no_part(self):
+        p = self.start(0); p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 0)
+        f = self.files(); self.assertEqual([x for x in f if x.endswith(".part")], []); self.assertEqual(len([x for x in f if x.startswith("pipe-")]), 1)
+
+    def test_term_to_the_script_leaves_no_part_and_opens_the_case(self):
+        import signal
+        p = self.start(3); self.wait_part(); p.send_signal(signal.SIGTERM)       # to bash only: the trap runs when the child ends
+        p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 143)
+        self.assertEqual([x for x in self.files() if x.endswith(".part")], [])
+        self.assertEqual([x for x in self.files() if x.startswith("pipe-")], [])
+        self.assertTrue(any(x.endswith(".bad") for x in self.files("_to_delete")))
+        self.assertEqual(self.case_open(), ["backup_failed"])
+
+    def test_int_to_the_script_leaves_no_part(self):
+        import signal
+        p = self.start(3); self.wait_part(); p.send_signal(signal.SIGINT); p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 130); self.assertEqual([x for x in self.files() if x.endswith(".part")], [])
+
+    def test_term_to_the_whole_process_group_leaves_no_part(self):
+        import signal
+        p = self.start(30); self.wait_part(); os.killpg(p.pid, signal.SIGTERM); p.communicate(timeout=30)   # what launchd does on unload
+        self.assertIn(p.returncode, (1, 143))
+        self.assertEqual([x for x in self.files() if x.endswith(".part")], [])
+        self.assertEqual([x for x in self.files() if x.startswith("pipe-")], [])
 
 
 if __name__ == "__main__":
