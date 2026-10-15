@@ -34,8 +34,11 @@ def sanitize_note_ex(note: str) -> tuple[str, list[tuple[str | None, str]]]:
         spans = [m.group(0).strip() for m in BRACKET_SPAN.finditer(line)]
         line = BRACKET_SPAN.sub("", line)
         head, sep, body = line.partition(":")
-        if sep and head in HEADINGS:
-            cur = head
+        # Attribution only: a heading after a removed leading span, spaces or a tab still starts that heading. The posted text
+        # below keeps deciding on the unstripped line, so nothing is reflowed.
+        ahead, asep, _ = line.lstrip().partition(":")
+        if asep and ahead in HEADINGS:
+            cur = ahead
         removed += [(cur, sp) for sp in spans]
         if not line.strip():
             continue

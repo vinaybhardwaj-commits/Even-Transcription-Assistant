@@ -140,3 +140,151 @@ def test_recorder_clean_notes_identical_and_flips_by_heading(tmp_path):
                 flips[e] = flips.get(e, 0) + 1
     assert n_total >= 400 and n_clean > 100 and flips
     print("flips posted->rejected by heading:", dict(sorted(flips.items())))
+
+
+# --- FIX1 F1: the heading a line belongs to does not depend on column 0 ---
+PLACEMENTS = {  # name -> prefix written before "<Heading>:"
+    "col0": "", "space1": " ", "space3": "   ", "tab": "\t", "span": "[S1] ", "span_nospace": "[S1]", "span_tab": "[S1]\t",
+    "tab_span": "\t[S1] ", "space_span_space": "  [S0|doctor]  ",
+}
+
+
+def gen_note_placed(r):
+    """Every heading at a random placement, with 0-2 inner spans each. Returns (text, [(heading, span)])."""
+    lines, want = [], []
+    for h in HEADINGS:
+        pname = r.choice(sorted(PLACEMENTS))
+        pre = PLACEMENTS[pname]
+        parts = ["word%d" % r.randint(0, 9)]
+        for _ in range(r.choice([0, 0, 1, 2])):
+            sp = r.choice(SPANS)
+            parts.insert(r.randint(0, len(parts)), sp)
+            want.append((h, sp))
+        if pre.strip():
+            want.append((h, pre.strip()))
+        lines.append(f"{pre}{h}: " + " ".join(parts))
+    return "\n".join(lines), want
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_f1_reject_in_every_placement(seed):
+    r = random.Random(1000 + seed)
+    for _ in range(200):
+        text, want = gen_note_placed(r)
+        out, removed = sanitize_note_ex(text)
+        assert sorted(removed) == sorted(want), text
+        assert out == base.sanitize_note(text)  # the posted text is unchanged from base, whatever the placement
+        errs = span_errors(removed)
+        assert sorted(errs) == sorted({f"FRX-L1 bracket span removed from {h}" for h, s in want if expected_reject(h, s)}), (text, errs)
+
+
+@pytest.mark.parametrize("pname", sorted(PLACEMENTS))
+@pytest.mark.parametrize("head", sorted(ORDER_HEADINGS))
+def test_f1_order_line_span_rejects_in_each_placement(head, pname):
+    text = "General Advice: rest\n" + PLACEMENTS[pname] + head + ": item [three times a day] x 3 days"
+    out, removed = sanitize_note_ex(text)
+    assert (head, "[three times a day]") in removed
+    assert f"FRX-L1 bracket span removed from {head}" in span_errors(removed)
+
+
+def test_f1_prefixed_heading_reports_its_own_heading_not_the_previous_one():
+    _, removed = sanitize_note_ex("Refer to: cardiology\n[S1] General Advice: rest")
+    assert removed == [("General Advice", "[S1]")]
+    _, removed = sanitize_note_ex("General Advice: rest\n[S1] Surgery or Procedure: dressing [left knee]")
+    assert removed == [("Surgery or Procedure", "[S1]"), ("Surgery or Procedure", "[left knee]")]
+    _, removed = sanitize_note_ex("General Advice: rest\n Follow up: review After [one] week")
+    assert removed == [("Follow up", "[one]")]
+
+
+def test_f1_text_of_non_column0_lines_is_not_reflowed():
+    t = "Medication: a\n[S1] Medication: b\n\tMedication: c [x]\n  Follow up: d"
+    assert sanitize_note_ex(t)[0] == base.sanitize_note(t) == "Medication: a\n Medication: b\n\tMedication: c\n  Follow up: d"
+
+
+def _extra_line(tmp_path, extra, medication=None):
+    b = STAGE_B if medication is None else STAGE_B.replace("Medication: paracetamol 1 g three times a day x 3 days", medication)
+    return _run(tmp_path, b + "\n" + extra)
+
+
+@pytest.mark.parametrize("extra", [
+    "[S1] Medication: paracetamol 1 g [three times a day] x 3 days",
+    "  Medication: paracetamol 1 g [three times a day] x 3 days",
+    "\tMedication: paracetamol 1 g [three times a day] x 3 days",
+    " [S1]  Medication: paracetamol 1 g [three times a day] x 3 days",
+])
+def test_f1_probe_medication_line_not_at_column0_rejects_the_llm_note(tmp_path, extra):
+    lg, od = _extra_line(tmp_path, extra)
+    assert "FRX-L1 bracket span removed from Medication" in lg["llm_note_errors"]
+    assert lg["note_source"] == "deterministic_fallback" and "note_repaired" not in lg
+    assert lg["final_valid"] and "x 3 days" not in lg["artifact"]["note_text"]  # the trimmed extra line is not what posts (the fallback says "x for three days")
+
+
+def test_f1_probe_repair_path_with_emptied_medication_and_prefixed_line(tmp_path):
+    lg, _ = _extra_line(tmp_path, "[S1] Medication: paracetamol 1 g [three times a day] x 3 days", medication="Medication:")
+    assert "FRX-L1 bracket span removed from Medication" in lg["llm_note_errors"]
+    assert lg["note_source"] == "deterministic_fallback" and "note_repaired" not in lg
+
+
+def test_f1_probe_prefixed_follow_up_and_surgery_lines_through_pipeline(tmp_path):
+    lg, _ = _extra_line(tmp_path, " Follow up: review After [one] week")
+    assert "FRX-L1 bracket span removed from Follow up" in lg["llm_note_errors"] and lg["note_source"] == "deterministic_fallback"
+    lg, _ = _extra_line(tmp_path, "[S1] Surgery or Procedure: dressing [left knee]")
+    assert "FRX-L1 bracket span removed from Surgery or Procedure" in lg["llm_note_errors"] and lg["note_source"] == "deterministic_fallback"
+
+
+def test_f1_probe_prefixed_general_advice_posts_with_count(tmp_path):
+    lg, _ = _extra_line(tmp_path, "[S1] General Advice: keep warm")
+    assert lg["final_valid"] and lg["note_source"].startswith("llm_") and lg["sanitize_removed"] == 1
+
+
+# --- FIX1 F2: the span accounting points the first round left untested ---
+def _run_a(tmp_path, stage_b, mutate_a):
+    c = load_consult(CONSULTS, UID)
+    a = copy.deepcopy(stage_a(UID))
+    mutate_a(a)
+    return run_consult(c, FakeClient({"stageA": json.dumps(a), "stageB": stage_b}), tmp_path), tmp_path / UID
+
+
+def test_m4_repaired_llm_note_that_loses_a_span_is_not_kept(tmp_path):
+    """Stage A timing `today [fasting]` + an LLM note with an empty Medication: the note goes to repair, the repaired note is
+    rebuilt from gp_extraction and the sanitiser removes [fasting] from Further Investigation. Posting that repaired note
+    (`CBC (today)`) is the defect; the span check on the repaired note must stop it."""
+    def m(a):
+        a["investigations"][0]["timing"] = "today [fasting]"
+    lg, od = _run_a(tmp_path, STAGE_B.replace("Medication: paracetamol 1 g three times a day x 3 days", "Medication:"), m)
+    assert lg["note_repaired"] is False
+    assert "FRX-L1 bracket span removed from Further Investigation" in lg["llm_note_errors"]
+    assert lg["note_source"] == "deterministic_fallback" and not lg["llm_note_valid"]
+
+
+def test_m5_recovery_rerender_replaces_the_removed_spans(tmp_path, monkeypatch):
+    """A recovery re-render rebuilds the note, so what the sanitiser removed from the LLM note no longer applies."""
+    from tools.eta2freescript import pipeline, recover
+    monkeypatch.setattr(recover, "soften_f2_m3", lambda art: ["FRX-F2 forced"])
+    lg, _ = _llm_with(tmp_path, "General Advice: Drink plenty of water; Take rest", "General Advice: [S1] Drink plenty of water; Take rest")
+    assert lg["field_recovery"] and lg["final_valid"] and "sanitize_removed" not in lg
+
+
+def test_m5_recovery_rerender_that_loses_a_span_rejects(tmp_path, monkeypatch):
+    from tools.eta2freescript import pipeline, recover
+    monkeypatch.setattr(recover, "soften_f2_m3", lambda art: ["FRX-F2 forced"])
+    real, n = pipeline._fallback_note_ex, [0]
+
+    def second_call_loses_a_span(*a, **k):
+        n[0] += 1
+        text, rem = real(*a, **k)
+        return (text, rem) if n[0] == 1 else (text, rem + [("Medication", "[frequency]")])
+    monkeypatch.setattr(pipeline, "_fallback_note_ex", second_call_loses_a_span)
+    lg, od = _run(tmp_path, STAGE_B)
+    assert not lg["final_valid"] and "FRX-L1 bracket span removed from Medication" in lg["final_errors"]
+    assert (od / "artifact.rejected.json").exists() and not (od / "artifact.json").exists()
+
+
+def test_m11_c4_retry_fallback_returns_its_removed_spans(tmp_path, monkeypatch):
+    from tools.eta2freescript import pipeline
+    lg, _ = _run(tmp_path, STAGE_B)
+    art = copy.deepcopy(lg["artifact"])
+    art["gp_extraction"]["medicines"][0]["name"] = "paracetamol [dose]"
+    monkeypatch.setattr(pipeline, "check", lambda a: ["C4 forced"])  # the first render "fails C4", so the retry path runs
+    text, rem = pipeline._fallback_note_ex(art, {}, [])
+    assert "[dose]" not in text and ("Medication", "[dose]") in rem
