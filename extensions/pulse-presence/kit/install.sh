@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: install.sh <ssh-target>     e.g. install.sh ehrc-audiometry@100.109.231.107
+# Usage: install.sh <ssh-target>     e.g. install.sh <kiosk-user>@<kiosk-host>
 # Builds a per-host CRX (machine_id = the target's LocalHostName, ingest URL and token baked into the
 # package, same signing key so the extension id never changes) and force-installs it into macOS Chrome
 # on the target through managed policy. Idempotent: re-running bumps the version and updates in place.
