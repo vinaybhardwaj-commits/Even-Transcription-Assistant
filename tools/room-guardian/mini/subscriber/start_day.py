@@ -4,13 +4,36 @@ Health-line fields: boot_age_s and usb_mic_present are the kiosk's (collect.sh h
 recorder_pid_age_s being a number (the field is empty when no recorder pid exists), and "started" as capture_open true. Both INFERRED, flagged in the report.
 The sender is injected: sender(room) returns on success and raises on failure. No credential lives here. Once per boot: key = room + boot epoch (now - boot_age_s),
 the same boot when two epochs are within BOOT_TOL_S. If the room is not capture_open within START_DEADLINE_S after the send, start_day_failed opens (URGENT, V kind)."""
-import json, os, time
+import json, math, os, subprocess, time
 
 BOOT_MAX_AGE_S, START_DEADLINE_S, BOOT_TOL_S = 600, 600, 120
 
 
 def _num(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+class ConfigError(Exception):
+    pass
+
+
+def command_sender(cmd, stderr=None, timeout=30, runner=subprocess.run):
+    """sender(room) over the configured argv (router.json start_day_cmd): no shell, a 30 s timeout, exit 0 = sent. A room starting with '-' is refused so it can never be
+    read as an option by the wrapper."""
+    def send(room):
+        if not isinstance(room, str) or not room or room.startswith("-"):
+            raise ValueError("room slug not allowed as an argument")
+        runner(list(cmd) + [room], check=True, timeout=timeout, stdout=subprocess.DEVNULL, stderr=stderr)
+    return send
+
+
+def build(flags, sink, home, clock=time.time, stderr=None, runner=subprocess.run):
+    """-> StartDayAfterBoot for the flag-on case. Raises ConfigError (the subscriber then refuses to start) when router.json has no start_day_cmd."""
+    cmd = flags.get("start_day_cmd") or []
+    if not cmd:
+        raise ConfigError("start_day_after_boot is true but router.json has no start_day_cmd")
+    return StartDayAfterBoot(command_sender(cmd, stderr, runner=runner), os.path.join(home, "data", "start-day-state.json"), sink, clock,
+                             os.path.join(home, "logs", "start-day-audit.jsonl"))
 
 
 class StartDayAfterBoot:
@@ -21,18 +44,22 @@ class StartDayAfterBoot:
             try:
                 with open(state_path) as f:
                     d = json.load(f)
-                if isinstance(d, dict):
-                    self.state = {str(k): v for k, v in d.items() if isinstance(v, dict)}
+                if isinstance(d, dict):    # an entry without a numeric boot and sent_at is corrupt and dropped, so it can never raise on a health line
+                    self.state = {str(k): v for k, v in d.items() if isinstance(v, dict) and _num(v.get("boot")) and _num(v.get("sent_at"))}
             except (OSError, ValueError):
                 pass
 
     def _save(self):
+        """Best effort: a write fault is audited and never raises (the in-memory state still stops a second send in this process)."""
         if not self.state_path:
             return
-        tmp = f"{self.state_path}.tmp{os.getpid()}"
-        with open(tmp, "w") as f:
-            json.dump(self.state, f, sort_keys=True)
-        os.replace(tmp, self.state_path)
+        try:
+            tmp = f"{self.state_path}.tmp{os.getpid()}"
+            with open(tmp, "w") as f:
+                json.dump(self.state, f, sort_keys=True)
+            os.replace(tmp, self.state_path)
+        except Exception:                 # noqa: BLE001
+            self._audit("-", "state_write_fault", self.clock())
 
     def _audit(self, room, event, now, **kw):
         if not self.audit_path:
@@ -44,7 +71,13 @@ class StartDayAfterBoot:
             pass
 
     def on_health(self, room, obj, now=None):
-        now = self.clock() if now is None else now
+        """Never raises: a fault is audited and the caller carries on with the rest of the health line."""
+        try:
+            self._on_health(room, obj, self.clock() if now is None else now)
+        except Exception:                 # noqa: BLE001
+            self._audit(room, "start_day_fault", self.clock())
+
+    def _on_health(self, room, obj, now):
         if not isinstance(obj, dict):
             return
         st = self.state.get(room)
@@ -73,10 +106,18 @@ class StartDayAfterBoot:
         """Called every loop: a room still not started START_DEADLINE_S after its start_day opens start_day_failed once per boot."""
         now = self.clock() if now is None else now
         for room, st in list(self.state.items()):
-            if st.get("started") or st.get("failed") or now - st.get("sent_at", now) < START_DEADLINE_S:
-                continue
-            st["failed"] = True
-            self._save()
-            self._audit(room, "start_day_failed", now, send_ok=bool(st.get("send_ok")))
-            if self.sink:
-                self.sink.start_day_failed(room, now)
+            try:
+                if st.get("started") or st.get("failed") or now - st["sent_at"] < START_DEADLINE_S:
+                    continue
+                st["failed"] = True
+                self._audit(room, "start_day_failed", now, send_ok=bool(st.get("send_ok")))
+                if self.sink:
+                    try:
+                        self.sink.start_day_failed(room, now)          # the page first, then the save: a state-write fault can never lose it
+                    except Exception:  # noqa: BLE001 -- a sink or store fault is retried on the next check
+                        st["failed"] = False
+                        self._audit(room, "start_day_failed_sink_fault", now)
+                        continue
+                self._save()
+            except Exception:             # noqa: BLE001
+                self._audit(room, "start_day_fault", now)

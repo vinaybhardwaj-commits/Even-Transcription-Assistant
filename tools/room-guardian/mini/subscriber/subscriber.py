@@ -269,7 +269,15 @@ class Subscriber:
             self._on_heal(room, obj, now)
         if stream == "health":
             if self.start_day is not None:
-                self.start_day.on_health(room, obj, now)
+                try:                       # a start_day fault must never stop the rest of the health handling (zero_ratio, last_seen, the quiet edge)
+                    self.start_day.on_health(room, obj, now)
+                except Exception:          # noqa: BLE001
+                    pass
+            if self.consult is not None:
+                try:
+                    self.consult.note_health(room, obj, now)
+                except Exception:          # noqa: BLE001
+                    pass
             zr = zero_ratio(obj)
             if zr is not None and zr < ZERO_RATIO_OK:
                 self.ok_streak[room] = self.ok_streak.get(room, 0) + 1
@@ -362,13 +370,19 @@ class Subscriber:
             modes[r] = m
         snap = {"kill": kill, "modes": modes}
         if self.consult is not None:                 # flag consult_open_publish: every room in rooms.json, fail closed (true) inside ConsultHold
-            hold = self.consult.hold(self.clock())
-            snap["consult_open"] = {r: hold.get(r, True) is not False for r in self.rooms}
+            try:
+                hold = self.consult.hold(self.clock())
+                snap["consult_open"] = {r: hold.get(r, True) is not False for r in self.rooms}
+            except Exception:              # noqa: BLE001 -- the hold path may never take the control line down: every room is held
+                snap["consult_open"] = {r: True for r in self.rooms}
         return snap
 
     def check_start_day(self):
         if self.start_day is not None:
-            self.start_day.check(self.clock())
+            try:
+                self.start_day.check(self.clock())
+            except Exception:              # noqa: BLE001
+                pass
 
     def control_payload(self):
         """control_snapshot() plus ts = publish epoch seconds (int), so a consumer can reject replayed or stale control by payload time. Additive."""

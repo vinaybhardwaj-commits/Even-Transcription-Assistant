@@ -62,19 +62,16 @@ def main():
     sink = RouterSink(router, router.bus_factory)
     consult = start_day = None
     if consult_on:                                   # FR1 2.4 d' flags: default off, so today's control bytes and behaviour are unchanged
-        from consult_hold import ConsultHold, pg_loader
-        consult = ConsultHold(rooms, flags.get("consult_room_map"), pg_loader(flags.get("consult_db_url_file")), time.time,
+        from consult_hold import ConsultHold, pg_sources
+        consult = ConsultHold(rooms, flags.get("consult_room_map"), pg_sources(flags.get("consult_db_url_file")), time.time,
                               audit_path=os.path.join(HOME, "logs", "consult-hold-audit.jsonl"), sink=sink)
     if start_on:
-        from start_day import StartDayAfterBoot
-        cmd = flags.get("start_day_cmd") or []
-        if not cmd:                                  # no existing admin path is wired by this code: refuse rather than page start_day_failed forever
-            log("REFUSING TO START: start_day_after_boot is true but router.json has no start_day_cmd")
+        import start_day as start_day_mod
+        try:
+            start_day = start_day_mod.build(flags, sink, HOME, time.time, LOG)
+        except start_day_mod.ConfigError as e:       # no existing admin path is wired by this code: refuse rather than page start_day_failed forever
+            log(f"REFUSING TO START: {e}")
             return 2
-
-        def sender(room):
-            subprocess.run(cmd + [room], check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=LOG)
-        start_day = StartDayAfterBoot(sender, os.path.join(HOME, "data", "start-day-state.json"), sink, time.time, os.path.join(HOME, "logs", "start-day-audit.jsonl"))
     s = Subscriber(os.path.join(HOME, "data"), os.path.join(HOME, "etc"), rooms, sink, quiet_after_s=cfg.get("quiet_after_s", 120), quiet_seed=sink.open_quiet_rooms(),
                    consult=consult, start_day=start_day)
     q = queue.Queue()
