@@ -1,6 +1,6 @@
 """usb_verify.py -- FR1 2.4 d' (Mini side): the F2 Mini-side verify after a kiosk reboot. The kiosk emits `kiosk_reboot` / `healed_pending` once it has verified the device
 is back, the recorder runs with one tapewriter and the boot is newer than the reboot (guardian-lead report F2). start_day accepted, a fresh tape piece and zero_ratio are
-checked HERE, within 15 min: the room must show capture_open true, a fresh piece (advancing data across two health lines, see below) and zero_ratio < 0.98. Otherwise
+checked HERE, within 15 min: the room must show capture_open true, a fresh piece (advancing data across two health lines, see below) and zero_ratio < 0.05. Otherwise
 usb_reboot_failed opens (source mini_verify; the case store has no source column, so the source goes to the audit line). The state is on disk, so a subscriber restart
 keeps a verify in progress.
 INFERRED: the health-line fields are the kiosk's own (collect.sh health_line): capture_open (bool), zero_ratio (number 0..1), pending_piece_count and rms_dbfs_2s (numbers).
@@ -8,7 +8,7 @@ guardian-lead's kickoff gives no field for "a fresh tape piece"; it is approxima
 rms_dbfs_2s differ. UNVERIFIED against a real kiosk."""
 import json, math, os, time
 
-VERIFY_S, ADVANCE_MIN_S, ZERO_RATIO_MAX, SINK_RETRY_S = 900, 30, 0.98, 300
+VERIFY_S, ADVANCE_MIN_S, ZERO_RATIO_MAX, SINK_RETRY_S = 900, 30, 0.05, 300   # 0.05 per guardian-lead F2 and herdr-lead (Round 6b); the consult-hold levels test keeps 0.98
 
 
 def _finite(v):

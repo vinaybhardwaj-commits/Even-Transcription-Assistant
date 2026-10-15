@@ -140,6 +140,16 @@ class F2Verify(unittest.TestCase):
                 e = UEnv(); e.heal(reboot("healed_pending")); e.health(line); e.clock.adv(40); e.health(dict(line, pending_piece_count=6)); e.clock.adv(900)
                 e.sub.check_usb_verify(); self.assertEqual(e.kinds(), ["usb_reboot_failed"], name)
 
+    def test_the_zero_ratio_boundary_is_0_05(self):                                                  # Round 6b
+        self.assertEqual(uv.ZERO_RATIO_MAX, 0.05); self.assertEqual(ch.SILENCE_ZERO_RATIO, 0.98)       # the consult-hold levels test keeps 0.98
+        for zr, ok in ((0.0, True), (0.049, True), (0.0499, True), (0.05, False), (0.0501, False), (0.5, False), (0.97, False), (0.98, False), (1.0, False)):
+            with self.subTest(zr=zr):
+                e = UEnv(); e.heal(reboot("healed_pending")); e.health(good(5, zero_ratio=zr)); e.clock.adv(40); e.health(good(6, zero_ratio=zr))
+                self.assertEqual(e.verify.state["r1"]["ok"], ok, zr)
+                e.clock.adv(900); e.sub.check_usb_verify(); self.assertEqual(e.kinds(), [] if ok else ["usb_reboot_failed"], zr)
+        e = UEnv(); e.heal(reboot("healed_pending")); e.health(good(5, zero_ratio=0.049)); e.clock.adv(40); e.health(good(6, zero_ratio=0.05))      # the second line fails the boundary
+        self.assertFalse(e.verify.state["r1"]["ok"])
+
     def test_data_that_does_not_advance_does_not_verify(self):
         e = UEnv(); e.heal(reboot("healed_pending"))
         e.health(good(5)); e.clock.adv(40); e.health(good(5))                       # same pieces, same level
