@@ -27,7 +27,8 @@ class Sink:
 
 
 ROOMS = ["opd-6", "opd-7"]
-MAP = {"opd-6": {"machine": "M6", "room_id": "b6", "slug": "s6"}, "opd-7": {"machine": ["M7", "m7legacy"], "room_id": "b7", "slug": "s7"}}
+MAP = {"opd-6": {"machine": "M6", "room_id": "b6", "slug": "s6"}, "opd-7": {"machine": "M7", "room_id": "b7", "slug": "s7"}}
+MAP2 = dict(MAP, **{"opd-7": {"machine": ["M7", "M7b"], "room_id": "b7", "slug": "s7"}})        # a two-machine room (map only machines in use)
 QUIET = {"capture_open": True, "zero_ratio": 1.0}                 # digital silence: the only quiet line unless capture_closed_counts_quiet is on
 
 
@@ -344,14 +345,17 @@ class PgSources(unittest.TestCase):
 
     def test_sql_is_constant_with_bound_parameters(self):
         at = datetime.fromtimestamp(T - 3, timezone.utc)
-        self.rows = {ch.HB_SQL: [("M6", at)], ch.ENC_SQL: [("M6", "encounter_open", at)]}
+        self.rows = {ch.HB_SQL: [("M6", at)], ch.ENC_SQL: [("M6", "encounter_open", at)], ch.POST_SQL: [("M6", "encounter_open", at)]}
         out = ch.pg_sources(self.f)["presence"](T, ["M6"])
-        self.assertEqual(out, {"hb": [("M6", T - 3)], "enc": [("M6", "encounter_open", T - 3)]})
-        ex = [c for c in self.calls if c[0] == "execute"]; self.assertEqual([x[1] for x in ex], [ch.HB_SQL, ch.ENC_SQL]); self.assertEqual(ex[0][2][0], ["M6"])
+        self.assertEqual(out, {"hb": [("M6", T - 3)], "enc": [("M6", "encounter_open", T - 3)], "post": [("M6", "encounter_open", T - 3)]})
+        ex = [c for c in self.calls if c[0] == "execute"]; self.assertEqual([x[1] for x in ex], [ch.HB_SQL, ch.ENC_SQL, ch.POST_SQL]); self.assertEqual(ex[0][2][0], ["M6"])
+        utc = timezone.utc                                                                           # I-1: the lookbacks are pinned (heartbeat 2 min, encounter events 4 h)
+        self.assertEqual(ex[0][2][1], datetime.fromtimestamp(T - 120, utc)); self.assertEqual(ex[1][2][1], datetime.fromtimestamp(T - 4 * 3600, utc))
+        self.assertEqual(ex[2][2][1], datetime.fromtimestamp(T - 4 * 3600, utc)); self.assertEqual(ch.ENC_LOOKBACK_S, 4 * 3600)
         self.rows = [("b6",)]; self.assertEqual(ch.pg_sources(self.f)["session"](T, ["b6"]), {"b6"})
         self.rows = [("s6", "b6", datetime.fromtimestamp(T - 9, timezone.utc), None)]; self.assertEqual(ch.pg_sources(self.f)["windows"](T, None), [("s6", "b6", T - 9, None)])
         self.rows = [("b6", datetime.fromtimestamp(T - 3, timezone.utc))]; self.assertEqual(ch.pg_sources(self.f)["levels"](T, ["b6"]), [("b6", T - 3)])
-        for q in (ch.HB_SQL, ch.ENC_SQL, ch.SESSION_SQL, ch.LEVEL_SQL, ch.WIN_SQL):
+        for q in (ch.HB_SQL, ch.ENC_SQL, ch.POST_SQL, ch.SESSION_SQL, ch.LEVEL_SQL, ch.WIN_SQL):
             self.assertIn("%s", q); self.assertNotIn("{", q)
 
     def test_a_missing_credential_file_is_a_source_error_not_a_crash(self):
@@ -521,7 +525,7 @@ class Round3(unittest.TestCase):
                 self.assertEqual(self.hold(Src(presence=self.enc(ev)))["opd-6"], want)
         self.assertEqual(self.hold(Src(presence=self.enc()))["opd-6"], False)                         # no open/close in the lookback and fresh heartbeats: not consulting
         self.assertEqual(self.hold(Src(presence=self.enc(("M7", "encounter_open", T - 10))))["opd-6"], False)            # another machine's open does not hold this room
-        self.assertEqual(self.hold(Src(presence=self.enc(("m7legacy", "encounter_open", T - 10))))["opd-7"], True)       # any of the room's machine keys
+        self.assertEqual(self.hold(Src(presence=self.enc(("M7b", "encounter_open", T - 10), hb=[("M6", T - 5), ("M7", T - 5), ("M7b", T - 5)])), rmap=MAP2)["opd-7"], True)    # any of the room's machine keys
 
     def test_stale_heartbeats_are_down_even_with_no_events(self):
         self.assertTrue(self.hold(Src(presence=self.enc(hb=[("M6", T - 121), ("M7", T - 5)])))["opd-6"])
@@ -530,7 +534,7 @@ class Round3(unittest.TestCase):
         self.assertTrue(self.hold(Src(presence=self.enc(hb=[("M6", float("nan")), ("M7", T - 5)])))["opd-6"])
 
     def test_presence_sql_names_and_has_no_limit_before_the_per_machine_filter(self):                # I-c
-        for q in (ch.HB_SQL, ch.ENC_SQL):
+        for q in (ch.HB_SQL, ch.ENC_SQL, ch.POST_SQL):
             self.assertIn("DISTINCT ON (p.machine)", q); self.assertNotIn("LIMIT", q)
         self.assertIn("'encounter_open'", ch.ENC_SQL); self.assertIn("'encounter_close'", ch.ENC_SQL)
         self.assertNotIn("p.source", ch.ENC_SQL); self.assertIn("p.source = 'ext'", ch.HB_SQL)             # events from any source; heartbeats from the extension only
@@ -693,6 +697,81 @@ class Round3(unittest.TestCase):
         for extra, want in (({}, False), ({"consult_windows_enabled": "true"}, False), ({"consult_windows_enabled": 1}, False), ({"consult_windows_enabled": False}, False),
                             ({"consult_windows_enabled": True}, True)):
             json.dump(dict({"to": ["a"], "ackers": ["a"]}, **extra), open(p, "w")); self.assertEqual(ubus_bus.load_cfg(p)["consult_windows_enabled"], want)
+
+
+class Round4(unittest.TestCase):
+    def enc(self, *events, post=(), hb=(("M6", T - 5), ("M7", T - 5), ("M7b", T - 5))):
+        return {"hb": list(hb), "enc": list(events), "post": list(post)}
+
+    def hold(self, pres, rmap=MAP, **kw):
+        h, _, _ = mk(Src(presence=pres), rmap=rmap, **kw); return h.hold()
+
+    def test_every_mapped_machine_needs_a_fresh_heartbeat(self):                                     # R3-M1
+        fresh = [("M6", T - 5), ("M7", T - 5), ("M7b", T - 5)]
+        self.assertEqual(self.hold(self.enc(hb=fresh), MAP2), {"opd-6": False, "opd-7": False})
+        for name, hb in (("one machine dead (absent)", [("M6", T - 5), ("M7", T - 5)]), ("one machine stale", [("M6", T - 5), ("M7", T - 5), ("M7b", T - 121)]),
+                         ("other one dead", [("M6", T - 5), ("M7b", T - 5)]), ("NaN ts", [("M6", T - 5), ("M7", T - 5), ("M7b", float("nan"))])):
+            with self.subTest(name):
+                out = self.hold(self.enc(hb=hb), MAP2); self.assertEqual(out, {"opd-6": False, "opd-7": True}, name)
+        h, _, _ = mk(Src(presence=self.enc(hb=[("M6", T - 5), ("M7", T - 5)])), rmap=MAP2); h.hold(); self.assertIn("presence_stale", h.last["opd-7"][1])
+        # the dead machine's own heartbeat rows of the OTHER machine do not count for it
+        self.assertEqual(self.hold(self.enc(hb=[("M6", T - 5), ("M7", T - 5), ("M7", T - 6)]), MAP2)["opd-7"], True)
+        self.assertEqual(self.hold(self.enc(hb=[("M6", T - 5), ("M7", T - 120), ("M7b", T - 120)]), MAP2)["opd-7"], False)    # exactly 120 s: still fresh
+
+    def test_post_open_overrides_a_later_url_close(self):                                              # R3-F1, the refuter's repro
+        post = [("M6", "encounter_open", T - 900)]; url_close = ("M6", "encounter_close", T - 480)
+        self.assertEqual(self.hold(self.enc(url_close, post=post))["opd-6"], True)                     # POST open 15 min ago, URL close 8 min ago, no POST close
+        self.assertEqual(self.hold(self.enc(url_close, post=post), post_open_overrides_url_close=False)["opd-6"], False)   # switch off: the newest-of-either rule
+        self.assertEqual(self.hold(self.enc(url_close, post=[("M6", "encounter_close", T - 500)]))["opd-6"], False)        # newest POST event is a close: no override
+        self.assertEqual(self.hold(self.enc(("M6", "encounter_open", T - 60), post=[("M6", "encounter_close", T - 500)]))["opd-6"], True)   # a later URL open still holds
+        self.assertEqual(self.hold(self.enc(post=[("M7", "encounter_open", T - 900)]))["opd-6"], False)    # another machine's POST open does not hold this room
+        self.assertEqual(self.hold(self.enc(url_close, post=[("M6", "encounter_open", float("nan"))]))["opd-6"], True)    # unreadable ts: held
+        h, _, _ = mk(Src(presence=self.enc(url_close, post=post))); h.hold(); self.assertIn("presence_consulting", h.last["opd-6"][1])
+
+    def test_post_override_switch_defaults_true_in_the_config(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup); p = os.path.join(t.name, "router.json")
+        for extra, want in (({}, True), ({"post_open_overrides_url_close": "false"}, True), ({"post_open_overrides_url_close": 0}, True), ({"post_open_overrides_url_close": False}, False),
+                            ({"post_open_overrides_url_close": True}, True)):
+            json.dump(dict({"to": ["a"], "ackers": ["a"]}, **extra), open(p, "w")); self.assertEqual(ubus_bus.load_cfg(p)["post_open_overrides_url_close"], want)
+
+    def test_post_sql_is_pinned(self):
+        q = ch.POST_SQL
+        self.assertIn("p.payload->>'encounter_id' IS NOT NULL", q); self.assertIn("<> ''", q); self.assertIn("'encounter_open', 'encounter_close'", q)
+        self.assertNotIn("p.source", q)
+
+    def test_newest_means_server_insert_order_not_the_doctor_clock(self):                           # I-2, S-2 (mutant P3)
+        for name in ("HB_SQL", "ENC_SQL", "POST_SQL"):
+            q = getattr(ch, name)
+            self.assertRegex(q, r"ORDER BY p\.machine, p\.id DESC$", name)                          # the newest row per machine is the highest id
+            self.assertNotIn("p.ts DESC", q); self.assertNotIn("ASC", q)
+            self.assertIn("DISTINCT ON (p.machine)", q)
+
+    def test_one_room_a_source_error_after_a_good_read_is_true_at_once(self):                       # S-1 (mutant P5)
+        one = {"opd-6": MAP["opd-6"]}
+        for name in ("presence", "session"):
+            with self.subTest(name):
+                src = Src(presence=[("M6", T - 10, None)]); h, clock, _ = mk(src, rooms=["opd-6"], rmap=one)
+                self.assertEqual(h.hold(), {"opd-6": False})
+                src.v[name] = RuntimeError("down"); clock.adv(31)
+                h.note_health("opd-6", QUIET, clock())
+                if name == "session": src.v["presence"] = {"hb": [("M6", clock() - 1)], "enc": []}
+                else: src.v["session"] = set()
+                self.assertEqual(h.hold(clock()), {"opd-6": True})                                   # no per-room retry for one room: only the err flag holds it
+
+    def test_windows_on_a_garbage_row_for_the_rooms_slug_holds_that_room(self):                      # S-3
+        W = dict(consult_windows_enabled=True)
+        h, _, _ = mk(Src(windows=[("s6",), ("s7", "b7", T - 9000, T - 8000)]), **W)
+        self.assertEqual(h.hold(), {"opd-6": True, "opd-7": False}); self.assertIn("windows_down", h.last["opd-6"][1])
+        h, _, _ = mk(Src(windows=[("other",), 5]), **W); self.assertEqual(h.hold(), {"opd-6": False, "opd-7": False})        # a row for no mapped slug is dropped
+
+    def test_one_rooms_fault_leaves_the_other_rooms_values_intact(self):                              # I-4 (mutant P16)
+        h, _, _ = mk(); orig = h._room
+        def picky(r, now):
+            if r == "opd-7": raise RuntimeError("room fault")
+            return orig(r, now)
+        h._room = picky
+        self.assertEqual(h.hold(), {"opd-6": False, "opd-7": True})                                  # exactly: only the faulting room is held
+        self.assertEqual(h.last["opd-7"][1], ("fault",)); self.assertEqual(h.last["opd-6"][1], ("clear",))
 
 
 class ConfigFlags(unittest.TestCase):

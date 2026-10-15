@@ -67,7 +67,8 @@ def main():
                               audit_path=os.path.join(HOME, "logs", "consult-hold-audit.jsonl"), sink=sink,
                               capture_closed_counts_quiet=flags.get("capture_closed_counts_quiet") is not False,
                               open_session_requires_levels=flags.get("open_session_requires_levels") is not False,
-                              consult_windows_enabled=flags.get("consult_windows_enabled") is True)
+                              consult_windows_enabled=flags.get("consult_windows_enabled") is True,
+                              post_open_overrides_url_close=flags.get("post_open_overrides_url_close") is not False)
     if start_on:
         import start_day as start_day_mod
         try:
