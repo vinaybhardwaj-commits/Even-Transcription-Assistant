@@ -130,7 +130,7 @@ describe("the live executor can only emit start_day — never stop, restart, pau
   it("every other executor method throws without touching the bus; the only kind ever queued is start_day", async () => {
     const { d, calls } = deps();
     const ex = new LiveExecutor({ deps: d, now: () => NOW });
-    for (const m of ["scribeStop", "scribeRestart", "issueTicket", "message"] as const) await expect((async () => ex[m](dec("room_a", m)))()).rejects.toThrow("live executor not enabled");
+    for (const m of ["scribeRestart", "issueTicket", "message"] as const) await expect((async () => ex[m](dec("room_a", m)))()).rejects.toThrow("live executor not enabled");
     expect(calls.insert).toHaveLength(0);
     expect(calls.listener + calls.active + calls.today + calls.recent).toBe(0);
     await ex.scribeStart(dec());
@@ -165,7 +165,7 @@ describe("the live executor can only emit start_day — never stop, restart, pau
 
   it("structural guard: executor.ts contains no other bench command kind", () => {
     const src = readFileSync("lib/steward/executor.ts", "utf8");
-    for (const k of ["end_day", "pause_day", "resume_day", "restart_engine", "close_orphan", "set_audio_input", "check_update_now", "report_diag", "self_test"]) expect(src.includes(k), k).toBe(false);
+    for (const k of ["pause_day", "resume_day", "restart_engine", "close_orphan", "set_audio_input", "check_update_now", "report_diag", "self_test"]) expect(src.includes(k), k).toBe(false);
   });
 });
 

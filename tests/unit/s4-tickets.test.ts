@@ -127,7 +127,7 @@ describe("live", () => {
     expect((await live(cfg({ kill: true, global: false, startLive: true }))).live_actions).toEqual([]);
     expect((await live(cfg({ global: true, startLive: true }))).live_actions).toEqual([]);
     // S1: config can say live for every other action, but LiveExecutor implements only scribe_start: they are NOT live (they would throw and stay in shadow)
-    expect((await live(cfg({ startLive: false, actions: { message: true } }))).live_actions).toEqual([]);
+    expect((await live(cfg({ startLive: false, actions: { message: true, scribe_stop: true } }))).live_actions).toEqual([]);
     const only = await live(cfg({ startLive: true, actions: Object.fromEntries(C.LIVE_CAPABLE_ACTIONS.filter((a) => a !== "scribe_start").map((a) => [a, true])) }));
     expect(only.live_actions).toEqual(["scribe_start"]);
     expect(only).toMatchObject({ kill_switch: false, shadow_global: false, start_day_live: true });
@@ -177,20 +177,21 @@ describe("S1: live means LiveExecutor implements it", () => {
   it("with every switch open, only scribe_start is live:true; every other live-capable action shows live:false, mode live (what config says) and reason not_implemented_live", async () => {
     answer = (t) => (/FROM steward_config/.test(t) ? cfgAllOpen : []);
     const out = await run({ view: "live" });
-    expect(out.live_actions).toEqual(["scribe_start"]);
+    expect(out.live_actions).toEqual(["scribe_start", "scribe_stop"]);
     for (const a of out.actions as Row[]) {
-      if (a.action === "scribe_start") expect(a).toMatchObject({ live: true, mode: "live" });
+      if (a.action === "scribe_start" || a.action === "scribe_stop") expect(a).toMatchObject({ live: true, mode: "live" });
       else expect(a, String(a.action)).toMatchObject({ live: false, mode: "live", reason: "not_implemented_live" });
     }
-    expect((out.actions as Row[]).filter((a) => a.reason === "not_implemented_live")).toHaveLength(C.LIVE_CAPABLE_ACTIONS.length - 1);
+    expect((out.actions as Row[]).filter((a) => a.reason === "not_implemented_live")).toHaveLength(C.LIVE_CAPABLE_ACTIONS.length - 2);
   });
   it("the list is PINNED to LiveExecutor: every live-capable action outside LIVE_IMPLEMENTED_ACTIONS throws LIVE_EXECUTOR_DISABLED through dispatch, and scribe_start is the one it implements", async () => {
     const X = await import("@/lib/steward/executor");
-    expect([...C.LIVE_IMPLEMENTED_ACTIONS]).toEqual(["scribe_start"]);
+    expect([...C.LIVE_IMPLEMENTED_ACTIONS]).toEqual(["scribe_start", "scribe_stop"]);
     for (const a of C.LIVE_CAPABLE_ACTIONS.filter((x) => !C.LIVE_IMPLEMENTED_ACTIONS.includes(x))) {
       await expect(Promise.resolve().then(() => X.dispatch(new X.LiveExecutor(), { action: a } as never)), a).rejects.toThrow(X.LIVE_EXECUTOR_DISABLED);
     }
-    for (const a of C.LIVE_IMPLEMENTED_ACTIONS) expect(typeof (new X.LiveExecutor() as unknown as Record<string, unknown>)["scribeStart"]).toBe("function");
+    expect(typeof (new X.LiveExecutor() as unknown as Record<string, unknown>)["scribeStart"]).toBe("function");
+    expect(typeof (new X.LiveExecutor() as unknown as Record<string, unknown>)["scribeStop"]).toBe("function");
   });
 });
 

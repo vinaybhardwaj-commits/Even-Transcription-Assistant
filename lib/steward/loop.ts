@@ -684,7 +684,7 @@ export async function runSteward(sql: StewardSql, opts: RunOptions): Promise<Ste
         // a LIVE scribe_start must also pass its gates (kiosk-health heartbeat <= 180 s, recorder ready + no session for >= 5 min, ...): the first failing gate is the result, nothing is sent
         const gateFail = am === "live" && d.action === "scribe_start" && typeof d.inputs.start_gate_fail === "string" ? d.inputs.start_gate_fail : null;
         // F20: the hard never-live list, checked here again whatever the rules said
-        const neverLive = am === "live" && d.action === "scribe_start" && !gateFail && isNeverLiveRoom(d.room_id);
+        const neverLive = am === "live" && (d.action === "scribe_start" || d.action === "scribe_stop") && !gateFail && isNeverLiveRoom(d.room_id);
         if (gateFail || neverLive) {
           am = "shadow";
           result = `shadow: ${gateFail ?? "never_live_room"}`;

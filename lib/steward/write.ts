@@ -128,6 +128,7 @@ export function planCommand(input: PlanInput, current: Record<string, unknown>):
       const turningOff = p.data.global === false && curGlobal !== false; // global true/absent -> false
       // SF1: going live is explicit PER ACTION. global:false must carry an actions map naming at least one action; every published action it does NOT name is written
       // as held in shadow (true), so nothing goes live implicitly (V's ruling: only scribe_start is ever meant to be live, and changing that is V's decision).
+      // scribe_stop live 15 Oct (V GO via fable); scribe_restart/message still shadow-only.
       // G51: {global:false} with no named action is refused WHATEVER the current global is (it used to fire only on a true -> false transition, so the same call was accepted as a no-op
       // when global was already false): the instruction means "take these actions live", and it names none.
       if (p.data.global === false && Object.keys(touched).length === 0) {

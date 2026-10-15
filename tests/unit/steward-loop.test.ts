@@ -296,8 +296,8 @@ describe("kill switch, shadow and the live executor that is not there", () => {
     expect(await dispatch(sh, d("message"))).toEqual({ result: "shadow: would message" });
     expect(await dispatch(sh, d("none"))).toBeNull();
     expect(await dispatch(sh, d("log_only"))).toBeNull();
-    // the live executor implements scribe_start only (steward-executor.test.ts); every other method throws
-    for (const a of ["scribe_stop", "scribe_restart", "ticket:wake", "message"]) await expect(dispatch(new LiveExecutor(), d(a))).rejects.toThrow("live executor not enabled in P0");
+    // the live executor implements scribe_start and scribe_stop (steward-executor.test.ts, steward-stop-live.test.ts); every other method throws
+    for (const a of ["scribe_restart", "ticket:wake", "message"]) await expect(dispatch(new LiveExecutor(), d(a))).rejects.toThrow("live executor not enabled in P0");
   });
 
   it("outcomeOf maps results to the rules' memory", () => {
@@ -671,8 +671,8 @@ describe("(d) per-action shadow lift: executes only if kill off AND start_day_li
     expect(db.state.table.filter((r) => r.action !== "none" && r.action !== "log_only").every((r) => r.result === "kill_switch")).toBe(true);
   });
 
-  it("an action that is not live-capable (scribe_stop here) or unnamed is SHADOW even with kill off, global false and no per-action entry", async () => {
-    const db = fakeDb({ cfg: { kill_switch: { on: false }, shadow: { global: false, actions: {} } } });
+  it("scribe_stop held by a per-action true is SHADOW even with kill off and global false", async () => {
+    const db = fakeDb({ cfg: { kill_switch: { on: false }, shadow: { global: false, actions: { scribe_stop: true } } } });
     senseWith((id, A) => healthy(A, { room_id: id })); // 22:00 IST: outside the clinic window with a session open and no consult -> scribe_stop
     const live = spyExec();
     await run(db.sql, ist("22:00"), { executorFor: (l: boolean) => (l ? live : new ShadowExecutor()) });

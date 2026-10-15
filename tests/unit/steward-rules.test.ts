@@ -97,7 +97,7 @@ describe("config: parse, roster, windows", () => {
     expect(actionMode(cfgOf(false, false, {}), "ticket:wake")).toBe("live");
     expect(actionMode(cfgOf(false, false, {}), "ticket:made_up")).toBe("shadow");
     expect(actionMode(cfgOf(false, false, { bogus: false }), "bogus")).toBe("shadow");
-    expect(actionMode(cfgOf(false, false, {}), "scribe_stop")).toBe("shadow");
+    expect(actionMode(cfgOf(false, false, {}), "scribe_stop")).toBe("live"); // live-capable since 15 Oct (V GO via fable)
     expect(actionMode(cfgOf(false, false, {}), "scribe_restart")).toBe("shadow");
     // a malformed per-action value parses as shadow (true), never as a lift
     const parsed = parseConfig([{ key: "shadow", value: { global: false, actions: { scribe_start: "no" } } }]);

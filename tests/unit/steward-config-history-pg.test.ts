@@ -44,7 +44,7 @@ const val = (key: string): unknown => cfgRows().find((r) => r.key === key)?.valu
 const run = (kind: CommandKind, extra: Record<string, unknown> = {}) =>
   runCommand(pg.sql as never, { kind, value: undefined, minutes: null, roomId: null, nowMs: Date.parse("2026-10-08T12:00:00Z"), actor: "mcp:tester", reason: "pg test", ...extra } as never);
 
-const PUBLISHED = ["scribe_start", "ticket:wake", "ticket:open_pulse", "ticket:relaunch_chrome", "ticket:policy_cycle", "ticket:restart_recorder_app", "ticket:restart_kiosk_health", "message"];
+const PUBLISHED = ["scribe_start", "scribe_stop", "ticket:wake", "ticket:open_pulse", "ticket:relaunch_chrome", "ticket:policy_cycle", "ticket:restart_recorder_app", "ticket:restart_kiosk_health", "message"];
 const HELD_EXCEPT_START = Object.fromEntries(PUBLISHED.map((a) => [a, a !== "scribe_start"]));
 
 describe("REQUIRED PROOF — 0136 against a real postgres", () => {

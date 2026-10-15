@@ -317,6 +317,12 @@ function outsideWindow(c: Ctx): Decision[] {
   if (s.recording.session_open === true) {
     const lateMax = c.cfg.schedule[s.kind].late_stop_max_min * MIN;
     const since = win.since_end_ms;
+    // R3: stops SENT for this still-open session (the executor sends at most caps.start_retries of them, with the start backoff); at the cap: warn once per tick and send nothing more
+    const sessionFrom = s.recording.session_started_at ? Date.parse(s.recording.session_started_at) : null;
+    const stopsSent = c.recent.room.filter((r) => r.action === "scribe_stop" && EXECUTED(r) && sessionFrom !== null && Date.parse(r.ts) >= sessionFrom).length;
+    if (sessionFrom !== null && stopsSent >= c.cfg.caps.start_retries) {
+      return [mk(c, "end_of_window", "log_only", { wanted: "scribe_stop" }, `stop not acknowledged: ${stopsSent} stops sent and the session is still open`, "scribe_stop held: retries used", "warn", {}, { stops_sent: stopsSent })];
+    }
     const sinceTxt = since === null ? "more than 3 days" : `${Math.round(since / MIN)} min`;
     if (s.consult_open !== false) {
       if (since !== null && since < lateMax) {
