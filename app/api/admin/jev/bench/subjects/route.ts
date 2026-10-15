@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
   const def = getUse(use, set ?? undefined);
   if (!def) return NextResponse.json({ error: { code: "unknown_set" } }, { status: 400 });
   try {
-    const ids = await def.eligible(limit);
+    const ids = await (def.benchEligible ?? def.eligible)(limit);
     return NextResponse.json({ use, set: def.setId, subject_ids: ids });
   } catch (e) {
     return respondError("PIPELINE_FAILED", `jev bench subjects failed: ${classifyDbError(e)}`);

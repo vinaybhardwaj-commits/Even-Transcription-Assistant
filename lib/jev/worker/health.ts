@@ -5,6 +5,7 @@
  */
 import { sql } from "@/lib/db";
 import { dailyCapUsd, dailySoftUsd, liveFlagOn, REAL_USES, useFlagOn, workerEnabled, textLaneOn, USE_SENDS_TEXT, type RealUse } from "./flags";
+import { consultCoverage, type Coverage } from "./coverage";
 import { getBreaker, isDue, type BreakerRow } from "./breaker";
 
 const n = (v: unknown): number => (typeof v === "number" ? v : Number(v ?? 0));
@@ -25,7 +26,7 @@ export type UseHealth = {
   error_classes_24h: Record<string, number>;
   drift_alerts: string[];
 };
-export type JevHealth = { ist_date: string; budget: { spent_usd: number; cap_usd: number; soft_usd: number; left_usd: number }; sweeper_last_job_at: string | null; uses: UseHealth[] };
+export type JevHealth = { ist_date: string; budget: { spent_usd: number; cap_usd: number; soft_usd: number; left_usd: number }; sweeper_last_job_at: string | null; coverage: Coverage | { unavailable: true }; uses: UseHealth[] };
 
 export async function jevHealth(): Promise<JevHealth> {
   const [spentRows, sets, calls, lastErr, queue, lastOk, bands, classes, drift, sweeper] = await Promise.all([
@@ -45,6 +46,11 @@ export async function jevHealth(): Promise<JevHealth> {
     sql`SELECT DISTINCT ON (use) use, alerts FROM jev_drift_report WHERE cardinality(alerts) > 0 ORDER BY use, ist_date DESC, created_at DESC`,
     sql`SELECT max(created_at) AS at FROM scribe_job WHERE kind = 'jev_ask' AND actor LIKE 'cron:jev_sweep%'`,
   ]) as unknown as Array<Array<Record<string, unknown>>>;
+  // L2: coverage is a bonus read; a throw or a 5 s stall must not take the rest of the health result down with it.
+  const coverage: Coverage | { unavailable: true } = await Promise.race([
+    consultCoverage().catch(() => ({ unavailable: true as const })),
+    new Promise<{ unavailable: true }>((res) => { const t = setTimeout(() => res({ unavailable: true }), 5000); t.unref?.(); }),
+  ]);
 
   const spent = n(spentRows[0]?.usd);
   const cap = dailyCapUsd();
@@ -77,6 +83,7 @@ export async function jevHealth(): Promise<JevHealth> {
     ist_date: new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10),
     budget: { spent_usd: spent, cap_usd: cap, soft_usd: dailySoftUsd(), left_usd: Math.max(0, Math.round((cap - spent) * 1e8) / 1e8) },
     sweeper_last_job_at: sweeper[0]?.at ? new Date(sweeper[0].at as string).toISOString() : null,
+    coverage,
     uses,
   };
 }

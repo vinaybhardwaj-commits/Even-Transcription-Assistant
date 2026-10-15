@@ -10,6 +10,7 @@
  * so those are bench-by-explicit-list only. Nothing here is imported by any capture, upload, STT or note path.
  */
 import { selectEvrWindows } from "@/lib/room-access/evr-select";
+import { allTranscribedConsults } from "./consult-eligible";
 import { buildTimelineState, resolveTimelineAnswer } from "./builders/timeline";
 import { buildSttPairState, buildSttRunState, resolveSttPick } from "./builders/stt";
 import { buildConsultState, buildDoubtState, buildPitchState } from "./builders/locators";
@@ -17,16 +18,17 @@ import { registerUse, usesOf, type JevUseDef } from "./uses";
 
 const istDaySeed = (): number => Number(new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10).replace(/-/g, ""));
 const noneEligible = async (): Promise<string[]> => [];
-const consultEligible = (limit: number): Promise<string[]> => selectEvrWindows(Math.min(limit, 200), istDaySeed());
+const consultBenchEligible = (limit: number): Promise<string[]> => selectEvrWindows(Math.min(limit, 200), istDaySeed());
+const consultEligible = (limit: number, ctx?: { sha: string; mode: string }): Promise<string[]> => allTranscribedConsults(limit, ctx);
 
 export const P2_USES: JevUseDef[] = [
   { use: "encounter_timeline", setId: "u10-timeline", subjectType: "encounter", eligible: noneEligible, build: (id) => buildTimelineState(id), resolve: resolveTimelineAnswer },
   { use: "encounter_timeline", setId: "encounter-end", subjectType: "encounter", eligible: noneEligible, build: (id) => buildTimelineState(id), resolve: resolveTimelineAnswer },
   { use: "stt_quality", setId: "stt-quality", subjectType: "stt_run", eligible: noneEligible, build: (id) => buildSttRunState(id) },
   { use: "stt_pick", setId: "stt-pick", subjectType: "stt_pair", eligible: noneEligible, build: (id) => buildSttPairState(id), resolve: resolveSttPick },
-  { use: "consult_rubric", setId: "pitch-detect", subjectType: "consult", eligible: consultEligible, build: (id) => buildConsultState(id) },
+  { use: "consult_rubric", setId: "pitch-detect", subjectType: "consult", eligible: consultEligible, benchEligible: consultBenchEligible, build: (id) => buildConsultState(id) },
   { use: "consult_rubric", setId: "pitch-uptake", subjectType: "pitch", eligible: noneEligible, build: (id) => buildPitchState(id) },
-  { use: "consult_rubric", setId: "chair-affect", subjectType: "consult", eligible: consultEligible, build: (id) => buildConsultState(id) },
+  { use: "consult_rubric", setId: "chair-affect", subjectType: "consult", eligible: consultEligible, benchEligible: consultBenchEligible, build: (id) => buildConsultState(id) },
   { use: "consult_rubric", setId: "doubt", subjectType: "doubt", eligible: noneEligible, build: (id) => buildDoubtState(id) },
 ];
 

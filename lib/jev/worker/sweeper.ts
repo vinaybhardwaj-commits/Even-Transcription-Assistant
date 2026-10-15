@@ -19,7 +19,7 @@ export type SweepUse = { use: string; enqueued: boolean; skipped?: SweepSkip; jo
 
 /** The subjects of `def` that have evidence ready and NO derived decision under this set hash in this mode. */
 export async function pendingSubjects(def: JevUseDef, sha: string, mode: JevMode, limit: number): Promise<string[]> {
-  const ids = await def.eligible(limit * 4);
+  const ids = await def.eligible(limit * 4, { sha, mode });
   if (ids.length === 0) return [];
   const done = (await sql`
     SELECT subject_id FROM jev_decision

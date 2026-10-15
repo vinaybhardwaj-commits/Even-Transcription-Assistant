@@ -19,6 +19,7 @@ import { breakerAdmit, recordOutcome } from "./breaker";
 import { budgetCheck, costUsd, reservationUsd } from "./budget";
 import { classifyCallError, policyOf, type ErrorClass } from "./errors";
 import type { JevMode } from "./flags";
+import { insertNoStateMarkers } from "@/lib/room-access/consult-select";
 import { insertCall, newCallId, stateHmac, upsertDecisions, type CallRecord, type WorkerDecision } from "./persist";
 import type { QuestionDef } from "./sets";
 import { acquireSlot, releaseSlot } from "./slots";
@@ -112,7 +113,14 @@ export async function askSubject(input: {
   const pv = (v: string) => `${set.id}@${set.version}+${v}`;
 
   // No builder output: the subject is no longer buildable. Recorded as no opinion, never a fabricated state.
-  if (!build || "unbuildable" in build) return { kind: "done", decisions: 0, calls: 0, errorClass: null, bench: [], inputTokens: 0 };
+  if (!build || "unbuildable" in build) {
+    // EVERY-CONSULT S1: a no_state MARKER (never changes an existing row; skipped when any row exists for the subject+sha+mode; a no_answer row, evidence.no_state = the closed reason) so the sweeper does not re-offer the subject every 5 minutes. Not in bench mode.
+    if (mode !== "bench") {
+      const reason = build && "unbuildable" in build ? build.unbuildable : "null_build";
+      await insertNoStateMarkers(defs.map((d) => ({ ...base(), questionId: d.question_id, orderVariant: "derived" as const, promptVersion: pv("derived"), optionOrderSha: null, answer: { type: "none" }, probabilities: null, confidence: null, band: ESCAPE_BAND, outcome: "no_answer" as const, evidence: { no_state: reason } })));
+    }
+    return { kind: "done", decisions: 0, calls: 0, errorClass: null, bench: [], inputTokens: 0 };
+  }
 
   if ("abstain" in build) {
     // a deterministic pre-gate (PRD §2): the call is SKIPPED with a reason code, never sent to Jev
