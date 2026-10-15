@@ -899,7 +899,7 @@ test_kiosk_code_has_no_perl_python_osascript_or_jq() {
 test_guardian_version_is_bumped_and_identifies_the_tree() {
   load_libs
   [ "$GUARDIAN_VERSION" != "c1-0.1.0" ] && ok || fail "GUARDIAN_VERSION is still c1-0.1.0"
-  assert_eq "$GUARDIAN_VERSION" "c1-0.3.0-r14" "R14 version string"
+  assert_eq "$GUARDIAN_VERSION" "c1-0.4.0-d1" "d1 version string"
 }
 
 # a fake tr, wc, sed, ps, tail, head or cat first on PATH must not be used on the control path

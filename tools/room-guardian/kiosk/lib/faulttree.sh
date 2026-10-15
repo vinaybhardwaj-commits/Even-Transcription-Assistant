@@ -18,8 +18,16 @@ fault_tree() {
     offline) echo "network|network_offline|state=offline last_http=${S_last_http:-null}" ;;
   esac
   # 3 USB device
+  # 3' (2.4 d') rung d' sits before d: absent for >= 2 ticks AND a fresh CC cable-detect "powering off" line. Absence without that line stays d (escalate only).
   if [ "$S_usb" = "false" ]; then
-    echo "usb|usb_device_missing|usb_mic_present=false audio_engine_present=${S_engine:-null}"
+    case "${S_cc_age:-}" in
+      ''|*[!0-9]*) echo "usb|usb_device_missing|usb_mic_present=false audio_engine_present=${S_engine:-null}" ;;
+      *) if [ "${S_usb_ticks:-0}" -ge "$USB_ABSENT_MIN_TICKS" ] 2>/dev/null; then
+           echo "usb|usb_power_off|usb_mic_present=false usb_absent_ticks=$S_usb_ticks cc_power_off_age_s=$S_cc_age port=${S_cc_port:-unknown}"
+         else
+           echo "usb|usb_device_missing|usb_mic_present=false audio_engine_present=${S_engine:-null}"
+         fi ;;
+    esac
   fi
   # 4 CoreAudio (held)
   if [ "$S_usb" = "true" ] && [ "$S_engine" = "false" ]; then

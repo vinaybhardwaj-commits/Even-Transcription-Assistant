@@ -46,6 +46,57 @@ boot_age_s() {
   [ -n "$sec" ] && echo "$(( $(now_epoch) - sec ))"
 }
 
+# 2.4 d': consecutive health ticks with the capture device absent from IOUSB. File "count last_epoch". A second collect inside the same tick (heal re-collect,
+# < 5 s later) does not count; a gap over 60 s breaks "consecutive" and restarts at 1. Present = 0.
+usb_ticks_update() {
+  local f="$STATE_DIR/usb_absent" now cnt last
+  now="$(now_epoch)"
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  cnt="$(awk 'NR==1 { print $1 }' "$f" 2>/dev/null)"; last="$(awk 'NR==1 { print $2 }' "$f" 2>/dev/null)"
+  case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  if [ "$S_usb" = "true" ]; then
+    [ "$cnt" = 0 ] || printf '0 %s\n' "$now" >"$f"
+    S_usb_ticks=0; return 0
+  fi
+  if [ "$cnt" -gt 0 ] && [ "$((now - last))" -gt 60 ]; then cnt=0; fi
+  if [ "$cnt" -eq 0 ]; then cnt=1; last="$now"
+  elif [ "$((now - last))" -ge 5 ] && [ "$cnt" -lt 1000 ]; then cnt=$((cnt + 1)); last="$now"; fi
+  printf '%s %s\n' "$cnt" "$last" >"$f"
+  S_usb_ticks="$cnt"
+}
+
+# 2.4 d': the cable-detect probe. Pinned log reader, fixed predicate, 4 s cap, clean environment (same path as the conf commands). Read-only.
+# Sets S_cc_age (seconds since the newest matching line, empty when none) and S_cc_port (the port name only). A timeout, an error or no line = no trigger.
+# A negative result is cached 50 s so a pulled cable does not run the log reader every 10 s tick.
+usb_cc_probe() {
+  local out="$STATE_DIR/cc_probe.out" neg="$STATE_DIR/cc_probe.neg" now line ts e age port last
+  S_cc_age=""; S_cc_port=""
+  now="$(now_epoch)"
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  last="$(awk 'NR==1 { print $1 }' "$neg" 2>/dev/null)"
+  case "$last" in ''|*[!0-9]*) ;; *) [ "$((now - last))" -ge 0 ] && [ "$((now - last))" -lt 50 ] && return 0 ;; esac
+  if ! run_capped "$USB_LOG_CAP_S" "$out" g_clean_exec "$G_LOG" show --last 15m --style compact --predicate "$USB_LOG_PREDICATE"; then printf '%s\n' "$now" >"$neg"; return 0; fi
+  line="$("$G_GREP" -F 'AppleUSBHostPort::cableChangeOccurred: powering off' "$out" 2>/dev/null | "$G_TAIL" -n1)"
+  ts="${line:0:19}"
+  if [ -n "$line" ] && [[ $ts =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+    e="$("$G_DATE" -j -f '%Y-%m-%d %H:%M:%S' "$ts" +%s 2>/dev/null)"
+    case "$e" in ''|*[!0-9]*) e="" ;; esac
+  else e=""; fi
+  if [ -n "$e" ]; then
+    age=$((now - e))
+    if [ "$age" -ge -5 ] && [ "$age" -le "$USB_CC_MAX_AGE_S" ]; then
+      [ "$age" -ge 0 ] || age=0
+      port="$(printf '%s\n' "$line" | "$G_SED" -n 's/.*[[:space:]]\([A-Za-z0-9_.@-]*\): AppleUSBHostPort::cableChangeOccurred: powering off.*/\1/p' | "$G_HEAD" -n1)"
+      case "$port" in ''|*[!A-Za-z0-9_.@-]*) port=unknown ;; esac
+      [ "${#port}" -le 64 ] || port=unknown
+      S_cc_age="$age"; S_cc_port="$port"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$now" >"$neg"
+}
+
 hid_idle_s() {
   ioreg -c IOHIDSystem 2>/dev/null | awk '/HIDIdleTime/ { print int($NF / 1000000000); exit }'
 }
@@ -106,6 +157,9 @@ collect_all() {
   S_usb=false; S_engine=false
   if ioreg -r -c IOUSBHostDevice -l -d 2 -w0 2>/dev/null | grep -q -- "$USB_MIC_PATTERN"; then S_usb=true; fi
   if ioreg -r -c IOAudioEngine -d 1 -w0 2>/dev/null | grep -q -- "$USB_MIC_PATTERN"; then S_engine=true; fi
+  S_usb_ticks=0; S_cc_age=""; S_cc_port=""
+  usb_ticks_update
+  if [ "$S_usb" = "false" ] && [ "$S_usb_ticks" -ge "$USB_ABSENT_MIN_TICKS" ]; then usb_cc_probe; fi
 
   S_ca_pid="$(pgrep -x coreaudiod 2>/dev/null | head -n1)"
   S_ca_age=""; [ -n "$S_ca_pid" ] && S_ca_age="$(pid_age_s "$S_ca_pid")"

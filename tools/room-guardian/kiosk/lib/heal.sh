@@ -1,5 +1,5 @@
 #!/bin/bash
-# shellcheck disable=SC2034,SC2154
+# shellcheck disable=SC2034,SC2154,SC2153
 # Kiosk Guardian: self-heal ladder (spec 2.4 a-g) with the G-rules in code.
 #  G1 no launchctl kickstart anywhere in this file; restart is bootout + bootstrap only.
 #  G2 Chrome restart by day only when HID idle >= IDLE_MIN_S AND no speech on the tape in SPEECH_QUIET_S AND no unproven-quiet open capture; else only in the night window.
@@ -30,13 +30,15 @@ heal_event() {
   line="$(printf '{"room_id":%s,"ts":%s,"action":%s,"layer":%s,"reason":%s,"before":%s,"after":%s,"result":%s,"shadow":%s,"target":%s,"severity":%s}' \
     "$(jstr "$GUARDIAN_ROOM")" "$(now_epoch)" "$(jstr "$1")" "$(jstr "$2")" "$(jstr "$3")" "$(jstr "$4")" "$(jstr "$5")" "$(jstr "$6")" \
     "$(jbool "$7")" "$(jstr "${8:-}")" "$(jstr "${9:-}")")"
+  # 2.4 d': HEAL_EXTRA holds pre-built JSON members (guards, boot_age_s, recorder_pid) for the d' events
+  [ -z "${HEAL_EXTRA:-}" ] || line="${line%\}},${HEAL_EXTRA}}"
   printf '%s\n' "$line" >>"$AUDIT_LOG" 2>/dev/null
   publish "kiosk/$GUARDIAN_ROOM/heal" "$line"
 }
 
 target_for() {
   case "$1" in
-    usb_device_missing|helper_xpc_down|disk_low|mic_restricted|recorder_crash_loop|recorder_capture_stalled|recorder_needs_enrol|coreaudio_rms_dead|autologin_changed) echo "fleet" ;;
+    usb_device_missing|usb_power_off|usb_reboot_failed|usb_power_off_recurring|helper_xpc_down|disk_low|mic_restricted|recorder_crash_loop|recorder_capture_stalled|recorder_needs_enrol|coreaudio_rms_dead|autologin_changed) echo "fleet" ;;
     server_retired|server_disabled|mic_row_missing|mic_flip_regranted|heal_rate_limited) echo "gating-lead,fleet" ;;
     presence_stale) echo "consult-lead" ;;
     *) echo "fleet" ;;
@@ -239,9 +241,151 @@ heal_drift() { # verdict
   esac
 }
 
+# ---- 2.4 d' USB-C port power-off -> reboot (the C270 left the bus because the port lost power; a reboot re-enumerates it) ----
+# The kiosk reboots through ONE root-helper verb and never sends the day-start command or any room command (the Mini router sends it, on the post-boot healed_pending event).
+# State: $STATE_DIR/usb-reboot (key=value lines: date = IST YYYYMMDD, epoch, recorder_pid, coreaudiod_pid, boot_age_s, port, verify). It survives the reboot it causes.
+USB_STATE="$STATE_DIR/usb-reboot"
+USB_LOCK="$STATE_DIR/usb-reboot-lock"        # first line = epoch of the failed verify
+USB_RESET="$STATE_DIR/usb-reboot-reset"      # the fleet hand-reset file: its mtime newer than the lock epoch clears the lock (audited)
+USB_REBOOT_ISSUED=0
+if [ "${G_RUNMODE:-}" = 1 ]; then readonly USB_STATE USB_LOCK USB_RESET; fi
+
+usb_state_get() { # key -> value from the state file
+  "$G_SED" -n "s/^$1=//p" "$USB_STATE" 2>/dev/null | "$G_HEAD" -n1
+}
+
+# none | today | bad. "bad" = the file exists but is not a readable regular file with an IST date: the budget cannot be shown to be unspent, so no reboot.
+usb_budget_state() {
+  local d
+  { [ -e "$USB_STATE" ] || [ -L "$USB_STATE" ]; } || { echo none; return; }
+  if [ ! -f "$USB_STATE" ] || [ -L "$USB_STATE" ] || [ ! -r "$USB_STATE" ]; then echo bad; return; fi
+  d="$(usb_state_get date)"
+  case "$d" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo bad; return ;; esac
+  if [ "$d" = "$(ist_date)" ]; then echo today; else echo none; fi
+}
+
+# usb_state_write <date> <epoch> <recorder_pid> <coreaudiod_pid> <boot_age_s> <port>: write via a temp file, then read it back. 0 only when the read-back is identical.
+usb_state_write() {
+  local tmp="$USB_STATE.tmp" want got
+  want="$(printf 'date=%s\nepoch=%s\nrecorder_pid=%s\ncoreaudiod_pid=%s\nboot_age_s=%s\nport=%s\nverify=pending' "$1" "$2" "$3" "$4" "$5" "$6")"
+  mkdir -p "$STATE_DIR" 2>/dev/null
+  printf '%s\n' "$want" >"$tmp" 2>/dev/null || return 1
+  "$G_MV" -f "$tmp" "$USB_STATE" 2>/dev/null || return 1
+  got="$("$G_CAT" "$USB_STATE" 2>/dev/null)"
+  [ "$got" = "$want" ]
+}
+
+# Put the previous state back after an abort between the write and the call (no delete: overwrite). Nothing before = a void marker with a date that is never today.
+usb_state_restore() { # previous content (may be empty)
+  local tmp="$USB_STATE.tmp"
+  if [ -n "$1" ]; then printf '%s\n' "$1" >"$tmp"; else printf 'date=00000000\nverify=void\n' >"$tmp"; fi 2>/dev/null
+  "$G_MV" -f "$tmp" "$USB_STATE" 2>/dev/null
+}
+
+usb_state_set_verify() { # value
+  local tmp="$USB_STATE.tmp"
+  "$G_SED" "s/^verify=.*/verify=$1/" "$USB_STATE" >"$tmp" 2>/dev/null && "$G_MV" -f "$tmp" "$USB_STATE" 2>/dev/null
+}
+
+# 0 while the rung is locked: 24 h after a failed verify, or until the fleet hand-reset file is newer than the lock. An unreadable lock counts as locked.
+usb_lock_active() {
+  local le now rm
+  { [ -e "$USB_LOCK" ] || [ -L "$USB_LOCK" ]; } || return 1
+  if [ ! -f "$USB_LOCK" ] || [ ! -r "$USB_LOCK" ]; then return 0; fi
+  le="$("$G_SED" -n '1p' "$USB_LOCK" 2>/dev/null)"
+  case "$le" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -f "$USB_RESET" ]; then
+    rm="$("$G_STAT" -f %m "$USB_RESET" 2>/dev/null)"
+    case "$rm" in ''|*[!0-9]*) ;; *) if [ "$rm" -gt "$le" ]; then audit "usb-reboot lock cleared by the hand-reset file"; return 1; fi ;; esac
+  fi
+  now="$(now_epoch)"
+  [ "$((now - le))" -lt "$USB_LOCK_S" ]
+}
+
+# the guards / boot_age_s / recorder_pid members every d' heal event carries: usb_extra <ticks> <cc_age> <hid_idle> <hold> <port> <boot_before> <boot_after> <pid_before> <pid_after>
+usb_extra() {
+  printf '"guards":{"usb_absent_ticks":%s,"cc_power_off_age_s":%s,"hid_idle_s":%s,"consult_hold":%s,"port":%s},"boot_age_s":{"before":%s,"after":%s},"recorder_pid":{"before":%s,"after":%s}' \
+    "$(jnum "$1")" "$(jnum "$2")" "$(jnum "$3")" "$(jstr "$4")" "$(jstr "$5")" "$(jnum "$6")" "$(jnum "$7")" "$(jnum "$8")" "$(jnum "$9")"
+}
+
+heal_usb_power_off() { # evidence (unused: the guards are re-read here)
+  local idle hold port ticks age before bstate prior now rc
+  now="$(now_epoch)"
+  ticks="${S_usb_ticks:-0}"; age="${S_cc_age:-}"; port="${S_cc_port:-unknown}"
+  idle="$(hid_idle_s)"; case "$idle" in ''|*[!0-9]*) idle="" ;; esac
+  hold="set"; consult_hold_clear && hold="clear"
+  before="usb_mic_present=false usb_absent_ticks=$ticks cc_power_off_age_s=${age:-null} hid_idle_s=${idle:-null} consult_hold=$hold port=$port"
+  HEAL_EXTRA="$(usb_extra "$ticks" "$age" "$idle" "$hold" "$port" "$S_boot_age" "" "$S_rec_pid" "")"
+  # G3: this rung runs only while the capture device is off the bus
+  if [ "$S_usb" != "false" ]; then HEAL_EXTRA=""; return 0; fi
+  # HID idle unreadable or under 600 s: no action. A person may be at the screen; it stays rung d (escalate only).
+  if [ -z "$idle" ] || [ "$idle" -lt "$USB_HID_IDLE_MIN_S" ]; then
+    escalate usb_device_missing usb "$before hid_busy"; HEAL_EXTRA=""; return 0
+  fi
+  if usb_lock_active; then escalate usb_device_missing usb "$before rung_locked"; HEAL_EXTRA=""; return 0; fi
+  bstate="$(usb_budget_state)"
+  case "$bstate" in
+    today) escalate usb_power_off_recurring usb "$before"; HEAL_EXTRA=""; return 0 ;;
+    bad) escalate usb_device_missing usb "$before state_unreadable"; HEAL_EXTRA=""; return 0 ;;
+  esac
+  # the consult hold: set, missing, unreadable or true = no reboot (would_do only, and not counted against the G6 cap)
+  if [ "$hold" != "clear" ]; then
+    once_per "would:usb:usb_power_off:hold" 300 && heal_event would_do usb usb_power_off "$before" "" "WOULD-DO blocked=consult_hold" true
+    HEAL_EXTRA=""; return 1
+  fi
+  act_begin usb usb_power_off "$before" || { HEAL_EXTRA=""; return 1; }
+  prior="$("$G_CAT" "$USB_STATE" 2>/dev/null)"
+  if ! usb_state_write "$(ist_date)" "$now" "$S_rec_pid" "$S_ca_pid" "$S_boot_age" "$port"; then
+    audit "usb-reboot state write failed: no reboot"
+    heal_event heal usb usb_power_off "$before" "" "state_write_failed" false "$(target_for usb_reboot_failed)" page
+    HEAL_EXTRA=""; return 1
+  fi
+  # second kill-switch read, immediately before the root call (spec: < 2 s). Nothing slow sits between here and root_do.
+  if ! act_step || ! consult_hold_clear; then
+    usb_state_restore "$prior"
+    heal_event abort usb usb_power_off "$before" "" "aborted_before_reboot" false
+    HEAL_EXTRA=""; return 1
+  fi
+  root_do reboot >/dev/null 2>&1; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    USB_REBOOT_ISSUED=1
+    audit "usb-reboot: reboot verb issued port=$port"
+    heal_event kiosk_reboot usb usb_power_off "$before" "reboot_issued" "reboot_issued" false "$(target_for usb_power_off)" info
+  else
+    heal_event kiosk_reboot usb usb_power_off "$before" "reboot_verb_rc=$rc" "reboot_failed" false "$(target_for usb_reboot_failed)" page
+  fi
+  HEAL_EXTRA=""
+  return 0
+}
+
+# Post-boot verify, kiosk side (the Mini checks the day start, a fresh piece and zero_ratio). Runs every tick while the state says verify=pending. Reporting and the lock only: no action on the room.
+# healed_pending: the device is back, the recorder runs with one tapewriter, and the boot is newer than the reboot. Failed: not so within 10 min of the reboot -> escalate usb_reboot_failed and lock 24 h.
+usb_reboot_verify() {
+  local ep now bb rp before
+  [ -f "$USB_STATE" ] && [ -r "$USB_STATE" ] || return 0
+  [ "$(usb_state_get verify)" = "pending" ] || return 0
+  ep="$(usb_state_get epoch)"; case "$ep" in ''|*[!0-9]*) return 0 ;; esac
+  now="$(now_epoch)"
+  bb="$(usb_state_get boot_age_s)"; rp="$(usb_state_get recorder_pid)"
+  before="usb_mic_present=${S_usb:-null} recorder_running=${S_rec_running:-null} tapewriters=$(tapewriter_count) boot_age_s=${S_boot_age:-null} reboot_age_s=$((now - ep))"
+  HEAL_EXTRA="$(usb_extra "" "" "" "" "$(usb_state_get port)" "$bb" "$S_boot_age" "$rp" "$S_rec_pid")"
+  if [ -n "$S_boot_age" ] && [ "$S_boot_age" -lt "$((now - ep))" ] 2>/dev/null && [ "$S_usb" = "true" ] && [ "$S_rec_running" = "true" ] && [ "$(tapewriter_count)" = "1" ]; then
+    usb_state_set_verify healed_pending
+    heal_event kiosk_reboot usb usb_power_off "$before" "healed_pending" "healed_pending" false "$(target_for usb_power_off)" info
+  elif [ "$((now - ep))" -gt "$USB_VERIFY_S" ]; then
+    usb_state_set_verify failed
+    printf '%s\n' "$now" >"$USB_LOCK" 2>/dev/null
+    audit "usb-reboot verify failed: rung locked for ${USB_LOCK_S}s"
+    escalate usb_reboot_failed usb "$before"
+  fi
+  HEAL_EXTRA=""
+  return 0
+}
+
 # Walk the tree; act on each fault in order; after a real fix re-collect and start over (faults stack).
 heal_cycle() {
   local pass=0 faults layer verdict evidence
+  usb_reboot_verify
   while [ "$pass" -lt 3 ]; do
     pass=$((pass + 1)); HEAL_CHANGED=0; HEAL_PASSES=$pass
     faults="$(fault_tree)"
@@ -250,6 +394,7 @@ heal_cycle() {
       case "$verdict" in
         mic_denied) heal_tcc ;;
         coreaudio_no_device) heal_coreaudiod ;;
+        usb_power_off) heal_usb_power_off "$evidence" ;;
         recorder_not_running|recorder_hung|recorder_needs_enrol) heal_recorder "$verdict" ;;
         presence_stale) heal_chrome ;;
         pmset_drift|launchagent_missing|autologin_changed) heal_drift "$verdict" ;;
@@ -258,6 +403,7 @@ heal_cycle() {
         power_rebooted) once_per "info:power_rebooted" 3600 && heal_event info "$layer" "$verdict" "$evidence" "" noted "$([ "$(current_mode)" = heal ] && echo false || echo true)" ;;
         *) : ;; # network_offline, upload_pending: the recorder retries itself
       esac
+      [ "${USB_REBOOT_ISSUED:-0}" = 1 ] && return 0   # the machine is going down: nothing else acts this tick
       [ "$HEAL_CHANGED" -eq 1 ] && break
     done <<EOF
 $faults

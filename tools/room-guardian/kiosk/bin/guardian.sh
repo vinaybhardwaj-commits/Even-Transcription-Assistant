@@ -64,6 +64,8 @@ tick() {
   collect_all
   publish "kiosk/$GUARDIAN_ROOM/health" "$(health_line)"
   heal_cycle
+  # a reboot was just issued (2.4 d'): nothing else acts this tick
+  [ "${USB_REBOOT_ISSUED:-0}" = 1 ] && return 0
   if type canary_cycle >/dev/null 2>&1; then canary_cycle; fi
 }
 

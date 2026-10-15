@@ -23,9 +23,19 @@ CONTROL_LAST="$STATE_DIR/control.last"
 # kill is the captured literal; mode is heal only when this room's key (valid room name) appears once in modes with "heal"; twice = killed.
 # Stale latches on the receive epoch: it stays stale until a message arrives with a DIFFERENT receive epoch, even if the clock steps back.
 CONTROL_RE='^\{"kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$'
+# 2.4 d' (release order: this kiosk first, the router second). The payload may ALSO be the new form, whose first key is consult_open (json.dumps sort_keys puts it first):
+#   {"consult_open": {"<room>": true|false, ...}, "kill": true|false, "modes": {...}, "ts": <epoch>}
+# kill, modes and ts are parsed IDENTICALLY in both forms: the new form is split into its consult_open value and an old-form remainder (the tail from ", "kill": " to the end),
+# and the remainder goes through every check above and below unchanged.
+# The consult hold (CTRL_HOLD) is "clear" ONLY on a fresh, new-form payload whose consult_open is well formed (<= 64 rooms, strictly ascending keys, true|false values) and holds this
+# room's key exactly once with false. Everything else is "set": the old form, a missing, true, duplicate, malformed or oversize consult_open, a stale or killed control, an invalid room name.
+# A malformed consult_open never changes kill or modes.
+CONTROL_TAIL_RE=', "kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$'
+CONTROL_CONSULT_RE='^\{("[a-z0-9_-]{1,64}": (true|false)(, "[a-z0-9_-]{1,64}": (true|false)){0,63})?\}$'
+CONTROL_NEW_PFX='{"consult_open": '
 CONTROL_RECV_RE='^[1-9][0-9]{0,14}$'
 CONTROL_ROOM_RE='^[a-z0-9_-]{1,64}$'
-if [ "${G_RUNMODE:-}" = 1 ]; then readonly CONTROL_RE CONTROL_LAST; fi   # R13 S6 (library tests may re-point CONTROL_LAST)
+if [ "${G_RUNMODE:-}" = 1 ]; then readonly CONTROL_RE CONTROL_TAIL_RE CONTROL_CONSULT_RE CONTROL_NEW_PFX CONTROL_LAST; fi   # R13 S6 (library tests may re-point CONTROL_LAST)
 
 # 0 when the keys of a validated modes body ('"a": "heal", "b": "shadow"', no braces) are strictly ascending bytewise, so none repeats.
 # One split on "," and two expansions per room (R11: the old pattern walk was quadratic). Keys and values hold no comma and no glob character (the regex proved it).
@@ -41,8 +51,8 @@ modes_keys_ascending() {
 
 control_parse() {
   local LC_ALL=C
-  local recv payload now latch size bad nl ts modes_part pat rest cnt
-  CTRL_FLEET=unreachable; CTRL_MODE=shadow; CTRL_WHY=missing; CTRL_AGE=""
+  local recv payload now latch size bad nl ts modes_part pat rest cnt body ctail frag=""
+  CTRL_FLEET=unreachable; CTRL_MODE=shadow; CTRL_WHY=missing; CTRL_AGE=""; CTRL_HOLD="set"
   # R12: a bad guardian.conf or a safety constant that could not be pinned = killed, whatever control.last says
   if [ "${G_CONF_BAD:-}" = 1 ]; then CTRL_WHY=conf; return 1; fi
   if [ -n "${G_BAD_CONST:-}" ]; then CTRL_WHY=constants; return 1; fi
@@ -70,6 +80,15 @@ control_parse() {
     "$G_MKDIR" -p "$STATE_DIR" 2>/dev/null; printf '%s\n' "$recv" >"$STATE_DIR/control_latch"
     CTRL_WHY=stale; return 1
   fi
+  # 3a. (2.4 d') the new form: split off the consult_open value; the remainder is the old form and takes every check below unchanged.
+  case "$payload" in
+    "$CONTROL_NEW_PFX"*)
+      body="${payload#"$CONTROL_NEW_PFX"}"
+      if [[ $body =~ $CONTROL_TAIL_RE ]]; then
+        ctail="${BASH_REMATCH[0]}"; frag="${body%"$ctail"}"
+        payload="{${ctail#, }"
+      fi ;;
+  esac
   # 3. the payload: one anchored regex
   [[ $payload =~ $CONTROL_RE ]] || { CTRL_WHY=unparseable; return 1; }
   case "$payload" in '{"kill": true,'*) CTRL_WHY="kill"; return 1 ;; '{"kill": false,'*) ;; *) CTRL_WHY=unparseable; return 1 ;; esac
@@ -93,8 +112,24 @@ control_parse() {
     cnt=$(( (${#modes_part} - ${#rest}) / ${#pat} ))
     if [ "$cnt" -gt 1 ]; then CTRL_FLEET=unreachable; CTRL_WHY=unparseable; return 1; fi
     case "$modes_part" in *"\"$GUARDIAN_ROOM\": \"heal\""*) CTRL_MODE=heal ;; esac
+    # the consult hold (2.4 d'): clear only on the exact new form, this room's key once, with false
+    if [ -n "$frag" ] && [[ $frag =~ $CONTROL_CONSULT_RE ]]; then
+      rest="${frag#\{}"; rest="${rest%\}}"
+      if modes_keys_ascending "$rest"; then
+        rest="${frag//"$pat"/}"
+        cnt=$(( (${#frag} - ${#rest}) / ${#pat} ))
+        if [ "$cnt" -eq 1 ]; then case "$frag" in *"\"$GUARDIAN_ROOM\": false"*) CTRL_HOLD=clear ;; esac; fi
+      fi
+    fi
   fi
   return 0
+}
+
+# 2.4 d': 0 only when control is fresh and parses AND the consult hold is clear. Anything else (no control command, old form, kill, stale) is a hold.
+consult_hold_clear() {
+  [ -n "$GUARDIAN_CONTROL_SUB_CMD" ] || return 1
+  control_parse || return 1
+  [ "$CTRL_HOLD" = clear ]
 }
 
 # One audit line per state change (on <-> killed, or a new reason for being killed).

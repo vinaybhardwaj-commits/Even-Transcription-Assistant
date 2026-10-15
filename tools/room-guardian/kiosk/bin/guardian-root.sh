@@ -7,6 +7,7 @@
 #   coreaudiod-kill                killall coreaudiod
 #   pmset-baseline                 pmset -a sleep 0 autorestart 1
 #   log-grab <minutes>             bounded audit lines around a grant flip
+#   reboot                         run exactly `/sbin/shutdown -r now` (2.4 d'); NO arguments accepted, anything else is refused
 # Root is never trusted with the caller's environment. The test seam below only works when NOT root.
 
 SVC="kTCCServiceMicrophone"
@@ -73,6 +74,13 @@ case "$verb" in
     echo "pruned"
     ;;
   coreaudiod-kill) killall coreaudiod ;;
+  reboot)
+    # exact argv: the verb alone. A test seam (GUARDIAN_SHUTDOWN_BIN) is honoured only when NOT root and GUARDIAN_ROOT_TESTMODE=1, like the TCC.db path above.
+    if [ "$#" -ne 0 ]; then echo "bad_args" >&2; exit 2; fi
+    sd=/sbin/shutdown
+    if [ "$(id -u)" != "0" ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_SHUTDOWN_BIN:-}" ]; then sd="$GUARDIAN_SHUTDOWN_BIN"; fi
+    exec "$sd" -r now
+    ;;
   pmset-baseline) pmset -a sleep 0 autorestart 1 ;;
   log-grab)
     m="$1"; case "$m" in ''|*[!0-9]*) m=2 ;; esac

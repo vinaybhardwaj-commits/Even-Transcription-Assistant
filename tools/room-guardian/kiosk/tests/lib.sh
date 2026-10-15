@@ -32,6 +32,7 @@ mk_sandbox() { # sets T and the whole environment; PATH gets the fake bin dir fi
   export GUARDIAN_SUDO="$T/bin/fakesudo"
   export GUARDIAN_ROOT_HELPER="$KDIR/bin/guardian-root.sh"
   export GUARDIAN_ROOT_TESTMODE=1 GUARDIAN_ROOT_TEST_DB="$T/TCC.db"
+  export GUARDIAN_LOG_BIN="$T/bin/fakelog" GUARDIAN_SHUTDOWN_BIN="$T/bin/fakeshutdown"   # /usr/bin/log and /sbin/shutdown are ALWAYS faked (2.4 d')
   export CANARY_AFPLAY="$T/bin/afplay" CANARY_SAMPLE_S=0   # afplay is always faked; no real sound
   export CALLS="$T/calls.log"; : >"$CALLS"
   : >"$T/pub.log"; printf 'fleet=off\n' >"$T/flagout"; echo 0 >"$T/flagrc"
@@ -87,7 +88,7 @@ F
   printf '#!/bin/bash\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/x 100 40 60 40%% /\\n"\n' >"$b/df"
   cat >"$b/sysctl" <<'F'
 #!/bin/bash
-echo "{ sec = $(( GUARDIAN_FAKE_NOW - 100000 )), usec = 0 }"
+echo "{ sec = $(( GUARDIAN_FAKE_NOW - ${FAKE_BOOT_AGE:-100000} )), usec = 0 }"
 F
   cat >"$b/pmset" <<'F'
 #!/bin/bash
@@ -100,6 +101,19 @@ F
 if [ -e "$T/sp_no_out" ]; then echo '{"SPAudioDataType":[{"coreaudio_default_audio_input_device":"yes"}]}'; else echo '{"SPAudioDataType":[{"coreaudio_default_audio_input_device":"yes","coreaudio_default_audio_output_device":"yes"}]}'; fi
 F
   printf '#!/bin/bash\necho "line from log"\n' >"$b/log"
+  cat >"$b/fakelog" <<'F'
+#!/bin/bash
+echo "LOG $*" >>"$CALLS"
+[ -s "$T/log_sleep" ] && sleep "$(cat "$T/log_sleep")"
+[ -r "$T/log.txt" ] && cat "$T/log.txt"
+exit "$(cat "$T/log_rc" 2>/dev/null || echo 0)"
+F
+  cat >"$b/fakeshutdown" <<'F'
+#!/bin/bash
+echo "SHUTDOWN $*" >>"$CALLS"
+[ -s "$GUARDIAN_HOME/state/usb-reboot" ] && echo "SHUTDOWN_STATE_WRITTEN=yes" >>"$CALLS"
+exit 0
+F
   cat >"$b/afplay" <<'F'
 #!/bin/bash
 echo "afplay $*" >>"$CALLS"
