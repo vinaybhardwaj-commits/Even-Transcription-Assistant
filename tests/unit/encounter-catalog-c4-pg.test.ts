@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
 
 const H = vi.hoisted(() => ({ tag: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>) }));
@@ -16,6 +17,8 @@ vi.mock("@/lib/db", () => ({
 }));
 
 import { ingestCatalogRows } from "@/lib/encounter-catalog/store";
+import { UPDATE_ONLY_SQL } from "@/lib/encounter-catalog/ingest-sql";
+import { sql as rawSql } from "@/lib/db";
 import { parseSearch, searchCatalog } from "@/lib/encounter-catalog/search";
 
 const HAVE_DOCKER = dockerAvailable();
@@ -109,6 +112,51 @@ d("encounter_catalog C4 columns on postgres:16", () => {
     const a = r.rows.find((x) => x.consult_uid === "synth-c4-a")!;
     expect([a.jev, a.clef_affect]).toEqual([JEV, CLEF]);
     expect((a.presence as { encounter_open: number }).encounter_open).toBe(T_OPEN);
+  });
+
+  it("CS-3 updateOnly: an existing uid is updated, a missing uid stays absent and is counted, and the default (route) path still inserts", async () => {
+    const n0 = await one("SELECT count(*)::int FROM encounter_catalog");
+    expect(await ingestCatalogRows([{ consult_uid: "synth-c4-a", jev: JEV }, { consult_uid: "synth-c4-gone", jev: JEV }], { updateOnly: true })).toEqual({ updated: 1, inserted: 0, stale: 0, missing: 1, retried: true });
+    expect(await rowOf("synth-c4-gone")).toBeUndefined();
+    expect(await one("SELECT count(*)::int FROM encounter_catalog")).toBe(n0);
+    expect(await ingestCatalogRows([{ consult_uid: "synth-c4-gone", jev: JEV }], { updateOnly: true })).toEqual({ updated: 0, inserted: 0, stale: 0, missing: 1, retried: true });
+    // stale rows are stale, not missing
+    expect(await ingestCatalogRows([box("synth-c4-a", { generated_at: "2026-10-15T01:00:00Z" })], { updateOnly: true })).toEqual({ updated: 0, inserted: 0, stale: 1, missing: 0 });
+    // updateOnly:false is the route's behaviour: it inserts
+    expect(await ingestCatalogRows([{ consult_uid: "synth-c4-new", jev: JEV }], { updateOnly: false })).toEqual({ updated: 0, inserted: 1, stale: 0 });
+    pg.exec("DELETE FROM encounter_catalog WHERE consult_uid = 'synth-c4-new'");
+  });
+
+  it("CS-3 RACE: an updateOnly row that loses the lock re-check to a NEWER commit is stale, not missing: the bare statement says missing 1, the app reruns once and counts it stale; the newer data stands", async () => {
+    const psql = (stmt: string) => {
+      const a = spawn("docker", ["exec", "-i", pg.name, "psql", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres"], { stdio: ["pipe", "pipe", "pipe"] });
+      a.stdin.write(stmt + "\n"); a.stdin.end();
+      return new Promise<void>((res) => a.on("close", () => res()));
+    };
+    const overlap = async (aGen: string, run: () => Promise<unknown>) => {
+      // Session A commits a NEWER generated_at after 3 s; the update-only post (older generated_at) starts inside that window: its snapshot sees the old row, its UPDATE waits, then skips on the re-check.
+      const done = psql(`BEGIN; UPDATE encounter_catalog SET generated_at = '${aGen}', first_gap = 'freescript:from_A' WHERE consult_uid = 'synth-c4-a'; SELECT pg_sleep(3); COMMIT;`);
+      await new Promise((r) => setTimeout(r, 1000));
+      const out = await run();
+      await done;
+      return out;
+    };
+    const old = (g: string) => [{ consult_uid: "synth-c4-a", generated_at: g, first_gap: "freescript:from_B_old" }];
+    const bare = (await overlap("2026-10-15T12:00:00Z", () => (rawSql as unknown as (t: string, p: unknown[]) => Promise<Array<Record<string, unknown>>>)(UPDATE_ONLY_SQL, [JSON.stringify(old("2026-10-15T08:00:00Z"))]))) as Array<Record<string, unknown>>;
+    expect(bare[0]).toEqual({ updated: 0, inserted: 0, stale: 0, missing: 1 });          // the misreport a single statement gives
+    expect((await rowOf("synth-c4-a")).first_gap).toBe("freescript:from_A");
+    const res = await overlap("2026-10-15T14:00:00Z", () => ingestCatalogRows(old("2026-10-15T13:00:00Z") as never, { updateOnly: true }));
+    expect(res).toEqual({ updated: 0, inserted: 0, stale: 1, missing: 0, retried: true });
+    expect((await rowOf("synth-c4-a")).first_gap).toBe("freescript:from_A");
+    // a genuinely missing uid is still missing after the rerun, and nothing was inserted
+    expect(await ingestCatalogRows([{ consult_uid: "synth-c4-gone", jev: JEV }], { updateOnly: true })).toEqual({ updated: 0, inserted: 0, stale: 0, missing: 1, retried: true });
+    expect(await rowOf("synth-c4-gone")).toBeUndefined();
+  });
+
+  it("CS-4: a jev set with state retired round-trips through the database", async () => {
+    const J = { sets: [{ ...JEV.sets[0], state: "retired" }] };
+    expect(await ingestCatalogRows([{ consult_uid: "synth-c4-a", jev: J }], { updateOnly: true })).toEqual({ updated: 1, inserted: 0, stale: 0, missing: 0 });
+    expect((await rowOf("synth-c4-a")).jev).toEqual(J);
   });
 
   it("the rollback drops only the three columns and its schema_migrations row; 0168's table and rows stay; 0169 can be applied again", async () => {

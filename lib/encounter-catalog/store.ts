@@ -6,7 +6,7 @@
  * (@/lib/db), never brain_svc. Field-level upsert: see ingest-sql.ts.
  */
 import { sql } from "@/lib/db";
-import { INGEST_SQL } from "./ingest-sql";
+import { INGEST_SQL, UPDATE_ONLY_SQL } from "./ingest-sql";
 
 /** The catalog starts on 9 Sep 2026 (fable gate C2): an earlier ist_date is refused, whoever sends it. */
 export const IST_FLOOR = "2026-09-09";
@@ -55,10 +55,10 @@ const okIso = (v: unknown) => typeof v === "string" && v.length <= 40 && ISO_INS
 const onlyKeys = (o: Record<string, unknown>, keys: readonly string[]) => Object.keys(o).every((k) => keys.includes(k));
 const tokOrNull = (v: unknown) => v === null || (typeof v === "string" && TOKEN.test(v));
 
-/** jev: {sets: [{set_id, set_sha, band, label, model, at}]}. No question text, no reasons: only these keys, each a token (at: an ISO instant). */
+/** jev: {sets: [{set_id, set_sha, band, label, model, at, state?}]}. No question text, no reasons: only these keys, each a token (at: an ISO instant). state is optional and a closed enum: current | retired. */
 export function validJev(v: Record<string, unknown>): boolean {
   if (!onlyKeys(v, ["sets"]) || !Array.isArray(v.sets) || v.sets.length > MAX_SETS) return false;
-  return v.sets.every((s) => isObj(s) && onlyKeys(s, ["set_id", "set_sha", "band", "label", "model", "at"]) && typeof s.set_id === "string" && TOKEN.test(s.set_id) && typeof s.set_sha === "string" && SHA.test(s.set_sha)
+  return v.sets.every((s) => isObj(s) && onlyKeys(s, ["set_id", "set_sha", "band", "label", "model", "at", "state"]) && (s.state === undefined || s.state === "current" || s.state === "retired") && typeof s.set_id === "string" && TOKEN.test(s.set_id) && typeof s.set_sha === "string" && SHA.test(s.set_sha)
     && tokOrNull(s.band ?? null) && tokOrNull(s.label ?? null) && typeof s.model === "string" && TOKEN.test(s.model) && okIso(s.at));
 }
 
@@ -123,7 +123,8 @@ export function validateBatch(body: unknown): Validation {
   return { ok: true, rows: rows as CatalogRow[] };
 }
 
-export type IngestResult = { updated: number; inserted: number; stale: number; retried?: boolean };
+export type IngestResult = { updated: number; inserted: number; stale: number; retried?: boolean; missing?: number };
+export type IngestOpts = { updateOnly?: boolean };
 
 /** Thrown when, after one rerun, some rows were neither updated, inserted nor skipped as stale (two posts raced on a new consult_uid). The route answers 409 so the sender retries. */
 export class ConcurrentIngestError extends Error {
@@ -132,9 +133,18 @@ export class ConcurrentIngestError extends Error {
   }
 }
 
-export async function ingestCatalogRows(rows: CatalogRow[]): Promise<IngestResult> {
+export async function ingestCatalogRows(rows: CatalogRow[], opts: IngestOpts = {}): Promise<IngestResult> {
   const q = sql as unknown as (text: string, params: unknown[]) => Promise<Array<Record<string, unknown>>>;
   const body = JSON.stringify(rows);
+  if (opts.updateOnly === true) {   // CS-3: UPDATE only. A uid with no row is counted (missing), never inserted.
+    const runU = async (): Promise<IngestResult> => {
+      const row = (await q(UPDATE_ONLY_SQL, [body]))[0] ?? {};
+      return { updated: Number(row.updated ?? 0), inserted: 0, stale: Number(row.stale ?? 0), missing: Number(row.missing ?? 0) };
+    };
+    // A row whose UPDATE waited on a lock and then lost the re-check against a NEWER committed generated_at is invisible to the snapshot counts and would read as missing: rerun once, the rerun sees the committed row and counts it stale.
+    const first = await runU();
+    return first.missing ? { ...(await runU()), retried: true } : first;
+  }
   const run = async (): Promise<IngestResult> => {
     const out = await q(INGEST_SQL, [body]);
     const row = out[0] ?? {};
