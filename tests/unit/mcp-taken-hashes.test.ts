@@ -105,5 +105,12 @@ describe("takenHashes never throws (R1)", () => {
     expect(status(tok)).toEqual({ fail: 401 });
     expect(status("rr4")).toEqual({ actor: "admin:ok", scopes: ["admin"] });
   });
-});
 
+  it("T1: an escaped key visited after a 200000-element array is still taken; a __proto__ parent is walked too", () => {
+    const h = sha(letterFirst("rr5"));
+    const raw = `[{"${escapedKey(h)}":1},[${Array(200000).fill("0").join(",")}]]`;
+    expect(raw).not.toContain(h);
+    expect(takenHashes(raw).has(h)).toBe(true);
+    expect(takenHashes(`{"__proto__":{"${escapedKey(h)}":1}}`).has(h)).toBe(true);
+  });
+});
