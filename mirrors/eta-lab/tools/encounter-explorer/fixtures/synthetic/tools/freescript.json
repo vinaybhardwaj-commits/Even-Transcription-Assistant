@@ -1,0 +1,268 @@
+{
+ "rows": [
+  {
+   "run_id": 1,
+   "consult_uid": "syn_c001",
+   "prescription_uid": "syn_rx_001",
+   "schema_version": "syn",
+   "room_slug": "room_syn01",
+   "room_id": null,
+   "ist_date": "2026-09-09",
+   "doctor_uid8": "syn_d001",
+   "validator": {
+    "ok": true,
+    "errors": []
+   },
+   "completion_required": [],
+   "artifact": {
+    "note_text": "Synthetic note for syn_c001",
+    "generator": {
+     "model": "syn-llm-1",
+     "version": "2.0"
+    },
+    "encounter": {
+     "room": "room_syn01",
+     "doctor": {
+      "specialty": "Synthetic Cardiology",
+      "pulse_doctor_uid": "syn_d001"
+     },
+     "languages": [
+      "en"
+     ],
+     "transcript": null,
+     "window_start": null,
+     "window_end": null
+    },
+    "pulse_link": {
+     "consult_uid": "syn_c001",
+     "link_status": "x",
+     "individual_uid": "syn_p001",
+     "prescription_uid": "syn_rx_001"
+    },
+    "provenance": [],
+    "unknown_future_key": {
+     "a": 1
+    }
+   },
+   "generator": {
+    "model": "syn-llm-1"
+   },
+   "cost_usd": 0.01,
+   "created_at": "2026-09-09T04:20:00Z",
+   "state": "stored"
+  },
+  {
+   "run_id": 2,
+   "consult_uid": "syn_c002",
+   "prescription_uid": null,
+   "schema_version": "syn",
+   "room_slug": "room_syn01",
+   "room_id": null,
+   "ist_date": "2026-09-09",
+   "doctor_uid8": "syn_d001",
+   "validator": {
+    "ok": true,
+    "errors": []
+   },
+   "completion_required": [],
+   "artifact": {
+    "note_text": "Synthetic note for syn_c002",
+    "generator": {
+     "model": "syn-llm-1",
+     "version": "2.0"
+    },
+    "encounter": {
+     "room": "room_syn01",
+     "doctor": {
+      "specialty": "Synthetic Cardiology",
+      "pulse_doctor_uid": "syn_d001"
+     },
+     "languages": [
+      "en"
+     ],
+     "transcript": null,
+     "window_start": null,
+     "window_end": null
+    },
+    "pulse_link": {
+     "consult_uid": "syn_c002",
+     "link_status": "x",
+     "individual_uid": null,
+     "prescription_uid": null
+    },
+    "provenance": [],
+    "unknown_future_key": {
+     "a": 1
+    }
+   },
+   "generator": {
+    "model": "syn-llm-1"
+   },
+   "cost_usd": 0.01,
+   "created_at": "2026-09-09T04:20:00Z",
+   "state": "stored"
+  },
+  {
+   "run_id": 3,
+   "consult_uid": "syn_c003",
+   "prescription_uid": null,
+   "schema_version": "syn",
+   "room_slug": "room_syn01",
+   "room_id": null,
+   "ist_date": "2026-09-10",
+   "doctor_uid8": "syn_d001",
+   "validator": {
+    "ok": false,
+    "errors": [
+     "syn_error_1"
+    ]
+   },
+   "completion_required": [
+    {
+     "kind": "missing",
+     "detail": "synthetic",
+     "prompt": "p",
+     "item_id": "i"
+    }
+   ],
+   "artifact": {
+    "note_text": "Synthetic note for syn_c003",
+    "generator": {
+     "model": "syn-llm-1",
+     "version": "2.0"
+    },
+    "encounter": {
+     "room": "room_syn01",
+     "doctor": {
+      "specialty": "Synthetic Cardiology",
+      "pulse_doctor_uid": "syn_d001"
+     },
+     "languages": [
+      "en"
+     ],
+     "transcript": null,
+     "window_start": null,
+     "window_end": null
+    },
+    "pulse_link": {
+     "consult_uid": "syn_c003",
+     "link_status": "x",
+     "individual_uid": null,
+     "prescription_uid": null
+    },
+    "provenance": [],
+    "unknown_future_key": {
+     "a": 1
+    }
+   },
+   "generator": {
+    "model": "syn-llm-1"
+   },
+   "cost_usd": 0.01,
+   "created_at": "2026-09-10T04:20:00Z",
+   "state": "stored"
+  },
+  {
+   "run_id": 4,
+   "consult_uid": "syn_c005",
+   "prescription_uid": "syn_rx_005",
+   "schema_version": "syn",
+   "room_slug": "room_syn02",
+   "room_id": null,
+   "ist_date": "2026-09-11",
+   "doctor_uid8": "syn_d002",
+   "validator": {
+    "ok": true,
+    "errors": []
+   },
+   "completion_required": [],
+   "artifact": {
+    "note_text": "Synthetic note for syn_c005",
+    "generator": {
+     "model": "syn-llm-1",
+     "version": "2.0"
+    },
+    "encounter": {
+     "room": "room_syn02",
+     "doctor": {
+      "specialty": "Synthetic Orthopaedics",
+      "pulse_doctor_uid": "syn_d002"
+     },
+     "languages": [
+      "en"
+     ],
+     "transcript": null,
+     "window_start": null,
+     "window_end": null
+    },
+    "pulse_link": {
+     "consult_uid": "syn_c005",
+     "link_status": "x",
+     "individual_uid": "syn_p005",
+     "prescription_uid": "syn_rx_005"
+    },
+    "provenance": [],
+    "unknown_future_key": {
+     "a": 1
+    }
+   },
+   "generator": {
+    "model": "syn-llm-1"
+   },
+   "cost_usd": 0.01,
+   "created_at": "2026-09-11T04:20:00Z",
+   "state": "stored"
+  },
+  {
+   "run_id": 5,
+   "consult_uid": "syn_c006",
+   "prescription_uid": "syn_rx_006",
+   "schema_version": "syn",
+   "room_slug": "room_syn01",
+   "room_id": null,
+   "ist_date": "2026-09-11",
+   "doctor_uid8": "syn_d001",
+   "validator": {
+    "ok": true,
+    "errors": []
+   },
+   "completion_required": [],
+   "artifact": {
+    "note_text": "Synthetic note for syn_c006",
+    "generator": {
+     "model": "syn-llm-1",
+     "version": "2.0"
+    },
+    "encounter": {
+     "room": "room_syn01",
+     "doctor": {
+      "specialty": "Synthetic Cardiology",
+      "pulse_doctor_uid": "syn_d001"
+     },
+     "languages": [
+      "en"
+     ],
+     "transcript": null,
+     "window_start": null,
+     "window_end": null
+    },
+    "pulse_link": {
+     "consult_uid": "syn_c006",
+     "link_status": "x",
+     "individual_uid": "syn_p006",
+     "prescription_uid": "syn_rx_006"
+    },
+    "provenance": [],
+    "unknown_future_key": {
+     "a": 1
+    }
+   },
+   "generator": {
+    "model": "syn-llm-1"
+   },
+   "cost_usd": 0.01,
+   "created_at": "2026-09-11T04:20:00Z",
+   "state": "stored"
+  }
+ ]
+}

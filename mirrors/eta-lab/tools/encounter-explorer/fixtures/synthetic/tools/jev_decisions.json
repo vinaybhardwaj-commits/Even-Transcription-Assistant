@@ -1,0 +1,64 @@
+{
+ "decisions": [
+  {
+   "subject_type": "consult",
+   "subject_id": "syn_c001",
+   "question_id": "syn_q_followup",
+   "answer": "yes",
+   "probability": 0.82
+  },
+  {
+   "subject_type": "consult",
+   "subject_id": "syn_c001",
+   "question_id": "syn_q_urgent",
+   "answer": "no",
+   "probability": 0.07,
+   "future_key": 1
+  },
+  {
+   "subject_type": "consult",
+   "subject_id": "syn_c003",
+   "question_id": "syn_q_followup",
+   "answer": "yes",
+   "probability": 0.82
+  },
+  {
+   "subject_type": "consult",
+   "subject_id": "syn_c003",
+   "question_id": "syn_q_urgent",
+   "answer": "no",
+   "probability": 0.07,
+   "future_key": 1
+  },
+  {
+   "subject_type": "consult",
+   "subject_id": "syn_c005",
+   "question_id": "syn_q_followup",
+   "answer": "yes",
+   "probability": 0.82
+  },
+  {
+   "subject_type": "consult",
+   "subject_id": "syn_c005",
+   "question_id": "syn_q_urgent",
+   "answer": "no",
+   "probability": 0.07,
+   "future_key": 1
+  },
+  {
+   "subject_type": "consult",
+   "subject_id": "syn_c006",
+   "question_id": "syn_q_followup",
+   "answer": "yes",
+   "probability": 0.82
+  },
+  {
+   "subject_type": "consult",
+   "subject_id": "syn_c006",
+   "question_id": "syn_q_urgent",
+   "answer": "no",
+   "probability": 0.07,
+   "future_key": 1
+  }
+ ]
+}
