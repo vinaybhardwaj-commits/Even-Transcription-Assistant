@@ -7,7 +7,6 @@ it does not smuggle a kept-out name or an identity pattern.
 from __future__ import annotations
 
 import re
-import unicodedata
 
 HEADINGS = ["Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses", "Plan of Management",
             "Surgery or Procedure", "Medication", "Further Investigation", "Follow up", "Refer to", "General Advice"]
@@ -131,27 +130,10 @@ def flags_by_pointer(art: dict) -> dict:
     return {p["json_pointer"]: p["flags"] for p in art["provenance"] if p["json_pointer"] and p["flags"]}
 
 
-def _paren_for(c: str) -> str | None:
-    """"(" for an opening bracket or brace, ")" for a closing one, None for anything else. Lookalikes count: the FRX-N1 check
-    NFKC-normalises first, then rejects [ ] { } and every Ps/Pe character except ( )."""
-    for x in unicodedata.normalize("NFKC", c):
-        if x in "[{" or (unicodedata.category(x) == "Ps" and x != "("):
-            return "("
-        if x in "]}" or (unicodedata.category(x) == "Pe" and x != ")"):
-            return ")"
-    return None
-
-
-def parenthesise(text: str) -> str:
-    """Make field text safe for the note without losing a character of content: [ ] { } and their NFKC / Ps / Pe lookalikes
-    become ( ). Nothing is deleted. Text with none of them comes back unchanged."""
-    return "".join(_paren_for(c) or c for c in text)
-
-
 def _clean(s) -> str:
-    """One rendered entry. None is empty; a non-string is its str. No template character leaves here."""
+    """One rendered entry. None is empty; a non-string is its str. Brackets and braces pass through untouched: FRX-N1 rejects them."""
     s = "" if s is None else s if isinstance(s, str) else str(s)
-    return parenthesise(s.replace(":", " -").replace("\n", " ").strip())
+    return s.replace(":", " -").replace("\n", " ").strip()
 
 
 def _t(v) -> str:

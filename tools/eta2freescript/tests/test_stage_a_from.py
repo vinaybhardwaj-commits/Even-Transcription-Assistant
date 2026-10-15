@@ -539,7 +539,9 @@ _FAIL_CASES = [
     ("is-a-directory", _case_dir, (FileNotFoundError,), False),
     ("dangling-symlink", _case_dangling_symlink, (FileNotFoundError,), False),
     ("chmod-000-file", _case_chmod_file, (PermissionError,), True),
-    ("chmod-000-dir", _case_chmod_dir, (PermissionError,), True),
+    # Reading inside a mode-000 directory is a PermissionError at the OS, but models.py checks existence first and Path.exists() reports
+    # False for it on some Python/filesystem combinations, so the client raises FileNotFoundError. Both are a hard failure with zero inner calls.
+    ("chmod-000-dir", _case_chmod_dir, (FileNotFoundError, PermissionError), True),
 ] + [(f"empty-{i}", (lambda root, uid, b=b: _mk_file(root, uid, b)), (ValueError,), False)
      for i, b in enumerate([b"", b" ", b"\n", b"\r\n", b"\t", b"\r", b" \n \r\n ", b"\n" * 500, " ".encode(), "  ".encode(), b"\x0b\x0c"])] \
   + [(f"bad-utf8-{i}", (lambda root, uid, b=b: _mk_file(root, uid, b)), (UnicodeDecodeError,), False)

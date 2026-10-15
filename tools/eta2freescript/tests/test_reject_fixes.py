@@ -4,6 +4,8 @@ import json
 import random
 import re
 import stat
+import subprocess
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -13,8 +15,9 @@ from tools.eta2freescript import pipeline
 from tools.eta2freescript.ingest import load_consult
 from tools.eta2freescript.mapper import raw_name_or
 from tools.eta2freescript.models import FakeClient
-from tools.eta2freescript.note import HEADINGS, _clean, parenthesise, render_note, sanitize_note
+from tools.eta2freescript.note import HEADINGS, _clean, render_note, sanitize_note
 from tools.eta2freescript.pipeline import _fallback_note, run_consult
+from tools.eta2freescript.validate import printable_errors
 
 TEMPLATE = re.compile(r"[\[\]{}]")
 PKG = Path(__file__).resolve().parents[1]
@@ -53,10 +56,16 @@ def test_k1_nothing_reads_the_rejected_file():
     assert len(hits) == 1 and hits[0].startswith("for name in (() if error_type else (")  # the keep-list copy, not a read
 
 
-# --- K2 ----------------------------------------------------------------------------------------------------------------
+# --- K2: the fallback adds no template characters. It does NOT rewrite brackets (Fable gate FRF-1): [ ] { } and lookalikes in field text
+# keep failing FRX-N1, exactly as on base. ------------------------------------------------------------------------------------------------------------------
+def _bracketish(c: str) -> bool:
+    """What FRX-N1 rejects: [ ] { } and every Ps/Pe character except ( ), after NFKC. Written here, not imported from note.py."""
+    return any(x in "[]{}" or (unicodedata.category(x) in ("Ps", "Pe") and x not in "()") for x in unicodedata.normalize("NFKC", c))
+
+
 POOL = ["", None, "tab", "Paracetamol 500 mg", "BD", "5 days", "after food", "fever", "a: b", "\n", "—", " ", "twice a day",
         "[ok]", "[a [b] c]", "x]", "[y", "{z}", "{a {b} c}", "p}", "{q", "［w］", "【v】", "「u」", "⟨t⟩", "a_b"]
-CLEAN_POOL = [p for p in POOL if not (p and re.search(r"[\[\]{}]", p))]
+CLEAN_POOL = [p for p in POOL if not (p and any(_bracketish(c) for c in p))]
 
 
 def _gen_gx(r, pool):
@@ -125,15 +134,58 @@ def test_k2_no_template_character_for_clean_extractions(seed):
     assert combos
 
 
+def _brackets(text: str) -> list[str]:
+    return [c for c in text if _bracketish(c)]
+
+
+def _frxn1(gx) -> list[str]:
+    return [e for e in printable_errors(render_note(gx), []) if e.startswith("FRX-N1")]
+
+
 @pytest.mark.parametrize("seed", range(8))
-def test_k2_no_template_character_even_when_the_fields_carry_them(seed):
+def test_k2_fields_carrying_brackets_still_fail_frxn1(seed):
     r = random.Random(100 + seed)
-    for n in range(150):
-        gx = _gen_gx(r, POOL)
-        art = _combo_art(gx) if n % 3 == 0 else {"gp_extraction": gx, "provenance": []}
-        for name, out in _all_outputs(art["gp_extraction"], art).items():
-            assert not TEMPLATE.search(out), (name, gx, out)
-            assert not any(ord(c) > 0x2000 and c in "［］｛｝【】「」⟨⟩" for c in out), (name, out)
+    seen = 0
+    for _ in range(200):
+        gx = _full_gx(r, POOL)
+        out = render_note(gx)
+        if _brackets(out):
+            seen += 1
+            assert _frxn1(gx), (gx, out)
+    assert seen
+
+
+_BASE_SHA = "40500139"
+
+
+def _base_note_module():
+    """note.py at base 40500139: from git when the history is there, else the frozen oracle copy (which has no combination groups)."""
+    import importlib.util
+    import tempfile
+    try:
+        src = subprocess.run(["git", "show", f"{_BASE_SHA}:tools/eta2freescript/note.py"], cwd=PKG, capture_output=True, check=True, text=True).stdout
+        path = Path(tempfile.mkdtemp()) / "note_base.py"
+        path.write_text(src.replace("from .validate import", "from tools.eta2freescript.validate import"))
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        path = Path(__file__).parent / "oracle_note_main.py"
+    spec = importlib.util.spec_from_file_location("note_at_base", path)
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = "tools.eta2freescript"
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_k2_property_the_renderer_neither_adds_nor_removes_brackets(seed):
+    """For ANY field text (strings, bracket-heavy pool), the bracket/brace characters in the rendered note equal base's."""
+    base = _base_note_module()
+    r = random.Random(1300 + seed)
+    for _ in range(300):
+        gx = _full_gx(r, [p for p in POOL if p is not None] + ["".join(r.choice("[]{}［］｛｝【】「」⟨⟩ab :") for _ in range(r.randint(1, 8))) for _ in range(6)])
+        got, want = render_note(gx), base.render_note(copy.deepcopy(gx))
+        assert _brackets(got) == _brackets(want), (gx, got, want)
+        assert got == want, (gx, got, want)
+        assert sanitize_note(got) == base.sanitize_note(want)
 
 
 def test_k2_empty_none_and_missing_fields_render_every_heading():
@@ -147,46 +199,49 @@ def test_k2_empty_none_and_missing_fields_render_every_heading():
         assert [l.partition(":")[0] for l in out.split("\n")] == HEADINGS and not TEMPLATE.search(out)
 
 
-def test_k2_brackets_become_parentheses_and_no_content_is_lost():
-    for s_, want in (("take [a [b] c] daily", "take (a (b) c) daily"), ("x ]", "x )"), ("[ y", "( y"), ("{z}", "(z)"), ("p } q", "p ) q"),
-                     ("［w］", "(w)"), ("a 【v】 b", "a (v) b"), ("「u」", "(u)"), ("take 1 [0-1-0] bd", "take 1 (0-1-0) bd")):
-        assert parenthesise(s_) == want, (s_, parenthesise(s_))
-    gx = {"medicines": [{"name": "alpha", "frequency": "bd ]", "instructions": "{with food}"}], "follow_up": {"followup_date": "[2026"}}
-    assert render_note(gx).split("\n")[6] == "Medication: alpha bd ) (with food)"
-    assert render_note(gx).split("\n")[8] == "Follow up: (2026"
+def test_k2_clean_leaves_brackets_alone():
+    for s_ in ("take [a [b] c] daily", "x ]", "[ y", "{z}", "p } q", "［w］", "a 【v】 b", "「u」", "take 1 [0-1-0] bd"):
+        assert _clean(s_) == s_.strip(), s_
+    assert _clean("a: b\n[c]") == "a - b [c]"
 
 
-def _content(s):
-    """Field text after base's own rewrites (colon to " -", newline to space), with whitespace and every bracket-like character removed."""
-    s = s.replace(":", " -").replace("\n", " ")
-    return "".join(c for c in s if not c.isspace() and parenthesise(c) == c and c not in "()")
+# The three probes are checked on the renderer's own output (render_note), which is what FRF-1 is about. sanitize_note (untouched, and the same
+# as base) strips a well-formed "[...]" span before validation, so the first and third probes reach FRX-N1 only through that path on base too.
+def test_k2_gate_probe_placeholder_dose_slots_are_rejected():
+    gx = {"medicines": [{"name": "Paracetamol", "frequency": "[frequency]", "duration": "[duration]"}]}
+    out = render_note(gx)
+    assert "Paracetamol [frequency] x [duration]" in out
+    assert "FRX-N1 note_text contains a bracket" in printable_errors(out, [])
 
 
-@pytest.mark.parametrize("seed", range(8))
-def test_k2_every_content_character_survives_in_order(seed):
-    r = random.Random(500 + seed)
-    for _ in range(300):
-        vals = [x for x in (r.choice(POOL) for _ in range(r.randint(1, 4))) if x]
-        want = _content("".join(vals))
-        line = _clean(" ".join(vals))
-        assert not TEMPLATE.search(line) and _content(line) == want, (vals, line)
-        out = render_note({"examination": " ".join(vals)})
-        assert _content(out.split("\n")[2].partition(":")[2]) == want
+def test_k2_gate_probe_serialised_structure_in_instructions_is_rejected():
+    gx = {"medicines": [{"name": "Amoxicillin", "frequency": "TID", "duration": "5 days", "instructions": str({"route": "oral", "timing": ["after food"]})}]}
+    out = render_note(gx)
+    assert "{" in out and "[" in out
+    errs = printable_errors(out, [])
+    assert "FRX-N1 note_text contains a bracket" in errs and "FRX-N1 note_text contains a template brace" in errs
+
+
+def test_k2_gate_probe_speaker_label_is_rejected():
+    gx = {"medicines": [{"name": "Cetirizine", "instructions": "[S1] take at night"}]}
+    out = render_note(gx)
+    assert "Cetirizine [S1] take at night" in out
+    assert "FRX-N1 note_text contains a bracket" in printable_errors(out, [])
 
 
 @pytest.mark.parametrize("seed", range(8))
 def test_k2_fields_without_brackets_render_exactly_as_before(seed):
     r = random.Random(900 + seed)
     for _ in range(300):
-        v = r.choice([p for p in CLEAN_POOL if p is not None and parenthesise(p) == p])
+        v = r.choice([p for p in CLEAN_POOL if p is not None])
         assert _clean(v) == (v or "").replace(":", " -").replace("\n", " ").strip()
         gx = _full_gx(r)
         assert render_note(gx) == base_render(gx)
 
 
-def _full_gx(r):
-    """Every field present and a string, none carrying a bracket: the inputs on which base does not crash."""
-    pool = [p for p in CLEAN_POOL if p is not None and parenthesise(p) == p]
+def _full_gx(r, pool=None):
+    """Every field present and a string (the inputs on which base does not crash); by default none carries a bracket."""
+    pool = pool or [p for p in CLEAN_POOL if p is not None]
 
     def s():
         return r.choice(pool)
