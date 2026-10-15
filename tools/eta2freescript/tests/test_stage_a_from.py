@@ -293,3 +293,162 @@ def test_p1_off_is_old(tmp_path):
     assert old["files"].keys() == new["files"].keys()
     bad = [k for k in old["files"] if old["files"][k] != new["files"][k]]
     assert bad == []
+
+
+# ---- FIX1: pins for the guards the first round of tests left unpinned (traversal, empty, delegation, byte-exactness) ----
+
+class RecordingClient(ModelClient):
+    """Records all six arguments, which FakeClient does not (it drops max_tokens and temperature)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def resolve(self, alias):
+        return "anthropic.claude-test", "converse"
+
+    def _chat(self, alias, prompt, system, max_tokens, temperature, tag):
+        self.calls.append((alias, prompt, system, max_tokens, temperature, tag))
+        return f"out:{len(self.calls)}"
+
+
+def _is_unusable(uid):
+    return uid in ("", ".", "..") or "/" in uid or "\\" in uid
+
+
+def _plant(path, tmp_path):
+    """Put a valid Stage A file at path when it lies inside the test tree, so a missing file cannot explain a raise."""
+    try:
+        path.resolve().relative_to(tmp_path.resolve())
+    except ValueError:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"consult_boundary": {"foreign_turns": []}}')
+    return True
+
+
+def _generated_bad_uids(n=120):
+    import random
+    rng = random.Random(f"{SEED}-uids")
+    segs = ["..", ".", "a", "b", "", "x..", "..x", "sub"]
+    out = set()
+    while len(out) < n:
+        uid = rng.choice(["/", "\\"]).join(rng.choice(segs) for _ in range(rng.randint(1, 4)))
+        if _is_unusable(uid):
+            out.add(uid)
+    return sorted(out)
+
+
+FIXED_BAD_UIDS = ["..", "../x", ".", "", "a/b", "/abs", "a\\b", "..\\outside", "sub/../x", "/etc"]
+
+
+@pytest.mark.parametrize("uid", FIXED_BAD_UIDS + _generated_bad_uids())
+def test_traversal_uids_raise_value_error_with_zero_inner_calls(tmp_path, uid):
+    root = tmp_path / "w" / "x" / "y" / "root"
+    root.mkdir(parents=True)
+    # a valid file at the traversal target, plus one at the absolute-uid target, so only the guard can stop the read
+    if uid.startswith("/"):
+        uid = str(tmp_path / "abs")  # an absolute uid, with a valid file at its target
+        _plant(tmp_path / "abs" / "stageA.raw.txt", tmp_path)
+    else:
+        _plant(root / uid / "stageA.raw.txt", tmp_path)
+    assert _is_unusable(uid)
+    inner = RecordingClient()
+    w = StageAFromClient(inner, root)
+    with pytest.raises(ValueError):
+        w.stage_a_text(uid)
+    with pytest.raises(ValueError):
+        w.stage_a_sha12(uid)
+    if ":" not in uid:
+        with pytest.raises(ValueError):
+            w.chat("sonnet", "P", "S", tag=f"stageA-v2:{uid}")
+    assert inner.calls == []
+
+
+def test_traversal_target_files_exist_for_the_fixed_list(tmp_path):
+    """Guard against the test passing only because the file is missing: the planted target is readable on its own."""
+    root = tmp_path / "root"
+    root.mkdir()
+    for uid in ("..", "../x", ".", "", "a/b", "a\\b"):
+        assert _plant(root / uid / "stageA.raw.txt", tmp_path)
+        assert (root / uid / "stageA.raw.txt").is_file()
+
+
+def test_colon_uid_is_parsed_to_its_last_segment_and_traversal_still_raises(tmp_path):
+    root = tmp_path / "w" / "root"
+    root.mkdir(parents=True)
+    _plant(root / ".." / "stageA.raw.txt", tmp_path)
+    inner = RecordingClient()
+    with pytest.raises(ValueError):
+        StageAFromClient(inner, root).chat("sonnet", "P", "S", tag="stageA-v2:x:..")
+    assert inner.calls == []
+
+
+EMPTY_BODIES = ["", " ", "\n", "\r\n", "\t \n", "  \r\n  \r\n", "\r", " \n"]
+
+
+@pytest.mark.parametrize("body", EMPTY_BODIES)
+def test_empty_or_whitespace_file_raises_in_the_client_and_says_empty(tmp_path, body):
+    (tmp_path / "u1").mkdir()
+    (tmp_path / "u1" / "stageA.raw.txt").write_bytes(body.encode())
+    inner = RecordingClient()
+    w = StageAFromClient(inner, tmp_path)
+    for call in (lambda: w.stage_a_text("u1"), lambda: w.stage_a_sha12("u1"), lambda: w.chat("sonnet", "P", "S", tag="stageA-v2:u1")):
+        with pytest.raises(ValueError, match="is empty"):
+            call()
+    assert inner.calls == []
+
+
+def _gen_text_bodies(n=60):
+    import random
+    rng = random.Random(f"{SEED}-bytes")
+    ws = ["", " ", "  ", "\n", "\r\n", "\r", "\t", "\n\n", " \r\n", "\r\r\n"]
+    core = ['{"consult_boundary": {"foreign_turns": [1, 2]}}', "{\r\n  \"a\": 1,\r\n  \"b\": \"café\"\r\n}", "{\"a\":\r1}", "x"]
+    out = ["{}", "{}\n", "\n{}", " {} \r\n", "{}\r", "{\"a\": 1}\r\n\r\n"]  # fixed edge shapes first
+    while len(out) < n:
+        out.append(rng.choice(ws) + rng.choice(core) + rng.choice(ws))
+    return out
+
+
+def test_returned_text_is_byte_equal_to_the_file(tmp_path):
+    inner = RecordingClient()
+    w = StageAFromClient(inner, tmp_path)
+    bodies = _gen_text_bodies()
+    shapes = set()
+    for i, body in enumerate(bodies):
+        raw = body.encode("utf-8")
+        d = tmp_path / f"u{i}"
+        d.mkdir()
+        (d / "stageA.raw.txt").write_bytes(raw)
+        for got in (w.stage_a_text(f"u{i}"), w.chat("sonnet", "P", "S", tag=f"stageA-v2:u{i}")):
+            assert got.encode("utf-8") == raw
+        assert w.stage_a_sha12(f"u{i}") == hashlib.sha256(raw).hexdigest()[:12]
+        shapes.add((body[:1].isspace(), body[-1:].isspace(), "\r\n" in body, "\r" in body.replace("\r\n", ""), not body.endswith("\n")))
+    assert any(s[0] for s in shapes) and any(s[1] for s in shapes) and any(s[2] for s in shapes) and any(s[3] for s in shapes) and any(s[4] for s in shapes)
+    assert inner.calls == []
+
+
+def test_all_six_delegated_arguments_equal_an_unwrapped_call(tmp_path):
+    import random
+    rng = random.Random(f"{SEED}-deleg")
+    (tmp_path / "u1").mkdir()
+    (tmp_path / "u1" / "stageA.raw.txt").write_text("{}")
+    wrapped_inner, plain = RecordingClient(), RecordingClient()
+    w = StageAFromClient(wrapped_inner, tmp_path)
+    tags = ["stageB-v9:u1", "judge-v1:u1", "judge-v1:stageA-x:u1", "xstageA-v2:u1", "", "stageB-v9", "stageAv2:u1"]
+    seen_mt, seen_t = set(), set()
+    for k in range(60):
+        args = (rng.choice(["sonnet", "opus", "haiku"]), f"prompt-{k}-{rng.random()}", f"system-{rng.random()}")
+        mt = rng.choice([1, 17, 255, 4096, 7999, 8001, 16000, rng.randint(1, 64000)])
+        t = rng.choice([0.0, 0.1, 0.25, 0.5, 0.7, 1.0, round(rng.random(), 3)])
+        tag = rng.choice(tags)
+        seen_mt.add(mt)
+        seen_t.add(t)
+        assert w.chat(*args, max_tokens=mt, temperature=t, tag=tag) == plain.chat(*args, max_tokens=mt, temperature=t, tag=tag)
+    # defaults too: the wrapper must not change them
+    assert w.chat("sonnet", "P", "S", tag="stageB-v9:u1") == plain.chat("sonnet", "P", "S", tag="stageB-v9:u1")
+    assert len(wrapped_inner.calls) == 61 and wrapped_inner.calls == plain.calls
+    assert any(m not in (8000,) for m in seen_mt) and any(x not in (0.0,) for x in seen_t)
+    assert {c[3] for c in wrapped_inner.calls} - {8000} and {c[4] for c in wrapped_inner.calls} - {0.0}
+    # a Stage A call adds nothing to the inner client's record
+    w.chat("sonnet", "P", "S", max_tokens=1234, temperature=0.9, tag="stageA-v2:u1")
+    assert len(wrapped_inner.calls) == 61
