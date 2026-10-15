@@ -3,7 +3,12 @@
 * Streams kiosk/<room>/health, heal, probe-reply -> JSONL under <data>/<YYYY-MM-DD>/<room>.<stream>.jsonl; days older than KEEP_DAYS are pruned.
 * Quiet detection is HERE, not pipe `monitor` (R4): a room with no health line for QUIET_AFTER_S raises guardian_quiet once (edge), and a
   line after that closes it. A room is counted from process start, so a room that never speaks is quiet too.
-* A heal line with result "escalated" raises heal_escalated through the same sink (inferred shape).
+* A heal line is validated strictly (validate_heal). Valid lines route as follows (INFERRED shape, see COREAUDIO-HEAL-MINI-15OCT.md):
+  a `kind` in HEAL_KINDS (capture_dead, capture_muted, coreaudio_heal_failed, recorder_changed) opens that case; no `kind` and result "escalated" or "failed"
+  with action "coreaudiod_restart" opens coreaudio_heal_failed; no `kind` and result "escalated" otherwise raises heal_escalated (older rule);
+  result "ok"/"healed" without a kind closes heal_escalated; "healed", "would_do" and a "failed" without that action are logged only.
+  Anything else (not an object, unknown kind, unknown result, neither kind nor result, not JSON) is stored/logged and opens ONE heal_message_invalid case.
+* A health line with a numeric zero_ratio < 0.05 closes open capture_dead, capture_muted and coreaudio_heal_failed cases for that room.
 * Serves control: control_snapshot() = {"kill": bool, "modes": {room: "shadow"|"heal"}} from files; publish_control() sends it on topic
   guardian/control. Anything not exactly "heal" is "shadow". An unreadable or missing kill file is kill=true (fail safe).
 Health/heal/probe lines are stored as received. Nothing here prints line content.
@@ -14,6 +19,32 @@ from datetime import datetime, timedelta, timezone
 IST = timezone(timedelta(hours=5, minutes=30))
 STREAMS = ("health", "heal", "probe-reply")
 QUIET_AFTER_S, KEEP_DAYS = 120, 30
+HEAL_KINDS = ("capture_dead", "capture_muted", "coreaudio_heal_failed", "recorder_changed")
+HEAL_RESULTS = ("ok", "healed", "failed", "escalated", "would_do")
+ZERO_RATIO_OK = 0.05
+RAW_CAP = 2000
+
+
+def validate_heal(obj):
+    """Strict heal-line check. Returns (True, None) or (False, reason); the reason is from a fixed set and never echoes line content."""
+    if not isinstance(obj, dict):
+        return False, "not_an_object"
+    kind, res = obj.get("kind"), obj.get("result")
+    if "kind" not in obj and "result" not in obj:
+        return False, "no_kind_or_result"
+    if "kind" in obj and (not isinstance(kind, str) or kind not in HEAL_KINDS):
+        return False, "unknown_kind"
+    if "result" in obj and (not isinstance(res, str) or res.lower() not in HEAL_RESULTS):
+        return False, "unknown_result"
+    return True, None
+
+
+def zero_ratio(obj):
+    """The health line's zero_ratio (INFERRED field name) as a float in [0, 1], else None."""
+    v = obj.get("zero_ratio") if isinstance(obj, dict) else None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or v < 0 or v > 1:
+        return None
+    return float(v)
 CONTROL_TOPIC = "guardian/control"
 # FROZEN CONTRACT (see etc/README.md "Control topic contract"): the kiosk accepts only this exact form; anything else kills every kiosk.
 # Changing any of it needs a coordinated kiosk release (guardian-lead) FIRST. Regex is the kiosk's, verbatim from FR1-C1-CONTROL-CC-KICKOFF "## R7".
@@ -89,6 +120,18 @@ class RouterSink:
     def heal_resolved(self, room, now):
         self.router.close_room(None, room, "recovery", kind="heal_escalated")
 
+    def heal_kind(self, room, kind, now):
+        self._open(room, kind, now)
+
+    def heal_invalid(self, room, now):
+        self._open(room, "heal_message_invalid", now)
+
+    def capture_recovered(self, room, now):
+        """Health zero_ratio back under 0.05: close the audio cases of this room. recorder_changed is NOT closed here (audio back says nothing about the recorder)."""
+        kinds = {"capture_dead", "capture_muted", "coreaudio_heal_failed"}
+        for k in {c["kind"] for c in self.router.store.list_open() if c["room_id"] == room and c["kind"] in kinds}:
+            self.router.close_room(None, room, "recovery", kind=k)
+
 
 class Subscriber:
     def __init__(self, data_dir, control_dir, rooms, sink, clock=time.time, quiet_after_s=QUIET_AFTER_S, quiet_seed=()):
@@ -105,9 +148,11 @@ class Subscriber:
             return False
         room, stream = pt
         try:
-            json.loads(raw)
+            obj = json.loads(raw)
         except (TypeError, ValueError):
-            return False                      # not JSON: dropped, never stored
+            if stream == "heal":              # a malformed heal line is logged (own file, capped, JSON-quoted) and raises the invalid case
+                self._log_invalid_heal(room, raw)
+            return False                      # not JSON: never stored in the stream file
         now = self.clock()
         day = datetime.fromtimestamp(now, IST).strftime("%Y-%m-%d")
         d = os.path.join(self.data, day)
@@ -115,21 +160,37 @@ class Subscriber:
         with open(os.path.join(d, f"{room}.{stream}.jsonl"), "a") as f:
             f.write(raw.rstrip("\n") + "\n")
         if stream == "heal":
-            self._on_heal(room, raw, now)
+            self._on_heal(room, obj, now)
         if stream == "health":
+            zr = zero_ratio(obj)
+            if zr is not None and zr < ZERO_RATIO_OK:
+                self.sink.capture_recovered(room, now)
             self.last_seen[room] = now
             if room in self.quiet:
                 self.quiet.discard(room)
                 self.sink.guardian_recovered(room, now)
         return True
 
-    # INFERRED heal record shape (FR-1 2.4): {"result": ...}. "escalated" opens heal_escalated; "ok"/"healed" closes it. Unverified against C1.
-    def _on_heal(self, room, raw, now):
-        try:
-            res = str(json.loads(raw).get("result", "")).lower()
-        except (ValueError, AttributeError):
+    def _log_invalid_heal(self, room, raw):
+        now = self.clock()
+        d = os.path.join(self.data, datetime.fromtimestamp(now, IST).strftime("%Y-%m-%d"))
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, f"{room}.heal-invalid.jsonl"), "a") as f:
+            f.write(json.dumps({"ts": int(now), "raw": str(raw)[:RAW_CAP]}) + "\n")
+        self.sink.heal_invalid(room, now)
+
+    # INFERRED heal record shape (FR-1 2.4 and SPEC-COREAUDIO-HEAL section 5/6): {"kind"?, "result"?, "action"?, ...}. Unverified against C1.1.
+    def _on_heal(self, room, obj, now):
+        ok, _why = validate_heal(obj)
+        if not ok:
+            self.sink.heal_invalid(room, now)
             return
-        if res == "escalated":
+        res = str(obj.get("result", "")).lower()
+        if obj.get("kind") in HEAL_KINDS:
+            self.sink.heal_kind(room, obj["kind"], now)
+        elif res in ("escalated", "failed") and obj.get("action") == "coreaudiod_restart":
+            self.sink.heal_kind(room, "coreaudio_heal_failed", now)
+        elif res == "escalated":
             self.sink.heal_escalated(room, now)
         elif res in ("ok", "healed"):
             self.sink.heal_resolved(room, now)

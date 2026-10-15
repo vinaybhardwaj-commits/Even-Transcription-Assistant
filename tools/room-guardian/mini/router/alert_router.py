@@ -24,14 +24,17 @@ from datetime import datetime, timedelta, timezone
 IST = timezone(timedelta(hours=5, minutes=30))
 ACKERS = {"gating-lead", "fleet"}
 REPAGE_CLINIC_S, REPAGE_OFF_S = 600, 1800
-V_KINDS = {"recorder_off", "fleet_outage", "no_machine", "install_retired"}   # patient-impacting (A6 finding 7)
+CA_KINDS = {"capture_dead", "capture_muted", "coreaudio_heal_failed", "recorder_changed"}      # coreaudio heal rule alerts (kiosk kiosk/<room>/heal lines)
+V_KINDS = {"recorder_off", "fleet_outage", "no_machine", "install_retired"} | CA_KINDS            # patient-impacting (A6 finding 7)
 V_FIRST_S, V_REMINDER_S = 1800, 3600
 CLINIC_START_MIN, CLINIC_END_MIN, CLINIC_DAYS = 7 * 60 + 30, 21 * 60 + 30, (1, 2, 3, 4, 5, 6)   # mirrors lib/alerts/clinic-hours.ts
 DIGEST_HOUR_IST = 21
 ROUTED_KEEP_S = 7 * 86400
 URGENT = {"offline", "degraded", "fleet_outage", "install_retired", "recorder_off", "mic_denied", "no_machine", "room_disabled",
-          "needs_enrol", "capture_stalled", "guardian_quiet", "heal_escalated", "backup_failed"}
-OPEN_KINDS = URGENT          # kinds that open a case; 'recovered' and 'session_reaped' never do
+          "needs_enrol", "capture_stalled", "guardian_quiet", "heal_escalated", "backup_failed"} | CA_KINDS
+OPEN_KINDS = URGENT | {"heal_message_invalid"}          # kinds that open a case; 'recovered' and 'session_reaped' never do
+# An ACK also CLOSES these (order: "closes on recovery or ACK"). recorder_changed and heal_message_invalid have no recovery signal, so ACK is their only close.
+ACK_CLOSE_KINDS = CA_KINDS | {"heal_message_invalid"}
 RECOVERY_KIND = "recovered"
 _ACK_RE = re.compile(r"^ACK\s+room-alert-(\d+)\b", re.I)
 _ID_RE = re.compile(r"room-alert-(\d+)\b", re.I)
@@ -262,7 +265,13 @@ class Router:
             for m in msgs(tid):
                 sender = str(m.get("from", ""))
                 if sender in ACKERS and c["first_id"] in self.ack_ids(m):
-                    self.store.update(c["first_id"], acked_by=sender, acked_at=self.clock())
+                    t = self.clock()
+                    self.store.update(c["first_id"], acked_by=sender, acked_at=t)
+                    if c["kind"] in ACK_CLOSE_KINDS:
+                        self.store.update(c["first_id"], closed_at=t, close_reason="acked")
+                        self.local["v_sent"].pop(str(c["first_id"]), None)
+                        self.store.add_note(f"room-alert-{c['first_id']} {c['kind']} in {c['room_id']} CLOSED (acked by {sender}) after {self._age_min(c)} min. "
+                                            f"Pages sent {c['page_count']}, duplicates folded {c['suppressed_count']}.", t)
                     return True
         return False
 
