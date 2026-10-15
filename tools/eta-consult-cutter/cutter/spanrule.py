@@ -44,8 +44,15 @@ def sig_changed(prev_sig, prev_row, cur):
 def plan_span(win, room_windows, tape_start, tape_end, has_print):
     """-> dict(start, mode 'fixed'|'search', end (fixed) or None, search_end (search) or None, rule, flags, next_open, prev_end).
     tape_start / tape_end = first / last second of tape of that room around the window (None = unknown, no cap)."""
-    prev, nxt = room_neighbours(win, room_windows)
     t_open, t_close = win["t_open"], win["t_close"]
+    if win.get("boundary_source") == "pqm" or win.get("close_reason") == "pqm":
+        # m3-17 F3: a PQM window is ALREADY padded (called - 60 s .. completed + 60 s) and each one is its own visit: the clip is exactly t_open .. t_close, with no extra lead, no tail, no cap at a neighbour
+        # (overlapping PQM visits in one room are allowed). Only the tape itself can shorten it. The rule below is for every other window and is unchanged.
+        start, end, flags = t_open, t_close, []
+        if tape_start is not None and tape_start > start: start = tape_start; flags.append("start_at_tape_start")
+        if tape_end is not None and end > tape_end: end = tape_end; flags.append("tape_truncated")
+        return dict(start=start, mode="fixed", end=end, search_end=None, rule="pqm_exact", flags=flags, next_open=None, prev_end=None)
+    prev, nxt = room_neighbours(win, room_windows)
     prev_end = None if prev is None else (prev["t_close"] if prev["t_close"] is not None else prev["t_open"])
     next_open = None if nxt is None else nxt["t_open"]
     flags = []

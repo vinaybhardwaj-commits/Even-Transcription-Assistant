@@ -1,0 +1,10 @@
+[Unit]
+Description=Consult cutter watchdog, once a minute
+
+[Timer]
+OnCalendar=*:*:00
+Persistent=false
+Unit=cutter-watchdog.service
+
+[Install]
+WantedBy=timers.target

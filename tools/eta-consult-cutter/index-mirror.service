@@ -1,0 +1,12 @@
+[Unit]
+Description=Mirror the cutter clip index to R2 (eta-lab-results consult/index/latest.jsonl + manifest.json) for scribe_sarvam; independent of cutter-hourly (no ordering or failure link)
+
+[Service]
+Type=oneshot
+# the pinned deploy worktree (moved only by deploy.sh from a clean commit), never the live working tree
+WorkingDirectory=%h/oc/consult/cutter-deploy
+# the wrapper takes its own flock, runs tools/index_mirror.py --live with the cutter venv (boto3) and appends ONE counts-only line to ~/oc/consult/index-mirror.log
+# the credential is the file named by CONSULT_MIRROR_CRED_FILE (default ~/.config/consult-cutter/r2_lab_results_write), opened by the tool itself; the path is the only thing read from the environment
+ExecStart=%h/oc/consult/cutter-deploy/tools/index_mirror_run.sh
+TimeoutStartSec=10min
+Nice=10

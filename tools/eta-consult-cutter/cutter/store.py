@@ -114,6 +114,17 @@ def mirror(final_dir, rel_path, client=None, cred_file=None, bucket=None, prefix
     except Exception as e:
         return dict(status="error", error=f"{type(e).__name__}: {str(e)[:120]}", bucket=bucket, prefix=f"{prefix}/{rel_path}", at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
 
+def r2_healthy(client=None, cred_file=None, bucket=None, prefix=None):
+    """m3-16f: can we WRITE to R2? A tiny put_object of a fixed probe key <prefix>/_health/probe.txt (overwritten each time, never deleted), same client and timeouts as the uploads. head_bucket would prove reads only: a token that lost
+    PutObject keeps it green. -> True | False | None (no credential: unknown). Never raises."""
+    prefix = prefix or C.R2_PREFIX
+    try:
+        if client is None:
+            client, bucket = _r2_client(cred_file, bucket)
+            if client is None: return None
+        client.put_object(Bucket=bucket or C.R2_BUCKET, Key=f"{prefix}/_health/probe.txt", Body=b"cutter r2 write probe\n"); return True
+    except Exception: return False
+
 def delete_remote(rel_path, names, client=None, cred_file=None, bucket=None, prefix=None):
     """m3-15 (m3-14 F5): delete the R2 keys of files a re-cut no longer has (doctor.flac / others.flac). -> list of deleted names (empty without a credential); an error is returned in the list as 'error: ...' and logged, never raised."""
     bucket, prefix = bucket or C.R2_BUCKET, prefix or C.R2_PREFIX; out = []

@@ -38,7 +38,7 @@ describe("close_kind", () => {
     const compute = readFileSync("lib/encounter-windows/compute.ts", "utf8");
     expect(compute).toContain('const EXPLICIT_CLOSE: ReadonlySet<CloseReason> = new Set(["endConsult", "url_clear"]);');
     const cutter = readFileSync("tools/eta-consult-cutter/cutter/config.py", "utf8");
-    expect(cutter).toMatch(/EXPLICIT = \{"url_clear", "endConsult"\}/);
+    expect(cutter).toMatch(/EXPLICIT = \{[^}]*"url_clear"[^}]*"endConsult"[^}]*\}/);
   });
 });
 

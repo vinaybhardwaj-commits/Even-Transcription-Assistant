@@ -1,4 +1,14 @@
-# consult cutter (m3-01)
+# consult cutter (m3-01, synced to box 2cf3b5a / m3-21b)
+Current behaviour in short:
+- PQM backfill: `tools/pqm_windows.py` + `tools/backfill_pqm.{py,sh}` build cut windows from PQM visits (explicit close `pqm`); from 2 Oct 2026 a visit is dropped when a Pulse window already covers it (`covered_by_pulse`).
+- Room placement: `tools/room_place.py` places each PQM visit in a room (pulse > presence > voice > usual > schedule) with a `room_confidence`; `usual` and `schedule` rows are flagged `room_uncertain`.
+- Daily recon: `tools/daily_recon.py` (units `units/daily-recon.*`, 10:00 and 22:00 IST) reconciles PQM visits, placements, clips, lanes and R2 per room and writes alerts.
+- Re-cut worker: `tools/recut_queue.py --loop` (`units/recut-queue.service`) re-cuts missed consults first, then clips without embeddings, waiting for `cutter.lock` and the :35 gap.
+- Run budget: one hourly run is bounded (budget 1500 s); the remaining windows go to the next run.
+- Partial tape: a window below the coverage floor that still holds `MIN_PARTIAL_TAPE_S` seconds of tape is cut and flagged `partial_tape`; a silent clip is still skipped.
+- Index mirror: `tools/index_mirror.py` + `index-mirror.{service,timer}` publish an allow-listed, leak-checked copy of the index (installed by hand, never by this repo).
+- Tests that need production files (real `heldout.py`, real index/blind config) skip unless those files exist on the machine. They run only when `CUTTER_LIVE_TESTS=1` is set AND the live files exist on the machine.
+
 Cuts every closed consult window into `~/eta-data/consult/clips/<IST date>/<room_slug>/<consult_uid>/` (0700): `consult.flac` (whole span, mono 16 kHz, -18 LUFS), `doctor.flac` + `others.flac` (only when the doctor has a confirmed print; overlap stays in consult only), `timeline.json`, and one row in `clips/index.jsonl` (append-only, latest row per consult wins). No transcription, no external API. Patient audio stays under `~/eta-data` and private R2.
 
 Input: Neon `eta_encounter_windows` (read-only credential `~/.config/eta-audio/db.url`, never printed); tape from the box mirror, missing chunks pulled from R2 like `tools/tape_pull_room.py`; blind room-days (heldout.py, union f07171dc) skipped; no-tape windows skipped with the reason from `room_audio_state` (no_session / device_missing / power).
@@ -11,6 +21,15 @@ Run: `python -m cutter.run --once [--since YYYY-MM-DD] [--only CONSULT_UID] [--d
 
 R2 mirror: intended `eta-audio` bucket (the tape bucket), prefix `consult-clips/<same path>`, private. The tape mirror key (a separate read credential) is READ-ONLY, so the upload needs a write credential file `~/.config/consult-cutter/r2_clips_write` (lines: access key, secret, endpoint [, bucket]); until it exists every index row carries `r2.status = pending_no_credential` and every later run uploads the pending rows once the credential exists (`mirror_pending`).
 
+## Watchdog (m3-23)
+`tools/cutter_watchdog.py --check` runs once a minute (`units/cutter-watchdog.timer`). With no argument it prints usage. `--status` is read-only and prints one JSON line (active, stop_file, holder, alerted_last_hour).
+It raises an incident when `cutter.lock` is held over 3000 s (50 min) by one process, when the lock is held with no holder file, or when one consult uid is re-cut more than 3 times in an IST day. A re-cut is a cut after the first.
+On a new incident it touches `recut.stop` and appends one row to `ALERTS.jsonl`. It never re-creates `recut.stop` for an incident it already stopped for. The operator resumes the re-cut worker by removing `recut.stop`, and that removal sticks until a new incident. It has no bus client: the operator reads `ALERTS.jsonl`. Never run `--check` against the live HOME by hand; tests use a temp HOME.
+
+## Daily recon: why a visit has no clip (m3-24)
+`tools/daily_recon.py` is read-only. For each placed visit with no cut clip it names the reason from the planner's own rules: `not_planned:<why>`, `dead:<why>` (the backfill's dead_reason), `window_other_room` (a Pulse window covers the visit only in another room), `window_<status>` (a window exists but its clip did not cut) or `no_cut_clip` (nothing is known). The report-only coverage rule accepts a short visit inside a longer clip (overlap of at least 50 percent of the shorter of the two). The R2 export keeps the stricter rule, so a loose match never binds a visit to another consult's clip.
+
 ## Local config (env, nothing real is in this repo)
 - `CONSULT_DIARIZE_PKG_DIR` and `CONSULT_DIARIZE_MODULE`: directory and module name of the diarize package that `cutter/diar_worker.py` imports. No default; the worker exits with a clear message if either is unset (set them in the cutter unit or shell).
 - `CONSULT_R2_WRITE_FILE`: path of the R2 write credential file. Without it (and without the default file) every clip stays `r2.status = pending_no_credential`.
+- `CONSULT_MIRROR_CRED_FILE`: path of the R2 credential file used by `tools/index_mirror.py --live` (default `~/.config/consult-cutter/r2_lab_results_write`).

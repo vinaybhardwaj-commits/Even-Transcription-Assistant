@@ -18,11 +18,12 @@ PULL_PY = f"{H}/.venv-r2/bin/python"
 PULL_ROOM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "tape_pull_room.py")
 # span rule (ORDERS m3-01)
 LEAD, EXPLICIT_TAIL, VOICE_TAIL, VOICE_SEARCH, NOPRINT_TAIL, MIN_AGE = 60.0, 15.0, 30.0, 1800.0, 600.0, 900.0
-EXPLICIT = {"url_clear", "endConsult"}                 # explicit closes; idle_timeout / unclosed / open / cap_90m are not
+EXPLICIT = {"url_clear", "endConsult", "pqm"}                 # explicit closes; idle_timeout / unclosed / open / cap_90m are not
 DOCTOR_LIKE_COS = 0.35                              # m3-07: a non-doctor group at cos >= 0.35 to the doctor print may be a split-off part of his voice: FLAG ONLY (doctor_like_s), it stays in others.flac
 COS = 0.55
 GAP_S = 0.3
 MIN_COVERAGE = 0.5
+MIN_PARTIAL_TAPE_S = 300.0                          # m3-21: a window below MIN_COVERAGE that still holds this many seconds of tape is cut anyway, flagged partial_tape (quality stays the resolver's; flag partial_tape, field tape_partial); a silent clip is still skipped as silent_audio
 GPU_WINDOW_ENABLED = False                          # m3-09 (V decision, option C, 08 Oct 2026): the cutter shares the T4 around the clock; False = GPU_STOP / GPU_START / GPU_HARD_STOP are NOT applied, a job may start at any hour (per-job gpu.lock sharing stays). True turns the night gate back on
 GPU_STOP, GPU_START = (22, 30), (6, 0)                 # no GPU work from 22:30 to 06:00 (E1 owns the T4 23:00-06:00)
 RUN_LOCK = f"{E}/consult/cutter.lock"                 # run-level lock (R8)

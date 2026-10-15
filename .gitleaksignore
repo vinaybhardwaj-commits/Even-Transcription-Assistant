@@ -8,3 +8,5 @@ a94843299a04708ae81673babbf61a8df63ef814:apps/room-recorder/Tests/HelperCoreTest
 5a1d05cad25b9454b018c0e5c069d02170d32981:tests/unit/mcp-catalog.test.ts:presigned-url:41
 # fake placeholder presigned URL in a unit test (scribe_catalog-3), gating-lead 14 Oct
 bbf77546ba1d39eeff6b39a5ca58d1d3115c1513:tests/unit/mcp-catalog.test.ts:presigned-url:816
+# carried from cutter resync (TITLE_TOKENS false positive, renamed to TITLE_WORDS in 19e6ef06), Fable CS-2
+357cc04fe7337601791bf6930b77391b8d42aa34:tools/eta-consult-cutter/tools/index_mirror.py:env-secret-assign:18
