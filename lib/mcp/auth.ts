@@ -266,10 +266,34 @@ export function parseAdminTokenMap(raw: string | undefined, envName: string = MC
 const loggedOnce = new Set<string>();
 const warnOnce = (msg: string) => { if (!loggedOnce.has(msg)) { loggedOnce.add(msg); console.warn(msg); } };
 
-/** PURE — every 64-hex string anywhere in the raw text of the primary and EXTRA envs (lowercased), valid JSON or not, entries valid or not. */
+/**
+ * PURE — every hash the parser could read a key as, anywhere in the raw text of the given envs (lowercased), valid JSON or not, entries valid or not. It over-collects
+ * and never under-collects (fail closed): (1) every 64-char window of every maximal hex run of 64+ chars, so a key inside a longer run is caught; (2) when the text
+ * parses as JSON, every object key at any depth that is 64 hex AFTER decoding, so a \u-escaped key is caught. Bad JSON gets (1) only.
+ */
 export function takenHashes(...raws: Array<string | undefined>): Set<string> {
   const out = new Set<string>();
-  for (const raw of raws) for (const m of (raw ?? "").matchAll(/[0-9a-fA-F]{64}/g)) out.add(m[0].toLowerCase());
+  for (const raw of raws) {
+    if (!raw) continue;
+    for (const m of raw.matchAll(/[0-9a-fA-F]{64,}/g)) {
+      const run = m[0].toLowerCase();
+      for (let i = 0; i + 64 <= run.length; i += 1) out.add(run.slice(i, i + 64));
+    }
+    let v: unknown;
+    try { v = JSON.parse(raw); } catch { continue; }
+    try {
+      const stack: unknown[] = [v];
+      while (stack.length > 0) {
+        const node = stack.pop();
+        if (!node || typeof node !== "object") continue;
+        if (Array.isArray(node)) { for (let i = 0; i < node.length; i += 1) stack.push(node[i]); continue; }
+        for (const [k, child] of Object.entries(node as Record<string, unknown>)) {
+          if (/^[0-9a-fA-F]{64}$/.test(k)) out.add(k.toLowerCase());
+          stack.push(child);
+        }
+      }
+    } catch { /* never throws: on any error keep what was collected (H1 plus the keys seen so far) */ }
+  }
   return out;
 }
 
