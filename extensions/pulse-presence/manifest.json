@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "ETA Pulse Presence",
-  "version": "0.1.0",
-  "description": "Reports doctor presence on Pulse to ETA. Captures identity (email, display name), route type, and consult ids only.",
+  "version": "0.1.4",
+  "description": "Reports doctor presence on Pulse to ETA. Captures identity (display name), the page greeting first name, route type, and consult ids only.",
   "minimum_chrome_version": "120",
   "permissions": ["storage", "alarms", "webRequest", "idle", "tabs"],
   "host_permissions": ["https://pulse.even.in/*", "https://www.evenscribe.app/*"],

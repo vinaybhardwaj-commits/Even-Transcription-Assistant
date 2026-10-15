@@ -1,13 +1,16 @@
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createAgent } = require('../src/agent.js');
+const { createAgent, sanitizeMessage } = require('../src/agent.js');
 const T = require('../src/lib/transport.js');
 const E = require('../src/lib/events.js');
-const { makeChrome, makeFetch, bytes, FAKE_EMAIL, FAKE_NAME, OTHER_EMAIL, OTHER_NAME } = require('./fakes.js');
+const { makeChrome, makeFetch, bytes, DR, F4, F5, lit } = require('./fakes.js');
 
 const CFG = { machine_id: 'MAC-7', room: 'OPD-3', ingest_url: 'https://ingest.example/v1/events', token: 'TOKEN-XYZ' };
 const PULSE_TAB = { focused: true, tabs: [{ active: true, url: 'https://pulse.even.in/prescription?prescription_uid=RX1' }] };
 const FROM = { id: 'ext-id', url: 'https://pulse.even.in/' };
+const DOC_A = { doctor_uid: 'DOC-A', display_name: lit(`${DR} ${F4}`), email: 'dr@example.test' };
+const DOC_B = { doctor_uid: 'DOC-B', display_name: lit(`${DR} ${F5}`), email: null }; // Google login: no email
 
 function setup({ statuses = [], managed = CFG, local = {}, t0 = Date.parse('2026-09-30T08:00:00Z') } = {}) {
   const chrome = makeChrome({ managed, local });
@@ -15,7 +18,7 @@ function setup({ statuses = [], managed = CFG, local = {}, t0 = Date.parse('2026
   const clock = { t: t0 };
   const agent = createAgent(chrome, { fetch, now: () => clock.t });
   const msg = (over = {}) => ({
-    type: 'pulse_state', status: 'present', identity: { email: FAKE_EMAIL, display_name: FAKE_NAME },
+    type: 'pulse_state', status: 'present', identity: { ...DOC_A },
     impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true, ...over,
   });
   const send = async (m) => { chrome.runtime.onMessage.fire(m, FROM); await agent.settled(); };
@@ -31,26 +34,80 @@ test('startup registers idle interval 120 s and a 30 s heartbeat alarm', async (
   assert.equal(chrome.alarms._map.get('pulse-heartbeat').periodInMinutes, 0.5);
 });
 
-test('login, then logout when the record disappears', async () => {
+test('login, then logout when the session disappears', async () => {
   const { send, msg, events } = setup();
   await send(msg());
   await send(msg()); // no change, no event
   await send(msg({ status: 'absent', identity: null }));
   const evs = events();
   assert.deepEqual(names(evs), ['login', 'logout']);
-  assert.equal(evs[0].email, FAKE_EMAIL);
-  assert.equal(evs[0].display_name, FAKE_NAME);
-  assert.equal(evs[1].email, FAKE_EMAIL); // logout names who left
+  assert.equal(evs[0].doctor_uid, 'DOC-A');
+  assert.equal(evs[0].email, 'dr@example.test');
+  assert.equal(evs[0].display_name, `${DR} ${F4}`);
+  assert.equal(evs[1].doctor_uid, 'DOC-A'); // logout names who left
+  assert.equal(evs[1].email, 'dr@example.test');
+  assert.equal(evs[1].display_name, `${DR} ${F4}`);
 });
 
-test('a changed email closes the previous doctor and opens the next', async () => {
+test('a changed doctor_uid closes the previous doctor and opens the next', async () => {
   const { send, msg, events } = setup();
   await send(msg());
-  await send(msg({ identity: { email: OTHER_EMAIL, display_name: OTHER_NAME } }));
+  await send(msg({ identity: { ...DOC_B } }));
   const evs = events();
   assert.deepEqual(names(evs), ['login', 'logout', 'login']);
-  assert.equal(evs[1].email, FAKE_EMAIL);
-  assert.equal(evs[2].email, OTHER_EMAIL);
+  assert.equal(evs[1].doctor_uid, 'DOC-A');
+  assert.equal(evs[1].email, 'dr@example.test');
+  assert.equal(evs[1].display_name, `${DR} ${F4}`);
+  assert.equal(evs[2].doctor_uid, 'DOC-B');
+  assert.equal(evs[2].email, null);
+  assert.equal(evs[2].display_name, `${DR} ${F5}`);
+});
+
+test('two doctors with the SAME null email but DIFFERENT doctor_uid still emit logout + login', async () => {
+  const { send, msg, events } = setup();
+  await send(msg({ identity: { doctor_uid: 'G-1', display_name: lit(`${DR} ${F4}`), email: null } }));
+  await send(msg({ identity: { doctor_uid: 'G-2', display_name: lit(`${DR} ${F5}`), email: null } }));
+  const evs = events();
+  assert.deepEqual(names(evs), ['login', 'logout', 'login']);
+  assert.deepEqual(evs.map((e) => e.doctor_uid), ['G-1', 'G-1', 'G-2']);
+  assert.ok(evs.every((e) => e.email === null), 'email-null events still send');
+  assert.deepEqual(evs.map((e) => e.display_name), [`${DR} ${F4}`, `${DR} ${F4}`, `${DR} ${F5}`]);
+  for (const e of evs) assert.deepEqual(E.validateEvent(e), []);
+});
+
+test('the same doctor_uid is the same doctor: an email appearing or changing is not a switch', async () => {
+  const { send, msg, events } = setup();
+  await send(msg({ identity: { doctor_uid: 'DOC-A', display_name: lit(`${DR} ${F4}`), email: null } }));
+  await send(msg({ identity: { doctor_uid: 'DOC-A', display_name: lit(`${DR} ${F4}`), email: 'dr@example.test' } })); // Firebase bonus arrives
+  await send(msg({ identity: { doctor_uid: 'DOC-A', display_name: lit(`${DR} ${F4}`), email: 'renamed@example.test' } }));
+  assert.deepEqual(names(events()), ['login']);
+});
+
+test('refreshed email/display_name for the same doctor_uid is carried on later events', async () => {
+  const { send, msg, events, chrome, agent } = setup();
+  await send(msg({ identity: { doctor_uid: 'DOC-A', display_name: null, email: null } }));
+  await send(msg({ identity: { doctor_uid: 'DOC-A', display_name: lit(`${DR} ${F4}`), email: 'dr@example.test' } }));
+  chrome.alarms.onAlarm.fire({ name: 'pulse-heartbeat' });
+  await agent.settled();
+  const hb = events().filter((e) => e.event === 'heartbeat')[0];
+  assert.equal(hb.doctor_uid, 'DOC-A');
+  assert.equal(hb.email, 'dr@example.test');
+  assert.equal(hb.display_name, `${DR} ${F4}`);
+});
+
+test('email-null identity: events still send with doctor_uid and display_name', async () => {
+  const { send, msg, events, chrome, agent } = setup();
+  await send(msg({ identity: { ...DOC_B } }));
+  chrome.alarms.onAlarm.fire({ name: 'pulse-heartbeat' });
+  await agent.settled();
+  const evs = events();
+  assert.deepEqual(names(evs), ['login', 'heartbeat']);
+  for (const e of evs) {
+    assert.equal(e.doctor_uid, 'DOC-B');
+    assert.equal(e.email, null);
+    assert.equal(e.display_name, `${DR} ${F5}`);
+    assert.equal(e.reason, null);
+  }
 });
 
 test('impersonation: doctor null, impersonating true, no login/logout churn', async () => {
@@ -61,20 +118,86 @@ test('impersonation: doctor null, impersonating true, no login/logout churn', as
   await agent.settled();
   const evs = events();
   assert.deepEqual(names(evs), ['login', 'heartbeat']);
+  assert.equal(evs[1].doctor_uid, null);
   assert.equal(evs[1].email, null);
   assert.equal(evs[1].display_name, null);
   assert.equal(evs[1].impersonating, true);
 });
 
-test('invalid identity record fails closed: doctor null, reason identity_unreadable on heartbeat', async () => {
+test('invalid identity read fails closed: doctor null, reason identity_unreadable on heartbeat', async () => {
   const { send, msg, events, chrome, agent } = setup();
   await send(msg({ status: 'invalid', identity: null }));
   chrome.alarms.onAlarm.fire({ name: 'pulse-heartbeat' });
   await agent.settled();
   const evs = events();
   assert.deepEqual(names(evs), ['heartbeat']);
+  assert.equal(evs[0].doctor_uid, null);
   assert.equal(evs[0].email, null);
   assert.equal(evs[0].reason, 'identity_unreadable');
+});
+
+test('a transient (invalid) read keeps the last-known doctor: no spurious logout, no second login on recovery', async () => {
+  const { send, msg, events, chrome, agent } = setup();
+  await send(msg());
+  await send(msg({ status: 'invalid', identity: null })); // network blip
+  chrome.alarms.onAlarm.fire({ name: 'pulse-heartbeat' });
+  await agent.settled();
+  await send(msg()); // same doctor is readable again
+  const evs = events();
+  assert.deepEqual(names(evs), ['login', 'heartbeat']);
+  assert.equal(evs[1].doctor_uid, null, 'unattributed while unreadable');
+  assert.equal(evs[1].reason, 'identity_unreadable');
+  chrome.alarms.onAlarm.fire({ name: 'pulse-heartbeat' });
+  await agent.settled();
+  const last = events().filter((e) => e.event === 'heartbeat').pop();
+  assert.equal(last.doctor_uid, 'DOC-A');
+  assert.equal(last.reason, null);
+});
+
+test('a different doctor after a transient invalid read is still a switch', async () => {
+  const { send, msg, events } = setup();
+  await send(msg());
+  await send(msg({ status: 'invalid', identity: null }));
+  await send(msg({ identity: { ...DOC_B } }));
+  const evs = events();
+  assert.deepEqual(names(evs), ['login', 'logout', 'login']);
+  assert.equal(evs[1].doctor_uid, 'DOC-A');
+  assert.equal(evs[2].doctor_uid, 'DOC-B');
+});
+
+// ---- sanitizeMessage: doctor_uid is required for 'present', email is not ----
+test('sanitizeMessage: present needs a valid doctor_uid, email optional', () => {
+  const base = { type: 'pulse_state', status: 'present', impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true };
+  const ok = sanitizeMessage({ ...base, identity: { doctor_uid: 'FAKEUID000000000001', display_name: lit(`${DR} ${F4}`), email: null } });
+  assert.equal(ok.status, 'present');
+  assert.deepEqual(ok.identity, { doctor_uid: 'FAKEUID000000000001', display_name: lit(`${DR} ${F4}`), email: null });
+  const noName = sanitizeMessage({ ...base, identity: { doctor_uid: 'U1' } });
+  assert.deepEqual(noName.identity, { doctor_uid: 'U1', display_name: null, email: null });
+  const badEmail = sanitizeMessage({ ...base, identity: { doctor_uid: 'U1', display_name: lit('D'), email: 'not-an-email' } });
+  assert.equal(badEmail.status, 'present');
+  assert.equal(badEmail.identity.email, null);
+  for (const uid of [undefined, null, '', 5, 'has space', 'a/b', 'x'.repeat(129)]) {
+    const r = sanitizeMessage({ ...base, identity: { doctor_uid: uid, display_name: lit('D'), email: 'dr@example.test' } });
+    assert.equal(r.status, 'invalid', String(uid));
+    assert.equal(r.identity, null);
+  }
+  // an email alone (the old shape) no longer identifies anyone
+  const old = sanitizeMessage({ ...base, identity: { email: 'dr@example.test', display_name: lit('D') } });
+  assert.equal(old.status, 'invalid');
+  assert.equal(old.identity, null);
+  // extra fields on the identity never pass through
+  const extra = sanitizeMessage({ ...base, identity: { doctor_uid: 'U1', display_name: lit('D'), email: null, uid: 'leak', token: 'leak' } });
+  assert.deepEqual(Object.keys(extra.identity).sort(), ['display_name', 'doctor_uid', 'email']);
+});
+
+test('a present message with no valid doctor_uid is treated as invalid (fail closed), not a login', async () => {
+  const { send, msg, events, chrome, agent } = setup();
+  await send(msg({ identity: { email: 'dr@example.test', display_name: lit(`${DR} ${F4}`) } }));
+  chrome.alarms.onAlarm.fire({ name: 'pulse-heartbeat' });
+  await agent.settled();
+  assert.deepEqual(names(events()), ['heartbeat']);
+  assert.equal(events()[0].doctor_uid, null);
+  assert.equal(events()[0].reason, 'identity_unreadable');
 });
 
 test('route: entering and leaving a prescription route opens and closes an encounter by opaque ref', async () => {
@@ -87,6 +210,7 @@ test('route: entering and leaving a prescription route opens and closes an encou
   assert.deepEqual(names(evs), ['encounter_open', 'encounter_close']);
   assert.equal(evs[0].prescription_ref, 'RX1');
   assert.equal(evs[0].encounter_id, null);
+  assert.equal(evs[0].doctor_uid, 'DOC-A');
 });
 
 test('idle, active, locked events', async () => {
@@ -140,7 +264,7 @@ test('non-2xx and errored Start/End emit nothing', async () => {
   assert.equal(events().length, 0);
 });
 
-test('body unavailable: event still emitted with consult_uid null and reason body_unavailable', async () => {
+test('body unavailable: event still emitted with consult_uid null and a body_<why> reason', async () => {
   const { chrome, agent, events } = setup();
   chrome.webRequest.onBeforeRequest.fire({ requestId: '1', method: 'POST', url: 'https://pulse.even.in/api/emr/startConsult' });
   chrome.webRequest.onCompleted.fire({ requestId: '1', statusCode: 200 });
@@ -149,7 +273,29 @@ test('body unavailable: event still emitted with consult_uid null and reason bod
   await agent.settled();
   const evs = events();
   assert.deepEqual(names(evs), ['encounter_open', 'encounter_close']);
-  for (const e of evs) { assert.equal(e.encounter_id, null); assert.equal(e.reason, 'body_unavailable'); }
+  for (const e of evs) { assert.equal(e.encounter_id, null); assert.equal(e.reason, 'body_no_body'); assert.ok(!('body_keys' in e)); }
+});
+
+test('0.1.4: json_no_key event carries body_keys (names only); other reasons do not; body_unavailable is never emitted', async () => {
+  const { chrome, agent, events } = setup();
+  const fire = (id, url, requestBody) => {
+    chrome.webRequest.onBeforeRequest.fire({ requestId: id, method: 'POST', url, requestBody });
+    chrome.webRequest.onCompleted.fire({ requestId: id, statusCode: 200 });
+  };
+  const S = 'https://pulse.even.in/api/emr/startConsult';
+  fire('1', S, bytes({ zeta: 'PATIENT-VALUE', alpha: 1 }));
+  fire('2', S, { raw: [{ file: '/x' }] });
+  fire('3', S, { formData: { other: ['v'] } });
+  fire('4', S, bytes({ consultUid: 'C-OK' }));
+  fire('5', S, bytes({ consult_uid: 'bad uid' }));
+  await agent.settled();
+  const evs = events();
+  assert.deepEqual(evs.map((e) => e.reason), ['body_json_no_key', 'body_raw_file_only', 'body_form_no_key', null, 'body_bad_uid']);
+  assert.deepEqual(evs[0].body_keys, ['alpha', 'zeta']);
+  assert.ok(!JSON.stringify(evs).includes('PATIENT-VALUE'));
+  for (const e of evs.slice(1)) assert.ok(!('body_keys' in e));
+  assert.equal(evs[3].encounter_id, 'C-OK');
+  assert.ok(!evs.some((e) => e.reason === 'body_unavailable'));
 });
 
 test('messages from other senders are ignored', async () => {
@@ -262,7 +408,7 @@ test('every timestamp is ISO with an offset', async () => {
 });
 
 // ---- R10: reason is the sorted comma-joined set of active status codes ----
-test('R10: identity invalid, not impersonating: every event type carries identity_unreadable with email null', async () => {
+test('R10: identity invalid, not impersonating: every event type carries identity_unreadable with identity null', async () => {
   const { chrome, agent, send, msg, events } = setup();
   await send(msg({ status: 'invalid', identity: null }));
   for (const s of ['idle', 'active', 'locked']) chrome.idle.onStateChanged.fire(s);
@@ -270,7 +416,12 @@ test('R10: identity invalid, not impersonating: every event type carries identit
   await send(msg({ status: 'invalid', identity: null, route: { type: 'prescription', prescription_ref: 'RX1' } }));
   const evs = events();
   assert.deepEqual(names(evs), ['idle', 'active', 'locked', 'encounter_open']);
-  for (const e of evs) { assert.equal(e.reason, 'identity_unreadable'); assert.equal(e.email, null); assert.equal(e.display_name, null); }
+  for (const e of evs) {
+    assert.equal(e.reason, 'identity_unreadable');
+    assert.equal(e.doctor_uid, null);
+    assert.equal(e.email, null);
+    assert.equal(e.display_name, null);
+  }
 });
 
 test('R10: impersonation heartbeat after an invalid record has reason null', async () => {
@@ -283,6 +434,7 @@ test('R10: impersonation heartbeat after an invalid record has reason null', asy
   assert.equal(hb.length, 1);
   assert.equal(hb[0].reason, null);
   assert.equal(hb[0].impersonating, true);
+  assert.equal(hb[0].doctor_uid, null);
   assert.equal(hb[0].email, null);
 });
 
@@ -292,7 +444,7 @@ test('R10: invalid identity and body unavailable give the sorted two-code set', 
   chrome.webRequest.onBeforeRequest.fire({ requestId: '1', method: 'POST', url: 'https://pulse.even.in/api/emr/startConsult' });
   chrome.webRequest.onCompleted.fire({ requestId: '1', statusCode: 200 });
   await agent.settled();
-  assert.equal(events()[0].reason, 'body_unavailable,identity_unreadable');
+  assert.equal(events()[0].reason, 'body_no_body,identity_unreadable');
 });
 
 test('R10: body_unavailable alone during impersonation; logout of a known doctor is not identity_unreadable', async () => {
@@ -302,17 +454,18 @@ test('R10: body_unavailable alone during impersonation; logout of a known doctor
   a.chrome.webRequest.onBeforeRequest.fire({ requestId: '1', method: 'POST', url: 'https://pulse.even.in/api/emr/endConsult' });
   a.chrome.webRequest.onCompleted.fire({ requestId: '1', statusCode: 200 });
   await a.agent.settled();
-  assert.equal(a.events()[0].reason, 'body_unavailable');
+  assert.equal(a.events()[0].reason, 'body_no_body');
   const b = setup();
   await b.send(b.msg());
   await b.send(b.msg({ status: 'invalid', identity: null }));
   await b.send(b.msg({ status: 'absent', identity: null }));
   const lo = b.events().find((e) => e.event === 'logout');
-  assert.equal(lo.email, FAKE_EMAIL);
+  assert.equal(lo.doctor_uid, 'DOC-A');
+  assert.equal(lo.email, 'dr@example.test');
   assert.equal(lo.reason, null);
 });
 
-test('R10: valid present state has reason null on every event and exactly 12 keys', async () => {
+test('R10: valid present state has reason null on every event and exactly 20 keys', async () => {
   const { chrome, agent, send, msg, events } = setup();
   await send(msg({ route: { type: 'prescription', prescription_ref: 'RX1' } }));
   for (const s of ['idle', 'active', 'locked']) chrome.idle.onStateChanged.fire(s);
@@ -323,7 +476,7 @@ test('R10: valid present state has reason null on every event and exactly 12 key
   await send(msg({ route: { type: 'home', prescription_ref: null } }));
   const evs = events();
   assert.ok(evs.length >= 8);
-  for (const e of evs) { assert.equal(e.reason, null, e.event); assert.equal(Object.keys(e).length, 12); }
+  for (const e of evs) { assert.equal(e.reason, null, e.event); assert.equal(Object.keys(e).length, 20); assert.equal(e.doctor_uid, 'DOC-A'); }
 });
 
 test('config: managed beats local beats baked manifest.eta_config, per key', async () => {
@@ -345,4 +498,17 @@ test('baked config alone is enough to deliver a batch', async () => {
   assert.equal(fetch.calls.length, 1);
   assert.equal(fetch.calls[0].init.headers.Authorization, 'Bearer BAKED');
   assert.equal(fetch.calls[0].body.events[0].machine_id, 'BAKED-M');
+});
+
+test('a hidden tab reporting absent does not evict a doctor logged in elsewhere on the machine', async () => {
+  const { send, msg, events, chrome, agent } = setup();
+  await send(msg()); // DOC-A logged in on a visible tab
+  await send(msg({ status: 'absent', identity: null, visible: false })); // a background/stray tab on the login page
+  chrome.alarms.onAlarm.fire({ name: 'pulse-heartbeat' });
+  await agent.settled();
+  const evs = events();
+  assert.deepEqual(names(evs), ['login', 'heartbeat'], 'no spurious logout from the hidden tab');
+  assert.equal(evs.find((e) => e.event === 'heartbeat').doctor_uid, 'DOC-A', 'doctor retained');
+  await send(msg({ status: 'absent', identity: null, visible: true })); // a VISIBLE absent is an authoritative logout
+  assert.ok(names(events()).includes('logout'));
 });

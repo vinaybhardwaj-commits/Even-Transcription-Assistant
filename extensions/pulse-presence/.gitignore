@@ -1,3 +1,5 @@
 node_modules/
 .scratch/
 src/eta_config.js
+e2e/last-run.log
+e2e/q-contract-first-run.txt

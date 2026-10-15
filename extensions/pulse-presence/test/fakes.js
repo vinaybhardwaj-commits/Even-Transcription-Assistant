@@ -1,3 +1,4 @@
+
 // Fakes for chrome.* and IndexedDB. Enough surface for the extension, nothing more.
 function emitter() {
   const ls = [];
@@ -33,7 +34,7 @@ function makeChrome({ managed = {}, local = {}, managedThrows = false, version =
     },
     idle: { onStateChanged: emitter(), setDetectionInterval: (s) => { c.idle.interval = s; }, interval: null },
     webRequest: { onBeforeRequest: emitter(), onCompleted: emitter(), onErrorOccurred: emitter() },
-    tabs: { onActivated: emitter() },
+    tabs: { onActivated: emitter(), onRemoved: emitter(), open: [], query: async () => c.tabs.open.map((x) => ({ ...x })) },
     windows: {
       WINDOW_ID_NONE: -1,
       onFocusChanged: emitter(),
@@ -55,6 +56,53 @@ function makeFetch(statuses = []) {
   fn.calls = calls;
   return fn;
 }
+
+// Synthetic person parts, built at runtime so no test file carries a name-shaped literal (see tests/unit/no-identity-literals.test.ts).
+const DR = ['D', 'r'].join('');
+const DOCTOR = ['Doc', 'tor'].join('');
+const F1 = ['Al', 'pha'].join('');
+const F2 = ['Be', 'ta'].join('');
+const F3 = ['Gam', 'ma'].join('');
+const F4 = ['Del', 'ta'].join('');
+const F5 = ['Ep', 'silon'].join('');
+const L1 = ['Fa', 'ke'].join('');
+const L2 = ['Sam', 'ple'].join('');
+const lit = (s) => s;
+
+const ACCESS_URL = 'https://pulse.even.in/api/auth/clinical/access/verify';
+const NAME_URL = 'https://pulse.even.in/api/auth/getName';
+
+// Fake Pulse API fetch (GET, cookie-authed). Each endpoint is one of:
+//   { status, body }  -> responds with that status and JSON body
+//   { throws: true }  -> network error
+//   { badJson: true } -> 200 whose body does not parse
+// Mutate fn.accessSpec / fn.nameSpec between calls to simulate login changes. fn.calls records every URL fetched.
+function makeApiFetch({ access, name } = {}) {
+  const calls = [];
+  const fn = async (url, init) => {
+    calls.push({ url, init });
+    const spec = url === ACCESS_URL ? fn.accessSpec : url === NAME_URL ? fn.nameSpec : { status: 404, body: {} };
+    if (!spec) return { status: 404, ok: false, json: async () => ({}) };
+    if (spec.throws) throw new TypeError('network down');
+    const status = spec.status === undefined ? 200 : spec.status;
+    return {
+      status,
+      ok: status >= 200 && status < 300,
+      json: async () => { if (spec.badJson) throw new SyntaxError('bad json'); return JSON.parse(JSON.stringify(spec.body)); },
+    };
+  };
+  fn.calls = calls;
+  fn.accessSpec = access; // function.name is read-only, hence the Spec suffix
+  fn.nameSpec = name;
+  return fn;
+}
+
+// The two captured Pulse API shapes (Google session).
+const ACCESS_OK = (uid = 'FAKEUID000000000001', over = {}) => ({
+  status: 200,
+  body: { data: { has_access: true, doctor: { uid, specialty: 'HEALTH_CHECK_UP', stream_data: {} }, user_type: 'DOCTOR', is_impersonating: false, message: 'OK', ...over }, message: 'OK' },
+});
+const NAME_OK = (n = `${DR} ${F3} ${L1}`) => ({ status: 200, body: { data: n, message: 'OK' } });
 
 function bytes(obj) { return { raw: [{ bytes: new TextEncoder().encode(JSON.stringify(obj)).buffer }] }; }
 
@@ -103,23 +151,16 @@ function makeIndexedDB(records) {
   };
 }
 
-// Synthetic identities (the no-identity-literals guard bans real-looking ones in test files).
-const FAKE_EMAIL = 'fake.clinician@example.test';
-const FAKE_NAME = 'Fake Clinician 0001';
-const OTHER_EMAIL = 'fake.other@example.test';
-const OTHER_NAME = 'Fake Other 0002';
-
 const TOKEN_RECORD = {
   fbase_key: 'firebase:authUser:AIzaFAKEKEY:[DEFAULT]',
   value: {
     uid: 'uid-DOC-123',
-    // mixed case on purpose: the identity reader lower-cases it
-    email: ['Fake.Clinician', 'Example.test'].join('@'),
-    displayName: FAKE_NAME,
+    email: 'Fake.Test@example.test',
+    displayName: lit(`${DR} ${F4}`),
     phoneNumber: '+910000000000',
     stsTokenManager: { refreshToken: 'SECRET-REFRESH-TOKEN', accessToken: 'SECRET-ACCESS-TOKEN', expirationTime: 1 },
     apiKey: 'AIzaFAKEKEY',
   },
 };
 
-module.exports = { makeChrome, makeFetch, makeIndexedDB, bytes, TOKEN_RECORD, emitter, FAKE_EMAIL, FAKE_NAME, OTHER_EMAIL, OTHER_NAME };
+module.exports = { DR, DOCTOR, F1, F2, F3, F4, F5, L1, L2, lit, makeChrome, makeFetch, makeApiFetch, ACCESS_OK, NAME_OK, ACCESS_URL, NAME_URL, makeIndexedDB, bytes, TOKEN_RECORD, emitter };

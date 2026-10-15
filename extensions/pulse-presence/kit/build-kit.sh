@@ -2,7 +2,7 @@
 # Packs the extension into a CRX with the stable key (key.pem in the kit dir, mode 600, never committed).
 #   build-kit.sh                  generic CRX (empty eta_config)
 #   HOST_CONFIG=<json> build-kit.sh   per-host CRX: eta_config baked into the packaged manifest and the
-#                                 version bumped (0.1.0.<seq>) so Chrome treats it as an update. The JSON
+#                                 version bumped (<manifest version>.<seq>, e.g. 0.1.1.<seq>) so Chrome treats it as an update. The JSON
 #                                 file holds {ingest_url, token, machine_id, room}; it lives outside git.
 # Output: $KIT_OUT (default ~/oc/pulse-ext/kit), or $KIT_OUT/hosts/<machine_id> for a per-host build.
 set -euo pipefail
