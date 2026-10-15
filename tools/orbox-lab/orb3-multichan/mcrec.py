@@ -435,7 +435,10 @@ def package(cfg, t0, t1, out):
         w0 = e.get("gap_wall_ns", e["wall_ns"])
         if any(g["kind"] == "gap" and g["place"] == e["place"] and g["wall_start_ns"] >= w0 for g in events): continue   # it came back: already listed above if it overlaps the window
         w0 = max(w0, lo)
-        gaps.append(dict(place=e["place"], wall_start_ns=w0, wall_end_ns=hi, byte_offset=e["byte_offset"], gap_s=round((hi - w0) / 1e9, 3), zero_filled=True, open_ended=True))
+        restart = next((r["wall_ns"] for r in events if r["kind"] == "start" and r["wall_ns"] > e["wall_ns"]), None)   # a recorder restart closes an open drop
+        w1 = hi if restart is None else min(restart, hi)
+        if w1 < w0: continue
+        gaps.append(dict(place=e["place"], wall_start_ns=w0, wall_end_ns=w1, byte_offset=e["byte_offset"], gap_s=round((w1 - w0) / 1e9, 3), zero_filled=True, open_ended=restart is None))
     iso = lambda e, tz: dt.datetime.fromtimestamp(e / 1e9, tz).isoformat(timespec="seconds")
     man = dict(window_start_ist=iso(lo, IST), window_end_ist=iso(hi, IST), window_start_utc=iso(lo, dt.timezone.utc), window_end_utc=iso(hi, dt.timezone.utc),
                sample_rate=RATE, channels=chans, sources=sources, gaps=gaps,

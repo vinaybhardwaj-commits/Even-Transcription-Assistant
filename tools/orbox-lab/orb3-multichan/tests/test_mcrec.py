@@ -164,3 +164,20 @@ def test_O22_dropped_and_never_returned_gets_open_ended_gap(tmp_path):
     assert not any(e["kind"] == "gap" for e in s.jl("events.jsonl"))
     raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(out / "media" / "high.flac"), "-f", "s16le", "-ar", "48000", "-ac", "1", "-"], capture_output=True, check=True).stdout
     assert len(raw) // 2 == 23 * RATE and not np.frombuffer(raw, dtype="<i2")[9 * RATE:].any()   # tail after the drop is digital zero
+
+
+def test_O22b_recorder_restart_closes_open_drop(tmp_path):
+    import datetime as dt
+    rec = tmp_path / "rec"; rec.mkdir(); n = 30 * RATE
+    sig = to_i16(0.2 * np.sin(2 * np.pi * 300 * t_arr(n)))
+    mics = [dict(place="corner", port="usb3/3-4/3-4:1.0", gain=41), dict(place="high", port="usb3/3-6/3-6:1.0", gain=41)]
+    s = Sim(rec, [FakeDevice(sig, mics[0]["port"], 0), FakeDevice(sig, mics[1]["port"], 1, down=(10.0, 999.0))], mics=mics, hpf=False); s.run(18)
+    s.clock.t = 20.0; mcrec.Recorder(s.cfg, s.rec.env)                 # recorder restarts at t=20 s: writes a new "start" event
+    ist0 = dt.datetime.fromtimestamp(BASE_WALL / 1e9, mcrec.IST); fmt = "%Y-%m-%d %H:%M:%S"; cfgp = tmp_path / "c.json"; json.dump(s.cfg, open(cfgp, "w"))
+    def pkg(a, b, name):
+        out = tmp_path / name
+        mcrec.main(["package", "--config", str(cfgp), "--from", (ist0 + dt.timedelta(seconds=a)).strftime(fmt), "--to", (ist0 + dt.timedelta(seconds=b)).strftime(fmt), "--out", str(out)])
+        return json.load(open(out / "manifest.json"))["gaps"]
+    assert pkg(22, 28, "later") == []                                   # window after the restart: no open gap
+    g = pkg(2, 28, "across")
+    assert len(g) == 1 and g[0]["open_ended"] is False and g[0]["wall_end_ns"] == BASE_WALL + 20 * 10**9
