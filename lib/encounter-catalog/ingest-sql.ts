@@ -43,7 +43,7 @@ export const COLUMNS: Col[] = [
 
 const setList = COLUMNS.map((c) => `${c.name} = CASE WHEN jsonb_exists(p.j, '${c.name}') THEN ${c.expr} ELSE e.${c.name} END`).join(",\n    ");
 
-export const INGEST_SQL = `WITH p AS (SELECT r AS j FROM jsonb_array_elements($1::jsonb) AS r),
+const HEAD = `WITH p AS (SELECT r AS j FROM jsonb_array_elements($1::jsonb) AS r),
 upd AS (
   UPDATE encounter_catalog e SET
     ${setList},
@@ -56,7 +56,9 @@ upd AS (
 stale AS (
   SELECT e.consult_uid FROM p JOIN encounter_catalog e ON e.consult_uid = p.j->>'consult_uid'
    WHERE NULLIF(p.j->>'generated_at', '') IS NOT NULL AND e.generated_at IS NOT NULL AND e.generated_at > (p.j->>'generated_at')::timestamptz
-),
+)`;
+
+export const INGEST_SQL = `${HEAD},
 ins AS (
   INSERT INTO encounter_catalog (consult_uid, ${COLUMNS.map((c) => c.name).join(", ")})
   SELECT p.j->>'consult_uid', ${COLUMNS.map((c) => c.expr).join(", ")}
@@ -67,3 +69,8 @@ ins AS (
   RETURNING consult_uid
 )
 SELECT (SELECT count(*) FROM upd)::integer AS updated, (SELECT count(*) FROM ins)::integer AS inserted, (SELECT count(*) FROM stale)::integer AS stale`;
+
+/** CS-3: the same UPDATE and stale guard, and no INSERT at all. A consult_uid with no row is counted as missing (rows in the batch minus updated minus stale), never created. */
+export const UPDATE_ONLY_SQL = `${HEAD}
+SELECT (SELECT count(*) FROM upd)::integer AS updated, 0 AS inserted, (SELECT count(*) FROM stale)::integer AS stale,
+  (SELECT count(*) FROM p WHERE NOT EXISTS (SELECT 1 FROM upd WHERE upd.consult_uid = p.j->>'consult_uid') AND NOT EXISTS (SELECT 1 FROM stale WHERE stale.consult_uid = p.j->>'consult_uid'))::integer AS missing`;

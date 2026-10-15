@@ -111,6 +111,25 @@ d("encounter_catalog C4 columns on postgres:16", () => {
     expect((a.presence as { encounter_open: number }).encounter_open).toBe(T_OPEN);
   });
 
+  it("CS-3 updateOnly: an existing uid is updated, a missing uid stays absent and is counted, and the default (route) path still inserts", async () => {
+    const n0 = await one("SELECT count(*)::int FROM encounter_catalog");
+    expect(await ingestCatalogRows([{ consult_uid: "synth-c4-a", jev: JEV }, { consult_uid: "synth-c4-gone", jev: JEV }], { updateOnly: true })).toEqual({ updated: 1, inserted: 0, stale: 0, missing: 1 });
+    expect(await rowOf("synth-c4-gone")).toBeUndefined();
+    expect(await one("SELECT count(*)::int FROM encounter_catalog")).toBe(n0);
+    expect(await ingestCatalogRows([{ consult_uid: "synth-c4-gone", jev: JEV }], { updateOnly: true })).toEqual({ updated: 0, inserted: 0, stale: 0, missing: 1 });
+    // stale rows are stale, not missing
+    expect(await ingestCatalogRows([box("synth-c4-a", { generated_at: "2026-10-15T01:00:00Z" })], { updateOnly: true })).toEqual({ updated: 0, inserted: 0, stale: 1, missing: 0 });
+    // updateOnly:false is the route's behaviour: it inserts
+    expect(await ingestCatalogRows([{ consult_uid: "synth-c4-new", jev: JEV }], { updateOnly: false })).toEqual({ updated: 0, inserted: 1, stale: 0 });
+    pg.exec("DELETE FROM encounter_catalog WHERE consult_uid = 'synth-c4-new'");
+  });
+
+  it("CS-4: a jev set with state retired round-trips through the database", async () => {
+    const J = { sets: [{ ...JEV.sets[0], state: "retired" }] };
+    expect(await ingestCatalogRows([{ consult_uid: "synth-c4-a", jev: J }], { updateOnly: true })).toEqual({ updated: 1, inserted: 0, stale: 0, missing: 0 });
+    expect((await rowOf("synth-c4-a")).jev).toEqual(J);
+  });
+
   it("the rollback drops only the three columns and its schema_migrations row; 0168's table and rows stay; 0169 can be applied again", async () => {
     const withC4 = await cols();
     pg.exec(DOWN);

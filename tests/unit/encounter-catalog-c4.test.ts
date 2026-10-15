@@ -54,6 +54,23 @@ describe("jev", () => {
     expect(one({ jev: jev({ reason: "x" }) })).toEqual({ ok: false, error: "bad_jev" });
     expect(one({ jev: { sets: [], counts: { a: 1 } } })).toEqual({ ok: false, error: "bad_jev" });
   });
+  it("CS-4: state is optional and one of current | retired; any other value or type is bad_jev", () => {
+    expect(one({ jev: jev({ state: "retired" }) }).ok).toBe(true);
+    expect(one({ jev: jev({ state: "current" }) }).ok).toBe(true);
+    expect(one({ jev: jev() }).ok).toBe(true);
+    for (const bad of ["Retired", "RETIRED", "active", "", "retired ", null, 1, true, {}, ["retired"]]) {
+      expect(one({ jev: jev({ state: bad }) }), JSON.stringify(bad)).toEqual({ ok: false, error: "bad_jev" });
+    }
+    expect(validJev({ sets: [{ ...jev().sets[0], state: "retired" }] })).toBe(true);
+    expect(one({ jev: jev({ status: "retired" }) })).toEqual({ ok: false, error: "bad_jev" });
+  });
+  it("CS-3: the update-only statement has no INSERT and counts missing; the default statement is unchanged", async () => {
+    const { UPDATE_ONLY_SQL } = await import("@/lib/encounter-catalog/ingest-sql");
+    expect(UPDATE_ONLY_SQL).not.toMatch(/INSERT INTO/i);
+    expect(UPDATE_ONLY_SQL).toMatch(/AS missing/);
+    expect(UPDATE_ONLY_SQL).toMatch(/UPDATE encounter_catalog e SET/);
+    expect(INGEST_SQL).toMatch(/INSERT INTO encounter_catalog/);
+  });
   it("refuses a free-text value, a bad instant, a bad sha, a non-array sets and too many sets", () => {
     for (const bad of [{ band: "has spaces and words" }, { label: "two words" }, { label: "x".repeat(61) }, { model: "m m" }, { at: "yesterday" }, { at: "2026-02-30T00:00:00Z" }, { set_sha: "no sha!" }, { set_id: "" }, { set_id: 5 }]) {
       expect(one({ jev: jev(bad) }), JSON.stringify(bad)).toEqual({ ok: false, error: "bad_jev" });
