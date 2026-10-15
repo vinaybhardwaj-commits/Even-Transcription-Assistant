@@ -907,7 +907,8 @@ def gen_wrote5(rng):
     if kind == "lead":
         return pair[0], f"Medication:\n{n} {pre}{pair[1]}", True
     if kind == "bullet":
-        return pair[0], f"Medication:\n{pre}{pair[1]}\n{rng.choice(['-', '\u2022', '*', '\u00b7'])} {n} mg", True
+        bullet = rng.choice(["-", "\u2022", "*", "\u00b7"])
+        return pair[0], f"Medication:\n{pre}{pair[1]}\n{bullet} {n} mg", True
     if kind == "label":
         return pair[0], f"Medication:\n{pre}{pair[1]}\n{rng.choice(['Strength', 'Dose', 'Tablet strength'])}: {n} mg", True
     if kind == "ctl_time":
