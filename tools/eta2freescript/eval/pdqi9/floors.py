@@ -814,6 +814,27 @@ def _strict_run(run: str, own_text: str, eta_text: str, own_raw: str | None = No
         have4 = set(_run_units(e, run_n, table=_READINGS4)) | set(_run_units(e, run, table=_READINGS4))
         if any(u in have4 for u in _run_units(o, run_n, (0,), _READINGS4) + _run_units(o, run, (0,), _READINGS4)):
             return True
+    return _synonym_run(run, own_in, eta_in)  # FIX6: the third reading
+
+
+# ---- FIX6: unit sameness, third reading ------------------------------------------------------------------------------------------
+# A synonym map applied after _unit_norm on both sides, OR'd beside the FIX3 and FIX4/5 readings, so it can only add matches.
+_UNIT_SYN = {"tab": "tablet", "cap": "capsule", "d": "day", "wk": "week", "hr": "hour", "hrly": "hour", "hourly": "hour", "cc": "ml",
+             "iu": "unit", "mcg": "microgram", "\u00b5g": "microgram", "\u03bcg": "microgram", "mg": "milligram", "g": "gram"}
+_DEVANAGARI_DAY = re.compile("\u0926\u093f\u0928")
+
+
+def _syn_units(text: str, run: str, readings: tuple = (0, 1)) -> set[str]:
+    return {_UNIT_SYN.get(u, u) for u in _run_units(_DEVANAGARI_DAY.sub(" day ", text), run, readings, _READINGS4) if u}
+
+
+def _synonym_run(run: str, own_in: str, eta_in: str) -> bool:
+    run_n = _nfkc(run)
+    for fix5 in (False, True):
+        o, e = _same_norm4(own_in, fix5), _same_norm4(eta_in, fix5)
+        have = _syn_units(e, run_n) | _syn_units(e, run)
+        if have & (_syn_units(o, run_n, (0,)) | _syn_units(o, run, (0,))):
+            return True
     return False
 
 
@@ -830,10 +851,14 @@ def _run_source(m: dict, field: str, run: str, art: dict | None, prov: dict | No
 
 
 # Time, frequency and form words: a number followed by one of these (after _unit_norm: lower-case, dots out, one trailing "s" off) is
-# NOT a strength. Anything outside the set counts as a strength, so an unknown unit errs toward "ETA wrote one".
+# NOT a strength. Anything outside the set counts as a strength, so an unknown unit errs toward "ETA wrote one". Unchanged since FIX5;
+# _has_strength reads it, and _same_norm turns once/twice into a digit there, so "twice a day" must keep reading as no strength.
 NON_STRENGTH_UNITS = frozenset({
     "day", "d", "week", "wk", "month", "year", "yr", "hour", "hr", "h", "minute", "min", "time", "daily", "dose", "tablet", "tab",
     "capsule", "cap", "drop", "puff", "sachet", "spoon", "spoonful", "teaspoon", "tsp", "tbsp", "night", "morning", "evening"})
+# FIX6: the set rule (a) of _strength_in reads (on _wrote_norm text, where only a written number is a number): the set above less the
+# frequency words, so a frequency word never cancels a number ("Pan 40 daily"). A subset, so it only turns "wrote nothing" into "wrote a strength".
+_NON_STRENGTH_UNITS6 = NON_STRENGTH_UNITS - {"time", "daily", "night", "morning", "evening"}
 
 
 def _has_strength(text: str) -> bool:
@@ -849,7 +874,8 @@ _NW = "|".join(_NUMBER_WORDS)
 # A run of number words of any size ("forty", "two hundred and fifty", "twenty-five"). This local normaliser replaces the run with a
 # digit; once/twice/thrice are frequency words, not numbers, and stay words.
 _NW_RUN = re.compile(rf"\b(?:{_NW})(?:(?:[\s\-]+(?:and[\s\-]+)?)(?:{_NW}))*\b")
-_TIMEFREQ = frozenset({"day", "week", "month", "year", "hour", "minute", "daily", "time"})
+# FIX6: only a DURATION word cancels a number. Daily, time(s), "a day", "/day", od, bd, morning and night are frequencies and never do.
+_DURATION = frozenset({"day", "week", "month", "year", "hour", "minute"})
 
 
 def _wrote_norm(s: str) -> str:
@@ -860,10 +886,10 @@ def _wrote_norm(s: str) -> str:
 
 
 def _number_not_time(text: str, pat: re.Pattern) -> bool:
-    """A match of pat (group 1: the number) whose next token on the same line is not a time or frequency word. A form word does not cancel."""
+    """A match of pat (group 1: the number) whose next token on the same line is not a duration word. A form word does not cancel."""
     for mt in pat.finditer(text):
         tok = re.match(r"[ \t\-]*([^\W\d_]+)", text[mt.end():])
-        if not (tok and _unit_norm(tok.group(1)) in _TIMEFREQ):
+        if not (tok and _unit_norm(tok.group(1)) in _DURATION):
             return True
     return False
 
@@ -881,9 +907,9 @@ def _brand_number(text: str, names: set[str]) -> bool:
 
 
 def _strength_in(text: str, names: set[str] | None = None) -> bool:
-    """text is _wrote_norm'd pieces joined by _CUT (a unit never crosses it). (a) a number then a unit token outside NON_STRENGTH_UNITS,
+    """text is _wrote_norm'd pieces joined by _CUT (a unit never crosses it). (a) a number then a unit token outside _NON_STRENGTH_UNITS6,
     a wrapped line included (reading A) and brackets or quotes around the unit skipped; (b) a brand-number."""
-    if any((u := _unit_after(text, mt, 0, _READINGS4)) and u not in NON_STRENGTH_UNITS for mt in _DIGITS.finditer(text)):
+    if any((u := _unit_after(text, mt, 0, _READINGS4)) and u not in _NON_STRENGTH_UNITS6 for mt in _DIGITS.finditer(text)):
         return True
     return _brand_number(text, names) if names else False
 
@@ -942,15 +968,15 @@ def _strength_groups(m: dict, art: dict | None, fix5: bool = True) -> tuple[list
 
 
 def _any_number_not_time(text: str) -> bool:
-    """FIX5: some digit run in _wrote_norm'd text whose next token on the same line is not a time or frequency word (nor "x" then one)."""
+    """FIX5: some digit run in _wrote_norm'd text whose next token on the same line is not a duration word (nor "x" then one)."""
     for mt in _ANY_NUMBER.finditer(text):
         rest = text[mt.end():]
         tok = re.match(r"[ \t\-]*([^\W\d_]+)", rest)
         if tok:
-            if _unit_norm(tok.group(1)) in _TIMEFREQ:
+            if _unit_norm(tok.group(1)) in _DURATION:
                 continue
             nxt = re.match(r"[ \t]*([^\W\d_]+)", rest[tok.end():]) if tok.group(1) == "x" else None
-            if nxt and _unit_norm(nxt.group(1)) in _TIMEFREQ:
+            if nxt and _unit_norm(nxt.group(1)) in _DURATION:
                 continue
         return True
     return False
@@ -985,7 +1011,7 @@ def _eta_wrote_strength(m: dict, art: dict | None, prov: dict | None) -> bool:
     if _strength_in(_CUT.join(_wrote_norm(x) for x in groups + pieces), names):
         return True
     # FIX5: one structural rule, OR'd beside (a)-(f). Any digit run in this medicine's note lines, their continuation lines or its
-    # provenance strength that is not followed by a time or frequency word is a strength ("Dolo-DSR 650", "- 650 mg", {text: "650"}).
+    # provenance strength that is not followed by a duration word is a strength ("Dolo-DSR 650", "- 650 mg", {text: "650"}).
     return any(_any_number_not_time(_wrote_norm(x)) for x in _strength_groups(m, art)[0] + _prov_strength_leaves(p))
 
 
