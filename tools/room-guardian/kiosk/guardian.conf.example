@@ -1,16 +1,29 @@
-# Kiosk Guardian config. Copy to $GUARDIAN_HOME/guardian.conf. The REAL file lives outside git
-# (~/oc/fleet-access/guardian/) because it names hosts and keys (G7). Nothing below is a real value.
+# Kiosk Guardian config. Copy to $GUARDIAN_HOME/guardian.conf (mode 600). The REAL file lives outside git
+# (~/oc/fleet-access/guardian-kiosk/) because it names hosts and keys (G7). Nothing below is a real value.
+#
+# THIS FILE IS DATA, NOT SHELL (R12). It is never sourced. Only these lines are read:
+#   KEY="value"   KEY='value'   KEY=value   export KEY='value'   # comment   blank lines
+# An unknown key, a bad value, a duplicate key or any other shape (a function, an if, a redirect, a variable reference) makes the whole file bad:
+# the agent then runs KILLED (shadow, no actions), audits the line number and key name, and keeps publishing health.
+# Inside "double quotes" write \$ for a dollar sign; in 'single quotes' everything is literal. Nothing is ever expanded.
+# The safety numbers (the 90 s control limit, the clock skew, the payload caps) are not keys: they are fixed in code.
+#
+# Allowed keys: GUARDIAN_ROOM GUARDIAN_PUBLISH_CMD GUARDIAN_SUBSCRIBE_CMD GUARDIAN_CONTROL_SUB_CMD GUARDIAN_SUDO
+#               GUARDIAN_ROOT_HELPER USB_MIC_PATTERN CANARY_VOLUME PRESENCE_FILE GUARDIAN_PIPE_SSH
 GUARDIAN_ROOM="<room-slug>"
-# Each command runs under `bash -c`. Publish: topic is $1, the line is on stdin.
+# Each command runs under `/bin/bash -p -c` with a clean environment (HOME, USER, LOGNAME, TMPDIR, a fixed PATH, GUARDIAN_HOME, GUARDIAN_PIPE_SSH only). Publish: topic is $1, the line is on stdin.
 # Subscribe: $1 is the room; print "<topic><TAB><payload>" per message, forever.
-# Flags: reads the newest message on topic $2 (guardian/control); print "fleet=on|off" and "mode=shadow|heal" for room $1; exit non-zero when the Mini is unreachable.
-GUARDIAN_PUBLISH_CMD="<command that publishes stdin to topic \$1>"
-GUARDIAN_SUBSCRIBE_CMD="<command that streams topic<TAB>payload lines>"
-GUARDIAN_FLAG_CMD="<command that prints fleet=... and mode=... lines>"
-# Control subscription (preferred; when set, GUARDIAN_FLAG_CMD is unused). $1 = room, $2 = topic; print one raw payload line per message, forever. No message for 90 s = killed.
-GUARDIAN_CONTROL_SUB_CMD="<command that streams one control payload line per message>"
+GUARDIAN_PUBLISH_CMD='<command that publishes stdin to topic $1>'
+GUARDIAN_SUBSCRIBE_CMD='<command that streams topic<TAB>payload lines>'
+# REQUIRED. Control subscription: $1 = room, $2 = topic; print one raw payload line per message, forever. No message for 90 s = killed.
+# Empty or missing = the agent is killed (the old flag command is gone).
+GUARDIAN_CONTROL_SUB_CMD='<command that streams one control payload line per message>'
+# Extra environment for the transport commands (exported).
+# export GUARDIAN_PIPE_SSH='<ssh options for the pipe>'
 # The kiosk-sudo path: a command that runs its arguments as root (sudoers NOPASSWD for the root helper only).
 GUARDIAN_SUDO="sudo -n"
 GUARDIAN_ROOT_HELPER="/usr/local/libexec/eta-guardian-root"
 USB_MIC_PATTERN="C270"
-# PRESENCE_FILE="<file whose mtime is the Presence heartbeat>"
+# PRESENCE_FILE="/absolute/path/of/the/Presence/heartbeat/file"
+# Nightly canary tone level for afplay -v: 0.d or 0.dd, above 0 and at most 0.5 (anything else, even 0 or 1, kills the agent). The system volume is never changed. Real playback needs mode heal; in shadow it only reports would_do.
+# CANARY_VOLUME=0.3

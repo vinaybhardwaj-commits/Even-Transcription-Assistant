@@ -14,11 +14,14 @@
 HEAL_CHANGED=0
 ACTIONS_FILE="$STATE_DIR/actions"
 
+# Actions in the last hour. Fails closed (R12): an actions file that exists but is not a readable regular file counts as the cap REACHED,
+# and a line whose first field is not an epoch counts as one recent action.
 actions_last_hour() {
   local cut
   cut=$(( $(now_epoch) - 3600 ))
-  [ -r "$ACTIONS_FILE" ] || { echo 0; return; }
-  awk -v c="$cut" '$1 >= c { n++ } END { print n + 0 }' "$ACTIONS_FILE"
+  [ -e "$ACTIONS_FILE" ] || { echo 0; return; }
+  if [ ! -f "$ACTIONS_FILE" ] || [ ! -r "$ACTIONS_FILE" ]; then echo "$HEAL_MAX_PER_HOUR"; return; fi
+  awk -v c="$cut" '{ if ($1 !~ /^[0-9]+$/) n++; else if ($1 + 0 >= c) n++ } END { print n + 0 }' "$ACTIONS_FILE"
 }
 
 # heal_event <action> <layer> <reason> <before> <after> <result> <shadow> [target] [severity]
@@ -100,9 +103,9 @@ recorder_restart() {
   act_step || return 1
   # point of no return: bootout is followed by bootstrap whatever the kill switch says (an unloaded agent is not reloaded by KeepAlive)
   launchctl bootout "gui/$uid/$RR_LABEL" 2>/dev/null
-  gsleep "${GUARDIAN_SETTLE_S:-1}"
+  gsleep "$GUARDIAN_SETTLE_S"
   launchctl bootstrap "gui/$uid" "$RR_PLIST" 2>/dev/null && return 0
-  gsleep "${GUARDIAN_SETTLE_S:-1}"
+  gsleep "$GUARDIAN_SETTLE_S"
   launchctl bootstrap "gui/$uid" "$RR_PLIST" 2>/dev/null
 }
 
@@ -206,7 +209,7 @@ heal_chrome() {
   act_step || return 1
   # point of no return: once Chrome is killed it is always reopened
   pkill -x "Google Chrome" 2>/dev/null
-  gsleep "${GUARDIAN_SETTLE_S:-1}"
+  gsleep "$GUARDIAN_SETTLE_S"
   open -a "Google Chrome" 2>/dev/null
   heal_event heal presence presence_stale "$before" "chrome_restarted" ok false
   HEAL_CHANGED=1
