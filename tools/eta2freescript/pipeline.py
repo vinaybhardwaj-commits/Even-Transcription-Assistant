@@ -6,7 +6,7 @@
   fallback. An artifact that is still invalid is not written.
 
 Outputs in <out>/<uid>/ (umask 077): stageA.raw.txt, encounter.json, note_text.llm.txt, artifact.json, artifact.v0.1.json
-(the v0.1 projection), artifact.validation.json. Nothing is sent anywhere except the model calls, which go through the
+(the v0.1 projection), artifact.validation.json; a rejected consult writes artifact.rejected.json instead of artifact.json. Nothing is sent anywhere except the model calls, which go through the
 client and phi_guard.
 """
 from __future__ import annotations
@@ -160,6 +160,12 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         (od / "artifact.json").write_text(json.dumps(art, indent=1, ensure_ascii=False), encoding="utf-8")
         if opts.write_v01:
             (od / "artifact.v0.1.json").write_text(json.dumps(to_v01(art), indent=1, ensure_ascii=False), encoding="utf-8")
+    else:
+        # A rejected artifact is kept for diagnosis only: the artifact as built, with the final note. Posting reads artifact.json
+        # and artifact.v0.1.json, never this file.
+        rej = od / "artifact.rejected.json"
+        rej.write_text(json.dumps(art, indent=1, ensure_ascii=False), encoding="utf-8")
+        os.chmod(rej, 0o600)
     (od / "artifact.validation.json").write_text(json.dumps({k: v for k, v in log.items() if k != "artifact"}, indent=1, ensure_ascii=False), encoding="utf-8")
     log["artifact"] = art
     return log

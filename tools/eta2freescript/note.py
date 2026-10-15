@@ -7,6 +7,7 @@ it does not smuggle a kept-out name or an identity pattern.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 HEADINGS = ["Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses", "Plan of Management",
             "Surgery or Procedure", "Medication", "Further Investigation", "Follow up", "Refer to", "General Advice"]
@@ -130,12 +131,35 @@ def flags_by_pointer(art: dict) -> dict:
     return {p["json_pointer"]: p["flags"] for p in art["provenance"] if p["json_pointer"] and p["flags"]}
 
 
+BRACE_SPAN = re.compile(r"\s*\{[^}]*\}")
+
+
+def _is_template_char(c: str) -> bool:
+    """A bracket or brace, or a lookalike that NFKC folds to one (the FRX-N1 check normalises first)."""
+    return any(x in "[]{}" or (unicodedata.category(x) in ("Ps", "Pe") and x not in "()") for x in unicodedata.normalize("NFKC", c))
+
+
+def strip_template(text: str) -> str:
+    """Remove template characters from text the deterministic renderer is about to emit. A "[...]" or "{...}" span goes
+    whole (as sanitize_note does for brackets); what is left of an unbalanced or nested span goes character by character."""
+    text = BRACE_SPAN.sub("", BRACKET_SPAN.sub("", text))
+    if not any(_is_template_char(c) for c in text):
+        return text
+    return re.sub(r"[ \t]{2,}", " ", "".join(" " if _is_template_char(c) else c for c in text)).strip()
+
+
 def _clean(s) -> str:
-    return (s or "").replace(":", " -").replace("\n", " ").strip()
+    """One rendered entry. None is empty; a non-string is its str. No template character leaves here."""
+    s = "" if s is None else s if isinstance(s, str) else str(s)
+    return strip_template(s.replace(":", " -").replace("\n", " ").strip()).strip()
+
+
+def _t(v) -> str:
+    return "" if v is None else v if isinstance(v, str) else str(v)
 
 
 def follow_up_line(fu: dict) -> str:
-    parts = [fu.get("followup_type", "").replace("_", " ").lower(), fu.get("followup_date", ""), fu.get("follow_up_instructions", "")]
+    parts = [_t(fu.get("followup_type")).replace("_", " ").lower(), _t(fu.get("followup_date")), _t(fu.get("follow_up_instructions"))]
     return _clean("; ".join(x for x in parts if x))
 
 
@@ -179,22 +203,23 @@ def render_note(gx: dict, flags: dict | None = None, banned_names: list[str] | N
 
     def med(i, m):
         own = [m.get("name"), m.get("raw_name")] + list(m.get("aliases") or [])
-        instr = _scrub(m.get("instructions") or "", banned, own)
+        instr = _scrub(_t(m.get("instructions")), banned, own)
         # printable-v1: only the fields present. What is missing lives in completion_required, never in the note.
-        s = " ".join(x for x in [m.get("name", ""), m.get("frequency", ""), ("x " + m["duration"]) if m.get("duration") else "", instr] if x)
+        s = " ".join(x for x in [_t(m.get("name")), _t(m.get("frequency")), ("x " + _t(m["duration"])) if m.get("duration") else "", instr] if x)
         return _clean(s)
 
     def med_group(brand, idx):
-        ms = [gx["medicines"][i] for i in idx]
+        ms = [meds_in[i] for i in idx]
         own = [x for m in ms for x in [m.get("name"), m.get("raw_name")] + list(m.get("aliases") or [])] + [brand]
-        instr = _scrub(ms[0].get("instructions") or "", banned, own)
-        head = f"{brand} ({' + '.join(m.get('name', '') for m in ms)})"
-        s = " ".join(x for x in [head, ms[0].get("frequency", ""), ("x " + ms[0]["duration"]) if ms[0].get("duration") else "", instr] if x)
+        instr = _scrub(_t(ms[0].get("instructions")), banned, own)
+        head = f"{brand} ({' + '.join(_t(m.get('name')) for m in ms)})"
+        s = " ".join(x for x in [head, _t(ms[0].get("frequency")), ("x " + _t(ms[0]["duration"])) if ms[0].get("duration") else "", instr] if x)
         return _clean(s)
 
     meds_out, skip = [], set()
-    gmap = _valid_groups(groups, len(gx.get("medicines", [])))
-    for i, m in enumerate(gx.get("medicines", [])):
+    meds_in = gx.get("medicines") or []
+    gmap = _valid_groups(groups, len(meds_in))
+    for i, m in enumerate(meds_in):
         if i in skip:
             continue
         if i in gmap:
@@ -204,16 +229,16 @@ def render_note(gx: dict, flags: dict | None = None, banned_names: list[str] | N
             meds_out.append(med(i, m))
 
     sec = {
-        "Co-morbidities": [_clean(c["name"]) for c in gx.get("comorbidities", [])],
+        "Co-morbidities": [_clean(c.get("name")) for c in gx.get("comorbidities") or []],
         "Presenting Complaint": [_clean(pc.get("symptoms"))],
         "Examination": [_clean(gx.get("examination"))],
-        "Diagnoses": [("?" if d.get("is_differential_diagnosis") else "") + _clean(d["diagnosis_or_impression"]) for d in pc.get("diagnoses", [])],
+        "Diagnoses": [("?" if d.get("is_differential_diagnosis") else "") + _clean(d.get("diagnosis_or_impression")) for d in pc.get("diagnoses") or []],
         "Plan of Management": [_clean(pom.get("management_plan"))],
-        "Surgery or Procedure": [_clean(s["name"]) for s in pom.get("surgery_or_procedure_recommendations", [])],
+        "Surgery or Procedure": [_clean(s.get("name")) for s in pom.get("surgery_or_procedure_recommendations") or []],
         "Medication": meds_out,
-        "Further Investigation": [_clean(i["name"] + (" (" + ins + ")" if (ins := _scrub(i.get("instruction") or "", banned, [i.get("name"), i.get("raw_name")])) else "")) for i in gx.get("further_investigations", [])],
+        "Further Investigation": [_clean(_t(i.get("name")) + (" (" + ins + ")" if (ins := _scrub(_t(i.get("instruction")), banned, [i.get("name"), i.get("raw_name")])) else "")) for i in gx.get("further_investigations") or []],
         "Follow up": [follow_up_line(fu)] if fu else [],
-        "Refer to": [_clean(r["speciality"] + (" - " + notes if (notes := _scrub(r.get("notes") or "", banned, [r.get("speciality")])) else "")) for r in gx.get("referrals", [])],
+        "Refer to": [_clean(_t(r.get("speciality")) + (" - " + notes if (notes := _scrub(_t(r.get("notes")), banned, [r.get("speciality")])) else "")) for r in gx.get("referrals") or []],
         "General Advice": [_clean(gx.get("general_advice"))],
     }
     lines = []
