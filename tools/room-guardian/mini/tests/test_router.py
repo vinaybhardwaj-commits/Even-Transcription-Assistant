@@ -127,6 +127,13 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(self.store.get_open("r1", "recorder_off")["first_id"], 105)
         self.assertEqual(len(self.bus.pages("room-alert-105")), 1)
 
+    def test_a_server_recovered_row_does_not_close_the_ack_only_cases(self):
+        for n, kind in enumerate(("recorder_disturbed", "heal_message_invalid")):
+            i = 200 + 10 * n
+            self.r.on_row(self.bus, row(i, kind)); self.r.on_row(self.bus, row(i + 1, "recorder_off")); self.r.on_row(self.bus, row(i + 2, "recovered"))
+            self.assertIsNotNone(self.store.get_open("r1", kind))                # only an ACK closes it
+            self.assertIsNone(self.store.get_open("r1", "recorder_off"))         # an ordinary case still closes
+
     def test_crash_between_post_and_state_write_no_duplicate_no_loss(self):
         store = FlakyStore(); bus = FakeBus(); r = ar.Router(store, lambda: bus, self.clock)
         store.insert({"first_id": 100, "room_id": "r1", "kind": "recorder_off", "opened_at": self.clock(), "last_paged_at": None, "page_count": 0,

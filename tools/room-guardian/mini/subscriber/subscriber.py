@@ -97,6 +97,8 @@ def inbox_line(room, obj, now):
     no free text from the kiosk."""
     if not isinstance(obj, dict) or str(obj.get("result", "")).lower() not in INBOX_RESULTS:
         return None
+    if obj.get("mode") == "shadow" or obj.get("shadow") is True:      # S6: a SHADOW kind line logs and opens its case as before but never queues an INBOX line
+        return None
     pb, pa = obj.get("recorder_pid_before"), obj.get("recorder_pid_after")
     if isinstance(pb, int) and isinstance(pa, int) and not isinstance(pb, bool) and not isinstance(pa, bool):
         same = "y" if pb == pa else "n"
@@ -117,7 +119,7 @@ def r9_inbox_line(room, obj, now):
     res = obj.get("result")
     if not isinstance(res, str) or res.upper().startswith("WOULD"):
         return None
-    word = res if re.fullmatch(r"[a-z0-9_]{1,32}", res) else "other"
+    word = res.lower() if re.fullmatch(r"[a-z0-9_]{1,32}", res, re.I) else "other"
     after = obj.get("after") if isinstance(obj.get("after"), str) else ""
     changed = "y" if "coreaudiod_pid_changed=true" in after else "n" if "coreaudiod_pid_changed=false" in after else "?"
     when = datetime.fromtimestamp(now, IST).strftime("%d %b %H:%M")
@@ -239,7 +241,7 @@ class Subscriber:
         try:
             obj = json.loads(raw)
         except (TypeError, ValueError):
-            if stream == "heal":              # a malformed heal line is logged (own file, capped, JSON-quoted) and raises the invalid case
+            if stream == "heal":              # a non-JSON heal line is logged only (own file, capped, JSON-quoted): no case
                 self._log_invalid_heal(room, raw)
             return False                      # not JSON: never stored in the stream file
         now = self.clock()
