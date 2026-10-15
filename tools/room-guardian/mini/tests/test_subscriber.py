@@ -515,7 +515,9 @@ class CAResultGateTests(unittest.TestCase):
                     opened = sorted(c["kind"] for c in e.router.store.list_open()); queued = len(e.router.store.list_inbox_pending())
                     canon = "recorder_disturbed" if kind == "recorder_changed" else kind
                     with self.subTest(kind=kind, result=res, action=act):
-                        if res in ("failed", "escalated"): self.assertEqual(opened, [canon])
+                        if canon == "recorder_disturbed":                                            # CA-C5: any result, top severity
+                            self.assertEqual(opened, sorted(["recorder_disturbed"] + (["heal_message_invalid"] if res == "ok" else [])))
+                        elif res in ("failed", "escalated"): self.assertEqual(opened, [canon])
                         elif res == "ok": self.assertEqual(opened, ["heal_message_invalid"])        # the older "ok" is not a contract result
                         else: self.assertEqual(opened, [])                                           # healed / would_do: log only
                         self.assertEqual(queued, 1 if res in ("healed", "failed", "escalated") else 0)   # INBOX by result, any action; never would_do
@@ -550,6 +552,41 @@ class CAResultGateTests(unittest.TestCase):
             e.heal(obj)
         out = e.router.tick(e.bus); self.assertEqual((out["paged"], e.bus.sends, e.router.store.list_open()), (0, 0, []))
         self.assertEqual(len(e.router.store.list_inbox_pending()), 1)                             # only the real heal reaches the INBOX queue
+
+    def test_recorder_disturbed_and_its_alias_open_a_case_for_every_result(self):
+        for kind in ("recorder_disturbed", "recorder_changed"):
+            for res in ("healed", "failed", "escalated", "would_do", "HEALED", "ok", "weird", "", None, 5, ["x"], True, "MISSING"):
+                for act in ("coreaudiod_restart", "escalate", "heal", None):
+                    e = CAEnv(); obj = {"kind": kind}
+                    if res != "MISSING": obj["result"] = res
+                    if act: obj["action"] = act
+                    e.heal(obj)
+                    with self.subTest(kind=kind, result=res, action=act):
+                        self.assertIn("recorder_disturbed", [c["kind"] for c in e.router.store.list_open()])
+                        self.assertEqual(len([c for c in e.router.store.list_open() if c["kind"] == "recorder_disturbed"]), 1)
+
+    def test_recorder_disturbed_with_a_bad_shape_opens_both_cases_and_other_kinds_do_not(self):
+        e = CAEnv(); e.heal({"kind": "recorder_disturbed", "result": "healed", "mode": "armed", "recorder_pid_before": -1})
+        self.assertEqual(sorted(c["kind"] for c in e.router.store.list_open()), ["heal_message_invalid", "recorder_disturbed"])
+        for obj in ({"kind": "capture_dead", "result": "healed", "mode": "armed"}, {"kind": "capture_dead", "result": "healed"}, {"kind": "capture_muted", "result": "would_do"}):
+            e = CAEnv(); e.heal(obj); self.assertNotIn("recorder_disturbed", [c["kind"] for c in e.router.store.list_open()])
+            self.assertNotIn("capture_dead" if obj["kind"] == "capture_dead" else "capture_muted", [c["kind"] for c in e.router.store.list_open()])
+
+    def test_an_unhashable_kind_does_not_crash(self):
+        e = CAEnv()
+        for obj in ({"kind": ["recorder_disturbed"]}, {"kind": {"a": 1}}, {"kind": None}, {"kind": 5}):
+            e.heal(obj)
+        self.assertEqual([c["kind"] for c in e.router.store.list_open()], ["heal_message_invalid"])
+
+    def test_recorder_disturbed_healed_is_paged_and_v_flagged_in_the_window_and_closes_only_on_ack(self):
+        e = CAEnv(T0); e.heal({"kind": "recorder_disturbed", "result": "healed", "mode": "heal", "action": "coreaudiod_restart", "recorder_pid_before": 5, "recorder_pid_after": 9})
+        out = e.router.tick(e.bus); self.assertEqual((out["paged"], e.bus.sends), (1, 1))
+        self.assertIn("recorder_disturbed in r1", e.bus.real[0]["body"]); self.assertEqual(e.bus.real[0]["priority"], "urgent")
+        for _ in range(6): e.health({"zero_ratio": 0.0}); e.clock.adv(10)
+        self.assertIn("recorder_disturbed", e.open())                                         # audio back does not close it
+        e.clock.adv(1800); e.router.tick(e.bus); self.assertTrue(e.v_texts())                 # V inside 07:00-21:35
+        cid = e.open()["recorder_disturbed"]["first_id"]; e.bus.human("fleet", f"ACK room-alert-{cid}", f"room-alert-{cid}"); e.clock.adv(30); e.router.tick(e.bus)
+        self.assertEqual(e.open(), {})
 
     def test_validate_heal_drops_ok_for_kind_lines(self):
         self.assertFalse(sb.validate_heal({"kind": "capture_dead", "result": "ok"})[0])

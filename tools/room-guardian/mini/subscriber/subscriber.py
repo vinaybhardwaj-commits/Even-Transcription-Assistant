@@ -6,7 +6,9 @@
 * Strict validation (validate_heal) applies ONLY to heal messages that carry `kind` (coreaudio_scope). Any other heal message (today's R9 shape, including its
   layer "coreaudio" lines, no kind) is stored and handled as before: result escalated -> heal_escalated, ok/healed -> closes it, nothing else, never an invalid case.
   An in-scope line has a kind in HEAL_KINDS (capture_dead, capture_muted, coreaudio_heal_failed, recorder_disturbed; recorder_changed is an alias). It opens that
-  kind's case ONLY when result is failed or escalated, or when result is absent (fail closed). result healed or would_do: stored, no case, no page. An unknown
+  kind's case ONLY when result is failed or escalated, or when result is absent (fail closed). result healed or would_do: stored, no case, no page. EXCEPT
+  recorder_disturbed (and its alias recorder_changed): CA-C5 makes any recorder pid change top severity even if audio is back, so it opens its case for ANY
+  result (healed, would_do, unknown, none) and even when the line fails validation (which then also opens heal_message_invalid). An unknown
   result (including the older "ok") fails validation: one heal_message_invalid case. Results healed / failed / escalated are also queued for the gating INBOX,
   whatever the action; would_do never is.
   An in-scope line (it has a kind) that fails the check (unknown kind or result, neither kind nor result, a contract field of the wrong type) is stored and opens ONE
@@ -29,6 +31,7 @@ HEAL_KINDS = ("capture_dead", "capture_muted", "coreaudio_heal_failed", "recorde
 KIND_ALIASES = {"recorder_changed": "recorder_disturbed"}        # accepted for now; the canonical name is the gate's (CA-C5)
 RECOVERY_LINES = 4                                               # consecutive health lines under ZERO_RATIO_OK (CA-C5)
 HEAL_ACTION = "coreaudiod_restart"
+ALWAYS_OPEN_KIND = "recorder_disturbed"                         # opens its case whatever the result (CA-C5); recorder_changed is its alias
 HEAL_RESULTS = ("healed", "failed", "escalated", "would_do")      # the contract set for a kind line; the older "ok" is NOT one of them
 OPEN_RESULTS = ("failed", "escalated")                            # a kind line opens its case only on these (or when `result` is absent)
 INBOX_RESULTS = ("healed", "failed", "escalated")                 # and is queued for the gating INBOX on these, whatever the action (never would_do)
@@ -261,18 +264,23 @@ class Subscriber:
             elif res in ("ok", "healed"):
                 self.sink.heal_resolved(room, now)
             return
+        kind_raw = obj.get("kind")
+        kind = KIND_ALIASES.get(kind_raw, kind_raw) if isinstance(kind_raw, str) else None
+        always = kind == ALWAYS_OPEN_KIND                  # CA-C5: a recorder pid change is top severity "even if audio is back": its case opens for ANY result
         ok, _why = validate_heal(obj)
         if not ok:
+            if always:                                     # the recorder alert is never lost to a shape problem; the shape problem still surfaces as its own case
+                self.ok_streak[room] = 0
+                self.sink.heal_kind(room, kind, now)
             self.sink.heal_invalid(room, now)
             return
         line = inbox_line(room, obj, now)
         if line:
             self.sink.heal_action(room, line, now)
-        kind = KIND_ALIASES.get(obj.get("kind"), obj.get("kind"))
-        if res in OPEN_RESULTS or not res:                 # failed / escalated, or no result at all (cannot show it healed: fail closed to the kind's case)
+        if always or res in OPEN_RESULTS or not res:       # failed / escalated, or no result at all (cannot show it healed: fail closed to the kind's case)
             self.ok_streak[room] = 0                       # recovery must be seen AFTER the alert, so a good run before it cannot close it at once
             self.sink.heal_kind(room, kind, now)
-        # healed / would_do: stored in the stream file, plus the INBOX line above for a real heal; no case, no page
+        # healed / would_do (not recorder_disturbed): stored in the stream file, plus the INBOX line above for a real heal; no case, no page
 
     # ---- quiet detection
     def check_quiet(self):
