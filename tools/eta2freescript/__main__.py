@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import STAGE_A_VERSION, STAGE_B_VERSION
 from .ingest import list_consults, load_consult
-from .models import UsageLedger, make_client
+from .models import StageAFromClient, UsageLedger, make_client
 from .phi_guard import PhiGuardError, assert_phi_safe
 
 
@@ -38,12 +38,18 @@ def _uids(a) -> list[str]:
 
 def _client(a, out: Path):
     kind = "replay" if a.replay and a.client == "bedrock" else a.client
-    return make_client(kind, UsageLedger(out / "usage.jsonl"), a.replay)
+    client = make_client(kind, UsageLedger(out / "usage.jsonl"), a.replay)
+    if getattr(a, "stage_a_from", None):
+        client = StageAFromClient(client, a.stage_a_from)
+    return client
 
 
 def cmd_run(a) -> int:
     from .pipeline import Options, run_consult
     out = a.out or a.data / "_eta2freescript"
+    if a.stage_a_from and a.no_stage_b:
+        print("--stage-a-from cannot be combined with --no-stage-b", file=sys.stderr)
+        return 2
     client = _client(a, out)
     try:
         assert_phi_safe(*client.resolve(a.model))
@@ -55,7 +61,10 @@ def cmd_run(a) -> int:
     def one(uid):
         try:
             c = load_consult(a.data, uid, english=a.english, use_role_track=not a.no_role_track)
-            return run_consult(c, client, out, opts)
+            lg = run_consult(c, client, out, opts)
+            if a.stage_a_from:
+                lg["stage_a_sha12"] = client.stage_a_sha12(uid)
+            return lg
         except Exception as e:  # one consult failing must not stop the batch; the error is reported, never swallowed
             return {"uid": uid, "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
@@ -68,7 +77,8 @@ def cmd_run(a) -> int:
                 continue
             bad += not lg["final_valid"]
             print(lg["uid"], f"valid={lg['final_valid']} note={lg['note_source']} roles={lg['speaker_source']}"
-                  f" completion_required={lg['completion_required']} boundary={'suspected' if lg['boundary']['suspected'] else 'clean'}",
+                  f" completion_required={lg['completion_required']} boundary={'suspected' if lg['boundary']['suspected'] else 'clean'}"
+                  + (f" stageA=from:{lg['stage_a_sha12']}" if a.stage_a_from else ""),
                   f"-> {out / lg['uid'] / 'artifact.json'}" if lg["written"] else "(not written)", flush=True)
     return 1 if bad else 0
 
@@ -133,6 +143,8 @@ def main(argv=None) -> int:
     r.add_argument("--stage-a-version", default=STAGE_A_VERSION)
     r.add_argument("--stage-b-version", default=STAGE_B_VERSION)
     r.add_argument("--no-stage-b", action="store_true", help="deterministic note_text only")
+    r.add_argument("--stage-a-from", type=Path, default=None, metavar="DIR",
+                   help="reuse DIR/<uid>/stageA.raw.txt from another run instead of calling Stage A (fails closed if missing)")
     r.set_defaults(fn=cmd_run)
     e = sub.add_parser("eval", help="judge artifacts against signed notes")
     _common(e)

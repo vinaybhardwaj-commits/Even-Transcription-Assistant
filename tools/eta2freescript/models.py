@@ -5,6 +5,7 @@ Unit tests use FakeClient / ReplayClient only; nothing under tests/ imports boto
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -187,6 +188,52 @@ class ReplayClient(ModelClient):
         if not p.exists():
             raise FileNotFoundError(f"replay: no stored {stage} output for {uid} at {p}")
         return p.read_text(encoding="utf-8")
+
+
+class StageAFromClient(ModelClient):
+    """Reuses another run's stored Stage A output so two arms differ only in Stage B. A Stage A call (tag stage part
+    starts ``stageA-``) returns ROOT/<uid>/stageA.raw.txt exactly, with no model call and no ledger row. Every other
+    call goes to the inner client unchanged. A missing, unreadable or empty file raises: never a live Stage A fallback."""
+
+    def __init__(self, inner: ModelClient, root: Path):
+        self.inner, self.root = inner, Path(root)
+
+    @property
+    def ledger(self) -> UsageLedger:
+        return self.inner.ledger
+
+    def resolve(self, alias):
+        return self.inner.resolve(alias)
+
+    @staticmethod
+    def _uid(tag: str) -> str:
+        return tag.partition(":")[2].split(":")[-1]
+
+    def stage_a_path(self, uid: str) -> Path:
+        if not uid or uid in (".", "..") or "/" in uid or "\\" in uid:
+            raise ValueError(f"stage-a-from: unusable consult id in tag {uid!r}")
+        return self.root / uid / "stageA.raw.txt"
+
+    def stage_a_text(self, uid: str) -> str:
+        p = self.stage_a_path(uid)
+        if not p.is_file():
+            raise FileNotFoundError(f"stage-a-from: no stored Stage A output for {uid} at {p}")
+        text = p.read_bytes().decode("utf-8")
+        if not text.strip():
+            raise ValueError(f"stage-a-from: stored Stage A output for {uid} is empty at {p}")
+        return text
+
+    def stage_a_sha12(self, uid: str) -> str:
+        self.stage_a_text(uid)
+        return hashlib.sha256(self.stage_a_path(uid).read_bytes()).hexdigest()[:12]
+
+    def chat(self, alias, prompt, system, max_tokens=8000, temperature=0.0, tag=""):
+        if tag.partition(":")[0].startswith("stageA-"):
+            return self.stage_a_text(self._uid(tag))
+        return self.inner.chat(alias, prompt, system, max_tokens, temperature, tag)
+
+    def _chat(self, alias, prompt, system, max_tokens, temperature, tag):
+        return self.chat(alias, prompt, system, max_tokens, temperature, tag)
 
 
 def make_client(kind: str, ledger: UsageLedger | None = None, replay_dir: Path | None = None) -> ModelClient:
