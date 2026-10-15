@@ -50,7 +50,10 @@ export async function readInstalls(db: Db, ids: readonly string[]): Promise<Inst
   return rows.map((r) => ({ room_id: String(r.room_id), hostname: (r.hostname as string | null) ?? null, state_flags: r.state_flags ?? null, state_changed_at: tsOrNull(r.state_changed_at), input_device_name: (r.input_device_name as string | null) ?? null, input_devices: r.input_devices ?? null }));
 }
 
-/** open sessions (recording or paused) of the last 20 h, each with its newest chunk of the last 30 min */
+/**
+ * open sessions (recording or paused), each with its newest chunk of the last 30 min. A session counts when it started within the last 20 h, OR when it has a chunk
+ * created in the last 30 min (kiosks record across days, so a live session can be older than 20 h). A session with neither is dead and stays excluded.
+ */
 export async function readSessions(db: Db, ids: readonly string[], asOf: string): Promise<SessionRow[]> {
   const rows = (await db`
     SELECT s.room_id, s.id, s.status, s.started_at,
@@ -58,7 +61,10 @@ export async function readSessions(db: Db, ids: readonly string[], asOf: string)
              WHERE c.session_id = s.id AND c.created_at > ${asOf}::timestamptz - interval '30 minutes' AND c.created_at <= ${asOf}::timestamptz) AS last_chunk_at
       FROM bench_session s
      WHERE s.room_id = ANY(${ids}::text[]) AND s.status IN ('recording', 'paused')
-       AND s.started_at > ${asOf}::timestamptz - interval '20 hours' AND s.started_at <= ${asOf}::timestamptz
+       AND s.started_at <= ${asOf}::timestamptz
+       AND (s.started_at > ${asOf}::timestamptz - interval '20 hours'
+            OR EXISTS (SELECT 1 FROM bench_chunk c2
+                        WHERE c2.session_id = s.id AND c2.created_at > ${asOf}::timestamptz - interval '30 minutes' AND c2.created_at <= ${asOf}::timestamptz))
      ORDER BY s.started_at DESC
      LIMIT 40
   `) as Array<Record<string, unknown>>;
