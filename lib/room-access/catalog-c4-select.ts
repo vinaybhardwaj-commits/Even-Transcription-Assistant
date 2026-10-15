@@ -32,11 +32,25 @@ export async function selectC4Candidates(days: number, cursor: Cursor, limit: nu
                      JOIN cur ON cur.id = d.question_set_id AND cur.content_sha256 = d.question_set_sha256
                     WHERE x.consult_uid = g.consult_uid AND d.subject_type = 'consult' AND d.order_variant = 'derived' AND d.mode IN ('shadow', 'live') AND d.outcome = 'answered'
                       AND NOT (coalesce(d.evidence, '{}'::jsonb) ? 'no_state'))
-            OR EXISTS (SELECT 1 FROM affect_consult_latest a WHERE a.consult_uid = g.consult_uid))
+            OR EXISTS (SELECT 1 FROM affect_consult_latest a WHERE a.consult_uid = g.consult_uid)
+            -- FU2 (CS-4): a stored entry that still needs its state written (no state yet) or flipping to retired (its set is no longer shadow/live at that sha), even when nothing current is left to send
+            OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(ec.jev -> 'sets') = 'array' THEN ec.jev -> 'sets' ELSE '[]'::jsonb END) e
+                        WHERE e ->> 'state' IS NULL
+                           OR (e ->> 'state' <> 'retired' AND NOT EXISTS (SELECT 1 FROM cur WHERE starts_with(e ->> 'set_id', cur.id || ':') AND cur.content_sha256 = e ->> 'set_sha'))))
      ORDER BY g.t0 ASC, g.consult_uid ASC
      LIMIT ${limit}::int
   `) as Array<{ consult_uid: string; t0: string; stored_jev: unknown; stored_clef: unknown }>;
   return rows.map((r) => ({ consult_uid: r.consult_uid, t0: r.t0, stored_jev: r.stored_jev ?? null, stored_clef: r.stored_clef ?? null }));
+}
+
+export type CurrentSet = { id: string; sha: string };
+
+/** FU2 (CS-4): every set that is shadow or live, with the content sha of its current version (the newest-created one, the same `cur` the two selects above use). Ids and shas only. */
+export async function selectCurrentSets(): Promise<CurrentSet[]> {
+  const rows = (await sql`
+    SELECT DISTINCT ON (s.id) s.id, s.content_sha256 AS sha FROM jev_question_set s WHERE s.status IN ('shadow', 'live') ORDER BY s.id, s.created_at DESC, s.version DESC
+  `) as CurrentSet[];
+  return rows.map((r) => ({ id: r.id, sha: r.sha }));
 }
 
 export type JevPick = {

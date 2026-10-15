@@ -13,10 +13,14 @@ const H = vi.hoisted(() => ({
   sqlCalls: 0,
   posted: [] as unknown[][],
   throwStep: false,
+  beforeIngest: null as null | (() => void),   // FU2: runs just before the real ingest (a row deleted mid-tick)
+  ingestDelayMs: 0,                              // FU2 G3: the ingest takes this long
+  delayMs: 0,                                    // FU2 G3: every select takes this long
 }));
 vi.mock("@/lib/db", () => {
   const fn = (a: TemplateStringsArray | string, ...v: unknown[]) => {
     H.sqlCalls += 1;
+    if (H.delayMs > 0 && typeof a !== "string") return new Promise((res, rej) => setTimeout(() => H.tag!(a, ...v).then(res, rej), H.delayMs));
     if (typeof a === "string") {   // ingestCatalogRows: sql(text, params)
       const params = v[0] as unknown[];
       const parts = a.split(/\$\d+/);
@@ -38,13 +42,13 @@ vi.mock("@/jev/question-sets", async (orig) => {
 });
 vi.mock("@/lib/encounter-catalog/store", async (orig) => {
   const real = (await orig()) as typeof import("@/lib/encounter-catalog/store");
-  return { ...real, ingestCatalogRows: async (rows: unknown[]) => { H.posted.push(rows); return real.ingestCatalogRows(rows as never); } };
+  return { ...real, ingestCatalogRows: async (rows: unknown[], opts?: unknown) => { H.posted.push(rows); H.beforeIngest?.(); if (H.ingestDelayMs > 0) await new Promise((r) => setTimeout(r, H.ingestDelayMs)); return real.ingestCatalogRows(rows as never, opts as never); } };
 });
 
 import { QUESTION_SET_FILES } from "@/jev/question-sets";
 import { setSha, validateSetFile } from "@/lib/jev/worker/sets";
 import { validateBatch } from "@/lib/encounter-catalog/store";
-import { labelOf, runCatalogC4Sync, buildClef, zeroCounts, NOUL_YES_THRESHOLD, CATALOG_SYNC_BUDGET_MS } from "@/lib/jev/worker/catalog-sync";
+import { labelOf, runCatalogC4Sync, buildClef, zeroCounts, NOUL_YES_THRESHOLD, CATALOG_SYNC_BUDGET_MS, CATALOG_SYNC_STATEMENT_TIMEOUT_MS, mergeJev, carriesAllStored, storedEntries, type JevEntry } from "@/lib/jev/worker/catalog-sync";
 
 const HAVE = dockerAvailable();
 const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
@@ -99,7 +103,7 @@ suite("CATALOG-C4-SYNC — Jev and Clef into encounter_catalog", () => {
     }
   }, 300_000);
   afterAll(() => pg.stop());
-  beforeEach(() => { wipe(); H.posted.length = 0; H.sqlCalls = 0; });
+  beforeEach(() => { wipe(); H.posted.length = 0; H.sqlCalls = 0; H.beforeIngest = null; H.ingestDelayMs = 0; H.delayMs = 0; });
   afterEach(() => { delete process.env.CATALOG_C4_SYNC_ENABLED; });
 
   it("flag off (unset, 0) reads NOTHING and posts nothing", async () => {
@@ -358,6 +362,233 @@ suite("CATALOG-C4-SYNC — Jev and Clef into encounter_catalog", () => {
       expect(r).toMatchObject({ posted: 1, updated: 1, unchanged: 0, budget_hit: false, error_class: null });
       expect((H.posted[0] as Array<{ consult_uid: string }>).map((x) => x.consult_uid)).toEqual(["u_real"]);
     });
+  });
+
+  // ---- CATALOG-C4-SYNC-FU2: updateOnly (CS-3), retired entries kept (CS-4), statement timeout, tick + ceiling log ----
+  const NEW_SHA = "d".repeat(64);
+  const bumpVersion = () => pg.exec(`INSERT INTO jev_question_set (id, version, use, subject_type, state_schema, model_pin, content_sha256, status, created_by, ratified_by, ratified_at, created_at)
+             VALUES ('chair-affect', 'v_new', '${fileOf("chair-affect").use}', 'consult', 'x', 'jev-1.13.0', '${NEW_SHA}', 'shadow', 'test', 'v', now(), now() + interval '1 hour')`);
+  const unbump = () => pg.exec("DELETE FROM jev_question_set WHERE version = 'v_new'");
+  const setStatus = (id: string, st: string) => pg.exec(`UPDATE jev_question_set SET status = '${st}' WHERE id = '${id}'`);
+  type Entry = Record<string, unknown>;
+  const setsOf = async (uid: string) => ((await catalogOf(uid))!.jev?.sets ?? []) as Entry[];
+  const noNullJev = () => { for (const b of H.posted) for (const r of b as Array<Record<string, unknown>>) if ("jev" in r) expect(r.jev).not.toBeNull(); };
+  const infoLines = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.map((c) => String(c[0]));
+
+  it("FU2 G1: the ingest is updateOnly: a row deleted mid-tick is counted missing, never inserted, and retried:true is not an error", async () => {
+    on();
+    win("cx_0001@ma", "u_0001"); win("cx_0002@ma", "u_0002");
+    for (const k of ["cx_0001@ma", "cx_0002@ma"]) decide(k, "chair-affect", "distress", { type: "choice", choice: "low" });
+    H.beforeIngest = () => pg.exec("DELETE FROM encounter_catalog WHERE consult_uid = 'u_0002'");
+    const r = await runCatalogC4Sync();
+    expect(r).toMatchObject({ posted: 2, updated: 1, inserted: 0, missing: 1, retried: 1, error_class: null });
+    expect((await rows`SELECT count(*)::int AS c FROM encounter_catalog`)[0]!.c).toBe(1);
+    expect((await rows`SELECT count(*)::int AS c FROM encounter_catalog WHERE consult_uid = 'u_0002'`)[0]!.c).toBe(0);
+  });
+  it("FU2 G1: a normal tick reports missing 0, retried 0, inserted 0 (the unexpected_insert class no longer exists)", async () => {
+    on();
+    win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+    expect(await runCatalogC4Sync()).toMatchObject({ posted: 1, updated: 1, inserted: 0, missing: 0, retried: 0, error_class: null });
+  });
+  it("FU2 G2: every posted entry carries state current; a first tick stores state current", async () => {
+    on();
+    win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" }); decide("cx_0001@ma", "chair-affect", "confusion", { type: "choice", choice: "high" });
+    await runCatalogC4Sync();
+    expect((await setsOf("u_0001")).map((e) => e.state)).toEqual(["current", "current"]);
+  });
+  it("FU2 G2 proof (set version bump): the old-sha entry is retired on tick N and is still there, retired and byte-equal, on N+1 and N+2; the ticks after the first post 0", async () => {
+    on();
+    win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+    await runCatalogC4Sync();
+    const before = (await setsOf("u_0001"))[0]!;
+    expect(before).toMatchObject({ state: "current", set_sha: SHA["chair-affect"] });
+    bumpVersion();
+    try {
+      H.posted.length = 0;
+      expect(await runCatalogC4Sync()).toMatchObject({ posted: 1, updated: 1, retired: 1, error_class: null });   // tick N
+      expect(await setsOf("u_0001")).toEqual([{ ...before, state: "retired" }]);
+      for (let i = 1; i <= 2; i++) {                                                                                 // N+1, N+2
+        H.posted.length = 0;
+        expect(await runCatalogC4Sync()).toMatchObject({ posted: 0, updated: 0, error_class: null });
+        expect(H.posted).toHaveLength(0);
+        expect(await setsOf("u_0001")).toEqual([{ ...before, state: "retired" }]);
+      }
+      // a decision on the new version later: the block holds BOTH the retired and the new current entry
+      pg.exec(`INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, question_set_id, question_set_version, question_set_sha256, order_variant, mode, answer, band, outcome, evidence)
+               VALUES ('jd_newv', 'consult', 'cx_0001@ma', 'distress', 'pv', 'jev-1.13.0', 'chair-affect', 'v_new', '${NEW_SHA}', 'derived', 'shadow', '{"type":"choice","choice":"low"}', 'review', 'answered', '{}')`);
+      await runCatalogC4Sync();
+      const sets = await setsOf("u_0001");
+      expect(sets.map((e) => [e.set_sha, e.state])).toEqual([[NEW_SHA, "current"], [SHA["chair-affect"], "retired"]].sort((a, b) => (a[0]! < b[0]! ? -1 : 1)));
+      expect(sets.find((e) => e.state === "retired")).toEqual({ ...before, state: "retired" });
+      expect((await runCatalogC4Sync())).toMatchObject({ posted: 0 });
+    } finally { unbump(); }
+    noNullJev();
+  });
+  it("FU2 G2 proof (set retirement): the entry is retired on tick N even though nothing current is left to send, and is still there on N+1 and N+2", async () => {
+    on();
+    win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "syn-noul", "is_x", { type: "noul", noul: 0.9 }); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+    await runCatalogC4Sync();
+    const before = await setsOf("u_0001");
+    expect(before.map((e) => e.state)).toEqual(["current", "current"]);
+    setStatus("syn-noul", "retired");
+    try {
+      expect(await runCatalogC4Sync()).toMatchObject({ posted: 1, retired: 1 });                                      // tick N
+      const afterN = await setsOf("u_0001");
+      expect(afterN.find((e) => e.set_id === "chair-affect:distress")).toEqual(before.find((e) => e.set_id === "chair-affect:distress"));
+      expect(afterN.find((e) => e.set_id === "syn-noul:is_x")).toEqual({ ...before.find((e) => e.set_id === "syn-noul:is_x"), state: "retired" });
+      // now the other set goes too: no current entry and no current decision remain; the consult is still a candidate once, then quiet
+      setStatus("chair-affect", "retired");
+      expect(await runCatalogC4Sync()).toMatchObject({ posted: 1, retired: 1 });
+      for (let i = 0; i < 2; i++) {
+        H.posted.length = 0;
+        expect(await runCatalogC4Sync()).toMatchObject({ posted: 0, error_class: null });
+        expect((await setsOf("u_0001")).map((e) => e.state)).toEqual(["retired", "retired"]);
+      }
+      expect((await setsOf("u_0001")).map((e) => [e.set_id, e.label, e.model, e.at, e.band])).toEqual(before.map((e) => [e.set_id, e.label, e.model, e.at, e.band]).sort((a, b) => (String(a[0]) < String(b[0]) ? -1 : 1)));
+    } finally { setStatus("syn-noul", "shadow"); setStatus("chair-affect", "shadow"); }
+    noNullJev();
+  });
+  it("FU2 G2: a stored entry written before FU2 (no state) is classified by sha: current gets state current, an old sha gets retired; then a second tick posts 0", async () => {
+    on();
+    win("cx_0001@ma", "u_0001");
+    const at = "2026-10-14T01:00:00.000Z";
+    const legacy = { sets: [
+      { set_id: "chair-affect:distress", set_sha: SHA["chair-affect"], band: "review", label: "low", model: "jev-1.13.0", at },
+      { set_id: "chair-affect:confusion", set_sha: "c".repeat(64), band: null, label: null, model: "jev-1.13.0", at }] };
+    pg.exec(`UPDATE encounter_catalog SET jev = '${JSON.stringify(legacy)}'::jsonb WHERE consult_uid = 'u_0001'`);
+    expect(await runCatalogC4Sync()).toMatchObject({ posted: 1, retired: 1, error_class: null });
+    expect(await setsOf("u_0001")).toEqual([
+      { ...legacy.sets[1], state: "retired" },      // chair-affect:confusion sorts first
+      { ...legacy.sets[0], state: "current" }]);
+    expect(await runCatalogC4Sync()).toMatchObject({ posted: 0 });
+  });
+  it("FU2 G2: the cap drops the OLDEST retired entries first (counted in capped); the current entries all stay", async () => {
+    on();
+    win("cx_0001@ma", "u_0001");
+    const old = Array.from({ length: 48 }, (_, i) => ({ set_id: `gone:q${String(i).padStart(2, "0")}`, set_sha: "c".repeat(64), band: null, label: null, model: "jev-1.13.0", at: `2026-10-01T00:${String(i).padStart(2, "0")}:00.000Z`, state: "retired" }));
+    pg.exec(`UPDATE encounter_catalog SET jev = '${JSON.stringify({ sets: old })}'::jsonb WHERE consult_uid = 'u_0001'`);
+    for (const q of ["distress", "confusion", "frustration", "pain"]) decide("cx_0001@ma", "chair-affect", q, { type: "choice", choice: "low" });
+    const r = await runCatalogC4Sync();
+    const sets = await setsOf("u_0001");
+    expect(sets).toHaveLength(50);
+    expect(r).toMatchObject({ capped: 48 + 4 - 50, posted: 1 });
+    expect(sets.filter((e) => e.state === "current")).toHaveLength(4);
+    expect(sets.some((e) => e.set_id === "gone:q00")).toBe(false);
+    expect(sets.some((e) => e.set_id === "gone:q01")).toBe(false);
+    expect(sets.some((e) => e.set_id === "gone:q02")).toBe(true);
+  });
+  it("mergeJev: current entries alone over the cap keep the newest 50 current and drop every retired entry; a retired entry whose sha is current again is current", () => {
+    const c = zeroCounts();
+    const cur = [{ id: "s", sha: "a".repeat(40) }];
+    const e = (i: number, sha: string, state?: "current" | "retired"): JevEntry => ({ set_id: `s:q${String(i).padStart(2, "0")}`, set_sha: sha, band: null, label: null, model: "m", at: `2026-10-01T00:${String(i % 60).padStart(2, "0")}:00.000Z`, ...(state ? { state } : {}) });
+    const stored = [...Array.from({ length: 55 }, (_, i) => e(i, "a".repeat(40), "current")), e(60, "b".repeat(40), "retired")];
+    const m = mergeJev(stored, [], cur, c);
+    expect(m.block!.sets).toHaveLength(50);
+    expect(m.block!.sets.every((x) => x.state === "current")).toBe(true);
+    expect(c.capped).toBe(6);
+    expect(m.capDropped.size).toBe(6);
+    expect(carriesAllStored(stored, m.block, m.capDropped)).toBe(true);
+    const back = mergeJev([e(1, "a".repeat(40), "retired")], [], cur, zeroCounts());
+    expect(back.block!.sets[0]).toMatchObject({ state: "current" });
+  });
+  it("FU2 G2 assertion: carriesAllStored rejects a block that lost a stored entry (not dropped by the cap) and a null block; storedEntries refuses an unreadable stored value", () => {
+    const e = (id: string): JevEntry => ({ set_id: id, set_sha: "a".repeat(40), band: null, label: null, model: "m", at: "2026-10-01T00:00:00.000Z", state: "current" });
+    expect(carriesAllStored([e("s:a"), e("s:b")], { sets: [e("s:a")] }, new Set())).toBe(false);
+    expect(carriesAllStored([e("s:a")], null, new Set())).toBe(false);
+    expect(carriesAllStored([], null, new Set())).toBe(true);
+    expect(carriesAllStored([e("s:a"), e("s:b")], { sets: [e("s:a")] }, new Set([`s:b\u0000${"a".repeat(40)}`]))).toBe(true);
+    expect(storedEntries({ sets: "no" })).toBeNull();
+    expect(storedEntries({ sets: [{ set_id: 1 }] })).toBeNull();
+    expect(storedEntries("x")).toBeNull();
+    expect(storedEntries(null)).toEqual([]);
+  });
+  it("FU2 G2: an unreadable stored jev block is left exactly as it is (the row's jev is not posted, invariant_dropped counts it)", async () => {
+    on();
+    win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+    pg.exec(`UPDATE encounter_catalog SET jev = '{"sets":"not-an-array"}'::jsonb WHERE consult_uid = 'u_0001'`);
+    const r = await runCatalogC4Sync();
+    expect(r).toMatchObject({ posted: 0, invariant_dropped: 1 });
+    expect((await catalogOf("u_0001"))!.jev).toEqual({ sets: "not-an-array" });
+    expect(H.posted).toHaveLength(0);
+  });
+  it("FU2 G3: a select slower than the statement timeout stops the step with error_class statement_timeout; nothing is posted; the function does not throw", async () => {
+    on();
+    win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+    expect(CATALOG_SYNC_STATEMENT_TIMEOUT_MS).toBe(15_000);
+    H.delayMs = 400;
+    const r = await runCatalogC4Sync(Date.now, 50);
+    expect(r).toMatchObject({ posted: 0, error_class: "statement_timeout" });
+    expect(H.posted).toHaveLength(0);
+    await new Promise((res) => setTimeout(res, 450));   // let the abandoned statements finish before the next test
+  });
+  it("FU2 G3: an ingest slower than the statement timeout is statement_timeout too (the posted batch is counted as not applied: posted stays 0)", async () => {
+    on();
+    win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+    H.ingestDelayMs = 400;
+    const r = await runCatalogC4Sync(Date.now, 50);
+    expect(r).toMatchObject({ posted: 0, error_class: "statement_timeout" });
+    await new Promise((res) => setTimeout(res, 450));
+  });
+  it("FU2 G3: a timeout in this step leaves the jev-sweep route's body as it was except catalog.error_class", async () => {
+    vi.resetModules();
+    process.env.CRON_SECRET = "s"; process.env.JEV_WORKER_ENABLED = "1";
+    vi.doMock("@/lib/jev/worker/sync", () => ({ syncQuestionSets: async () => [] }));
+    vi.doMock("@/lib/jev/worker/sweeper", () => ({ sweepJev: async () => ({ uses: [], drift_enqueued: false }) }));
+    vi.doMock("@/lib/jev/worker/register", () => ({}));
+    vi.doMock("@/lib/jev/worker/catalog-sync", async (orig) => ({ ...((await orig()) as object), runCatalogC4Sync: async () => ({ ...zeroCounts(), error_class: "statement_timeout" }) }));
+    const { GET } = await import("@/app/api/cron/jev-sweep/route");
+    const { NextRequest } = await import("next/server");
+    const res = await GET(new NextRequest("http://x/api/cron/jev-sweep", { headers: { authorization: "Bearer s" } }));
+    const data = (await res.json()); const d = data.data ?? data;
+    expect(res.status).toBe(200);
+    expect(d.catalog.error_class).toBe("statement_timeout");
+    expect(d.uses).toEqual([]);
+    vi.doUnmock("@/lib/jev/worker/catalog-sync");
+    delete process.env.CRON_SECRET; delete process.env.JEV_WORKER_ENABLED;
+  });
+  it("FU2 G4: an enabled tick emits exactly one tick line and one ceiling line (console.info), counts and tokens only", async () => {
+    on();
+    win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" }); affect("u_0001");
+    const spy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const r = await runCatalogC4Sync();
+      const lines = infoLines(spy);
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toMatch(/^catalog_c4 tick \{/);
+      expect(lines[1]).toMatch(/^catalog_c4 ceiling \{/);
+      const tick = JSON.parse(lines[0]!.slice("catalog_c4 tick ".length));
+      expect(tick).toEqual({ ...r, ms: expect.any(Number) });
+      expect(tick.ms).toBeGreaterThanOrEqual(0);
+      expect(JSON.parse(lines[1]!.slice("catalog_c4 ceiling ".length))).toEqual({ pages: 1, candidates_scanned: 1, max_pages: 10, page_size: 500 });
+      expect(lines.join("\n")).not.toMatch(/u_0001|cx_0001|chair-affect|distress|jev-1\.13/);
+    } finally { spy.mockRestore(); }
+  });
+  it("FU2 G4: the ceiling line counts pages and candidates scanned; a failing tick still logs its two lines with the error_class", async () => {
+    on();
+    bulkWins("p", 520, 3); bulkDecisions("p", 520, SHA["chair-affect"]!, "v0", "{}");
+    const spy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await runCatalogC4Sync();
+      expect(JSON.parse(infoLines(spy)[1]!.slice("catalog_c4 ceiling ".length))).toEqual({ pages: 1, candidates_scanned: 500, max_pages: 10, page_size: 500 });
+      spy.mockClear();
+      H.delayMs = 300;
+      await runCatalogC4Sync(Date.now, 40);
+      const lines = infoLines(spy);
+      expect(lines).toHaveLength(2);
+      expect(JSON.parse(lines[0]!.slice("catalog_c4 tick ".length)).error_class).toBe("statement_timeout");
+      await new Promise((res) => setTimeout(res, 350));
+    } finally { spy.mockRestore(); }
+  });
+  it("FU2 G4: flag off (unset, 0) and an unrecognised flag value emit NO console.info line", async () => {
+    win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+    const spy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      for (const v of [undefined, "0", "maybe"]) {
+        if (v === undefined) delete process.env.CATALOG_C4_SYNC_ENABLED; else process.env.CATALOG_C4_SYNC_ENABLED = v;
+        await runCatalogC4Sync();
+      }
+      expect(spy).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
   });
 });
 
