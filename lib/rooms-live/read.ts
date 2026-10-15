@@ -50,16 +50,26 @@ export async function readInstalls(db: Db, ids: readonly string[]): Promise<Inst
   return rows.map((r) => ({ room_id: String(r.room_id), hostname: (r.hostname as string | null) ?? null, state_flags: r.state_flags ?? null, state_changed_at: tsOrNull(r.state_changed_at), input_device_name: (r.input_device_name as string | null) ?? null, input_devices: r.input_devices ?? null }));
 }
 
-/** open sessions (recording or paused) of the last 20 h, each with its newest chunk of the last 30 min */
+/**
+ * open sessions (recording or paused), each with its newest chunk of the last 30 min. A session counts when it started within the last 20 h, OR when it has a chunk
+ * created in the last 30 min (kiosks record across days, so a live session can be older than 20 h). A session with neither is dead and stays excluded.
+ * The inner select bounds the candidates to sessions started within the last 7 days and computes last_chunk_at once per session (an index lookup per session);
+ * OFFSET 0 keeps the planner from flattening it, so the outer OR reads that column instead of scanning bench_chunk. A session older than 7 days never shows open.
+ */
 export async function readSessions(db: Db, ids: readonly string[], asOf: string): Promise<SessionRow[]> {
   const rows = (await db`
-    SELECT s.room_id, s.id, s.status, s.started_at,
-           (SELECT max(c.created_at) FROM bench_chunk c
-             WHERE c.session_id = s.id AND c.created_at > ${asOf}::timestamptz - interval '30 minutes' AND c.created_at <= ${asOf}::timestamptz) AS last_chunk_at
-      FROM bench_session s
-     WHERE s.room_id = ANY(${ids}::text[]) AND s.status IN ('recording', 'paused')
-       AND s.started_at > ${asOf}::timestamptz - interval '20 hours' AND s.started_at <= ${asOf}::timestamptz
-     ORDER BY s.started_at DESC
+    SELECT q.room_id, q.id, q.status, q.started_at, q.last_chunk_at
+      FROM (
+        SELECT s.room_id, s.id, s.status, s.started_at,
+               (SELECT max(c.created_at) FROM bench_chunk c
+                 WHERE c.session_id = s.id AND c.created_at > ${asOf}::timestamptz - interval '30 minutes' AND c.created_at <= ${asOf}::timestamptz) AS last_chunk_at
+          FROM bench_session s
+         WHERE s.room_id = ANY(${ids}::text[]) AND s.status IN ('recording', 'paused')
+           AND s.started_at <= ${asOf}::timestamptz AND s.started_at > ${asOf}::timestamptz - interval '7 days'
+         OFFSET 0
+      ) q
+     WHERE q.started_at > ${asOf}::timestamptz - interval '20 hours' OR q.last_chunk_at IS NOT NULL
+     ORDER BY q.started_at DESC
      LIMIT 40
   `) as Array<Record<string, unknown>>;
   return rows.map((r) => ({ room_id: String(r.room_id), id: String(r.id), status: String(r.status), started_at: iso(r.started_at), last_chunk_at: tsOrNull(r.last_chunk_at) }));
