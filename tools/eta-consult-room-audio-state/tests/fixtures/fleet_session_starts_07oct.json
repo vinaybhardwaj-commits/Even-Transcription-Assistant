@@ -1,0 +1,10 @@
+{
+  "_note": "Validation data from FLEET 10:35 IST, relayed by consult-lead. 7 Oct 2026 session start times (IST). The labels in the tests are derived from kiosk_health_events, not from this list; the list is only the cross-check. Room mapping: Dietary -> room_ymch4bxu is my assumption (machine EHRC-DISCUSSION); ORB2 is room_mah3aspr, which has no kiosk-health rows.",
+  "date": "2026-10-07",
+  "starts_ist": {"room_pnyc9u49": "09:33", "room_qyzghzaf": "09:33", "room_bh6jtq4t": "09:33", "room_d74hhmc4": "09:33",
+                 "room_87frpus9": "09:34", "room_mah3aspr": "09:34", "room_yh3etjpf": "09:53", "room_ux92qpws": "10:24",
+                 "room_4ggnkg5x": "10:28", "room_ymch4bxu": "10:30"},
+  "names": {"room_pnyc9u49": "OPD6", "room_qyzghzaf": "OPD7", "room_bh6jtq4t": "Cardiology/ECHO", "room_d74hhmc4": "Audiometry",
+            "room_87frpus9": "OPD3", "room_mah3aspr": "ORB2", "room_yh3etjpf": "OPD1", "room_ux92qpws": "OPD4",
+            "room_4ggnkg5x": "OPD5", "room_ymch4bxu": "Dietary"}
+}

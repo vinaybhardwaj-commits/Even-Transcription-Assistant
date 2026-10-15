@@ -1,0 +1,1373 @@
+{
+"_note": "Real kiosk_health_events rows, trimmed to the fields the cause labelling needs (read-only export)",
+"horizon": "2026-10-07T05:10:55.342000+00:00",
+"rows": [
+{
+"id": 7288,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:30:39.761000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7291,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:30:55.391000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7307,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:31:39.521000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7305,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:31:39.761000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7313,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:31:55.505000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7332,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:32:39.761000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7334,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:32:55.462000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7335,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:33:03.778000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7354,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:33:39.761000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7357,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:33:55.392000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7371,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:34:39.761000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7375,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:34:55.392000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7389,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:35:39.760000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7393,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:35:55.392000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7411,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:36:39.760000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7414,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:36:49.523000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7422,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:36:55.517000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7436,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:37:39.760000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7440,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:37:55.426000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7442,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:38:03.779000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7457,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:38:39.760000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7458,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:38:55.451000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7479,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:39:39.760000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7485,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:39:55.491000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7497,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:40:39.760000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7499,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:40:55.510000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7517,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:41:39.745000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7515,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:41:49.546000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7518,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:41:55.512000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7533,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:42:39.744000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7535,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:42:55.400000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7539,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:43:13.763000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7557,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:43:39.744000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7560,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:43:55.524000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7582,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:44:39.744000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7586,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:44:55.525000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7611,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:45:39.743000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7618,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:45:55.528000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7630,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:46:39.743000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7637,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:46:55.508000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7639,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:46:59.543000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7660,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:47:39.743000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7664,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:47:55.528000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7673,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:48:23.762000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7683,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:48:39.743000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7687,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:48:55.526000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7701,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:49:39.742000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7703,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:49:55.510000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7727,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:50:39.742000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7728,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:50:55.504000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7755,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:51:39.742000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7756,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:51:55.530000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7763,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:52:09.494000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7778,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:52:39.742000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7785,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:52:55.518000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7799,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:53:33.761000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7805,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:53:39.741000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7807,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:53:55.391000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7819,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:54:39.741000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7821,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:54:55.508000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7834,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:55:22.917000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "audio.error",
+"payload": {
+"class": "start_failure",
+"code_name": "kIOReturnNotResponding",
+"detail": "iokit_not_responding",
+"start_failure": true
+}
+},
+{
+"id": 7835,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:55:22.930000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "audio.error",
+"payload": {
+"class": "hal_error",
+"code_name": null,
+"detail": "hal_error",
+"start_failure": false
+}
+},
+{
+"id": 7836,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:55:39.744000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7832,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:55:42.926000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "audio.devices",
+"payload": {
+"trigger": "usb_change",
+"usb_added": [],
+"usb_removed": [],
+"devices": null,
+"usb_audio": [
+{
+"name": "C270 HD WEBCAM"
+}
+]
+}
+},
+{
+"id": 7833,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:55:46.512000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "audio.devices",
+"payload": {
+"trigger": "usb_change",
+"usb_added": null,
+"usb_removed": null,
+"devices": [
+{
+"name": "CRSM24FMDA029"
+},
+{
+"name": "Mac mini Speakers"
+}
+],
+"usb_audio": null
+}
+},
+{
+"id": 7840,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:55:55.458000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7837,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:55:59.387000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "audio.error",
+"payload": {
+"class": "start_failure",
+"code_name": "kIOReturnNotResponding",
+"detail": "iokit_not_responding",
+"start_failure": true
+}
+},
+{
+"id": 7838,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:55:59.387000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "audio.error",
+"payload": {
+"class": "start_failure",
+"code_name": "kIOReturnNotResponding",
+"detail": "iokit_not_responding",
+"start_failure": true
+}
+},
+{
+"id": 7839,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:55:59.432000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "audio.error",
+"payload": {
+"class": "hal_error",
+"code_name": null,
+"detail": "hal_error",
+"start_failure": false
+}
+},
+{
+"id": 7852,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:56:39.756000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7858,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:56:55.282000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7856,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:56:58.496000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "audio.devices",
+"payload": {
+"trigger": "usb_change",
+"usb_added": [],
+"usb_removed": [
+{
+"name": "C270 HD WEBCAM"
+}
+],
+"devices": null,
+"usb_audio": []
+}
+},
+{
+"id": 7857,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:57:01.926000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "audio.devices",
+"payload": {
+"trigger": "usb_change",
+"usb_added": null,
+"usb_removed": null,
+"devices": [
+{
+"name": "CRSM24FMDA029"
+},
+{
+"name": "Mac mini Speakers"
+}
+],
+"usb_audio": null
+}
+},
+{
+"id": 7866,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:57:19.346000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7870,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:57:39.755000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7873,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:57:55.473000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7881,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:58:33.772000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7886,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:58:39.758000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7887,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:58:55.295000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7897,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T11:59:39.756000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7899,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T11:59:55.446000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7911,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:00:39.757000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7918,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:00:55.520000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7943,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:01:39.754000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7944,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:01:55.493000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7957,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:02:19.528000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7964,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:02:39.754000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7965,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:02:55.519000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7974,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:03:33.775000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 7983,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:03:39.754000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7985,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:03:55.518000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 7994,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:04:39.756000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8003,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:04:55.419000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8009,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:05:39.758000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8011,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:05:55.508000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8024,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:06:39.754000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8029,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:06:55.508000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8040,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:07:29.456000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 8043,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:07:39.758000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8050,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:07:55.520000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8062,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:08:33.775000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 8066,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:08:39.757000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8070,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:08:55.505000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8080,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:09:39.757000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8081,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:09:55.089000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8088,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:10:39.757000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8093,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:10:55.460000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8100,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:11:39.765000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8104,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:11:55.372000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8115,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:12:29.496000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 8119,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:12:39.767000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8123,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:12:55.279000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8134,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:13:33.788000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 8141,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:13:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8143,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:13:55.398000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8156,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:14:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8157,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:14:55.398000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8169,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:15:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8170,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:15:55.159000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8183,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:16:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8185,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:16:55.257000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8201,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:17:39.285000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 8205,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:17:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8208,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:17:55.222000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8225,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:18:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8226,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:18:43.789000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 8230,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:18:55.381000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8244,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:19:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8247,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:19:55.291000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8261,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:20:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8264,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:20:55.275000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8277,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:21:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8283,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:21:55.425000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8296,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:22:39.436000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 8298,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:22:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8300,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:22:55.449000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8313,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:23:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8314,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:23:53.789000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 8315,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:23:55.414000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8325,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:24:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8326,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:24:55.264000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8335,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:25:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8337,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:25:55.144000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8345,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:26:39.769000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8347,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:26:55.186000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8359,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:27:39.777000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8358,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:27:49.349000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 8360,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:27:55.343000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8376,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:28:39.777000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8378,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:28:53.797000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "recorder.status",
+"payload": {
+"state": "recording",
+"session_open": "yes"
+}
+},
+{
+"id": 8379,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:28:55.311000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8396,
+"room_id": "room_d74hhmc4",
+"ts": "2026-10-06T12:29:39.777000+00:00",
+"boot_id": "6F3DB43F-2730-4691-A3FF-C49D99D68137",
+"kind": "heartbeat",
+"payload": {}
+},
+{
+"id": 8401,
+"room_id": "room_ux92qpws",
+"ts": "2026-10-06T12:29:55.387000+00:00",
+"boot_id": "9CE97F5D-4D51-4AED-8523-F08E686E2531",
+"kind": "heartbeat",
+"payload": {}
+}
+]
+}

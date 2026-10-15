@@ -1,0 +1,12 @@
+[Unit]
+Description=Room audio state: rescan tape manifest, classify, write today and yesterday to Neon
+
+[Service]
+Type=oneshot
+# runs the pinned deploy worktree (moved only by deploy.sh from a clean commit), never the live working tree
+WorkingDirectory=%h/oc/consult/audio/deploy
+# the venv lives outside both trees (~/oc/consult/audio/ras-venv, made from requirements.txt); the code comes from the
+# deploy worktree (python -m puts the cwd first)
+ExecStart=%h/oc/consult/audio/ras-venv/bin/python -m ras.hourly
+# the credential is read from ~/.config/eta-audio/db.url by the writer; nothing is passed on the command line
+TimeoutStartSec=30min
