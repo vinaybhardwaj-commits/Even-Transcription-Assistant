@@ -1,0 +1,47 @@
+# Snippet for Vinay — DO NOT auto-apply (needs sudo).
+# Goal: expose local SER at emotion.llmvinayminihome.uk → 127.0.0.1:8086
+#
+# Find the live cloudflared config (common locations):
+#   /opt/homebrew/etc/cloudflared/config.yml
+#   /usr/local/etc/cloudflared/config.yml
+#   ~/.cloudflared/config.yml
+#   or the path shown by: launchctl print system/com.cloudflare.cloudflared  (or gui variant)
+#
+# Add this ingress rule ABOVE the catch-all `service: http_status:404` rule:
+
+ingress:
+  # ... existing hostnames ...
+  - hostname: emotion.llmvinayminihome.uk
+    service: http://127.0.0.1:8086
+  # - service: http_status:404   # keep as last rule
+
+# Also ensure a DNS CNAME (or use cloudflared route):
+#   emotion.llmvinayminihome.uk → <your-tunnel-id>.cfargotunnel.com
+#
+# Exact sudo steps for Vinay (adjust CONFIG path after locating it):
+#
+#   1) Locate config:
+#        sudo find /opt/homebrew /usr/local /Library /Users/vinaybhardwaj -name 'config.yml' 2>/dev/null | rg cloudflare
+#      or:
+#        ps aux | rg '[c]loudflared' ; launchctl print system | rg -i cloudflare
+#
+#   2) Backup + edit:
+#        CONFIG=/path/to/cloudflared/config.yml
+#        sudo cp "$CONFIG" "$CONFIG.bak.$(date +%Y%m%d-%H%M%S)"
+#        sudo nano "$CONFIG"
+#      Insert the hostname/service pair above the 404 catch-all.
+#
+#   3) DNS route (if not already present):
+#        sudo cloudflared tunnel route dns <TUNNEL_NAME_OR_ID> emotion.llmvinayminihome.uk
+#
+#   4) Reload cloudflared (pick what matches how it is supervised):
+#        sudo launchctl kickstart -k system/com.cloudflare.cloudflared
+#      or if brew service:
+#        sudo brew services restart cloudflared
+#      or if a LaunchDaemon plist:
+#        sudo launchctl bootout system /Library/LaunchDaemons/com.cloudflare.cloudflared.plist
+#        sudo launchctl bootstrap system /Library/LaunchDaemons/com.cloudflare.cloudflared.plist
+#
+#   5) Verify:
+#        curl -fsS https://emotion.llmvinayminihome.uk/health
+#        curl -fsS -X POST https://emotion.llmvinayminihome.uk/inference -F "file=@/tmp/ser-smoke.wav;type=audio/wav"

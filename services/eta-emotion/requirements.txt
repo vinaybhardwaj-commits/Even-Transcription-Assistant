@@ -1,0 +1,11 @@
+torch>=2.8
+torchaudio>=2.8
+transformers>=4.40
+fastapi>=0.110
+uvicorn[standard]>=0.27
+soundfile>=0.12
+numpy>=1.26
+python-multipart>=0.0.9
+compressed-tensors>=0.15.0
+funasr>=1.2
+modelscope>=1.14
