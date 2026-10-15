@@ -521,6 +521,10 @@ class CAR9InboxTests(unittest.TestCase):
             e.heal(self.line(**kw))
         self.assertEqual(self.queued(e), [])
 
+    def test_the_result_word_is_case_insensitive(self):
+        e = CAEnv(); e.heal(self.line(result="OK")); e.heal(self.line(result="No_Restart_Seen"))
+        self.assertEqual([("result=ok" in q, "result=no_restart_seen" in q) for q in self.queued(e)], [(True, False), (False, True)])
+
     def test_no_kiosk_free_text_reaches_the_line(self):
         e = CAEnv(); e.heal(self.line(result="ok; echo SECRET", reason="SECRET reason", before="SECRET before", after="SECRET after coreaudiod_pid_changed=true", target="SECRET"))
         q = self.queued(e); self.assertEqual(len(q), 1); self.assertNotIn("SECRET", q[0]); self.assertIn("result=other", q[0]); self.assertEqual(len(q[0].splitlines()), 1)
@@ -583,6 +587,13 @@ class CAResultGateTests(unittest.TestCase):
         e.heal({"kind": "capture_dead", "result": "healed", "action": "coreaudiod_restart"})      # a later successful heal line: no new case, run keeps counting
         self.assertEqual(e.open()["capture_dead"]["suppressed_count"], 0)
         e.health({"zero_ratio": 0.0}); self.assertEqual(e.open(), {})
+
+    def test_a_shadow_kind_line_opens_its_case_but_never_queues_the_inbox(self):
+        for extra in ({"mode": "shadow"}, {"shadow": True}, {"mode": "shadow", "shadow": True}):
+            e = CAEnv(); e.heal(dict({"kind": "capture_dead", "result": "escalated", "action": "escalate"}, **extra))
+            self.assertEqual(list(e.open()), ["capture_dead"]); self.assertEqual(e.router.store.list_inbox_pending(), [])
+        e = CAEnv(); e.heal({"kind": "capture_dead", "result": "escalated", "action": "escalate", "mode": "heal", "shadow": False})
+        self.assertEqual(len(e.router.store.list_inbox_pending()), 1)             # a heal-mode line still queues
 
     def test_the_night_heal_and_the_shadow_would_do_page_nobody(self):
         e = CAEnv(TUE_22H)

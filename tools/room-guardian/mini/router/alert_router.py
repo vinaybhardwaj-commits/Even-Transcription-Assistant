@@ -42,6 +42,7 @@ OPEN_KINDS = URGENT | {"heal_message_invalid"}          # kinds that open a case
 # An ACK also CLOSES these (order: "closes on recovery or ACK"). recorder_changed and heal_message_invalid have no recovery signal, so ACK is their only close.
 ACK_CLOSE_KINDS = CA_KINDS | {"heal_message_invalid"}
 RECOVERY_KIND = "recovered"
+ACK_ONLY_KINDS = {"recorder_disturbed", "heal_message_invalid"}     # a server `recovered` row never closes these: only an ACK does
 _ACK_RE = re.compile(r"^ACK\s+room-alert-(\d+)\b", re.I)
 _ID_RE = re.compile(r"room-alert-(\d+)\b", re.I)
 _MARK_RE = re.compile(r"room-alert-(\d+) .*\[page (\d+)\]")
@@ -128,7 +129,7 @@ class Router:
             return
         for room in rooms:
             if kind == RECOVERY_KIND:
-                self.close_room(bus, room, "recovery")
+                self.close_room(bus, room, "recovery", keep=ACK_ONLY_KINDS)
             elif kind in OPEN_KINDS:
                 self._open_or_bump(bus, room, kind, rid, row)
         self.store.mark_routed(rid, self.clock())    # AFTER the work: a crash before this replays the row (a late duplicate), never loses it
@@ -154,9 +155,9 @@ class Router:
         self.store.insert({"first_id": rid, "room_id": room, "kind": kind, "opened_at": now, "last_paged_at": None, "page_count": 0,
                            "suppressed_count": 0, "acked_by": None, "acked_at": None, "closed_at": None, "close_reason": None})
 
-    def close_room(self, bus, room, reason, kind=None):
+    def close_room(self, bus, room, reason, kind=None, keep=()):
         for c in self.store.list_open():
-            if c["room_id"] == room and (kind is None or c["kind"] == kind):
+            if c["room_id"] == room and (kind is None or c["kind"] == kind) and c["kind"] not in keep:
                 self.store.update(c["first_id"], closed_at=self.clock(), close_reason=reason)
                 self.local["v_sent"].pop(str(c["first_id"]), None)
                 self.store.add_note(f"room-alert-{c['first_id']} {c['kind']} in {room} CLOSED ({reason}) after {self._age_min(c)} min. "
