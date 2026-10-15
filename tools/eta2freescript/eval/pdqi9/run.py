@@ -289,7 +289,7 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
     }
     (out / "floors.json").write_text(json.dumps(fl, indent=1, default=str), encoding="utf-8")
     (out / "jev.json").write_text(json.dumps(jev_res, indent=1), encoding="utf-8")
-    (out / "scores.json").write_text(json.dumps([{"uid": u, "arm": ar, "combo": c, "note_id": judge.note_id(u, ar), **stamp, **(v or {"parse_failure": True})}
+    (out / "scores.json").write_text(json.dumps([{"uid": u, "arm": ar, "combo": c, "note_id": judge.note_id(u, texts[(u, ar)]), **stamp, **(v or {"parse_failure": True})}
                                                  for (u, ar, c), v in sorted(scores.items())], indent=1), encoding="utf-8")
     jp = scoreboard.write(row, Path(a.scoreboard))
     print(f"scored {len(uids)} consults, split {split_name}, floors {'PASS' if table['all_pass'] else 'FAIL'}, row -> {jp.name}")
