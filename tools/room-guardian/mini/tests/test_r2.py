@@ -481,6 +481,28 @@ class SF3PgdumpSignals(unittest.TestCase):
         self.assertEqual([x for x in self.files() if x.endswith(".part")], [])
         self.assertTrue(any(x.endswith(".bad") for x in self.files("_to_delete"))); self.assertEqual(self.case_open(), ["backup_failed"])
 
+    def fixed_date(self):
+        with open(os.path.join(self.bin, "date"), "w") as f: f.write("#!/bin/sh\necho 20261015-000000\n")      # PG_BIN comes first on PATH: the script's STAMP is now known
+        os.chmod(os.path.join(self.bin, "date"), 0o755)
+
+    def test_a_name_clash_in_to_delete_gets_a_suffix_on_failure(self):
+        import signal
+        self.fixed_date(); td = os.path.join(self.gh, "backup", "_to_delete"); os.makedirs(td)
+        open(os.path.join(td, "pipe-20261015-000000.dump.part.bad"), "w").write("OLD")
+        p = self.start(2); self.wait_part(); p.send_signal(signal.SIGTERM); p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 143)
+        self.assertEqual(sorted(self.files("_to_delete")), ["pipe-20261015-000000.dump.part.bad", "pipe-20261015-000000.dump.part.bad.1"])
+        self.assertEqual(open(os.path.join(td, "pipe-20261015-000000.dump.part.bad")).read(), "OLD")             # not overwritten
+
+    def test_a_name_clash_in_to_delete_gets_a_suffix_on_rotation(self):
+        self.fixed_date(); bk = os.path.join(self.gh, "backup"); td = os.path.join(bk, "_to_delete"); os.makedirs(td)
+        for i in range(1, 16): open(os.path.join(bk, f"pipe-20260101-{i:06d}.dump"), "w").write(f"d{i}")
+        open(os.path.join(td, "pipe-20260101-000001.dump"), "w").write("OLD")
+        p = self.start(0); p.communicate(timeout=30); self.assertEqual(p.returncode, 0)
+        self.assertEqual(len([x for x in self.files() if x.startswith("pipe-")]), 14)
+        self.assertEqual(sorted(self.files("_to_delete")), ["pipe-20260101-000001.dump", "pipe-20260101-000001.dump.1", "pipe-20260101-000002.dump"])
+        self.assertEqual(open(os.path.join(td, "pipe-20260101-000001.dump")).read(), "OLD"); self.assertEqual(open(os.path.join(td, "pipe-20260101-000001.dump.1")).read(), "d1")
+
     def test_term_to_the_whole_process_group_leaves_no_part(self):
         import signal
         p = self.start(30); self.wait_part(); os.killpg(p.pid, signal.SIGTERM); p.communicate(timeout=30)   # what launchd does on unload
@@ -514,6 +536,26 @@ class FUDeployStep(unittest.TestCase):
             bk = [d for d in os.listdir(os.path.join(gh, "backup-src")) if d.startswith("deploy-")]
             self.assertEqual(len(bk), 1); self.assertTrue(open(os.path.join(gh, "backup-src", bk[0], "app", "router", "alert_router.py")).read().endswith("# drift\n"))   # replaced file was kept
             self.assertNotIn("# drift", open(live).read())
+
+    def test_a_missing_source_stops_the_deploy_before_anything_is_copied(self):
+        import shutil, subprocess
+        with tempfile.TemporaryDirectory() as t:
+            tree = os.path.join(t, "mini"); shutil.copytree(os.path.join(os.path.dirname(_deploy_script()), ".."), tree, ignore=shutil.ignore_patterns("__pycache__"))
+            os.remove(os.path.join(tree, "router", "ubus_bus.py"))              # the LAST-but-one file in the copy order would have left a partial deploy before
+            os.remove(os.path.join(tree, "tests", "selftest", "selftest3.py"))
+            live = os.path.join(t, "live"); os.makedirs(live)
+            r = subprocess.run(["/bin/bash", os.path.join(tree, "ops", "deploy.sh")], env=dict(os.environ, GUARDIAN_HOME=live), capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 1); self.assertIn("2 source file(s) missing; nothing was copied", r.stderr)
+            self.assertIn("ubus_bus.py", r.stderr); self.assertIn("selftest3.py", r.stderr)
+            self.assertEqual(os.listdir(live), [])                              # nothing was copied, no SOURCE-SHA, no backup folder
+
+    def test_each_deploy_gets_its_own_backup_folder(self):
+        import re
+        with tempfile.TemporaryDirectory() as gh:
+            self.run_deploy(gh); open(os.path.join(gh, "app", "router", "alert_router.py"), "a").write("# d1\n"); self.run_deploy(gh)
+            open(os.path.join(gh, "app", "router", "alert_router.py"), "a").write("# d2\n"); self.run_deploy(gh)
+            names = sorted(os.listdir(os.path.join(gh, "backup-src"))); self.assertEqual(len(names), 2)
+            for n in names: self.assertRegex(n, r"^deploy-\d{8}-\d{6}-\d+$")
 
     def test_deploy_restarts_nothing(self):
         src = open(_deploy_script()).read()

@@ -6,7 +6,7 @@
 set -euo pipefail
 MINI="$(cd "$(dirname "$0")/.." && pwd)"
 LIVE="${GUARDIAN_HOME:-$HOME/oc/fleet-access/guardian}"
-STAMP="$(date +%Y%m%d-%H%M%S)"
+STAMP="$(date +%Y%m%d-%H%M%S)-$$"           # seconds plus the pid: two deploys in one second never share a backup folder
 BK="$LIVE/backup-src/deploy-$STAMP"
 map=()
 for f in alert_router run_router ubus_bus router_relay relay_watcher; do map+=("router/$f.py:app/router/$f.py"); done
@@ -15,10 +15,15 @@ for f in test_router test_subscriber test_r2 test_control_contract; do map+=("te
 for f in run-pipe add-key grant-admin init-schema pipe-ssh run-postgres outbound-check; do map+=("pipe/$f.sh:scripts/$f.sh"); done
 map+=("ops/pgdump.sh:scripts/pgdump.sh" "ops/backup-case.py:scripts/backup-case.py")
 for f in fake-room selftest selftest2 selftest3; do map+=("tests/selftest/$f.py:scripts/$f.py"); done
+# Pre-check EVERY source before anything is copied, so a missing file can never leave a partial deploy.
+missing=0
+for pair in "${map[@]}"; do
+  [ -f "$MINI/${pair%%:*}" ] || { echo "deploy: missing $MINI/${pair%%:*}" >&2; missing=$((missing + 1)); }
+done
+[ "$missing" = 0 ] || { echo "deploy: $missing source file(s) missing; nothing was copied" >&2; exit 1; }
 changed=0
 for pair in "${map[@]}"; do
   src="$MINI/${pair%%:*}"; dst="$LIVE/${pair##*:}"
-  [ -f "$src" ] || { echo "deploy: missing $src" >&2; exit 1; }
   if [ -f "$dst" ] && cmp -s "$src" "$dst"; then continue; fi
   mkdir -p "$(dirname "$dst")"
   if [ -f "$dst" ]; then mkdir -p "$BK/$(dirname "${pair##*:}")"; cp -p "$dst" "$BK/${pair##*:}"; fi
