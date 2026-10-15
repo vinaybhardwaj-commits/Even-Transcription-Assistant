@@ -97,15 +97,31 @@ def sanitize_note(note: str) -> str:
     return sanitize_note_ex(note)[0]
 
 
-def span_errors(removed: list[tuple[str | None, str]]) -> list[str]:
-    """FRX-L1: a removed span rejects the consult unless its line is positively under a non-order heading (and the span is not a
-    dose / slot field word). Order lines and unattributed lines (head None) always reject. A speaker label on a General Advice
-    line is only counted."""
-    from .validate import _D4_FIELDS  # lazy: validate does not import this module, but keep the import cycle-proof
+# FRX-L1 allowlist (FIX3). A removed span is benign only if its content fully matches this, after _span_key.
+SPAN_ALLOWLIST = re.compile(r"s[0-9]{1,3}")
+"""SPAN_ALLOWLIST: the ONLY known-harmless bracket content, a speaker label `s` + 1-3 ASCII digits (`[S1]`, `[ s12 ]`).
+It may grow only by a lead/fable decision. Every other removed span rejects the consult, wherever it sits."""
 
+
+def _span_key(span: str) -> str:
+    """The content of a removed `[...]` span, NFKC, Cf removed, whitespace collapsed, casefolded. For the allowlist check only."""
+    s = span.strip()
+    if s.startswith("["):
+        s = s[1:]
+    if s.endswith("]"):
+        s = s[:-1]
+    s = unicodedata.normalize("NFKC", "".join(c for c in s if unicodedata.category(c) != "Cf"))
+    s = "".join(c for c in s if unicodedata.category(c) != "Cf")
+    return re.sub(r"\s+", " ", s).strip().casefold()
+
+
+def span_errors(removed: list[tuple[str | None, str]]) -> list[str]:
+    """FRX-L1, fail-closed on the SPAN: a removed span is benign only if its content is on SPAN_ALLOWLIST (a speaker label) AND its
+    line is attributed to a non-order heading. Every other span rejects, on any line, under any heading, or before any heading
+    ("unattributed")."""
     heads: list[str] = []
     for head, span in removed:
-        if head is None or head in ORDER_HEADINGS or span.strip("[] \t").lower() in _D4_FIELDS:
+        if head is None or head in ORDER_HEADINGS or not SPAN_ALLOWLIST.fullmatch(_span_key(span)):
             h = head or "unattributed"
             if h not in heads:
                 heads.append(h)

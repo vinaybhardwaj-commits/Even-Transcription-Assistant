@@ -2,6 +2,8 @@
 import copy
 import json
 import random
+import re
+import unicodedata
 
 import pytest
 from conftest import CONSULTS, MODEL, stage_a
@@ -21,7 +23,8 @@ SPANS = ["[frequency]", "[duration]", "[dose]", "[Name]", "[ STRENGTH ]", "[S1]"
 
 
 def expected_reject(head, span):
-    return head in ORDER_HEADINGS or span.strip("[] ").lower() in _D4_FIELDS
+    """FIX3: a span is benign only if it is a speaker label `s`+1-3 digits AND its line is a non-order line."""
+    return head is None or head in ORDER_HEADINGS or not re.fullmatch(r"s[0-9]{1,3}", span.strip("[] ").lower())
 
 
 def gen_note(r):
@@ -349,7 +352,7 @@ def test_fx2_continuation_of_an_order_section_rejects(head):
 @pytest.mark.parametrize("head", NON_ORDER)
 def test_fx2_speaker_label_on_properly_attributed_non_order_line_still_posts(head):
     for pre in ("", "  ", "[S1] ", "​", "- ", "："[:0]):
-        text = f"Medication: x\n{pre}{head}: keep warm [S1]\n{head.upper()}​ : and more [S0|doctor]"
+        text = f"Medication: x\n{pre}{head}: keep warm [S1]\n{head.upper()}​ : and more [S2]"
         out, removed = sanitize_note_ex(text)
         assert removed and all(h == head for h, _ in removed), (head, pre, removed)
         assert span_errors(removed) == []
@@ -480,3 +483,162 @@ def _kills(monkeypatch, which):
 @pytest.mark.parametrize("which", ["no_cf", "no_casefold", "no_anywhere", "unattributed_benign"])
 def test_fx2_mutation_is_caught(monkeypatch, which):
     assert _kills(monkeypatch, which), f"mutant {which} survived"
+
+
+# --- FIX3: fail closed on the SPAN. Benign only if the content is a speaker label AND the line is not an order line. ---
+VARIANT_HEADS = ["Follow-up", "Followup", "Follow Up", "Investigations", "Investigation", "Further Investigations", "Referral", "Referred to",
+                 "Refer", "Medications", "Medicines", "Medicine", "Rx", "Tab", "Prescription", "Drugs", "Procedure", "Surgery", "Review",
+                 "М\u0435dication", "Medicati\u00f3n", "Medicatio\u0301n"]
+LAYOUTS = {"col0": "{h}: {b}", "indent": "   {h}: {b}", "no_sep": "{h} {b}", "dash": "{h} - {b}", "inline": "General Advice: rest; {h}: {b}",
+           "tab": "\t{h}: {b}"}
+ALLOWED = ["[S1]", "[s1]", "[ S12 ]", "[S123]", "[\u200bS1]", "[\uff33\uff11]", "[ s  1 ]".replace("  ", " ").replace(" 1", "1")]
+HARMFUL = ["[500 mg]", "[three times a day]", "[dose]", "[Name]", "[frequency?]", "[dose/frequency]", "[]", "[ ]", "[?]", "[see note]", "[1]",
+           "[S]", "[S1234]", "[S1|doctor]", "[S0|doctor]", "[S 1 2]", "[do\u200bse]", "[d\u00adose]", "[\uff44\uff4f\uff53\uff45]", "[Dose:]",
+           "[\u0455\u0031]", "[S\u0661]", "[dose not stated \u2014 doctor to verify]", "[x", "[[S1]", "[urgent]", "[left knee]"]
+
+
+def _all_lines():
+    for h in HEADINGS + VARIANT_HEADS:
+        for ln, tpl in LAYOUTS.items():
+            yield h, ln, tpl
+
+
+def test_fx3_every_non_allowlisted_span_rejects_everywhere():
+    n = 0
+    for h, ln, tpl in _all_lines():
+        for sp in HARMFUL:
+            for text in (f"General Advice: rest\n" + tpl.format(h=h, b=f"item {sp} x 3 days"), tpl.format(h=h, b=f"item {sp}"),
+                         f"Examination: ok\n" + tpl.format(h=h, b=f"{sp} item")):
+                _, removed = sanitize_note_ex(text)
+                if not removed:  # an unbalanced '[x' is not a span; nothing was removed
+                    assert "]" not in sp or sp == "[[S1]", (sp, text)
+                    continue
+                errs = span_errors(removed)
+                assert errs and all(e.startswith("FRX-L1 bracket span removed from ") for e in errs), (h, ln, sp, repr(text), errs)
+                n += 1
+    assert n > 3000
+
+
+def test_fx3_empty_and_before_any_heading():
+    for text in ("[] opening\nGeneral Advice: rest", "General Advice: rest []", "[500 mg] x\nExamination: a", "preamble [do\u200bse]\nMedication: x"):
+        assert span_errors(sanitize_note_ex(text)[1]), text
+    assert span_errors(sanitize_note_ex("[dose] hi")[1]) == ["FRX-L1 bracket span removed from unattributed"]
+
+
+@pytest.mark.parametrize("head", NON_ORDER)
+def test_fx3_speaker_label_posts_only_on_a_non_order_line(head):
+    for sp in ALLOWED:
+        for tpl in ("{h}: keep warm {s}", "  {h}: {s} keep warm", "{h}: a\n{s} more", "- {h} : {s} b"):
+            _, removed = sanitize_note_ex(tpl.format(h=head, s=sp))
+            assert removed and span_errors(removed) == [], (head, sp, tpl, removed)
+    _, removed = sanitize_note_ex(f"{head}: keep warm [S1] [dose]")
+    assert span_errors(removed) == [f"FRX-L1 bracket span removed from {head}"]
+
+
+@pytest.mark.parametrize("head", sorted(ORDER_HEADINGS))
+def test_fx3_speaker_label_never_posts_on_an_order_line(head):
+    for sp in ALLOWED:
+        for tpl in ("{h}: x {s}", "General Advice: a\n{h}: x\n{s} more", "[S1] {h}: x {s}", "General Advice: a; {h}: {s}"):
+            _, removed = sanitize_note_ex(tpl.format(h=head, s=sp))
+            assert f"FRX-L1 bracket span removed from {head}" in span_errors(removed), (head, sp, tpl)
+
+
+def test_fx3_posted_text_is_byte_identical_to_base_for_every_span_class():
+    r = random.Random(33)
+    pool = HARMFUL + ALLOWED
+    for _ in range(600):
+        h = r.choice(HEADINGS + VARIANT_HEADS)
+        tpl = r.choice(list(LAYOUTS.values()))
+        text = "\n".join(tpl.format(h=r.choice([h] + HEADINGS), b=f"w {r.choice(pool)} z {r.choice(pool)}") for _ in range(3))
+        assert sanitize_note_ex(text)[0] == base.sanitize_note(text) == sanitize_note(text)
+
+
+@pytest.mark.parametrize("head", VARIANT_HEADS)
+@pytest.mark.parametrize("layout", ["{h}: {b}", "{h} - {b}", "{h} {b}", "General Advice: rest; {h}: {b}"])
+def test_fx3_verdict3_variant_heading_probes_never_post_the_trimmed_line(tmp_path, head, layout):
+    extra = layout.format(h=head, b="paracetamol 1 g three times a day x 3 days [500 mg]")
+    lg, od = _extra_line(tmp_path, extra)
+    assert "FRX-L1 bracket span removed from General Advice" in lg["llm_note_errors"] or any(e.startswith("FRX-L1") for e in lg["llm_note_errors"])
+    assert lg["note_source"] == "deterministic_fallback" and "[500 mg]" not in lg["artifact"]["note_text"]
+
+
+def test_fx3_verdict3_prose_probe_and_field_word_variants(tmp_path):
+    lg, _ = _llm_with(tmp_path, "General Advice: Drink plenty of water; Take rest",
+                      "General Advice: Drink plenty of water; paracetamol 1 g [three times a day] if fever")
+    assert lg["note_source"] == "deterministic_fallback" and any(e.startswith("FRX-L1") for e in lg["llm_note_errors"])
+    for sp in ("[do\u200bse]", "[d\u00adose]", "[\uff44\uff4f\uff53\uff45]", "[Dose:]", "[frequency?]", "[dose/frequency]"):
+        lg, _ = _llm_with(tmp_path / str(abs(hash(sp))), "General Advice: Drink", f"General Advice: {sp} Drink")
+        assert lg["note_source"] == "deterministic_fallback", sp
+
+
+def test_fx3_colon_map_is_exercised():
+    for colon in ("\u2236", "\ua789", "\u02d0"):
+        _, removed = sanitize_note_ex(f"General Advice: rest\nMedication{colon} a [S1]")
+        assert span_errors(removed) == ["FRX-L1 bracket span removed from Medication"], colon
+
+
+def test_fx3_s_label_in_a_full_pipeline_still_posts_with_count(tmp_path):
+    lg, _ = _llm_with(tmp_path, "General Advice: Drink plenty of water; Take rest", "General Advice: [ s12 ] Drink plenty of water; Take rest")
+    assert lg["final_valid"] and lg["note_source"].startswith("llm_") and lg["sanitize_removed"] == 1
+
+
+# --- FIX3 mutations: each must fail at least one probe ---
+def _fx3_probes():
+    out = []
+    for text, benign in (("General Advice: rest [S1]", True), ("General Advice: rest [s1]", True), ("General Advice: rest [ S12 ]", True),
+                         ("General Advice: rest [\uff33\uff11]", True), ("General Advice: rest [\u200bS1]", True),
+                         ("General Advice: rest [500 mg]", False), ("General Advice: rest []", False), ("Examination: a [urgent]", False),
+                         ("Follow-up: x [500 mg]", False), ("Rx: x [500 mg]", False), ("Medication - x [S1]", False),
+                         ("General Advice: rest [S1|doctor]", False), ("General Advice: rest [do\u200bse]", False),
+                         ("Medication: x [S1]", False), ("Follow up: x [S1]", False)):
+        out.append((text, benign))
+    return out
+
+
+def _fx3_wrong(monkeypatch=None):
+    wrong = []
+    for text, benign in _fx3_probes():
+        got = note_mod.span_errors(sanitize_note_ex(text)[1]) == []
+        if got != benign:
+            wrong.append(text)
+    return wrong
+
+
+def test_fx3_probes_pass_unmutated():
+    assert _fx3_wrong() == []
+
+
+def _spk_key_no_nfkc(span):
+    s = span.strip()[1:-1]
+    s = "".join(c for c in s if unicodedata.category(c) != "Cf")
+    return re.sub(r"\s+", " ", s).strip().casefold()
+
+
+def _spk_key_no_casefold(span):
+    s = span.strip()[1:-1]
+    s = unicodedata.normalize("NFKC", "".join(c for c in s if unicodedata.category(c) != "Cf"))
+    return re.sub(r"\s+", " ", s).strip()
+
+
+@pytest.mark.parametrize("which", ["widen_any", "no_nfkc", "no_casefold", "no_order_check", "line_only"])
+def test_fx3_mutation_is_caught(monkeypatch, which):
+    if which == "widen_any":
+        monkeypatch.setattr(note_mod, "SPAN_ALLOWLIST", re.compile(r".*"))
+    elif which == "no_nfkc":
+        monkeypatch.setattr(note_mod, "_span_key", _spk_key_no_nfkc)
+    elif which == "no_casefold":
+        monkeypatch.setattr(note_mod, "_span_key", _spk_key_no_casefold)
+    elif which == "no_order_check":  # drop A1(b): attribution ignored
+        real = note_mod.span_errors
+        monkeypatch.setattr(note_mod, "span_errors", lambda rem: real([("General Advice", s) for _, s in rem]))
+    elif which == "line_only":  # restore FIX2 line-only classification
+        def old(removed):
+            heads = []
+            for head, span in removed:
+                if head is None or head in ORDER_HEADINGS or span.strip("[] \t").lower() in _D4_FIELDS:
+                    h = head or "unattributed"
+                    if h not in heads:
+                        heads.append(h)
+            return [f"FRX-L1 bracket span removed from {h}" for h in heads]
+        monkeypatch.setattr(note_mod, "span_errors", old)
+    assert _fx3_wrong(), f"mutant {which} survived"
