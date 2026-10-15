@@ -6,13 +6,13 @@
 #   check cap   = min(PROBE_CAP_S, remaining - PROBE_PUBLISH_RESERVE_MS)   (no check is started when under 0.2 s is left: all rows are marked timeout)
 #   publish cap = remaining at publish time minus how late the check timers fired and PROBE_TIMER_SLACK_MS (the publish timer itself fires late too), at least PROBE_PUBLISH_MIN_MS
 
-PROBE_CAP_S="${PROBE_CAP_S:-2.5}"
-PROBE_BUDGET_MS="${PROBE_BUDGET_MS:-4000}"
-PROBE_PUBLISH_RESERVE_MS="${PROBE_PUBLISH_RESERVE_MS:-1000}"
-PROBE_PUBLISH_MIN_MS="${PROBE_PUBLISH_MIN_MS:-300}"
+g_def PROBE_CAP_S 2.5
+g_def PROBE_BUDGET_MS 4000
+g_def PROBE_PUBLISH_RESERVE_MS 1000
+g_def PROBE_PUBLISH_MIN_MS 300
 # Deviation from the R3 ruling, accepted by gating-lead at R5: this allowance comes off the publish cap. It only shortens the publish.
 # run_capped fires its kill 0.2-0.6 s after the cap on a busy host (refuter: publish lateness 171-593 ms; builder trace 0.2-0.3 s).
-PROBE_TIMER_SLACK_MS="${PROBE_TIMER_SLACK_MS:-250}"
+g_def PROBE_TIMER_SLACK_MS 250
 PROBE_NAMES="rms_dbfs_2s tcc usb audio_engine default_input coreaudiod recorder helper upload presence disk power"
 
 # Pure bash, no external process (every fork costs real time on a loaded host).
@@ -94,7 +94,7 @@ probe_run() { # id
   local id="$1" dir ts name v verdict first=1 body="" t0 deadline payload pubcap planned_end late=0 now_ms
   t0="$(mono_ms)"; deadline=$((t0 + PROBE_BUDGET_MS))
   dir="$(mktemp -d "$STATE_DIR/probe.XXXXXX" 2>/dev/null)" || return 1
-  ts="$((t0 / 1000))"; [ "${GUARDIAN_TESTMODE:-}" = 1 ] && [ -n "${GUARDIAN_FAKE_NOW:-}" ] && ts="$GUARDIAN_FAKE_NOW"
+  ts="$((t0 / 1000))"; [ "${G_RUNMODE:-}" != 1 ] && [ "${GUARDIAN_TESTMODE:-}" = 1 ] && [ -n "${GUARDIAN_FAKE_NOW:-}" ] && ts="$GUARDIAN_FAKE_NOW"
   probe_start_hook
   now_ms="$(mono_ms)"
   probe_check_cap_v $((deadline - now_ms)); PROBE_CHECK_CAP="$PSECS"

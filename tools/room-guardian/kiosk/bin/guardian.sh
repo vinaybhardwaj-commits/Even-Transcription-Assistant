@@ -3,16 +3,37 @@
 #   guardian.sh run      loop forever: health line every 10 s, heal cycle, subscriber child
 #   guardian.sh once     one tick (collect, publish health, heal cycle) and exit
 #   guardian.sh handle <topic> <payload>   answer one message (used by tests)
-# Config: $GUARDIAN_CONF or $HOME/Library/Application Support/EvenScribe/Guardian/guardian.conf (sourced, not in git).
+#   guardian.sh check    print the kill switch state and mode once, through the run-mode preamble (diagnostics and tests)
+# Config: $GUARDIAN_HOME/guardian.conf, parsed as DATA by lib/conf.sh (R12). It is never sourced. Not in git.
+#
+# R12 run-mode preamble. `run` and `check` (and `once`/`handle` unless GUARDIAN_TEST_ENTRY=1, which only the test harness sets) ignore the
+# environment for every test seam and every tunable: GUARDIAN_TESTMODE, GUARDIAN_FAKE_NOW, GUARDIAN_PS, GUARDIAN_FLAG_CMD, GUARDIAN_CONF and the rest.
+# The safety numbers are readonly constants in lib/common.sh, set before anything else runs. The only way to change behaviour is the conf's allow-listed keys.
+
+# No alias, no DEBUG/ERR/RETURN trap, no functrace may survive from the caller's environment.
+shopt -u expand_aliases 2>/dev/null
+trap - DEBUG ERR RETURN 2>/dev/null
+set +T +E 2>/dev/null
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONF="${GUARDIAN_CONF:-${GUARDIAN_HOME:-$HOME/Library/Application Support/EvenScribe/Guardian}/guardian.conf}"
-_G_TM="${GUARDIAN_TESTMODE:-}"   # test mode comes from the environment only: guardian.conf cannot turn it on
-# shellcheck disable=SC1090
-[ -r "$CONF" ] && . "$CONF"
-GUARDIAN_TESTMODE="$_G_TM"; unset _G_TM
+G_MODE_ARG="${1:-run}"
+if [ "${GUARDIAN_TEST_ENTRY:-}" = 1 ] && { [ "$G_MODE_ARG" = once ] || [ "$G_MODE_ARG" = handle ]; }; then
+  unset G_RUNMODE G_CONF_BAD G_BAD_CONST
+  CONF="${GUARDIAN_CONF:-${GUARDIAN_HOME:-$HOME/Library/Application Support/EvenScribe/Guardian}/guardian.conf}"
+else
+  unset GUARDIAN_TESTMODE GUARDIAN_FAKE_NOW GUARDIAN_PS GUARDIAN_FLAG_CMD GUARDIAN_CONF GUARDIAN_TEST_ENTRY CANARY_AFPLAY \
+    GUARDIAN_ROOT_TESTMODE GUARDIAN_ROOT_TEST_DB FAKE_SP_SLEEP G_CONF_BAD G_BAD_CONST
+  G_RUNMODE=1; readonly G_RUNMODE
+  CONF="${GUARDIAN_HOME:-$HOME/Library/Application Support/EvenScribe/Guardian}/guardian.conf"
+fi
 # shellcheck source=../lib/common.sh
 . "$HERE/lib/common.sh"
+# shellcheck source=../lib/conf.sh
+. "$HERE/lib/conf.sh"
+# The conf, as data. Any error leaves the agent KILLED; the valid keys are still applied so health keeps flowing.
+G_CONF_BAD=0
+if ! conf_load "$CONF"; then G_CONF_BAD=1; fi
+[ "${G_RUNMODE:-}" = 1 ] && readonly G_CONF_BAD
 # shellcheck source=../lib/collect.sh
 . "$HERE/lib/collect.sh"
 # shellcheck source=../lib/killswitch.sh
@@ -24,7 +45,7 @@ GUARDIAN_TESTMODE="$_G_TM"; unset _G_TM
 # shellcheck source=../lib/probe.sh
 . "$HERE/lib/probe.sh"
 # shellcheck source=../lib/canary.sh
-[ -r "$HERE/lib/canary.sh" ] && . "$HERE/lib/canary.sh"   # install.sh copies a fixed lib list: an older install has no canary.sh, and the tick then skips it
+[ -r "$HERE/lib/canary.sh" ] && . "$HERE/lib/canary.sh"   # an older install has no canary.sh, and the tick then skips it
 
 "$G_MKDIR" -p "$STATE_DIR" "$FLAG_DIR" 2>/dev/null
 
@@ -54,13 +75,13 @@ loop_init() {
 
 # 0 while main is alive and is still this loop's parent (a reused main pid does not pass: the parent link is checked, not just kill -0).
 # An empty ps read (a failed fork) is not "main gone": it counts as a miss and the loop leaves only after 3 misses in a row.
-# After a 3-strike exit nothing restarts the loop: this fails safe (no control messages = stale = shadow, never heal). GUARDIAN_PS (a fake ps) is honoured only with GUARDIAN_TESTMODE=1.
+# After a 3-strike exit nothing restarts the loop: this fails safe (no control messages = stale = shadow, never heal). GUARDIAN_PS (a fake ps) is a library-test seam and is never read in run mode.
 loop_parent_ok() {
   local info ps_cmd
   [ -n "$MAIN_PID" ] || return 1
   kill -0 "$MAIN_PID" 2>/dev/null || return 1
   ps_cmd="$G_PS"
-  [ "${GUARDIAN_TESTMODE:-}" = 1 ] && [ -n "${GUARDIAN_PS:-}" ] && ps_cmd="$GUARDIAN_PS"
+  [ "${G_RUNMODE:-}" != 1 ] && [ "${GUARDIAN_TESTMODE:-}" = 1 ] && [ -n "${GUARDIAN_PS:-}" ] && ps_cmd="$GUARDIAN_PS"
   info="$("$ps_cmd" -o ppid= -p "$LOOP_ME" 2>/dev/null | "$G_TR" -d ' ')"
   if [ -z "$info" ]; then
     LOOP_MISS=$((LOOP_MISS + 1))
@@ -135,7 +156,6 @@ nul_to_soh() {
 # Read control lines from stdin with a length cap (R10). A line longer than CONTROL_LINE_MAX (4200) bytes is never stored as a line:
 # the marker "overlong" is stored instead (not the control form = killed) and the rest of that line is read in 4096-byte chunks and dropped up to its next LF.
 # Memory stays bounded by one chunk, however long the line is. A partial last line (no LF at EOF) is not stored.
-CONTROL_LINE_MAX=4200
 control_pump() {
   local LC_ALL=C line junk rc
   while :; do
@@ -175,6 +195,7 @@ run() {
   local t0 t1
   [ -n "$GUARDIAN_ROOM" ] || { echo "GUARDIAN_ROOM not set" >&2; exit 2; }
   audit "guardian start version=$GUARDIAN_VERSION"
+  if [ "${G_CONF_BAD:-}" = 1 ]; then audit "guardian.conf rejected: running KILLED (shadow, no actions); health continues"; fi
   MAIN_PID="$(exec sh -c 'echo $PPID')"
   [ -n "$MAIN_PID" ] || MAIN_PID=$$
   trap 'exit 0' TERM INT HUP
@@ -194,9 +215,23 @@ run() {
   done
 }
 
-case "${1:-run}" in
+# check: the state the kill switch would give right now (same parse the actions use). Prints "killswitch=engaged|clear mode=shadow|heal why=<reason>".
+check() {
+  local ks=clear
+  flag_fetch
+  killswitch_engaged && ks=engaged
+  echo "killswitch=$ks mode=$(current_mode) why=${CTRL_WHY:-none}"
+}
+
+# Run mode: every function is readonly before anything is dispatched, so nothing defined later (or imported) can replace one.
+if [ "${G_RUNMODE:-}" = 1 ]; then
+  while read -r _ _ G_FN; do readonly -f "$G_FN" 2>/dev/null; done < <(declare -F)
+fi
+
+case "$G_MODE_ARG" in
   run) run ;;
+  check) check ;;
   once) flag_fetch; tick ;;
   handle) handle_message "$2" "$3" ;;
-  *) echo "usage: guardian.sh run|once|handle" >&2; exit 2 ;;
+  *) echo "usage: guardian.sh run|check|once|handle" >&2; exit 2 ;;
 esac

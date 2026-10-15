@@ -20,6 +20,12 @@ while [ $# -gt 0 ]; do
 done
 case "$ROOM" in ''|*[!a-z0-9-]*) echo "--room <slug> required (lowercase letters, digits, hyphen)" >&2; exit 2 ;; esac
 [ -z "$CONFIG" ] || [ -r "$CONFIG" ] || { echo "cannot read --config" >&2; exit 2; }
+# R12: guardian.conf is data, parsed by lib/conf.sh. Refuse a config the agent would reject (it would run killed), before anything is installed.
+if [ -n "$CONFIG" ]; then
+  if ! ( G_TR=/usr/bin/tr; G_WC=/usr/bin/wc; audit() { echo "  conf: $*" >&2; }; . "$SRC/lib/conf.sh"; conf_load "$CONFIG" ); then
+    echo "refusing: --config is not valid guardian.conf (data lines only, allow-listed keys)" >&2; exit 2
+  fi
+fi
 
 do_it() { if [ "$DRY" -eq 1 ]; then echo "DRY-RUN: $*"; else "$@"; fi; }
 copy_if_changed() { # src dst mode
@@ -30,7 +36,7 @@ copy_if_changed() { # src dst mode
 do_it mkdir -p "$GUARDIAN_HOME/bin" "$GUARDIAN_HOME/lib" "$GUARDIAN_HOME/state" "$GUARDIAN_HOME/flags" "$GUARDIAN_HOME/keys" "$LA_DIR"
 do_it chmod 700 "$GUARDIAN_HOME/keys"
 copy_if_changed "$SRC/bin/guardian.sh" "$GUARDIAN_HOME/bin/guardian.sh" 755
-for f in common collect killswitch faulttree heal probe; do copy_if_changed "$SRC/lib/$f.sh" "$GUARDIAN_HOME/lib/$f.sh" 644; done
+for f in common conf collect killswitch faulttree heal probe canary; do copy_if_changed "$SRC/lib/$f.sh" "$GUARDIAN_HOME/lib/$f.sh" 644; done
 
 # config: from --config (kept outside git), else a stub the operator completes. Existing config is kept unless --config differs (old one backed up).
 if [ -n "$CONFIG" ]; then

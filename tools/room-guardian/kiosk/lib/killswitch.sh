@@ -3,7 +3,7 @@
 # Kiosk Guardian: kill switch and mode (spec 2.4 last paragraph, 2.5, G8).
 # Control comes from pipe topic guardian/control (C4 ruling); the transport command is injectable and gets the room as $1 and the topic as $2.
 # Per-kiosk flag: file $FLAG_DIR/heal-off. Fleet-wide flag and per-room mode: fetched from the Mini
-# every FLAG_FETCH_S through GUARDIAN_FLAG_CMD (old path), or derived from control.last (GUARDIAN_CONTROL_SUB_CMD, no message for CONTROL_STALE_S = killed), which prints lines "fleet=on|off" and "mode=shadow|heal".
+# every FLAG_FETCH_S through GUARDIAN_FLAG_CMD (old path, library tests only: run mode never uses it, R12), or derived from control.last (GUARDIAN_CONTROL_SUB_CMD, no message for CONTROL_STALE_S = killed), which prints lines "fleet=on|off" and "mode=shadow|heal".
 # No command, a failed command, a timeout, a stale cache, or anything but fleet=on means heal OFF.
 
 FLAG_CACHE="$STATE_DIR/flags.cache"
@@ -11,7 +11,7 @@ FLAG_CACHE="$STATE_DIR/flags.cache"
 CONTROL_LAST="$STATE_DIR/control.last"
 
 # Parse $CONTROL_LAST (line 1 = receive epoch, line 2 = payload). Sets CTRL_FLEET (on|unreachable),
-# CTRL_MODE (shadow|heal), CTRL_WHY (ok|missing|unparseable|stale|kill|skew) and CTRL_AGE (receive age, or empty).
+# CTRL_MODE (shadow|heal), CTRL_WHY (ok|missing|unparseable|stale|kill|skew|conf|constants) and CTRL_AGE (receive age, or empty).
 # No JSON scanner. The Mini publishes exactly one form (json.dumps with sort_keys and default separators), and only that form is accepted:
 #   {"kill": true|false, "modes": {"<room>": "shadow|heal", ...}, "ts": <epoch>}
 # Everything else is killed. Order of checks:
@@ -42,11 +42,14 @@ control_parse() {
   local LC_ALL=C
   local recv payload now latch size bad nl ts modes_part pat rest cnt
   CTRL_FLEET=unreachable; CTRL_MODE=shadow; CTRL_WHY=missing; CTRL_AGE=""
+  # R12: a bad guardian.conf or a safety constant that could not be pinned = killed, whatever control.last says
+  if [ "${G_CONF_BAD:-}" = 1 ]; then CTRL_WHY=conf; return 1; fi
+  if [ -n "${G_BAD_CONST:-}" ]; then CTRL_WHY=constants; return 1; fi
   [ -r "$CONTROL_LAST" ] || return 1
   # 1. raw bytes, as a file
   size="$("$G_WC" -c <"$CONTROL_LAST" 2>/dev/null | "$G_TR" -d " ")"
   case "$size" in ""|*[!0-9]*) CTRL_WHY=unparseable; return 1 ;; esac
-  if [ "$size" -gt "$((${CONTROL_MAX_BYTES:-4096} + 17))" ]; then CTRL_WHY=unparseable; return 1; fi
+  if [ "$size" -gt "$((CONTROL_MAX_BYTES + 17))" ]; then CTRL_WHY=unparseable; return 1; fi
   bad="$(LC_ALL=C "$G_TR" -d '\n\040-\176' <"$CONTROL_LAST" 2>/dev/null | "$G_WC" -c | "$G_TR" -d " ")"
   nl="$("$G_WC" -l <"$CONTROL_LAST" 2>/dev/null | "$G_TR" -d " ")"
   if [ "$bad" != "0" ] || [ "$nl" != "2" ] || [ "$("$G_TAIL" -c 1 "$CONTROL_LAST" 2>/dev/null | "$G_WC" -l | "$G_TR" -d " ")" != "1" ]; then CTRL_WHY=rawbytes; return 1; fi
@@ -54,14 +57,15 @@ control_parse() {
   payload="$("$G_SED" -n '2p' "$CONTROL_LAST" 2>/dev/null)"
   now="$(now_epoch)"
   # the payload line itself is capped (the file cap above is the payload cap plus a 15-digit epoch and 2 newlines)
-  if [ "${#payload}" -gt "${CONTROL_MAX_BYTES:-4096}" ]; then CTRL_WHY=unparseable; return 1; fi
+  if [ "${#payload}" -gt "$CONTROL_MAX_BYTES" ]; then CTRL_WHY=unparseable; return 1; fi
   # 2. receive epoch
   [[ $recv =~ $CONTROL_RECV_RE ]] || { CTRL_WHY=unparseable; return 1; }
   CTRL_AGE=$((10#$now - 10#$recv))
   if [ "$CTRL_AGE" -lt -2 ]; then CTRL_WHY=unparseable; return 1; fi
   latch="$("$G_CAT" "$STATE_DIR/control_latch" 2>/dev/null)"
   if [ "$latch" = "$recv" ]; then CTRL_WHY=stale; return 1; fi
-  if [ "$CTRL_AGE" -gt "$CONTROL_STALE_S" ]; then
+  # fail closed: written as "not (age <= limit)", so a comparison that errors counts as stale
+  if ! [ "$CTRL_AGE" -le "$CONTROL_STALE_S" ]; then
     "$G_MKDIR" -p "$STATE_DIR" 2>/dev/null; printf '%s\n' "$recv" >"$STATE_DIR/control_latch"
     CTRL_WHY=stale; return 1
   fi
@@ -70,8 +74,8 @@ control_parse() {
   case "$payload" in '{"kill": true,'*) CTRL_WHY="kill"; return 1 ;; '{"kill": false,'*) ;; *) CTRL_WHY=unparseable; return 1 ;; esac
   ts="${payload##*\"ts\": }"; ts="${ts%\}}"
   ts=$((10#$ts))
-  if [ "$((ts - 10#$now))" -gt 30 ]; then CTRL_WHY=skew; return 1; fi
-  if [ "$((10#$now - ts))" -gt "$CONTROL_STALE_S" ]; then
+  if ! [ "$((ts - 10#$now))" -le "$CONTROL_SKEW_S" ]; then CTRL_WHY=skew; return 1; fi
+  if ! [ "$((10#$now - ts))" -le "$CONTROL_STALE_S" ]; then
     "$G_MKDIR" -p "$STATE_DIR" 2>/dev/null; printf '%s\n' "$recv" >"$STATE_DIR/control_latch"
     CTRL_WHY=stale; return 1
   fi
@@ -105,6 +109,13 @@ flag_fetch() {
   local out="$STATE_DIR/flags.fetch" now rc
   "$G_MKDIR" -p "$STATE_DIR" "$FLAG_DIR" 2>/dev/null
   now="$(now_epoch)"
+  if [ "${G_RUNMODE:-}" = 1 ] && [ -z "$GUARDIAN_CONTROL_SUB_CMD" ]; then
+    # run mode needs the control subscription; the old flag command is not used there (R12)
+    CTRL_FLEET=unreachable; CTRL_MODE=shadow; CTRL_WHY=no_control_cmd; CTRL_AGE=""
+    [ "${G_CONF_BAD:-}" = 1 ] && CTRL_WHY=conf
+    control_audit_change
+    printf '%s\nfleet=unreachable\n' "$now" >"$FLAG_CACHE"; return 1
+  fi
   if [ -n "$GUARDIAN_CONTROL_SUB_CMD" ]; then
     control_parse; rc=$?
     control_audit_change
@@ -116,10 +127,10 @@ flag_fetch() {
   fi
   run_capped 5 "$out" bash -c "$GUARDIAN_FLAG_CMD" _ "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC"
   rc=$?
-  if [ "$rc" -ne 0 ] || ! grep -q '^fleet=' "$out" 2>/dev/null; then
+  if [ "$rc" -ne 0 ] || ! "$G_GREP" -q '^fleet=' "$out" 2>/dev/null; then
     printf '%s\nfleet=unreachable\n' "$now" >"$FLAG_CACHE"; return 1
   fi
-  { printf '%s\n' "$now"; grep -E '^(fleet|mode)=' "$out"; } >"$FLAG_CACHE"
+  { printf '%s\n' "$now"; "$G_GREP" -E '^(fleet|mode)=' "$out"; } >"$FLAG_CACHE"
   return 0
 }
 
@@ -127,6 +138,9 @@ flag_fetch() {
 killswitch_engaged() {
   local fetched now fleet
   [ -e "$FLAG_DIR/heal-off" ] && return 0
+  [ "${G_CONF_BAD:-}" = 1 ] && return 0
+  [ -n "${G_BAD_CONST:-}" ] && return 0
+  [ "${G_RUNMODE:-}" = 1 ] && [ -z "$GUARDIAN_CONTROL_SUB_CMD" ] && return 0
   [ -r "$FLAG_CACHE" ] || return 0
   fetched="$("$G_SED" -n '1p' "$FLAG_CACHE")"
   now="$(now_epoch)"
@@ -135,6 +149,7 @@ killswitch_engaged() {
   # With the control subscription the live file is re-read below on every call, so the cache age adds nothing there and would only
   # abort a long HEAL action (the 30 s tcc confirm wait outlasts FLAG_MAX_AGE_S=30 between two fetches). The old flag-command path keeps the age limit.
   if [ -z "$GUARDIAN_CONTROL_SUB_CMD" ]; then
+    # old flag path (library tests only; run mode returned above)
     [ "$((10#$now - 10#$fetched))" -le "$FLAG_MAX_AGE_S" ] || return 0
   fi
   fleet="$("$G_SED" -n 's/^fleet=//p' "$FLAG_CACHE" | "$G_HEAD" -n1)"

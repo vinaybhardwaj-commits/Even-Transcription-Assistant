@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2030,SC2031
 # FR1-C5 nightly canary. Clock and HID are injected (GUARDIAN_FAKE_NOW, the fake ioreg); afplay is the sandbox fake. No real sound, ever.
 cn_events() { grep "^kiosk/$GUARDIAN_ROOM/canary$(printf '\t')" "$T/pub.log" 2>/dev/null; }
 cn_plays() { grep -c '^afplay ' "$CALLS" 2>/dev/null; }
@@ -8,7 +9,7 @@ cn_prep() {
   load_libs; mk_fakes; echo 1000000000000 >"$T/hid"; rm -f "$T/afplay_amp" "$T/afplay_rc" "$T/sp_no_out"   # a clean slate: cases change fakes
   GUARDIAN_FAKE_NOW="$(ist_epoch "${1:-22:00}")"
   write_status; mk_pcm 100 10
-  rm -f "$STATE_DIR/canary_night" "$STATE_DIR/actions"
+  rm -rf "$STATE_DIR/once" "$STATE_DIR/canary_night" "$STATE_DIR/canary_last_play" "$STATE_DIR/actions"; rm -f "$T/afplay_lag"
   : >"$CALLS"; : >"$T/pub.log"
 }
 cn_run() { collect_all; canary_cycle; }
@@ -115,26 +116,163 @@ test_confirm_plus_25_db_is_pass() {
   assert_not "$(cn_events)" 'RIFF' "G9 no audio in the event"
 }
 
-test_confirm_plus_10_db_is_fail_capture() {
+test_confirm_plus_10_db_is_no_local_rise() {
   cn_prep; go_heal; echo 316 >"$T/afplay_amp"; cn_run
-  assert_has "$(cn_events)" '"result":"fail_capture"' "fail_capture"
+  assert_has "$(cn_events)" '"result":"no_local_rise"' "no_local_rise"
   assert_has "$(cn_events)" '"rise_db":\(9\|10\)\.' "rise about 10 dB"
 }
 
-test_confirm_no_rise_is_fail_capture() {
+test_confirm_no_rise_is_no_local_rise() {
   cn_prep; go_heal; echo 100 >"$T/afplay_amp"; cn_run
-  assert_has "$(cn_events)" '"result":"fail_capture"' "same level = no local rise"
+  assert_has "$(cn_events)" '"result":"no_local_rise"' "same level = no local rise"
 }
 
 test_confirm_output_absent_is_inconclusive() {
   cn_prep; go_heal; touch "$T/sp_no_out"; echo 1778 >"$T/afplay_amp"; cn_run
-  assert_has "$(cn_events)" '"result":"inconclusive:output_muted"' "no output device"
+  assert_has "$(cn_events)" '"result":"inconclusive:output_absent"' "no output device"
+  assert_has "$(cn_events)" '"output":"absent"' "output field"
   assert_eq "$(cn_plays)" "0" "nothing played to a missing device"
   cn_prep 22:00; rm -f "$T/sp_no_out"; echo 3 >"$T/afplay_rc"; go_heal; cn_run
-  assert_has "$(cn_events)" '"result":"inconclusive:output_muted"' "afplay fails"
+  assert_has "$(cn_events)" '"result":"inconclusive:afplay_error"' "afplay fails"
+  assert_has "$(cn_events)" '"output":"present"' "output field present"
 }
 
 test_confirm_tape_stalled_is_inconclusive() {
   cn_prep; go_heal; rm -f "$T/afplay_amp"; cn_run
   assert_has "$(cn_events)" '"result":"inconclusive:tape_stalled"' "tape did not advance"
+}
+
+# ---- R12 / C5 fixes ----
+cn_fake_sp_sets_heal_off() { printf '#!/bin/bash\n: >"%s/flags/heal-off"\necho "{\\"SPAudioDataType\\":[{\\"coreaudio_default_audio_output_device\\":\\"yes\\"}]}"\n' "$GUARDIAN_HOME" >"$T/bin/system_profiler"; chmod +x "$T/bin/system_profiler"; }
+
+test_direct_call_in_shadow_makes_no_afplay_call() {
+  cn_prep; go_shadow; echo 1778 >"$T/afplay_amp"
+  ACT_LAYER=canary; canary_play_and_confirm
+  assert_eq "$(cn_plays)" "0" "canary_play_and_confirm in SHADOW: 0 plays"
+  assert_has "$(cn_events)" '"result":"would_do"' "reported as would_do"
+}
+
+test_kill_engaged_during_the_output_check_makes_no_play() {
+  cn_prep; go_heal; echo 1778 >"$T/afplay_amp"; cn_fake_sp_sets_heal_off
+  cn_run
+  [ -e "$FLAG_DIR/heal-off" ] && ok || fail "the fake output check set heal-off"
+  assert_eq "$(cn_plays)" "0" "kill engaged after act_step, before afplay: 0 plays"
+}
+
+test_burst_found_at_any_tape_lag() {
+  local lag
+  for lag in 0 1 2 3; do
+    cn_prep; go_heal; echo 1778 >"$T/afplay_amp"; echo "$lag" >"$T/afplay_lag"; cn_run
+    assert_has "$(cn_events)" '"result":"pass"' "lag ${lag}s passes"
+  done
+}
+
+test_volume_must_be_a_decimal_in_0_to_0_5() {
+  local v
+  for v in 0 0.0 0.00 0.51 0.6 1 1.0 abc "0.3 -x" "" -0.2 .3 0.123; do
+    cn_prep; go_heal; echo 1778 >"$T/afplay_amp"; CANARY_VOLUME="$v"; cn_run
+    assert_eq "$(cn_plays)" "0" "volume [$v]: no play"
+    assert_has "$(cn_events)" 'inconclusive:bad_volume' "volume [$v]: reported"
+  done
+  for v in 0.3 0.5 0.05 0.1; do
+    cn_prep; go_heal; echo 1778 >"$T/afplay_amp"; CANARY_VOLUME="$v"; cn_run
+    assert_eq "$(cn_plays)" "1" "volume [$v]: plays"
+  done
+}
+
+test_night_state_fails_closed() {
+  local c
+  for c in garbage empty dir unreadable future short; do
+    cn_prep; go_heal; echo 1778 >"$T/afplay_amp"; rm -rf "$CANARY_NIGHT_FILE"
+    case "$c" in
+      garbage) echo "garbage" >"$CANARY_NIGHT_FILE" ;;
+      empty) : >"$CANARY_NIGHT_FILE" ;;
+      dir) mkdir "$CANARY_NIGHT_FILE" ;;
+      unreadable) canary_night_key >"$CANARY_NIGHT_FILE"; echo 19990101 >"$CANARY_NIGHT_FILE"; chmod 000 "$CANARY_NIGHT_FILE" ;;
+      future) echo 20991231 >"$CANARY_NIGHT_FILE" ;;
+      short) echo 2026101 >"$CANARY_NIGHT_FILE" ;;
+    esac
+    cn_run
+    assert_eq "$(cn_plays)" "0" "state $c: no play"
+    assert_has "$(cn_events)" 'inconclusive:state_' "state $c: reported"
+    chmod 600 "$CANARY_NIGHT_FILE" 2>/dev/null; rm -rf "$CANARY_NIGHT_FILE"
+  done
+  # an older night is fine
+  cn_prep; go_heal; echo 1778 >"$T/afplay_amp"; echo 20200101 >"$CANARY_NIGHT_FILE"; cn_run
+  assert_eq "$(cn_plays)" "1" "an older night plays"
+  assert_eq "$(cat "$CANARY_NIGHT_FILE")" "$(canary_night_key)" "night written"
+  assert_eq "$(cat "$CANARY_LAST_FILE")" "$GUARDIAN_FAKE_NOW" "last-play epoch written"
+}
+
+test_no_second_play_within_12_h_of_the_last() {
+  cn_prep; go_heal; echo 1778 >"$T/afplay_amp"
+  echo "$((GUARDIAN_FAKE_NOW - 3600))" >"$CANARY_LAST_FILE"; cn_run
+  assert_eq "$(cn_plays)" "0" "1 h after a play: refused"
+  assert_has "$(cn_events)" 'inconclusive:state_recent_play' "reported"
+  cn_prep; go_heal; echo 1778 >"$T/afplay_amp"; echo "$((GUARDIAN_FAKE_NOW + 3600))" >"$CANARY_LAST_FILE"; cn_run
+  assert_eq "$(cn_plays)" "0" "a last play in the future (clock went back): refused"
+  cn_prep; go_heal; echo 1778 >"$T/afplay_amp"; echo "junk" >"$CANARY_LAST_FILE"; cn_run
+  assert_eq "$(cn_plays)" "0" "garbage last-play: refused"
+  cn_prep; go_heal; echo 1778 >"$T/afplay_amp"; echo "$((GUARDIAN_FAKE_NOW - 44000))" >"$CANARY_LAST_FILE"; cn_run
+  assert_eq "$(cn_plays)" "1" "over 12 h: plays"
+}
+
+test_state_that_cannot_be_written_means_no_play() {
+  cn_prep; go_heal; echo 1778 >"$T/afplay_amp"; mkdir "$CANARY_LAST_FILE"
+  cn_run
+  assert_eq "$(cn_plays)" "0" "last-play path is a directory: no play"
+}
+
+test_canary_constants_are_not_settable_from_the_environment() {
+  local out
+  out="$( CANARY_START=0000 CANARY_END=2359 CANARY_IDLE_MIN_S=0 HEAL_MAX_PER_HOUR=99 G_RUNMODE=1; . "$KDIR/lib/common.sh"; echo "$CANARY_START $CANARY_END $CANARY_IDLE_MIN_S $HEAL_MAX_PER_HOUR" )"
+  assert_eq "$out" "2135 0700 600 3" "run mode"
+  out="$( CANARY_START=0000 CANARY_END=2359 CANARY_IDLE_MIN_S=0 HEAL_MAX_PER_HOUR=99; . "$KDIR/lib/common.sh"; echo "$CANARY_START $CANARY_END $CANARY_IDLE_MIN_S $HEAL_MAX_PER_HOUR" )"
+  assert_eq "$out" "2135 0700 600 3" "library tests too"
+}
+
+# run and once never honour CANARY_AFPLAY / TESTMODE: the tone goes to the pinned afplay path only. A fake /usr/bin is impossible here, so the check
+# is on the code path: the variable that reaches run_capped, with G_RUNMODE=1 and with every seam set.
+test_run_mode_never_uses_the_afplay_seam() {
+  cn_prep; go_heal; echo 1778 >"$T/afplay_amp"
+  printf '#!/bin/bash\necho "PINNED-CALL $*" >>"%s/pinned_calls"\n' "$T" >"$T/pinned_afplay"; chmod +x "$T/pinned_afplay"
+  G_AFPLAY="$T/pinned_afplay"
+  # every seam set, run mode on: the tone must go to the pinned path and never to the CANARY_AFPLAY fake
+  ( G_RUNMODE=1; GUARDIAN_TESTMODE=1; CANARY_AFPLAY="$T/bin/afplay"; act_step() { return 0; }; canary_play_and_confirm ) >/dev/null 2>&1
+  assert_eq "$(cn_plays)" "0" "the seam fake (CANARY_AFPLAY) was not called in run mode"
+  assert_eq "$(grep -c PINNED-CALL "$T/pinned_calls" 2>/dev/null || echo 0)" "1" "only the pinned afplay path was used"
+  # and outside run mode (the test harness) the seam is the fake, so a test can never reach the real afplay
+  : >"$CALLS"; rm -f "$T/pinned_calls"
+  ( GUARDIAN_TESTMODE=1; CANARY_AFPLAY="$T/bin/afplay"; act_step() { return 0; }; canary_play_and_confirm ) >/dev/null 2>&1
+  assert_eq "$(cn_plays)" "1" "test mode uses the fake"
+  assert_eq "$(ls "$T/pinned_calls" 2>/dev/null | wc -l | tr -d ' ')" "0" "and not the pinned path"
+  assert_eq "$(grep -v '^[[:space:]]*#' "$KDIR/lib/canary.sh" | grep 'CANARY_AFPLAY' | grep -vc 'G_RUNMODE')" "0" "every CANARY_AFPLAY read has the run-mode gate"
+  assert_has "$(grep -n 'unset GUARDIAN_TESTMODE' "$KDIR/bin/guardian.sh")" "CANARY_AFPLAY" "the run-mode preamble unsets it (run, check, once and handle without the test marker)"
+  assert_eq "$(grep -c '/usr/bin/afplay' "$KDIR/lib/canary.sh")" "1" "one pinned afplay path"
+}
+
+test_unreadable_directory_and_garbage_actions_log_count_as_cap_reached() {
+  load_libs; mkdir -p "$STATE_DIR"
+  rm -rf "$ACTIONS_FILE"
+  assert_eq "$(actions_last_hour)" "0" "no file: 0"
+  printf '%s a:b\n' "$GUARDIAN_FAKE_NOW" >"$ACTIONS_FILE"
+  assert_eq "$(actions_last_hour)" "1" "one recent line"
+  chmod 000 "$ACTIONS_FILE"
+  assert_eq "$(actions_last_hour)" "$HEAL_MAX_PER_HOUR" "unreadable: cap reached"
+  chmod 600 "$ACTIONS_FILE"; rm -f "$ACTIONS_FILE"; mkdir "$ACTIONS_FILE"
+  assert_eq "$(actions_last_hour)" "$HEAL_MAX_PER_HOUR" "directory: cap reached"
+  rmdir "$ACTIONS_FILE"
+  printf 'junk\n\nxx yy\n' >"$ACTIONS_FILE"
+  assert_eq "$(actions_last_hour)" "3" "garbage lines count as recent actions"
+  printf '1 old\n' >"$ACTIONS_FILE"
+  assert_eq "$(actions_last_hour)" "0" "an old epoch does not count"
+  # and the cap really stops an action
+  rmdir "$ACTIONS_FILE" 2>/dev/null; rm -rf "$ACTIONS_FILE"; mkdir "$ACTIONS_FILE"
+  go_heal; act_begin x y z; assert_rc $? 1 "act_begin refuses with an unreadable log"
+  rmdir "$ACTIONS_FILE"
+}
+
+test_tape_with_a_future_mtime_is_not_advancing() {
+  cn_prep; touch -t 203012010000 "$RR_ROOT"/captures/c1/seg_001/tape.pcm
+  assert_eq "$(rms_dbfs_2s)" "" "future mtime: no rms"
 }

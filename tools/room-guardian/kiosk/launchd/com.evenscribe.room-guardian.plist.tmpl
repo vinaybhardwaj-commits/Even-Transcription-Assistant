@@ -6,9 +6,12 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
+    <string>-p</string>
     <string>__GUARDIAN_HOME__/bin/guardian.sh</string>
     <string>run</string>
   </array>
+  <!-- R12: bash -p ignores BASH_ENV, SHELLOPTS and exported functions. guardian.sh run reads only GUARDIAN_HOME (and HOME, RR_*) from this environment:
+       a test seam or tunable set here (GUARDIAN_TESTMODE, GUARDIAN_FAKE_NOW, CONTROL_STALE_S ...) is ignored. The safety numbers are constants in code. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>GUARDIAN_HOME</key><string>__GUARDIAN_HOME__</string>

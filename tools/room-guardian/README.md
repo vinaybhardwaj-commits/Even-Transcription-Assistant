@@ -21,3 +21,11 @@ Tests: `mini/tests/run.sh` (shellcheck, then 26 unittest cases; clock injected).
 5. A `recovered` outbox row closes every open case of that room; coverage unverified.
 6. Bus message shape from `bus_thread` (`from`, `subject`, `body`) is inferred.
 7. Two processes (relay, subscriber) share the SQLite file. WAL plus a 10 s busy timeout; the unique open-case index settles a race (loser counts as a duplicate).
+
+## Kiosk Guardian: threat model (R12)
+- The kiosk `guardian.conf` is data. `lib/conf.sh` reads allow-listed `KEY=value` lines and nothing else; it is never sourced. An unknown key, a bad value, a duplicate or any other line makes the agent run KILLED (shadow, no actions, health still published, the line number and key name audited).
+- The code and the root helper are the trust boundary. Whoever can write the agent directory (code, `lib/`, the plist) or the root helper controls the kiosk; the conf cannot.
+- The safety numbers are readonly constants in `lib/common.sh`: the 90 s control limit, the 30 s skew, the 4096 byte caps, the fetch period. They are not conf keys and the environment cannot set them.
+- `guardian.sh run` and `check` read no test seam (`GUARDIAN_TESTMODE`, `GUARDIAN_FAKE_NOW`, `GUARDIAN_PS`, `GUARDIAN_FLAG_CMD`, `GUARDIAN_CONF`) and no tunable from the environment. A variable set on the launchd plist, or by `launchctl setenv`, changes nothing. The plist runs `bash -p` and sets only `GUARDIAN_HOME`.
+- Production needs `GUARDIAN_CONTROL_SUB_CMD`. Empty or missing means killed. The old flag-command path is not used in run mode.
+- Accepted: the transport commands run under `bash -c` through PATH, and `GUARDIAN_HOME`, `RR_*` and `HOME` still come from the environment. Both are inside the trust boundary above (an attacker who can set them can already write the agent directory).

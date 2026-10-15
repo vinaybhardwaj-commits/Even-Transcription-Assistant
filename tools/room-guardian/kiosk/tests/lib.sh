@@ -23,7 +23,8 @@ mk_sandbox() { # sets T and the whole environment; PATH gets the fake bin dir fi
   export RR_ROOT="$T/rr" RR_PLIST="$HOME/Library/LaunchAgents/com.evenscribe.room-recorder.plist" RR_APP="$T/app"
   : >"$RR_PLIST"
   export GUARDIAN_ROOM="opd9"
-  export GUARDIAN_TESTMODE=1   # GUARDIAN_FAKE_NOW is honoured only in test mode (R11)
+  export GUARDIAN_TESTMODE=1   # library-test seam: GUARDIAN_FAKE_NOW is honoured only here; guardian.sh run|check never read it (R12)
+  export GUARDIAN_TEST_ENTRY=1 # lets guardian.sh once|handle honour the environment; run|check ignore it
   export GUARDIAN_FAKE_NOW; GUARDIAN_FAKE_NOW="$(ist_epoch 11:00)"
   export CONFIRM_TIMEOUT_S=2 GUARDIAN_SETTLE_S=0 PROBE_CAP_S=1
   export GUARDIAN_PUBLISH_CMD='{ printf "%s\t" "$1"; cat; } >>"$T/pub.log"'
@@ -102,7 +103,8 @@ F
   cat >"$b/afplay" <<'F'
 #!/bin/bash
 echo "afplay $*" >>"$CALLS"
-if [ -s "$T/afplay_amp" ]; then perl -e 'print pack("s<*", ($ARGV[0]) x 40000)' "$(cat "$T/afplay_amp")" >>"$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"; fi
+if [ -s "$T/afplay_lag" ]; then perl -e 'my($lag,$a)=@ARGV; my @s=((100) x ($lag*16000)); for my $b (1..3){ push @s,(($a) x 8000); push @s,((100) x 8000) if $b<3 } push @s,((100) x 8000); print pack("s<*",@s)' "$(cat "$T/afplay_lag")" "$(cat "$T/afplay_amp")" >>"$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"
+elif [ -s "$T/afplay_amp" ]; then perl -e 'print pack("s<*", ($ARGV[0]) x 40000)' "$(cat "$T/afplay_amp")" >>"$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"; fi
 exit "$(cat "$T/afplay_rc" 2>/dev/null || echo 0)"
 F
   printf '#!/bin/bash\necho "room-recorder $*" >>"$CALLS"; exit 0\n' >"$T/app/Contents/MacOS/room-recorder"

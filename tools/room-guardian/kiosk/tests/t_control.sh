@@ -237,7 +237,7 @@ test_rooms_named_ts_and_kill_inside_modes_are_not_read() {
 
 # ---- process helpers (tests only ever signal pids they started and recorded in $T/*.pid; lib.sh reap_tracked cleans up) ----
 # the loop and helper functions of guardian.sh, for a stand-in main
-guardian_funcs() { sed -n '/^MAIN_PID=""/,/^case "\${1:-run}"/p' "$KDIR/bin/guardian.sh" | sed '$d'; }
+guardian_funcs() { sed -n '/^MAIN_PID=""/,/^# check: /p' "$KDIR/bin/guardian.sh" | sed '$d'; }
 # fake_sub <name> <secs>: a subscriber command that records the pid of its own sleep in $T/<name>.pid
 fake_sub() { printf 'sleep %s & echo $! >>"%s/%s.pid"; wait' "$2" "$T" "$1"; }
 # set_subs <ctl secs> <sub secs>: both subscriber commands, each recording its sleep pid
@@ -248,7 +248,12 @@ alive_of() { local p n=0; for p in $(cat "$T/$1.pid" 2>/dev/null); do pid_alive 
 # wait_alive <name> <count> [tries of 0.25 s]
 wait_alive() { local i=0; while [ "$i" -lt "${3:-40}" ] && [ "$(alive_of "$1")" != "$2" ]; do sleep 0.25; i=$((i + 1)); done; }
 # start_guardian: the real guardian.sh run, in the background; GP = its pid (recorded for cleanup)
-start_guardian() { bash "$KDIR/bin/guardian.sh" run >/dev/null 2>&1 & GP=$!; echo "$GP" >>"$T/main.pid"; }
+# (a stand-in main in a subshell: guardian.sh run itself reads no environment, R12, so the environment-driven loop tests drive its functions.)
+start_guardian() {
+  { printf '#!/bin/bash\n'; for f in common collect killswitch faulttree heal probe canary; do printf '. "%s/lib/%s.sh"\n' "$KDIR" "$f"; done
+    printf 'mkdir -p "$STATE_DIR" "$FLAG_DIR"\n'; guardian_funcs; printf 'run\n'; } >"$T/gmain.sh"
+  bash "$T/gmain.sh" >/dev/null 2>&1 & GP=$!; echo "$GP" >>"$T/main.pid"
+}
 # start_loops <fn>...: a stand-in main (subshell) that runs the named loops under job control, as run() does. LM = its pid.
 # LOOP_STDIN = fd to give it as stdin (default 0).
 start_loops() {
@@ -894,7 +899,7 @@ test_kiosk_code_has_no_perl_python_osascript_or_jq() {
 test_guardian_version_is_bumped_and_identifies_the_tree() {
   load_libs
   [ "$GUARDIAN_VERSION" != "c1-0.1.0" ] && ok || fail "GUARDIAN_VERSION is still c1-0.1.0"
-  assert_eq "$GUARDIAN_VERSION" "c1-0.2.1-r11" "R11 version string"
+  assert_eq "$GUARDIAN_VERSION" "c1-0.3.0-r12" "R12 version string"
 }
 
 # a fake tr, wc, sed, ps, tail, head or cat first on PATH must not be used on the control path
