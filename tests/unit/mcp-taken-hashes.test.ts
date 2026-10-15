@@ -81,3 +81,29 @@ describe("a taken spelling blocks ADMIN, ADMIN_2 and EXTRA entries with that has
     expect(status("tb6")).toEqual({ fail: 401 });
   });
 });
+
+describe("takenHashes never throws (R1)", () => {
+  it("a JSON array of 200000 items and a 10000-deep nested array give no throw, and checkMcpBearer still answers", () => {
+    const big = `[${Array.from({ length: 200000 }, (_, i) => String(i)).join(",")}]`;
+    const deep = "[".repeat(10000) + "]".repeat(10000);
+    expect(() => takenHashes(big)).not.toThrow();
+    expect(() => takenHashes(deep)).not.toThrow();
+    const h = sha("rr1");
+    expect(takenHashes(`${big} ${h}`).has(h)).toBe(true);
+    process.env.SCRIBE_MCP_TOKENS = big;
+    process.env[MCP_TOKENS_EXTRA_ENV] = deep;
+    process.env[MCP_TOKENS_ADMIN_ENV] = json({ [sha("rr2")]: { actor: "admin:ok", scopes: ["admin"] } });
+    expect(() => status("rr2")).not.toThrow();
+    expect(status("rr2")).toBeDefined();
+  });
+
+  it("A2: with an unreadable primary, an escaped EXTRA key blocks an ADMIN entry with that hash (H2 on the EXTRA argument)", () => {
+    const tok = letterFirst("rr3"); const h = sha(tok);
+    process.env.SCRIBE_MCP_TOKENS = "{bad";
+    process.env[MCP_TOKENS_EXTRA_ENV] = `{"${escapedKey(h)}":{"actor":"relay","scopes":["read"]}}`;
+    process.env[MCP_TOKENS_ADMIN_ENV] = json({ [h]: { actor: "admin:a", scopes: ["admin"] }, [sha("rr4")]: { actor: "admin:ok", scopes: ["admin"] } });
+    expect(status(tok)).toEqual({ fail: 401 });
+    expect(status("rr4")).toEqual({ actor: "admin:ok", scopes: ["admin"] });
+  });
+});
+

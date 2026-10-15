@@ -281,16 +281,18 @@ export function takenHashes(...raws: Array<string | undefined>): Set<string> {
     }
     let v: unknown;
     try { v = JSON.parse(raw); } catch { continue; }
-    const stack: unknown[] = [v];
-    while (stack.length > 0) {
-      const node = stack.pop();
-      if (!node || typeof node !== "object") continue;
-      if (Array.isArray(node)) { stack.push(...node); continue; }
-      for (const [k, child] of Object.entries(node as Record<string, unknown>)) {
-        if (/^[0-9a-fA-F]{64}$/.test(k)) out.add(k.toLowerCase());
-        stack.push(child);
+    try {
+      const stack: unknown[] = [v];
+      while (stack.length > 0) {
+        const node = stack.pop();
+        if (!node || typeof node !== "object") continue;
+        if (Array.isArray(node)) { for (let i = 0; i < node.length; i += 1) stack.push(node[i]); continue; }
+        for (const [k, child] of Object.entries(node as Record<string, unknown>)) {
+          if (/^[0-9a-fA-F]{64}$/.test(k)) out.add(k.toLowerCase());
+          stack.push(child);
+        }
       }
-    }
+    } catch { /* never throws: on any error keep what was collected (H1 plus the keys seen so far) */ }
   }
   return out;
 }
