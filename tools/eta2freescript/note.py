@@ -65,23 +65,31 @@ def _order_heading_inside(view: str) -> str | None:
     return best[1] if best else None
 
 
-def sanitize_note_ex(note: str) -> tuple[str, list[tuple[str | None, str]]]:
-    """sanitize_note plus what it removed: (text, [(heading, removed span), ...]).
+def _bounded(line: str, m: re.Match) -> bool:
+    """FIX4 (b): the removed span (BRACKET_SPAN match `m`, which also ate the whitespace before it) is bounded on BOTH sides by the
+    start / end of the line or by Unicode whitespace. A letter, digit, punctuation or Cf character touching it on either side is not."""
+    left = m.group(0)[:1].isspace() or m.start() == 0
+    right = m.end() == len(line) or line[m.end()].isspace()
+    return left and right
+
+
+def sanitize_note_ex(note: str) -> tuple[str, list[tuple[str | None, str, bool]]]:
+    """sanitize_note plus what it removed: (text, [(heading, removed span, bounded), ...]).
 
     The heading is where the line sits, decided fail-closed on a normalised view of the line (see _norm_view):
     an order heading if the view holds one anywhere (N2a) or the line continues a section opened by one (N2b); otherwise the
     non-order heading the line is positively under; None when no heading has been seen yet (N2c)."""
     out = []
-    removed: list[tuple[str | None, str]] = []
+    removed: list[tuple[str | None, str, bool]] = []
     cur: str | None = None
     for line in note.split("\n"):
-        spans = [m.group(0).strip() for m in BRACKET_SPAN.finditer(line)]
+        spans = [(m.group(0).strip(), _bounded(line, m)) for m in BRACKET_SPAN.finditer(line)]
         line = BRACKET_SPAN.sub("", line)
         head, sep, body = line.partition(":")
         view = _norm_view(line)
         cur = _line_heading(view) or cur
         attr = _order_heading_inside(view) or cur
-        removed += [(attr, sp) for sp in spans]
+        removed += [(attr, sp, ok) for sp, ok in spans]
         if not line.strip():
             continue
         if sep and head in HEADINGS:
@@ -115,13 +123,19 @@ def _span_key(span: str) -> str:
     return re.sub(r"\s+", " ", s).strip().casefold()
 
 
-def span_errors(removed: list[tuple[str | None, str]]) -> list[str]:
-    """FRX-L1, fail-closed on the SPAN: a removed span is benign only if its content is on SPAN_ALLOWLIST (a speaker label) AND its
-    line is attributed to a non-order heading. Every other span rejects, on any line, under any heading, or before any heading
-    ("unattributed")."""
+# FRX-L1 (FIX4). A speaker-label span is benign only under these headings, where a dictated label can appear and S1-S4 are not clinical
+# findings (S3 gallop and sacral S1 live under Examination and Diagnoses).
+SPAN_BENIGN_HEADINGS = frozenset({"General Advice", "Presenting Complaint"})
+"""SPAN_BENIGN_HEADINGS: the ONLY headings under which a removed speaker label is benign. It grows only by a lead/fable decision."""
+
+
+def span_errors(removed: list[tuple[str | None, str, bool]]) -> list[str]:
+    """FRX-L1, fail-closed on the SPAN. A removed span is benign only if ALL hold: its content is on SPAN_ALLOWLIST (a speaker label);
+    its line is attributed to a heading in SPAN_BENIGN_HEADINGS; and it is bounded on both sides by line edge or whitespace (FIX4 b).
+    Every other span rejects: any other heading, an order line, or before any heading ("unattributed")."""
     heads: list[str] = []
-    for head, span in removed:
-        if head is None or head in ORDER_HEADINGS or not SPAN_ALLOWLIST.fullmatch(_span_key(span)):
+    for head, span, bounded in removed:
+        if head not in SPAN_BENIGN_HEADINGS or not bounded or not SPAN_ALLOWLIST.fullmatch(_span_key(span)):
             h = head or "unattributed"
             if h not in heads:
                 heads.append(h)

@@ -12,7 +12,7 @@ import oracle_note_main as base
 from tools.eta2freescript import note as note_mod
 from tools.eta2freescript.ingest import load_consult
 from tools.eta2freescript.models import FakeClient
-from tools.eta2freescript.note import HEADINGS, ORDER_HEADINGS, sanitize_note, sanitize_note_ex, span_errors
+from tools.eta2freescript.note import HEADINGS, ORDER_HEADINGS, SPAN_BENIGN_HEADINGS, sanitize_note, sanitize_note_ex, span_errors
 from tools.eta2freescript.pipeline import run_consult
 from tools.eta2freescript.validate import _D4_FIELDS, check
 
@@ -23,8 +23,13 @@ SPANS = ["[frequency]", "[duration]", "[dose]", "[Name]", "[ STRENGTH ]", "[S1]"
 
 
 def expected_reject(head, span):
-    """FIX3: a span is benign only if it is a speaker label `s`+1-3 digits AND its line is a non-order line."""
-    return head is None or head in ORDER_HEADINGS or not re.fullmatch(r"s[0-9]{1,3}", span.strip("[] ").lower())
+    """FIX4: a span (bounded by whitespace / line edge in these generators) is benign only if it is a speaker label `s`+1-3 digits AND its
+    line is under General Advice or Presenting Complaint."""
+    return head not in SPAN_BENIGN_HEADINGS or not re.fullmatch(r"s[0-9]{1,3}", span.strip("[] ").lower())
+
+
+def _r2(removed):
+    return [(h, s) for h, s, _ in removed]
 
 
 def gen_note(r):
@@ -50,7 +55,7 @@ def test_s2_s3_reject_iff_order_line_or_field_word(seed):
     for _ in range(200):
         text, want = gen_note(r)
         out, removed = sanitize_note_ex(text)
-        assert sorted(removed) == sorted(want)
+        assert sorted(_r2(removed)) == sorted(want)
         assert out == sanitize_note(text) == base.sanitize_note(text)
         errs = span_errors(removed)
         assert bool(errs) == any(expected_reject(h, s) for h, s in want), (text, errs)
@@ -152,6 +157,9 @@ PLACEMENTS = {  # name -> prefix written before "<Heading>:"
 }
 
 
+TIGHT: set = set()
+
+
 def gen_note_placed(r):
     """Every heading at a random placement, with 0-2 inner spans each. Returns (text, [(heading, span)])."""
     lines, want = [], []
@@ -165,6 +173,8 @@ def gen_note_placed(r):
             want.append((h, sp))
         if pre.strip():
             want.append((h, pre.strip()))
+            if not pre.endswith((" ", "\t")):  # "[S1]Heading:" touches the heading: not bounded on the right (FIX4 b)
+                TIGHT.add(h)
         lines.append(f"{pre}{h}: " + " ".join(parts))
     return "\n".join(lines), want
 
@@ -173,12 +183,13 @@ def gen_note_placed(r):
 def test_f1_reject_in_every_placement(seed):
     r = random.Random(1000 + seed)
     for _ in range(200):
+        TIGHT.clear()
         text, want = gen_note_placed(r)
         out, removed = sanitize_note_ex(text)
-        assert sorted(removed) == sorted(want), text
+        assert sorted(_r2(removed)) == sorted(want), text
         assert out == base.sanitize_note(text)  # the posted text is unchanged from base, whatever the placement
         errs = span_errors(removed)
-        assert sorted(errs) == sorted({f"FRX-L1 bracket span removed from {h}" for h, s in want if expected_reject(h, s)}), (text, errs)
+        assert sorted(errs) == sorted({f"FRX-L1 bracket span removed from {h}" for h, s in want if expected_reject(h, s) or h in TIGHT}), (text, errs)
 
 
 @pytest.mark.parametrize("pname", sorted(PLACEMENTS))
@@ -186,17 +197,17 @@ def test_f1_reject_in_every_placement(seed):
 def test_f1_order_line_span_rejects_in_each_placement(head, pname):
     text = "General Advice: rest\n" + PLACEMENTS[pname] + head + ": item [three times a day] x 3 days"
     out, removed = sanitize_note_ex(text)
-    assert (head, "[three times a day]") in removed
+    assert (head, "[three times a day]") in _r2(removed)
     assert f"FRX-L1 bracket span removed from {head}" in span_errors(removed)
 
 
 def test_f1_prefixed_heading_reports_its_own_heading_not_the_previous_one():
     _, removed = sanitize_note_ex("Refer to: cardiology\n[S1] General Advice: rest")
-    assert removed == [("General Advice", "[S1]")]
+    assert _r2(removed) == [("General Advice", "[S1]")]
     _, removed = sanitize_note_ex("General Advice: rest\n[S1] Surgery or Procedure: dressing [left knee]")
-    assert removed == [("Surgery or Procedure", "[S1]"), ("Surgery or Procedure", "[left knee]")]
+    assert _r2(removed) == [("Surgery or Procedure", "[S1]"), ("Surgery or Procedure", "[left knee]")]
     _, removed = sanitize_note_ex("General Advice: rest\n Follow up: review After [one] week")
-    assert removed == [("Follow up", "[one]")]
+    assert _r2(removed) == [("Follow up", "[one]")]
 
 
 def test_f1_text_of_non_column0_lines_is_not_reflowed():
@@ -276,7 +287,7 @@ def test_m5_recovery_rerender_that_loses_a_span_rejects(tmp_path, monkeypatch):
     def second_call_loses_a_span(*a, **k):
         n[0] += 1
         text, rem = real(*a, **k)
-        return (text, rem) if n[0] == 1 else (text, rem + [("Medication", "[frequency]")])
+        return (text, rem) if n[0] == 1 else (text, rem + [("Medication", "[frequency]", True)])
     monkeypatch.setattr(pipeline, "_fallback_note_ex", second_call_loses_a_span)
     lg, od = _run(tmp_path, STAGE_B)
     assert not lg["final_valid"] and "FRX-L1 bracket span removed from Medication" in lg["final_errors"]
@@ -290,13 +301,15 @@ def test_m11_c4_retry_fallback_returns_its_removed_spans(tmp_path, monkeypatch):
     art["gp_extraction"]["medicines"][0]["name"] = "paracetamol [dose]"
     monkeypatch.setattr(pipeline, "check", lambda a: ["C4 forced"])  # the first render "fails C4", so the retry path runs
     text, rem = pipeline._fallback_note_ex(art, {}, [])
-    assert "[dose]" not in text and ("Medication", "[dose]") in rem
+    assert "[dose]" not in text and ("Medication", "[dose]", True) in rem
 
 
 # --- FIX2: fail-closed line classification on a normalised view (N1-N3) ---
 from tools.eta2freescript.note import _norm_view  # noqa: E402
 
 NON_ORDER = [h for h in HEADINGS if h not in ORDER_HEADINGS]
+BENIGN_H = sorted(SPAN_BENIGN_HEADINGS)
+REJECT_H = [h for h in HEADINGS if h not in SPAN_BENIGN_HEADINGS]
 CF = ["​", "﻿", "⁠", "­", "‍", "‎", "‏", "‪", "⁦"]
 SP = "[three times a day]"
 PRE = {  # name -> (text written before the heading, case function, text between heading and colon)
@@ -335,7 +348,7 @@ def test_fx2_order_line_span_rejects_in_every_placement(head):
             text = before + "\n" + _line(head, pre, cf, colon, f"item {SP} x 3 days")
             _, removed = sanitize_note_ex(text)
             errs = span_errors(removed)
-            assert any(e.startswith("FRX-L1") for e in errs) and any(sp == SP for _, sp in removed), (pn, cn, kn, before, repr(text))
+            assert any(e.startswith("FRX-L1") for e in errs) and any(sp == SP for _, sp, _b in removed), (pn, cn, kn, before, repr(text))
             assert f"FRX-L1 bracket span removed from {head}" in errs, (pn, cn, kn, before, repr(text), errs)
             n += 1
     assert n > 1000
@@ -349,12 +362,12 @@ def test_fx2_continuation_of_an_order_section_rejects(head):
             assert f"FRX-L1 bracket span removed from {head}" in span_errors(removed), (head, pre, cont)
 
 
-@pytest.mark.parametrize("head", NON_ORDER)
+@pytest.mark.parametrize("head", BENIGN_H)
 def test_fx2_speaker_label_on_properly_attributed_non_order_line_still_posts(head):
     for pre in ("", "  ", "[S1] ", "​", "- ", "："[:0]):
         text = f"Medication: x\n{pre}{head}: keep warm [S1]\n{head.upper()}​ : and more [S2]"
         out, removed = sanitize_note_ex(text)
-        assert removed and all(h == head for h, _ in removed), (head, pre, removed)
+        assert removed and all(h == head for h, _, _b in removed), (head, pre, removed)
         assert span_errors(removed) == []
         assert out == base.sanitize_note(text)
 
@@ -437,7 +450,7 @@ def _mutated(monkeypatch, which):
         monkeypatch.setattr(note_mod, "_order_heading_inside", lambda v: None)
     elif which == "unattributed_benign":
         real_se = note_mod.span_errors
-        monkeypatch.setattr(note_mod, "span_errors", lambda rem: real_se([(h, s) for h, s in rem if h is not None]))
+        monkeypatch.setattr(note_mod, "span_errors", lambda rem: real_se([(h, s, b) for h, s, b in rem if h is not None]))
 
 
 def _norm_no_cf(line):
@@ -525,7 +538,7 @@ def test_fx3_empty_and_before_any_heading():
     assert span_errors(sanitize_note_ex("[dose] hi")[1]) == ["FRX-L1 bracket span removed from unattributed"]
 
 
-@pytest.mark.parametrize("head", NON_ORDER)
+@pytest.mark.parametrize("head", BENIGN_H)
 def test_fx3_speaker_label_posts_only_on_a_non_order_line(head):
     for sp in ALLOWED:
         for tpl in ("{h}: keep warm {s}", "  {h}: {s} keep warm", "{h}: a\n{s} more", "- {h} : {s} b"):
@@ -590,7 +603,8 @@ def _fx3_probes():
                          ("General Advice: rest [500 mg]", False), ("General Advice: rest []", False), ("Examination: a [urgent]", False),
                          ("Follow-up: x [500 mg]", False), ("Rx: x [500 mg]", False), ("Medication - x [S1]", False),
                          ("General Advice: rest [S1|doctor]", False), ("General Advice: rest [do\u200bse]", False),
-                         ("Medication: x [S1]", False), ("Follow up: x [S1]", False)):
+                         ("Medication: x [S1]", False), ("Follow up: x [S1]", False),
+                         ("Examination: CVS - [S3] gallop", False), ("Diagnoses: [S1] radiculopathy", False)):
         out.append((text, benign))
     return out
 
@@ -630,11 +644,11 @@ def test_fx3_mutation_is_caught(monkeypatch, which):
         monkeypatch.setattr(note_mod, "_span_key", _spk_key_no_casefold)
     elif which == "no_order_check":  # drop A1(b): attribution ignored
         real = note_mod.span_errors
-        monkeypatch.setattr(note_mod, "span_errors", lambda rem: real([("General Advice", s) for _, s in rem]))
+        monkeypatch.setattr(note_mod, "span_errors", lambda rem: real([("General Advice", s, b) for _, s, b in rem]))
     elif which == "line_only":  # restore FIX2 line-only classification
         def old(removed):
             heads = []
-            for head, span in removed:
+            for head, span, _b in removed:
                 if head is None or head in ORDER_HEADINGS or span.strip("[] \t").lower() in _D4_FIELDS:
                     h = head or "unattributed"
                     if h not in heads:
@@ -642,3 +656,118 @@ def test_fx3_mutation_is_caught(monkeypatch, which):
             return [f"FRX-L1 bracket span removed from {h}" for h in heads]
         monkeypatch.setattr(note_mod, "span_errors", old)
     assert _fx3_wrong(), f"mutant {which} survived"
+
+
+# --- FIX4: a speaker label is benign ONLY under General Advice / Presenting Complaint AND bounded by line edge or whitespace ---
+def test_fx4_constant_is_exactly_the_two_headings():
+    assert SPAN_BENIGN_HEADINGS == frozenset({"General Advice", "Presenting Complaint"})
+
+
+# adjacency: (template for the line body, bounded?). {s} is the span.
+ADJ = [("keep {s} warm", True), ("{s}", True), ("{s} keep", True), ("keep {s}", True), ("x{s} keep", False), ("keep {s}x", False),
+       ("{s}x keep", False), ("keep x{s}", False), ("2{s}0 keep", False), ("keep {s}.", False), ("keep {s},", False), ("keep.{s} x", False),
+       ("keep ({s}) x", False), ("keep -{s} x", False), ("keep {s}- x", False), ("keep {s}{s} x", False), ("{s}\u200bkeep", False),
+       ("keep\u200b{s} x", False), ("keep\u00a0{s}\u00a0x", True), ("keep\u3000{s}\u3000x", True), ("keep\t{s}\tx", True),
+       ("keep {s}:", False), ("keep {s}/ x", False), ("keep {s}% x", False)]
+
+
+def _benign_expected(head, bounded):
+    return head in SPAN_BENIGN_HEADINGS and bounded
+
+
+@pytest.mark.parametrize("head", HEADINGS)
+def test_fx4_generated_every_heading_every_adjacency(head):
+    n = 0
+    for sp in ALLOWED:
+        for body, bounded in ADJ:
+            for lay in ("{h}: {b}", "General Advice: z\n{h}: {b}", "Medication: x\n{h}: {b}", "{h}: z\n{b}"):
+                text = lay.format(h=head, b=body.format(s=sp))
+                out, removed = sanitize_note_ex(text)
+                assert len(removed) in (1, 2) and all(r[1] == sp.strip() for r in removed), (text, removed)
+                attr = {r[0] for r in removed}
+                if lay.startswith("{h}: z\n"):  # continuation line: attributed to the section the first line opened
+                    attr = {head}
+                assert len(attr) == 1
+                ah = attr.pop()
+                errs = span_errors(removed)
+                want_ok = all(_benign_expected(ah, r[2]) for r in removed)
+                assert (errs == []) == want_ok, (head, sp, lay, body, removed, errs)
+                assert out == base.sanitize_note(text)
+                n += 1
+    assert n > 600
+
+
+def test_fx4_bounded_flag():
+    cases = {"a [S1] b": True, "[S1] b": True, "a [S1]": True, "a[S1] b": False, "a [S1]b": False, "2[S1]0": False, "a [S1].": False,
+             "a [S1]\u00a0b": True, "a [S1]\u200bb": False}
+    for text, want in cases.items():
+        assert [r[2] for r in sanitize_note_ex("General Advice: " + text)[1]] == [want], text
+
+
+def test_fx4_refuter_fixed_cases():
+    for text in ("General Advice: rest\nExamination: CVS - [S3] gallop; chest clear",
+                 "General Advice: rest\nDiagnoses: [S1] radiculopathy", "Co-morbidities: [S2] murmur",
+                 "Plan of Management: review [S1]", "Examination: [S1]"):
+        _, removed = sanitize_note_ex(text)
+        errs = span_errors(removed)
+        assert errs and all(e.startswith("FRX-L1") for e in errs), text
+    assert span_errors(sanitize_note_ex("General Advice: rest\nExamination: CVS - [S3] gallop")[1]) == ["FRX-L1 bracket span removed from Examination"]
+    assert span_errors(sanitize_note_ex("General Advice: rest\nDiagnoses: [S1] radiculopathy")[1]) == ["FRX-L1 bracket span removed from Diagnoses"]
+    assert span_errors(sanitize_note_ex("General Advice: Drink 2[S1]0 glasses")[1]) == ["FRX-L1 bracket span removed from General Advice"]
+    assert span_errors(sanitize_note_ex("Presenting Complaint: cough [S1] since Monday")[1]) == []
+
+
+def test_fx4_pipeline_s1_on_general_advice_posts_and_examination_falls_back(tmp_path):
+    lg, _ = _llm_with(tmp_path / "ga", "General Advice: Drink plenty of water; Take rest", "General Advice: [S1] take at night; Drink plenty of water; Take rest")
+    assert lg["final_valid"] and lg["note_source"].startswith("llm_") and lg["sanitize_removed"] == 1
+    lg, _ = _llm_with(tmp_path / "glued", "General Advice: Drink plenty of water; Take rest", "General Advice: Drink 2[S1]0 glasses of water; Take rest")
+    assert lg["note_source"] == "deterministic_fallback" and "FRX-L1 bracket span removed from General Advice" in lg["llm_note_errors"]
+    ex = next(ln for ln in STAGE_B.split("\n") if ln.startswith("Examination:"))
+    lg, _ = _llm_with(tmp_path / "ex", ex, ex + " CVS - [S3] gallop")
+    assert lg["note_source"] == "deterministic_fallback" and "FRX-L1 bracket span removed from Examination" in lg["llm_note_errors"]
+
+
+def test_fx4_posted_text_byte_identical_to_fix3_and_base_for_every_input():
+    r = random.Random(44)
+    pool = HARMFUL + ALLOWED
+    for _ in range(600):
+        text = "\n".join(r.choice(LAYOUTS_ALL).format(h=r.choice(HEADINGS + VARIANT_HEADS), b=f"w{r.choice(pool)}z {r.choice(pool)} 2{r.choice(pool)}0")
+                         for _ in range(3))
+        assert sanitize_note_ex(text)[0] == base.sanitize_note(text) == sanitize_note(text)
+
+
+LAYOUTS_ALL = list(LAYOUTS.values())
+
+
+# --- FIX4 mutations: each must fail a test ---
+def _fx4_wrong():
+    bad = []
+    for text, benign in (("General Advice: take [S1] at night", True), ("Presenting Complaint: cough [S1]", True), ("[S1] x", False),
+                         ("Examination: CVS - [S3] gallop", False), ("Diagnoses: [S1] radiculopathy", False),
+                         ("Plan of Management: [S1] x", False), ("Co-morbidities: x [S2]", False), ("Medication: x [S1]", False),
+                         ("General Advice: Drink 2[S1]0 glasses", False), ("General Advice: x[S1] y", False), ("General Advice: [S1]x", False),
+                         ("General Advice: rest [S1].", False), ("Presenting Complaint: ([S1])", False)):
+        if (span_errors(note_mod.sanitize_note_ex(text)[1]) == []) != benign:
+            bad.append(text)
+    return bad
+
+
+def test_fx4_probes_pass_unmutated():
+    assert _fx4_wrong() == []
+
+
+@pytest.mark.parametrize("which", ["drop_a_all_non_order", "drop_a_widen", "drop_b", "drop_b_left_only", "drop_b_right_only"])
+def test_fx4_mutation_is_caught(monkeypatch, which):
+    real_bounded = note_mod._bounded
+    if which == "drop_a_all_non_order":  # FIX3 rule: any non-order heading is benign
+        monkeypatch.setattr(note_mod, "SPAN_BENIGN_HEADINGS", frozenset(h for h in HEADINGS if h not in ORDER_HEADINGS))
+    elif which == "drop_a_widen":
+        monkeypatch.setattr(note_mod, "SPAN_BENIGN_HEADINGS", frozenset(HEADINGS))
+    elif which == "drop_b":
+        monkeypatch.setattr(note_mod, "_bounded", lambda line, m: True)
+    elif which == "drop_b_left_only":
+        monkeypatch.setattr(note_mod, "_bounded", lambda line, m: m.group(0)[:1].isspace() or m.start() == 0)
+    elif which == "drop_b_right_only":
+        monkeypatch.setattr(note_mod, "_bounded", lambda line, m: m.end() == len(line) or line[m.end()].isspace())
+    assert real_bounded is not note_mod._bounded or which.startswith("drop_a")
+    assert _fx4_wrong(), f"mutant {which} survived"
