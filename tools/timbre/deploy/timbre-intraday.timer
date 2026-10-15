@@ -1,0 +1,13 @@
+# /etc/systemd/system/timbre-intraday.timer — every 15 min, 08:00-23:45 IST (02:30-18:15 UTC). Not persistent: a missed tick is
+# not replayed, the next one picks the consult up from the ledger. `systemctl disable --now timbre-intraday.timer` switches it off.
+[Unit]
+Description=Timbre intraday (every consult) schedule
+
+[Timer]
+OnCalendar=*-*-* 02:30,45:00 UTC
+OnCalendar=*-*-* 03..17:00,15,30,45:00 UTC
+OnCalendar=*-*-* 18:00,15:00 UTC
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -2,6 +2,7 @@
 
     python -m tools.timbre.nightly run [--date YYYY-MM-DD] [--config tools/timbre/deploy/nightly.json] [--dry-run]
     python -m tools.timbre.nightly plan [--date ...]          # list what would be scored; fetches nothing, scores nothing
+    python -m tools.timbre.nightly intraday [--date ...]      # one record-only tick for TODAY (IST); see NIGHTLY.md "Intraday"
 
 Steps, for the previous IST day by default:
   1. GET  <app>/api/timbre/consults?date=D   (HMAC, TIMBRE_INGEST_SECRET). The app reads consult_index (0150) and drops
@@ -208,20 +209,82 @@ def git_sha() -> str:
     return sha
 
 
-def manifest(cfg: dict, day: str, info: dict, *, sha: str, started: str, finished: str, gpu_s: float, state: str, withheld_blind: int) -> dict:
+def manifest(cfg: dict, day: str, info: dict, *, sha: str, started: str, finished: str, gpu_s: float, state: str, withheld_blind: int, job: str = "timbre-nightly") -> dict:
     keys = ("pipeline_version", "compute", "device", "worker_id", "nemotron_model_rev", "arousal_model_id", "arousal_model_rev",
             "fallback_model_id", "fallback_model_rev", "valence_model_id", "valence_model_rev", "clef_question_set",
             "purity_rule_version", "purity_rule_json", "calibration_git_sha", "calibration_fit_on")
     m = {k: cfg.get(k) for k in keys}
     m.update({
         "git_sha": sha, "speaker_source": cfg["speaker"], "text_lane_on": bool(cfg.get("text_lane")), "state": state,
-        "scope_json": {"job": "timbre-nightly", "ist_date": day, "withheld_blind_room_days": withheld_blind, **info},
+        "scope_json": {"job": job, "ist_date": day, "withheld_blind_room_days": withheld_blind, **info},
         "timing_json": {"wall_s": round((datetime.fromisoformat(finished) - datetime.fromisoformat(started)).total_seconds(), 1)},
         "gpu_seconds": round(gpu_s, 1), "cost_usd_est": info["cost_usd_est"], "started_at": started, "finished_at": finished,
         "calibration_arousal_path": cfg["calibration_arousal"], "calibration_valence_path": cfg["calibration_valence"],
     })
     m["calibration_git_sha"] = m.get("calibration_git_sha") or sha
     return m
+
+
+def _score_and_store(day: str, cfg: dict, kept: list[dict], info: dict, withheld: int, started: str, secret: str, *, job: str,
+                     runner, post, preparer) -> tuple[int, list[dict]]:
+    """Prepare -> pipeline -> manifest -> POST for already-planned consults. Returns (exit code, scored) where `scored` is one
+    {consult_uid, windows, cost_usd_est} per consult that has windows in an ok-ingested payload; it is empty on every
+    failure, on a nothing-to-score outcome and on a partial-before-store exit."""
+    work = Path(cfg["workdir"]) / day / datetime.now(timezone.utc).strftime("%H%M%S")
+    prep_dir = None
+    t0 = time.monotonic()
+    prepared = None
+    if cfg.get("prepare") and cfg["speaker"] == "nemotron":
+        prep_dir = work / "prep"
+        prep_dir.mkdir(parents=True, exist_ok=True)
+        if preparer is None:
+            from tools.timbre import nightly_prepare
+
+            nightly_prepare.voiceprints_from_centroids(str(cfg["centroids"]), prep_dir / "voiceprints.json")
+            embed = nightly_prepare.ecapa_embedder(str(cfg["ecapa_model"]), str(cfg.get("ecapa_device") or "cpu"))
+            prepared = nightly_prepare.prepare(kept, prep_dir, embed=embed)
+        else:
+            prepared = preparer(kept, prep_dir)
+        info.update({"prepared_parts": len(prepared.clips), "no_diarization": len(prepared.no_diarization),
+                     "audio_errors": len(prepared.audio_errors), "parts_short": prepared.parts_short, "parts_no_nlp": prepared.parts_no_nlp})
+        print(f"[{job}] prepared: {len(prepared.clips)} part(s) from {len({c['consult_uid'] for c in prepared.clips})} consult(s); "
+              f"no_diarization={len(prepared.no_diarization)} audio_errors={len(prepared.audio_errors)}")
+        if not prepared.clips:
+            print(f"[{job}] no consult has Nemotron diarization for this day; nothing to score")
+            return 0, []
+        sessions, clips = write_inputs(prepared.clips, day, work, str(cfg["speaker"]), local_audio=True)
+    else:
+        sessions, clips = write_inputs(kept, day, work, str(cfg["speaker"]))
+    out = work / "out"
+    proc = runner(pipeline_cmd(cfg, sessions, out, prep_dir), timeout=int(cfg["pipeline_timeout_s"]), check=False)
+    gpu_s = time.monotonic() - t0
+    if getattr(proc, "returncode", 1) != 0 or not (out / "windows.parquet").is_file():
+        print(f"ALERT [{job}] pipeline failed for {day} (exit {getattr(proc, 'returncode', '?')}); nothing stored")
+        return 1, []
+    state = "partial" if info["dropped_budget"] or info["dropped_max"] else "ok"
+    man = manifest(cfg, day, info, sha=git_sha(), started=started, finished=datetime.now(timezone.utc).isoformat(), gpu_s=gpu_s, state=state, withheld_blind=withheld, job=job)
+    man_path = work / "run.json"
+    man_path.write_text(json.dumps(man, indent=2, sort_keys=True), encoding="utf-8")
+    from tools.timbre import store
+
+    payload = store.build_from_files(str(out / "windows.parquet"), str(man_path), str(clips), str(out / "consults.json") if (out / "consults.json").is_file() else None)
+    result = (post or store.post_payload)(payload, cfg["app_url"].rstrip("/") + "/api/timbre/ingest", secret)
+    print(f"[{job}] stored: {json.dumps(result, sort_keys=True)}")
+    scored: list[dict] = []
+    if isinstance(result, dict) and result.get("ok"):
+        counts: dict[str, int] = {}
+        for w in payload.get("windows") or []:
+            uid = w.get("consult_uid")
+            if uid:
+                counts[uid] = counts.get(uid, 0) + 1
+        by_uid = {c["consult_uid"]: c for c in kept}
+        scored = [{"consult_uid": uid, "windows": n, "run_id": result.get("run_id"), "cut_version": by_uid[uid].get("cut_version"),
+                   "cost_usd_est": round(estimate_usd(by_uid[uid]["duration_s"]), 6)}
+                  for uid, n in sorted(counts.items()) if uid in by_uid]
+    if state == "partial":
+        print(f"ALERT [{job}] {day} is PARTIAL: {info['dropped_budget']} consult(s) over the daily budget, {info['dropped_max']} over max_consults")
+        return 2, scored
+    return 0, scored
 
 
 def run(day: str, cfg: dict, *, dry_run: bool = False, runner=subprocess.run, fetch=fetch_consults, post=None, preparer=None) -> int:
@@ -242,68 +305,128 @@ def run(day: str, cfg: dict, *, dry_run: bool = False, runner=subprocess.run, fe
         return 0
     if dry_run:
         return 0
-    work = Path(cfg["workdir"]) / day / datetime.now(timezone.utc).strftime("%H%M%S")
-    prep_dir = None
-    t0 = time.monotonic()
-    if cfg.get("prepare") and cfg["speaker"] == "nemotron":
-        prep_dir = work / "prep"
-        prep_dir.mkdir(parents=True, exist_ok=True)
-        if preparer is None:
-            from tools.timbre import nightly_prepare
+    return _score_and_store(day, cfg, kept, info, withheld, started, secret, job="timbre-nightly", runner=runner, post=post, preparer=preparer)[0]
 
-            nightly_prepare.voiceprints_from_centroids(str(cfg["centroids"]), prep_dir / "voiceprints.json")
-            embed = nightly_prepare.ecapa_embedder(str(cfg["ecapa_model"]), str(cfg.get("ecapa_device") or "cpu"))
-            prepared = nightly_prepare.prepare(kept, prep_dir, embed=embed)
-        else:
-            prepared = preparer(kept, prep_dir)
-        info.update({"prepared_parts": len(prepared.clips), "no_diarization": len(prepared.no_diarization),
-                     "audio_errors": len(prepared.audio_errors), "parts_short": prepared.parts_short, "parts_no_nlp": prepared.parts_no_nlp})
-        print(f"[timbre-nightly] prepared: {len(prepared.clips)} part(s) from {len({c['consult_uid'] for c in prepared.clips})} consult(s); "
-              f"no_diarization={len(prepared.no_diarization)} audio_errors={len(prepared.audio_errors)}")
-        if not prepared.clips:
-            print("[timbre-nightly] no consult has Nemotron diarization for this day; nothing to score")
-            return 0
-        sessions, clips = write_inputs(prepared.clips, day, work, str(cfg["speaker"]), local_audio=True)
-    else:
-        sessions, clips = write_inputs(kept, day, work, str(cfg["speaker"]))
-    out = work / "out"
-    proc = runner(pipeline_cmd(cfg, sessions, out, prep_dir), timeout=int(cfg["pipeline_timeout_s"]), check=False)
-    gpu_s = time.monotonic() - t0
-    if getattr(proc, "returncode", 1) != 0 or not (out / "windows.parquet").is_file():
-        print(f"ALERT [timbre-nightly] pipeline failed for {day} (exit {getattr(proc, 'returncode', '?')}); nothing stored")
+
+# ------------------------------------------------------------------------------------------------------------ intraday
+
+JOB_INTRADAY = "timbre-intraday"
+
+
+def today_ist(now: datetime | None = None) -> str:
+    return (now or datetime.now(timezone.utc)).astimezone(IST).date().isoformat()
+
+
+def _versions(cfg: dict) -> dict:
+    return {"pipeline_version": cfg.get("pipeline_version"), "valence_model_rev": cfg.get("valence_model_rev"), "arousal_model_rev": cfg.get("arousal_model_rev")}
+
+
+def read_ledger(path: Path) -> tuple[list[dict], int]:
+    """(usable rows, bad-row count). A row that is not JSON, not an object with a consult_uid, has a non-numeric cost, or has
+    invalid UTF-8 is skipped and counted, never fatal; its consult may be re-scored."""
+    rows: list[dict] = []
+    bad = 0
+    if not path.is_file():
+        return rows, bad
+    for raw in path.read_bytes().split(b"\n"):
+        if not raw.strip(b"\x00 \t\r"):
+            continue
+        try:
+            row = json.loads(raw.decode("utf-8", errors="replace"))
+            if not isinstance(row, dict) or not row.get("consult_uid"):
+                raise ValueError("no consult_uid")
+            float(row.get("cost_usd_est") or 0.0)
+        except (ValueError, TypeError):
+            bad += 1
+            continue
+        rows.append(row)
+    return rows, bad
+
+
+def append_ledger(path: Path, scored: list[dict], day: str, cfg: dict) -> None:
+    """Append-only, consult_uids and counts only (no text, no doctor id). Called only after an ok ingest."""
+    ts = datetime.now(timezone.utc).isoformat()
+    torn = False
+    if path.is_file() and path.stat().st_size > 0:
+        with path.open("rb") as raw:
+            raw.seek(-1, os.SEEK_END)
+            torn = raw.read(1) != b"\n"
+    with path.open("a", encoding="utf-8") as fh:
+        if torn:
+            fh.write("\n")
+        for s in scored:
+            fh.write(json.dumps({"consult_uid": s["consult_uid"], "ist_date": day, **_versions(cfg), "run_id": s.get("run_id"), "cut_version": s.get("cut_version"), "windows": s["windows"],
+                                 "cost_usd_est": s["cost_usd_est"], "ts": ts}, sort_keys=True) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def intraday(day: str, cfg: dict, *, dry_run: bool = False, runner=subprocess.run, fetch=fetch_consults, post=None, preparer=None) -> int:
+    """One intraday tick for IST date `day`. Record-only; idempotent per (consult_uid, pipeline/valence/arousal versions)."""
+    if not cfg["enabled"]:
+        print("[timbre-intraday] disabled (TIMBRE_NIGHTLY_ENABLED / config enabled) — nothing to do")
+        return 0
+    secret = os.environ.get("TIMBRE_INGEST_SECRET", "").strip()
+    if not cfg["app_url"] or not secret:
+        print("ALERT [timbre-intraday] app_url or TIMBRE_INGEST_SECRET not set")
         return 1
-    state = "partial" if info["dropped_budget"] or info["dropped_max"] else "ok"
-    man = manifest(cfg, day, info, sha=git_sha(), started=started, finished=datetime.now(timezone.utc).isoformat(), gpu_s=gpu_s, state=state, withheld_blind=withheld)
-    man_path = work / "run.json"
-    man_path.write_text(json.dumps(man, indent=2, sort_keys=True), encoding="utf-8")
-    from tools.timbre import store
+    import fcntl
 
-    payload = store.build_from_files(str(out / "windows.parquet"), str(man_path), str(clips), str(out / "consults.json") if (out / "consults.json").is_file() else None)
-    result = (post or store.post_payload)(payload, cfg["app_url"].rstrip("/") + "/api/timbre/ingest", secret)
-    print(f"[timbre-nightly] stored: {json.dumps(result, sort_keys=True)}")
-    if state == "partial":
-        print(f"ALERT [timbre-nightly] {day} is PARTIAL: {info['dropped_budget']} consult(s) over the daily budget, {info['dropped_max']} over max_consults")
-        return 2
-    return 0
+    workdir = Path(cfg["workdir"])
+    workdir.mkdir(parents=True, exist_ok=True)
+    with (workdir / "intraday.lock").open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("[timbre-intraday] busy")
+            return 0
+        started = datetime.now(timezone.utc).isoformat()
+        ledger_path = workdir / "intraday-ledger.jsonl"
+        rows, bad_rows = read_ledger(ledger_path)
+        print(f"[timbre-intraday] ledger_bad_rows={bad_rows}")
+        ver = _versions(cfg)
+        done = {(r["consult_uid"], r.get("cut_version")) for r in rows if all(r.get(k) == v for k, v in ver.items())}
+        spent = sum(float(r.get("cost_usd_est") or 0.0) for r in rows if r.get("ist_date") == day)
+        body = fetch(cfg["app_url"], day, secret)
+        todo = [c for c in body["consults"] if (c.get("consult_uid"), c.get("cut_version")) not in done]
+        remaining = max(0.0, float(cfg["budget_usd_daily"]) - spent)
+        kept, info = plan(todo, dict(cfg, budget_usd_daily=remaining))
+        info.update({"already_done": len(body["consults"]) - len(todo), "spent_usd_before": round(spent, 4)})
+        withheld = int(body.get("withheld_blind") or 0)
+        print(f"[timbre-intraday] {day}: {info} withheld_blind={withheld}")
+        if not kept:
+            if info["dropped_budget"] or info["dropped_max"]:
+                print(f"ALERT [timbre-intraday] {day} is PARTIAL: {info['dropped_budget']} consult(s) over the daily budget, {info['dropped_max']} over max_consults")
+                return 2
+            print("[timbre-intraday] nothing to score")
+            return 0
+        if dry_run:
+            return 0
+        rc, scored = _score_and_store(day, cfg, kept, info, withheld, started, secret, job=JOB_INTRADAY, runner=runner, post=post, preparer=preparer)
+        if scored:
+            append_ledger(ledger_path, scored, day, cfg)
+        return rc
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="tools.timbre.nightly")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("run", "plan"):
+    for name in ("run", "plan", "intraday"):
         s = sub.add_parser(name)
-        s.add_argument("--date", default=None, help="IST date; default the previous IST day")
+        s.add_argument("--date", default=None, help="IST date; default today (IST) for intraday, the previous IST day for run/plan")
         s.add_argument("--config", default=os.environ.get("TIMBRE_NIGHTLY_CONFIG"))
-        if name == "run":
+        if name in ("run", "intraday"):
             s.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
-    day = args.date or previous_ist_day()
+    day = args.date or (today_ist() if args.cmd == "intraday" else previous_ist_day())
     date.fromisoformat(day)
     try:
         cfg = load_config(args.config)
+        if args.cmd == "intraday":
+            return intraday(day, cfg, dry_run=bool(args.dry_run))
         return run(day, cfg, dry_run=(args.cmd == "plan" or bool(getattr(args, "dry_run", False))))
     except Exception as exc:  # noqa: BLE001 — every failure is one ALERT line and exit 1
-        print(f"ALERT [timbre-nightly] {day} failed: {type(exc).__name__}: {str(exc)[:300]}")
+        print(f"ALERT [{'timbre-intraday' if args.cmd == 'intraday' else 'timbre-nightly'}] {day} failed: {type(exc).__name__}: {str(exc)[:300]}")
         return 1
 
 
