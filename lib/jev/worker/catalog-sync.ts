@@ -27,6 +27,8 @@ export const MAX_SETS_PER_ROW = 50;     // store MAX_SETS
 export const WINDOW_DAYS = 8;
 /** CS-2: wall-clock budget for one tick, measured from the step's start; checked before each page select only (FIX1: the collected rows, at most 500, are always posted; one bounded ingest fits the slack under maxDuration). */
 export const CATALOG_SYNC_BUDGET_MS = 20_000;
+/** FIX1 X1: hard wall-clock limit on the whole step, every statement included, measured from the step's start; inside maxDuration 60. */
+export const CATALOG_SYNC_HARD_MS = 35_000;
 /** FU2 G3 (FU1-3): wall-clock limit on each of the four selects and the ingest. A Promise race, not SET LOCAL: see withTimeout. */
 export const CATALOG_SYNC_STATEMENT_TIMEOUT_MS = 15_000;
 const PAGE = 500;
@@ -149,6 +151,8 @@ export function carriesAllStored(stored: JevEntry[], block: Merged | null, capDr
 }
 
 class StatementTimeoutError extends Error { constructor() { super("statement_timeout"); } }
+/** FIX1 X1: no time left before a statement, so it is not started. */
+class HardDeadlineError extends Error { constructor() { super("hard_deadline"); } }
 /**
  * G3: a Promise race, abandoning the await at `ms` (the timer is cleared on settle). SET LOCAL statement_timeout was the first choice but lib/db is the Neon HTTP driver: each
  * statement is its own HTTP request with no interactive transaction, so a SET LOCAL does not reach the next statement, and the one batch form (sql.transaction([...])) would need
@@ -200,9 +204,12 @@ export async function runCatalogC4Sync(now: () => number = Date.now, stmtTimeout
   const t0 = now();
   const deadline = t0 + CATALOG_SYNC_BUDGET_MS;
   const overBudget = (): boolean => now() > deadline;
+  const hardDeadline = t0 + CATALOG_SYNC_HARD_MS;
+  // FIX1 X1: every statement gets min(per-statement limit, time left to the hard deadline); none starts with <= 0 left
+  const limit = (): number => { const left = hardDeadline - now(); if (left <= 0) throw new HardDeadlineError(); return Math.min(stmtTimeoutMs, left); };
   const scan = { pages: 0, candidates_scanned: 0 };
   try {
-    await runStep(c, scan, overBudget, stmtTimeoutMs);
+    await runStep(c, scan, overBudget, limit);
   } catch (e) {
     c.error_class = e instanceof StatementTimeoutError ? "statement_timeout" : e instanceof ConcurrentIngestError ? "concurrent_insert" : classifyDbError(e);
   }
@@ -211,48 +218,56 @@ export async function runCatalogC4Sync(now: () => number = Date.now, stmtTimeout
   return c;
 }
 
-async function runStep(c: CatalogCounts, scan: { pages: number; candidates_scanned: number }, overBudget: () => boolean, ms: number): Promise<void> {
+async function runStep(c: CatalogCounts, scan: { pages: number; candidates_scanned: number }, overBudget: () => boolean, limit: () => number): Promise<void> {
   const rows: CatalogRow[] = [];
   let cursor: Cursor = null;
   let cur: CurrentSet[] | null = null;
-  for (let page = 0; page < MAX_PAGES && rows.length < BATCH_ROWS; page++) {
-    if (overBudget()) { c.budget_hit = true; break; }
-    const cands: Candidate[] = await withTimeout(selectC4Candidates(WINDOW_DAYS, cursor, PAGE), ms);
-    scan.pages++; scan.candidates_scanned += cands.length;
-    if (cands.length === 0) break;
-    cur ??= await withTimeout(selectCurrentSets(), ms);
-    const uids = cands.map((x) => x.consult_uid);
-    const [jevPicks, clefPicks] = await Promise.all([withTimeout(selectJevPicks(uids), ms), withTimeout(selectClefPicks(uids), ms)]);
-    const byJev = new Map<string, JevPick[]>();
-    for (const p of jevPicks) (byJev.get(p.consult_uid) ?? byJev.set(p.consult_uid, []).get(p.consult_uid)!).push(p);
-    const byClef = new Map(clefPicks.map((p) => [p.consult_uid, p]));
-    for (const cand of cands) {
-      if (rows.length >= BATCH_ROWS) break;
-      const row: CatalogRow = { consult_uid: cand.consult_uid };
-      const stored = storedEntries(cand.stored_jev);
-      if (stored === null) c.invariant_dropped++;      // an unreadable stored block is left exactly as it is
-      else {
-        const m = mergeJev(stored, freshEntries(byJev.get(cand.consult_uid) ?? [], c), cur, c);
-        if (!carriesAllStored(stored, m.block, m.capDropped)) c.invariant_dropped++;   // never post a block that loses a stored entry, nor jev: null
-        else if (m.block && !same(m.block, cand.stored_jev)) { row.jev = m.block; c.retired += m.newlyRetired; }
+  try {
+    for (let page = 0; page < MAX_PAGES && rows.length < BATCH_ROWS; page++) {
+      if (overBudget()) { c.budget_hit = true; break; }
+      const cands: Candidate[] = await withTimeout(selectC4Candidates(WINDOW_DAYS, cursor, PAGE), limit());
+      scan.pages++; scan.candidates_scanned += cands.length;
+      if (cands.length === 0) break;
+      cur ??= await withTimeout(selectCurrentSets(), limit());
+      const uids = cands.map((x) => x.consult_uid);
+      const lj = limit();
+      const [jevPicks, clefPicks] = await Promise.all([withTimeout(selectJevPicks(uids), lj), withTimeout(selectClefPicks(uids), lj)]);
+      const byJev = new Map<string, JevPick[]>();
+      for (const p of jevPicks) (byJev.get(p.consult_uid) ?? byJev.set(p.consult_uid, []).get(p.consult_uid)!).push(p);
+      const byClef = new Map(clefPicks.map((p) => [p.consult_uid, p]));
+      for (const cand of cands) {
+        if (rows.length >= BATCH_ROWS) break;
+        const row: CatalogRow = { consult_uid: cand.consult_uid };
+        const stored = storedEntries(cand.stored_jev);
+        if (stored === null) c.invariant_dropped++;      // an unreadable stored block is left exactly as it is
+        else {
+          const m = mergeJev(stored, freshEntries(byJev.get(cand.consult_uid) ?? [], c), cur, c);
+          if (!carriesAllStored(stored, m.block, m.capDropped)) c.invariant_dropped++;   // never post a block that loses a stored entry, nor jev: null
+          else if (m.block && !same(m.block, cand.stored_jev)) { row.jev = m.block; c.retired += m.newlyRetired; }
+        }
+        const cp = byClef.get(cand.consult_uid);
+        const clef = cp ? buildClef(cp, c) : null;
+        if (clef && !same(clef, cand.stored_clef)) row.clef_affect = clef;
+        if (Object.keys(row).length === 1) { c.unchanged++; continue; }
+        // a row that fails the ingest's own validator is dropped alone (one bad row must not starve the batch) and counted
+        if (!validateBatch({ rows: [row] }).ok) { c.error_class = "row_invalid"; continue; }
+        rows.push(row);
       }
-      const cp = byClef.get(cand.consult_uid);
-      const clef = cp ? buildClef(cp, c) : null;
-      if (clef && !same(clef, cand.stored_clef)) row.clef_affect = clef;
-      if (Object.keys(row).length === 1) { c.unchanged++; continue; }
-      // a row that fails the ingest's own validator is dropped alone (one bad row must not starve the batch) and counted
-      if (!validateBatch({ rows: [row] }).ok) { c.error_class = "row_invalid"; continue; }
-      rows.push(row);
+      const last = cands[cands.length - 1]!;
+      cursor = { t0: last.t0, uid: last.consult_uid };
+      if (cands.length < PAGE) break;
     }
-    const last = cands[cands.length - 1]!;
-    cursor = { t0: last.t0, uid: last.consult_uid };
-    if (cands.length < PAGE) break;
+  } catch (e) {
+    if (!(e instanceof HardDeadlineError)) throw e;
+    c.budget_hit = true;      // rows from earlier pages are kept; the ingest below runs only if time remains
   }
   if (c.capped > 0) console.warn(`catalog-c4-sync: jev entries over ${MAX_SETS_PER_ROW} dropped (retired first, then oldest): ${c.capped}`);
   if (rows.length === 0) return;
   const v = validateBatch({ rows });
   if (!v.ok) { c.error_class = `validate_${v.error}`; return; }
-  const res = await withTimeout(ingestCatalogRows(v.rows, { updateOnly: true }), ms);
+  let lm: number;
+  try { lm = limit(); } catch (e) { if (e instanceof HardDeadlineError) { c.budget_hit = true; return; } throw e; }      // no time to start the ingest: post nothing
+  const res = await withTimeout(ingestCatalogRows(v.rows, { updateOnly: true }), lm);
   c.posted = v.rows.length; c.updated = res.updated; c.inserted = res.inserted; c.stale = res.stale;
   c.missing = res.missing ?? 0; c.retried = res.retried ? 1 : 0;      // retried is not an error
 }

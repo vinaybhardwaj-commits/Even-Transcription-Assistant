@@ -16,10 +16,12 @@ const H = vi.hoisted(() => ({
   beforeIngest: null as null | (() => void),   // FU2: runs just before the real ingest (a row deleted mid-tick)
   ingestDelayMs: 0,                              // FU2 G3: the ingest takes this long
   delayMs: 0,                                    // FU2 G3: every select takes this long
+  onSql: null as null | ((n: number) => void),   // FIX1: runs on the nth statement of a tick (advances an injected clock)
 }));
 vi.mock("@/lib/db", () => {
   const fn = (a: TemplateStringsArray | string, ...v: unknown[]) => {
     H.sqlCalls += 1;
+    H.onSql?.(H.sqlCalls);
     if (H.delayMs > 0 && typeof a !== "string") return new Promise((res, rej) => setTimeout(() => H.tag!(a, ...v).then(res, rej), H.delayMs));
     if (typeof a === "string") {   // ingestCatalogRows: sql(text, params)
       const params = v[0] as unknown[];
@@ -48,7 +50,7 @@ vi.mock("@/lib/encounter-catalog/store", async (orig) => {
 import { QUESTION_SET_FILES } from "@/jev/question-sets";
 import { setSha, validateSetFile } from "@/lib/jev/worker/sets";
 import { validateBatch } from "@/lib/encounter-catalog/store";
-import { labelOf, runCatalogC4Sync, buildClef, zeroCounts, NOUL_YES_THRESHOLD, CATALOG_SYNC_BUDGET_MS, CATALOG_SYNC_STATEMENT_TIMEOUT_MS, mergeJev, carriesAllStored, storedEntries, type JevEntry } from "@/lib/jev/worker/catalog-sync";
+import { labelOf, runCatalogC4Sync, buildClef, zeroCounts, NOUL_YES_THRESHOLD, CATALOG_SYNC_BUDGET_MS, CATALOG_SYNC_STATEMENT_TIMEOUT_MS, CATALOG_SYNC_HARD_MS, mergeJev, carriesAllStored, storedEntries, type JevEntry } from "@/lib/jev/worker/catalog-sync";
 
 const HAVE = dockerAvailable();
 const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
@@ -103,7 +105,7 @@ suite("CATALOG-C4-SYNC — Jev and Clef into encounter_catalog", () => {
     }
   }, 300_000);
   afterAll(() => pg.stop());
-  beforeEach(() => { wipe(); H.posted.length = 0; H.sqlCalls = 0; H.beforeIngest = null; H.ingestDelayMs = 0; H.delayMs = 0; });
+  beforeEach(() => { wipe(); H.posted.length = 0; H.sqlCalls = 0; H.beforeIngest = null; H.ingestDelayMs = 0; H.delayMs = 0; H.onSql = null; });
   afterEach(() => { delete process.env.CATALOG_C4_SYNC_ENABLED; });
 
   it("flag off (unset, 0) reads NOTHING and posts nothing", async () => {
@@ -578,6 +580,57 @@ suite("CATALOG-C4-SYNC — Jev and Clef into encounter_catalog", () => {
       expect(JSON.parse(lines[0]!.slice("catalog_c4 tick ".length)).error_class).toBe("statement_timeout");
       await new Promise((res) => setTimeout(res, 350));
     } finally { spy.mockRestore(); }
+  });
+  describe("FIX1 X1: the hard deadline", () => {
+    const vclock = () => { const k = { t: 0 }; return { k, now: () => k.t }; };
+    it("a slow later page cannot push the step past HARD_MS: the next statement is not started, budget_hit, nothing posted (the ingest has no time either), both info lines emitted", async () => {
+      on();
+      expect(CATALOG_SYNC_HARD_MS).toBe(35_000);
+      bulkWins("p", 520, 3); bulkDecisions("p", 520, SHA["chair-affect"]!, "v0", "{}");
+      await runCatalogC4Sync();
+      H.posted.length = 0; H.sqlCalls = 0;
+      decide("p_1@ma", "chair-affect", "confusion", { type: "choice", choice: "high" });
+      const { k, now } = vclock();
+      H.onSql = (n) => { if (n === 5) k.t = CATALOG_SYNC_HARD_MS + 1; };      // call 5 = page-2 candidates select: it "takes" past the hard deadline
+      const spy = vi.spyOn(console, "info").mockImplementation(() => {});
+      try {
+        const r = await runCatalogC4Sync(now);
+        expect(r).toMatchObject({ posted: 0, budget_hit: true, error_class: null });
+        expect(H.sqlCalls).toBe(5);       // page-2 picks never started
+        expect(H.posted).toHaveLength(0);
+        expect(infoLines(spy)).toHaveLength(2);
+      } finally { spy.mockRestore(); }
+    });
+    it("an ingest that would start after HARD_MS does not start; the collected rows are not applied", async () => {
+      on();
+      win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+      const { k, now } = vclock();
+      H.onSql = (n) => { if (n === 4) k.t = CATALOG_SYNC_HARD_MS; };          // call 4 = clef picks, the last select: left is exactly 0
+      const spy = vi.spyOn(console, "info").mockImplementation(() => {});
+      try {
+        const r = await runCatalogC4Sync(now);
+        expect(r).toMatchObject({ posted: 0, updated: 0, budget_hit: true, error_class: null });
+        expect(H.posted).toHaveLength(0);
+        expect((await catalogOf("u_0001"))!.jev).toBeNull();
+        expect(infoLines(spy)).toHaveLength(2);
+      } finally { spy.mockRestore(); }
+    });
+    it("a statement gets min(statement limit, time left): 50 ms left caps a 400 ms ingest even with a 15 s statement limit", async () => {
+      on();
+      win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+      const { k, now } = vclock();
+      H.onSql = (n) => { if (n === 4) k.t = CATALOG_SYNC_HARD_MS - 50; };
+      H.ingestDelayMs = 400;
+      const r = await runCatalogC4Sync(now);
+      expect(r).toMatchObject({ posted: 0, error_class: "statement_timeout" });
+      await new Promise((res) => setTimeout(res, 450));
+    });
+    it("a tick well inside the hard deadline is unaffected", async () => {
+      on();
+      win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+      const { now } = vclock();
+      expect(await runCatalogC4Sync(now)).toMatchObject({ posted: 1, updated: 1, budget_hit: false, error_class: null });
+    });
   });
   it("FU2 G4: flag off (unset, 0) and an unrecognised flag value emit NO console.info line", async () => {
     win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
