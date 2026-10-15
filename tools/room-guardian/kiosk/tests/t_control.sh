@@ -227,8 +227,8 @@ test_ts_malformed_or_duplicated_is_killed() {
 
 test_rooms_named_ts_and_kill_inside_modes_are_not_read() {
   use_ctl
-  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"ts\": \"heal\", \"kill\": \"heal\"}, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 1 "keys inside modes ignored, real ones used"
-  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"ts\": \"heal\", \"kill\": \"heal\"}, \"ts\": $((GUARDIAN_FAKE_NOW - 200))}"; assert_rc $? 0 "real old ts still stale"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"kill\": \"heal\", \"ts\": \"heal\"}, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 1 "keys inside modes ignored, real ones used"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"kill\": \"heal\", \"ts\": \"heal\"}, \"ts\": $((GUARDIAN_FAKE_NOW - 200))}"; assert_rc $? 0 "real old ts still stale"
   ctl_engaged 1 '{"kill": true, "modes": {"ts": "heal", "kill": "heal"}, "ts": 1}'; assert_rc $? 0 "real kill=true wins"
   export GUARDIAN_ROOM=ts
   ctl_engaged 1 "{\"kill\": false, \"modes\": {\"ts\": \"heal\"}, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 1 "room named ts"
@@ -614,7 +614,7 @@ test_scanner_token_order_is_strict() {
 gen_payload() {
   local n="$1" len="$2" i m="" name
   for i in $(seq 1 "$n"); do
-    if [ "$i" = 1 ]; then name="opd9"; else name="$(printf 'r%s' "$i" | head -c "$len")"; name="$(printf '%s%s' "$name" "$(head -c $((len - ${#name})) /dev/zero | tr '\0' x)")"; fi
+    if [ "$i" = 1 ]; then name="opd9"; else name="$(printf 'r%02d' "$i" | head -c "$len")"; name="$(printf '%s%s' "$name" "$(head -c $((len - ${#name})) /dev/zero | tr '\0' x)")"; fi
     [ -n "$m" ] && m="$m, "
     m="$m\"$name\": \"$([ "$i" = 1 ] && echo heal || echo shadow)\""
   done
@@ -780,7 +780,7 @@ test_two_heal_keys_for_this_room_is_killed_and_bad_room_name_is_shadow() {
   use_ctl
   ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal", "opd9": "heal"}, "ts": @TS@}'; assert_rc $? 0 "room twice, both heal"
   ctl_engaged 1 '{"kill": false, "modes": {"opd9": "shadow", "opd9": "heal"}, "ts": @TS@}'; assert_rc $? 0 "room twice, shadow then heal"
-  ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal", "opd8": "heal"}, "ts": @TS@}'; assert_rc $? 1 "another room is not a duplicate"
+  ctl_engaged 1 '{"kill": false, "modes": {"opd8": "heal", "opd9": "heal"}, "ts": @TS@}'; assert_rc $? 1 "another room is not a duplicate"
   assert_eq "$(current_mode)" "heal" "heal for the one room"
   GUARDIAN_ROOM='OPD9'
   ctl_engaged 1 '{"kill": false, "modes": {"opd9": "heal"}, "ts": @TS@}'; assert_rc $? 1 "clear"
@@ -888,4 +888,163 @@ test_message_from_a_still_open_stream_reaches_control_last_before_eof() {
 
 test_kiosk_code_has_no_perl_python_osascript_or_jq() {
   assert_eq "$(grep -rnE '\b(perl|python3?|osascript|jq)\b' "$KDIR/bin" "$KDIR/lib" | grep -vcE '^[^:]*:[0-9]+:[[:space:]]*#')" "0" "no perl, python, osascript or jq outside comments"
+}
+
+# ---- R10 ----
+test_guardian_version_is_bumped_and_identifies_the_tree() {
+  load_libs
+  [ "$GUARDIAN_VERSION" != "c1-0.1.0" ] && ok || fail "GUARDIAN_VERSION is still c1-0.1.0"
+  assert_eq "$GUARDIAN_VERSION" "c1-0.2.0-r10" "R10 version string"
+}
+
+# a fake tr, wc, sed, ps, tail, head or cat first on PATH must not be used on the control path
+test_pinned_tools_ignore_fakes_earlier_on_path() {
+  use_ctl
+  local t funcs
+  funcs="$(guardian_funcs)"
+  for t in tr wc sed tail head cat ps; do
+    printf '#!/bin/bash\necho %s >>"%s/fake_used"\necho 99999\nexit 1\n' "$t" "$T" >"$T/bin/$t"; chmod +x "$T/bin/$t"
+  done
+  assert_eq "$(command -v tr)" "$T/bin/tr" "the fake tr is first on PATH"
+  put_ctl 1 "$HEAL"; flag_fetch; killswitch_engaged; assert_rc $? 1 "fresh heal payload is clear with fakes on PATH"
+  assert_eq "$(current_mode)" "heal" "mode read with fakes on PATH"
+  [ ! -e "$T/fake_used" ] && ok || fail "a fake tool ran: $(cat "$T/fake_used")"
+  assert_eq "$G_TR" "/usr/bin/tr" "tr pinned"
+  assert_eq "$G_WC" "/usr/bin/wc" "wc pinned"
+  assert_eq "$G_SED" "/usr/bin/sed" "sed pinned"
+  assert_eq "$G_PS" "/bin/ps" "ps pinned"
+  # the NUL filter and the loop supervision, from the real guardian.sh
+  ( eval "$funcs"; printf 'a\000b' | nul_to_soh | /usr/bin/od -An -tx1 | /usr/bin/tr -d ' \n' ) >"$T/nul.out" 2>&1
+  assert_eq "$(cat "$T/nul.out")" "610162" "nul_to_soh did not use the fake tr"
+  [ ! -e "$T/fake_used" ] && ok || fail "a fake tool ran in nul_to_soh: $(cat "$T/fake_used")"
+}
+
+test_control_path_code_has_no_bare_tr_wc_sed_ps() {
+  local n
+  n="$(sed -n '/^control_parse()/,/^control_audit_change/p;/^killswitch_engaged()/,/^current_mode/p' "$KDIR/lib/killswitch.sh" | grep -v '^[[:space:]]*#' | grep -cE '(^|[|;&(`[:space:]])(tr|wc|sed|ps|tail|head|cat)[[:space:]]')"
+  assert_eq "$n" "0" "no bare tool name in control_parse / killswitch_engaged"
+  n="$(sed -n '/^loop_parent_ok()/,/^loop_nap/p;/^nul_to_soh()/,/^}/p' "$KDIR/bin/guardian.sh" | grep -v '^[[:space:]]*#' | grep -v 'audit ' | grep -cE '(^|[|;&(`[:space:]=])(tr|wc|sed|ps|/bin/ps)[[:space:]]')"
+  assert_eq "$n" "0" "no bare tool name in the loop helpers"
+}
+
+# overlong_run <sub cmd body>: run control_loop on an open stream, wait for control.last to change from the good HEAL payload
+overlong_run() {
+  put_ctl 0 "$HEAL"; flag_fetch; killswitch_engaged; assert_rc $? 1 "good payload before the long line"
+  export GUARDIAN_CONTROL_SUB_CMD="$1"'; sleep 30 & echo $! >>"$T/ctl.pid"; wait'
+  start_loops control_loop
+  local i=0
+  while [ "$i" -lt 80 ] && ! grep -q 'overlong' "$STATE_DIR/control.last" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+}
+overlong_check() { # <label>
+  flag_fetch; killswitch_engaged; assert_rc $? 0 "$1: killed"
+  assert_eq "$(current_mode)" "shadow" "$1: shadow"
+  assert_eq "$(sed -n '2p' "$STATE_DIR/control.last")" "overlong" "$1: only the marker was stored"
+  [ "$(wc -c <"$STATE_DIR/control.last" | tr -d ' ')" -lt 100 ] && ok || fail "$1: control.last holds the long line"
+}
+
+test_5kb_line_is_killed_and_not_stored() {
+  use_ctl
+  overlong_run '/usr/bin/head -c 5000 /dev/zero | /usr/bin/tr "\000" a; printf "\n"'
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
+  overlong_check "5 KB"
+}
+
+test_70kb_line_is_killed_and_not_stored() {
+  use_ctl
+  overlong_run '/usr/bin/head -c 70000 /dev/zero | /usr/bin/tr "\000" a; printf "\n"'
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
+  overlong_check "70 KB"
+}
+
+test_remainder_of_an_overlong_line_is_not_stored_as_a_line() {
+  use_ctl
+  # 4300 filler bytes, then a canonical payload on the SAME line: the tail must not become a valid line
+  overlong_run 'printf "%s" "$(/usr/bin/head -c 4300 /dev/zero | /usr/bin/tr "\000" a)"; printf "{\"kill\": false, \"modes\": {\"opd9\": \"heal\"}, \"ts\": %s}\n" "$GUARDIAN_FAKE_NOW"'
+  sleep 1
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
+  overlong_check "tail of a long line"
+}
+
+test_overlong_line_then_canonical_line_the_canonical_line_lands() {
+  use_ctl
+  overlong_run '/usr/bin/head -c 4300 /dev/zero | /usr/bin/tr "\000" a; printf "\n"; printf "{\"kill\": false, \"modes\": {\"opd9\": \"heal\"}, \"ts\": %s}\n" "$GUARDIAN_FAKE_NOW"'
+  local i=0
+  while [ "$i" -lt 40 ] && ! grep -q '"kill": false' "$STATE_DIR/control.last" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
+  assert_has "$(sed -n '2p' "$STATE_DIR/control.last")" '"opd9": "heal"' "the canonical line after the long one landed"
+  flag_fetch; killswitch_engaged; assert_rc $? 1 "and it is accepted"
+  assert_eq "$(current_mode)" "heal" "heal from the line after the long one"
+}
+
+test_4200_byte_line_is_a_line_and_4201_is_not() {
+  use_ctl
+  # exactly CONTROL_LINE_MAX bytes is stored as a line (and then fails the form check); one more is the marker
+  export GUARDIAN_CONTROL_SUB_CMD='/usr/bin/head -c 4200 /dev/zero | /usr/bin/tr "\000" a; printf "\n"; sleep 30 & echo $! >>"$T/ctl.pid"; wait'
+  start_loops control_loop
+  local i=0 sz=0
+  while [ "$i" -lt 40 ] && [ "$sz" -lt 4200 ]; do sleep 0.1; i=$((i + 1)); sz="$(wc -c <"$STATE_DIR/control.last" 2>/dev/null | tr -d ' ')"; sz="${sz:-0}"; done
+  kill "$LM" 2>/dev/null; wait "$LM" 2>/dev/null
+  [ "$sz" -ge 4200 ] && ok || fail "a 4200-byte line was not stored"
+  flag_fetch; killswitch_engaged; assert_rc $? 0 "killed by the form check"
+}
+
+# an endless line with no LF: memory of the reader stays bounded, nothing valid is stored, and the state is killed
+test_endless_line_without_lf_keeps_memory_bounded_and_stores_nothing() {
+  use_ctl
+  put_ctl 0 "$HEAL"; flag_fetch
+  ( eval "$(guardian_funcs)"; control_pump < <(/usr/bin/head -c 3000000 /dev/zero | /usr/bin/tr '\000' a; sleep 3) ) >/dev/null 2>&1 &
+  local pp=$! r max=0 base=0 i=0
+  echo "$pp" >>"$T/pump.pid"
+  while kill -0 "$pp" 2>/dev/null && [ "$i" -lt 200 ]; do
+    r="$(/bin/ps -o rss= -p "$pp" 2>/dev/null | tr -d ' ')"
+    if [ -n "$r" ]; then [ "$base" -eq 0 ] && base="$r"; [ "$r" -gt "$max" ] && max="$r"; fi
+    sleep 0.1; i=$((i + 1))
+  done
+  kill "$pp" 2>/dev/null; wait "$pp" 2>/dev/null
+  [ "$((max - base))" -lt 1500 ] && ok || fail "reader RSS grew by $((max - base)) KB over a 3 MB line"
+  assert_eq "$(sed -n '2p' "$STATE_DIR/control.last")" "overlong" "nothing but the marker stored"
+  flag_fetch; killswitch_engaged; assert_rc $? 0 "killed"
+}
+
+# ---- R10: exact canonical modes (payloads from the real json.dumps, tests only) ----
+ctl_json() { # <ts> <kill py literal> <modes as py dict literal> [sort|nosort]
+  python3 -c 'import json,sys; print(json.dumps({"kill": sys.argv[2]=="True", "modes": eval(sys.argv[3]), "ts": int(sys.argv[1])}, sort_keys=(sys.argv[4]=="sort")))' "$1" "$2" "$3" "${4:-sort}"
+}
+
+test_json_dumps_sorted_modes_are_accepted() {
+  use_ctl
+  local p
+  p="$(ctl_json "$GUARDIAN_FAKE_NOW" False '{"z-room":"shadow","opd9":"heal","opd10":"shadow","a":"shadow","a-b":"shadow","a1":"shadow","a_b":"heal","opd2":"heal"}')"
+  assert_has "$p" '"a": "shadow", "a-b"' "python sorted a before a-b"
+  ctl_engaged 1 "$p"; assert_rc $? 1 "sorted modes accepted"
+  assert_eq "$(current_mode)" "heal" "this room's key read from a real json.dumps payload"
+  ctl_engaged 1 "$(ctl_json "$GUARDIAN_FAKE_NOW" False '{}')"; assert_rc $? 1 "empty modes accepted"
+  ctl_engaged 1 "$(ctl_json "$GUARDIAN_FAKE_NOW" False '{"opd9":"shadow"}')"; assert_rc $? 1 "one room accepted"
+}
+
+test_unsorted_or_duplicate_modes_keys_are_killed() {
+  use_ctl
+  local ts="$GUARDIAN_FAKE_NOW" p
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"opd9\": \"heal\", \"opd2\": \"shadow\"}, \"ts\": $ts}"; assert_rc $? 0 "unsorted (this room first)"
+  assert_eq "$CTRL_WHY" "unparseable" "by the modes check"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"opd3\": \"heal\", \"opd2\": \"shadow\", \"opd9\": \"heal\"}, \"ts\": $ts}"; assert_rc $? 0 "unsorted other rooms"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"opd2\": \"heal\", \"opd2\": \"shadow\", \"opd9\": \"heal\"}, \"ts\": $ts}"; assert_rc $? 0 "duplicate other room, adjacent"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"opd2\": \"heal\", \"opd9\": \"heal\", \"opd2\": \"heal\"}, \"ts\": $ts}"; assert_rc $? 0 "duplicate other room, apart"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"opd9\": \"heal\", \"opd9\": \"heal\"}, \"ts\": $ts}"; assert_rc $? 0 "duplicate this room"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {\"a-b\": \"shadow\", \"a\": \"shadow\", \"opd9\": \"heal\"}, \"ts\": $ts}"; assert_rc $? 0 "prefix order wrong"
+  p="$(ctl_json "$ts" False '{"opd9":"heal","opd2":"shadow"}' nosort)"
+  assert_has "$p" '"opd9": "heal", "opd2"' "python insertion order, not sorted"
+  ctl_engaged 1 "$p"; assert_rc $? 0 "json.dumps without sort_keys, unsorted"
+  assert_eq "$(current_mode)" "shadow" "no heal from an unsorted payload"
+}
+
+test_flag_max_age_does_not_abort_a_long_heal_action_under_the_control_subscription() {
+  use_ctl
+  put_ctl 0 "$HEAL"; flag_fetch
+  # a 40 s action: the cache is older than FLAG_MAX_AGE_S (30) but the live file is fresh again
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 40)); put_ctl 0 "$HEAL"
+  killswitch_engaged; assert_rc $? 1 "fresh live file, old cache: not engaged (no spurious aborted_killswitch)"
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 100)); killswitch_engaged; assert_rc $? 0 "live file stale: still engaged"
+  # the flag-command path keeps its age limit
+  GUARDIAN_CONTROL_SUB_CMD=""; go_heal; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 40)); killswitch_engaged; assert_rc $? 0 "flag cmd path: a 40 s old cache is engaged"
 }

@@ -4,7 +4,15 @@
 # Sourced, never executed. Every external effect goes through a PATH command or a GUARDIAN_* command
 # variable, so tests can substitute fakes.
 
-GUARDIAN_VERSION="c1-0.1.0"
+GUARDIAN_VERSION="c1-0.2.0-r10"   # bump per release: the audit "guardian start version=" line identifies the tree
+# External tools on the control path are pinned to absolute paths (R10): a PATH change or a planted binary cannot turn a kill into a clear.
+G_TR=/usr/bin/tr
+G_WC=/usr/bin/wc
+G_SED=/usr/bin/sed
+G_TAIL=/usr/bin/tail
+G_HEAD=/usr/bin/head
+G_CAT=/bin/cat
+G_PS=/bin/ps
 
 : "${GUARDIAN_HOME:=$HOME/Library/Application Support/EvenScribe/Guardian}"
 : "${RR_ROOT:=$HOME/Library/Application Support/EvenScribe/RoomRecorder}"
@@ -67,7 +75,7 @@ in_clinic_hours() { hhmm_in_window "$(ist_hhmm)" "$CLINIC_START" "$CLINIC_END"; 
 in_night_window() { hhmm_in_window "$(ist_hhmm)" "$NIGHT_START" "$NIGHT_END"; }
 
 # ---- JSON out (hand built; escape \ " and control characters) ----
-jesc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n\t\r' '   '; }
+jesc() { printf '%s' "$1" | "$G_SED" -e 's/\\/\\\\/g' -e 's/"/\\"/g' | "$G_TR" '\n\t\r' '   '; }
 jstr() { if [ -z "$1" ]; then printf 'null'; else printf '"%s"' "$(jesc "$1")"; fi; }
 # Same output as jstr, no subshell and no external process: jstr_v <value> sets JSTR_V. For hot paths under load.
 jstr_v() {
@@ -83,7 +91,7 @@ jbool() { case "$1" in true|false) printf '%s' "$1" ;; *) printf 'null' ;; esac;
 json_get() {
   local f="$1" k="$2" v
   [ -r "$f" ] || return 0
-  v="$(tr -d '\n' <"$f" | sed -nE 's/.*"'"$k"'"[[:space:]]*:[[:space:]]*("([^"]*)"|([^,}[:space:]]*)).*/\2\3/p' | head -n1)"
+  v="$("$G_TR" -d '\n' <"$f" | "$G_SED" -nE 's/.*"'"$k"'"[[:space:]]*:[[:space:]]*("([^"]*)"|([^,}[:space:]]*)).*/\2\3/p' | "$G_HEAD" -n1)"
   [ "$v" = "null" ] && v=""
   printf '%s' "$v"
 }

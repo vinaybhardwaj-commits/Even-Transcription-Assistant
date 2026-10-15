@@ -19,6 +19,7 @@ CONTROL_LAST="$STATE_DIR/control.last"
 #      every byte in 0x20-0x7E or the newline, ending in a newline;
 #   2. line 1 matches ^[1-9][0-9]{0,14}$ (read base 10); stale/latch/skew rules on the receive epoch and on "ts";
 #   3. line 2 matches ONE anchored regex under LC_ALL=C.
+# modes keys must be strictly ascending (bytewise) and unique, for every room; anything else is killed.
 # kill is the captured literal; mode is heal only when this room's key (valid room name) appears once in modes with "heal"; twice = killed.
 # Stale latches on the receive epoch: it stays stale until a message arrives with a DIFFERENT receive epoch, even if the clock steps back.
 CONTROL_RE='^\{"kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$'
@@ -27,18 +28,18 @@ CONTROL_ROOM_RE='^[a-z0-9_-]{1,64}$'
 
 control_parse() {
   local LC_ALL=C
-  local recv payload now latch size bad nl ts modes_part pat rest cnt
+  local recv payload now latch size bad nl ts modes_part pat rest cnt prev key
   CTRL_FLEET=unreachable; CTRL_MODE=shadow; CTRL_WHY=missing; CTRL_AGE=""
   [ -r "$CONTROL_LAST" ] || return 1
   # 1. raw bytes, as a file
-  size="$(wc -c <"$CONTROL_LAST" 2>/dev/null | tr -d " ")"
+  size="$("$G_WC" -c <"$CONTROL_LAST" 2>/dev/null | "$G_TR" -d " ")"
   case "$size" in ""|*[!0-9]*) CTRL_WHY=unparseable; return 1 ;; esac
   if [ "$size" -gt "$((${CONTROL_MAX_BYTES:-4096} + 17))" ]; then CTRL_WHY=unparseable; return 1; fi
-  bad="$(LC_ALL=C tr -d '\n\040-\176' <"$CONTROL_LAST" 2>/dev/null | wc -c | tr -d " ")"
-  nl="$(wc -l <"$CONTROL_LAST" 2>/dev/null | tr -d " ")"
-  if [ "$bad" != "0" ] || [ "$nl" != "2" ] || [ "$(tail -c 1 "$CONTROL_LAST" 2>/dev/null | wc -l | tr -d " ")" != "1" ]; then CTRL_WHY=rawbytes; return 1; fi
-  recv="$(sed -n '1p' "$CONTROL_LAST" 2>/dev/null)"
-  payload="$(sed -n '2p' "$CONTROL_LAST" 2>/dev/null)"
+  bad="$(LC_ALL=C "$G_TR" -d '\n\040-\176' <"$CONTROL_LAST" 2>/dev/null | "$G_WC" -c | "$G_TR" -d " ")"
+  nl="$("$G_WC" -l <"$CONTROL_LAST" 2>/dev/null | "$G_TR" -d " ")"
+  if [ "$bad" != "0" ] || [ "$nl" != "2" ] || [ "$("$G_TAIL" -c 1 "$CONTROL_LAST" 2>/dev/null | "$G_WC" -l | "$G_TR" -d " ")" != "1" ]; then CTRL_WHY=rawbytes; return 1; fi
+  recv="$("$G_SED" -n '1p' "$CONTROL_LAST" 2>/dev/null)"
+  payload="$("$G_SED" -n '2p' "$CONTROL_LAST" 2>/dev/null)"
   now="$(now_epoch)"
   # the payload line itself is capped (the file cap above is the payload cap plus a 15-digit epoch and 2 newlines)
   if [ "${#payload}" -gt "${CONTROL_MAX_BYTES:-4096}" ]; then CTRL_WHY=unparseable; return 1; fi
@@ -46,7 +47,7 @@ control_parse() {
   [[ $recv =~ $CONTROL_RECV_RE ]] || { CTRL_WHY=unparseable; return 1; }
   CTRL_AGE=$((10#$now - 10#$recv))
   if [ "$CTRL_AGE" -lt -2 ]; then CTRL_WHY=unparseable; return 1; fi
-  latch="$(cat "$STATE_DIR/control_latch" 2>/dev/null)"
+  latch="$("$G_CAT" "$STATE_DIR/control_latch" 2>/dev/null)"
   if [ "$latch" = "$recv" ]; then CTRL_WHY=stale; return 1; fi
   if [ "$CTRL_AGE" -gt "$CONTROL_STALE_S" ]; then
     mkdir -p "$STATE_DIR" 2>/dev/null; printf '%s\n' "$recv" >"$STATE_DIR/control_latch"
@@ -62,6 +63,15 @@ control_parse() {
     mkdir -p "$STATE_DIR" 2>/dev/null; printf '%s\n' "$recv" >"$STATE_DIR/control_latch"
     CTRL_WHY=stale; return 1
   fi
+  # Exact canonical modes (R10): keys strictly ascending bytewise (json.dumps sort_keys), so no key repeats, for ALL rooms.
+  modes_part="${payload#*\"modes\": }"; modes_part="${modes_part%, \"ts\": *}"
+  rest="${modes_part#\{}"; rest="${rest%\}}"; prev=""
+  while [ -n "$rest" ]; do
+    key="${rest#\"}"; key="${key%%\"*}"
+    if [ -n "$prev" ] && ! [[ $key > $prev ]]; then CTRL_WHY=unparseable; return 1; fi
+    prev="$key"
+    rest="${rest#\"*\": \"*\"}"; rest="${rest#, }"
+  done
   CTRL_FLEET=on; CTRL_WHY=ok
   if [[ $GUARDIAN_ROOM =~ $CONTROL_ROOM_RE ]]; then
     modes_part="${payload#*\"modes\": }"; modes_part="${modes_part%, \"ts\": *}"
@@ -77,7 +87,7 @@ control_parse() {
 # One audit line per state change (on <-> killed, or a new reason for being killed).
 control_audit_change() {
   local f="$STATE_DIR/control_state" prev cur="$CTRL_FLEET:$CTRL_WHY"
-  prev="$(cat "$f" 2>/dev/null)"
+  prev="$("$G_CAT" "$f" 2>/dev/null)"
   [ "$prev" = "$cur" ] && return 0
   printf '%s\n' "$cur" >"$f"
   audit "control state ${prev:-none} -> $cur age=${CTRL_AGE:-none}"
@@ -110,12 +120,16 @@ killswitch_engaged() {
   local fetched now fleet
   [ -e "$FLAG_DIR/heal-off" ] && return 0
   [ -r "$FLAG_CACHE" ] || return 0
-  fetched="$(sed -n '1p' "$FLAG_CACHE")"
+  fetched="$("$G_SED" -n '1p' "$FLAG_CACHE")"
   now="$(now_epoch)"
   case "$fetched" in ""|*[!0-9]*) return 0 ;; esac
   [ "${#fetched}" -le 15 ] || return 0
-  [ "$((10#$now - 10#$fetched))" -le "$FLAG_MAX_AGE_S" ] || return 0
-  fleet="$(sed -n 's/^fleet=//p' "$FLAG_CACHE" | head -n1)"
+  # With the control subscription the live file is re-read below on every call, so the cache age adds nothing there and would only
+  # abort a long HEAL action (the 30 s tcc confirm wait outlasts FLAG_MAX_AGE_S=30 between two fetches). The old flag-command path keeps the age limit.
+  if [ -z "$GUARDIAN_CONTROL_SUB_CMD" ]; then
+    [ "$((10#$now - 10#$fetched))" -le "$FLAG_MAX_AGE_S" ] || return 0
+  fi
+  fleet="$("$G_SED" -n 's/^fleet=//p' "$FLAG_CACHE" | "$G_HEAD" -n1)"
   [ "$fleet" = "on" ] || return 0
   # With the control subscription the live file is re-read here, so staleness engages without waiting for the next fetch.
   if [ -n "$GUARDIAN_CONTROL_SUB_CMD" ]; then control_parse || return 0; fi

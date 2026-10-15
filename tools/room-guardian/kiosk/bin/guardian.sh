@@ -54,9 +54,9 @@ loop_parent_ok() {
   local info ps_cmd
   [ -n "$MAIN_PID" ] || return 1
   kill -0 "$MAIN_PID" 2>/dev/null || return 1
-  ps_cmd=/bin/ps
+  ps_cmd="$G_PS"
   [ "${GUARDIAN_TESTMODE:-}" = 1 ] && [ -n "${GUARDIAN_PS:-}" ] && ps_cmd="$GUARDIAN_PS"
-  info="$("$ps_cmd" -o ppid= -p "$LOOP_ME" 2>/dev/null | tr -d ' ')"
+  info="$("$ps_cmd" -o ppid= -p "$LOOP_ME" 2>/dev/null | "$G_TR" -d ' ')"
   if [ -z "$info" ]; then
     LOOP_MISS=$((LOOP_MISS + 1))
     if [ "$LOOP_MISS" -ge 3 ]; then audit "loop exits: 3 empty ps reads in a row"; return 1; fi
@@ -70,7 +70,7 @@ loop_parent_ok() {
 # otherwise only the current background job (a job-table reference, never a bare pid) is signalled.
 loop_orphaned() {
   local pg
-  pg="$(/bin/ps -o pgid= -p "$LOOP_ME" 2>/dev/null | tr -d ' ')"
+  pg="$("$G_PS" -o pgid= -p "$LOOP_ME" 2>/dev/null | "$G_TR" -d ' ')"
   if [ -n "$LOOP_ME" ] && [ "$pg" = "$LOOP_ME" ]; then
     trap '' TERM
     kill -TERM 0 2>/dev/null
@@ -124,20 +124,41 @@ control_store() {
 
 # NUL -> 0x01 filter. tr -u (BSD tr: unbuffered) matters: a plain tr holds a message back on a pipe until EOF.
 nul_to_soh() {
-  LC_ALL=C tr -u '\000' '\001'
+  LC_ALL=C "$G_TR" -u '\000' '\001'
+}
+
+# Read control lines from stdin with a length cap (R10). A line longer than CONTROL_LINE_MAX (4200) bytes is never stored as a line:
+# the marker "overlong" is stored instead (not the control form = killed) and the rest of that line is read in 4096-byte chunks and dropped up to its next LF.
+# Memory stays bounded by one chunk, however long the line is. A partial last line (no LF at EOF) is not stored.
+CONTROL_LINE_MAX=4200
+control_pump() {
+  local LC_ALL=C line junk rc
+  while :; do
+    IFS= read -r -n "$((CONTROL_LINE_MAX + 1))" line; rc=$?
+    if [ "${#line}" -gt "$CONTROL_LINE_MAX" ]; then
+      control_store "overlong"
+      line=""
+      while :; do
+        IFS= read -r -n 4096 junk; rc=$?
+        [ "$rc" -eq 0 ] || return 0
+        [ "${#junk}" -ge 4096 ] || break
+      done
+      continue
+    fi
+    [ "$rc" -eq 0 ] || return 0
+    [ -n "$line" ] && control_store "$line"
+  done
 }
 
 # Kiosk's own subscription to guardian/control. Same backoff pattern as subscriber_loop.
 control_loop() {
-  local line backoff=2
+  local backoff=2
   [ -n "$GUARDIAN_CONTROL_SUB_CMD" ] || return 0
   loop_init
   while :; do
     # bash drops NUL on read, which would turn "fa<NUL>lse" into a clean "false": map NUL to 0x01 first so the raw-byte check on control.last kills it.
     loop_parent_ok || loop_orphaned
-    { bash -c "$GUARDIAN_CONTROL_SUB_CMD" _ "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | nul_to_soh | while IFS= read -r line; do
-      [ -n "$line" ] && control_store "$line"
-    done; } </dev/null &
+    { bash -c "$GUARDIAN_CONTROL_SUB_CMD" _ "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | nul_to_soh | control_pump; } </dev/null &
     loop_watch $!
     audit "control subscriber exited; retry in ${backoff}s"
     loop_nap "$backoff"
