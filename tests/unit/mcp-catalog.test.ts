@@ -1452,6 +1452,17 @@ describe("CATALOG-8: layers.audio_features", () => {
     }
   });
 
+  it("CATALOG-10: a flags track in shape c is read; a near-miss engine is still skipped", async () => {
+    setTrack(fk("flags"), ftrack([{ ...GOOD, feature: "overlap_flag" }]));
+    withAf({ flags: { r2_key: fk("flags"), status: "ok" }, flagz: { r2_key: fk("flagz") } });
+    const l = await af();
+    expect(l.status).toBe("ok");
+    const d = l.data as { tracks: Row[]; n_skipped: number };
+    expect(d.tracks).toEqual([{ engine: "flags", version: "v1", rows: [{ ...GOOD, feature: "overlap_flag" }], n_rows_dropped: 0 }]);
+    expect(d.n_skipped).toBe(1);
+    expect(reads.filter((r) => r.includes("flagz"))).toEqual([]);
+  });
+
   it("an unknown engine is skipped and counted, never read", async () => {
     setTrack(fk("clef"), ftrack([GOOD]));
     withAf([{ r2_key: fk("clef") }, { r2_key: fk("mystery") }, { r2_key: fk("clef", "v1").replace("features.", "other.") }]);
