@@ -761,9 +761,32 @@ def _flat_ws(t: str) -> str:
     return re.sub(r"\s+", lambda m: "\n" if "\n" in m.group() else " ", t)
 
 
-def _same_norm4(s: str) -> str:
+def _words_to_digits(t: str) -> str:
+    """FIX5: every run of number words (one..twenty and, by the local normaliser, larger ones) becomes digits, separators kept as tokens
+    ("five or ten" -> "5 or 10", "five-ten" -> "5 - 10", "two hundred fifty" -> "250")."""
+    def conv(mt):
+        toks, spans = _scan_numbers(mt.group())
+        starts = {a: (b, v) for v, a, b, _ in spans}
+        out, i = [], 0
+        while i < len(toks):
+            if i in starts:
+                j, v = starts[i]
+                out.append(str(int(v)) if v == v.to_integral_value() else str(v))
+                i = j
+            else:
+                out.append(toks[i])
+                i += 1
+        return " ".join(out)
+    return _NW_RUN.sub(conv, t)
+
+
+def _same_norm4(s: str, fix5: bool = True) -> str:
+    """fix5=False is the FIX4 normaliser; the strict check reads both and ORs them, so FIX5 can only add matches."""
     t = _flat_ws(_nfkc(s).lower())
     t = re.sub(r"\b(once|twice|thrice)\b", lambda m: _TIMES_WORD[m.group(1)], t)
+    if fix5:
+        t = _words_to_digits(t)
+        t = re.sub(r"\b(\d+)\s*x\b", r"\1 times", t)
     t = re.sub(r"\b(?:a|per|each)\s+day\b|/\s*day\b|\bdaily\b", " daily ", t)
     t = re.sub(r"\bper\s?cent\b|\bpercent\b", " % ", t)
     return _flat_ws(t)
@@ -784,9 +807,14 @@ def _strict_run(run: str, own_text: str, eta_text: str, own_raw: str | None = No
     have = set(_run_units(eta_text, run))
     if any(u in have for u in _run_units(own_text, run, (0,))):  # the replayed field is one piece: only ETA's text has boundaries
         return True
-    o, e = _same_norm4(own_text if own_raw is None else own_raw), _same_norm4(eta_text if eta_raw is None else eta_raw)
-    have4 = set(_run_units(e, run, table=_READINGS4))
-    return any(u in have4 for u in _run_units(o, run, (0,), _READINGS4))
+    own_in, eta_in = own_text if own_raw is None else own_raw, eta_text if eta_raw is None else eta_raw
+    run_n = _nfkc(run)  # FIX5: the normalised texts hold ASCII digits, so look the run up as NFKC does
+    for fix5 in (False, True):
+        o, e = _same_norm4(own_in, fix5), _same_norm4(eta_in, fix5)
+        have4 = set(_run_units(e, run_n, table=_READINGS4)) | set(_run_units(e, run, table=_READINGS4))
+        if any(u in have4 for u in _run_units(o, run_n, (0,), _READINGS4) + _run_units(o, run, (0,), _READINGS4)):
+            return True
+    return False
 
 
 def _run_source(m: dict, field: str, run: str, art: dict | None, prov: dict | None, scope: str | None = None) -> str:
@@ -845,7 +873,7 @@ _ANY_NUMBER = re.compile(rf"({_NUM_RE})")
 
 def _brand_number(text: str, names: set[str]) -> bool:
     """A number directly after, or glued to, one of the medicine's names ("Dolo 650", "Dolo650", "Dolo-650 tab", "Pan 40 BD")."""
-    alts = [r"\s+".join(map(re.escape, n.split())) for n in sorted(names) if len(n) >= 3]
+    alts = [r"[\s\-]+".join(map(re.escape, n.split())) for n in sorted(names) if len(n) >= 3]
     if not alts:
         return False
     pat = re.compile(r"(?<![a-z0-9])(?:" + "|".join(alts) + r")(?![a-z])[ \t\-\u2013\u2014:(\[]*(" + _NUM_RE + ")")
@@ -877,12 +905,14 @@ def _prov_strength_pieces(node, out: list[str]) -> None:
             _prov_strength_pieces(x, out)
 
 
-_STARTS_NUMBER = re.compile(rf"[\s(\[]*(?:\d|(?:{_NW})\b)", re.I)
+_STARTS_NUMBER_FIX4 = re.compile(rf"[\s(\[]*(?:\d|(?:{_NW})\b)", re.I)
+# FIX5: a leading bullet and an optional short label ("- 650 mg", "Strength: 650 mg") also start a continuation line
+_STARTS_NUMBER = re.compile(rf"[\s(\[]*(?:[-\u2022*\u00b7][\s(\[]*)?(?:[A-Za-z ]{{1,15}}:[\s(\[]*)?(?:\d|(?:{_NW})\b)", re.I)
 _ENDS_NUMBER = re.compile(rf"(?:\d|\b(?:{_NW}))[\s.]*$", re.I)
 _STARTS_WORD = re.compile(r"[\s(\[]*[^\W\d_]")
 
 
-def _strength_groups(m: dict, art: dict | None) -> tuple[list[str], list[str]]:
+def _strength_groups(m: dict, art: dict | None, fix5: bool = True) -> tuple[list[str], list[str]]:
     """(groups, naming lines). A group is a note line that names the medicine plus the lines that directly follow it and (f) start with
     a number or dose pattern, or (e) start a word right after a line ending in a number (a wrapped "650" / "mg"), while naming no other
     medicine. Following lines are taken while they qualify."""
@@ -903,12 +933,40 @@ def _strength_groups(m: dict, art: dict | None) -> tuple[list[str], list[str]]:
         naming.append(lines[i])
         g, j = [lines[i]], i + 1
         while (j < len(lines) and not names_me(lines[j]) and not any(_line_names(lines[j], o) for o in others)
-               and (_STARTS_NUMBER.match(lines[j]) or (_ENDS_NUMBER.search(_nfkc(g[-1]).lower()) and _STARTS_WORD.match(lines[j])))):
+               and ((_STARTS_NUMBER if fix5 else _STARTS_NUMBER_FIX4).match(lines[j]) or (_ENDS_NUMBER.search(_nfkc(g[-1]).lower()) and _STARTS_WORD.match(lines[j])))):
             g.append(lines[j])
             j += 1
         groups.append("\n".join(g))
         i = j
     return groups, naming
+
+
+def _any_number_not_time(text: str) -> bool:
+    """FIX5: some digit run in _wrote_norm'd text whose next token on the same line is not a time or frequency word (nor "x" then one)."""
+    for mt in _ANY_NUMBER.finditer(text):
+        rest = text[mt.end():]
+        tok = re.match(r"[ \t\-]*([^\W\d_]+)", rest)
+        if tok:
+            if _unit_norm(tok.group(1)) in _TIMEFREQ:
+                continue
+            nxt = re.match(r"[ \t]*([^\W\d_]+)", rest[tok.end():]) if tok.group(1) == "x" else None
+            if nxt and _unit_norm(nxt.group(1)) in _TIMEFREQ:
+                continue
+        return True
+    return False
+
+
+def _prov_strength_leaves(p: dict | None) -> list[str]:
+    """The strength text and value of a provenance item, in any form (str, int, float; a dict's text and value)."""
+    med = p.get("medicine") if isinstance(p, dict) else None
+    node = med.get("strength") if isinstance(med, dict) else None
+    out: list[str] = []
+    for x in ([node.get("text"), node.get("value")] if isinstance(node, dict) else [node]):
+        if isinstance(x, str):
+            out.append(x)
+        elif isinstance(x, (int, float)) and not isinstance(x, bool):
+            out.append(f"{x:g}" if isinstance(x, float) else str(x))
+    return out
 
 
 def _eta_wrote_strength(m: dict, art: dict | None, prov: dict | None) -> bool:
@@ -917,14 +975,18 @@ def _eta_wrote_strength(m: dict, art: dict | None, prov: dict | None) -> bool:
     p = prov if prov is not None else _prov_for(m, art)
     if _has_strength(_same_norm("\n".join([_note_lines_for(m, art), _prov_text(p)]))):
         return True
-    groups, naming = _strength_groups(m, art)
+    groups, naming = _strength_groups(m, art, False)
     pieces: list[str] = []
     _prov_strength_pieces({k: p.get(k) for k in ("text", "names", "diagnosis", "follow_up", "investigation", "procedure", "medicine")} if isinstance(p, dict) else None, pieces)
     names = set(_rx_names(m))
     if isinstance(p, dict):
         names |= {_norm_name(x) for x in p.get("names") or [] if isinstance(x, str)} - {""}
     names |= {w for ln in naming for w in re.findall(r"[a-z]{3,}", _nfkc(ln).lower()) if _names_match(names, {w})}
-    return _strength_in(_CUT.join(_wrote_norm(x) for x in groups + pieces), names)
+    if _strength_in(_CUT.join(_wrote_norm(x) for x in groups + pieces), names):
+        return True
+    # FIX5: one structural rule, OR'd beside (a)-(f). Any digit run in this medicine's note lines, their continuation lines or its
+    # provenance strength that is not followed by a time or frequency word is a strength ("Dolo-DSR 650", "- 650 mg", {text: "650"}).
+    return any(_any_number_not_time(_wrote_norm(x)) for x in _strength_groups(m, art)[0] + _prov_strength_leaves(p))
 
 
 def _catalogue_name_has_strength(m: dict) -> bool:
