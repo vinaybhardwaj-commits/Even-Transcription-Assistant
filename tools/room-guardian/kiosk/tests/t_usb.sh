@@ -231,7 +231,7 @@ test_usb_verify_healed_pending_then_failed_and_lock() {
   rm -f "$STATE_DIR/usb_absent" "$STATE_DIR/cc_probe.neg"
   : >"$T/usb.txt"; : >"$T/engine.txt"; rm -f "$STATE_DIR/once"/*
   GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 3 * 3600)); export GUARDIAN_FAKE_NOW; usb_logline 100; echo 1000000000000 >"$T/hid"
-  printf 'date=00000000\nverify=failed\n' >"$STATE_DIR/usb-reboot"
+  printf 'date=00000000\nepoch=1\nverify=failed\n' >"$STATE_DIR/usb-reboot"   # R15b N1: a real failed-verify state carries its epoch (usb_state_set_verify edits a written state)
   usb_go "$U_CLEAR"
   assert_eq "$(n_reboot_calls)" "0" "locked rung: no reboot"
   # the fleet hand-reset file (newer than the lock) clears it
@@ -333,7 +333,7 @@ test_usb_control_64_rooms_parse_and_exactly_one_false_is_clear() {
 
 test_usb_static_c3_and_version() {
   assert_eq "$(grep -rn -E "start_""recording|stop_""recording|scribe_""room_command|rec_""start|rec_""stop|$SD_TOK" "$KDIR"/bin "$KDIR"/lib "$KDIR"/install.sh "$KDIR"/uninstall.sh | wc -l | tr -d ' ')" "0" "C3 grep (with the day-start command) over the kiosk tree is 0"
-  assert_has "$(cat "$KDIR/lib/common.sh")" 'GUARDIAN_VERSION="c1-0.4.1-r15"' "version"
+  assert_has "$(cat "$KDIR/lib/common.sh")" 'GUARDIAN_VERSION="c1-0.4.2-r15b"' "version"
   assert_has "$(grep -n 'USB_LOG_PREDICATE' "$KDIR/lib/common.sh" | head -n1)" 'process == "kernel" AND processID == 0 AND subsystem' "S8: predicate pins processID == 0"
   assert_eq "$(cat "$KDIR/lib/heal.sh" "$KDIR/lib/collect.sh" "$KDIR/lib/faulttree.sh" "$KDIR/bin/guardian.sh" | grep -v '^[[:space:]]*#' | grep -c 'shutdown')" "0" "the agent code never names shutdown: only the root helper does"
   assert_eq "$(grep -n 'shutdown' "$KDIR/bin/guardian-root.sh" | grep -v '^[0-9]*:#' | wc -l | tr -d ' ')" "1" "the helper's only code line naming shutdown is the absolute default path"
@@ -606,6 +606,32 @@ test_usb_r15_s1_leading_zero_epoch_is_bad_and_only_none_reboots() {
   : >"$T/pub.log"; usb_reboot_verify
   assert_eq "$(events | wc -l | tr -d ' ')" "0" "S-1: verify with a leading-zero epoch publishes nothing"
   [ ! -e "$USB_LOCK" ] && ok || fail "S-1: and writes no lock"
+}
+
+# R15b N1: the state file exists, so an empty or non-digit epoch is "bad" (a planted or damaged file): 0 reboots with the seam on. The date is old (so a missing epoch used to fall through to "none").
+test_usb_r15b_n1_empty_or_non_digit_epoch_is_bad_and_never_reboots() {
+  load_libs
+  local ep n=0
+  for ep in abc "" 12x " 5" +5 1e9; do
+    n=$((n + 1)); usb_reset
+    printf 'date=00000000\nepoch=%s\nverify=healed_pending\n' "$ep" >"$STATE_DIR/usb-reboot"
+    assert_eq "$(usb_budget_state)" "bad" "N1 [$ep]: the state is bad"
+    usb_go "$U_CLEAR"
+    assert_eq "$(n_reboot_calls)" "0" "N1 [$ep]: no reboot"
+    usb_esc "N1 [$ep]"
+  done
+  # no epoch line at all (and not the void marker) is the same
+  usb_reset; printf 'date=00000000\nverify=healed_pending\n' >"$STATE_DIR/usb-reboot"
+  assert_eq "$(usb_budget_state)" "bad" "N1: no epoch line is bad"
+  usb_go "$U_CLEAR"; assert_eq "$(n_reboot_calls)" "0" "N1: no epoch line: no reboot"
+  # the void marker the code itself writes (no epoch line at all) is none; the same with an empty epoch line is bad
+  usb_reset; printf 'date=00000000\nverify=void\n' >"$STATE_DIR/usb-reboot"
+  assert_eq "$(usb_budget_state)" "none" "N1: the void marker (no epoch line) is none"
+  usb_reset; printf 'date=00000000\nepoch=\nverify=void\n' >"$STATE_DIR/usb-reboot"
+  assert_eq "$(usb_budget_state)" "bad" "N1: verify=void with an empty epoch line is bad"
+  # positive control: the same fixture with a plain old epoch reboots
+  usb_reset; printf 'date=00000000\nepoch=%s\nverify=healed_pending\n' "$((GUARDIAN_FAKE_NOW - 2 * 86400))" >"$STATE_DIR/usb-reboot"
+  usb_go "$U_CLEAR"; assert_eq "$(n_reboot_calls)" "1" "N1 control: a plain old epoch reboots"
 }
 
 # a fake ioreg whose USB read can be slowed (T/slow) and whose reads advance a skew file read by now_epoch (T/bump): the two S-2 probes

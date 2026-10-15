@@ -92,6 +92,21 @@ while [ -n "$ANC" ] && [ "$ROUND" -lt 3 ]; do
 done
 if [ "$DRY" -ne 1 ] && [ -n "$ANC" ]; then echo "refusing: ancestors of $GUARDIAN_HOME still fail after repair" >&2; exit 2; fi
 
+# R15b (S3): state/, flags/ and keys/ are the agent's own: state/control.last decides the mode, flags/ is its cache, keys/ holds the SSH key. One that is a symlink, is not a directory
+# or is not owned by this user is refused with rc 2 before anything is created or changed (--dry-run says "would refuse", rc 2, and changes nothing).
+ME_UID="$(id -u)"; S3_BAD=""
+for d in state flags keys; do
+  if [ -L "$GUARDIAN_HOME/$d" ]; then S3_BAD="${S3_BAD}$GUARDIAN_HOME/$d is a symlink"$'\n'
+  elif [ -e "$GUARDIAN_HOME/$d" ]; then
+    if [ ! -d "$GUARDIAN_HOME/$d" ]; then S3_BAD="${S3_BAD}$GUARDIAN_HOME/$d is not a directory"$'\n'
+    elif [ "$(/usr/bin/stat -f '%u' "$GUARDIAN_HOME/$d" 2>/dev/null)" != "$ME_UID" ]; then S3_BAD="${S3_BAD}$GUARDIAN_HOME/$d is not owned by this user"$'\n'; fi
+  fi
+done
+if [ -n "$S3_BAD" ]; then
+  if [ "$DRY" -eq 1 ]; then printf '%s' "$S3_BAD" | sed 's/^/DRY-RUN: would refuse: /'; else printf '%s' "$S3_BAD" | sed 's/^/refusing: /' >&2; fi
+  exit 2
+fi
+
 # R14 A2: GUARDIAN_HOME is the conf's parent directory. The agent rejects a conf whose directory is group/world-writable or carries an ACL, so make it 0700, no ACL
 # (an inheritable ACL on the parent would otherwise be copied onto it), before anything else is created inside it.
 do_it mkdir -p "$GUARDIAN_HOME"
@@ -101,11 +116,11 @@ do_it /bin/chmod -N "$GUARDIAN_HOME"
 for d in bin lib; do
   if [ -L "$GUARDIAN_HOME/$d" ]; then echo "refusing: $GUARDIAN_HOME/$d is a symlink; move it aside" >&2; exit 2; fi
 done
-do_it mkdir -p "$GUARDIAN_HOME/bin" "$GUARDIAN_HOME/lib" "$GUARDIAN_HOME/state" "$GUARDIAN_HOME/flags" "$GUARDIAN_HOME/keys" "$LA_DIR"
-do_it chmod 700 "$GUARDIAN_HOME/keys"
-# R15: state/ and flags/ are the agent's own: not group/world-writable, no inherited ACL (an earlier umask-000 install left them 0777)
-do_it /bin/chmod go-w "$GUARDIAN_HOME/state" "$GUARDIAN_HOME/flags"
-do_it /bin/chmod -N "$GUARDIAN_HOME/state" "$GUARDIAN_HOME/flags"
+do_it mkdir -p "$GUARDIAN_HOME/bin" "$GUARDIAN_HOME/lib" "$GUARDIAN_HOME/state" "$GUARDIAN_HOME/flags" "$GUARDIAN_HOME/keys" "$LA_DIR" || { echo "failed: mkdir under $GUARDIAN_HOME" >&2; exit 1; }
+do_it chmod 700 "$GUARDIAN_HOME/keys" || { echo "failed: chmod 700 keys/" >&2; exit 1; }
+# R15: state/ and flags/ are the agent's own: not group/world-writable, no inherited ACL (an earlier umask-000 install left them 0777). R15b: each rc is checked.
+do_it /bin/chmod go-w "$GUARDIAN_HOME/state" "$GUARDIAN_HOME/flags" || { echo "failed: chmod go-w state/ flags/" >&2; exit 1; }
+do_it /bin/chmod -N "$GUARDIAN_HOME/state" "$GUARDIAN_HOME/flags" "$GUARDIAN_HOME/keys" || { echo "failed: chmod -N state/ flags/ keys/" >&2; exit 1; }
 copy_if_changed "$SRC/bin/guardian.sh" "$GUARDIAN_HOME/bin/guardian.sh" 755 || { echo "failed to install bin/guardian.sh" >&2; exit 1; }
 for f in common conf collect killswitch faulttree heal probe canary; do copy_if_changed "$SRC/lib/$f.sh" "$GUARDIAN_HOME/lib/$f.sh" 644 || { echo "failed to install lib/$f.sh" >&2; exit 1; }; done
 # R15: on every install, changed or not: bin/ and lib/ and the files under them lose group/world write and every ACL entry (an inherited everyone-write ACL survives a plain copy)

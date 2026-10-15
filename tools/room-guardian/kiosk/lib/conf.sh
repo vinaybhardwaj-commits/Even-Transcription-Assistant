@@ -255,7 +255,7 @@ tree_walk_anc() {
   return 0
 }
 
-# tree_check_paths <code dir> <agent home>: rc 0 when the code directory, bin/, lib/, each file the agent sources or runs from its tree (strict: regular file or directory,
+# tree_check_paths <code dir> <agent home>: rc 0 when the code directory, bin/, lib/, the agent home's state/ and flags/, each file the agent sources or runs from its tree (strict: regular file or directory,
 # owner root or the agent, not group/world-writable, no ACL at all) and every ancestor of the code directory and of the agent home (tree_walk_anc) pass. Sets G_TREE_WHY on a finding.
 tree_check_paths() {
   local here="$1" home="$2" rel p r f first
@@ -264,6 +264,14 @@ tree_check_paths() {
     p="$here${rel:+/$rel}"
     r="$(tree_node "$p" d strict)"
     if [ -n "$r" ]; then G_TREE_WHY="dir ${r#*|}: ${rel:-.}"; return 1; fi
+  done
+  # R15b (S3): state/ and flags/ of the agent home decide the mode (state/control.last) and the flag cache: strict directories too (a link, a foreign owner, loose modes, an ACL = killed).
+  # Absent is accepted: the agent creates them just before its first check.
+  for rel in state flags; do
+    p="$home/$rel"
+    if [ ! -e "$p" ] && [ ! -L "$p" ]; then continue; fi
+    r="$(tree_node "$p" d strict)"
+    if [ -n "$r" ]; then G_TREE_WHY="dir ${r#*|}: $rel"; return 1; fi
   done
   for f in bin/guardian.sh lib/common.sh lib/conf.sh lib/collect.sh lib/killswitch.sh lib/faulttree.sh lib/heal.sh lib/probe.sh lib/canary.sh; do
     p="$here/$f"

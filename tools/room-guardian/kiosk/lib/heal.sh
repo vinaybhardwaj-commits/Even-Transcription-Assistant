@@ -269,7 +269,10 @@ usb_budget_state() {
   esac
   ep="$(usb_state_get epoch)"
   case "$ep" in
-    ''|*[!0-9]*) ;;
+    ''|*[!0-9]*)
+      # R15b (N1): the file exists, so an empty or non-digit epoch (abc, 12x, " 5", +5, 1e9) is a planted or damaged file: the budget cannot be shown to be unspent.
+      # The one file without an epoch line is the void marker usb_state_restore writes (date=00000000, verify=void, no epoch line at all).
+      if [ -z "$ep" ] && [ "$(usb_state_get verify)" = void ] && ! "$G_GREP" -q '^epoch' "$USB_STATE" 2>/dev/null; then :; else echo bad; return; fi ;;
     0*) echo bad; return ;;   # R15 S-1: a leading zero is octal to bash arithmetic (or an error): the budget cannot be shown to be unspent
     *) if [ "${#ep}" -gt 15 ]; then echo bad; return; fi
        if [ "$((10#$ep))" -gt "$(( $(now_epoch) + 300 ))" ]; then echo bad; return; fi
