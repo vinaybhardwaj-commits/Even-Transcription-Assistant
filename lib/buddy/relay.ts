@@ -72,18 +72,24 @@ const SAFE_CONSULT_UID = /^[a-z0-9]{20,32}$/;
 const SAFE_DOCTOR_UID = /^[A-Za-z0-9_-]{1,128}$/;
 /** Thrown by the resolver when METABASE_URL or METABASE_API_KEY is unset. Counted as doctor_resolve_off, not as a fault. */
 export const DOCTOR_RESOLVE_OFF = "doctor_resolve_off";
-
-/** Resolves the one exact doctor_uid, or null (zero rows, several distinct rows, or an unsafe consult_uid). Throws on a fault or when off. */
-export type DoctorResolver = (consultUid: string) => Promise<string | null>;
+/** Thrown by the resolver when consult_uid fails SAFE_CONSULT_UID: no Metabase call is made. Counted as doctor_resolve_unsafe_uid. */
+export const DOCTOR_RESOLVE_UNSAFE = "doctor_resolve_unsafe_uid";
 
 /**
- * Exact lookup in the Pulse warehouse (db13 through Metabase), by consult_uid only. Never uses the room's last_doctor_uid hint.
+ * Resolves the one exact doctor_uid, or null (zero rows, or several distinct rows). Throws on a fault, when off, or
+ * DOCTOR_RESOLVE_UNSAFE for an unsafe consult_uid. `signal` is aborted by the caller when the time cap is lost.
+ */
+export type DoctorResolver = (consultUid: string, signal?: AbortSignal) => Promise<string | null>;
+
+/**
+ * Exact lookup in the Pulse warehouse (db13 through Metabase) on the consult record: accounts-members-calendar_events.uid = consult_uid,
+ * whose doctor_uid is set at booking. By consult_uid only. Never uses the room's last_doctor_uid hint.
  * Exactly one distinct doctor_uid = that uid; anything else = null.
  */
-export const defaultDoctorResolve: DoctorResolver = async (consultUid) => {
+export const defaultDoctorResolve: DoctorResolver = async (consultUid, signal) => {
   if (!(process.env.METABASE_URL ?? "").trim() || !(process.env.METABASE_API_KEY ?? "").trim()) throw new Error(DOCTOR_RESOLVE_OFF);
-  if (!SAFE_CONSULT_UID.test(consultUid)) return null;
-  const rows = await metabaseQuery(`SELECT doctor_uid FROM "individuals-prescriptions" WHERE consult_uid = '${consultUid}'`);
+  if (!SAFE_CONSULT_UID.test(consultUid)) throw new Error(DOCTOR_RESOLVE_UNSAFE);
+  const rows = await metabaseQuery(`SELECT doctor_uid FROM "accounts-members-calendar_events" WHERE uid = '${consultUid}'`, { signal });
   const seen = new Set<string>();
   for (const r of rows) {
     const v = r?.doctor_uid;
@@ -97,7 +103,13 @@ export const defaultDoctorResolve: DoctorResolver = async (consultUid) => {
 };
 
 /** Counts for the doctor resolve. Counts only, never a uid. */
-export type DoctorCounts = { doctor_resolve_off: number; doctor_resolve_fault: number; doctor_hint_would_help: number };
+export type DoctorCounts = {
+  doctor_resolve_off: number;
+  doctor_resolve_fault: number;
+  doctor_hint_would_help: number;
+  doctor_resolve_unsafe_uid: number;
+  doctor_resolve_null: number;
+};
 
 /** Counts for the log line. */
 export type DecideCounts = { decide_true: number; decide_false: number; decide_fault: number; decide_live?: number };
@@ -189,17 +201,22 @@ export async function relayConsultEvent(
     let doctorUid = doctorUidOf(row);
     if (!doctorUid) {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      const ctl = new AbortController();
       try {
         const cap = Math.min(DOCTOR_RESOLVE_TIMEOUT_MS, Math.max(0, deadline - Date.now()));
         doctorUid = await Promise.race([
-          resolveDoctor(consultUid),
-          new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error("doctor_resolve_timeout")), cap); }),
+          resolveDoctor(consultUid, ctl.signal),
+          // Race lost: abort the in-flight Metabase fetch, then reject.
+          new Promise<never>((_, rej) => { timer = setTimeout(() => { ctl.abort(); rej(new Error("doctor_resolve_timeout")); }, cap); }),
         ]);
+        if (doctorUid === null && dtally) dtally.doctor_resolve_null++;
         if (doctorUid === null && hintOf(row) && dtally) dtally.doctor_hint_would_help++;
       } catch (e) {
         doctorUid = null;
         if (dtally) {
-          if ((e as Error)?.message === DOCTOR_RESOLVE_OFF) dtally.doctor_resolve_off++;
+          const m = (e as Error)?.message;
+          if (m === DOCTOR_RESOLVE_OFF) dtally.doctor_resolve_off++;
+          else if (m === DOCTOR_RESOLVE_UNSAFE) dtally.doctor_resolve_unsafe_uid++;
           else dtally.doctor_resolve_fault++;
         }
       } finally {
@@ -263,7 +280,7 @@ export async function relayInserted(rows: PresenceRow[], decide: DecideClient = 
     const deadline = Date.now() + RELAY_TIMEOUT_MS;
     const counts = { sent: 0, duplicate: 0, skipped: 0, failed: 0, decide_false: 0, decide_fault: 0 };
     const tally: DecideCounts = { decide_true: 0, decide_false: 0, decide_fault: 0, decide_live: 0 };
-    const dtally: DoctorCounts = { doctor_resolve_off: 0, doctor_resolve_fault: 0, doctor_hint_would_help: 0 };
+    const dtally: DoctorCounts = { doctor_resolve_off: 0, doctor_resolve_fault: 0, doctor_hint_would_help: 0, doctor_resolve_unsafe_uid: 0, doctor_resolve_null: 0 };
     let timer: ReturnType<typeof setTimeout> | undefined;
     const work = (async () => {
       for (const r of todo) {
@@ -284,8 +301,8 @@ export async function relayInserted(rows: PresenceRow[], decide: DecideClient = 
     if (tally.decide_true + tally.decide_false + tally.decide_fault > 0) {
       console.info(`[buddy-relay] decide: decide_true=${tally.decide_true} decide_false=${tally.decide_false} decide_fault=${tally.decide_fault} decide_live=${tally.decide_live}`);
     }
-    if (dtally.doctor_resolve_off + dtally.doctor_resolve_fault + dtally.doctor_hint_would_help > 0) {
-      console.info(`[buddy-relay] doctor: doctor_resolve_off=${dtally.doctor_resolve_off} doctor_resolve_fault=${dtally.doctor_resolve_fault} doctor_hint_would_help=${dtally.doctor_hint_would_help}`);
+    if (dtally.doctor_resolve_off + dtally.doctor_resolve_fault + dtally.doctor_hint_would_help + dtally.doctor_resolve_unsafe_uid + dtally.doctor_resolve_null > 0) {
+      console.info(`[buddy-relay] doctor: doctor_resolve_off=${dtally.doctor_resolve_off} doctor_resolve_fault=${dtally.doctor_resolve_fault} doctor_hint_would_help=${dtally.doctor_hint_would_help} doctor_resolve_unsafe_uid=${dtally.doctor_resolve_unsafe_uid} doctor_resolve_null=${dtally.doctor_resolve_null}`);
     }
     if (outcome === "timeout" || counts.failed > 0) {
       console.warn(`[buddy-relay] ${outcome === "timeout" ? "timeout" : "fault"}: items=${todo.length} sent=${counts.sent} duplicate=${counts.duplicate} skipped=${counts.skipped} failed=${counts.failed} decide_false=${counts.decide_false} decide_fault=${counts.decide_fault}`);

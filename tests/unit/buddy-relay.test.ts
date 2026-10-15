@@ -391,7 +391,7 @@ describe("Encounter Buddy: server-side doctor resolve", () => {
     await post([openCU()]);
     expect(mbCalls).toHaveLength(1);
     expect(mbCalls[0]!.body.database).toBe(13);
-    expect(mbCalls[0]!.body.native.query).toBe(`SELECT doctor_uid FROM "individuals-prescriptions" WHERE consult_uid = '${CU}'`);
+    expect(mbCalls[0]!.body.native.query).toBe(`SELECT doctor_uid FROM "accounts-members-calendar_events" WHERE uid = '${CU}'`);
     expect(mbCalls[0]!.key).toBe("mb-key-value");
     expect(decideBodies()[0].doctor_uid).toBe("doc-res-1");
     expect(refs).toHaveLength(1);
@@ -414,6 +414,43 @@ describe("Encounter Buddy: server-side doctor resolve", () => {
     await post([openCU({ encounter_id: "x' OR '1'='1" })]);
     expect(mbCalls).toHaveLength(0);
     expect(decideBodies()[0].doctor_uid).toBeNull();
+  });
+
+  it("C3: a 19-char consult_uid counts unsafe=1 and makes no Metabase call", async () => {
+    await post([openCU({ encounter_id: "abcdefghij012345678" })]);
+    expect(mbCalls).toHaveLength(0);
+    expect(logs()).toContain("doctor_resolve_unsafe_uid=1");
+    expect(logs()).toContain("doctor_resolve_null=0");
+    expect(logs()).not.toContain("abcdefghij012345678");
+  });
+
+  it("C3: zero rows and two distinct rows each count null=1", async () => {
+    await post([openCU()]);
+    expect(logs()).toContain("doctor_resolve_null=1");
+    (console.info as unknown as { mockClear: () => void }).mockClear();
+    mbImpl = async () => mbRows(["doc-a", "doc-b"]);
+    await post([openCU({ encounter_id: "zyxwvutsrq9876543210abcd" })]);
+    expect(logs()).toContain("doctor_resolve_null=1");
+    expect(logs()).toContain("doctor_resolve_unsafe_uid=0");
+  });
+
+  it("C5: on race loss the Metabase fetch signal is aborted within 100 ms of the cap", async () => {
+    let sig: AbortSignal | undefined;
+    let abortedAt = 0;
+    fetchImpl = async (url, init) => {
+      if (url.startsWith(MB)) {
+        sig = init.signal as AbortSignal;
+        sig.addEventListener("abort", () => { abortedAt = Date.now(); });
+        return new Promise<Response>(() => {});
+      }
+      return new Response(JSON.stringify({ window: true, live: true, reason_code: "ok" }), { status: 200 });
+    };
+    const t0 = Date.now();
+    await post([openCU()]);
+    expect(sig).toBeDefined();
+    expect(sig!.aborted).toBe(true);
+    expect(abortedAt - t0).toBeLessThan(DOCTOR_RESOLVE_TIMEOUT_MS + 100);
+    expect(abortedAt - t0).toBeGreaterThanOrEqual(DOCTOR_RESOLVE_TIMEOUT_MS - 50);
   });
 
   it("the last_doctor_uid hint is never used; its count is logged when the resolve found nothing", async () => {

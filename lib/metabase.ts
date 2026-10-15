@@ -49,12 +49,21 @@ function apiKey(): string {
 
 type DatasetResponse = { status?: string; error?: unknown; data?: { rows?: unknown[][]; cols?: Array<{ name: string }> } };
 
-/** Run a native SQL query against the warehouse via Metabase /api/dataset. Returns rows as objects keyed by column name. */
-export async function metabaseQuery(query: string): Promise<Array<Record<string, unknown>>> {
+/**
+ * Run a native SQL query against the warehouse via Metabase /api/dataset. Returns rows as objects keyed by column name.
+ * `opts.signal` (optional): a caller's AbortSignal; aborting it aborts the fetch. Not passed = unchanged behaviour.
+ */
+export async function metabaseQuery(query: string, opts?: { signal?: AbortSignal }): Promise<Array<Record<string, unknown>>> {
   const url = `${baseUrl()}/api/dataset`;
   const key = apiKey();
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), METABASE_TIMEOUT_MS);
+  const ext = opts?.signal;
+  const onExt = () => ctl.abort();
+  if (ext) {
+    if (ext.aborted) ctl.abort();
+    else ext.addEventListener("abort", onExt, { once: true });
+  }
   let text: string;
   let ok: boolean;
   let status: number;
@@ -69,10 +78,12 @@ export async function metabaseQuery(query: string): Promise<Array<Record<string,
     status = res.status;
     text = await res.text();
   } catch (e) {
+    if (ext?.aborted) throw new Error("Metabase: aborted by caller");
     if (ctl.signal.aborted) throw new Error(`Metabase: timed out after ${METABASE_TIMEOUT_MS} ms`);
     throw new Error(`Metabase: request failed (${String((e as Error)?.name ?? "error")})`);
   } finally {
     clearTimeout(timer);
+    ext?.removeEventListener("abort", onExt);
   }
   if (!ok) throw new Error(`Metabase HTTP ${status}: ${text.slice(0, 200)}`);
   let j: DatasetResponse;
