@@ -17,6 +17,7 @@ class Sink:
     def guardian_quiet(self, room, q, now): self.quiet.append((room, int(q)))
     def guardian_recovered(self, room, now): self.rec.append(room)
     def heal_kind(self, room, kind, now): self.kinds.append((room, kind))
+    def heal_action(self, room, line, now): self.actions = getattr(self, "actions", []) + [line]
     def heal_invalid(self, room, now): self.invalid.append(room)
     def capture_recovered(self, room, now): self.cap_rec.append(room)
 
@@ -105,7 +106,7 @@ class HealTests(unittest.TestCase):
             s.on_line("kiosk/r1/heal", '{"result":"ok","shadow":true}'); s.on_line("kiosk/r1/heal", '{"result":"escalated"}')
             s.on_line("kiosk/r1/heal", '{"result":"ESCALATED"}'); s.on_line("kiosk/r1/heal", "garbage")
             self.assertEqual((sink.esc, sink.res), (["r1", "r1"], ["r1"]))
-            self.assertEqual(sink.invalid, ["r1"])                                  # "garbage" is a malformed heal line
+            self.assertEqual(sink.invalid, [])                                      # "garbage" cannot be attributed to the coreaudio rule: logged only, no case
 
 class SeedTests(unittest.TestCase):
     def test_restart_with_open_quiet_case_then_room_speaks_closes_it(self):
@@ -186,8 +187,24 @@ class CAKindTests(unittest.TestCase):
                 e.clock.adv(1860); e.router.tick(e.bus)
                 self.assertTrue(e.v_texts(), "clinic hours, 31 min open, unacked: V")
 
-    def test_no_v_flag_outside_clinic_hours(self):
-        for t0 in (SUN_NOON, TUE_22H):
+    def test_v_window_for_the_coreaudio_kinds_is_0700_to_2135_every_day(self):
+        for kind in sb.HEAL_KINDS:
+            for label, t0, expect_v in (("sunday noon", SUN_NOON, True), ("tue 07:01", _ist(2026, 10, 13, 7, 1), True), ("tue 21:31 (opened 21:00)", _ist(2026, 10, 13, 21, 0), True),
+                                        ("tue 06:31 (opened 06:00)", _ist(2026, 10, 13, 6, 0), False), ("tue 21:37 (opened 21:06)", _ist(2026, 10, 13, 21, 6), False)):
+                with self.subTest(kind=kind, at=label):
+                    e = CAEnv(t0); e.heal({"kind": kind}); e.router.tick(e.bus)
+                    e.clock.adv(1860); e.router.tick(e.bus)                      # 31 min later: the V clock is read at THIS time
+                    self.assertEqual(bool(e.v_texts()), expect_v)
+
+    def test_other_kinds_keep_the_general_clinic_window(self):
+        e = CAEnv(T0); e.router.on_row(e.bus, {"id": 77, "kind": "recorder_off", "room_ids": ["r1"]}); e.router.tick(e.bus)
+        e.clock.t = _ist(2026, 10, 13, 21, 45); e.router.tick(e.bus); e.clock.adv(60)
+        e2 = CAEnv(_ist(2026, 10, 13, 21, 10)); e2.router.on_row(e2.bus, {"id": 78, "kind": "recorder_off", "room_ids": ["r1"]}); e2.router.tick(e2.bus)
+        e2.clock.adv(1860); e2.router.tick(e2.bus)                               # 21:41: outside 07:30-21:30, so no V for a general kind
+        self.assertEqual(e2.v_texts(), [])
+
+    def test_no_v_flag_outside_the_window(self):
+        for t0 in (TUE_22H, _ist(2026, 10, 14, 3)):
             for kind in sb.HEAL_KINDS:
                 with self.subTest(t0=t0, kind=kind):
                     e = CAEnv(t0); e.heal({"kind": kind}); e.router.tick(e.bus)
@@ -195,8 +212,9 @@ class CAKindTests(unittest.TestCase):
                     self.assertEqual(e.v_texts(), []); self.assertGreaterEqual(e.bus.sends, 2)   # still paged, never V
 
     def test_result_without_kind_for_the_coreaudio_action(self):
-        e = CAEnv(); e.heal({"result": "escalated", "action": "coreaudiod_restart"}); self.assertEqual(list(e.open()), ["coreaudio_heal_failed"])
-        e = CAEnv(); e.heal({"result": "failed", "action": "coreaudiod_restart"}); self.assertEqual(list(e.open()), ["coreaudio_heal_failed"])
+        e = CAEnv(); e.heal({"layer": "coreaudio", "result": "escalated", "action": "coreaudiod_restart"}); self.assertEqual(list(e.open()), ["coreaudio_heal_failed"])
+        e = CAEnv(); e.heal({"layer": "coreaudio", "result": "failed", "action": "coreaudiod_restart"}); self.assertEqual(list(e.open()), ["coreaudio_heal_failed"])
+        e = CAEnv(); e.heal({"result": "escalated", "action": "coreaudiod_restart"}); self.assertEqual(list(e.open()), ["heal_escalated"])   # no kind, no layer: the older rule
         e = CAEnv(); e.heal({"result": "escalated"}); self.assertEqual(list(e.open()), ["heal_escalated"])          # the older rule is unchanged
 
     def test_healed_would_do_and_plain_failed_are_logged_only(self):
@@ -214,28 +232,44 @@ class CAKindTests(unittest.TestCase):
 
 
 class CACloseTests(unittest.TestCase):
-    def test_zero_ratio_under_005_closes_the_audio_kinds_of_that_room_only(self):
+    def good(self, e, n, room="r1", zr=0.0004):
+        for _ in range(n): e.health({"zero_ratio": zr}, room=room); e.clock.adv(10)
+
+    def test_four_good_health_lines_close_the_audio_kinds_of_that_room_only(self):
         e = CAEnv()
-        for k in ("capture_dead", "capture_muted", "coreaudio_heal_failed", "recorder_changed"): e.heal({"kind": k})
-        e.heal({"kind": "capture_dead"}, room="r2")
-        e.router.tick(e.bus)
-        e.health({"zero_ratio": 0.0004})
-        self.assertEqual(list(e.open("r1")), ["recorder_changed"])                  # audio is back; the recorder question stays open
+        for k in ("capture_dead", "capture_muted", "coreaudio_heal_failed", "recorder_disturbed"): e.heal({"kind": k})
+        e.heal({"kind": "capture_dead"}, room="r2"); e.router.tick(e.bus)
+        self.good(e, 3); self.assertEqual(len(e.open("r1")), 4)                      # three is not enough
+        self.good(e, 1)
+        self.assertEqual(list(e.open("r1")), ["recorder_disturbed"])                 # audio is back; the recorder question stays open
         self.assertIn("capture_dead", e.open("r2"))
-        e.clock.adv(30); e.router.tick(e.bus)
-        self.assertEqual(len([m for m in e.bus.real if "CLOSED (recovery)" in m["body"]]), 1)
-        self.assertEqual(e.bus.real[-1]["body"].count("CLOSED (recovery)"), 3)
+        e.router.tick(e.bus); self.assertEqual(e.bus.real[-1]["body"].count("CLOSED (recovery)"), 3)
+
+    def test_a_bad_line_between_resets_the_run(self):
+        e = CAEnv(); e.heal({"kind": "capture_dead"})
+        self.good(e, 3); e.health({"zero_ratio": 0.5}); self.good(e, 3); self.assertIn("capture_dead", e.open())
+        self.good(e, 1); self.assertEqual(e.open(), {})
+        e = CAEnv(); e.heal({"kind": "capture_dead"})
+        self.good(e, 3); e.health({"no_zero_ratio": 1}); self.good(e, 3); self.assertIn("capture_dead", e.open())   # a line without zero_ratio is not a good line
+
+    def test_good_lines_before_the_alert_do_not_count(self):
+        e = CAEnv(); self.good(e, 10)
+        e.heal({"kind": "capture_dead"}); self.good(e, 3); self.assertIn("capture_dead", e.open())
+        self.good(e, 1); self.assertEqual(e.open(), {})
+
+    def test_the_run_is_per_room(self):
+        e = CAEnv(); e.heal({"kind": "capture_dead"}); e.heal({"kind": "capture_dead"}, room="r2")
+        self.good(e, 2, "r1"); self.good(e, 2, "r2"); self.good(e, 2, "r1"); self.assertEqual(e.open("r1"), {}); self.assertIn("capture_dead", e.open("r2"))
 
     def test_zero_ratio_that_does_not_recover(self):
         e = CAEnv(); e.heal({"kind": "capture_dead"})
         for zr in (0.05, 0.06, 0.5, 1.0, True, False, "0.01", None, -0.1, 1.5, float("nan"), [0.0]):
-            e.health({"zero_ratio": zr}); self.assertIn("capture_dead", e.open(), zr)
-        e.health({"other": 0.0}); e.health({}); self.assertIn("capture_dead", e.open())
-        e.health({"zero_ratio": 0}); self.assertEqual(e.open(), {})                  # int 0 is a number under 0.05
+            for _ in range(5): e.health({"zero_ratio": zr}); self.assertIn("capture_dead", e.open(), zr)
+        self.good(e, 4, zr=0); self.assertEqual(e.open(), {})                        # int 0 is a number under 0.05
 
     def test_recovery_then_new_event_opens_a_new_case(self):
         e = CAEnv(); e.heal({"kind": "capture_muted"}); first = e.open()["capture_muted"]["first_id"]
-        e.health({"zero_ratio": 0.0}); e.heal({"kind": "capture_muted"})
+        self.good(e, 4); e.heal({"kind": "capture_muted"})
         self.assertNotEqual(e.open()["capture_muted"]["first_id"], first)
 
     def test_ack_closes_every_new_kind_and_stops_pages(self):
@@ -264,26 +298,66 @@ class CACloseTests(unittest.TestCase):
 
 
 class CAInvalidTests(unittest.TestCase):
-    BAD = [{"kind": "capture_ded"}, {"kind": "recorder_disturbed"}, {"kind": ""}, {"kind": None}, {"kind": ["capture_dead"]}, {"kind": 5},
-           {"result": "nope"}, {"result": 5}, {"result": None}, {"result": ["ok"]}, {}, {"action": "coreaudiod_restart"}, {"kind": "capture_dead", "result": "weird"}]
+    BAD = [{"kind": "capture_ded"}, {"kind": "recorder_disturbd"}, {"kind": ""}, {"kind": None}, {"kind": ["capture_dead"]}, {"kind": 5},
+           {"kind": "capture_dead", "result": "weird"}, {"kind": "capture_dead", "result": 5}, {"layer": "coreaudio"}, {"layer": "coreaudio", "result": "nope"},
+           {"layer": "coreaudio", "result": ["ok"]}, {"layer": "coreaudio", "action": "coreaudiod_restart"},
+           {"kind": "capture_dead", "mode": "armed"}, {"kind": "capture_dead", "kill": "yes"}, {"kind": "capture_dead", "control_age_s": "5"},
+           {"kind": "capture_dead", "control_age_s": -1}, {"kind": "capture_dead", "guards": [1]}, {"kind": "capture_dead", "zero_ratio_before": 1.5},
+           {"kind": "capture_dead", "zero_ratio_after": "0.1"}, {"kind": "capture_dead", "zero_ratio_before": True},
+           {"kind": "capture_dead", "recorder_pid_before": -3}, {"kind": "capture_dead", "coreaudiod_pid_after": "9"}, {"kind": "capture_dead", "recorder_pid_after": 1.5}]
+    # today's kiosk heal schema (R9 on main): no kind. None of these may ever be invalid.
+    R9 = {"room_id": "opd6", "ts": 1760500000, "action": "restart_recorder", "layer": "recorder", "reason": "tape stalled", "before": {"pid": 11}, "after": None,
+          "result": "would_do", "shadow": True, "target": "recorder", "severity": "info"}
 
     def test_validate_heal_shapes(self):
         for obj in self.BAD + [[1], "x", 5, None, True, [{"kind": "capture_dead"}]]:
             self.assertFalse(sb.validate_heal(obj)[0], obj)
-        for obj in [{"kind": k} for k in sb.HEAL_KINDS] + [{"result": r} for r in sb.HEAL_RESULTS] + [{"result": "Escalated"}, {"kind": "capture_dead", "result": "escalated", "extra": 1}]:
+        good = [{"kind": k} for k in sb.HEAL_KINDS] + [{"kind": "recorder_changed"}] + [{"layer": "coreaudio", "result": r} for r in sb.HEAL_RESULTS] + [
+            {"kind": "capture_dead", "result": "Escalated", "extra": 1},
+            {"kind": "capture_dead", "result": "would_do", "mode": "shadow", "kill": False, "control_age_s": 12.5, "guards": {"a": True}, "zero_ratio_before": 0.99,
+             "zero_ratio_after": None, "coreaudiod_pid_before": 100, "coreaudiod_pid_after": 200, "recorder_pid_before": 5, "recorder_pid_after": 5}]
+        for obj in good:
             self.assertEqual(sb.validate_heal(obj), (True, None), obj)
 
-    def test_every_bad_shape_opens_one_invalid_case_and_never_crashes(self):
+    def test_scope(self):
+        for obj in (self.R9, {}, {"result": "nope"}, {"layer": "recorder", "result": "zzz"}, [1], "x", 5, None, {"layer": "Coreaudio"}):
+            self.assertFalse(sb.coreaudio_scope(obj), obj)
+        for obj in ({"kind": "x"}, {"kind": None}, {"layer": "coreaudio"}, {"layer": "coreaudio", "kind": "capture_dead"}):
+            self.assertTrue(sb.coreaudio_scope(obj), obj)
+
+    def test_r9_shaped_lines_are_stored_and_never_open_a_case(self):
+        e = CAEnv()
+        for res in ("would_do", "deferred", "log_only", "alert", "heal", "aborted_killswitch", "aborted_stale_control", "something_new", 7, None, ["x"]):
+            e.heal(dict(self.R9, result=res))
+        e.heal({k: v for k, v in self.R9.items() if k != "result"}); e.heal(dict(self.R9, layer=None)); e.heal(dict(self.R9, severity={"a": 1}, shadow="maybe"))
+        self.assertEqual(e.router.store.list_open(), []); self.assertEqual(e.router.store.list_notes(), [])
+        lines = open(os.path.join(e.sub.data, "2026-10-13", "r1.heal.jsonl")).read().splitlines()
+        self.assertEqual(len(lines), 14); self.assertEqual(json.loads(lines[0]), dict(self.R9, result="would_do"))     # stored as received
+        self.assertEqual(e.router.store.list_inbox_pending(), [])                                                       # and no HEAL action line queued
+
+    def test_r9_shape_keeps_the_older_handling(self):
+        e = CAEnv(); e.heal(dict(self.R9, result="escalated")); self.assertEqual(list(e.open()), ["heal_escalated"])
+        e.heal(dict(self.R9, result="healed")); self.assertEqual(e.open(), {})                                           # the older close, unchanged
+
+    def test_r9_with_the_coreaudio_action_but_no_layer_or_kind_is_the_older_rule(self):
+        e = CAEnv(); e.heal(dict(self.R9, action="coreaudiod_restart", result="healed"))
+        self.assertEqual(e.router.store.list_open(), []); self.assertEqual(e.router.store.list_inbox_pending(), [])
+
+    def test_every_bad_in_scope_shape_opens_one_invalid_case_and_never_crashes(self):
         e = CAEnv()
         for obj in self.BAD: e.heal(obj)
-        for raw in ("[1]", '"x"', "5", "null", "true"): e.heal(None, raw=raw)
-        for raw in ("not json", "{", "", "\x00\xff", "x" * 5000): e.heal(None, raw=raw)
         self.assertEqual(list(e.open()), ["heal_message_invalid"])
         self.assertEqual(len(e.router.store.list_open()), 1)
-        self.assertEqual(e.open()["heal_message_invalid"]["suppressed_count"], len(self.BAD) + 5 + 5 - 1)
+        self.assertEqual(e.open()["heal_message_invalid"]["suppressed_count"], len(self.BAD) - 1)
         out = e.router.tick(e.bus); self.assertEqual((out["paged"], e.bus.sends, out["errors"]), (1, 1, 0))
-        body = e.bus.real[0]["body"]; self.assertIn("heal_message_invalid in r1", body); self.assertNotIn("capture_ded", body); self.assertNotIn("xxxx", body)
+        body = e.bus.real[0]["body"]; self.assertIn("heal_message_invalid in r1", body); self.assertNotIn("capture_ded", body)
         self.assertEqual(e.v_texts(), [])                                            # not patient-impacting by itself
+
+    def test_out_of_scope_garbage_is_never_a_case(self):
+        e = CAEnv()
+        for raw in ("[1]", '"x"', "5", "null", "true", "{}", '{"result":"nope"}', '{"result":5}', '{"action":"coreaudiod_restart"}'): e.heal(None, raw=raw)
+        for raw in ("not json", "{", "", "\x00\xff", "x" * 5000): e.heal(None, raw=raw)
+        self.assertEqual(e.router.store.list_open(), [])
 
     def test_malformed_lines_are_logged_capped_and_json_quoted(self):
         e = CAEnv(); e.heal(None, raw="not json"); e.heal(None, raw="y" * 5000)
@@ -291,24 +365,95 @@ class CAInvalidTests(unittest.TestCase):
         rows = [json.loads(l) for l in open(p).read().splitlines()]
         self.assertEqual([r["raw"][:8] for r in rows], ["not json", "yyyyyyyy"]); self.assertEqual(len(rows[1]["raw"]), sb.RAW_CAP)
         self.assertFalse(os.path.exists(os.path.join(e.sub.data, "2026-10-13", "r1.heal.jsonl")))   # the stream file only holds JSON lines
+        self.assertEqual(e.router.store.list_open(), [])
 
-    def test_invalid_json_but_parsed_lines_are_still_stored_as_received(self):
-        e = CAEnv(); e.heal(None, raw='{"kind":"capture_ded"}'); e.heal(None, raw="[1]")
-        self.assertEqual(open(os.path.join(e.sub.data, "2026-10-13", "r1.heal.jsonl")).read(), '{"kind":"capture_ded"}\n[1]\n')
+    def test_in_scope_invalid_lines_are_stored_as_received(self):
+        e = CAEnv(); e.heal(None, raw='{"kind":"capture_ded"}'); e.heal(None, raw='{"layer":"coreaudio","result":"zz"}')
+        self.assertEqual(open(os.path.join(e.sub.data, "2026-10-13", "r1.heal.jsonl")).read(), '{"kind":"capture_ded"}\n{"layer":"coreaudio","result":"zz"}\n')
 
     def test_valid_lines_do_not_open_the_invalid_case_and_other_streams_are_untouched(self):
         e = CAEnv(); e.heal({"kind": "capture_dead"}); e.heal({"result": "healed"})
         e.sub.on_line("kiosk/r1/probe-reply", "garbage"); e.sub.on_line("kiosk/r1/health", "garbage")
         self.assertEqual(list(e.open()), ["capture_dead"])
 
+    def test_recorder_changed_is_an_alias_for_recorder_disturbed(self):
+        e = CAEnv(); e.heal({"kind": "recorder_changed"}); self.assertEqual(list(e.open()), ["recorder_disturbed"])
+        e.heal({"kind": "recorder_disturbed"}); self.assertEqual(e.open()["recorder_disturbed"]["suppressed_count"], 1)
+
     def test_invalid_case_survives_a_subscriber_restart_and_dedupes(self):
         with tempfile.TemporaryDirectory() as t:
             path = os.path.join(t, "cases.sqlite"); clock, bus = Clock(T0), FakeBus()
             r1 = ar.Router(ar.SqliteStore(path), lambda: bus, clock)
-            sb.Subscriber(os.path.join(t, "d"), t, ["r1"], sb.RouterSink(r1), clock).on_line("kiosk/r1/heal", "garbage")
+            sb.Subscriber(os.path.join(t, "d"), t, ["r1"], sb.RouterSink(r1), clock).on_line("kiosk/r1/heal", '{"kind":"nope"}')
             r2 = ar.Router(ar.SqliteStore(path), lambda: bus, clock)
-            sb.Subscriber(os.path.join(t, "d"), t, ["r1"], sb.RouterSink(r2), clock).on_line("kiosk/r1/heal", "[]")
+            sb.Subscriber(os.path.join(t, "d"), t, ["r1"], sb.RouterSink(r2), clock).on_line("kiosk/r1/heal", '{"layer":"coreaudio","result":"zz"}')
             self.assertEqual([(c["kind"], c["suppressed_count"]) for c in r2.store.list_open()], [("heal_message_invalid", 1)])
+
+
+class CAInboxTests(unittest.TestCase):
+    HEALED = {"kind": "capture_dead", "layer": "coreaudio", "action": "coreaudiod_restart", "result": "healed", "mode": "heal", "zero_ratio_before": 0.999,
+              "zero_ratio_after": 0.0004, "recorder_pid_before": 321, "recorder_pid_after": 321, "reason": "SECRET-FREE-TEXT-MUST-NOT-APPEAR"}
+
+    def env(self, **kw):
+        e = CAEnv(**kw); self.d = tempfile.TemporaryDirectory(); self.addCleanup(self.d.cleanup)
+        self.path = os.path.join(self.d.name, "INBOX-FROM-GATING.md"); e.router.inbox_path = self.path
+        return e
+
+    def text(self): return open(self.path).read()
+
+    def test_heal_action_line_is_one_line_with_the_contract_fields_and_no_free_text(self):
+        e = self.env(); open(self.path, "w").write("- earlier entry\n")
+        e.heal(self.HEALED); self.assertEqual(e.bus.sends, 0)
+        out = e.router.tick(e.bus); self.assertEqual(out["inbox"], 1)
+        lines = self.text().splitlines(); self.assertEqual(lines[0], "- earlier entry"); self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[1], "- 13 Oct 11:00 IST pico-router HEAL: room=r1 result=healed zero_ratio_before=0.9990 zero_ratio_after=0.0004 recorder_pid_same=y")
+        self.assertNotIn("SECRET", self.text())
+
+    def test_every_action_result_is_appended_and_would_do_and_others_are_not(self):
+        e = self.env()
+        for res in ("healed", "failed", "escalated", "Healed"): e.heal(dict(self.HEALED, result=res, recorder_pid_after=999 if res == "failed" else 321))
+        for obj in (dict(self.HEALED, result="would_do"), dict(self.HEALED, result="ok"), dict(self.HEALED, action="other"), {k: v for k, v in self.HEALED.items() if k != "action"},
+                    {"kind": "capture_muted", "result": "escalated"}, {"kind": "capture_dead", "result": "would_do", "action": "coreaudiod_restart"}):
+            e.heal(obj)
+        e.router.tick(e.bus); ls = self.text().splitlines()
+        self.assertEqual(len(ls), 4); self.assertEqual([x.split("result=")[1].split()[0] for x in ls], ["healed", "failed", "escalated", "healed"])
+        self.assertIn("recorder_pid_same=n", ls[1])
+
+    def test_unknown_numbers_are_question_marks(self):
+        e = self.env(); e.heal({"kind": "capture_dead", "action": "coreaudiod_restart", "result": "failed"}); e.router.tick(e.bus)
+        self.assertIn("zero_ratio_before=? zero_ratio_after=? recorder_pid_same=?", self.text())
+
+    def test_a_file_without_a_final_newline_gets_one_first(self):
+        e = self.env(); open(self.path, "w").write("- no newline"); e.heal(self.HEALED); e.router.tick(e.bus)
+        self.assertEqual(self.text().splitlines()[0], "- no newline"); self.assertEqual(len(self.text().splitlines()), 2)
+
+    def test_missing_file_is_created_and_a_line_is_never_written_twice(self):
+        e = self.env(); e.heal(self.HEALED); e.router.tick(e.bus); e.clock.adv(30); e.router.tick(e.bus); e.router.tick(e.bus)
+        self.assertEqual(len(self.text().splitlines()), 1)
+
+    def test_without_inbox_path_the_queue_is_only_written(self):
+        e = CAEnv(); e.heal(self.HEALED); out = e.router.tick(e.bus)
+        self.assertEqual(len(e.router.store.list_inbox_pending()), 1); self.assertNotIn("inbox", out)
+
+    def test_unwritable_file_alarms_after_five_minutes_once_then_closes_when_it_drains(self):
+        e = self.env(); e.router.inbox_path = os.path.join(self.d.name, "nodir", "INBOX.md")
+        e.heal(self.HEALED); e.router.tick(e.bus); self.assertEqual(e.open("mini"), {})                                  # not yet: still inside 5 min
+        e.clock.adv(299); e.router.tick(e.bus); self.assertEqual(e.open("mini"), {})
+        e.clock.adv(2); e.router.tick(e.bus); self.assertEqual(list(e.open("mini")), ["heal_inbox_stuck"])
+        first = e.open("mini")["heal_inbox_stuck"]["first_id"]
+        for _ in range(3): e.clock.adv(30); e.router.tick(e.bus)
+        self.assertEqual(e.open("mini")["heal_inbox_stuck"]["first_id"], first); self.assertEqual(e.open("mini")["heal_inbox_stuck"]["suppressed_count"], 0)
+        self.assertTrue(any("heal_inbox_stuck in mini" in m["body"] for m in e.bus.real))
+        os.makedirs(os.path.join(self.d.name, "nodir")); e.clock.adv(30); out = e.router.tick(e.bus)
+        self.assertEqual(out["inbox"], 1); self.assertEqual(e.open("mini"), {}); self.assertEqual(len(open(e.router.inbox_path).read().splitlines()), 1)
+
+    def test_a_fault_in_the_inbox_stage_does_not_stop_the_others(self):
+        e = self.env(); e.router.on_row(e.bus, {"id": 5, "kind": "offline", "room_ids": ["r1"]})
+        e.router.store.list_inbox_pending = lambda: (_ for _ in ()).throw(RuntimeError("db"))
+        out = e.router.tick(e.bus); self.assertEqual(out["errors"], 1); self.assertEqual(out["paged"], 1)
+
+    def test_heal_inbox_stuck_is_not_a_v_kind(self):
+        self.assertNotIn("heal_inbox_stuck", ar.V_KINDS); self.assertIn("heal_inbox_stuck", ar.URGENT)
 
 
 if __name__ == "__main__":
