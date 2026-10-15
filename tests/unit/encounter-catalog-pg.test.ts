@@ -25,7 +25,9 @@ import { parseSearch, searchCatalog } from "@/lib/encounter-catalog/search";
 const HAVE_DOCKER = dockerAvailable();
 const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
 const pg = pgContainer("eta-encounter-catalog");
-const UP = readFileSync("db/migrations/0168_encounter_catalog.sql", "utf8");
+const UP168 = readFileSync("db/migrations/0168_encounter_catalog.sql", "utf8");
+const UP169 = readFileSync("db/migrations/0169_encounter_catalog_c4.sql", "utf8");   // the ingest SQL now names the C4 columns
+const UP = UP168 + "\n" + UP169;
 const DOWN = readFileSync("db/rollbacks/0168_encounter_catalog.down.sql", "utf8");
 
 describe("REQUIRED PROOF — encounter catalog runs against a real postgres", () => {
@@ -164,7 +166,7 @@ d("encounter_catalog on postgres:16", () => {
     expect(uids(await run("doctor_uid=DOC12345&room=room_abc&has_prescription=true&from=2026-10-12"))).toEqual(["synth-cat-a"]);
     const r = (await run("doctor_uid=DOC99999")).rows[0];
     expect([r.ist_date, r.t_open, r.updated_at === null]).toEqual(["2026-10-13", new Date(T_OPEN).toISOString(), false]);
-    expect(Object.keys(r).sort()).toEqual(["allowance", "catalog_version", "clip", "consult_uid", "doctor_name", "doctor_uid", "first_gap", "freescript", "generated_at", "individual_uid", "ist_date", "layers", "patient_name", "presc_state", "prescription", "prescription_uid", "room_id", "source", "stages", "t_close", "t_open", "updated_at"]);
+    expect(Object.keys(r).sort()).toEqual(["allowance", "catalog_version", "clef_affect", "clip", "consult_uid", "doctor_name", "doctor_uid", "first_gap", "freescript", "generated_at", "individual_uid", "ist_date", "jev", "layers", "patient_name", "presc_state", "prescription", "prescription_uid", "presence", "room_id", "source", "stages", "t_close", "t_open", "updated_at"]);
   });
 
   it("search pages with the cursor: every row exactly once, newest first, undated rows last, no row skipped at a page edge", async () => {

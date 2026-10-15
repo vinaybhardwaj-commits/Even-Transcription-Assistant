@@ -80,7 +80,7 @@ export function buildSearch(q: SearchQuery): [string, unknown[]] {
   if (q.cursor) where.push(`(COALESCE(ist_date, DATE '${NO_DATE}'), consult_uid) < (${add(q.cursor[0], "::date")}, ${add(q.cursor[1])})`);
   const limit = add(q.limit + 1, "::integer");
   const text = `SELECT consult_uid, to_char(ist_date, 'YYYY-MM-DD') AS ist_date, doctor_uid, room_id, ${ISO("t_open")} AS t_open, ${ISO("t_close")} AS t_close, source, clip, layers, freescript,
-       stages, first_gap, allowance, prescription, ${IDENTITY_COLUMNS}, catalog_version, ${ISO("generated_at")} AS generated_at, ${ISO("updated_at")} AS updated_at
+       stages, first_gap, allowance, prescription, jev, clef_affect, presence, ${IDENTITY_COLUMNS}, catalog_version, ${ISO("generated_at")} AS generated_at, ${ISO("updated_at")} AS updated_at
   FROM encounter_catalog${where.length ? "\n WHERE " + where.join(" AND ") : ""}
  ORDER BY COALESCE(ist_date, DATE '${NO_DATE}') DESC, consult_uid DESC
  LIMIT ${limit}`;

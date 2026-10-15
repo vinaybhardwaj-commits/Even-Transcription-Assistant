@@ -153,7 +153,7 @@ describe("validateBatch", () => {
 describe("ingest SQL", () => {
   it("is field-level: every column is guarded by jsonb_exists, the id is the only unconditional one, and no text column is named", () => {
     for (const c of COLUMNS) expect(INGEST_SQL).toContain(`CASE WHEN jsonb_exists(p.j, '${c.name}') THEN`);
-    expect(COLUMNS.map((c) => c.name)).toEqual(["ist_date", "doctor_uid", "room_id", "t_open", "t_close", "source", "clip", "layers", "freescript", "stages", "first_gap", "allowance", "prescription", "doctor_name", "patient_name", "individual_uid", "prescription_uid", "presc_state", "catalog_version", "generated_at"]);
+    expect(COLUMNS.map((c) => c.name)).toEqual(["ist_date", "doctor_uid", "room_id", "t_open", "t_close", "source", "clip", "layers", "freescript", "stages", "first_gap", "allowance", "prescription", "jev", "clef_affect", "presence", "doctor_name", "patient_name", "individual_uid", "prescription_uid", "presc_state", "catalog_version", "generated_at"]);
     expect(INGEST_SQL).toMatch(/\$1::jsonb/);
     expect(INGEST_SQL).not.toMatch(/\$2/);
     expect(INGEST_SQL).toMatch(/ON CONFLICT \(consult_uid\) DO NOTHING/);

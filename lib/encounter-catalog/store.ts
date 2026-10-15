@@ -19,10 +19,17 @@ const ROOM = /^[A-Za-z0-9_.\- ]{1,96}$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const GAP = /^[A-Za-z0-9_:.-]{1,120}$/;
 const JSON_FIELDS = ["clip", "layers", "freescript", "stages", "allowance", "prescription"] as const;
+/** 0169 (C4): presence (the lab box feed), jev and clef_affect (newcat's upsert job). Strict shapes: ids, tokens, scores and instants only. */
+const C4_FIELDS = ["jev", "clef_affect", "presence"] as const;
+const TOKEN = /^[A-Za-z0-9_:.-]{1,60}$/;
+const SHA = /^[A-Za-z0-9]{6,128}$/;
+const MAX_SETS = 50;
+const MAX_LANES = 20;
+const MAX_SCORES = 64;
 const IDENTITY_UIDS = ["individual_uid", "prescription_uid"] as const;
 const NAME_FIELDS = ["doctor_name", "patient_name"] as const;
 const STATE = /^[A-Za-z0-9_:.-]{1,40}$/;
-const KEYS = new Set<string>(["consult_uid", "ist_date", "doctor_uid", "room_id", "t_open", "t_close", "source", "first_gap", "catalog_version", "generated_at", "presc_state", ...IDENTITY_UIDS, ...NAME_FIELDS, ...JSON_FIELDS]);
+const KEYS = new Set<string>(["consult_uid", "ist_date", "doctor_uid", "room_id", "t_open", "t_close", "source", "first_gap", "catalog_version", "generated_at", "presc_state", ...IDENTITY_UIDS, ...NAME_FIELDS, ...JSON_FIELDS, ...C4_FIELDS]);
 const TEXT_KEY = /^(text|transcript|note|content)(_|s?$)/i;   // text, texts, text_en, transcript, transcript_en, note, notes, content, contents ...
 
 export type CatalogRow = Record<string, unknown>;
@@ -43,6 +50,33 @@ const okMs = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >
 /** A strict ISO-8601 instant Postgres will cast: YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM). Date.parse alone is lenient (it accepts 2026-02-30), so the calendar date is checked too. */
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 const okIso = (v: unknown) => typeof v === "string" && v.length <= 40 && ISO_INSTANT.test(v) && !Number.isNaN(Date.parse(v)) && realDate(v.slice(0, 10));
+
+const onlyKeys = (o: Record<string, unknown>, keys: readonly string[]) => Object.keys(o).every((k) => keys.includes(k));
+const tokOrNull = (v: unknown) => v === null || (typeof v === "string" && TOKEN.test(v));
+
+/** jev: {sets: [{set_id, set_sha, band, label, model, at}]}. No question text, no reasons: only these keys, each a token (at: an ISO instant). */
+export function validJev(v: Record<string, unknown>): boolean {
+  if (!onlyKeys(v, ["sets"]) || !Array.isArray(v.sets) || v.sets.length > MAX_SETS) return false;
+  return v.sets.every((s) => isObj(s) && onlyKeys(s, ["set_id", "set_sha", "band", "label", "model", "at"]) && typeof s.set_id === "string" && TOKEN.test(s.set_id) && typeof s.set_sha === "string" && SHA.test(s.set_sha)
+    && tokOrNull(s.band ?? null) && tokOrNull(s.label ?? null) && typeof s.model === "string" && TOKEN.test(s.model) && okIso(s.at));
+}
+
+/** clef_affect: {lanes: [{lane, scores, model_rev, at}]}; scores = an object of token keys to finite numbers. */
+export function validClef(v: Record<string, unknown>): boolean {
+  if (!onlyKeys(v, ["lanes"]) || !Array.isArray(v.lanes) || v.lanes.length > MAX_LANES) return false;
+  return v.lanes.every((l) => isObj(l) && onlyKeys(l, ["lane", "scores", "model_rev", "at"]) && typeof l.lane === "string" && TOKEN.test(l.lane) && isObj(l.scores)
+    && Object.keys(l.scores).length <= MAX_SCORES && Object.entries(l.scores).every(([k, n]) => TOKEN.test(k) && typeof n === "number" && Number.isFinite(n))
+    && typeof l.model_rev === "string" && TOKEN.test(l.model_rev) && okIso(l.at));
+}
+
+/** presence: the consult's Pulse Presence boundaries: UTC ms (or null) and two tokens (or null). No names. */
+export function validPresence(v: Record<string, unknown>): boolean {
+  return onlyKeys(v, ["encounter_open", "encounter_close", "boundary_source", "close_reason"])
+    && (["encounter_open", "encounter_close"] as const).every((k) => v[k] === undefined || v[k] === null || okMs(v[k]))
+    && (["boundary_source", "close_reason"] as const).every((k) => v[k] === undefined || tokOrNull(v[k]));
+}
+
+const C4_VALID: Record<(typeof C4_FIELDS)[number], (v: Record<string, unknown>) => boolean> = { jev: validJev, clef_affect: validClef, presence: validPresence };
 
 export function validateBatch(body: unknown): Validation {
   if (!isObj(body) || !Array.isArray(body.rows)) return { ok: false, error: "body_not_rows" };
@@ -78,6 +112,10 @@ export function validateBatch(body: unknown): Validation {
       if (!(f in r) || r[f] === null) continue;
       if (!isObj(r[f])) return { ok: false, error: "bad_" + f };
       if (JSON.stringify(r[f]).length > MAX_JSON_FIELD_CHARS) return { ok: false, error: f + "_too_large" };
+    }
+    for (const f of C4_FIELDS) {
+      if (!(f in r) || r[f] === null) continue;
+      if (!isObj(r[f]) || JSON.stringify(r[f]).length > MAX_JSON_FIELD_CHARS || !C4_VALID[f](r[f] as Record<string, unknown>)) return { ok: false, error: "bad_" + f };
     }
   }
   return { ok: true, rows: rows as CatalogRow[] };
