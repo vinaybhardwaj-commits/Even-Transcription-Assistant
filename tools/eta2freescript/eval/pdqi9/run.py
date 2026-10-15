@@ -50,6 +50,10 @@ def _load_art(d: Path, uid: str) -> dict | None:
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
 
+def quarantined_set(art: dict | None) -> set:
+    return set(((art or {}).get("clip_boundary") or {}).get("quarantined_turns") or [])
+
+
 def _agg(vals: list[float]) -> dict:
     return {"median": statistics.median(vals), "mean": statistics.fmean(vals), "n": len(vals)} if vals else {"median": None, "mean": None, "n": 0}
 
@@ -201,20 +205,22 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
     with open(ledger.path, "a", encoding="utf-8") as f:
         f.write(json.dumps({"kind": "run_header", "round": a.round, "resolved_model_ids": resolved, "n": len(uids)}) + "\n")
 
-    consult, transcript, art_bn, art_b0 = {}, {}, {}, {}
+    consult, transcript, transcript_b0, art_bn, art_b0 = {}, {}, {}, {}, {}
     for u in uids:
         art_bn[u] = _load_art(Path(a.artifacts), u)
         art_b0[u] = _load_art(Path(a.artifacts) / "b0", u) or art_bn[u]
-        quarantined = set(((art_bn[u] or {}).get("clip_boundary") or {}).get("quarantined_turns") or [])
+        quarantined = quarantined_set(art_bn[u])
+        quarantined_b0 = quarantined_set(art_b0[u])  # art_b0 is art_bn when b0 is missing, so the set is then the bn set
         consult[u] = ingest.load_bundle(json.loads((Path(a.bundles) / f"{u}.json").read_text(encoding="utf-8"))) if a.bundles else ingest.load_consult(Path(a.consults), u)
-        transcript[u] = ingest.format_transcript(consult[u], quarantined)
+        transcript[u] = ingest.format_transcript(consult[u], quarantined)  # arms A and Bn, jev lines
+        transcript_b0[u] = ingest.format_transcript(consult[u], quarantined_b0)  # arm B0: its own artifact's quarantine set
 
     texts = {(u, arm): render.render(arms[arm][u]["rx"]) for u in uids for arm in ARMS}
     combos = [f"{j}/{r}" for j in judge.JUDGES for r in judge.REFS]
     scores: dict = {}
     shape_log = out / "judge-shapes.jsonl"
     for u, arm, j, r in judge.plan_calls(uids, list(ARMS)):
-        res = judge.score_note(client, frozen, uid=u, arm=arm, judge=j, ref=r, note=texts[(u, arm)], transcript=transcript[u],
+        res = judge.score_note(client, frozen, uid=u, arm=arm, judge=j, ref=r, note=texts[(u, arm)], transcript=(transcript_b0 if arm == "B0" else transcript)[u],
                                cache_dir=cache / "pdqi9", render_version=render.RENDER_VERSION, shape_log=shape_log)
         scores[(u, arm, f"{j}/{r}")] = None if res["parse_failure"] else {"total": sum(res["scores"]), "items": res["scores"],
                                                                          **({"tolerated": True} if res.get("tolerated") else {})}
@@ -227,7 +233,7 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
     for u in uids:
         for kind, art in (("Bn", art_bn[u]), ("B0", art_b0[u])):
             fl[kind].append(stamp | floors.consult_floors(client, frozen, uid=u, arm_kind=kind, rx=arms[kind][u]["rx"], signed_rx=arms["A"][u]["rx"],
-                                                  art=art, consult=consult[u], transcript=transcript[u], cache_dir=cache / "floors", shape_log=shape_log, scope=scope))
+                                                  art=art, consult=consult[u], transcript=(transcript_b0 if kind == "B0" else transcript)[u], cache_dir=cache / "floors", shape_log=shape_log, scope=scope))
     floor_judged = [c for rows in fl.values() for x in rows for c in (x, x["completion"])]
     floor_rows_unparsed = sum(1 for c in floor_judged if c.get("parse_failure"))
     floor_rows_tolerated = sum(1 for c in floor_judged if c.get("tolerated"))
