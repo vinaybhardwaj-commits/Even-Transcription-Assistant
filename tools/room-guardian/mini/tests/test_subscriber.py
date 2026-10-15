@@ -448,14 +448,17 @@ class CAInboxTests(unittest.TestCase):
         self.assertEqual(lines[1], "- 13 Oct 11:00 IST pico-router HEAL: room=r1 result=healed zero_ratio_before=0.9990 zero_ratio_after=0.0004 recorder_pid_same=y")
         self.assertNotIn("SECRET", self.text())
 
-    def test_every_action_result_is_appended_and_would_do_and_others_are_not(self):
+    def test_every_result_is_appended_whatever_the_action_and_would_do_and_others_are_not(self):
         e = self.env()
         for res in ("healed", "failed", "escalated", "Healed"): e.heal(dict(self.HEALED, result=res, recorder_pid_after=999 if res == "failed" else 321))
-        for obj in (dict(self.HEALED, result="would_do"), dict(self.HEALED, result="ok"), dict(self.HEALED, action="other"), {k: v for k, v in self.HEALED.items() if k != "action"},
-                    {"kind": "capture_muted", "result": "escalated"}, {"kind": "capture_dead", "result": "would_do", "action": "coreaudiod_restart"}):
+        for obj in (dict(self.HEALED, action="other"), {k: v for k, v in self.HEALED.items() if k != "action"}, dict(self.HEALED, action="escalate", result="escalated"),
+                    {"kind": "capture_muted", "result": "escalated"}):                     # queued by result, whatever the action (S1 safety net)
+            e.heal(obj)
+        for obj in (dict(self.HEALED, result="would_do"), dict(self.HEALED, result="ok"), {"kind": "capture_dead", "result": "would_do", "action": "coreaudiod_restart"},
+                    {"kind": "capture_dead"}):                                              # would_do, the older ok (invalid), no result: never queued
             e.heal(obj)
         e.router.tick(e.bus); ls = self.text().splitlines()
-        self.assertEqual(len(ls), 4); self.assertEqual([x.split("result=")[1].split()[0] for x in ls], ["healed", "failed", "escalated", "healed"])
+        self.assertEqual(len(ls), 8); self.assertEqual([x.split("result=")[1].split()[0] for x in ls], ["healed", "failed", "escalated", "healed", "healed", "healed", "escalated", "escalated"])
         self.assertIn("recorder_pid_same=n", ls[1])
 
     def test_unknown_numbers_are_question_marks(self):
@@ -532,6 +535,65 @@ class CAR9InboxTests(unittest.TestCase):
         e = CAEnv(); d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
         e.router.inbox_path = os.path.join(d.name, "INBOX.md"); e.heal(self.line()); e.router.tick(e.bus)
         self.assertEqual(len(open(e.router.inbox_path).read().splitlines()), 1); self.assertIn("coreaudiod_pid_changed=y", open(e.router.inbox_path).read())
+
+
+class CAResultGateTests(unittest.TestCase):
+    """M1 (guardian-lead refute): a kind line opens its case ONLY on result failed / escalated (or no result); healed / would_do open nothing."""
+    KINDS = ("capture_dead", "capture_muted", "coreaudio_heal_failed", "recorder_disturbed", "recorder_changed")      # recorder_changed: the alias
+    RESULTS = ("healed", "failed", "escalated", "would_do", "ok")
+    ACTIONS = ("coreaudiod_restart", "escalate", "heal", None)
+
+    def test_guardian_leads_100_line_probe(self):
+        """5 kinds x 5 results x 4 actions, each on a fresh store."""
+        seen = {}
+        for kind in self.KINDS:
+            for res in self.RESULTS:
+                for act in self.ACTIONS:
+                    e = CAEnv(); obj = {"kind": kind, "result": res}
+                    if act: obj["action"] = act
+                    e.heal(obj)
+                    opened = sorted(c["kind"] for c in e.router.store.list_open()); queued = len(e.router.store.list_inbox_pending())
+                    canon = "recorder_disturbed" if kind == "recorder_changed" else kind
+                    with self.subTest(kind=kind, result=res, action=act):
+                        if res in ("failed", "escalated"): self.assertEqual(opened, [canon])
+                        elif res == "ok": self.assertEqual(opened, ["heal_message_invalid"])        # the older "ok" is not a contract result
+                        else: self.assertEqual(opened, [])                                           # healed / would_do: log only
+                        self.assertEqual(queued, 1 if res in ("healed", "failed", "escalated") else 0)   # INBOX by result, any action; never would_do
+                    seen[(res)] = seen.get(res, 0) + 1
+        self.assertEqual(sum(seen.values()), 100)
+
+    def test_a_line_with_no_result_fails_closed_to_the_kinds_case(self):
+        for kind in ("capture_dead", "capture_muted", "coreaudio_heal_failed", "recorder_disturbed"):
+            e = CAEnv(); e.heal({"kind": kind}); self.assertEqual(list(e.open()), [kind]); self.assertEqual(e.router.store.list_inbox_pending(), [])
+
+    def test_unknown_or_malformed_result_is_the_invalid_case(self):
+        for res in ("nope", "ok", "", "HEALED2", 5, None, ["failed"], {"a": 1}, True):
+            e = CAEnv(); e.heal({"kind": "capture_dead", "result": res})
+            self.assertEqual(list(e.open()), ["heal_message_invalid"], res)
+
+    def test_result_case_is_ignored(self):
+        e = CAEnv(); e.heal({"kind": "capture_dead", "result": "HEALED"}); self.assertEqual(e.router.store.list_open(), [])
+        e.heal({"kind": "capture_dead", "result": "Failed"}); self.assertEqual(list(e.open()), ["capture_dead"])
+
+    def test_a_healed_line_opens_nothing_closes_nothing_and_does_not_reset_the_recovery_run(self):
+        e = CAEnv(); e.heal({"kind": "capture_dead", "result": "failed"})
+        for _ in range(3): e.health({"zero_ratio": 0.0}); e.clock.adv(10)
+        e.heal({"kind": "capture_dead", "result": "healed", "action": "coreaudiod_restart"})      # a later successful heal line: no new case, run keeps counting
+        self.assertEqual(e.open()["capture_dead"]["suppressed_count"], 0)
+        e.health({"zero_ratio": 0.0}); self.assertEqual(e.open(), {})
+
+    def test_the_night_heal_and_the_shadow_would_do_page_nobody(self):
+        e = CAEnv(TUE_22H)
+        for obj in ({"kind": "capture_dead", "result": "would_do", "mode": "shadow", "action": "coreaudiod_restart"},
+                    {"kind": "capture_dead", "result": "healed", "mode": "heal", "action": "coreaudiod_restart", "zero_ratio_before": 1, "zero_ratio_after": 0.0004,
+                     "recorder_pid_before": 5, "recorder_pid_after": 5}):
+            e.heal(obj)
+        out = e.router.tick(e.bus); self.assertEqual((out["paged"], e.bus.sends, e.router.store.list_open()), (0, 0, []))
+        self.assertEqual(len(e.router.store.list_inbox_pending()), 1)                             # only the real heal reaches the INBOX queue
+
+    def test_validate_heal_drops_ok_for_kind_lines(self):
+        self.assertFalse(sb.validate_heal({"kind": "capture_dead", "result": "ok"})[0])
+        for r in ("healed", "failed", "escalated", "would_do"): self.assertTrue(sb.validate_heal({"kind": "capture_dead", "result": r})[0])
 
 
 if __name__ == "__main__":

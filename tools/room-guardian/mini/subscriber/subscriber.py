@@ -5,13 +5,15 @@
   line after that closes it. A room is counted from process start, so a room that never speaks is quiet too.
 * Strict validation (validate_heal) applies ONLY to heal messages that carry `kind` (coreaudio_scope). Any other heal message (today's R9 shape, including its
   layer "coreaudio" lines, no kind) is stored and handled as before: result escalated -> heal_escalated, ok/healed -> closes it, nothing else, never an invalid case.
-  An in-scope line has a kind in HEAL_KINDS (capture_dead, capture_muted, coreaudio_heal_failed, recorder_disturbed; recorder_changed is an alias) and opens that
-  case. A line with action "coreaudiod_restart" and result healed/failed/escalated is also queued for the gating INBOX.
+  An in-scope line has a kind in HEAL_KINDS (capture_dead, capture_muted, coreaudio_heal_failed, recorder_disturbed; recorder_changed is an alias). It opens that
+  kind's case ONLY when result is failed or escalated, or when result is absent (fail closed). result healed or would_do: stored, no case, no page. An unknown
+  result (including the older "ok") fails validation: one heal_message_invalid case. Results healed / failed / escalated are also queued for the gating INBOX,
+  whatever the action; would_do never is.
   An in-scope line (it has a kind) that fails the check (unknown kind or result, neither kind nor result, a contract field of the wrong type) is stored and opens ONE
   heal_message_invalid case per room. A line that is not JSON is logged to <room>.heal-invalid.jsonl only (it cannot be attributed to the coreaudio rule): no case.
 * RECOVERY_LINES (4) consecutive health lines with a numeric zero_ratio < 0.05, all after the alert, close the room's open capture_dead, capture_muted and
   coreaudio_heal_failed cases. recorder_disturbed and heal_message_invalid close only on ACK.
-* Every HEAL action line (action coreaudiod_restart, result healed / failed / escalated) is queued as one record for INBOX-FROM-GATING.md (inbox_line);
+* Every kind line with result healed / failed / escalated is queued as one record for INBOX-FROM-GATING.md (inbox_line);
   the router job appends it and raises heal_inbox_stuck if that has not happened within 5 min.
 * Serves control: control_snapshot() = {"kill": bool, "modes": {room: "shadow"|"heal"}} from files; publish_control() sends it on topic
   guardian/control. Anything not exactly "heal" is "shadow". An unreadable or missing kill file is kill=true (fail safe).
@@ -27,7 +29,9 @@ HEAL_KINDS = ("capture_dead", "capture_muted", "coreaudio_heal_failed", "recorde
 KIND_ALIASES = {"recorder_changed": "recorder_disturbed"}        # accepted for now; the canonical name is the gate's (CA-C5)
 RECOVERY_LINES = 4                                               # consecutive health lines under ZERO_RATIO_OK (CA-C5)
 HEAL_ACTION = "coreaudiod_restart"
-HEAL_RESULTS = ("ok", "healed", "failed", "escalated", "would_do")
+HEAL_RESULTS = ("healed", "failed", "escalated", "would_do")      # the contract set for a kind line; the older "ok" is NOT one of them
+OPEN_RESULTS = ("failed", "escalated")                            # a kind line opens its case only on these (or when `result` is absent)
+INBOX_RESULTS = ("healed", "failed", "escalated")                 # and is queued for the gating INBOX on these, whatever the action (never would_do)
 ZERO_RATIO_OK = 0.05
 RAW_CAP = 2000
 
@@ -84,9 +88,11 @@ def _num(v):
 
 
 def inbox_line(room, obj, now):
-    """CA-C6: the one-line HEAL action record for INBOX-FROM-GATING.md, or None. A HEAL action line is a valid heal line with action == coreaudiod_restart and
-    result healed / failed / escalated (not would_do, not the older ok). Built only from the room slug, a fixed result word and numbers: no free text from the kiosk."""
-    if not isinstance(obj, dict) or obj.get("action") != HEAL_ACTION or str(obj.get("result", "")).lower() not in ("healed", "failed", "escalated"):
+    """CA-C6: the one-line HEAL record for INBOX-FROM-GATING.md, or None. Called for a valid kind line; queued when the result is healed / failed / escalated,
+    WHATEVER the action (the contract names coreaudiod_restart for a restart attempt and escalate for escalate-only results; the action is not trusted as the
+    gate, so a drifted action word cannot hide a heal). Never would_do, never a line without a result. Built only from the room slug, a fixed result word and numbers:
+    no free text from the kiosk."""
+    if not isinstance(obj, dict) or str(obj.get("result", "")).lower() not in INBOX_RESULTS:
         return None
     pb, pa = obj.get("recorder_pid_before"), obj.get("recorder_pid_after")
     if isinstance(pb, int) and isinstance(pa, int) and not isinstance(pb, bool) and not isinstance(pa, bool):
@@ -282,13 +288,10 @@ class Subscriber:
         if line:
             self.sink.heal_action(room, line, now)
         kind = KIND_ALIASES.get(obj.get("kind"), obj.get("kind"))
-        if kind in HEAL_KINDS:
+        if res in OPEN_RESULTS or not res:                 # failed / escalated, or no result at all (cannot show it healed: fail closed to the kind's case)
             self.ok_streak[room] = 0                       # recovery must be seen AFTER the alert, so a good run before it cannot close it at once
             self.sink.heal_kind(room, kind, now)
-        elif res == "escalated":
-            self.sink.heal_escalated(room, now)
-        elif res in ("ok", "healed"):
-            self.sink.heal_resolved(room, now)
+        # healed / would_do: stored in the stream file, plus the INBOX line above for a real heal; no case, no page
 
     # ---- quiet detection
     def check_quiet(self):
