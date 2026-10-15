@@ -40,8 +40,11 @@ HB_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.ts FROM pulse_presence_ev
 ENC_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.event, p.ts FROM pulse_presence_events p "
            "WHERE p.event IN ('encounter_open', 'encounter_close') AND p.machine = ANY(%s::text[]) AND p.ts > %s ORDER BY p.machine, p.id DESC")
 # The newest POST-driven encounter event of each machine: the extension writes encounter_id only on the consult start/close POST event (URL-driven ones carry null).
+# A consult start whose body did not parse carries no encounter_id but a reason 'body_<why>' (agent.js onCompleted, why from lib/body.js WHY: no_body, form_no_key,
+# raw_missing, raw_file_only, too_large, not_json, json_no_key, bad_uid), so that also counts as POST-driven. The underscore is escaped and the % doubled (psycopg).
 POST_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.event, p.ts FROM pulse_presence_events p "
-            "WHERE p.event IN ('encounter_open', 'encounter_close') AND p.payload->>'encounter_id' IS NOT NULL AND p.payload->>'encounter_id' <> '' "
+            "WHERE p.event IN ('encounter_open', 'encounter_close') AND ((p.payload->>'encounter_id' IS NOT NULL AND p.payload->>'encounter_id' <> '') "
+            "OR p.payload->>'reason' LIKE 'body\\_%%') "
             "AND p.machine = ANY(%s::text[]) AND p.ts > %s ORDER BY p.machine, p.id DESC")
 SESSION_SQL = ("SELECT DISTINCT s.room_id FROM bench_session s "
                "WHERE s.room_id = ANY(%s::text[]) AND s.status IN ('recording', 'paused') AND s.started_at > %s")
@@ -379,3 +382,14 @@ class ConsultHold:
             self.err_since = now
         if now - self.err_since >= self.stuck_s and not self.case_open and self.sink and self._sink(self.sink.consult_hold_source_down, now):
             self.case_open = True
+
+
+def build(flags, rooms, sink, home, clock=time.time, sources=None):
+    """-> ConsultHold for the flag-on case, exactly as run_subscriber.main() builds it: every switch comes from the router.json flags (ubus_bus.load_cfg). `sources`
+    is injectable for tests; the default is the read-only Neon sources."""
+    return ConsultHold(rooms, flags.get("consult_room_map"), sources if sources is not None else pg_sources(flags.get("consult_db_url_file")), clock,
+                       audit_path=os.path.join(home, "logs", "consult-hold-audit.jsonl"), sink=sink,
+                       capture_closed_counts_quiet=flags.get("capture_closed_counts_quiet") is not False,
+                       open_session_requires_levels=flags.get("open_session_requires_levels") is not False,
+                       consult_windows_enabled=flags.get("consult_windows_enabled") is True,
+                       post_open_overrides_url_close=flags.get("post_open_overrides_url_close") is not False)

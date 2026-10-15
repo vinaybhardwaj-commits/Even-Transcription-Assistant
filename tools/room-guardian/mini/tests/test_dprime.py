@@ -774,6 +774,56 @@ class Round4(unittest.TestCase):
         self.assertEqual(h.last["opd-7"][1], ("fault",)); self.assertEqual(h.last["opd-6"][1], ("clear",))
 
 
+class Round5(unittest.TestCase):
+    def test_a_body_failed_consult_start_counts_as_post_driven(self):                                # S-1
+        q = ch.POST_SQL
+        self.assertIn("AND ((p.payload->>'encounter_id' IS NOT NULL AND p.payload->>'encounter_id' <> '') OR p.payload->>'reason' LIKE 'body\\_%%') AND p.machine", q)
+        # (the clause is an OR alternative to a non-empty encounter_id, with the underscore escaped and the % doubled for psycopg)
+        self.assertEqual(q.replace("%s", "").replace("%%", "").count("%"), 0)                          # no stray % that psycopg would read as a placeholder
+        self.assertEqual(q.count("%s"), 2)
+        # the refuter's repro at the hold level: the SQL returns the body-failed POST open as a POST event (encounter_id null, reason body_not_json); a URL close came later
+        pres = {"hb": [("M6", T - 5), ("M7", T - 5)], "enc": [("M6", "encounter_close", T - 480)], "post": [("M6", "encounter_open", T - 900)]}
+        h, _, _ = mk(Src(presence=pres)); self.assertEqual(h.hold()["opd-6"], True)
+        h, _, _ = mk(Src(presence=pres), post_open_overrides_url_close=False); self.assertEqual(h.hold()["opd-6"], False)
+
+    def test_the_post_sql_reason_values_match_the_extension(self):
+        # lib/body.js WHY and agent.js onCompleted: reason = 'body_' + why, why in WHY, so every reason starts with 'body_'
+        for why in ("no_body", "form_no_key", "raw_missing", "raw_file_only", "too_large", "not_json", "json_no_key", "bad_uid"):
+            self.assertTrue(("body_" + why).startswith("body_"))
+
+    def flags(self, extra):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup); p = os.path.join(t.name, "router.json")
+        json.dump(dict({"to": ["a"], "ackers": ["a"], "consult_room_map": MAP, "consult_db_url_file": "/nonexistent/db.url"}, **extra), open(p, "w"))
+        return ubus_bus.load_cfg(p)
+
+    def test_build_wires_every_switch_the_way_run_subscriber_does(self):                              # S-2 (mutant Q10)
+        sink = Sink()
+        cases = (({}, (True, True, True, False)),
+                 ({"post_open_overrides_url_close": False, "capture_closed_counts_quiet": False, "open_session_requires_levels": False, "consult_windows_enabled": True},
+                  (False, False, False, True)),
+                 ({"post_open_overrides_url_close": True, "capture_closed_counts_quiet": True, "open_session_requires_levels": True, "consult_windows_enabled": False},
+                  (True, True, True, False)),
+                 ({"post_open_overrides_url_close": False}, (False, True, True, False)), ({"capture_closed_counts_quiet": False}, (True, False, True, False)),
+                 ({"open_session_requires_levels": False}, (True, True, False, False)), ({"consult_windows_enabled": True}, (True, True, True, True)))
+        for extra, want in cases:
+            with self.subTest(extra=extra):
+                h = ch.build(self.flags(extra), ROOMS, sink, tempfile.gettempdir(), Clock(T), sources=Src())
+                self.assertEqual((h.post_override, h.closed_quiet, h.need_levels, h.windows_on), want)
+                self.assertIs(h.sink, sink); self.assertEqual(h.map, MAP); self.assertEqual(h.rooms, ROOMS)
+                self.assertEqual(h.audit_path, os.path.join(tempfile.gettempdir(), "logs", "consult-hold-audit.jsonl"))
+
+    def test_the_default_sources_use_the_configured_credential_file(self):
+        h = ch.build(self.flags({}), ROOMS, Sink(), tempfile.gettempdir(), Clock(T))
+        for r in ROOMS: h.note_health(r, QUIET, T)
+        self.assertEqual(h.hold(), {"opd-6": True, "opd-7": True})                                   # the nonexistent credential file is a read error: true, nothing raised
+
+    def test_run_subscriber_hands_the_flags_to_build(self):
+        src = open(os.path.join(HERE, "..", "subscriber", "run_subscriber.py")).read()
+        self.assertIn("consult_hold.build(flags, rooms, sink, HOME, time.time)", src)
+        for name in ("post_open_overrides_url_close", "capture_closed_counts_quiet", "open_session_requires_levels", "consult_windows_enabled"):
+            self.assertNotIn(name, src)                                                              # no per-switch wiring left in main() that a mutation could break unseen
+
+
 class ConfigFlags(unittest.TestCase):
     def cfg(self, extra):
         t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup); p = os.path.join(t.name, "router.json")
