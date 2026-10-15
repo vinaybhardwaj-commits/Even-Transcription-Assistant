@@ -573,15 +573,15 @@ def test_header_carries_basis_and_both_eta_and_pulse_counts_whichever_basis():
 def test_scoreboard_split_prints_coincidence_and_legacy():
     from tools.eta2freescript.eval.pdqi9 import scoreboard
     t = {"eta": 4, "eta_coincidence": 3, "pulse_catalogue": 2, "pulse_extraction": 1, "check": 0}
-    assert scoreboard.split_cell(t) == ("[eta 4, eta_coincidence 3, pulse_catalogue 2, pulse_extraction 1, check 0; eta_wrote_nothing 0 (flag, not a source); eta_legacy (old rule) 7]")
+    assert scoreboard.split_cell(t) == ("[eta 4, eta_coincidence 3, ordered_not_supported 0, pulse_catalogue 2, pulse_extraction 1, check 0; eta_wrote_nothing 0 (flag, not a source); eta_legacy (old rule) 7]")
     t["eta_wrote_nothing"] = 2
-    assert scoreboard.split_cell(t) == ("[eta 4, eta_coincidence 3, pulse_catalogue 2, pulse_extraction 1, check 0; eta_wrote_nothing 2 (flag, not a source); eta_legacy (old rule) 9]")
+    assert scoreboard.split_cell(t) == ("[eta 4, eta_coincidence 3, ordered_not_supported 0, pulse_catalogue 2, pulse_extraction 1, check 0; eta_wrote_nothing 2 (flag, not a source); eta_legacy (old rule) 9]")
 
 
 def test_scoreboard_old_row_without_coincidence_reads_zero():
     from tools.eta2freescript.eval.pdqi9 import scoreboard
     t = {"eta": 5, "pulse_catalogue": 0, "pulse_extraction": 1, "check": 0}
-    assert scoreboard.split_cell(t) == "[eta 5, eta_coincidence 0, pulse_catalogue 0, pulse_extraction 1, check 0; eta_wrote_nothing 0 (flag, not a source); eta_legacy (old rule) 5]"
+    assert scoreboard.split_cell(t) == "[eta 5, eta_coincidence 0, ordered_not_supported 0, pulse_catalogue 0, pulse_extraction 1, check 0; eta_wrote_nothing 0 (flag, not a source); eta_legacy (old rule) 5]"
     assert "eta_legacy (old rule) -" in scoreboard.split_cell({**t, "eta": None})
 
 
