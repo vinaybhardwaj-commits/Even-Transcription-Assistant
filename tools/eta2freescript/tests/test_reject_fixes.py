@@ -13,7 +13,7 @@ from tools.eta2freescript import pipeline
 from tools.eta2freescript.ingest import load_consult
 from tools.eta2freescript.mapper import raw_name_or
 from tools.eta2freescript.models import FakeClient
-from tools.eta2freescript.note import HEADINGS, render_note, sanitize_note, strip_template
+from tools.eta2freescript.note import HEADINGS, _clean, parenthesise, render_note, sanitize_note
 from tools.eta2freescript.pipeline import _fallback_note, run_consult
 
 TEMPLATE = re.compile(r"[\[\]{}]")
@@ -48,7 +48,9 @@ def test_k1_a_written_consult_leaves_no_rejected_file(tmp_path):
 
 def test_k1_nothing_reads_the_rejected_file():
     users = [p.name for p in PKG.rglob("*.py") if "tests" not in p.parts and "vendor" not in p.parts and "artifact.rejected" in p.read_text()]
-    assert users == ["pipeline.py"]
+    assert users == ["nightly.py", "pipeline.py"]
+    hits = [l.strip() for l in (PKG / "nightly.py").read_text().splitlines() if "artifact.rejected" in l]
+    assert len(hits) == 1 and hits[0].startswith("for name in (() if error_type else (")  # the keep-list copy, not a read
 
 
 # --- K2 ----------------------------------------------------------------------------------------------------------------
@@ -145,15 +147,82 @@ def test_k2_empty_none_and_missing_fields_render_every_heading():
         assert [l.partition(":")[0] for l in out.split("\n")] == HEADINGS and not TEMPLATE.search(out)
 
 
-def test_k2_the_places_that_emitted_them():
-    # a nested span leaves a stray "]" once the span is removed; an unbalanced "[" or "{" is not a span; braces were never removed;
-    # fullwidth and CJK brackets fold to brackets under the validator's NFKC pass
-    for s_, want in (("take [a [b] c] daily", "take c daily"), ("x ]", "x"), ("[ y", "y"), ("{z}", ""), ("p } q", "p q"), ("{ q", "q"),
-                     ("［w］", "w"), ("a 【v】 b", "a v b"), ("「u」", "u")):
-        assert strip_template(s_) == want, (s_, strip_template(s_))
+def test_k2_brackets_become_parentheses_and_no_content_is_lost():
+    for s_, want in (("take [a [b] c] daily", "take (a (b) c) daily"), ("x ]", "x )"), ("[ y", "( y"), ("{z}", "(z)"), ("p } q", "p ) q"),
+                     ("［w］", "(w)"), ("a 【v】 b", "a (v) b"), ("「u」", "(u)"), ("take 1 [0-1-0] bd", "take 1 (0-1-0) bd")):
+        assert parenthesise(s_) == want, (s_, parenthesise(s_))
     gx = {"medicines": [{"name": "alpha", "frequency": "bd ]", "instructions": "{with food}"}], "follow_up": {"followup_date": "[2026"}}
-    assert not TEMPLATE.search(render_note(gx))
-    assert render_note(gx).split("\n")[6] == "Medication: alpha bd"
+    assert render_note(gx).split("\n")[6] == "Medication: alpha bd ) (with food)"
+    assert render_note(gx).split("\n")[8] == "Follow up: (2026"
+
+
+def _content(s):
+    """Field text after base's own rewrites (colon to " -", newline to space), with whitespace and every bracket-like character removed."""
+    s = s.replace(":", " -").replace("\n", " ")
+    return "".join(c for c in s if not c.isspace() and parenthesise(c) == c and c not in "()")
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_k2_every_content_character_survives_in_order(seed):
+    r = random.Random(500 + seed)
+    for _ in range(300):
+        vals = [x for x in (r.choice(POOL) for _ in range(r.randint(1, 4))) if x]
+        want = _content("".join(vals))
+        line = _clean(" ".join(vals))
+        assert not TEMPLATE.search(line) and _content(line) == want, (vals, line)
+        out = render_note({"examination": " ".join(vals)})
+        assert _content(out.split("\n")[2].partition(":")[2]) == want
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_k2_fields_without_brackets_render_exactly_as_before(seed):
+    r = random.Random(900 + seed)
+    for _ in range(300):
+        v = r.choice([p for p in CLEAN_POOL if p is not None and parenthesise(p) == p])
+        assert _clean(v) == (v or "").replace(":", " -").replace("\n", " ").strip()
+        gx = _full_gx(r)
+        assert render_note(gx) == base_render(gx)
+
+
+def _full_gx(r):
+    """Every field present and a string, none carrying a bracket: the inputs on which base does not crash."""
+    pool = [p for p in CLEAN_POOL if p is not None and parenthesise(p) == p]
+
+    def s():
+        return r.choice(pool)
+
+    return {"medicines": [{"name": s(), "frequency": s(), "duration": s(), "instructions": s(), "raw_name": s(), "aliases": []} for _ in range(r.randint(0, 3))],
+            "presenting_complaints": {"symptoms": s(), "diagnoses": [{"diagnosis_or_impression": s(), "is_differential_diagnosis": r.random() < 0.5} for _ in range(r.randint(0, 2))]},
+            "follow_up": {"followup_type": s(), "followup_date": s(), "follow_up_instructions": s()},
+            "comorbidities": [{"name": s()} for _ in range(r.randint(0, 2))],
+            "further_investigations": [{"name": s(), "raw_name": s(), "instruction": s()} for _ in range(r.randint(0, 2))],
+            "referrals": [{"speciality": s(), "notes": s()} for _ in range(r.randint(0, 2))],
+            "plan_of_management": {"management_plan": s(), "surgery_or_procedure_recommendations": [{"name": s()} for _ in range(r.randint(0, 2))]},
+            "examination": s(), "general_advice": s()}
+
+
+def base_render(gx):
+    """render_note as it stood before the reject fixes: the frozen oracle copy of note.py (no combination groups, as here)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("oracle_note_main", Path(__file__).parent / "oracle_note_main.py")
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = "tools.eta2freescript"
+    spec.loader.exec_module(mod)
+    return mod.render_note(gx)
+
+
+# --- bundle persistence --------------------------------------------------------------------------------------------------
+def test_k1_bundle_mode_keeps_the_rejected_artifact_and_posting_ignores_it(tmp_path, monkeypatch):
+    from tools.eta2freescript import nightly
+    monkeypatch.setattr(pipeline, "check", lambda art: ["synthetic reject"])
+    tmp_out, keep = tmp_path / "tmp", tmp_path / "keep"
+    lg = run_consult(load_consult(CONSULTS, "synth-fever-dose"), _fake(), tmp_out)
+    nightly._keep_derived(tmp_out, str(keep), "synth-fever-dose", lg, 0)
+    kd = keep / "synth-fever-dose"
+    assert sorted(p.name for p in kd.iterdir()) == ["artifact.rejected.json", "artifact.validation.json"]
+    assert stat.S_IMODE((kd / "artifact.rejected.json").stat().st_mode) == 0o600
+    assert json.loads((kd / "artifact.rejected.json").read_text())["note_text"]
+    assert nightly._repost_log(str(keep), "synth-fever-dose") is None  # posting reads artifact.json only
 
 
 # --- K3 ----------------------------------------------------------------------------------------------------------------

@@ -131,27 +131,27 @@ def flags_by_pointer(art: dict) -> dict:
     return {p["json_pointer"]: p["flags"] for p in art["provenance"] if p["json_pointer"] and p["flags"]}
 
 
-BRACE_SPAN = re.compile(r"\s*\{[^}]*\}")
+def _paren_for(c: str) -> str | None:
+    """"(" for an opening bracket or brace, ")" for a closing one, None for anything else. Lookalikes count: the FRX-N1 check
+    NFKC-normalises first, then rejects [ ] { } and every Ps/Pe character except ( )."""
+    for x in unicodedata.normalize("NFKC", c):
+        if x in "[{" or (unicodedata.category(x) == "Ps" and x != "("):
+            return "("
+        if x in "]}" or (unicodedata.category(x) == "Pe" and x != ")"):
+            return ")"
+    return None
 
 
-def _is_template_char(c: str) -> bool:
-    """A bracket or brace, or a lookalike that NFKC folds to one (the FRX-N1 check normalises first)."""
-    return any(x in "[]{}" or (unicodedata.category(x) in ("Ps", "Pe") and x not in "()") for x in unicodedata.normalize("NFKC", c))
-
-
-def strip_template(text: str) -> str:
-    """Remove template characters from text the deterministic renderer is about to emit. A "[...]" or "{...}" span goes
-    whole (as sanitize_note does for brackets); what is left of an unbalanced or nested span goes character by character."""
-    text = BRACE_SPAN.sub("", BRACKET_SPAN.sub("", text))
-    if not any(_is_template_char(c) for c in text):
-        return text
-    return re.sub(r"[ \t]{2,}", " ", "".join(" " if _is_template_char(c) else c for c in text)).strip()
+def parenthesise(text: str) -> str:
+    """Make field text safe for the note without losing a character of content: [ ] { } and their NFKC / Ps / Pe lookalikes
+    become ( ). Nothing is deleted. Text with none of them comes back unchanged."""
+    return "".join(_paren_for(c) or c for c in text)
 
 
 def _clean(s) -> str:
     """One rendered entry. None is empty; a non-string is its str. No template character leaves here."""
     s = "" if s is None else s if isinstance(s, str) else str(s)
-    return strip_template(s.replace(":", " -").replace("\n", " ").strip()).strip()
+    return parenthesise(s.replace(":", " -").replace("\n", " ").strip())
 
 
 def _t(v) -> str:
