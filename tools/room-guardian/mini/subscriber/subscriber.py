@@ -3,13 +3,11 @@
 * Streams kiosk/<room>/health, heal, probe-reply -> JSONL under <data>/<YYYY-MM-DD>/<room>.<stream>.jsonl; days older than KEEP_DAYS are pruned.
 * Quiet detection is HERE, not pipe `monitor` (R4): a room with no health line for QUIET_AFTER_S raises guardian_quiet once (edge), and a
   line after that closes it. A room is counted from process start, so a room that never speaks is quiet too.
-* Strict validation (validate_heal) applies ONLY to heal messages that carry `kind` or have layer == "coreaudio" (coreaudio_scope). Any other heal message
-  (today's R9 shape, no kind) is stored and handled as before: result escalated -> heal_escalated, ok/healed -> closes it, nothing else, never an invalid case.
-  In-scope valid lines route as follows (INFERRED shape, see COREAUDIO-HEAL-MINI-15OCT.md):
-  a `kind` in HEAL_KINDS (capture_dead, capture_muted, coreaudio_heal_failed, recorder_disturbed; recorder_changed is an alias) opens that case; no `kind` and result "escalated" or "failed"
-  with action "coreaudiod_restart" opens coreaudio_heal_failed; no `kind` and result "escalated" otherwise raises heal_escalated (older rule);
-  result "ok"/"healed" without a kind closes heal_escalated; "healed", "would_do" and a "failed" without that action are logged only.
-  An in-scope line that fails the check (unknown kind or result, neither kind nor result, a contract field of the wrong type) is stored and opens ONE
+* Strict validation (validate_heal) applies ONLY to heal messages that carry `kind` (coreaudio_scope). Any other heal message (today's R9 shape, including its
+  layer "coreaudio" lines, no kind) is stored and handled as before: result escalated -> heal_escalated, ok/healed -> closes it, nothing else, never an invalid case.
+  An in-scope line has a kind in HEAL_KINDS (capture_dead, capture_muted, coreaudio_heal_failed, recorder_disturbed; recorder_changed is an alias) and opens that
+  case. A line with action "coreaudiod_restart" and result healed/failed/escalated is also queued for the gating INBOX.
+  An in-scope line (it has a kind) that fails the check (unknown kind or result, neither kind nor result, a contract field of the wrong type) is stored and opens ONE
   heal_message_invalid case per room. A line that is not JSON is logged to <room>.heal-invalid.jsonl only (it cannot be attributed to the coreaudio rule): no case.
 * RECOVERY_LINES (4) consecutive health lines with a numeric zero_ratio < 0.05, all after the alert, close the room's open capture_dead, capture_muted and
   coreaudio_heal_failed cases. recorder_disturbed and heal_message_invalid close only on ACK.
@@ -35,9 +33,10 @@ RAW_CAP = 2000
 
 
 def coreaudio_scope(obj):
-    """Strict validation applies ONLY to heal messages that carry a `kind` or have layer == "coreaudio". Every other heal message (today's R9 kiosk schema:
-    {room_id, ts, action, layer, reason, before, after, result, shadow, target, severity}, no kind) is stored and handled as before, never invalid."""
-    return isinstance(obj, dict) and ("kind" in obj or obj.get("layer") == "coreaudio")
+    """Strict validation applies ONLY to heal messages that carry a `kind` (the new coreaudio contract field). Every other heal message, including today's R9
+    kiosk lines (heal.sh: {room_id, ts, action, layer, reason, before, after, result, shadow, target, severity}, which already use layer "coreaudio" with no kind),
+    is stored and handled as before, never invalid. The layer alone decides nothing."""
+    return isinstance(obj, dict) and "kind" in obj
 
 
 def _is_num(v):
@@ -267,9 +266,6 @@ class Subscriber:
         if kind in HEAL_KINDS:
             self.ok_streak[room] = 0                       # recovery must be seen AFTER the alert, so a good run before it cannot close it at once
             self.sink.heal_kind(room, kind, now)
-        elif res in ("escalated", "failed") and obj.get("action") == HEAL_ACTION:
-            self.ok_streak[room] = 0
-            self.sink.heal_kind(room, "coreaudio_heal_failed", now)
         elif res == "escalated":
             self.sink.heal_escalated(room, now)
         elif res in ("ok", "healed"):

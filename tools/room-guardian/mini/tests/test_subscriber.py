@@ -212,9 +212,9 @@ class CAKindTests(unittest.TestCase):
                     self.assertEqual(e.v_texts(), []); self.assertGreaterEqual(e.bus.sends, 2)   # still paged, never V
 
     def test_result_without_kind_for_the_coreaudio_action(self):
-        e = CAEnv(); e.heal({"layer": "coreaudio", "result": "escalated", "action": "coreaudiod_restart"}); self.assertEqual(list(e.open()), ["coreaudio_heal_failed"])
-        e = CAEnv(); e.heal({"layer": "coreaudio", "result": "failed", "action": "coreaudiod_restart"}); self.assertEqual(list(e.open()), ["coreaudio_heal_failed"])
-        e = CAEnv(); e.heal({"result": "escalated", "action": "coreaudiod_restart"}); self.assertEqual(list(e.open()), ["heal_escalated"])   # no kind, no layer: the older rule
+        e = CAEnv(); e.heal({"kind": "coreaudio_heal_failed", "result": "escalated", "action": "coreaudiod_restart"}); self.assertEqual(list(e.open()), ["coreaudio_heal_failed"])
+        e = CAEnv(); e.heal({"layer": "coreaudio", "result": "escalated", "action": "coreaudiod_restart"}); self.assertEqual(list(e.open()), ["heal_escalated"])   # no kind: the older rule
+        e = CAEnv(); e.heal({"layer": "coreaudio", "result": "failed", "action": "coreaudiod_restart"}); self.assertEqual(e.router.store.list_open(), [])
         e = CAEnv(); e.heal({"result": "escalated"}); self.assertEqual(list(e.open()), ["heal_escalated"])          # the older rule is unchanged
 
     def test_healed_would_do_and_plain_failed_are_logged_only(self):
@@ -299,8 +299,8 @@ class CACloseTests(unittest.TestCase):
 
 class CAInvalidTests(unittest.TestCase):
     BAD = [{"kind": "capture_ded"}, {"kind": "recorder_disturbd"}, {"kind": ""}, {"kind": None}, {"kind": ["capture_dead"]}, {"kind": 5},
-           {"kind": "capture_dead", "result": "weird"}, {"kind": "capture_dead", "result": 5}, {"layer": "coreaudio"}, {"layer": "coreaudio", "result": "nope"},
-           {"layer": "coreaudio", "result": ["ok"]}, {"layer": "coreaudio", "action": "coreaudiod_restart"},
+           {"kind": "capture_dead", "result": "weird"}, {"kind": "capture_dead", "result": 5}, {"kind": "capture_dead", "layer": "coreaudio", "result": "nope"}, {"kind": "capture_dead", "layer": "coreaudio", "result": ["ok"]},
+           {"kind": "capture_muted", "action": "coreaudiod_restart", "result": None}, {"kind": "x", "layer": "coreaudio"},
            {"kind": "capture_dead", "mode": "armed"}, {"kind": "capture_dead", "kill": "yes"}, {"kind": "capture_dead", "control_age_s": "5"},
            {"kind": "capture_dead", "control_age_s": -1}, {"kind": "capture_dead", "guards": [1]}, {"kind": "capture_dead", "zero_ratio_before": 1.5},
            {"kind": "capture_dead", "zero_ratio_after": "0.1"}, {"kind": "capture_dead", "zero_ratio_before": True},
@@ -320,9 +320,10 @@ class CAInvalidTests(unittest.TestCase):
             self.assertEqual(sb.validate_heal(obj), (True, None), obj)
 
     def test_scope(self):
-        for obj in (self.R9, {}, {"result": "nope"}, {"layer": "recorder", "result": "zzz"}, [1], "x", 5, None, {"layer": "Coreaudio"}):
+        for obj in (self.R9, {}, {"result": "nope"}, {"layer": "recorder", "result": "zzz"}, [1], "x", 5, None, {"layer": "Coreaudio"}, {"layer": "coreaudio"},
+                    {"layer": "coreaudio", "result": "zzz"}, dict(self.R9, layer="coreaudio")):
             self.assertFalse(sb.coreaudio_scope(obj), obj)
-        for obj in ({"kind": "x"}, {"kind": None}, {"layer": "coreaudio"}, {"layer": "coreaudio", "kind": "capture_dead"}):
+        for obj in ({"kind": "x"}, {"kind": None}, {"kind": "capture_dead", "layer": "coreaudio"}, dict(self.R9, kind="capture_dead")):
             self.assertTrue(sb.coreaudio_scope(obj), obj)
 
     def test_r9_shaped_lines_are_stored_and_never_open_a_case(self):
@@ -339,9 +340,46 @@ class CAInvalidTests(unittest.TestCase):
         e = CAEnv(); e.heal(dict(self.R9, result="escalated")); self.assertEqual(list(e.open()), ["heal_escalated"])
         e.heal(dict(self.R9, result="healed")); self.assertEqual(e.open(), {})                                           # the older close, unchanged
 
-    def test_r9_with_the_coreaudio_action_but_no_layer_or_kind_is_the_older_rule(self):
-        e = CAEnv(); e.heal(dict(self.R9, action="coreaudiod_restart", result="healed"))
-        self.assertEqual(e.router.store.list_open(), []); self.assertEqual(e.router.store.list_inbox_pending(), [])
+    def test_r9_with_the_coreaudio_action_but_no_kind_is_the_older_rule(self):
+        for layer in ("recorder", "coreaudio"):
+            e = CAEnv(); e.heal(dict(self.R9, layer=layer, action="coreaudiod_restart", result="healed"))
+            self.assertEqual(e.router.store.list_open(), []); self.assertEqual(e.router.store.list_inbox_pending(), [])
+
+    # The lines the kiosk's R9 heal.sh emits for the coreaudio layer TODAY (no kind): heal_event <action> <layer> <reason> <before> <after> <result> <shadow> <target> <severity>.
+    HEAL_SH_COREAUDIO = [
+        ("would_do", "coreaudio", "coreaudiod_wedged", "usb=true engine=false coreaudiod_pid=412", "", "WOULD-DO blocked=killswitch", True, "", ""),     # act_begin, kill switch
+        ("would_do", "coreaudio", "coreaudiod_wedged", "usb=true engine=false coreaudiod_pid=412", "", "WOULD-DO", True, "", ""),                          # act_begin, shadow
+        ("escalate", "coreaudio", "heal_rate_limited", "actions_last_hour=3", "", "stopped", False, "gating-lead,fleet", "page"),                         # act_begin, rate limit
+        ("abort", "coreaudio", "coreaudiod_wedged", "usb=true engine=false coreaudiod_pid=412", "", "aborted_killswitch", False, "", ""),                   # act_step
+        ("heal", "coreaudio", "coreaudiod_wedged", "usb=true engine=false coreaudiod_pid=412", "coreaudiod_pid_changed=true", "ok", False, "", ""),       # heal_coreaudiod ok
+        ("heal", "coreaudio", "coreaudiod_wedged", "usb=true engine=false coreaudiod_pid=412", "coreaudiod_pid_changed=false", "no_restart_seen", False, "fleet", "page"),
+        ("escalate", "coreaudio", "coreaudio_rms_dead", "usb=true engine=false coreaudiod_pid=412 capture_open=true", "", "escalated", True, "fleet", "info"),  # capture not idle
+    ]
+
+    def hs_line(self, row):
+        a, layer, reason, before, after, result, shadow, target, sev = row
+        return json.dumps({"room_id": "opd6", "ts": 1760500000, "action": a, "layer": layer, "reason": reason, "before": before, "after": after,
+                           "result": result, "shadow": shadow, "target": target, "severity": sev}, separators=(",", ":"))
+
+    def test_the_exact_heal_sh_coreaudio_layer_lines_never_open_the_invalid_case(self):
+        e = CAEnv()
+        for row in self.HEAL_SH_COREAUDIO: self.assertTrue(e.heal(None, raw=self.hs_line(row)))
+        kinds = [c["kind"] for c in e.router.store.list_open()]
+        self.assertNotIn("heal_message_invalid", kinds)
+        self.assertEqual(kinds, ["heal_escalated"])                                  # only the one with result "escalated", by the older rule, as before
+        self.assertEqual(e.router.store.list_inbox_pending(), [])
+        lines = open(os.path.join(e.sub.data, "2026-10-13", "r1.heal.jsonl")).read().splitlines()
+        self.assertEqual(len(lines), len(self.HEAL_SH_COREAUDIO)); self.assertEqual(lines[0], self.hs_line(self.HEAL_SH_COREAUDIO[0]))
+
+    def test_each_heal_sh_coreaudio_line_alone_opens_no_invalid_case(self):
+        for row in self.HEAL_SH_COREAUDIO:
+            with self.subTest(result=row[5]):
+                e = CAEnv(); e.heal(None, raw=self.hs_line(row))
+                self.assertNotIn("heal_message_invalid", [c["kind"] for c in e.router.store.list_open()])
+
+    def test_the_heal_sh_ok_line_closes_heal_escalated_as_before(self):
+        e = CAEnv(); e.heal(None, raw=self.hs_line(self.HEAL_SH_COREAUDIO[6])); self.assertEqual(list(e.open()), ["heal_escalated"])
+        e.heal(None, raw=self.hs_line(self.HEAL_SH_COREAUDIO[4])); self.assertEqual(e.open(), {})
 
     def test_every_bad_in_scope_shape_opens_one_invalid_case_and_never_crashes(self):
         e = CAEnv()
@@ -368,8 +406,8 @@ class CAInvalidTests(unittest.TestCase):
         self.assertEqual(e.router.store.list_open(), [])
 
     def test_in_scope_invalid_lines_are_stored_as_received(self):
-        e = CAEnv(); e.heal(None, raw='{"kind":"capture_ded"}'); e.heal(None, raw='{"layer":"coreaudio","result":"zz"}')
-        self.assertEqual(open(os.path.join(e.sub.data, "2026-10-13", "r1.heal.jsonl")).read(), '{"kind":"capture_ded"}\n{"layer":"coreaudio","result":"zz"}\n')
+        e = CAEnv(); e.heal(None, raw='{"kind":"capture_ded"}'); e.heal(None, raw='{"kind":"capture_dead","result":"zz"}')
+        self.assertEqual(open(os.path.join(e.sub.data, "2026-10-13", "r1.heal.jsonl")).read(), '{"kind":"capture_ded"}\n{"kind":"capture_dead","result":"zz"}\n')
 
     def test_valid_lines_do_not_open_the_invalid_case_and_other_streams_are_untouched(self):
         e = CAEnv(); e.heal({"kind": "capture_dead"}); e.heal({"result": "healed"})
@@ -386,7 +424,7 @@ class CAInvalidTests(unittest.TestCase):
             r1 = ar.Router(ar.SqliteStore(path), lambda: bus, clock)
             sb.Subscriber(os.path.join(t, "d"), t, ["r1"], sb.RouterSink(r1), clock).on_line("kiosk/r1/heal", '{"kind":"nope"}')
             r2 = ar.Router(ar.SqliteStore(path), lambda: bus, clock)
-            sb.Subscriber(os.path.join(t, "d"), t, ["r1"], sb.RouterSink(r2), clock).on_line("kiosk/r1/heal", '{"layer":"coreaudio","result":"zz"}')
+            sb.Subscriber(os.path.join(t, "d"), t, ["r1"], sb.RouterSink(r2), clock).on_line("kiosk/r1/heal", '{"kind":"capture_dead","result":"zz"}')
             self.assertEqual([(c["kind"], c["suppressed_count"]) for c in r2.store.list_open()], [("heal_message_invalid", 1)])
 
 
