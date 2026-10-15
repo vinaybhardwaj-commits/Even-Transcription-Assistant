@@ -1,3 +1,4 @@
+# Frozen copy of note.py at 7c523d3f for the brand-first byte-identity guarantee. Delete this file when that guarantee is retired; it is not a second renderer.
 # Verbatim copy of origin/main:tools/eta2freescript/note.py (7c523d3f), except the relative import. The byte-identical oracle.
 """note_text: the deterministic renderer (fallback and reference), sanitize_note, and repair_note.
 

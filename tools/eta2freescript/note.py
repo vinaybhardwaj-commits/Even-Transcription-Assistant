@@ -158,8 +158,10 @@ def _valid_groups(groups, n: int) -> dict[int, tuple[str, list[int]]]:
     for g in groups or []:
         try:
             brand, idx = g
-            idx = [int(i) for i in idx]
+            idx = list(idx)
         except (TypeError, ValueError):
+            continue
+        if not all(type(i) is int for i in idx):
             continue
         brand = _clean(brand)
         if (not brand or len(idx) < 2 or idx != list(range(idx[0], idx[0] + len(idx))) or idx[0] < 0 or idx[-1] >= n
@@ -240,9 +242,12 @@ def _spoken_in(brand: str, texts) -> bool:
 
 
 def _cited_texts(prov_item: dict) -> list[str]:
+    """Quote texts of the cited turns spoken by the DOCTOR. Each evidence item carries the turn's role in `speaker`
+    (mapper.evidence: s.role from the consult's role track; segment_ref `uid:turn` names the turn). No role, or any
+    other role, and the quote does not count."""
     out = []
     for ev in prov_item.get("evidence") or []:
-        if isinstance(ev, dict):
+        if isinstance(ev, dict) and ev.get("speaker") == "doctor":
             out += [ev.get(k) for k in ("quote_en", "quote", "quote_native") if ev.get(k)]
     return out
 
@@ -258,7 +263,7 @@ def combination_groups(art: dict) -> list[tuple[str, list[int]]]:
     said), that brand in aliases, and one provenance item per component citing the same turns. A group is a run of
     ADJACENT medicines (2+, distinct names) with the same raw_name that is also in each one's aliases, the same cited
     segment_refs, and identical frequency / duration / instructions. The brand (form prefix stripped) must occur as
-    a whole word in a turn the provenance cites; a brand present only in catalogue fields never forms a group.
+    a whole word in a DOCTOR turn the provenance cites; a brand present only in catalogue fields never forms a group.
     """
     gx = art.get("gp_extraction") or {}
     meds = gx.get("medicines") if isinstance(gx.get("medicines"), list) else []

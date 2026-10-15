@@ -12,6 +12,7 @@ from conftest import CONSULTS, MODEL, build_artifact, empty_encounter, mk_consul
 from tools.eta2freescript import STAGE_B_VERSION
 from tools.eta2freescript.ingest import list_consults, load_consult
 from tools.eta2freescript.models import FakeClient
+from tools.eta2freescript import note as note_mod
 from tools.eta2freescript.note import combination_groups, flags_by_pointer, render_note, repair_note
 from tools.eta2freescript.pipeline import run_consult
 from tools.eta2freescript.validate import check, printable_errors, to_v01, V
@@ -169,7 +170,7 @@ def test_every_component_name_is_in_the_grouped_line_generated():
         brand = f"Brand{rng.randint(100, 999)}"
         meds = [{"name": n, "raw_name": brand, "aliases": [brand], "frequency": "BD", "duration": "3 days"} for n in names]
         art = {"gp_extraction": {"medicines": meds},
-               "provenance": [{"json_pointer": f"/medicines/{i}", "evidence": [{"segment_ref": "u:0", "quote_en": f"take {brand.lower()} now"}]} for i in range(k)]}
+               "provenance": [{"json_pointer": f"/medicines/{i}", "evidence": [{"segment_ref": "u:0", "speaker": "doctor", "quote_en": f"take {brand.lower()} now"}]} for i in range(k)]}
         g = combination_groups(art)
         assert g == [(brand, list(range(k)))]
         line = render_note(art["gp_extraction"], {}, [], g).split("Medication: ")[1].split("\n")[0]
@@ -250,3 +251,63 @@ def test_a_failed_llm_note_repairs_or_falls_back_brand_first(tmp_path):
     fake = FakeClient({"stageA": json.dumps(enc), "stageB": "garbage"})
     lg = run_consult(c, fake, tmp_path)
     assert lg["final_valid"] and "Augmentin 625 (amoxicillin + clavulanic acid) twice a day x for five days" in lg["artifact"]["note_text"]
+
+
+# --- R2: only the DOCTOR's words count --------------------------------------------------------------------
+ROLES = ["doctor", "patient", "attendant", "staff", "other", "unknown", None]
+
+
+def _set_speaker(a, speaker):
+    for p in a["provenance"]:
+        for ev in p.get("evidence") or []:
+            if speaker is None:
+                ev.pop("speaker", None)
+            else:
+                ev["speaker"] = speaker
+
+
+@pytest.mark.parametrize("role", ["patient", "attendant", "staff", "other", "unknown", None])
+def test_brand_said_only_by_a_non_doctor_does_not_group(role):
+    a = combo_art()
+    assert combination_groups(a) == [("Augmentin 625", [0, 1])]
+    _set_speaker(a, role)
+    assert combination_groups(a) == []
+    assert render_note(a["gp_extraction"], {}, [], combination_groups(a)) == ORACLE.render_note(a["gp_extraction"], {}, [])
+
+
+def test_brand_said_by_the_doctor_groups():
+    a = combo_art()
+    assert all(ev["speaker"] == "doctor" for p in a["provenance"] for ev in p.get("evidence") or [])  # the mapper wrote the role
+    assert combination_groups(a) == [("Augmentin 625", [0, 1])]
+
+
+def test_patient_turn_from_the_role_track_does_not_group():
+    c = mk_consult([(0, 8, "1", "Take Augmentin 625 twice a day for five days.")], roles=DOC)
+    enc = empty_encounter(examination=EXAM, prescription=[rx("Augmentin 625")])
+    assert combination_groups(build_artifact(c, enc)) == []
+
+
+def test_group_forms_iff_a_doctor_quote_has_the_brand_generated():
+    rng = random.Random(5)
+    for _ in range(300):
+        k = rng.randint(2, 3)
+        brand = f"Brand{rng.randint(100, 999)}"
+        meds = [{"name": f"drug{chr(97 + i)}", "raw_name": brand, "aliases": [brand], "frequency": "BD"} for i in range(k)]
+        ev = []
+        for t in range(rng.randint(1, 4)):
+            ev.append({"segment_ref": f"u:{t}", "speaker": rng.choice(ROLES), "quote_en": rng.choice([f"give {brand} now", "give it now", f"{brand}s"])})
+        for e in ev:
+            if e["speaker"] is None:
+                del e["speaker"]
+        art = {"gp_extraction": {"medicines": meds},
+               "provenance": [{"json_pointer": f"/medicines/{i}", "evidence": copy.deepcopy(ev)} for i in range(k)]}
+        expect = any(e.get("speaker") == "doctor" and brand.lower() in e["quote_en"].lower().split() for e in ev)
+        assert bool(combination_groups(art)) == expect, ev
+
+
+@pytest.mark.parametrize("idx", [[0.5, 1], [True, 2], ["0", "1"], [0.0, 1.0], [False, 1], [0, True], [None, 1]])
+def test_valid_groups_rejects_non_int_indices(idx):
+    gx = {"medicines": [{"name": "a"}, {"name": "b"}, {"name": "c"}]}
+    assert render_note(gx, {}, [], [("Brand", idx)]) == ORACLE.render_note(gx, {}, [])
+    assert note_mod._valid_groups([("Brand", idx)], 3) == {}
+    assert note_mod._valid_groups([("Brand", [0, 1])], 3) == {0: ("Brand", [0, 1])}
