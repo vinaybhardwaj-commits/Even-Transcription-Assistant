@@ -173,7 +173,7 @@ test('fail closed: network error is invalid with no identity; 401 is absent', as
   await createContent(a.e).check();
   assert.equal(a.sent[0].status, 'invalid');
   assert.equal(a.sent[0].identity, null);
-  assert.ok(!JSON.stringify(a.sent[0]).includes('dr.test'), 'a stale Firebase record must not stand in for a failed API read');
+  assert.ok(!JSON.stringify(a.sent[0]).includes('fake.test'), 'a stale Firebase record must not stand in for a failed API read');
   const b = env(RX_URL, [], { fetch: makeApiFetch({ access: { status: 401, body: {} } }) }); // no Firebase record: a real cookie 401
   await createContent(b.e).check();
   assert.equal(b.sent[0].status, 'absent');
@@ -193,7 +193,7 @@ test('impersonation flag (URL or session): no identity fetch is made, the Fireba
     assert.equal(sent[0].status, 'absent');
     assert.equal(sent[0].identity, null);
     const s = JSON.stringify(sent[0]);
-    assert.ok(!s.includes('dr.test') && !s.includes(UID));
+    assert.ok(!s.includes('fake.test') && !s.includes(UID));
   }
 });
 
@@ -205,7 +205,7 @@ test('impersonation reported by the API (is_impersonating true): identity null, 
   assert.equal(sent[0].status, 'absent');
   assert.equal(sent[0].identity, null);
   const s = JSON.stringify(sent[0]);
-  assert.ok(!s.includes('dr.test') && !s.includes(UID) && !s.includes(`${F3}`));
+  assert.ok(!s.includes('fake.test') && !s.includes(UID) && !s.includes(`${F3}`));
 });
 
 test('an unusable uid with is_impersonating true is still treated as impersonation', async () => {
