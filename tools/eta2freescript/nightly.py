@@ -1106,7 +1106,7 @@ def _keep_derived(tmp_out: Path, keep_root: str | None, uid: str, log: dict, usa
     for d in (root, dest):
         d.mkdir(parents=True, exist_ok=True)
         os.chmod(d, 0o700)
-    for name in (() if error_type else ("artifact.json", "artifact.validation.json")):
+    for name in (() if error_type else ("artifact.json", "artifact.rejected.json", "artifact.validation.json")):
         src = tmp_out / uid / name
         if src.is_file():
             shutil.copyfile(src, dest / name)

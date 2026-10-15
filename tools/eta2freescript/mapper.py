@@ -281,6 +281,14 @@ def cap_advice_items(items: list[str]) -> tuple[list[str], list[str]]:
     return kept, dropped
 
 
+def raw_name_or(*cands):
+    """The first candidate that is a non-empty string, as given. If none is, the first candidate unchanged (no new drop or keep logic)."""
+    for c in cands:
+        if isinstance(c, str) and c.strip():
+            return c
+    return cands[0] if cands else None
+
+
 def strip_form_prefix(name: str) -> str:
     return re.sub(r"^(?:tab|tablet|cap|capsule|syp|syrup|inj|injection)\b\.?\s*", "", name or "", flags=re.I).strip()
 
@@ -885,7 +893,7 @@ class Builder:
                            "_drug_key": heard_key, "_heard_name": heard_key}, lead=dec)
                 continue
             stripped = bool(rx.get("brand_as_said_as_heard")) and bool(generic)
-            m = {"name": name, "raw_name": generic if stripped else (brand or generic)}
+            m = {"name": name, "raw_name": raw_name_or(generic if stripped else (brand or generic), rx.get("_heard_name"), brand, generic, name)}
             for k in ("frequency", "duration", "instructions"):
                 if not rx.get(k):
                     continue
@@ -1172,7 +1180,7 @@ class Builder:
         if not name or m1_rejected(name):
             return
         spoken = (brand or "").strip()
-        m = {"name": name, "raw_name": spoken or generic}
+        m = {"name": name, "raw_name": raw_name_or(spoken or generic, brand, generic, name)}
         if spoken and spoken.lower() not in name.lower():
             m["aliases"] = [spoken]
         part_rx = dict(rx)
@@ -1466,7 +1474,7 @@ class Builder:
         if not name or m1_rejected(name):
             return
         rx["generic"] = name
-        m = {"name": name, "raw_name": spoken}
+        m = {"name": name, "raw_name": raw_name_or(spoken, name)}
         for k in ("frequency", "duration"):
             if rx.get(k) and self._numbers_supported(str(rx[k]), blob):
                 m[k] = str(rx[k])
