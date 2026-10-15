@@ -1,4 +1,4 @@
-# Encounter catalog (migration 0168)
+# Encounter catalog (migrations 0168, 0169)
 
 One searchable row per consult_uid, filled by the lab box's stage ledger (C1, `POST /api/encounter-catalog/ingest`, HMAC) and by the prescription join (C3, the same route, partial rows), read by `GET /api/encounter-catalog/search`.
 
@@ -13,8 +13,17 @@ Ids, UTC times, R2 object keys, per-layer status, stage states with reasons, all
 - **Field-level upsert**: a row updates only the columns whose key it carries; a present `null` clears the column.
 - **Batch**: at most 500 rows and 4,000,000 characters; keep C1 batches at 500 rows (Vercel's edge limit is near 4.5 MB for non-ASCII bodies).
 
+## C4: jev, clef_affect, presence (migration 0169, ORDER 23N)
+Three nullable jsonb columns, written by the same ingest route as field-level upserts and returned by the search route to admins only.
+- `presence` (the lab box feed, `catalog_version` 2): `{encounter_open, encounter_close, boundary_source, close_reason}`, UTC ms and two tokens.
+- `jev` (newcat's upsert job): `{sets: [{set_id, set_sha, band, label, model, at}]}`. `band` and `label` may be null; no question text, no reasons.
+- `clef_affect` (newcat's upsert job): `{lanes: [{lane, scores, model_rev, at}]}`; `scores` is an object of token keys to finite numbers.
+The ingest validates these shapes strictly (only those keys; values are tokens of 1..60 characters `[A-Za-z0-9_:.-]`, `at` a strict ISO instant, at most 50 sets / 20 lanes / 64 scores) and the text-key refusal applies inside them. A bad block answers 400 `bad_jev` / `bad_clef_affect` / `bad_presence`; a present `null` clears the column. A row that carries only `jev` (or only `clef_affect`) never touches the box's columns, and the box's next row (which has no `jev` / `clef_affect` key) never blanks newcat's.
+`presence.boundary_source` may also contain `+` (CAA's values are token+token); no other field may. **newcat's upsert rows must not send `generated_at`**: it belongs to the box feed's stale-write guard, and a partial row without it is never guarded or skipped.
+Turn the feed's `--post-url` on only after 0169 is applied: an older ingest refuses the unknown `presence` key.
+
 ## Logs (by design)
 `individual_uid` and `prescription_uid` are accepted as **search query parameters**, so they appear in Vercel request logs. That is deliberate and acceptable under V's internal-tool ruling (14 Oct 2026: the Encounter Explorer is for internal admins only, no PHI removal); it is not a leak. The admin token never appears in a URL (see above). Neither route nor lib logs a row value.
 
 ## Rollback
-`db/rollbacks/0168_encounter_catalog.down.sql`, by hand only. It drops the table; the box re-derives the rows from its ledger (one full C1 refeed and one C3 rerun).
+`db/rollbacks/0169_encounter_catalog_c4.down.sql` drops only the three C4 columns. `db/rollbacks/0168_encounter_catalog.down.sql`, by hand only, drops the table; the box re-derives the rows from its ledger (one full C1 refeed and one C3 rerun).
