@@ -22,6 +22,8 @@ The ingest validates these shapes strictly (only those keys; values are tokens o
 `presence.boundary_source` may also contain `+` (CAA's values are token+token); no other field may. **newcat's upsert rows must not send `generated_at`**: it belongs to the box feed's stale-write guard, and a partial row without it is never guarded or skipped.
 Turn the feed's `--post-url` on only after 0169 is applied: an older ingest refuses the unknown `presence` key.
 
+newcat's writer for `jev` and `clef_affect` runs in-process in Scribe, as the last step of the `jev-sweep` cron (`lib/jev/worker/catalog-sync.ts`), through `validateBatch` and `ingestCatalogRows` (no HTTP, no HMAC). Flag `CATALOG_C4_SYNC_ENABLED` (unset or 0 = off; an unrecognised value = off, counted as `error_class: "bad_flag"`). It only updates consults that already have a row, and the cron's ok body carries `catalog: {posted, updated, inserted, stale, unchanged, skipped_off_enum, skipped_bad_token, error_class}`.
+
 ## Logs (by design)
 `individual_uid` and `prescription_uid` are accepted as **search query parameters**, so they appear in Vercel request logs. That is deliberate and acceptable under V's internal-tool ruling (14 Oct 2026: the Encounter Explorer is for internal admins only, no PHI removal); it is not a leak. The admin token never appears in a URL (see above). Neither route nor lib logs a row value.
 
