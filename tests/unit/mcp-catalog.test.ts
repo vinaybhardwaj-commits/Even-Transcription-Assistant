@@ -1600,3 +1600,28 @@ describe("CATALOG-9 FIX1: prefixes anywhere, more key field names, the whole row
     expect(r).toMatchObject({ consult_uid: UID, ist_date: "2026-10-05", room_id: "room_a", stray: null, manifest: { state: "ok" }, nested: { by: [null] } });
   });
 });
+
+describe("CATALOG-9 FIX2: key-named layers, whole-row caps", () => {
+  const K = `reb/2026-10-05/room_a/_consults/${UID}/tracks/x__v1__ab12cd34.json`;
+  const searchRow = async (o: Row): Promise<Row> => {
+    resetCatalogCacheForTests();
+    setCatalog([crow(UID, o)]);
+    return ((await run({ action: "search", from: "2026-10-05", to: "2026-10-05" })).rows as Row[])[0]!;
+  };
+  it("a layer named like a key or a store path is in neither layers nor layers_present", async () => {
+    const r = await searchRow({ layers: { stt: layer("stt.sarvam-saaras-v3"), [K]: { status: "ok" }, r2_key: { status: "ok" }, url: [1] } });
+    expect(JSON.stringify(r)).not.toContain("reb/");
+    expect(Object.keys(r.layers as Row)).toEqual(["stt"]);
+    expect(r.layers_present).toEqual(["stt"]);
+  });
+  it("top-level fields keep arrays past 64 and objects 8 deep; clip too; key rules still apply at depth", async () => {
+    const deep = { a: { b: { c: { d: { e: { f: { g: { h: "leaf", k: K } } } } } } } };
+    const r = await searchRow({ many: Array.from({ length: 70 }, (_, i) => i), deep, clip: { bytes: 5, list: Array.from({ length: 70 }, (_, i) => i) } });
+    expect((r.many as unknown[]).length).toBe(70);
+    expect(JSON.stringify(r.deep)).toBe('{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":"leaf","k":null}}}}}}}}');
+    expect(((r.clip as Row).list as unknown[]).length).toBe(70);
+    // layer values keep the tight caps
+    const l = await searchRow({ layers: { lay: Array.from({ length: 70 }, (_, i) => i) } });
+    expect(((l.layers as Row).lay as unknown[]).length).toBe(64);
+  });
+});

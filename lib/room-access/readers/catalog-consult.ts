@@ -94,14 +94,15 @@ const SCRUB_KEY_STRING = /(?:^|[^A-Za-z0-9_-])(?:reb|consult-clips|palimpsest)\/
 export const SCRUB_MAX_DEPTH = 6;
 export const SCRUB_MAX_ARRAY = 64;
 /** PURE. Search never shows a storage key: fields named like a key or url, or whose name looks like a store path, are dropped, strings that look like a store path or URL become null, depth is capped at 6 (deeper = null) and arrays at 64. */
-export function scrubKeys(v: unknown, depth = 0): unknown {
-  if (depth > SCRUB_MAX_DEPTH) return null;
+export const SCRUB_ROW_MAX_DEPTH = 32;
+export function scrubKeys(v: unknown, depth = 0, maxDepth = SCRUB_MAX_DEPTH, maxArray = SCRUB_MAX_ARRAY): unknown {
+  if (depth > maxDepth) return null;
   if (typeof v === "string") return SCRUB_KEY_STRING.test(v) ? null : v;
-  if (Array.isArray(v)) return v.slice(0, SCRUB_MAX_ARRAY).map((e) => scrubKeys(e, depth + 1));
+  if (Array.isArray(v)) return v.slice(0, maxArray).map((e) => scrubKeys(e, depth + 1, maxDepth, maxArray));
   const rec = asRec(v);
   if (!rec) return v;
   const out: Row = {};
-  for (const [k, x] of Object.entries(rec)) if (!SCRUB_DROP_FIELD.test(k) && !SCRUB_KEY_STRING.test(k)) out[k] = scrubKeys(x, depth + 1);
+  for (const [k, x] of Object.entries(rec)) if (!SCRUB_DROP_FIELD.test(k) && !SCRUB_KEY_STRING.test(k)) out[k] = scrubKeys(x, depth + 1, maxDepth, maxArray);
   return out;
 }
 
@@ -113,6 +114,7 @@ export function searchView(row: Row): Row {
   if (layers) {
     slim = {};
     for (const [name, l] of Object.entries(layers)) {
+      if (SCRUB_DROP_FIELD.test(name) || SCRUB_KEY_STRING.test(name)) continue;
       const rec = asRec(l);
       if (Array.isArray(l)) {
         present.push(name);
@@ -128,7 +130,7 @@ export function searchView(row: Row): Row {
     }
   }
   const rest: Row = {};
-  for (const [k, x] of Object.entries(row)) if (k !== "layers" && !SCRUB_DROP_FIELD.test(k) && !SCRUB_KEY_STRING.test(k)) rest[k] = scrubKeys(x);
+  for (const [k, x] of Object.entries(row)) if (k !== "layers" && !SCRUB_DROP_FIELD.test(k) && !SCRUB_KEY_STRING.test(k)) rest[k] = scrubKeys(x, 0, SCRUB_ROW_MAX_DEPTH, Infinity);
   return { ...rest, ...(slim ? { layers: slim } : {}), layers_present: present };
 }
 
