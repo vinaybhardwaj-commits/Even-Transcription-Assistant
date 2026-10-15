@@ -128,3 +128,30 @@ def test_random_sets_each_arm_marks_exactly_its_own_set(tmp_path, monkeypatch, s
         go(d, monkeypatch, bn=bn, b0=b0)
         for kind, arm, tr in spy:
             assert marked(tr) == (b0 if arm == "B0" else bn), (i, kind, arm)
+
+
+def go_many(tmp_path, monkeypatch, per_uid):
+    """per_uid: {uid: (bn_set, b0_set or None)}. Returns the scoreboard row and the scorer's scores.json rows."""
+    monkeypatch.delenv("JEV_MCP_CMD", raising=False)
+    fdir = make_frozen(tmp_path / "frozen", tuning=tuple(per_uid), lockbox=())
+    arts, arms = _write_inputs(tmp_path, list(per_uid))
+    for u, (bn, b0) in per_uid.items():
+        set_quarantine(arts, u, bn, b0)
+    assert run.main(_argv(tmp_path, arms, arts, fdir, tmp_path / "out"), client=FakeClient(responder)) == 0
+    return json.loads((tmp_path / "SCOREBOARD.R1.json").read_text()), json.loads((tmp_path / "out" / "scores.json").read_text())
+
+
+def test_row_counts_b0_quarantine_differs_equal_sets_is_zero(tmp_path, monkeypatch):
+    row, scores = go_many(tmp_path, monkeypatch, {u: ({1, 2}, {1, 2}) for u in UIDS})
+    assert row["b0_quarantine_differs"] == 0
+    assert all(s["arm_quarantine"] == "per-arm (amendment 10)" for s in scores) and scores
+
+
+def test_row_counts_two_of_three_consults_differ(tmp_path, monkeypatch):
+    row, _ = go_many(tmp_path, monkeypatch, {UIDS[0]: ({1, 2}, {3}), UIDS[1]: ({1, 2}, {1, 2}), UIDS[2]: ({4}, set())})
+    assert row["b0_quarantine_differs"] == 2
+
+
+def test_row_b0_missing_counts_as_equal(tmp_path, monkeypatch):
+    row, _ = go_many(tmp_path, monkeypatch, {u: ({1, 2}, None) for u in UIDS})
+    assert row["b0_quarantine_differs"] == 0

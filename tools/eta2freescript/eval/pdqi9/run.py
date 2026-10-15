@@ -227,7 +227,9 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
     parse_failures = sum(1 for v in scores.values() if v is None)
     tolerated_cells = sum(1 for v in scores.values() if v and v.get("tolerated"))
 
-    stamp = {"frozen_hashes": frozen.hashes, "render_version": render.RENDER_VERSION, "split_sha": frozen.hashes["split-v1.json"]}
+    stamp = {"frozen_hashes": frozen.hashes, "render_version": render.RENDER_VERSION, "split_sha": frozen.hashes["split-v1.json"],
+             "arm_quarantine": "per-arm (amendment 10)"}
+    b0_quarantine_differs = sum(1 for u in uids if quarantined_set(art_b0[u]) != quarantined_set(art_bn[u]))  # art_b0 is art_bn when b0 is missing, so missing counts as equal
     scope = floors.floor_scope()
     fl = {"Bn": [], "B0": []}
     for u in uids:
@@ -275,7 +277,7 @@ def main(argv: list[str] | None = None, client: ModelClient | None = None, jev_c
         "render": render.RENDER_VERSION, "resolved_model_ids": resolved, "split_sha": frozen.hashes["split-v1.json"], "split": split_name, "candidate": a.candidate,
         "frozen_hashes": frozen.hashes, "n": len(uids), "uids_dropped_not_in_all_arms": dropped_uids, "parse_failures": parse_failures,
         "tolerated_cells": tolerated_cells, "parse_fail_cells": parse_failures, "floor_rows_unparsed": floor_rows_unparsed,
-        "floor_rows_tolerated": floor_rows_tolerated,
+        "floor_rows_tolerated": floor_rows_tolerated, "b0_quarantine_differs": b0_quarantine_differs,
         "totals": totals, "item_means": item_means, "items_bn_gt_a": gt,
         "succinct_bn_minus_a": compare_family(scores, uids, combos, "Bn", "A", SUCCINCT),
         "thorough_bn_minus_b0": thorough,
