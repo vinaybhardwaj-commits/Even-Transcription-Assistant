@@ -94,15 +94,19 @@ const TODAY0 = "(date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZO
 let SHA_PITCH = "", SHA_CHAIR = "";
 let n = 0;
 /** One eta_encounter_windows row: opened `daysAgo` IST days before today's midnight (+ `min` minutes), closed 1 s after. Synthetic ids only. */
-function win(key: string, uid: string | null, o: { daysAgo?: number; min?: number; closed?: boolean; room?: string | null; rx?: string | null; text?: boolean; layer?: "translate" | "stt"; lang?: string | null; sealed?: string | null } = {}): void {
-  const { daysAgo = 0, min = 0, closed = true, room = "rm_a", rx = null, text = true, layer = "translate", lang = null, sealed = "ok" } = o;
+function win(key: string, uid: string | null, o: { daysAgo?: number; min?: number; closed?: boolean; room?: string | null; rx?: string | null; text?: boolean; sealed?: string | null; stt?: string | null; translate?: string | null; reason?: string | null } = {}): void {
+  const { daysAgo = 0, min = 0, closed = true, room = "rm_a", rx = null, text = true, sealed = "ok", reason = null } = o;
+  // catalog stages (INFERRED keys): text:false = stt and translate never ran; stt/translate default to ok
+  const stt = o.stt !== undefined ? o.stt : text ? "ok" : null, translate = o.translate !== undefined ? o.translate : text ? "ok" : null;
   const open = `${TODAY0} - interval '${daysAgo} days' + interval '${min} minutes'`;
   pg.exec(`INSERT INTO eta_encounter_windows (consult_key, consult_uid, prescription_ref, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version)
            VALUES ('${key}', ${uidSql(uid)}, ${rx ? `'${rx}'` : "NULL"}, 'mc_1', ${room ? `'${room}'` : "NULL"}, 'none', ${open}, ${closed ? `${open} + interval '1 second'` : "NULL"}, '${closed ? "endConsult" : "open"}', 'clean', 'v_t')`);
   if (!uid) return;
-  if (text) pg.exec(`INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, status, r2_key, sha256) VALUES ('consult-${uid}', current_date, '${room ?? "rm_a"}', '${layer}', 'e_${++n}', 'v', 'h', 'ok', 'k_${n}', 's_${n}') ON CONFLICT DO NOTHING`);
-  if (lang) pg.exec(`INSERT INTO consult_sarvam_result (consult_uid, cut_version, mode, english, job_id, result_r2_key, model_stt, model_translate, model_rev, pipeline_rev, language_code, t0_ms) SELECT '${uid}', 'cv', 'transcribe', false, 'j_${++n}', 'mcp-sarvam/j_${n}.json', 'm', 'm', 'r', 'r', '${lang}', 0 WHERE NOT EXISTS (SELECT 1 FROM consult_sarvam_result WHERE consult_uid = '${uid}')`);
-  if (sealed) pg.exec(`INSERT INTO encounter_catalog (consult_uid, stages) VALUES ('${uid}', '{"sealed":{"state":"${sealed}"}}'::jsonb) ON CONFLICT DO NOTHING`);
+  const st: Record<string, unknown> = {};
+  if (sealed) st.sealed = { state: sealed };
+  if (stt) st.stt = { state: stt };
+  if (translate) st.translate = reason ? { state: translate, reason } : { state: translate };
+  if (sealed || stt || translate) pg.exec(`INSERT INTO encounter_catalog (consult_uid, stages) VALUES ('${uid}', '${JSON.stringify(st)}'::jsonb) ON CONFLICT DO NOTHING`);
 }
 const uidSql = (u: string | null) => (u ? `'${u}'` : "NULL");
 const decide = (key: string, sha: string, mode = "shadow", type = "consult") =>
@@ -144,17 +148,21 @@ suite("JEV-EVERY-CONSULT S1 — every transcribed consult, record-only", () => {
     win("cx_0001@ma", "u_0001", { text: false }); win("cx_0002@ma", "u_0002", { closed: false }); win("cx_0003@ma", null); win("cx_0004@ma", "u_0004", { room: null }); win("cx_0005@ma", "u_0005");
     expect(await allTranscribedConsults(50, ctx(SHA_PITCH))).toEqual(["cx_0005@ma"]);
   });
-  it("ADDENDUM 1: a non-English consult with stt ok and NO translate is excluded; an English stt-only consult is included; a translate-ok consult is included", async () => {
-    win("cx_0001@ma", "u_0001", { layer: "stt", lang: "hi-IN" }); win("cx_0002@ma", "u_0002", { layer: "stt", lang: "en-IN" }); win("cx_0003@ma", "u_0003", { layer: "translate", lang: "hi-IN" });
-    win("cx_0004@ma", "u_0004", { layer: "stt", lang: null });
-    expect((await allTranscribedConsults(50, ctx(SHA_PITCH))).sort()).toEqual(["cx_0002@ma", "cx_0003@ma"]);
+  it("FIX 2 catalog stages: translate ok in; translate n/a + english in; n/a + other reason out; translate pending/failed (stt ok) out; stt not ok out; sealed not ok out", async () => {
+    win("cx_0001@ma", "u_0001", { min: 1 });
+    win("cx_0002@ma", "u_0002", { min: 2, translate: "n/a", reason: "english" });
+    win("cx_0003@ma", "u_0003", { min: 3, translate: "n/a", reason: "no_speech" });
+    win("cx_0004@ma", "u_0004", { min: 4, translate: "pending" });
+    win("cx_0005@ma", "u_0005", { min: 5, translate: "failed" });
+    win("cx_0006@ma", "u_0006", { min: 6, stt: "pending" });
+    win("cx_0007@ma", "u_0007", { min: 7, stt: "failed", translate: "ok" });
+    win("cx_0008@ma", "u_0008", { min: 8, sealed: "recut_queued" });
+    win("cx_0009@ma", "u_0009", { min: 9, translate: "n/a" });
+    expect(await allTranscribedConsults(50, ctx(SHA_PITCH))).toEqual(["cx_0001@ma", "cx_0002@ma"]);
   });
-  it("ADDENDUM 1(c): the bench_window stt_turn cue alone is NOT a transcript any more", async () => {
+  it("FIX 2: a reb_track_index row or a sarvam result alone no longer makes a consult transcribed", async () => {
     win("cx_0001@ma", "u_0001", { text: false });
-    pg.exec(`INSERT INTO room (id, slug, name, pin_hash) VALUES ('rm_a', 'rm-a-t1', 'Room T', 'x') ON CONFLICT DO NOTHING; INSERT INTO room_day (id, room_id, ist_date) VALUES ('rd_1', 'rm_a', current_date); INSERT INTO bench_session (id, room_id) VALUES ('bs_1', 'rm_a')`);
-    const t = (await rows`SELECT (extract(epoch FROM t_open) * 1000)::bigint AS o FROM eta_encounter_windows WHERE consult_key = 'cx_0001@ma'`)[0]!.o;
-    pg.exec(`INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic) VALUES ('bw_1', 'bs_1', 'rd_1', ${Number(t) - 1000}, ${Number(t) + 60000}, 'mic_1')`);
-    pg.exec(`INSERT INTO cue (id, room_day_id, type, at, payload) VALUES ('cu_1', 'rd_1', 'stt_turn', now(), '{"window":{"start_ms":${Number(t) - 1000}}}')`);
+    pg.exec(`INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, status, r2_key, sha256) VALUES ('consult-u_0001', current_date, 'rm_a', 'translate', 'e', 'v', 'h', 'ok', 'k_1', 's_1')`);
     expect(await allTranscribedConsults(50, ctx(SHA_PITCH))).toEqual([]);
   });
   it("ADDENDUM 2: encounter_catalog sealed state other than ok (or no catalog row, or no sealed stage) excludes the consult", async () => {
@@ -188,9 +196,7 @@ suite("JEV-EVERY-CONSULT S1 — every transcribed consult, record-only", () => {
   it("NO STARVATION: 300 decided old consults and 1 new one: eligible(50) returns the new one (and pendingSubjects, which asks limit*4)", async () => {
     pg.exec(`INSERT INTO eta_encounter_windows (consult_key, consult_uid, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version)
              SELECT 'cx_old' || lpad(g::text, 4, '0') || '@ma', 'u_old' || lpad(g::text, 4, '0'), 'mc_1', 'rm_a', 'none', ${TODAY0} - interval '3 days' + g * interval '1 second', ${TODAY0} - interval '3 days' + g * interval '1 second' + interval '1 second', 'endConsult', 'clean', 'v_t' FROM generate_series(1, 300) g`);
-    pg.exec(`INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, status, r2_key, sha256)
-             SELECT 'consult-u_old' || lpad(g::text, 4, '0'), current_date, 'rm_a', 'translate', 'e', 'v', 'h', 'ok', 'k' || g, 's' || g FROM generate_series(1, 300) g`);
-    pg.exec(`INSERT INTO encounter_catalog (consult_uid, stages) SELECT 'u_old' || lpad(g::text, 4, '0'), '{"sealed":{"state":"ok"}}'::jsonb FROM generate_series(1, 300) g`);
+    pg.exec(`INSERT INTO encounter_catalog (consult_uid, stages) SELECT 'u_old' || lpad(g::text, 4, '0'), '{"sealed":{"state":"ok"},"stt":{"state":"ok"},"translate":{"state":"ok"}}'::jsonb FROM generate_series(1, 300) g`);
     pg.exec(`INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, question_set_sha256, order_variant, mode, answer)
              SELECT 'jd_old' || g, 'consult', 'cx_old' || lpad(g::text, 4, '0') || '@ma', 'q_1', 'pv', 'm', '${SHA_PITCH}', 'derived', 'shadow', '{"type":"none"}' FROM generate_series(1, 300) g`);
     win("cx_new1@ma", "u_new1", { min: 30 });
@@ -288,12 +294,5 @@ suite("JEV-EVERY-CONSULT S1 — every transcribed consult, record-only", () => {
       expect(h.uses.length).toBeGreaterThan(0);
       expect(h.budget).toBeDefined();
     } finally { pg.exec(`ALTER TABLE encounter_catalog_x RENAME TO encounter_catalog`); }
-  });
-  it("L3: an older-cut en row plus a current-cut non-en row, stt only, is excluded; a current-cut en row is included", async () => {
-    win("cx_0001@ma", "u_0001", { layer: "stt" }); win("cx_0002@ma", "u_0002", { min: 1, layer: "stt" });
-    const ins = (uid: string, cv: string, lang: string, at: string) => pg.exec(`INSERT INTO consult_sarvam_result (consult_uid, cut_version, mode, english, job_id, result_r2_key, model_stt, model_translate, model_rev, pipeline_rev, language_code, t0_ms, created_at) VALUES ('${uid}', '${cv}', 'transcribe', false, 'j_${++n}', 'mcp-sarvam/j_${n}.json', 'm', 'm', 'r', 'r', '${lang}', 0, now() - interval '${at}')`);
-    ins("u_0001", "cv_old", "en-IN", "2 hours"); ins("u_0001", "cv_new", "hi-IN", "1 hour");
-    ins("u_0002", "cv_old", "hi-IN", "2 hours"); ins("u_0002", "cv_new", "en-IN", "1 hour");
-    expect(await allTranscribedConsults(50, ctx(SHA_PITCH))).toEqual(["cx_0002@ma"]);
   });
 });

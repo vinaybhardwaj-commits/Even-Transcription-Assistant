@@ -2,9 +2,8 @@
  * lib/jev/worker/consult-eligible.ts — JEV-EVERY-CONSULT S1: every closed consult with a stored transcript, oldest first (V ruling 15 Oct 2026: Jev on EVERY consult, record-only).
  * Replaces the seeded daily EVR sample for the two consult-level sets. Differences from selectEvrWindows (which is unchanged): no warehouse_prescription_uid, no BLIND_ROOM_DAYS,
  * a backfill window instead of a first day, ONE consult_key per consult_uid (the lexically smallest qualifying key), and subjects already decided for the set are excluded IN SQL so a
- * backlog larger than limit*4 never starves newer consults. The transcript test is TIGHTER than selectEvrWindows' (Addendum 1+2): a non-shadow ok reb translate row, OR a non-shadow ok stt row with an English consult_sarvam_result.language_code (en*)
- * (INFERRED: reb_track_index has no language column), AND the encounter_catalog stage sealed.state = 'ok' (cut final; NOT consult_index.sealed, which means "refuse Sarvam"). The bench cue path is dropped.
- * NOT HANDLED: a partial translate (gapfilled later); buildConsultState reads reb translate first, else the stt track when wholly English (from the R2 doc), then window_english / bench text.
+ * backlog larger than limit*4 never starves newer consults. The transcript test (Fix 2, palimpsest-architect's rule) is the encounter_catalog stage rule: sealed ok AND stt ok AND (translate ok OR translate n/a with reason english); see consult-select.ts (INFERRED stage keys). It is TIGHTER than selectEvrWindows'. The bench cue path is dropped.
+ * buildConsultState reads reb translate first, else the stt track when wholly English (from the R2 doc), then window_english / bench text.
  */
 import { selectTranscribedConsults } from "@/lib/room-access/consult-select";
 

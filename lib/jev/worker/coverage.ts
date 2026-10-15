@@ -1,6 +1,6 @@
 /**
  * lib/jev/worker/coverage.ts — JEV-EVERY-CONSULT S1: today's (IST) consult coverage, counts only, no ids. Read-only; nothing here acts on a decision.
- * cut = distinct consult_uid with a closed window today; transcribed = of those, passes the SAME transcript test as allTranscribedConsults (Addendum 1+2);
+ * cut = distinct consult_uid with a closed window today; transcribed = of those, passes the SAME catalog-stage test as allTranscribedConsults (Fix 2);
  * jev_done[set] = distinct consults in the TRANSCRIBED set holding at least one SHADOW row under that set's current sha (live set else newest shadow, as the sweeper picks it) that is NOT a no_state marker;
  * no_state[set] = distinct transcribed consults whose rows under that sha are markers only (Jev never called);
  * clef_done = distinct consult_uid in affect_consult_latest (migration 0155) with ist_date today.

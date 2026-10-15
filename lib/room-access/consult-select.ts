@@ -1,6 +1,11 @@
 /**
- * lib/room-access/consult-select.ts — JEV-EVERY-CONSULT S1: the SQL (eta_encounter_windows, reb_track_index are room-data tables, so the room-access gate wants it HERE) behind
+ * lib/room-access/consult-select.ts — JEV-EVERY-CONSULT S1: the SQL (eta_encounter_windows is a room-data table, so the room-access gate wants it HERE) behind
  * lib/jev/worker/consult-eligible.ts and coverage.ts. Counts and consult_key values only; no text. See those files for the rules.
+ *
+ * "Transcribed" (eligibility AND coverage) is the palimpsest encounter_catalog stage rule, INFERRED (stage keys per 0168_encounter_catalog.sql:4,15 "stage states with reasons"; the writer is the lab box's ledger, not in this repo):
+ *   stages->'sealed'->>'state' = 'ok' AND stages->'stt'->>'state' = 'ok'
+ *   AND (stages->'translate'->>'state' = 'ok' OR (stages->'translate'->>'state' = 'n/a' AND stages->'translate'->>'reason' = 'english')).
+ * From 16 Oct palimpsest's R2 ready feed replaces this (not this slice).
  */
 import { sql } from "@/lib/db";
 import { newDecisionId, type WorkerDecision } from "@/lib/jev/worker/persist";
@@ -11,11 +16,9 @@ export async function selectTranscribedConsults(n: number, days: number, sha: st
       SELECT w.consult_key, w.consult_uid, w.t_close FROM eta_encounter_windows w
        WHERE w.t_close IS NOT NULL AND w.consult_uid IS NOT NULL AND w.room_id IS NOT NULL
          AND w.t_open >= ((date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') - make_interval(days => ${days}::int)) AT TIME ZONE 'Asia/Kolkata') AND w.t_open <= now()
-         AND EXISTS (SELECT 1 FROM encounter_catalog ec WHERE ec.consult_uid = w.consult_uid AND ec.stages->'sealed'->>'state' = 'ok')
-         AND (EXISTS (SELECT 1 FROM reb_track_index x WHERE x.window_id = 'consult-' || w.consult_uid AND x.status = 'ok' AND x.shadow = false AND x.layer = 'translate')
-              OR (EXISTS (SELECT 1 FROM reb_track_index x WHERE x.window_id = 'consult-' || w.consult_uid AND x.status = 'ok' AND x.shadow = false AND x.layer = 'stt')
-                  AND EXISTS (SELECT 1 FROM consult_sarvam_result sr WHERE sr.consult_uid = w.consult_uid AND sr.language_code ILIKE 'en%'
-                       AND sr.cut_version = (SELECT c.cut_version FROM consult_sarvam_result c WHERE c.consult_uid = w.consult_uid ORDER BY c.created_at DESC, c.id DESC LIMIT 1))))
+         AND EXISTS (SELECT 1 FROM encounter_catalog ec WHERE ec.consult_uid = w.consult_uid
+                       AND ec.stages->'sealed'->>'state' = 'ok' AND ec.stages->'stt'->>'state' = 'ok'
+                       AND (ec.stages->'translate'->>'state' = 'ok' OR (ec.stages->'translate'->>'state' = 'n/a' AND ec.stages->'translate'->>'reason' = 'english')))
     ), pick AS (
       SELECT DISTINCT ON (consult_uid) consult_key, consult_uid, t_close FROM q ORDER BY consult_uid, consult_key
     )
@@ -35,17 +38,15 @@ export async function coverageCutAndTranscribed(istDate: string): Promise<{ cut:
          WHERE w.t_close IS NOT NULL AND w.consult_uid IS NOT NULL AND (w.t_close AT TIME ZONE 'Asia/Kolkata')::date = ${istDate}::date`,
     sql`SELECT count(DISTINCT w.consult_uid)::int AS c FROM eta_encounter_windows w
          WHERE w.t_close IS NOT NULL AND w.consult_uid IS NOT NULL AND w.room_id IS NOT NULL AND (w.t_close AT TIME ZONE 'Asia/Kolkata')::date = ${istDate}::date
-           AND EXISTS (SELECT 1 FROM encounter_catalog ec WHERE ec.consult_uid = w.consult_uid AND ec.stages->'sealed'->>'state' = 'ok')
-         AND (EXISTS (SELECT 1 FROM reb_track_index x WHERE x.window_id = 'consult-' || w.consult_uid AND x.status = 'ok' AND x.shadow = false AND x.layer = 'translate')
-              OR (EXISTS (SELECT 1 FROM reb_track_index x WHERE x.window_id = 'consult-' || w.consult_uid AND x.status = 'ok' AND x.shadow = false AND x.layer = 'stt')
-                  AND EXISTS (SELECT 1 FROM consult_sarvam_result sr WHERE sr.consult_uid = w.consult_uid AND sr.language_code ILIKE 'en%'
-                       AND sr.cut_version = (SELECT c.cut_version FROM consult_sarvam_result c WHERE c.consult_uid = w.consult_uid ORDER BY c.created_at DESC, c.id DESC LIMIT 1))))`,
+           AND EXISTS (SELECT 1 FROM encounter_catalog ec WHERE ec.consult_uid = w.consult_uid
+                         AND ec.stages->'sealed'->>'state' = 'ok' AND ec.stages->'stt'->>'state' = 'ok'
+                         AND (ec.stages->'translate'->>'state' = 'ok' OR (ec.stages->'translate'->>'state' = 'n/a' AND ec.stages->'translate'->>'reason' = 'english')))`,
   ])) as unknown as Array<Array<{ c: unknown }>>;
   return { cut: Number(cut[0]?.c ?? 0), transcribed: Number(trans[0]?.c ?? 0) };
 }
 
 /**
- * Coverage of one set on `istDate` (IST), over the TRANSCRIBED consults only (same transcript test as selectTranscribedConsults).
+ * Coverage of one set on `istDate` (IST), over the TRANSCRIBED consults only (same catalog-stage test as selectTranscribedConsults).
  * done = distinct consults holding at least one shadow derived row for `sha` that is NOT a no_state marker (a Jev call was made);
  * noState = distinct consults whose rows for `sha` are markers only (Jev was never called).
  */
@@ -54,11 +55,9 @@ export async function coverageJevDone(sha: string, subjectType: string, istDate:
     WITH t AS (
       SELECT DISTINCT w.consult_uid FROM eta_encounter_windows w
        WHERE w.t_close IS NOT NULL AND w.consult_uid IS NOT NULL AND w.room_id IS NOT NULL AND (w.t_close AT TIME ZONE 'Asia/Kolkata')::date = ${istDate}::date
-         AND EXISTS (SELECT 1 FROM encounter_catalog ec WHERE ec.consult_uid = w.consult_uid AND ec.stages->'sealed'->>'state' = 'ok')
-         AND (EXISTS (SELECT 1 FROM reb_track_index x WHERE x.window_id = 'consult-' || w.consult_uid AND x.status = 'ok' AND x.shadow = false AND x.layer = 'translate')
-              OR (EXISTS (SELECT 1 FROM reb_track_index x WHERE x.window_id = 'consult-' || w.consult_uid AND x.status = 'ok' AND x.shadow = false AND x.layer = 'stt')
-                  AND EXISTS (SELECT 1 FROM consult_sarvam_result sr WHERE sr.consult_uid = w.consult_uid AND sr.language_code ILIKE 'en%'
-                       AND sr.cut_version = (SELECT c.cut_version FROM consult_sarvam_result c WHERE c.consult_uid = w.consult_uid ORDER BY c.created_at DESC, c.id DESC LIMIT 1))))
+         AND EXISTS (SELECT 1 FROM encounter_catalog ec WHERE ec.consult_uid = w.consult_uid
+                       AND ec.stages->'sealed'->>'state' = 'ok' AND ec.stages->'stt'->>'state' = 'ok'
+                       AND (ec.stages->'translate'->>'state' = 'ok' OR (ec.stages->'translate'->>'state' = 'n/a' AND ec.stages->'translate'->>'reason' = 'english')))
     ), per AS (
       SELECT t.consult_uid, bool_or(NOT (coalesce(d.evidence, '{}'::jsonb) ? 'no_state')) AS real_row
         FROM t JOIN eta_encounter_windows x ON x.consult_uid = t.consult_uid
