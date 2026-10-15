@@ -8,6 +8,7 @@ import alert_router, ubus_bus
 
 HOME = os.environ.get("GUARDIAN_HOME", os.path.expanduser("~/oc/fleet-access/guardian"))
 TICK_S = 30
+alert_router.Router.inbox_path = os.environ.get("GUARDIAN_GATING_INBOX", "~/oc/fable/INBOX-FROM-GATING.md")      # CA-C6: HEAL action lines are appended here
 
 
 def log(msg):
