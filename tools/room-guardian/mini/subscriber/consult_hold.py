@@ -7,12 +7,13 @@ The hold comes from LIVE sources and fails closed. A room is `false` ONLY if all
   2. the kiosk's own health line for the room is fresh (<= 2 min, by the older of receive time and the line's own ts) and shows no activity;
   3. the room has no open recorder session in the DB (bench_session, status recording or paused), or with open_session_requires_levels true, none with level activity
      (bench_level_sample, session_open, zero_ratio not digital silence) in the last 2 min;
-  4. (extra, may only force true) the hourly eta_encounter_windows table shows no open window for the room, when the room has a slug mapped. If that source is down
-     it contributes nothing (neither true nor false).
+  4. (extra, OFF by default: config consult_windows_enabled, a literal true turns it on; it may only force true) the hourly eta_encounter_windows table shows no open
+     window for the room, when the room has a slug mapped. When it is enabled, a windows read error or stale data (> 2 min) gives true (fable 17:16: any read error in
+     the hold path holds the room). When it is off the windows query is not made at all.
 Any source missing, stale (> 2 min), erroring (down at once, the last good answer is NOT kept) or unmapped gives true FOR THAT ROOM; a batched read that fails is retried
 per room (within an 8 s budget) so one room's read error holds that room only. fable 17:16 ruled both recorder switches default TRUE (config keys, a literal false turns
 one off): capture_closed_counts_quiet (a non-capturing recorder, capture_open false, is quiet) and open_session_requires_levels (an open session holds only with level
-activity, zero_ratio < 0.98, in the last 2 min). The hourly windows signal is optional and may only force true: it being down changes nothing.
+activity, zero_ratio < 0.98, in the last 2 min). The hourly windows signal is OFF by default (consult_windows_enabled) and may only force true.
 The DB sources are Neon reads with the read-only credential file the consult cutter uses (read by path, never printed), one thread and one 5 s timeout per source.
 Every SQL string, table, field and event name below is INFERRED (copied from lib/rooms-live/read.ts, tools/pulse-watch and extensions/pulse-presence/src/agent.js and
 lib/events.js; not run on the Mini)."""
@@ -156,7 +157,7 @@ def _entry(v):
 
 class ConsultHold:
     def __init__(self, rooms, room_map, sources, clock=time.time, audit_path=None, sink=None, cache_s=CACHE_S, max_age_s=MAX_AGE_S, timeout_s=QUERY_TIMEOUT_S,
-                 stuck_s=STUCK_S, capture_closed_counts_quiet=True, open_session_requires_levels=True):
+                 stuck_s=STUCK_S, capture_closed_counts_quiet=True, open_session_requires_levels=True, consult_windows_enabled=False):
         self.rooms, self.map, self.src, self.clock, self.audit_path, self.sink = list(rooms), dict(room_map or {}), sources, clock, audit_path, sink
         self.cache_s, self.max_age_s, self.timeout_s, self.stuck_s = cache_s, max_age_s, timeout_s, stuck_s
         self.closed_quiet, self.need_levels = capture_closed_counts_quiet is not False, open_session_requires_levels is not False     # fable 17:16: default true, only a literal false turns one off
@@ -167,6 +168,7 @@ class ConsultHold:
         self.err_since = None
         self.case_open = False
         self.sink_block_until = 0         # after a sink fault no sink call is tried again for SINK_RETRY_S, so a broken store cannot raise on every tick
+        self.windows_on = consult_windows_enabled is True                 # off unless the config says a literal true
         self.item_bad = {}                # source name -> set of items (machine keys / room ids) whose own read failed in the per-room retry
         self.inflight = {}                # source name -> the fetch thread still running (a new fetch never starts while one is alive)
         self.last = {}                    # room -> (hold, reasons) for the audit line on change
@@ -204,7 +206,7 @@ class ConsultHold:
         self.tried_at = now
         keys = sorted({k for r in self.rooms for k in (_entry(self.map.get(r))[0] or [])})
         ids = sorted({i for r in self.rooms for i in [_entry(self.map.get(r))[1]] if i})
-        todo = [("presence", keys), ("session", ids), ("windows", None)] + ([("levels", ids)] if self.need_levels else [])
+        todo = [("presence", keys), ("session", ids)] + ([("windows", None)] if self.windows_on else []) + ([("levels", ids)] if self.need_levels else [])
         for name, arg in todo:
             if name in ("presence", "session", "levels") and not arg:
                 continue                  # nothing is mapped for this source: every room is already true as unmapped
@@ -285,8 +287,11 @@ class ConsultHold:
             elif any(x[0] == rid and x[1] is not None and (not _finite(x[1]) or now - x[1] <= LEVEL_FRESH_S) for x in self.data["levels"][0]):
                 reasons.append("session_open")                   # level activity in the last 2 min (an unreadable time counts as activity)
         # 4. hourly windows: may only force true
-        if self._fresh("windows", now) and slug and any(w[0] == slug and window_open(w[2], w[3], now) for w in self.data["windows"][0]):
-            reasons.append("windows_open")
+        if self.windows_on and slug:
+            if not self._fresh("windows", now):
+                reasons.append("windows_down")                   # enabled: a read error or stale data holds the room (fable 17:16)
+            elif any(w[0] == slug and window_open(w[2], w[3], now) for w in self.data["windows"][0]):
+                reasons.append("windows_open")
         return (bool(reasons), reasons or ["clear"])
 
     def _active(self, obj):
@@ -315,14 +320,14 @@ class ConsultHold:
                 except Exception:         # noqa: BLE001 -- one room's fault holds that room
                     out[r], why[r] = True, ["fault"]
             self._audit(out, why, now)
-            self._stuck(any((not self._fresh(n, now)) or bool(self.item_bad.get(n)) for n in ("presence", "session", "levels") if self._needed(n)), now)
+            self._stuck(any((not self._fresh(n, now)) or bool(self.item_bad.get(n)) for n in ("presence", "session", "levels", "windows") if self._needed(n)), now)
             return out
         except Exception:                 # noqa: BLE001
             return {r: True for r in self.rooms}
 
     def _needed(self, name):
         if name == "windows":
-            return True
+            return self.windows_on
         if name == "levels" and not self.need_levels:
             return False
         keyname = 0 if name == "presence" else 1

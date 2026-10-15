@@ -129,7 +129,8 @@ class HoldSemantics(unittest.TestCase):
             "presence error": dict(src=Src(presence=RuntimeError("down"))),
             "session open with level activity": dict(src=Src(session={"b6"}, levels=[("b6", T - 5)])),
             "session error": dict(src=Src(session=RuntimeError("down"))),
-            "windows open": dict(src=Src(windows=[("s6", "b6", T - 600, None)])),
+            "windows open (enabled)": dict(src=Src(windows=[("s6", "b6", T - 600, None)]), consult_windows_enabled=True),
+            "windows error (enabled)": dict(src=Src(windows=RuntimeError("down")), consult_windows_enabled=True),
         }
         for name, kw in cases.items():
             with self.subTest(name):
@@ -172,10 +173,11 @@ class HoldSemantics(unittest.TestCase):
                 h, _, _ = mk(rmap=rmap); self.assertEqual(h.hold(), {"opd-6": False, "opd-7": True})
 
     def test_windows_can_force_true_never_false(self):
-        h, _, _ = mk(Src(windows=[("s6", "b6", T - 600, None)])); self.assertEqual(h.hold(), {"opd-6": True, "opd-7": False})
-        h, _, _ = mk(Src(windows=[("s6", "b6", T - 9000, T - 8000)])); self.assertEqual(h.hold(), {"opd-6": False, "opd-7": False})
-        h, _, _ = mk(Src(presence=[], windows=[])); self.assertEqual(h.hold(), {"opd-6": True, "opd-7": True})        # quiet windows cannot rescue a stale presence
-        h, _, _ = mk(Src(session={"b6"}, levels=[("b6", T - 5)], windows=[])); self.assertTrue(h.hold()["opd-6"])
+        W = dict(consult_windows_enabled=True)
+        h, _, _ = mk(Src(windows=[("s6", "b6", T - 600, None)]), **W); self.assertEqual(h.hold(), {"opd-6": True, "opd-7": False})
+        h, _, _ = mk(Src(windows=[("s6", "b6", T - 9000, T - 8000)]), **W); self.assertEqual(h.hold(), {"opd-6": False, "opd-7": False})
+        h, _, _ = mk(Src(presence=[], windows=[]), **W); self.assertEqual(h.hold(), {"opd-6": True, "opd-7": True})        # quiet windows cannot rescue a stale presence
+        h, _, _ = mk(Src(session={"b6"}, levels=[("b6", T - 5)], windows=[]), **W); self.assertTrue(h.hold()["opd-6"])
         self.assertTrue(ch.window_open(T - 900, T - 60, T)); self.assertFalse(ch.window_open(T - 900, T - 300, T)); self.assertFalse(ch.window_open(T - 5 * 3600, None, T))
         for bad in ((None, None), (float("nan"), None), (True, None), ("x", None), (T - 900, float("nan")), (T - 900, "x"), (float("inf"), None), (T + 500, None)):
             self.assertTrue(ch.window_open(bad[0], bad[1], T), bad)
@@ -188,8 +190,11 @@ class HoldSemantics(unittest.TestCase):
                 src = Src(session={"b6", "b7"} if name == "levels" else None); src.v[name] = bad        # levels only matter for a room with an open session
                 h, _, _ = mk(src)
                 out = h.hold(); self.assertEqual(out["opd-6"], True, (name, bad))                  # each of these sources is required for a false
-            src = Src(windows=bad); out = mk(src)[0].hold()                                         # the optional windows source: garbage changes nothing, never raises
+            out = mk(Src(windows=bad))[0].hold()                                                    # windows off (default): garbage changes nothing, never raises
             self.assertEqual(out, {"opd-6": False, "opd-7": False}, bad)
+            if bad is not None and not isinstance(bad, list):                                       # (None is the stub default; a list of odd rows is a valid reply, those rows are dropped)
+                out = mk(Src(windows=bad), consult_windows_enabled=True)[0].hold()                  # windows on: a bad reply is a read error, true for the slugged rooms
+                self.assertEqual(out["opd-6"], True, bad)
 
     def test_timeout_and_no_pileup_of_fetch_threads(self):
         gate = threading.Event(); self.addCleanup(gate.set); calls = []
@@ -201,7 +206,7 @@ class HoldSemantics(unittest.TestCase):
         self.assertEqual(h.hold(), {"opd-6": True, "opd-7": True})
         for _ in range(10):
             clock.adv(31); h.hold(clock())
-        self.assertEqual(sorted(calls), ["levels", "presence", "session", "windows"])           # one thread per source; none started while one was alive
+        self.assertEqual(sorted(calls), ["levels", "presence", "session"])           # one thread per source; none started while one was alive
 
     def test_cache_is_30_s(self):
         h, clock, src = mk(); h.hold(); clock.adv(29); h.hold(clock()); self.assertEqual(src.calls["presence"], 1)
@@ -650,14 +655,44 @@ class Round3(unittest.TestCase):
         self.assertEqual(self.hold(Src(presence=pres)), {"opd-6": False, "opd-7": False})
         self.assertEqual(self.hold(Src(session={"b6", "b7", 5, None}, levels=[("b6", None), ("b7",), 3])), {"opd-6": False, "opd-7": True})    # b7's malformed level row holds only opd-7
 
-    def test_the_windows_source_down_changes_nothing_either_way(self):
-        h, clock, src = mk(Src(windows=RuntimeError("down"))); self.assertEqual(h.hold(), {"opd-6": False, "opd-7": False})
-        self.assertEqual(h.last["opd-6"][1], ("clear",))
+    def test_windows_off_by_default_makes_no_query_and_ignores_open_windows(self):                    # Round 3b
+        h, clock, src = mk(Src(windows=[("s6", "b6", T - 60, None)]))
+        self.assertEqual(h.hold(), {"opd-6": False, "opd-7": False}); self.assertEqual(src.calls["windows"], 0)
+        for v in (False, "true", 1, None):
+            h, _, src = mk(Src(windows=[("s6", "b6", T - 60, None)]), consult_windows_enabled=v)
+            self.assertEqual(h.hold()["opd-6"], False, v); self.assertEqual(src.calls["windows"], 0)           # only a literal true enables it
         sink = Sink(); h2, clock2, _ = mk(Src(windows=RuntimeError("down")), sink=sink)
         for _ in range(80):
             h2.hold(clock2()); clock2.adv(30)
             for r in ROOMS: h2.note_health(r, QUIET, clock2())
-        self.assertEqual(sink.down, 0)                                                               # an optional source being down opens no stuck-source case
+        self.assertEqual(sink.down, 0)                                                               # an off source being "down" opens no stuck-source case
+
+    def test_windows_enabled_error_or_staleness_holds_the_slugged_room(self):                      # Round 3b
+        W = dict(consult_windows_enabled=True)
+        h, clock, src = mk(Src(windows=RuntimeError("down")), **W)
+        self.assertEqual(h.hold(), {"opd-6": True, "opd-7": True}); self.assertIn("windows_down", h.last["opd-6"][1])
+        src.v["windows"] = []; clock.adv(31)
+        for r in ROOMS: h.note_health(r, QUIET, clock())
+        src.v["presence"] = {"hb": [("M6", clock() - 1), ("M7", clock() - 1)], "enc": []}
+        self.assertEqual(h.hold(clock()), {"opd-6": False, "opd-7": False})                         # recovers on the next good read
+        h.cache_s = 10 ** 9; h.data["windows"] = ([], clock() - 130)                                # stale after a good read, no refetch
+        for r in ROOMS: h.note_health(r, QUIET, clock())
+        h.data["presence"] = (src.v["presence"], clock())
+        self.assertEqual(h.hold(clock()), {"opd-6": True, "opd-7": True})
+        # a room with no slug has no windows signal to fail
+        rmap = {"opd-6": MAP["opd-6"], "opd-7": {"machine": ["M7"], "room_id": "b7"}}
+        h3, _, _ = mk(Src(windows=RuntimeError("down")), rmap=rmap, **W); self.assertEqual(h3.hold(), {"opd-6": True, "opd-7": False})
+        # enabled, a windows read error also counts toward the 30 min stuck-source case
+        sink = Sink(); h4, c4, _ = mk(Src(windows=RuntimeError("down")), sink=sink, **W)
+        for _ in range(64):
+            h4.hold(c4()); c4.adv(30)
+        self.assertEqual(sink.down, 1)
+
+    def test_windows_switch_in_the_config(self):
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup); p = os.path.join(t.name, "router.json")
+        for extra, want in (({}, False), ({"consult_windows_enabled": "true"}, False), ({"consult_windows_enabled": 1}, False), ({"consult_windows_enabled": False}, False),
+                            ({"consult_windows_enabled": True}, True)):
+            json.dump(dict({"to": ["a"], "ackers": ["a"]}, **extra), open(p, "w")); self.assertEqual(ubus_bus.load_cfg(p)["consult_windows_enabled"], want)
 
 
 class ConfigFlags(unittest.TestCase):
