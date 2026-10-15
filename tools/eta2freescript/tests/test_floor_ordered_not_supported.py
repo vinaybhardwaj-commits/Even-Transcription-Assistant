@@ -3,7 +3,6 @@ the doctor said it in an unquarantined turn. Synthetic only; the oracle is origi
 from __future__ import annotations
 
 import random
-import subprocess
 import types
 from pathlib import Path
 
@@ -15,13 +14,22 @@ from test_pdqi9_harness import frozen, make_frozen  # noqa: F401
 from tools.eta2freescript.eval.pdqi9 import floors, scoreboard
 
 BASE = "f675fef7"  # origin/main when the order was written
+BASE_SHA = "f675fef7facaef568acc33f1cd99a3535db5ea98"
+FIX_BASE_SHA = "df3c6dd0de2b87841be50647672a87f05d5db47f"
+ORACLE_DIR = Path(__file__).resolve().parent / "fixtures" / "oracles"
+
+
+def _oracle_src(sha: str) -> str:
+    """The vendored floors.py at `sha`, read as text (CI may check out shallow)."""
+    return (ORACLE_DIR / f"floors_{sha}.py").read_bytes().decode("utf-8")
+
+
 ROLES = {"0": "doctor", "1": "patient"}
 
 
 @pytest.fixture(scope="module")
 def old():
-    src = subprocess.run(["git", "show", f"{BASE}:tools/eta2freescript/eval/pdqi9/floors.py"], cwd=Path(__file__).resolve().parent,
-                         capture_output=True, text=True, check=True).stdout
+    src = _oracle_src(BASE_SHA)
     mod = types.ModuleType("tools.eta2freescript.eval.pdqi9.floors_base")
     mod.__package__ = "tools.eta2freescript.eval.pdqi9"
     exec(compile(src, f"floors@{BASE}", "exec"), mod.__dict__)
@@ -217,8 +225,7 @@ FIX_BASE = "df3c6dd0"  # the first ONS commit: _names_match for (i), (?<!\w)/(?!
 
 @pytest.fixture(scope="module")
 def v1():
-    src = subprocess.run(["git", "show", f"{FIX_BASE}:tools/eta2freescript/eval/pdqi9/floors.py"], cwd=Path(__file__).resolve().parent,
-                         capture_output=True, text=True, check=True).stdout
+    src = _oracle_src(FIX_BASE_SHA)
     mod = types.ModuleType("tools.eta2freescript.eval.pdqi9.floors_v1")
     mod.__package__ = "tools.eta2freescript.eval.pdqi9"
     exec(compile(src, f"floors@{FIX_BASE}", "exec"), mod.__dict__)

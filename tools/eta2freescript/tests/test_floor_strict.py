@@ -3,7 +3,6 @@ Property 4 (legacy equivalence) is checked against a private copy of the pre-cha
 from __future__ import annotations
 
 import random
-import subprocess
 import types
 from pathlib import Path
 
@@ -14,6 +13,13 @@ from test_pdqi9_harness import floors_row
 
 from tools.eta2freescript.eval.pdqi9 import floors
 from tools.eta2freescript.eval.pdqi9.floors import _CUT, _DIGITS, _s
+
+ORACLE_DIR = Path(__file__).resolve().parent / "fixtures" / "oracles"
+
+
+def _oracle_source(sha):
+    """floors.py as it was at commit `sha`, vendored as a fixture read as text (CI may check out shallow)."""
+    return (ORACLE_DIR / f"floors_{sha}.py").read_bytes().decode("utf-8")
 
 
 # ---- private copy of the pre-change logic (origin/main 3e10381c) ------------------------------------------------
@@ -373,12 +379,11 @@ def test_flag_is_counted_alongside_the_source_and_rolls_up():
 
 
 # ---- FIX4 (15 Oct 2026): in doubt, ETA's -------------------------------------------------------------------------------
-PREV = "387abea4"  # FIX3: the second oracle. FIX4 may only move a hit toward eta compared with it.
+PREV = "387abea4dc53b293a5d1c9efac79ea8b2a60b292"  # FIX3: the second oracle. FIX4 may only move a hit toward eta compared with it.
 
 
 def _oracle_prev():
-    src = subprocess.run(["git", "show", f"{PREV}:tools/eta2freescript/eval/pdqi9/floors.py"], cwd=Path(__file__).resolve().parent,
-                         capture_output=True, text=True, check=True).stdout
+    src = _oracle_source(PREV)
     mod = types.ModuleType("tools.eta2freescript.eval.pdqi9.floors_prev")
     mod.__package__ = "tools.eta2freescript.eval.pdqi9"
     exec(compile(src, f"floors@{PREV}", "exec"), mod.__dict__)
@@ -763,13 +768,12 @@ def test_fix4_the_new_probes_fail_on_387abea4(prev):
 
 
 # ---- FIX5 (15 Oct 2026): the VERDICT3 probes -----------------------------------------------------------------------------------
-PREV4 = "01e164fd"  # FIX4: the third oracle
+PREV4 = "01e164fdf46c9e4c309a952ff20fd42f39cca4fa"  # FIX4: the third oracle
 
 
 @pytest.fixture(scope="module")
 def prev4():
-    src = subprocess.run(["git", "show", f"{PREV4}:tools/eta2freescript/eval/pdqi9/floors.py"], cwd=Path(__file__).resolve().parent,
-                         capture_output=True, text=True, check=True).stdout
+    src = _oracle_source(PREV4)
     mod = types.ModuleType("tools.eta2freescript.eval.pdqi9.floors_prev4")
     mod.__package__ = "tools.eta2freescript.eval.pdqi9"
     exec(compile(src, f"floors@{PREV4}", "exec"), mod.__dict__)
@@ -1004,13 +1008,12 @@ def test_fix5_the_new_probes_fail_on_fix4(prev4):
 
 
 # ---- FIX6 (15 Oct 2026): VERDICT4 findings 1 and 2 -----------------------------------------------------------------------------
-PREV5 = "ec06d654"  # FIX5: the fourth oracle
+PREV5 = "ec06d654e5876b9942f054f84f58cb6537163c2d"  # FIX5: the fourth oracle
 
 
 @pytest.fixture(scope="module")
 def prev5():
-    src = subprocess.run(["git", "show", f"{PREV5}:tools/eta2freescript/eval/pdqi9/floors.py"], cwd=Path(__file__).resolve().parent,
-                         capture_output=True, text=True, check=True).stdout
+    src = _oracle_source(PREV5)
     mod = types.ModuleType("tools.eta2freescript.eval.pdqi9.floors_prev5")
     mod.__package__ = "tools.eta2freescript.eval.pdqi9"
     exec(compile(src, f"floors@{PREV5}", "exec"), mod.__dict__)
@@ -1152,13 +1155,12 @@ def test_fix6_the_new_probes_fail_on_fix5(prev5):
 
 
 # ---- FIX8 (15 Oct 2026): VERDICT5 findings 1, 2 and 3 --------------------------------------------------------------------------
-PREV6 = "66ccda0a"  # FIX7: the fifth oracle
+PREV6 = "66ccda0aba980ae118d60a6fe11ff4ea19559919"  # FIX7: the fifth oracle
 
 
 @pytest.fixture(scope="module")
 def prev6():
-    src = subprocess.run(["git", "show", f"{PREV6}:tools/eta2freescript/eval/pdqi9/floors.py"], cwd=Path(__file__).resolve().parent,
-                         capture_output=True, text=True, check=True).stdout
+    src = _oracle_source(PREV6)
     mod = types.ModuleType("tools.eta2freescript.eval.pdqi9.floors_prev6")
     mod.__package__ = "tools.eta2freescript.eval.pdqi9"
     exec(compile(src, f"floors@{PREV6}", "exec"), mod.__dict__)
