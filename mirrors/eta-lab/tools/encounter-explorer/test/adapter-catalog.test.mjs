@@ -134,13 +134,17 @@ test("blind room-days: search omits them and reports the count; get and audio re
   assert.deepEqual([(await a.getAudio(FULL.consult_uid)).code], ["blind_room_day"]);
 });
 
+// Non-name tokens: the repo rule bans name-shaped literals on person fields in test files.
+const SYN_DOC = "syn-doctor-01";
+const SYN_PAT = "syn-patient-01";
+
 test("rows are normalised: catalog names, layers_present mapped onto panels, run-id artifact, identity, junk tolerated", () => {
   assert.equal(normRow(null), null);
   assert.equal(normRow({}), null);
   assert.equal(normRow({ consult_uid: 5 }), null);
   const n = normRow({ consult_uid: "syn_c9999", stages: { stt: { state: "ok" }, diar: { state: "failed", reason: "x" }, odd: "weird", jev: { state: "not_available" }, rx: { state: "absent" } }, clip: { minutes: 5.5 }, layers: { stt: { status: "ok", r2_key: "k" }, role: 5 },
     layers_present: ["stt", "translate", "role", "parts", "diar_sarvam", 5], freescript: { artifact_id: 4, state: "ok" }, has_prescription: true,
-    identity: { doctor_name: "Dr Test X", patient_name: "Pat Test X", individual_uid: "syn_ind_x", prescription_uid: "syn_rx_x", presc_state: "signed" }, allowance: "x", t_open: "x", unknown_future: 1 });
+    identity: { doctor_name: SYN_DOC, patient_name: SYN_PAT, individual_uid: "syn_ind_x", prescription_uid: "syn_rx_x", presc_state: "signed" }, allowance: "x", t_open: "x", unknown_future: 1 });
   assert.deepEqual(n.stages, { stt: { state: "done", reason: null }, diar: { state: "failed", reason: "x" }, odd: { state: "pending", reason: null }, jev: { state: "na", reason: null }, rx: { state: "missing", reason: null } });
   assert.equal(n.first_gap, "diar:x");
   assert.equal(n.lengthSec, 330);
@@ -149,7 +153,7 @@ test("rows are normalised: catalog names, layers_present mapped onto panels, run
   assert.equal(n.layers.role, null);
   assert.deepEqual(n.layers_present, ["transcript", "parts"]);
   assert.equal(n.freescript.artifact_id, "4");
-  assert.deepEqual([n.doctor_name, n.patient_name, n.individual_uid, n.prescription_uid], ["Dr Test X", "Pat Test X", "syn_ind_x", "syn_rx_x"]);
+  assert.deepEqual([n.doctor_name, n.patient_name, n.individual_uid, n.prescription_uid], [SYN_DOC, SYN_PAT, "syn_ind_x", "syn_rx_x"]);
   assert.equal(n.prescription.presc_state, "signed");
   assert.equal(n.has_prescription, true);
   assert.equal(normRow({ consult_uid: "syn_c9998" }).has_prescription, null);
