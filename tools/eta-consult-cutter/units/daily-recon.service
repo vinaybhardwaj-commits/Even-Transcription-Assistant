@@ -1,0 +1,13 @@
+[Unit]
+Description=Consult daily reconciliation (PQM visits vs placed vs clips vs lanes vs R2, per room); read-only, writes ~/eta-data/consult/recon and the alert spool
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/oc/consult/cutter-deploy
+# --auto: the 22:00 run reconciles today, the 10:00 run reconciles yesterday
+ExecStart=%h/oc/consult/cutter-venv/bin/python tools/daily_recon.py --auto
+Nice=19
+# V, 12 Oct 2026: same durable override as index-mirror (the guard runs at upload only)
+Environment=INDEX_MIRROR_SKIP_SLUG_GUARD=1
+IOSchedulingClass=idle
+TimeoutStartSec=30min

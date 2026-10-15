@@ -1,0 +1,19 @@
+[Unit]
+Description=Consult re-cut worker (standing): re-cuts missed consults first, then cut clips without embeddings; waits for cutter.lock and the :35 timer gap (tools/recut_queue.py --loop)
+
+[Service]
+Type=simple
+# runs the pinned deploy worktree, like cutter-hourly.service
+WorkingDirectory=%h/oc/consult/cutter-deploy
+ExecStart=%h/oc/consult/cutter-venv/bin/python tools/recut_queue.py --loop
+Nice=10
+# stop: SIGINT to the worker only (mixed); it finishes the cut in flight, then exits. 330 s is the grace; a longer cut is killed (a re-cut is idempotent, the next pass redoes it)
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=330
+Restart=on-failure
+RestartSec=300
+# stop it without a unit change: touch ~/eta-data/consult/recut.stop (the worker idles while the file exists)
+
+[Install]
+WantedBy=default.target

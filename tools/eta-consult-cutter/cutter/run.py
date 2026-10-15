@@ -4,7 +4,7 @@
   python -m cutter.run --backfill 2026-10-02 2026-10-07 [--execute]      (dry-run unless --execute; NOT to be executed before the review PASS)
 Eligible = window closed >= 15 min ago, not a blind room-day, with tape (else the skip reason from room_audio_state), not already cut with the same signature (t_close, close_reason, doctor).
 GPU work (pyannote 3.1 on the T4) runs in ONE worker under flock ~/gpu.lock and, only while config.GPU_WINDOW_ENABLED is True, never starts between 22:30 and 06:00 (off since 08 Oct 2026: per-job gpu.lock sharing instead). Patient audio stays under ~/eta-data (0700) and private R2."""
-import argparse, datetime as dt, json, logging, os, shutil, subprocess, sys, time
+import argparse, atexit, datetime as dt, json, logging, os, shutil, signal, subprocess, sys, time
 from . import config as C, spanrule as S, windows as Wn, tape as T, state as ST, speak as SP, store as SO, gpu as G
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 log = logging.getLogger("cutter")
@@ -50,25 +50,32 @@ def safe_sig(w, rw, ctx):
     try: return window_sig(w, rw, ctx)[0]
     except Exception: return None
 
+def low_tape(w, cov):
+    """m3-21: -> "ok" (coverage >= MIN_COVERAGE), "partial" (below it but >= MIN_PARTIAL_TAPE_S seconds of tape in the window: cut, flagged), "none" (skip)."""
+    if cov >= C.MIN_COVERAGE: return "ok"
+    return "partial" if cov * (w["t_close"] - w["t_open"]) >= C.MIN_PARTIAL_TAPE_S else "none"
+
 def prepare(w, room_windows, ctx, mode=None):
     """checks + plan + working audio. -> ('skip', row) | ('job', dict)."""
     base = dict(consult_uid=w["consult_uid"], ist_date=ist_date(w["t_open"]), room_slug=w["room_slug"], room_id=w["room_id"], doctor_uid=w["doctor_uid"], doctor_name=w["doctor_name"],
                 window_id=w["id"], t_open=iso(w["t_open"]), t_close=iso(w["t_close"]), close_reason=w["close_reason"], quality=w["quality"], resolver_version=w["resolver_version"], computed_at=w["computed_at"],
-                signature=window_sig(w, room_windows, ctx)[0], code_commit=ctx["commit"])
+                signature=window_sig(w, room_windows, ctx)[0], code_commit=ctx["commit"],
+                **{k: w[k] for k in ("boundary_source", "room_source", "room_confidence", "pqm_step_uid", "pqm_called", "pqm_completed") if k in w})                    # m3-17: PQM file windows only
     ho, union = ctx["heldout"], ctx["union"]
     # R5: the SPAN's days, not only the window's: plan the widest span (no tape cap) from the manifest and skip the whole window if any IST day it touches is a blind room-day, before any tape is pulled
     pr0 = S.plan_span(w, room_windows, None, None, w["doctor_uid"] in ctx["prints"]); hi = pr0["end"] if pr0["mode"] == "fixed" else pr0["search_end"]
     if any(ho.is_held_out(union, d, w["room_id"]) for d in span_days(pr0["start"], max(hi, w["t_close"]))): return "skip", dict(base, status="skipped", skip_reason="blind_room_day")
     wmin = (w["t_close"] - w["t_open"]) / 60.0                                                                       # m3-12: a window of more than MAX_DIARIZE_MIN is mostly not one consult; no tape pull, no GPU, recorded for the index page / M1 (no boundary trimmer yet, so it is not retried)
-    if wmin > C.MAX_DIARIZE_MIN:
+    if wmin > C.MAX_DIARIZE_MIN and "pqm_timeout_3600" not in w.get("flags", ()):                                  # m3-17: a PQM 3600 s timeout window is cut (flagged), every other long window is still deferred
         if (ctx.get("prev_rows", {}).get(w["consult_uid"]) or {}).get("status") == "cut": return "keep", None            # an earlier cut stays the latest row
         return "deferred_long", dict(base, status="deferred_long", window_min=round(wmin, 2), span_min=round((max(pr0["end"] if pr0["mode"] == "fixed" else pr0["search_end"], w["t_close"]) - pr0["start"]) / 60.0, 2))
     by = ctx["by"]; want = wanted(pr0, w)
     if T.coverage(by, w["room_id"], w["t_open"], w["t_close"]) < C.MIN_COVERAGE:
         T.LAST_PULL_ERROR = None
         if ctx["pull"](w["room_id"], w["t_open"] - 60, w["t_close"] + 900): by = ctx["by"] = ctx["reload_by"]()
-        if T.coverage(by, w["room_id"], w["t_open"], w["t_close"]) < C.MIN_COVERAGE:
-            return "skip", dict(base, status="skipped", skip_reason=ctx["no_tape_reason"](w["room_id"], w["t_open"], w["t_close"]), coverage=round(T.coverage(by, w["room_id"], *want), 3), **({"pull_error": T.LAST_PULL_ERROR} if T.LAST_PULL_ERROR else {}))
+        if low_tape(w, T.coverage(by, w["room_id"], w["t_open"], w["t_close"])) == "none":
+            return "skip", dict(base, status="skipped", skip_reason=ctx["no_tape_reason"](w["room_id"], w["t_open"], w["t_close"]), coverage=round(T.coverage(by, w["room_id"], *want), 3), **({"pull_error": T.LAST_PULL_ERROR, "pull_error_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")} if T.LAST_PULL_ERROR else {}))
+    partial = low_tape(w, T.coverage(by, w["room_id"], w["t_open"], w["t_close"])) == "partial"
     if mode == "recut":                                                                                              # m3-15 (m3-14 F6): never replace a cut by a re-cut with LESS tape (rotated tape)
         pc = (ctx.get("prev_rows", {}).get(w["consult_uid"]) or {}).get("coverage"); wc = T.coverage(by, w["room_id"], *want)
         if pc is not None and wc + 0.005 < pc: log.warning("re-cut of %s refused: tape coverage %.3f < the original cut's %.3f", w["consult_uid"], wc, pc); return "skip", dict(base, status="skipped", skip_reason=f"recut_coverage_lower {wc:.3f} < {pc:.3f}")
@@ -84,7 +91,7 @@ def prepare(w, room_windows, ctx, mode=None):
     if silent:                                                                                                       # m3-05(a): digital silence is recorded, with the measured loudness, before any GPU time is spent on it; final
         os.remove(work); return "skip", dict(base, status="skipped", skip_reason="silent_audio", lufs=lufs, final=True, coverage=round(cov, 3))
     if not g["ok"]: os.remove(work); return "defer", dict(why=g["why"])
-    return "job", dict(w=w, base=base, plan=pr, by=by, work=work, identified=identified, out=f"{ctx['work']}/{w['consult_uid']}.diar.json", coverage=round(cov, 3), want_coverage=round(T.coverage(by, w["room_id"], *want), 3), span_min=span_min)
+    return "job", dict(partial=partial, w=w, base=base, plan=pr, by=by, work=work, identified=identified, out=f"{ctx['work']}/{w['consult_uid']}.diar.json", coverage=round(cov, 3), want_coverage=round(T.coverage(by, w["room_id"], *want), 3), span_min=span_min)
 
 def finish(job, ctx, commit=None):
     """diarizer result -> span end, labels, files, index row."""
@@ -93,7 +100,7 @@ def finish(job, ctx, commit=None):
     if "error" in res: raise RuntimeError(res["error"])                                                              # m3-05(d): through error_row, so every error row carries attempts and the cap applies
     log.info("worker timing %s %s", w["consult_uid"], res.get("timing"))                                             # m3-12: diarize / ECAPA load / embedding seconds and the ECAPA device
     pv = ctx["prints"].get(w["doctor_uid"]) if job["identified"] else None
-    lab = SP.label(res, pv); flags = list(pr["flags"]); identified = job["identified"]
+    lab = SP.label(res, pv); flags = list(pr["flags"]) + list(w.get("flags", [])) + (["partial_tape"] if job.get("partial") else []); identified = job["identified"]
     split_fail = SP.split_failed(lab, identified)                                                                    # m3-06 (M1): never put the doctor's speech into others.flac silently
     if split_fail:
         lab = SP.label(res, None); pv = None; identified = False; flags.append("doctor_split_failed"); split_fail += " (search end not extended)" if pr["mode"] == "search" else ""        # N4
@@ -116,7 +123,7 @@ def finish(job, ctx, commit=None):
               overlap="overlapped speech is in consult.flac only; doctor.flac / others.flac drop it", code_commit=ctx["commit"], created_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
     sizes = SO.write_consult(final, job["work"], end_rel, dp, op, identified, tl, ctx["work"])
     prev_row = ctx.get("prev_rows", {}).get(w["consult_uid"])
-    row = dict(base, status="cut", consult_zero_ratio=tl["consult_zero_ratio"], vi_frame_share=tl["vi_frame_share"], voice_isolated=tl["voice_isolated"], gating_source=tl["gating_source"], rule=pr["rule"], flags=flags, doctor_identified=identified, doctor_split_failed=bool(split_fail), doctor_split_failed_reason=split_fail, unembedded_s=unemb, doctor_like_s=dlike, span_start=iso(pr["start"]), span_end=iso(end), span_end_epoch=round(end, 3), minutes=round(end_rel / 60, 2),
+    row = dict(base, status="cut", consult_zero_ratio=tl["consult_zero_ratio"], vi_frame_share=tl["vi_frame_share"], voice_isolated=tl["voice_isolated"], gating_source=tl["gating_source"], rule=pr["rule"], flags=flags, doctor_identified=identified, doctor_split_failed=bool(split_fail), doctor_split_failed_reason=split_fail, unembedded_s=unemb, doctor_like_s=dlike, **({"tape_partial": True} if job.get("partial") else {}), span_start=iso(pr["start"]), **({"consult_offset_s": round(w["pqm_called"] - pr["start"], 3)} if "pqm_called" in w else {}), span_end=iso(end), span_end_epoch=round(end, 3), minutes=round(end_rel / 60, 2),
                path=rel, coverage=job["want_coverage"], bytes=sizes, bytes_total=sum(sizes.values()), r2=dict(status="pending_mirror"), cut_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
     if commit: commit(row)                                                                                           # m3-15 (re-cut): files swapped -> the NEW row is in the index at once (row and files agree) -> only then R2
     try: r2 = ctx["mirror"](final, rel)
@@ -165,7 +172,7 @@ def make_ctx(now, runner=None, mirror_fn=None, pull=None, loader=None, prints=No
     ho, union, usha = load_heldout()
     def reload_by(): ctx["by"] = T.load_manifest(); return ctx["by"]
     ctx = dict(now=now, clock=time.time, silent=T.is_silent, commit=code_commit(), heldout=ho, union=union, union16=usha, prints=prints if prints is not None else SP.load_prints(strict=True), work=f"{C.E}/consult/cutter-work", by=T.load_manifest(), reload_by=reload_by,
-               pull=pull or (lambda room, a, b: T.pull_missing(room, a, b)), no_tape_reason=lambda room, a, b: ST.no_tape_reason(room, a, b, loader=loader), mirror=mirror_fn or (lambda d, rel: SO.mirror(d, rel)), unmirror=lambda rel, names: SO.delete_remote(rel, names), runner=runner)
+               pull=pull or (lambda room, a, b: T.pull_missing(room, a, b)), no_tape_reason=lambda room, a, b: ST.no_tape_reason(room, a, b, loader=loader), mirror=mirror_fn or (lambda d, rel: SO.mirror(d, rel)), unmirror=lambda rel, names: SO.delete_remote(rel, names), r2_ok=SO.r2_healthy, runner=runner)
     return ctx
 
 def error_row(base, msg, prev):
@@ -177,23 +184,26 @@ def cleanup(job):
         try: os.remove(f)
         except OSError: pass
 
-def run_once(windows, ctx, only=None, date_from=None, date_to=None, dry=False, index_path=None, min_open=None, recut=False):
-    now = ctx["now"]; index = SO.read_index(index_path); ctx["prev_rows"] = index; state = SO.read_state(ctx.get("state_path")); todo = select(windows, index, now, only, date_from, date_to, state, sigfn=lambda w, rw: window_sig(w, rw, ctx)[0], min_open=min_open, recut=recut)
-    todo.sort(key=lambda t: (-dt.datetime.strptime(ist_date(t[0]["t_open"]), "%Y-%m-%d").toordinal(), t[0]["t_open"], t[0]["id"]))        # m3-12: newest IST day first (today's and the VP-ACC holdout days before the old backlog), oldest first within a day
-    summary = dict(eligible=len(todo), cut=0, skipped=0, errors=0, deferred_gpu=0, deferred_long=0); rows = []
+def run_once(windows, ctx, only=None, date_from=None, date_to=None, dry=False, index_path=None, min_open=None, recut=False, budget_s=None, t0=None):
+    """budget_s (m3-21; the hourly run passes 1500): after budget_s seconds (counted from t0, default now) no NEW window is started; the one in flight finishes; the windows not started stay eligible for the next run and are counted in summary["budget_stopped"]."""
+    t_start = t0 if t0 is not None else (ctx["clock"]() if budget_s is not None else None); now = ctx["now"]; index = SO.read_index(index_path); ctx["prev_rows"] = index; state = SO.read_state(ctx.get("state_path")); todo = select(windows, index, now, only, date_from, date_to, state, sigfn=lambda w, rw: window_sig(w, rw, ctx)[0], min_open=min_open, recut=recut)
+    todo.sort(key=lambda t: (-dt.datetime.strptime(ist_date(t[0]["t_open"]), "%Y-%m-%d").toordinal(), t[0].get("prio", 0), t[0]["t_open"], t[0]["id"]))        # m3-12: newest IST day first (today's and the VP-ACC holdout days before the old backlog), oldest first within a day
+    summary = dict(eligible=len(todo), cut=0, skipped=0, errors=0, deferred_gpu=0, deferred_long=0, budget_stopped=0); rows = []
     if dry:                                                                                                          # planned spans from the current manifest, no writes at all
         for w, rw, mode in todo:
             ts, te = T.bounds(ctx["by"], w["room_id"], w["t_open"]); pr = S.plan_span(w, rw, ts, te, w["doctor_uid"] in ctx["prints"]); hi = pr["end"] if pr["mode"] == "fixed" else pr["search_end"]
             cov_w = T.coverage(ctx["by"], w["room_id"], w["t_open"], w["t_close"]); wide = S.plan_span(w, rw, None, None, w["doctor_uid"] in ctx["prints"]); hi0 = wide["end"] if wide["mode"] == "fixed" else wide["search_end"]
             blind = any(ctx["heldout"].is_held_out(ctx["union"], d, w["room_id"]) for d in span_days(wide["start"], max(hi0, w["t_close"])))                               # N2: the dry-run applies the same skips as prepare()
-            would = "blind_room_day" if blind else "deferred_long (window %.0f min > %.0f)" % ((w["t_close"] - w["t_open"]) / 60.0, C.MAX_DIARIZE_MIN) if (w["t_close"] - w["t_open"]) / 60.0 > C.MAX_DIARIZE_MIN else ("no_tape_coverage_%.2f (re-checked hourly for 24 h)" % cov_w if cov_w < C.MIN_COVERAGE else None)
+            would = "blind_room_day" if blind else "deferred_long (window %.0f min > %.0f)" % ((w["t_close"] - w["t_open"]) / 60.0, C.MAX_DIARIZE_MIN) if (w["t_close"] - w["t_open"]) / 60.0 > C.MAX_DIARIZE_MIN and "pqm_timeout_3600" not in w.get("flags", ()) else ("no_tape_coverage_%.2f (re-checked hourly for 24 h)" % cov_w if low_tape(w, cov_w) == "none" else None)
             rows.append(dict(consult_uid=w["consult_uid"], mode=mode, room=w["room_slug"], tape_coverage_of_window=round(cov_w, 3), **({"would_skip": would} if would else {}), close_reason=w["close_reason"], window_min=round((w["t_close"] - w["t_open"]) / 60, 1), rule=pr["rule"], start=iso(pr["start"]),
                              **({"end": iso(pr["end"])} if pr["mode"] == "fixed" else {"search_to": iso(hi), "end": "last doctor turn + 30 s, never before t_close"}), span_min_max=round((hi - pr["start"]) / 60, 1), flags=pr["flags"],
                              covers_whole_window=hi >= w["t_close"] and pr["start"] <= w["t_open"]))
         summary["consults"] = [r["consult_uid"] for r in rows]; return summary, rows
     SO.ensure_dir(C.CLIPS)                                                                                           # R6: the clips root is 0700 too (chmod an existing one)
     summary["swept_tmp"] = SO.sweep_tmp(C.CLIPS, now)                                                                # m3-05(e): stale <uid>.tmp dirs older than 1 h
-    for w, rw, mode in todo:
+    for n_done, (w, rw, mode) in enumerate(todo):
+        if budget_s is not None and ctx["clock"]() - t_start >= budget_s:                                           # m3-21: the run budget is spent: start nothing new
+            summary["budget_stopped"] = len(todo) - n_done; log.info("run budget %.0f s spent: %d window(s) left for the next run", budget_s, summary["budget_stopped"]); break
         prev = index.get(w["consult_uid"]); base = None; job = None; state[w["consult_uid"]] = now
         try:
             if mode in ("recheck", "final") and prev and prev.get("status") == "cut":                                 # partial-tape cut: pull, and re-cut only if the coverage of the wanted span increased
@@ -209,8 +219,9 @@ def run_once(windows, ctx, only=None, date_from=None, date_to=None, dry=False, i
                 summary["deferred_long"] += 1
                 if not (prev and prev.get("status") == "deferred_long" and prev.get("t_close") == x["t_close"] and prev.get("close_reason") == x["close_reason"]): SO.append_index(x, index_path); rows.append(x)          # one row per change, not one per hourly run
                 continue
-            if kind == "skip" and mode in ("recheck", "final") and prev and prev.get("status") == "skipped" and mode == "recheck" and x.get("skip_reason") == prev.get("skip_reason"): continue          # nothing new: no extra row
-            if kind == "skip" and mode == "final": x = dict(x, final=True, skip_reason=f"final after 24 h: {x['skip_reason']}")
+            pqm_pull_fail = kind == "skip" and w.get("boundary_source") == "pqm" and x.get("pull_error")                              # m3-17 add. 4: every failed PQM pull is its own row (the runner counts them) and is never final
+            if kind == "skip" and not pqm_pull_fail and mode in ("recheck", "final") and prev and prev.get("status") == "skipped" and mode == "recheck" and x.get("skip_reason") == prev.get("skip_reason"): continue          # nothing new: no extra row
+            if kind == "skip" and mode == "final" and not pqm_pull_fail: x = dict(x, final=True, skip_reason=f"final after 24 h: {x['skip_reason']}")
             if kind == "skip": SO.append_index(x, index_path); rows.append(x); summary["skipped"] += 1; continue
             if kind == "defer": summary["deferred_gpu"] += 1; log.info("GPU deferred %s: %s", w["consult_uid"], x["why"]); continue
             job = x; base = job["base"]; g = G.gate(ctx["clock"](), job["span_min"])                                  # again right before the launch (the cut took time)
@@ -269,7 +280,7 @@ def note_upload_success(uids=()):
         if new != st: _write_mirror_state(new)
     except Exception as e: log.warning("mirror-state update failed (%s): carrying on", type(e).__name__)
 
-def _stall_check(tried, succeeded, pending_left):
+def _stall_check(tried, succeeded, pending_left, healthy=None):
     """m3-16d: a pass counts toward the STALL only if it tried >= 2 distinct rows (the probe included) and every upload failed; at MIRROR_STALL_PASSES one ALERT line "r2_mirror_stalled". A single row failing alone for MIRROR_ROW_STUCK_PASSES passes
     gets its own one-time ALERT "r2_row_stuck <consult_uid>". Any success resets and re-arms. Never raises (a telemetry counter must not stop the cutter)."""
     try:
@@ -277,6 +288,13 @@ def _stall_check(tried, succeeded, pending_left):
         st = _read_mirror_state(); new = dict(st)
         if succeeded:
             new.update(zero_success_passes=0, alerted=False)
+        elif len(tried) >= 2 and healthy is True:                                                # m3-16e/f: R2 accepts a write probe but these rows fail: each is its own problem, never a stall; R2 is writable, so the consecutive count restarts and the stall alert is re-armed
+            new.update(zero_success_passes=0, alerted=False)
+            solo = dict(st["solo"]); ra = list(st["row_alerted"])
+            for u in tried:
+                solo[u] = solo.get(u, 0) + 1
+                if solo[u] >= C.MIRROR_ROW_STUCK_PASSES and u not in ra: alert(f"r2_row_stuck {u}"); ra.append(u)
+            new.update(solo=solo, row_alerted=ra)
         elif len(tried) >= 2:
             z = st["zero_success_passes"] + 1; alerted = st["alerted"]
             if z >= C.MIRROR_STALL_PASSES and not alerted: alert(f"r2_mirror_stalled: {z} consecutive mirror passes in which every upload of >= 2 rows failed, {pending_left} rows pending"); alerted = True
@@ -313,45 +331,133 @@ def mirror_pending(ctx, index_path=None, budget_s=None, clock=time.time, include
             att = (row["r2"].get("attempts") or 0) + 1; SO.append_index(dict(row, r2=dict(r2, attempts=att)), index_path)
             if att == MIRROR_MAX_ATTEMPTS: log.error("R2 mirror of %s failed %d times: skipped until fixed (%s)", uid, att, r2.get("error")); alert(f"ALERT cutter R2 mirror skipped after {att} failed attempts: consult {uid}: {r2.get('error')}")
         note_upload_success(uploaded)
-    _stall_check(tried, n, len(pending_mirror_rows(index_path, include_parked=include_parked)))
+    healthy = None
+    if n == 0 and len(tried) >= 2:                                                       # every upload failed: is it R2 or the rows? write a probe (m3-16f); the probe's time counts against the pass budget (no probe when the budget is already spent)
+        try: healthy = ctx["r2_ok"]() if ctx.get("r2_ok") and not (budget_s is not None and clock() - t0 >= budget_s) else None
+        except Exception: healthy = None
+    _stall_check(tried, n, len(pending_mirror_rows(index_path, include_parked=include_parked)), healthy)
     return n
 
 def acquire_run_lock(path=None):
     """R8: one cutter run at a time (timer and manual --backfill --execute can no longer interleave). -> the open lock file (keep it referenced) or None when another run holds it."""
     import fcntl
     p = path or C.RUN_LOCK; os.makedirs(os.path.dirname(p), exist_ok=True); f = open(p, "a")
-    try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); return f
+    try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError: f.close(); return None
+    _write_holder(p); return f
+
+def _write_holder(lock_path):
+    """m3-23: <lock>.holder = {pid, mode, start, ticks} for tools/cutter_watchdog.py; removed at exit / release_run_lock. Never raises (a failed write must not cost the lock)."""
+    hp = lock_path + ".holder"; tmp = f"{hp}.tmp.{os.getpid()}"
+    try:
+        ticks = None
+        try: ticks = int(open("/proc/self/stat").read().rsplit(")", 1)[1].split()[19])
+        except (OSError, IndexError, ValueError): pass
+        with open(tmp, "w") as fh: json.dump(dict(pid=os.getpid(), mode=" ".join(x for x in sys.argv[1:] if x.startswith("--")) or "run", start=time.time(), ticks=ticks), fh)
+        os.replace(tmp, hp)
+        atexit.register(_drop_holder, hp, os.getpid())
+        try: signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))                      # SIGTERM while holding: SystemExit runs atexit, which removes the holder
+        except (ValueError, OSError): pass
+    except OSError:
+        try: os.remove(tmp)
+        except OSError: pass
+
+def _drop_holder(hp, pid):
+    try:
+        if json.load(open(hp)).get("pid") == pid: os.remove(hp)
+    except (OSError, ValueError, AttributeError): pass
+
+def release_run_lock(f):
+    """m3-23: drop the holder file, then the lock."""
+    _drop_holder(f.name + ".holder", os.getpid()); f.close()
+
+DEFAULT_LOCK_WAIT_S = 900.0; LOCK_POLL_S = 5.0
+
+def lock_wait_s():
+    """m3-21c: env CUTTER_LOCK_WAIT_S (seconds, >= 0), else 900; an unreadable or negative value -> the default."""
+    try: v = float(os.environ.get("CUTTER_LOCK_WAIT_S", ""))
+    except ValueError: return DEFAULT_LOCK_WAIT_S
+    return v if v >= 0 and v == v and v != float("inf") else DEFAULT_LOCK_WAIT_S
+
+def waiting_marker_path(): return os.path.join(os.path.dirname(C.RUN_LOCK), "hourly-waiting")
+
+def _write_waiting_marker(path):
+    """m3-21c F1: atomic marker {pid, start} so recut_queue and backfill_pqm do not start a cut while the hourly run waits for the lock."""
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w") as fh: json.dump(dict(pid=os.getpid(), start=time.strftime("%Y-%m-%dT%H:%M:%S%z")), fh)
+        os.replace(tmp, path)
+    except OSError: log.warning("could not write %s", path)
+
+def acquire_run_lock_wait(wait_s, path=None, sleep=time.sleep, clock=time.monotonic, poll_s=LOCK_POLL_S, marker=None):
+    """m3-21c: like acquire_run_lock, but polls every poll_s for up to wait_s seconds. -> (lock file or None, seconds waited). While it waits it keeps `marker` (default waiting_marker_path()) and removes it on acquire or exit."""
+    take = (lambda: acquire_run_lock(path)) if path else (lambda: acquire_run_lock())
+    t0 = clock(); f = take()
+    if f is not None or wait_s <= 0: return f, round(clock() - t0, 1)
+    mk = marker or waiting_marker_path(); _write_waiting_marker(mk)
+    old_term = None
+    try: old_term = signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))                   # m3-21c F4: systemctl stop / the unit timeout send SIGTERM; SystemExit runs the finally below like Ctrl-C does
+    except (ValueError, OSError): pass                                                                           # not the main thread: no handler
+    try:
+        while f is None and clock() - t0 < wait_s:
+            sleep(min(poll_s, max(0.0, wait_s - (clock() - t0)))); f = take()
+    finally:
+        if old_term is not None and f is None:                                                                   # m3-23: after an acquire the holder's SIGTERM handler stays
+            try: signal.signal(signal.SIGTERM, old_term)
+            except (ValueError, OSError): pass
+        try: os.remove(mk)
+        except OSError: pass
+    return f, round(clock() - t0, 1)
 
 def default_since(now=None):
     """m3-07: the hourly run's range start = the floor date (2 Oct), not now - 2 days: a window that was deferred (GPU gate) or had no row yet is cut whatever its age; select() skips every window that already has a final row."""
     return dt.datetime.strptime(C.FLOOR_DATE, "%Y-%m-%d").replace(tzinfo=IST).timestamp()
 
+DEFAULT_RUN_BUDGET_S = 1500.0                                                                                       # m3-21 round 2: 25 min + the longest job in flight (~12 min) ~= the 40 min target; the post-run mirror (<= MIRROR_BUDGET_S) comes on top
+
+def run_budget_s():
+    """env CUTTER_RUN_BUDGET_S (seconds, > 0), else the default; an unreadable or non-positive value -> the default."""
+    try: v = float(os.environ.get("CUTTER_RUN_BUDGET_S", ""))
+    except ValueError: return DEFAULT_RUN_BUDGET_S
+    return v if v > 0 and v == v and v != float("inf") else DEFAULT_RUN_BUDGET_S
+
 def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument("--once", action="store_true"); ap.add_argument("--since"); ap.add_argument("--only"); ap.add_argument("--recut", action="store_true", help="with --only: cut that already-cut window again with the current code"); ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--mirror-only", action="store_true", help="take cutter.lock and only upload the pending R2 mirrors (no cutting, no DB, no GPU)")
-    ap.add_argument("--backfill", nargs=2, metavar=("FROM", "TO")); ap.add_argument("--execute", action="store_true"); a = ap.parse_args(argv)
+    ap.add_argument("--backfill", nargs=2, metavar=("FROM", "TO")); ap.add_argument("--windows-file", metavar="PATH", help="m3-17: cut the windows of this JSONL file (tools/pqm_windows.py) instead of the Neon windows; no 2 Oct floor; the hourly path never sets it"); ap.add_argument("--execute", action="store_true"); a = ap.parse_args(argv)
     if a.recut and not a.only: ap.error("--recut needs --only UID")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     if a.mirror_only:                                                                                               # m3-15: drain the R2 backlog without a cutting run
         lock = acquire_run_lock()
         if lock is None: print(json.dumps({"locked": True})); return 0
-        n = mirror_pending(dict(mirror=lambda d, rel: SO.mirror(d, rel)), budget_s=C.MIRROR_BUDGET_S * 2, include_parked=True); print(json.dumps(dict(mirrored_pending=n, still_pending=len(pending_mirror_rows()), parked_after_3_failures=len(pending_mirror_rows(include_parked=True)) - len(pending_mirror_rows())))); return 0
+        n = mirror_pending(dict(mirror=lambda d, rel: SO.mirror(d, rel), r2_ok=SO.r2_healthy), budget_s=C.MIRROR_BUDGET_S * 2, include_parked=True); print(json.dumps(dict(mirrored_pending=n, still_pending=len(pending_mirror_rows()), parked_after_3_failures=len(pending_mirror_rows(include_parked=True)) - len(pending_mirror_rows())))); return 0
     try: prints = SP.load_prints(strict=True)                                                                      # vp-auto-05b F2: bad prints abort the run BEFORE any cutting, loudly, no fallback; the SAME dict is used for the run (05c N3: no second read)
     except SP.PrintsError as e:
         msg = f"ALERT cutter prints invalid, run aborted before cutting: {e}"; log.error(msg); alert(msg); print(json.dumps({"aborted": "prints_invalid", "alert": msg})); return 3
-    lock = acquire_run_lock()
-    if lock is None: log.info("another cutter run holds %s: exiting 0", C.RUN_LOCK); print(json.dumps({"locked": True})); return 0
-    now = time.time(); d_from = d_to = None; dry = a.dry_run
+    waits = a.once and not (a.only or a.backfill or a.windows_file or a.dry_run)                                        # m3-21c: only the hourly path waits for a busy lock; every other mode exits at once
+    if waits:
+        lock, waited = acquire_run_lock_wait(lock_wait_s())
+        if lock is None: log.info("another cutter run still holds %s after %.0f s: exiting 0", C.RUN_LOCK, waited); print(json.dumps({"locked": True, "lock_waited_s": waited})); return 0
+    else:
+        lock = acquire_run_lock(); waited = None
+        if lock is None: log.info("another cutter run holds %s: exiting 0", C.RUN_LOCK); print(json.dumps({"locked": True})); return 0
+    t_run = time.time(); now = t_run; d_from = d_to = None; dry = a.dry_run                                          # m3-21c: the run budget clock (t_run) starts HERE, after the lock is held; the wait does not spend it
     if a.backfill: d_from, d_to = a.backfill; dry = not a.execute; since = dt.datetime.strptime(d_from, "%Y-%m-%d").replace(tzinfo=IST).timestamp()
     else: since = dt.datetime.strptime(a.since, "%Y-%m-%d").replace(tzinfo=IST).timestamp() if a.since else default_since(now)
     if not (a.once or a.backfill): ap.error("--once or --backfill")
     mirrored_first = 0
-    if not dry and not a.only: mirrored_first = mirror_pending(dict(mirror=lambda d, rel: SO.mirror(d, rel)), budget_s=C.MIRROR_BUDGET_S)                # m3-15: the backlog first (cheap, no GPU), bounded; a run killed by the unit timeout no longer starves it
-    windows = Wn.fetch(since - C.LOOKBACK_S); ctx = make_ctx(now, prints=prints)                                                     # N1(b): neighbours from 24 h before the range being cut
-    summary, rows = run_once(windows, ctx, a.only, d_from, d_to, dry, min_open=since, recut=a.recut)
+    if not dry and not a.only: mirrored_first = mirror_pending(dict(mirror=lambda d, rel: SO.mirror(d, rel), r2_ok=SO.r2_healthy), budget_s=C.MIRROR_BUDGET_S)                # m3-15: the backlog first (cheap, no GPU), bounded; a run killed by the unit timeout no longer starves it
+    if a.windows_file:                                                                                              # m3-17: file input has its own range (no 2 Oct floor); the day filter of --backfill still applies
+        try: windows = Wn.load_file(a.windows_file)
+        except (OSError, ValueError) as e: log.error("windows file: %s", e); print(json.dumps({"aborted": "windows_file_invalid", "error": str(e)[:200]})); return 3
+        if not a.backfill: since = min([w["t_open"] for w in windows], default=since)
+        ctx = make_ctx(now, prints=prints)
+    else: windows = Wn.fetch(since - C.LOOKBACK_S); ctx = make_ctx(now, prints=prints)                                                     # N1(b): neighbours from 24 h before the range being cut
+    budget = run_budget_s() if not (a.only or a.backfill or a.windows_file) else None                                  # m3-21: the hourly path only (--once, no --only / --backfill / --windows-file)
+    summary, rows = run_once(windows, ctx, a.only, d_from, d_to, dry, min_open=since, recut=a.recut, **(dict(budget_s=budget, t0=t_run) if budget is not None and not dry else {}))
     if not dry and not a.only: summary["mirrored_pending"] = mirrored_first + mirror_pending(ctx, budget_s=C.MIRROR_BUDGET_S)                # m3-16 L1: a single-consult (--only / --recut) run never spends time on the backlog
     if dry:
         for r in rows: print(json.dumps(r))
+    if waits: summary["lock_waited_s"] = waited
     print(json.dumps(summary, default=str)); return 0
 
 if __name__ == "__main__": sys.exit(main())

@@ -1,0 +1,10 @@
+[Unit]
+Description=Consult cutter watchdog: cutter.lock held over 30 min, or one uid re-cut more than 3 times a day -> ALERTS.jsonl + recut.stop
+
+[Service]
+Type=oneshot
+# runs the pinned deploy worktree, like cutter-hourly.service; stdlib only
+WorkingDirectory=%h/oc/consult/cutter-deploy
+ExecStart=/usr/bin/python3 tools/cutter_watchdog.py --check
+Nice=10
+TimeoutStartSec=50

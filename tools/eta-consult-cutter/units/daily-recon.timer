@@ -1,0 +1,11 @@
+[Unit]
+Description=Consult daily reconciliation, 22:00 IST (today) and 10:00 IST (yesterday)
+
+[Timer]
+OnCalendar=*-*-* 22:00:00 Asia/Kolkata
+OnCalendar=*-*-* 10:00:00 Asia/Kolkata
+Persistent=false
+Unit=daily-recon.service
+
+[Install]
+WantedBy=timers.target

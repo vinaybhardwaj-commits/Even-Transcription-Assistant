@@ -6,6 +6,8 @@ def tone(path, seconds=6, silent=False):
     src = "anullsrc=r=16000:cl=mono" if silent else "sine=frequency=300:sample_rate=16000"
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", src, "-t", str(seconds), "-ac", "1", path], check=True)
 
+NEEDS_DIARIZE = unittest.skipUnless(os.environ.get("CONSULT_DIARIZE_PKG_DIR") and os.environ.get("CONSULT_DIARIZE_MODULE"), "needs the diarize package: set CONSULT_DIARIZE_PKG_DIR and CONSULT_DIARIZE_MODULE")
+
 class Silence(unittest.TestCase):
     def test_is_silent(self):
         d = tempfile.mkdtemp(); tone(f"{d}/s.wav", silent=True); tone(f"{d}/t.wav")
@@ -14,6 +16,7 @@ class Silence(unittest.TestCase):
         d = tempfile.mkdtemp(); tone(f"{d}/s.wav", silent=True); tone(f"{d}/t.wav")
         self.assertFalse(SO.normalize(["-i", f"{d}/s.wav"], f"{d}/s.flac")); self.assertTrue(os.path.getsize(f"{d}/s.flac") > 0)         # kept as it is, no exception
         self.assertTrue(SO.normalize(["-i", f"{d}/t.wav"], f"{d}/t.flac")); self.assertLess(abs(T.loudness(f"{d}/t.flac") + 18), 1.5)
+    @NEEDS_DIARIZE
     def test_worker_segment_guard(self):
         from cutter import diar_worker as DW
         def tiny(*a): raise RuntimeError("Padding size should be less than the corresponding input dimension")

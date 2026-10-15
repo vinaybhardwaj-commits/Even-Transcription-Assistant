@@ -11,6 +11,8 @@ def W(i, o, c, reason="url_clear", doc=D, room="r1", slug="opd-1", q="clean"):
     return dict(id=i, consult_uid=f"cons{i}", machine="m", room_id=room, room_slug=slug, t_open=T0 + o, t_close=None if c is None else T0 + c, close_reason=reason, quality=q, resolver_version="v1",
                 computed_at="2026-10-07T10:00:00+00:00", doctor_uid=doc, doctor_name=DOC_NAME, doctor_source="warehouse_doctor_uid")
 
+NEEDS_DIARIZE = unittest.skipUnless(os.environ.get("CONSULT_DIARIZE_PKG_DIR") and os.environ.get("CONSULT_DIARIZE_MODULE"), "needs the diarize package: set CONSULT_DIARIZE_PKG_DIR and CONSULT_DIARIZE_MODULE")
+
 class Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -132,6 +134,7 @@ class GPUGate(Base):                                                            
         from cutter import gpu as G, speak as SP
         g = G.gate(self.at(22, 0), 15); self.assertEqual(g["hard_stop"], self.at(22, 50)); cmds = []
         SP.run_job(dict(id="x", audio="a", out="o"), g, runner=lambda cmd, stdin: cmds.append(cmd) or 0); self.assertIn("--hard-stop", cmds[0]); self.assertEqual(cmds[0][cmds[0].index("--hard-stop") + 1], f"{self.at(22, 50):.0f}")
+    @NEEDS_DIARIZE
     def test_worker_refuses_to_start_after_the_latest_start(self):
         import subprocess as sp
         r = sp.run([C.DIAR_PY, os.path.join(os.path.dirname(R.__file__), "diar_worker.py"), "--not-after", "1"], input='{"jobs": []}', capture_output=True, text=True); self.assertEqual(r.returncode, 75)
@@ -296,7 +299,7 @@ class Horizon(Base):                                                            
         def fetch(since): seen["since"] = since; return []
         def run_once(windows, ctx, only=None, d_from=None, d_to=None, dry=False, index_path=None, min_open=None, recut=False): seen["min_open"] = min_open; return dict(eligible=0), []
         C.RUN_LOCK = f"{self.out}/l.lock"
-        with mock.patch.object(R.Wn, "fetch", fetch), mock.patch.object(R, "make_ctx", lambda now, **kw: dict(now=now)), mock.patch.object(R, "run_once", run_once): R.main(["--once", "--since", "2026-10-05", "--dry-run"])
+        with mock.patch.object(R.SP, "load_prints", lambda strict=False: {}), mock.patch.object(R.Wn, "fetch", fetch), mock.patch.object(R, "make_ctx", lambda now, **kw: dict(now=now)), mock.patch.object(R, "run_once", run_once): R.main(["--once", "--since", "2026-10-05", "--dry-run"])
         s0 = dt.datetime(2026, 10, 5, tzinfo=R.IST).timestamp(); self.assertEqual(seen["since"], s0 - 86400); self.assertEqual(seen["min_open"], s0)
     def test_a_doctor_who_gets_a_print_later_has_the_clip_cut_again_with_the_split(self):                         # N4
         w = W(1, 200, 235, "idle_timeout", doc="LATE")
@@ -329,7 +332,7 @@ class Mirror(unittest.TestCase):
         self.assertEqual(c.puts, [("eta-audio", "consult-clips/2026-10-07/opd-7/c1/consult.flac"), ("eta-audio", "consult-clips/2026-10-07/opd-7/c1/timeline.json")])
     def test_no_credential_is_pending_not_an_error(self):
         r = SO.mirror(tempfile.mkdtemp(), "x/y/z", cred_file="/nonexistent/cred"); self.assertEqual((r["status"], r["bucket"], r["prefix"]), ("pending_no_credential", "eta-audio", "consult-clips/x/y/z"))
-if __name__ == "__main__": unittest.main()
+
 
 class SilentSpan(Base):                                                                                          # m3-05
     def test_silent_audio_is_skipped_before_the_gpu_and_never_retried(self):
@@ -444,6 +447,7 @@ class DoctorSplitFailed(Base):                                                  
         import time as _t
         base = f"{C.CLIPS}/2026-10-03/opd-3/u9"; os.makedirs(base); os.makedirs(f"{base}.old"); os.utime(f"{base}.old", (1, 1))
         self.assertEqual(SO.sweep_tmp(C.CLIPS, _t.time()), 1); self.assertTrue(os.path.isdir(base)); self.assertFalse(os.path.exists(f"{base}.old"))
+    @NEEDS_DIARIZE
     def test_worker_guards_each_segment_inside_the_cluster_average(self):
         import types, numpy as _np
         from cutter import diar_worker as DW
@@ -567,6 +571,7 @@ class Throughput(Base):                                                         
     def test_dry_run_names_the_long_window(self):
         summ, rows = R.run_once([W(1, 100, 100 + 50 * 60)], self.ctx(now_off=9000), dry=True); self.assertTrue(rows[0]["would_skip"].startswith("deferred_long"))
 
+@NEEDS_DIARIZE
 class WorkerEcapa(unittest.TestCase):
     def test_ecapa_stays_on_cpu_without_cuda_and_leaves_the_module_alone(self):
         import types, os as _os
@@ -829,3 +834,112 @@ class Mirror16(Base):                                                           
         with mock.patch.object(C, "ALERTS", sp):
             for _ in range(8): R.mirror_pending(dict(mirror=lambda d, rel: dict(status="pending_no_credential")))
         self.assertFalse(os.path.exists(sp)); self.assertFalse(os.path.exists(f"{C.CLIPS}/mirror-state.json"))
+
+    def test_16e_with_r2_healthy_two_permanently_failing_rows_get_their_own_alerts_not_a_stall_and_a_later_real_outage_still_alerts(self):
+        from unittest import mock
+        self.rowdirs(("2026-10-01", "2026-10-02")); sp = f"{self.out}/ALERTS.jsonl"; state = {"r2_up": True}
+        bad = lambda d, rel: dict(status="error", error="unreadable file")
+        ctx = lambda: dict(mirror=bad, r2_ok=lambda: state["r2_up"])
+        with mock.patch.object(C, "ALERTS", sp):
+            for _ in range(8): R.mirror_pending(ctx())
+            al = sorted(json.loads(l)["alert"] for l in open(sp)); self.assertEqual(al, ["r2_row_stuck u0", "r2_row_stuck u1"])           # one each, no stall
+            self.assertEqual(json.load(open(f"{C.CLIPS}/mirror-state.json"))["zero_success_passes"], 0)
+            for k in range(3): self.newrow(f"2026-10-1{k}", f"o{k}")                                                                  # now R2 really goes down
+            state["r2_up"] = False
+            for _ in range(6): R.mirror_pending(ctx())
+            al = [json.loads(l)["alert"] for l in open(sp)]; self.assertEqual(len(al), 3); self.assertTrue(al[2].startswith("r2_mirror_stalled"))
+    def test_16e_an_unreachable_or_raising_health_check_means_unknown_and_the_old_rule_applies(self):
+        from unittest import mock
+        self.rowdirs(("2026-10-01", "2026-10-02")); sp = f"{self.out}/ALERTS.jsonl"; bad = lambda d, rel: dict(status="error", error="x")
+        def boom(): raise RuntimeError("probe")
+        with mock.patch.object(C, "ALERTS", sp):
+            for _ in range(6): R.mirror_pending(dict(mirror=bad, r2_ok=boom))
+        self.assertTrue(json.loads(open(sp).read().splitlines()[0])["alert"].startswith("r2_mirror_stalled"))
+    def test_16f_store_r2_healthy_writes_a_fixed_probe_key_never_deletes_and_never_raises(self):
+        class Ok:
+            keys = []
+            def put_object(self, **kw): self.keys.append((kw["Bucket"], kw["Key"], kw["Body"]))
+        o = Ok(); self.assertIs(SO.r2_healthy(client=o, bucket="bk", prefix="consult-clips"), True); self.assertIs(SO.r2_healthy(client=o, bucket="bk", prefix="consult-clips"), True)
+        self.assertEqual([k[:2] for k in o.keys], [("bk", "consult-clips/_health/probe.txt")] * 2)                           # the same fixed key each time; the client has no delete_object at all
+        class Denied:
+            def put_object(self, **kw): raise PermissionError("AccessDenied")
+            def head_bucket(self, **kw): return {}                                                                           # reads still answer
+        self.assertIs(SO.r2_healthy(client=Denied(), bucket="bk"), False)
+        self.assertIsNone(SO.r2_healthy(cred_file="/nonexistent/cred"))
+    def test_16f_S1_a_token_that_lost_write_is_a_stall_not_a_stream_of_row_alerts(self):
+        from unittest import mock
+        class NoWrite:
+            def put_object(self, **kw): raise PermissionError("AccessDenied")
+            def head_bucket(self, **kw): return {}
+        self.rowdirs(("2026-10-01", "2026-10-02", "2026-10-03")); sp = f"{self.out}/ALERTS.jsonl"
+        mk = lambda: dict(mirror=lambda d, rel: dict(status="error", error="AccessDenied"), r2_ok=lambda: SO.r2_healthy(client=NoWrite(), bucket="bk"))
+        with mock.patch.object(C, "ALERTS", sp):
+            for _ in range(12): R.mirror_pending(mk())
+        al = [json.loads(l)["alert"] for l in open(sp)]; self.assertEqual(len(al), 1); self.assertTrue(al[0].startswith("r2_mirror_stalled"))
+    def test_16f_S2_a_pass_where_r2_answers_restarts_the_consecutive_count(self):
+        from unittest import mock
+        self.rowdirs(("2026-10-01", "2026-10-02")); sp = f"{self.out}/ALERTS.jsonl"; up = {"on": False}; bad = lambda d, rel: dict(status="error", error="x")
+        with mock.patch.object(C, "ALERTS", sp):
+            for _ in range(5): R.mirror_pending(dict(mirror=bad, r2_ok=lambda: False))                                          # 5 outage passes
+            self.assertEqual(json.load(open(f"{C.CLIPS}/mirror-state.json"))["zero_success_passes"], 5)
+            for _ in range(3): R.mirror_pending(dict(mirror=bad, r2_ok=lambda: True))                                           # R2 back, the two rows are bad
+            self.assertEqual(json.load(open(f"{C.CLIPS}/mirror-state.json"))["zero_success_passes"], 0)
+            R.mirror_pending(dict(mirror=bad, r2_ok=lambda: False))                                                              # one blip
+            self.assertEqual(json.load(open(f"{C.CLIPS}/mirror-state.json"))["zero_success_passes"], 1)
+        self.assertFalse(os.path.exists(sp))                                                                                    # no stall alert from one blip (no spool file at all)
+    def test_16f_the_probe_time_counts_against_the_budget(self):
+        from unittest import mock
+        self.rowdirs(("2026-10-01", "2026-10-02", "2026-10-03")); probed = []; t = iter(range(0, 10000, 40))
+        with mock.patch.object(C, "ALERTS", f"{self.out}/A.jsonl"): R.mirror_pending(dict(mirror=lambda d, rel: dict(status="error", error="x"), r2_ok=lambda: (probed.append(1), True)[1]), budget_s=100, clock=lambda: next(t))
+        self.assertEqual(probed, [])                                                                                           # the uploads used up the budget: no probe
+
+
+
+class RunBudget(Base):
+    """m3-21: after the budget no new window is started; the one in flight finishes; the rest stays eligible and is counted."""
+    def test_budget_stops_new_windows_and_counts_the_rest(self):
+        ws = [W(1, 200, 400), W(2, 450, 650), W(3, 700, 900)]; ctx = self.ctx(); b0 = ctx["clock"](); t = [b0]; ctx["clock"] = lambda: t[0]; ctx["mirror"] = lambda d, rel: (t.__setitem__(0, b0 + 3000.0), dict(status="test"))[1]               # the first cut takes 50 min
+        summ, rows = R.run_once(ws, ctx, budget_s=2100.0, t0=b0)
+        self.assertEqual((summ["cut"], summ["budget_stopped"]), (1, 2)); self.assertEqual(len(R.SO.read_index()), 1)
+        ctx2 = self.ctx(); summ2, _ = R.run_once(ws, ctx2, budget_s=2100.0); self.assertEqual((summ2["cut"], summ2["budget_stopped"]), (2, 0))      # next run: the two left are still eligible (the fixed clock never passes the budget)
+
+    def test_no_budget_means_no_stop_and_the_key_is_present(self):
+        (summ, _), _ = self.go([W(1, 200, 400)]); self.assertEqual((summ["cut"], summ["budget_stopped"]), (1, 0))
+
+    def test_budget_env(self):
+        import os
+        old = os.environ.get("CUTTER_RUN_BUDGET_S")
+        try:
+            os.environ.pop("CUTTER_RUN_BUDGET_S", None); self.assertEqual(R.run_budget_s(), 1500.0)
+            for v, want in (("600", 600.0), ("x", 1500.0), ("0", 1500.0), ("-5", 1500.0), ("nan", 1500.0), ("inf", 1500.0)):
+                os.environ["CUTTER_RUN_BUDGET_S"] = v; self.assertEqual(R.run_budget_s(), want, v)
+        finally:
+            if old is None: os.environ.pop("CUTTER_RUN_BUDGET_S", None)
+            else: os.environ["CUTTER_RUN_BUDGET_S"] = old
+
+
+class PartialTape(Base):
+    """m3-21: below MIN_COVERAGE but >= MIN_PARTIAL_TAPE_S of tape -> cut, flag partial_tape + tape_partial, the resolver quality untouched; less, or silent -> skipped as before."""
+    def test_300_s_of_tape_in_a_low_coverage_window_is_cut_and_flagged(self):
+        self.assertEqual(C.MIN_PARTIAL_TAPE_S, 300.0)
+        (summ, rows), _ = self.go([W(1, 900, 2100)], now_off=3500); self.assertEqual((summ["cut"], summ["skipped"]), (1, 0), rows)
+        self.assertIn("partial_tape", rows[0]["flags"]); self.assertEqual((rows[0]["quality"], rows[0]["tape_partial"]), ("clean", True)); self.assertLess(rows[0]["coverage"], 1.0)
+        self.assertEqual(self.tl("cons1")["window"]["quality"], "clean")
+    def test_a_partial_multi_doctor_stays_multi_doctor_and_out_of_the_recut_queue(self):
+        import sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")); import recut_queue as RQ
+        (summ, rows), _ = self.go([W(1, 900, 2100, q="multi_doctor")], now_off=3500); self.assertEqual(summ["cut"], 1); r = rows[0]; tl = self.tl("cons1")
+        self.assertEqual((r["quality"], tl["window"]["quality"], r["tape_partial"]), ("multi_doctor", "multi_doctor", True)); self.assertIn("partial_tape", r["flags"])
+        tl2 = dict(tl, doctor=dict(uid="D", source="warehouse_doctor_uid"), clusters={}); r2 = dict(r, minutes=10.0)
+        self.assertEqual(RQ.queue({"cons1": r2}, lambda x: tl2, tempfile.mkdtemp()), [])
+    def test_under_300_s_of_tape_is_still_skipped(self):
+        (summ, rows), _ = self.go([W(1, 1000, 2200)], now_off=3500); self.assertEqual((summ["cut"], summ["skipped"]), (0, 1)); self.assertEqual(rows[0]["skip_reason"], "no_session")
+    def test_a_silent_partial_clip_is_still_silent_audio(self):
+        ctx = self.ctx(now_off=3500); ctx["silent"] = lambda p: (True, "-inf"); summ, rows = R.run_once([W(1, 900, 2100)], ctx)
+        self.assertEqual((summ["cut"], rows[0]["skip_reason"], rows[0]["final"]), (0, "silent_audio", True))
+    def test_full_coverage_is_not_flagged_and_dry_run_agrees(self):
+        (summ, rows), _ = self.go([W(1, 200, 400)]); self.assertNotIn("partial_tape", rows[0]["flags"]); self.assertNotIn("tape_partial", rows[0]); self.assertEqual(rows[0]["quality"], "clean")
+        (s2, r2), _ = self.go([W(1, 900, 2100)], now_off=3500, dry=True); self.assertNotIn("would_skip", r2[0])
+        (s3, r3), _ = self.go([W(1, 1000, 2200)], now_off=3500, dry=True); self.assertTrue(r3[0]["would_skip"].startswith("no_tape_coverage"))
+
+
+if __name__ == "__main__": unittest.main()
