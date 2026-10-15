@@ -11,7 +11,7 @@
 # Allowed keys: GUARDIAN_ROOM GUARDIAN_PUBLISH_CMD GUARDIAN_SUBSCRIBE_CMD GUARDIAN_CONTROL_SUB_CMD GUARDIAN_SUDO
 #               GUARDIAN_ROOT_HELPER USB_MIC_PATTERN CANARY_VOLUME PRESENCE_FILE GUARDIAN_PIPE_SSH
 GUARDIAN_ROOM="<room-slug>"
-# Each command runs under `bash -c`. Publish: topic is $1, the line is on stdin.
+# Each command runs under `/bin/bash -p -c` with a clean environment (HOME, USER, LOGNAME, TMPDIR, a fixed PATH, GUARDIAN_HOME, GUARDIAN_PIPE_SSH only). Publish: topic is $1, the line is on stdin.
 # Subscribe: $1 is the room; print "<topic><TAB><payload>" per message, forever.
 GUARDIAN_PUBLISH_CMD='<command that publishes stdin to topic $1>'
 GUARDIAN_SUBSCRIBE_CMD='<command that streams topic<TAB>payload lines>'
@@ -25,5 +25,5 @@ GUARDIAN_SUDO="sudo -n"
 GUARDIAN_ROOT_HELPER="/usr/local/libexec/eta-guardian-root"
 USB_MIC_PATTERN="C270"
 # PRESENCE_FILE="/absolute/path/of/the/Presence/heartbeat/file"
-# Nightly canary tone level for afplay -v (0.0 to 1.0). The system volume is never changed. Real playback needs mode heal; in shadow it only reports would_do.
+# Nightly canary tone level for afplay -v: 0.d or 0.dd, above 0 and at most 0.5 (anything else, even 0 or 1, kills the agent). The system volume is never changed. Real playback needs mode heal; in shadow it only reports would_do.
 # CANARY_VOLUME=0.3

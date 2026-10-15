@@ -22,7 +22,7 @@ case "$ROOM" in ''|*[!a-z0-9-]*) echo "--room <slug> required (lowercase letters
 [ -z "$CONFIG" ] || [ -r "$CONFIG" ] || { echo "cannot read --config" >&2; exit 2; }
 # R12: guardian.conf is data, parsed by lib/conf.sh. Refuse a config the agent would reject (it would run killed), before anything is installed.
 if [ -n "$CONFIG" ]; then
-  if ! ( G_TR=/usr/bin/tr; G_WC=/usr/bin/wc; audit() { echo "  conf: $*" >&2; }; . "$SRC/lib/conf.sh"; conf_load "$CONFIG" ); then
+  if ! ( G_TR=/usr/bin/tr; G_WC=/usr/bin/wc; audit() { echo "  conf: $*" >&2; }; . "$SRC/lib/conf.sh"; conf_load "$CONFIG" noperm ); then
     echo "refusing: --config is not valid guardian.conf (data lines only, allow-listed keys)" >&2; exit 2
   fi
 fi

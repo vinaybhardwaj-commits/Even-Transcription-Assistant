@@ -10,6 +10,15 @@
 # environment for every test seam and every tunable: GUARDIAN_TESTMODE, GUARDIAN_FAKE_NOW, GUARDIAN_PS, GUARDIAN_FLAG_CMD, GUARDIAN_CONF and the rest.
 # The safety numbers are readonly constants in lib/common.sh, set before anything else runs. The only way to change behaviour is the conf's allow-listed keys.
 
+# R13 S2. run and check refuse to continue without `bash -p` (no BASH_FUNC_* import, no BASH_ENV, no SHELLOPTS). Only keywords are used before the
+# re-exec. The one re-exec carries a marker ARGUMENT (an argument cannot come from the environment); if p is still missing after it, exit killed.
+G_REEXEC=0
+if [[ ${1:-} == --reexec ]]; then G_REEXEC=1; shift; fi
+if [[ $- != *p* ]] && [[ ${1:-run} == run || ${1:-} == check ]]; then
+  if [[ $G_REEXEC == 1 ]]; then echo "guardian: bash -p could not be set: KILLED" >&2; exit 3; fi
+  exec /bin/bash -p "$0" --reexec "$@"
+fi
+
 # No alias, no DEBUG/ERR/RETURN trap, no functrace may survive from the caller's environment.
 shopt -u expand_aliases 2>/dev/null
 trap - DEBUG ERR RETURN 2>/dev/null
@@ -17,12 +26,14 @@ set +T +E 2>/dev/null
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 G_MODE_ARG="${1:-run}"
-if [ "${GUARDIAN_TEST_ENTRY:-}" = 1 ] && { [ "$G_MODE_ARG" = once ] || [ "$G_MODE_ARG" = handle ]; }; then
+# R13 S5. The test entry is honoured only for once|handle, with GUARDIAN_TEST_ENTRY=1, and only when the test harness file sits next to this
+# script tree. install.sh never copies tests/, so an installed tree has no such file and ignores the variable.
+if [ "${GUARDIAN_TEST_ENTRY:-}" = 1 ] && { [ "$G_MODE_ARG" = once ] || [ "$G_MODE_ARG" = handle ]; } && [ -f "$HERE/tests/run.sh" ]; then
   unset G_RUNMODE G_CONF_BAD G_BAD_CONST
   CONF="${GUARDIAN_CONF:-${GUARDIAN_HOME:-$HOME/Library/Application Support/EvenScribe/Guardian}/guardian.conf}"
 else
   unset GUARDIAN_TESTMODE GUARDIAN_FAKE_NOW GUARDIAN_PS GUARDIAN_FLAG_CMD GUARDIAN_CONF GUARDIAN_TEST_ENTRY CANARY_AFPLAY \
-    GUARDIAN_ROOT_TESTMODE GUARDIAN_ROOT_TEST_DB FAKE_SP_SLEEP G_CONF_BAD G_BAD_CONST
+    GUARDIAN_ROOT_TESTMODE GUARDIAN_ROOT_TEST_DB FAKE_SP_SLEEP G_CONF_BAD G_BAD_CONST GUARDIAN_PIPE_SSH
   G_RUNMODE=1; readonly G_RUNMODE
   CONF="${GUARDIAN_HOME:-$HOME/Library/Application Support/EvenScribe/Guardian}/guardian.conf"
 fi
@@ -131,7 +142,7 @@ subscriber_loop() {
   loop_init
   while :; do
     loop_parent_ok || loop_orphaned
-    { bash -c "$GUARDIAN_SUBSCRIBE_CMD" _ "$GUARDIAN_ROOM" </dev/null 2>/dev/null | while IFS="$(printf '\t')" read -r topic payload; do
+    { g_conf_cmd "$GUARDIAN_SUBSCRIBE_CMD" "$GUARDIAN_ROOM" </dev/null 2>/dev/null | while IFS="$(printf '\t')" read -r topic payload; do
       handle_message "$topic" "$payload"
     done; } </dev/null &
     loop_watch $!
@@ -183,7 +194,7 @@ control_loop() {
   while :; do
     # bash drops NUL on read, which would turn "fa<NUL>lse" into a clean "false": map NUL to 0x01 first so the raw-byte check on control.last kills it.
     loop_parent_ok || loop_orphaned
-    { bash -c "$GUARDIAN_CONTROL_SUB_CMD" _ "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | nul_to_soh | control_pump; } </dev/null &
+    { g_conf_cmd "$GUARDIAN_CONTROL_SUB_CMD" "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | nul_to_soh | control_pump; } </dev/null &
     loop_watch $!
     audit "control subscriber exited; retry in ${backoff}s"
     loop_nap "$backoff"
@@ -193,8 +204,8 @@ control_loop() {
 
 run() {
   local t0 t1
-  [ -n "$GUARDIAN_ROOM" ] || { echo "GUARDIAN_ROOM not set" >&2; exit 2; }
   audit "guardian start version=$GUARDIAN_VERSION"
+  [ -n "$GUARDIAN_ROOM" ] || { audit "running KILLED: no room (guardian.conf has no valid GUARDIAN_ROOM)"; echo "GUARDIAN_ROOM not set" >&2; exit 2; }
   if [ "${G_CONF_BAD:-}" = 1 ]; then audit "guardian.conf rejected: running KILLED (shadow, no actions); health continues"; fi
   MAIN_PID="$(exec sh -c 'echo $PPID')"
   [ -n "$MAIN_PID" ] || MAIN_PID=$$

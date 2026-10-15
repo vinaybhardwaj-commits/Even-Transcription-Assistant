@@ -276,3 +276,56 @@ test_tape_with_a_future_mtime_is_not_advancing() {
   cn_prep; touch -t 203012010000 "$RR_ROOT"/captures/c1/seg_001/tape.pcm
   assert_eq "$(rms_dbfs_2s)" "" "future mtime: no rms"
 }
+
+# ---- R13 S4: the control.last / GUARDIAN_CONTROL_SUB_CMD path (the production path), not only the old flag command ----
+# cn_ctl <age s> [mode] [kill]: control.last received <age> s ago at the fake clock, canonical form, then the fetch the main loop would run.
+cn_ctl() {
+  local recv=$((GUARDIAN_FAKE_NOW - $1))
+  GUARDIAN_CONTROL_SUB_CMD=true
+  rm -f "$STATE_DIR/control_latch" "$STATE_DIR/control_state"
+  { printf '%s\n' "$recv"; printf '{"kill": %s, "modes": {"opd9": "%s"}, "ts": %s}\n' "${3:-false}" "${2:-heal}" "$recv"; } >"$STATE_DIR/control.last"
+  flag_fetch
+}
+
+test_control_path_fresh_heal_plays_once() {
+  cn_prep; echo 1778 >"$T/afplay_amp"; cn_ctl 5 heal; cn_run
+  assert_eq "$(cn_plays)" "1" "control.last fresh heal: 1 play"
+  assert_has "$(cn_events)" '"result":"pass"' "pass"
+}
+
+test_control_path_age_90_plays_age_91_does_not() {
+  cn_prep; echo 1778 >"$T/afplay_amp"; cn_ctl 90 heal; cn_run
+  assert_eq "$(cn_plays)" "1" "age 90 s: 1 play"
+  cn_prep; echo 1778 >"$T/afplay_amp"; cn_ctl 91 heal; cn_run
+  assert_eq "$(cn_plays)" "0" "age 91 s: 0 plays"
+  assert_has "$(cn_events)" '"result":"would_do"' "age 91 s: reported as would_do"
+}
+
+test_control_path_shadow_kill_and_heal_off_never_play() {
+  cn_prep; echo 1778 >"$T/afplay_amp"; cn_ctl 5 shadow; cn_run
+  assert_eq "$(cn_plays)" "0" "mode shadow: 0 plays"
+  assert_has "$(cn_events)" '"result":"would_do"' "shadow: would_do"
+  cn_prep; echo 1778 >"$T/afplay_amp"; cn_ctl 5 heal true; cn_run
+  assert_eq "$(cn_plays)" "0" "kill true: 0 plays"
+  cn_prep; echo 1778 >"$T/afplay_amp"; cn_ctl 5 heal; touch "$FLAG_DIR/heal-off"; cn_run
+  assert_eq "$(cn_plays)" "0" "heal-off flag: 0 plays"
+  cn_prep; echo 1778 >"$T/afplay_amp"; rm -f "$STATE_DIR/control.last"; GUARDIAN_CONTROL_SUB_CMD=true; flag_fetch; cn_run
+  assert_eq "$(cn_plays)" "0" "no control message at all: 0 plays"
+}
+
+test_control_path_flip_during_the_output_check_makes_no_play() {
+  local flip
+  # the fake output check rewrites control.last (a kill, then a message that is already 91 s old) after act_step and before afplay
+  for flip in kill stale shadow; do
+    cn_prep; echo 1778 >"$T/afplay_amp"; cn_ctl 5 heal
+    case "$flip" in
+      kill) body="printf '%s\\n{\"kill\": true, \"modes\": {\"opd9\": \"heal\"}, \"ts\": %s}\\n' $((GUARDIAN_FAKE_NOW)) $((GUARDIAN_FAKE_NOW))" ;;
+      stale) body="printf '%s\\n{\"kill\": false, \"modes\": {\"opd9\": \"heal\"}, \"ts\": %s}\\n' $((GUARDIAN_FAKE_NOW - 91)) $((GUARDIAN_FAKE_NOW - 91))" ;;
+      shadow) body="printf '%s\\n{\"kill\": false, \"modes\": {\"opd9\": \"shadow\"}, \"ts\": %s}\\n' $((GUARDIAN_FAKE_NOW)) $((GUARDIAN_FAKE_NOW))" ;;
+    esac
+    printf '#!/bin/bash\n%s >"%s/control.last"\nrm -f "%s/control_latch"\necho "{\\"SPAudioDataType\\":[{\\"coreaudio_default_audio_output_device\\":\\"yes\\"}]}"\n' "$body" "$STATE_DIR" "$STATE_DIR" >"$T/bin/system_profiler"
+    chmod +x "$T/bin/system_profiler"
+    cn_run
+    assert_eq "$(cn_plays)" "0" "control flip ($flip) during the output check: 0 plays"
+  done
+}

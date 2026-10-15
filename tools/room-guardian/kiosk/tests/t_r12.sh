@@ -343,54 +343,348 @@ test_r12_installed_tree_runs_the_check() {
   assert_has "$out" "killswitch=" "the installed copy (with conf.sh and canary.sh) starts"
 }
 
-# ---- the live run: a wedged subscriber ----
-# The real guardian.sh run, real clock, production shape. The control subscriber delivers ONE canonical heal and then wedges (it prints nothing more).
-# A persistent fault (recorder not running) makes the Guardian act while the heal is fresh. From +91 s of the message no mutating call may happen.
-test_r12_live_wedged_subscriber_no_action_after_91_s() {
-  local fl="$T/calls.ts" t0 tmsg i mut_before mut_after hl
-  cat >"$T/bin/launchctl" <<'F'
+# ---- the live runs (R13): the real guardian.sh run, real clock, production shape ----
+# r13_live_start <name> <ctl-body> [env k=v ...]: one real `run` in its own GUARDIAN_HOME ($T/<name>/home). The control command is the shell text <ctl-body>
+# (a conf data line, single-quoted). A persistent fault (recorder not running) makes the Guardian act while the feed is fresh; the fake launchctl logs every call
+# with its epoch in $T/<name>/calls.ts. The 3/h action cap is defeated by a helper that empties the actions file every 2 s.
+r13_live_start() {
+  local name="$1" body="$2" d="$T/$1" h; shift 2
+  h="$d/home"; mkdir -p "$d/bin" "$h/state"
+  cat >"$d/bin/launchctl" <<F
 #!/bin/bash
-echo "$(/bin/date +%s) launchctl $*" >>"$T/calls.ts"
-case "$1" in print) exit 113 ;; esac
+echo "\$(/bin/date +%s) launchctl \$*" >>"$d/calls.ts"
+case "\$1" in print) exit 113 ;; esac
 exit 0
 F
-  chmod +x "$T/bin/launchctl"
-  : >"$T/rec_pid"
-  GUARDIAN_FAKE_NOW="$(/bin/date +%s)" write_status state=recording poll_age=5
-  r12_write_conf ""
-  cat >"$T/ctlsub.sh" <<'F'
+  # a fixed idle HID and a present mic, so the result does not depend on whether someone is using the machine the suite runs on
+  cat >"$d/bin/ioreg" <<'F'
 #!/bin/bash
-echo $$ >>"$T/ctl.pid"
-printf '{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}\n' "$(/bin/date +%s)"
-exec sleep 400
+case "$*" in
+  *IOUSBHostDevice*) echo "USB Audio C270 HD" ;;
+  *IOAudioEngine*) echo "C270 engine" ;;
+  *IOHIDSystem*) echo "    | |   \"HIDIdleTime\" = 1000000000000" ;;
+esac
 F
-  printf '#!/bin/bash\necho $$ >>"$T/sub.pid"\nexec sleep 400\n' >"$T/sub.sh"
-  chmod +x "$T/ctlsub.sh" "$T/sub.sh"
+  # no browser, no tape writer, a coreaudiod: nothing on the host the suite runs on can hold the heal back
+  cat >"$d/bin/pgrep" <<'F'
+#!/bin/bash
+case "$*" in *coreaudiod*) echo 9999; exit 0 ;; esac
+exit 1
+F
+  chmod +x "$d/bin/launchctl" "$d/bin/ioreg" "$d/bin/pgrep"
+  : >"$d/calls.ts"
+  printf '%s\n' "$body" >"$d/ctl.sh"
   {
-    r12_base_conf | sed "s|__T__|$T|g" | grep -v 'GUARDIAN_CONTROL_SUB_CMD\|GUARDIAN_SUBSCRIBE_CMD'
-    printf "GUARDIAN_SUBSCRIBE_CMD='T=%s /bin/bash %s/sub.sh'\n" "$T" "$T"
-    printf "GUARDIAN_CONTROL_SUB_CMD='T=%s /bin/bash %s/ctlsub.sh'\n" "$T" "$T"
-  } >"$GUARDIAN_HOME/guardian.conf"
-  : >"$fl"; rm -f "$GUARDIAN_HOME/state/control.last"
+    printf 'GUARDIAN_ROOM="opd9"\n'
+    printf "GUARDIAN_PUBLISH_CMD='cat >>%s/pub.log'\n" "$d"
+    printf "GUARDIAN_SUBSCRIBE_CMD='sleep 1013'\n"
+    printf "GUARDIAN_CONTROL_SUB_CMD='/bin/bash -p %s/ctl.sh'\n" "$d"
+    printf 'GUARDIAN_SUDO=""\nGUARDIAN_ROOT_HELPER="/usr/local/libexec/eta-guardian-root"\nUSB_MIC_PATTERN="C270"\n'
+  } >"$h/guardian.conf"
+  chmod 600 "$h/guardian.conf"
+  GUARDIAN_FAKE_NOW="$(/bin/date +%s)" write_status state=recording poll_age=5
+  ( exec /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$h" PATH="$d/bin:$PROD_PATH" RR_ROOT="$RR_ROOT" RR_PLIST="$RR_PLIST" RR_APP="$RR_APP" "$@" \
+      /bin/bash -p "$KDIR/bin/guardian.sh" run >"$d/run.out" 2>&1 ) &
+  echo $! >"$d/main.pid"
+  # keep the 3/h cap from ending the run of actions early
+  ( while :; do : >"$h/state/actions"; /bin/sleep 2; done ) &
+  echo $! >"$d/cap.pid"
+}
+r13_live_stop() { # <name>...
+  local n p
+  for n in "$@"; do
+    for p in "$T/$n/main.pid" "$T/$n/cap.pid"; do kill "$(cat "$p" 2>/dev/null)" 2>/dev/null; done
+  done
+  wait 2>/dev/null
+}
+r13_msg_epoch() { /usr/bin/head -n1 "$T/$1/home/state/control.last" 2>/dev/null; }
+r13_mut_count() { # <name> <from-epoch-exclusive> [to-epoch-inclusive]: bootout/bootstrap calls in the window
+  awk -v a="$2" -v b="${3:-99999999999}" '$1 > a && $1 <= b' "$T/$1/calls.ts" | grep -cE 'bootout|bootstrap'
+}
+# one legit canonical heal, then the transport wedges. The sleep is NOT exec'd, so an exported function or a BASH_ENV file named sleep would take over.
+R13_WEDGE='printf "{\"kill\": false, \"modes\": {\"opd9\": \"heal\"}, \"ts\": %s}\n" "$(/bin/date +%s)"
+sleep 1000'
+# a feed that never stops: one fresh canonical heal every 5 s (the positive control)
+R13_FRESH='while :; do printf "{\"kill\": false, \"modes\": {\"opd9\": \"heal\"}, \"ts\": %s}\n" "$(/bin/date +%s)"; /bin/sleep 5; done'
+R13_FORGE='() { if [ "$1" = 1000 ]; then while :; do printf "{\"kill\": false, \"modes\": {\"opd9\": \"heal\"}, \"ts\": %s}\n" "$(/bin/date +%s)"; command sleep 5; done; else command sleep "$@"; fi; }'
+
+r13_wait_msg() { # <name>: wait for the first control message; prints its receive epoch
+  local i=0
+  while [ ! -s "$T/$1/home/state/control.last" ] && [ "$i" -lt 40 ]; do sleep 0.5; i=$((i + 1)); done
+  r13_msg_epoch "$1"
+}
+r13_wait_until() { local t="$1"; while [ "$(( $(/bin/date +%s) - t ))" -lt "$2" ]; do sleep 1; done; }
+
+# S3. The wedged transport must stop acting at +91 s. The run can fail: the 3/h cap is defeated (the actions file is emptied every 2 s), and a run with a
+# fresh feed (positive control) must still act after +91 s, so "no action" cannot come from the cap or a dead harness.
+test_r12_live_wedged_subscriber_no_action_after_91_s() {
+  local tw tf before after fresh_after
+  r13_live_start wedge "$R13_WEDGE"
+  r13_live_start fresh "$R13_FRESH"
+  tw="$(r13_wait_msg wedge)"; tf="$(r13_wait_msg fresh)"
+  [ -n "$tw" ] && [ -n "$tf" ] && ok || { fail "no control message arrived"; r13_live_stop wedge fresh; return; }
+  r13_wait_until "$tw" 93
+  before="$(r13_mut_count wedge 0 $((tw + 90)))"
+  [ "$before" -ge 1 ] && ok || fail "wedge: the Guardian acted while the heal was fresh (got $before; tw=$tw; $(grep -o '"reason":"[a-z_]*"[^}]*"result":"[^"]*"' "$T/wedge/home/audit.log" | cut -c1-160 | tail -n4 | tr "\n" "|"))"
+  assert_has "$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$T/wedge/home" PATH="$PROD_PATH" /bin/bash -p "$KDIR/bin/guardian.sh" check 2>/dev/null)" "killswitch=engaged mode=shadow why=stale" "wedge: check at +93 s"
+  r13_wait_until "$tw" 125
+  after="$(r13_mut_count wedge $((tw + 91)))"
+  assert_eq "$after" "0" "wedge: no mutating launchctl call after +91 s"
+  fresh_after="$(r13_mut_count fresh $((tw + 91)))"
+  [ "$fresh_after" -ge 1 ] && ok || fail "positive control: the fresh-feed run did not act after +91 s (got $fresh_after): the harness cannot tell"
+  assert_has "$(cat "$T/wedge/home/audit.log")" "unreachable:stale" "wedge: audit shows the stale transition"
+  assert_has "$(grep -h '"mode"' "$T/wedge/pub.log" 2>/dev/null | tail -n 1)" '"mode":"shadow"' "wedge: health after +91 s says shadow"
+  kill -0 "$(cat "$T/wedge/main.pid")" 2>/dev/null && ok || fail "the Guardian itself is still running (it did not exit to stop acting)"
+  r13_live_stop wedge fresh
+}
+
+# M1. An exported function or a BASH_ENV file named sleep (the refuter's repro) used to reach the transport child. Through the real run, the wedged feed must
+# still go stale at +91 s: 0 mutating calls after, and the forged feed never keeps the switch clear.
+test_r13_live_env_injection_into_the_transport_child_is_inert() {
+  local tf tb a b
+  printf 'sleep%s\n' "$R13_FORGE" >"$T/benv.sh"
+  r13_live_start bashfunc "$R13_WEDGE" 'BASH_FUNC_sleep%%'"$R13_FORGE"
+  r13_live_start bashenv "$R13_WEDGE" BASH_ENV="$T/benv.sh" ENV="$T/benv.sh"
+  tf="$(r13_wait_msg bashfunc)"; tb="$(r13_wait_msg bashenv)"
+  [ -n "$tf" ] && [ -n "$tb" ] && ok || { fail "no control message arrived"; r13_live_stop bashfunc bashenv; return; }
+  # +15 s: the repro showed "clear heal" here, from a forged feed
+  r13_wait_until "$tf" 15
+  r13_wait_until "$tb" 15
+  r13_wait_until "$tf" 93
+  assert_has "$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$T/bashfunc/home" PATH="$PROD_PATH" 'BASH_FUNC_sleep%%'"$R13_FORGE" /bin/bash -p "$KDIR/bin/guardian.sh" check 2>/dev/null)" "killswitch=engaged mode=shadow why=stale" "BASH_FUNC_sleep: stale at +93 s"
+  assert_has "$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$T/bashenv/home" PATH="$PROD_PATH" BASH_ENV="$T/benv.sh" /bin/bash -p "$KDIR/bin/guardian.sh" check 2>/dev/null)" "killswitch=engaged mode=shadow why=stale" "BASH_ENV: stale at +93 s"
+  r13_wait_until "$tf" 125; r13_wait_until "$tb" 125
+  a="$(r13_mut_count bashfunc $((tf + 91)))"; b="$(r13_mut_count bashenv $((tb + 91)))"
+  assert_eq "$a" "0" "BASH_FUNC_sleep%%: 0 mutating calls after +91 s"
+  assert_eq "$b" "0" "BASH_ENV: 0 mutating calls after +91 s"
+  [ "$(r13_mut_count bashfunc 0 $((tf + 90)))" -ge 1 ] && ok || fail "BASH_FUNC run did not act while the legit heal was fresh (harness check)"
+  [ "$(r13_mut_count bashenv 0 $((tb + 90)))" -ge 1 ] && ok || fail "BASH_ENV run did not act while the legit heal was fresh (harness check)"
+  r13_live_stop bashfunc bashenv
+}
+
+# M1. The children of a conf command (publish, subscribe, control subscribe, the sudo path) get an allow-listed environment and bash -p.
+test_r13_conf_command_children_get_an_allow_listed_environment() {
+  local d="$T/envchk" h f k keys
+  h="$d/home"; mkdir -p "$d" "$h/state"
+  {
+    printf 'GUARDIAN_ROOM="opd9"\n'
+    printf "export GUARDIAN_PIPE_SSH='-i /k/id -o ConnectTimeout=5 pipe@host'\n"
+    printf "GUARDIAN_PUBLISH_CMD='/usr/bin/env >%s/pub.env; echo \"\$-\" >%s/pub.flags; cat >/dev/null'\n" "$d" "$d"
+    printf "GUARDIAN_SUBSCRIBE_CMD='/usr/bin/env >%s/sub.env; echo \"\$-\" >%s/sub.flags; sleep 1013'\n" "$d" "$d"
+    printf "GUARDIAN_CONTROL_SUB_CMD='/usr/bin/env >%s/ctl.env; echo \"\$-\" >%s/ctl.flags; sleep 1013'\n" "$d" "$d"
+    printf 'GUARDIAN_SUDO=""\n'
+  } >"$h/guardian.conf"
+  chmod 600 "$h/guardian.conf"
+  printf 'x=1\n' >"$d/benv.sh"
+  ( exec /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$h" PATH="$PROD_PATH" RR_ROOT="$RR_ROOT" RR_PLIST="$RR_PLIST" RR_APP="$RR_APP" \
+      BASH_ENV="$d/benv.sh" ENV="$d/benv.sh" SHELLOPTS=xtrace BASHOPTS=extglob PS4='+EVIL ' IFS=x FOO=bar SSH_AUTH_SOCK=/tmp/agent.sock \
+      'BASH_FUNC_evil%%=() { :; }' GUARDIAN_PIPE_SSH='-o ProxyCommand=evil' \
+      /bin/bash -p "$KDIR/bin/guardian.sh" run >"$d/run.out" 2>&1 ) &
+  echo $! >"$d/main.pid"
+  local i=0
+  while { [ ! -s "$d/pub.env" ] || [ ! -s "$d/sub.env" ] || [ ! -s "$d/ctl.env" ]; } && [ "$i" -lt 60 ]; do sleep 0.5; i=$((i + 1)); done
+  for f in pub sub ctl; do
+    [ -s "$d/$f.env" ] && ok || { fail "$f child did not run"; continue; }
+    keys="$(sed 's/=.*//' "$d/$f.env" | grep -E '^[A-Za-z_][A-Za-z0-9_%]*$' | sort | tr '\n' ' ')"
+    for k in BASH_ENV ENV SHELLOPTS BASHOPTS PS4 IFS FOO SSH_AUTH_SOCK BASH_FUNC_evil%% ; do
+      case " $keys " in *" $k "*) fail "$f child has $k" ;; *) ok ;; esac
+    done
+    assert_has "$(cat "$d/$f.env")" '^PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin$' "$f child: the pinned PATH"
+    assert_has "$(cat "$d/$f.env")" "^GUARDIAN_HOME=$h\$" "$f child: GUARDIAN_HOME"
+    assert_has "$(cat "$d/$f.env")" '^GUARDIAN_PIPE_SSH=-i /k/id -o ConnectTimeout=5 pipe@host$' "$f child: GUARDIAN_PIPE_SSH is the conf value, not the environment's"
+    assert_has "$(cat "$d/$f.flags")" 'p' "$f child: bash -p"
+    assert_not "$(cat "$d/$f.flags")" 'x' "$f child: no xtrace"
+    # nothing but the allow-list (bash adds PWD, SHLVL, _, OLDPWD)
+    k="$(sed 's/=.*//' "$d/$f.env" | grep -vxE 'HOME|USER|LOGNAME|TMPDIR|PATH|GUARDIAN_HOME|GUARDIAN_PIPE_SSH|PWD|SHLVL|_|OLDPWD' | tr '\n' ' ')"
+    assert_eq "$k" "" "$f child: no variable outside the allow-list"
+  done
+  r13_live_stop envchk
+  kill "$(cat "$d/main.pid")" 2>/dev/null
+}
+
+# the sudo path gets the same clean environment (library function, run mode on)
+test_r13_sudo_path_runs_under_the_clean_environment() {
+  local out
+  printf '#!/bin/bash\n/usr/bin/env\n' >"$T/bin/envsudo"; chmod +x "$T/bin/envsudo"
+  out="$( G_RUNMODE=1; . "$KDIR/lib/common.sh"; GUARDIAN_SUDO="$T/bin/envsudo"; export BASH_ENV=/x FOO=bar 'BASH_FUNC_zz%%=() { :; }'; root_do tcc-row u 2>&1 )"
+  assert_not "$out" "BASH_ENV" "sudo child: no BASH_ENV"
+  assert_not "$out" "FOO=" "sudo child: no FOO"
+  assert_has "$out" "^PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin$" "sudo child: pinned PATH"
+}
+
+# the one place conf commands start is g_conf_cmd: no bare bash -c anywhere in the code
+test_r13_no_bare_bash_c_in_the_code() {
+  assert_eq "$(grep -v '^[[:space:]]*#' "$KDIR/bin/guardian.sh" "$KDIR"/lib/*.sh | grep -cE '(^|[^_A-Za-z"])bash -c')" "0" "every conf command goes through g_conf_cmd"
+}
+
+# S2. run and check refuse to continue without bash -p: they re-exec once. Env functions that used to flip `check` no longer do.
+test_r13_check_without_bash_p_reexecs_and_holds() {
+  local old out f; old="$(( $(/bin/date +%s) - 600 ))"
+  r12_write_conf ""; r12_msg 600
+  for f in 'BASH_FUNC_shopt%%=() { return 0; }' 'BASH_FUNC_return%%=() { :; }' "BASH_FUNC_now_epoch%%=() { echo $old; }" 'BASH_FUNC_[%%=() { return 0; }' 'BASH_FUNC_trap%%=() { :; }'; do
+    out="$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" "$f" /bin/bash "$KDIR/bin/guardian.sh" check 2>/dev/null)"
+    assert_has "$out" "killswitch=engaged mode=shadow" "no -p, $f: still killed"
+  done
+  r12_msg 5
+  assert_has "$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" 'BASH_FUNC_shopt%%=() { return 0; }' /bin/bash "$KDIR/bin/guardian.sh" check 2>/dev/null)" "killswitch=clear mode=heal" "positive control: the re-exec path gives the true answer for a fresh heal"
+  # the marker argument is the loop guard: with it and no p, exit killed (rc 3), no state printed
+  out="$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" /bin/bash "$KDIR/bin/guardian.sh" --reexec check 2>/dev/null)"; assert_rc $? 3 "marker without p: exit killed"
+  assert_eq "$out" "" "and nothing is printed"
+  out="$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" /bin/bash "$KDIR/bin/guardian.sh" --reexec run 2>/dev/null)"; assert_rc $? 3 "run, marker without p: exit killed"
+  # a hand-run `run` without -p re-execs under -p (no conf: it stops at "no room", rc 2, instead of looping)
+  rm -f "$GUARDIAN_HOME/guardian.conf"
+  /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" /bin/bash "$KDIR/bin/guardian.sh" run >/dev/null 2>&1; assert_rc $? 2 "run without -p reached the room check through the re-exec"
+}
+
+# S1. A byte error rejects its own line only; the room survives and health keeps flowing. If no room can be read, `run` audits it and exits 2.
+test_r13_byte_error_is_per_line_and_health_keeps_flowing() {
+  local out
+  r12_write_conf ""; printf '# note \xc3\xa9\n' >>"$GUARDIAN_HOME/guardian.conf"; r12_msg 1
+  assert_has "$(prod -- check)" "killswitch=engaged mode=shadow why=conf" "a UTF-8 comment: killed (conf bad)"
+  : >"$T/pub.log"
+  prod PATH="$T/bin:$PROD_PATH" T="$T" CALLS="$CALLS" RR_ROOT="$RR_ROOT" RR_PLIST="$RR_PLIST" RR_APP="$RR_APP" -- once >/dev/null
+  assert_has "$(cat "$T/pub.log")" "kiosk/opd9/health" "health still published: the room survived"
+  assert_has "$(cat "$T/pub.log")" '"mode":"shadow"' "and it says shadow"
+  out="$(cat "$GUARDIAN_HOME/audit.log")"
+  assert_has "$out" 'conf error line=[0-9]*: byte outside' "the bad line is audited by number"
+  assert_not "$out" 'xc3' "never the content"
+  # CRLF on one line, a NUL on another, a high byte on a third: each rejected alone, the others applied
+  r12_write_conf ""; printf 'USB_MIC_PATTERN="C270"\r\nCANARY_VOLUME=0.2\nGUARDIAN_SUDO="a\0b"\n' >>"$GUARDIAN_HOME/guardian.conf"
+  rm -f "$GUARDIAN_HOME/audit.log"; r12_msg 1
+  assert_has "$(prod -- check)" "why=conf" "CR / NUL lines: killed"
+  assert_eq "$(grep -c 'conf error line=' "$GUARDIAN_HOME/audit.log")" "2" "two bad lines, two audit lines"
+  assert_eq "$(conf_parse_in_sub "$GUARDIAN_HOME/guardian.conf" GUARDIAN_ROOM CANARY_VOLUME)" "rc=1 GUARDIAN_ROOM=[opd9] CANARY_VOLUME=[0.2]" "the other lines are applied"
+  # a file that is nothing but CRLF: no room at all. run audits one line per start and exits 2.
+  sed 's/$/\r/' "$KDIR/guardian.conf.example" >"$GUARDIAN_HOME/guardian.conf"
+  rm -f "$GUARDIAN_HOME/audit.log"
+  prod -- run >/dev/null; assert_rc $? 2 "no room: rc 2"
+  assert_eq "$(grep -c 'running KILLED: no room' "$GUARDIAN_HOME/audit.log")" "1" "one audit line per start"
+  prod -- run >/dev/null
+  assert_eq "$(grep -c 'running KILLED: no room' "$GUARDIAN_HOME/audit.log")" "2" "and one more on the next start"
+  # the size cap stays a hard stop
+  r12_write_conf ""; { printf '# '; head -c 17000 /dev/zero | tr '\0' 'x'; printf '\n'; } >>"$GUARDIAN_HOME/guardian.conf"
+  rm -f "$GUARDIAN_HOME/audit.log"
+  prod -- run >/dev/null; assert_rc $? 2 "over 16 KiB: nothing applied, no room, rc 2"
+  assert_has "$(cat "$GUARDIAN_HOME/audit.log")" "over 16 KiB" "size cap audited"
+}
+
+# S5. GUARDIAN_TEST_ENTRY is honoured only next to tests/run.sh. An installed tree never has it.
+test_r13_installed_tree_ignores_the_test_entry() {
+  local out
+  rm -rf "$GUARDIAN_HOME"
+  GUARDIAN_ROOT_HELPER="$T/libexec/eta-guardian-root" LA_DIR="$HOME/Library/LaunchAgents" bash "$KDIR/install.sh" --room opd9 --sudo "$T/bin/fakesudo" >/dev/null
+  [ ! -e "$GUARDIAN_HOME/tests/run.sh" ] && ok || fail "install.sh copied tests/"
+  r12_write_conf ""
+  : >"$T/pub.log"; : >"$CALLS"
   /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$T/bin:$PROD_PATH" T="$T" CALLS="$CALLS" RR_ROOT="$RR_ROOT" RR_PLIST="$RR_PLIST" RR_APP="$RR_APP" \
-    /bin/bash "$KDIR/bin/guardian.sh" run >"$T/run.out" 2>&1 &
-  echo $! >"$T/main.pid"
-  t0="$(/bin/date +%s)"
-  i=0; while [ ! -s "$GUARDIAN_HOME/state/control.last" ] && [ "$i" -lt 30 ]; do sleep 0.5; i=$((i + 1)); done
-  tmsg="$(/usr/bin/head -n1 "$GUARDIAN_HOME/state/control.last" 2>/dev/null)"
-  [ -n "$tmsg" ] && ok || { fail "no control message arrived"; return; }
-  # wait until 93 s after the message
-  while [ "$(( $(/bin/date +%s) - tmsg ))" -lt 93 ]; do sleep 1; done
-  mut_before="$(awk -v t="$tmsg" '$1 <= t + 90' "$fl" | grep -cE 'bootout|bootstrap')"
-  [ "$mut_before" -ge 1 ] && ok || fail "positive control: the Guardian acted while the heal was fresh (got $mut_before)"
-  assert_has "$(prod -- check)" "killswitch=engaged mode=shadow why=stale" "check at +93 s"
-  # two more ticks and a bit
-  while [ "$(( $(/bin/date +%s) - tmsg ))" -lt 125 ]; do sleep 1; done
-  mut_after="$(awk -v t="$tmsg" '$1 > t + 91' "$fl" | grep -cE 'bootout|bootstrap')"
-  assert_eq "$mut_after" "0" "no mutating launchctl call after +91 s"
-  assert_has "$(cat "$GUARDIAN_HOME/audit.log")" "unreachable:stale" "audit shows the stale transition"
-  hl="$(grep 'kiosk/opd9/health' "$T/pub.log" | tail -n 1)"
-  assert_has "$hl" '"mode":"shadow"' "health after +91 s says shadow"
-  kill -0 "$(cat "$T/main.pid")" 2>/dev/null && ok || fail "the Guardian itself is still running (it did not exit to stop acting)"
-  kill "$(cat "$T/main.pid")" 2>/dev/null; wait "$(cat "$T/main.pid")" 2>/dev/null
+    GUARDIAN_TEST_ENTRY=1 GUARDIAN_TESTMODE=1 GUARDIAN_FAKE_NOW=5 GUARDIAN_FLAG_CMD='echo fleet=on; echo mode=heal' CANARY_AFPLAY="$T/bin/afplay" \
+    /bin/bash "$GUARDIAN_HOME/bin/guardian.sh" once >/dev/null 2>&1
+  out="$(grep -o '"ts":[0-9]*' "$T/pub.log" | head -n1 | cut -d: -f2)"
+  [ -n "$out" ] && [ "$out" != "5" ] && ok || fail "installed once used the fake clock: [$out]"
+  assert_not "$(cat "$GUARDIAN_HOME/state/flags.cache" 2>/dev/null)" "fleet=on" "FLAG_CMD ignored in the installed tree"
+  assert_eq "$(grep -c '"ts":5[,}]' "$GUARDIAN_HOME/audit.log" 2>/dev/null)" "0" "no audit line at the fake epoch"
+  assert_eq "$(grep -c '^afplay' "$CALLS")" "0" "CANARY_AFPLAY fake never called"
+  : >"$T/pub.log"
+  /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" RR_ROOT="$RR_ROOT" GUARDIAN_TEST_ENTRY=1 GUARDIAN_TESTMODE=1 GUARDIAN_FAKE_NOW=5 \
+    /bin/bash "$GUARDIAN_HOME/bin/guardian.sh" handle "kiosk/opd9/probe" "probe opd9 e3" >/dev/null 2>&1
+  out="$(grep -o '"ts":[0-9]*' "$T/pub.log" | head -n1 | cut -d: -f2)"
+  [ -n "$out" ] && [ "$out" != "5" ] && ok || fail "installed handle used the fake clock: [$out]"
+}
+
+# S6. Run mode: these are readonly after load. The canary volume audit text matches the check.
+test_r13_more_names_are_readonly_in_run_mode() {
+  local nm out
+  for nm in G_AFPLAY CANARY_MIN_GAP_S CONTROL_RE CONTROL_LAST; do
+    out="$(G_RUNMODE=1 /bin/bash -c '. "$1/lib/common.sh"; . "$1/lib/killswitch.sh"; . "$1/lib/canary.sh"; if ( eval "$2=x" ) 2>/dev/null; then echo assignable; else echo readonly; fi' _ "$KDIR" "$nm" 2>&1)"
+    assert_eq "$out" "readonly" "$nm is readonly in run mode"
+  done
+  out="$( . "$KDIR/lib/common.sh"; . "$KDIR/lib/killswitch.sh"; . "$KDIR/lib/canary.sh"; G_AFPLAY=/x; CONTROL_LAST=/y; echo "$G_AFPLAY $CONTROL_LAST" )"
+  assert_eq "$out" "/x /y" "library tests may still re-point them"
+  assert_eq "$(grep -c '(0,1\]' "$KDIR/lib/canary.sh")" "0" "no (0,1] left in canary.sh"
+  assert_has "$(cat "$KDIR/lib/canary.sh")" 'CANARY_VOLUME is not in (0,0.5\]' "the audit text says (0,0.5]"
+}
+
+# The orphan rule through the real run: a SIGKILL of the real main leaves no conf-command child behind.
+test_r13_sigkill_of_the_real_main_leaves_no_transport_child() {
+  local d="$T/orph" h p i alive
+  h="$d/home"; mkdir -p "$d" "$h/state"
+  {
+    printf 'GUARDIAN_ROOM="opd9"\n'
+    printf "GUARDIAN_PUBLISH_CMD='cat >/dev/null'\n"
+    printf "GUARDIAN_SUBSCRIBE_CMD='echo \$\$ >>%s/sub.pid; sleep 1013 & echo \$! >>%s/sub.pid; wait'\n" "$d" "$d"
+    printf "GUARDIAN_CONTROL_SUB_CMD='echo \$\$ >>%s/ctl.pid; sleep 1014 & echo \$! >>%s/ctl.pid; wait'\n" "$d" "$d"
+    printf 'GUARDIAN_SUDO=""\n'
+  } >"$h/guardian.conf"
+  chmod 600 "$h/guardian.conf"
+  ( exec /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$h" PATH="$PROD_PATH" RR_ROOT="$RR_ROOT" RR_PLIST="$RR_PLIST" RR_APP="$RR_APP" \
+      /bin/bash -p "$KDIR/bin/guardian.sh" run >"$d/run.out" 2>&1 ) &
+  echo $! >"$d/main.pid"
+  i=0; while { [ "$(wc -l <"$d/sub.pid" 2>/dev/null | tr -d ' ')" != 2 ] || [ "$(wc -l <"$d/ctl.pid" 2>/dev/null | tr -d ' ')" != 2 ]; } && [ "$i" -lt 60 ]; do sleep 0.5; i=$((i + 1)); done
+  alive=0; for p in $(cat "$d/sub.pid" "$d/ctl.pid" 2>/dev/null); do kill -0 "$p" 2>/dev/null && alive=$((alive + 1)); done
+  assert_eq "$alive" "4" "both transport shells and both sleeps are up"
+  # main.pid is the real guardian.sh (the subshell exec'd into it)
+  kill -9 "$(cat "$d/main.pid")" 2>/dev/null
+  i=0
+  while [ "$i" -lt 30 ]; do
+    alive=0; for p in $(cat "$d/sub.pid" "$d/ctl.pid" 2>/dev/null); do kill -0 "$p" 2>/dev/null && alive=$((alive + 1)); done
+    [ "$alive" -eq 0 ] && break
+    sleep 0.5; i=$((i + 1))
+  done
+  assert_eq "$alive" "0" "no transport child left within 15 s of SIGKILL of the real main"
+}
+
+# C3 rerun 11 MUST 2: the conf must be a regular file (not a symlink), owned by root or the agent's uid, and not group- or world-writable.
+# Hard stop: no key is read (so no room), killed, one audit line "conf rejected: <why>".
+test_r13_conf_file_type_owner_and_mode_are_checked() {
+  local out good="$T/good.conf"
+  r12_write_conf ""; cp "$GUARDIAN_HOME/guardian.conf" "$good"; chmod 600 "$good"; r12_msg 1
+  assert_has "$(prod -- check)" "killswitch=clear mode=heal" "positive control: a 0600 regular file owned by the agent passes"
+  chmod 640 "$GUARDIAN_HOME/guardian.conf"; assert_has "$(prod -- check)" "killswitch=clear mode=heal" "0640 passes (not writable)"
+  chmod 644 "$GUARDIAN_HOME/guardian.conf"; assert_has "$(prod -- check)" "killswitch=clear mode=heal" "0644 passes"
+  chmod 666 "$GUARDIAN_HOME/guardian.conf"; rm -f "$GUARDIAN_HOME/audit.log"
+  assert_has "$(prod -- check)" "killswitch=engaged mode=shadow why=conf" "world-writable: killed"
+  assert_has "$(cat "$GUARDIAN_HOME/audit.log")" "conf rejected: mode" "audit: mode"
+  chmod 660 "$GUARDIAN_HOME/guardian.conf"; rm -f "$GUARDIAN_HOME/audit.log"
+  assert_has "$(prod -- check)" "killswitch=engaged mode=shadow why=conf" "group-writable: killed"
+  assert_has "$(cat "$GUARDIAN_HOME/audit.log")" "conf rejected: mode" "audit: mode (group)"
+  chmod 602 "$GUARDIAN_HOME/guardian.conf"
+  assert_has "$(prod -- check)" "why=conf" "other-write only: killed"
+  rm -f "$GUARDIAN_HOME/guardian.conf"; ln -s "$good" "$GUARDIAN_HOME/guardian.conf"; rm -f "$GUARDIAN_HOME/audit.log"
+  assert_has "$(prod -- check)" "killswitch=engaged mode=shadow why=conf" "symlink to a good conf: killed"
+  assert_has "$(cat "$GUARDIAN_HOME/audit.log")" "conf rejected: symlink" "audit: symlink"
+  rm -f "$GUARDIAN_HOME/guardian.conf"; ln -s "$T/nowhere" "$GUARDIAN_HOME/guardian.conf"
+  assert_has "$(prod -- check)" "why=conf" "dangling symlink: killed"
+  rm -f "$GUARDIAN_HOME/guardian.conf"; mkdir "$GUARDIAN_HOME/guardian.conf"; rm -f "$GUARDIAN_HOME/audit.log"
+  assert_has "$(prod -- check)" "why=conf" "directory: killed"
+  assert_has "$(cat "$GUARDIAN_HOME/audit.log")" "conf rejected: not regular" "audit: not regular"
+  rmdir "$GUARDIAN_HOME/guardian.conf"
+  # nothing was read from a rejected file: a good body behind a bad mode gives no room, so run stops at rc 2
+  cp "$good" "$GUARDIAN_HOME/guardian.conf"; chmod 666 "$GUARDIAN_HOME/guardian.conf"
+  prod -- run >/dev/null; assert_rc $? 2 "rejected conf: no key read, no room, rc 2"
+  # another uid: root-owned is accepted, anyone else is not. A harness cannot chown to another uid without root, so this case is checked on the function.
+  if [ "$(id -u)" = 0 ]; then
+    cp "$good" "$GUARDIAN_HOME/guardian.conf"; chmod 600 "$GUARDIAN_HOME/guardian.conf"; chown 12345 "$GUARDIAN_HOME/guardian.conf"
+    assert_has "$(prod -- check)" "why=conf" "foreign owner: killed"
+  else
+    printf '#!/bin/bash\necho "4242 600 Regular File"\n' >"$T/bin/fakestat"; chmod +x "$T/bin/fakestat"
+    cp "$good" "$T/own.conf"
+    out="$( readonly G_STAT="$T/bin/fakestat"; . "$KDIR/lib/common.sh"; . "$KDIR/lib/conf.sh"; audit() { echo "$*"; }; conf_perms_ok "$T/own.conf"; echo "rc=$?" )"
+    assert_has "$out" "conf rejected: owner" "a file owned by another uid (stat shim says uid 4242; a real chown needs root, so the real-file case runs only as root): rejected"
+    assert_has "$out" "rc=1" "and rc 1"
+  fi
+  # a root-owned file passes the owner check (/etc/hosts is root-owned, 0644 here)
+  out="$( . "$KDIR/lib/common.sh"; . "$KDIR/lib/conf.sh"; audit() { echo "$*"; }; conf_perms_ok /etc/hosts; echo "rc=$?" )"
+  assert_has "$out" "rc=0" "root-owned, not writable: accepted"
+}
+test_r13_install_writes_a_conf_that_passes_the_check() {
+  rm -rf "$GUARDIAN_HOME"
+  chmod 644 "$T/good.conf" 2>/dev/null
+  printf 'GUARDIAN_ROOM="opd9"\nGUARDIAN_CONTROL_SUB_CMD='"'"'true'"'"'\n' >"$T/in.conf"; chmod 664 "$T/in.conf"
+  GUARDIAN_ROOT_HELPER="$T/libexec/eta-guardian-root" LA_DIR="$HOME/Library/LaunchAgents" bash "$KDIR/install.sh" --room opd9 --config "$T/in.conf" --sudo "$T/bin/fakesudo" >/dev/null 2>&1
+  assert_rc $? 0 "install accepts a --config source of any mode (the lint is for content)"
+  assert_eq "$(/usr/bin/stat -f '%Lp %u %HT' "$GUARDIAN_HOME/guardian.conf")" "600 $(id -u) Regular File" "installed conf: regular, 0600, the agent's uid"
+  assert_has "$(conf_parse_in_sub "$GUARDIAN_HOME/guardian.conf" GUARDIAN_ROOM)" "rc=0 GUARDIAN_ROOM=\[opd9\]" "and it passes conf_load with the check on"
+  rm -rf "$GUARDIAN_HOME"
+  GUARDIAN_ROOT_HELPER="$T/libexec/eta-guardian-root" LA_DIR="$HOME/Library/LaunchAgents" bash "$KDIR/install.sh" --room opd9 --sudo "$T/bin/fakesudo" >/dev/null 2>&1
+  assert_eq "$(/usr/bin/stat -f '%Lp %u %HT' "$GUARDIAN_HOME/guardian.conf")" "600 $(id -u) Regular File" "installed stub conf: regular, 0600, the agent's uid"
 }

@@ -4,7 +4,7 @@
 # Sourced, never executed. Every external effect goes through a PATH command or a GUARDIAN_* command
 # variable, so tests can substitute fakes.
 
-GUARDIAN_VERSION="c1-0.3.0-r12"   # bump per release: the audit "guardian start version=" line identifies the tree
+GUARDIAN_VERSION="c1-0.3.0-r13"   # bump per release: the audit "guardian start version=" line identifies the tree
 
 # R12. Run mode (guardian.sh run|check, G_RUNMODE=1) reads no test seam and no environment tunable: every name below is assigned its default
 # unconditionally and only guardian.conf (parsed as data by conf.sh, never sourced) can change the allow-listed keys. Library tests source this
@@ -40,6 +40,12 @@ g_const G_DATE /bin/date
 g_const G_MV /bin/mv
 g_const G_MKDIR /bin/mkdir
 g_const G_GREP /usr/bin/grep
+g_const G_ENV /usr/bin/env
+g_const G_BASH /bin/bash
+g_const G_ID /usr/bin/id
+g_const G_STAT /usr/bin/stat
+# The PATH every conf command (transport, sudo path) is started with in run mode (R13): a constant, never the caller's PATH.
+g_const G_CHILD_PATH /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 
 : "${GUARDIAN_HOME:=$HOME/Library/Application Support/EvenScribe/Guardian}"
 : "${RR_ROOT:=$HOME/Library/Application Support/EvenScribe/RoomRecorder}"
@@ -83,6 +89,25 @@ g_def GUARDIAN_SETTLE_S 1
 STATE_DIR="$GUARDIAN_HOME/state"
 AUDIT_LOG="$GUARDIAN_HOME/audit.log"
 FLAG_DIR="$GUARDIAN_HOME/flags"
+
+# g_clean_exec <argv...> (R13 M1): run a child that executes a conf command. In run mode the child gets an ALLOW-LISTED environment:
+# `env -i` plus HOME, USER, LOGNAME, TMPDIR (if set), the pinned PATH, GUARDIAN_HOME and GUARDIAN_PIPE_SSH (if the conf set it).
+# So no BASH_ENV, ENV, BASH_FUNC_*, SHELLOPTS, BASHOPTS, PS4 or IFS from outside reaches the child. SSH_AUTH_SOCK is not passed: the pipe uses the key
+# file in the agent directory (GUARDIAN_PIPE_SSH names it), so no current code path needs an agent socket.
+# Library tests (G_RUNMODE unset) keep the caller's environment, because the fakes and sandbox paths travel in it.
+g_clean_exec() {
+  local -a envv
+  if [ "${G_RUNMODE:-}" != 1 ]; then "$@"; return; fi
+  envv=("HOME=$HOME" "USER=${USER:-$("$G_ID" -un)}" "LOGNAME=${LOGNAME:-${USER:-$("$G_ID" -un)}}" "PATH=$G_CHILD_PATH" "GUARDIAN_HOME=$GUARDIAN_HOME")
+  [ -z "${TMPDIR:-}" ] || envv+=("TMPDIR=$TMPDIR")
+  [ -z "${GUARDIAN_PIPE_SSH+x}" ] || envv+=("GUARDIAN_PIPE_SSH=$GUARDIAN_PIPE_SSH")
+  "$G_ENV" -i "${envv[@]}" "$@"
+}
+# g_conf_cmd <command string> <args...>: the one way a conf command is run. bash -p (no startup file, no imported function) under the clean env.
+g_conf_cmd() {
+  local c="$1"; shift
+  g_clean_exec "$G_BASH" -p -c "$c" _ "$@"
+}
 
 gsleep() { sleep "$1"; }
 
@@ -181,7 +206,7 @@ publish() {
   mkdir -p "$STATE_DIR" 2>/dev/null
   tmp="$STATE_DIR/pub.$$.out"
   printf '%s\n' "$line" >"$tmp.in"
-  RC_STDIN="$tmp.in" run_capped "$PUBLISH_CAP_S" "$tmp" bash -c "$GUARDIAN_PUBLISH_CMD" _ "$topic"
+  RC_STDIN="$tmp.in" run_capped "$PUBLISH_CAP_S" "$tmp" g_conf_cmd "$GUARDIAN_PUBLISH_CMD" "$topic"
   local rc=$?
   rm -f "$tmp" "$tmp.in"
   [ "$rc" -eq 0 ] || audit "publish_failed topic=$topic rc=$rc"
@@ -191,7 +216,8 @@ publish() {
 # sudo only through the configured kiosk-sudo path, only the root helper (G5).
 root_do() {
   if [ -z "$GUARDIAN_SUDO" ]; then audit "root_do refused: no sudo path"; return 97; fi
-  $GUARDIAN_SUDO "$GUARDIAN_ROOT_HELPER" "$@"
+  # shellcheck disable=SC2086
+  g_clean_exec $GUARDIAN_SUDO "$GUARDIAN_ROOT_HELPER" "$@"
 }
 
 # stamp files: once_per <key> <secs> -> 0 when allowed (and records), 1 when still inside the window

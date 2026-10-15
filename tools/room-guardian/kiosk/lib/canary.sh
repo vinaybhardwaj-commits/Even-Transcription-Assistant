@@ -11,6 +11,7 @@ CANARY_WAV="$STATE_DIR/canary.wav"
 CANARY_NIGHT_FILE="$STATE_DIR/canary_night"
 CANARY_LAST_FILE="$STATE_DIR/canary_last_play"
 CANARY_MIN_GAP_S=43200   # no second play within 12 h of the last one, whatever the night key says (a clock that went forward and back)
+if [ "${G_RUNMODE:-}" = 1 ]; then readonly G_AFPLAY CANARY_MIN_GAP_S; fi   # R13 S6
 
 # IST night key YYYYMMDD. Before 07:00 the night still belongs to the evening before.
 canary_night_key() {
@@ -160,7 +161,7 @@ canary_rms_peak_window() { # file offset_bytes length_bytes
 canary_play_and_confirm() {
   local ap="$G_AFPLAY" f0 f1 s0 s1 pstart pre_off pre_len blen pre burst rise rem el out="$STATE_DIR/canary.play"
   [ "${G_RUNMODE:-}" != 1 ] && [ "${GUARDIAN_TESTMODE:-}" = 1 ] && ap="${CANARY_AFPLAY:-/usr/bin/false}"   # test mode never reaches the real afplay
-  if ! canary_volume_ok; then audit "canary not played: CANARY_VOLUME is not in (0,1]"; canary_event "inconclusive:bad_volume"; return 0; fi
+  if ! canary_volume_ok; then audit "canary not played: CANARY_VOLUME is not in (0,0.5]"; canary_event "inconclusive:bad_volume"; return 0; fi
   canary_output_present || { canary_event "inconclusive:output_absent"; return 0; }
   f0="$(canary_tape_file)"; s0="$(canary_size "$f0")"
   case "$s0" in ''|*[!0-9]*) canary_event "inconclusive:tape_unreadable"; return 0 ;; esac

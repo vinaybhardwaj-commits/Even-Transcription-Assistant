@@ -25,6 +25,7 @@ CONTROL_LAST="$STATE_DIR/control.last"
 CONTROL_RE='^\{"kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$'
 CONTROL_RECV_RE='^[1-9][0-9]{0,14}$'
 CONTROL_ROOM_RE='^[a-z0-9_-]{1,64}$'
+if [ "${G_RUNMODE:-}" = 1 ]; then readonly CONTROL_RE CONTROL_LAST; fi   # R13 S6 (library tests may re-point CONTROL_LAST)
 
 # 0 when the keys of a validated modes body ('"a": "heal", "b": "shadow"', no braces) are strictly ascending bytewise, so none repeats.
 # One split on "," and two expansions per room (R11: the old pattern walk was quadratic). Keys and values hold no comma and no glob character (the regex proved it).
@@ -125,7 +126,7 @@ flag_fetch() {
   if [ -z "$GUARDIAN_FLAG_CMD" ]; then
     printf '%s\nfleet=unreachable\n' "$now" >"$FLAG_CACHE"; return 1
   fi
-  run_capped 5 "$out" bash -c "$GUARDIAN_FLAG_CMD" _ "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC"
+  run_capped 5 "$out" g_conf_cmd "$GUARDIAN_FLAG_CMD" "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC"
   rc=$?
   if [ "$rc" -ne 0 ] || ! "$G_GREP" -q '^fleet=' "$out" 2>/dev/null; then
     printf '%s\nfleet=unreachable\n' "$now" >"$FLAG_CACHE"; return 1
