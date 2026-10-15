@@ -7,9 +7,9 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=timbre
-WorkingDirectory=/opt/timbre/eta
+User=eta
+WorkingDirectory=/home/eta/timbre-nightly/code
 EnvironmentFile=/etc/timbre-nightly.env
-ExecStart=/opt/timbre/eta/tools/timbre/.venv/bin/python -m tools.timbre.nightly run --config /etc/timbre-nightly.json
+ExecStart=/home/eta/timbre-nightly/venv/bin/python -m tools.timbre.nightly run --config /etc/timbre-nightly.json
 TimeoutStartSec=8h
 Nice=10

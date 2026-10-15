@@ -271,6 +271,43 @@ def test_bad_utf8_row_skipped_and_counted(rig, capsys):  # N3
     _bad_ledger_case(rig, capsys, b'{"consult_uid": "c9", "x": "\xff\xfe"}\xff\n')
 
 
+def _row(**over) -> bytes:
+    r = {"consult_uid": "c9", "ist_date": DAY, "pipeline_version": "timbre-v1", "valence_model_rev": None, "arousal_model_rev": None,
+         "cut_version": "sig:x", "cost_usd_est": 0.01}
+    r.update(over)
+    return (json.dumps(r) + "\n").encode()
+
+
+@pytest.mark.parametrize("cost", [b"NaN", b"Infinity", b"-Infinity", b"-1", b"true", b"false", b"null", b'"0.5"', b"1e999"])
+def test_r1_bad_cost_never_enters_spend(rig, capsys, cost):  # R1
+    bad = _row().replace(b"0.01", cost)
+    assert b"cost_usd_est" in bad and cost in bad
+    _bad_ledger_case(rig, capsys, bad)
+    rig.runs.clear()
+    rig.cfg["budget_usd_daily"] = 0.0001
+    rows, n = nightly.read_ledger(Path(rig.cfg["workdir"]) / "intraday-ledger.jsonl")
+    assert n == 1 and sum(r["cost_usd_est"] for r in rows if r["ist_date"] == DAY) < 1
+
+
+@pytest.mark.parametrize("field,val", [("consult_uid", 5), ("consult_uid", ""), ("consult_uid", None), ("consult_uid", ["a"]), ("ist_date", 20261015),
+                                       ("ist_date", None), ("pipeline_version", 1), ("valence_model_rev", {"a": 1}), ("arousal_model_rev", True),
+                                       ("cut_version", 7)])
+def test_r2_bad_identity_or_version_row_skipped_and_counted(rig, capsys, field, val):  # R2
+    _bad_ledger_case(rig, capsys, _row(**{field: val}))
+
+
+def test_r2_null_version_fields_are_allowed(tmp_path):  # R2
+    p = tmp_path / "l.jsonl"
+    p.write_bytes(_row(pipeline_version=None, cut_version=None))
+    assert nightly.read_ledger(p) == ([json.loads(_row(pipeline_version=None, cut_version=None))], 0)
+
+
+def test_r2_missing_ist_date_row_skipped(tmp_path):  # R2
+    p = tmp_path / "l.jsonl"
+    p.write_bytes(b'{"consult_uid": "c9", "cost_usd_est": 0.1}\n')
+    assert nightly.read_ledger(p) == ([], 1)
+
+
 def test_intraday_exception_uses_intraday_tag(monkeypatch, capsys):  # N5
     monkeypatch.setattr(nightly, "load_config", lambda path: (_ for _ in ()).throw(RuntimeError("boom")))
     assert nightly.main(["intraday", "--date", DAY]) == 1
