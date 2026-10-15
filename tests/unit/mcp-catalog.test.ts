@@ -99,7 +99,7 @@ vi.mock("@/lib/rubrics/blind-room-days", () => ({
 
 import { setLabStoreForTests, ENCOUNTER_CATALOG_KEY, labReadable, type LabStore } from "@/lib/sarvam-lab";
 import { catalogTool } from "@/lib/mcp/tools/catalog";
-import { resetCatalogCacheForTests, selectTrack, parseCatalog, type Track } from "@/lib/room-access/readers/catalog-consult";
+import { resetCatalogCacheForTests, readAudioFeaturesLayer, selectTrack, parseCatalog, type Track } from "@/lib/room-access/readers/catalog-consult";
 import { ROOM_RESTRICTED_ALLOWED_TOOLS, type ToolContext } from "@/lib/mcp/registry";
 import type { McpScope } from "@/lib/mcp/auth";
 
@@ -359,7 +359,7 @@ describe("get: arguments and the row", () => {
     expect((o.row as Row).extra_field).toEqual({ keep: "me" });
     expect(((o.row as Row).layers as Row).stt).toMatchObject({ r2_key: tk("stt.sarvam-saaras-v3") });
     const layers = o.layers as Record<string, Row>;
-    expect(Object.keys(layers)).toEqual(["transcript", "parts", "freescript", "rubric", "jev", "identity", "cdmss", "rx"]);
+    expect(Object.keys(layers)).toEqual(["transcript", "parts", "audio_features", "freescript", "rubric", "jev", "identity", "cdmss", "rx"]);
     for (const l of Object.values(layers)) expect(Object.keys(l).filter((k) => k !== "error").sort()).toEqual(["data", "source", "status"]);
     expect(layers.cdmss).toEqual({ status: "not_available", source: ["consult-audit S5 (pending)"], data: null });
   });
@@ -1416,4 +1416,212 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
     });
   });
 });
+});
+
+describe("CATALOG-8: layers.audio_features", () => {
+  const fk = (engine: string, ver = "v1", uid = UID, room = "room_a", day = "2026-10-05", cfg = "ab12cd34") => `reb/${day}/${room}/_consults/${uid}/tracks/features.${engine}__${ver}__${cfg}.json`;
+  const ftrack = (features: unknown, o: Row = {}): Row => ({ layer: "features", engine: "x", version: "v1", status: "ok", config: {}, segments: [], extras: { features }, ...o });
+  const GOOD = { speaker: "spk0", role: "doctor", role_source: "llm", feature: "f0_mean", stat: "median", value: 1.5, iqr: 0.2, n_turns: 4, seconds: 12.5, overlap_excluded_s: 0, reliability: 0.9, model_id: "m1", model_rev: "r1" };
+  const withAf = (af: unknown, uid = UID, o: Row = {}) => (resetCatalogCacheForTests(), setCatalog([crow(uid, { layers: { stt: null, translate: null, role: null, parts: null, audio_features: af }, ...o })]));
+  const af = async (): Promise<Row> => (((await run({ action: "get", consult_uid: UID })).layers as Record<string, Row>).audio_features)!;
+
+  it("a row without audio_features is absent, and a get with every key absent is still ok", async () => {
+    setCatalog([crow(UID)]);
+    seedLayers();
+    expect(await af()).toEqual({ status: "absent", source: [], data: null });
+    withAf({ r2_key: fk("timbre-e2v") });
+    const o = await run({ action: "get", consult_uid: UID });
+    expect(o.ok).toBe(true);
+    expect((o.layers as Record<string, Row>).audio_features).toEqual({ status: "absent", source: [fk("timbre-e2v")], data: null });
+  });
+
+  it("shapes a, b and c each read", async () => {
+    setTrack(fk("timbre-e2v"), ftrack([GOOD]));
+    setTrack(fk("talktime", "v2"), ftrack([{ ...GOOD, feature: "talk_share" }]));
+    const a = { r2_key: fk("timbre-e2v"), status: "ok" };
+    const b2 = { r2_key: fk("talktime", "v2") };
+    for (const [shape, v, n] of [["a", a, 1], ["b", [a, b2], 2], ["c", { "timbre-e2v": a, talktime: b2 }, 2]] as const) {
+      withAf(v);
+      resetCatalogCacheForTests();
+      const l = await af();
+      expect(l.status, shape).toBe("ok");
+      const d = l.data as { tracks: Row[]; n_skipped: number };
+      expect(d.tracks.length, shape).toBe(n);
+      expect(d.n_skipped).toBe(0);
+      expect(d.tracks[0]).toEqual({ engine: "timbre-e2v", version: "v1", rows: [GOOD], n_rows_dropped: 0 });
+    }
+  });
+
+  it("an unknown engine is skipped and counted, never read", async () => {
+    setTrack(fk("clef"), ftrack([GOOD]));
+    withAf([{ r2_key: fk("clef") }, { r2_key: fk("mystery") }, { r2_key: fk("clef", "v1").replace("features.", "other.") }]);
+    const l = await af();
+    expect((l.data as Row).n_skipped).toBe(2);
+    expect(((l.data as Row).tracks as Row[]).length).toBe(1);
+    expect(reads.filter((r) => r.includes("mystery") || r.includes("other."))).toEqual([]);
+  });
+
+  it("a key bound to another consult is key_not_readable; a non-string key too", async () => {
+    withAf({ r2_key: fk("clef", "v1", "OTHERUID0001") });
+    expect(await af()).toMatchObject({ status: "error", error: "key_not_readable" });
+    withAf({ r2_key: 42 });
+    expect(await af()).toMatchObject({ status: "error", error: "key_not_readable" });
+    expect(reads.filter((r) => r.includes("OTHERUID0001"))).toEqual([]);
+  });
+
+  it("a blind room-day key is refused", async () => {
+    const k = fk("clef", "v1", UID, "room_blind", "2026-10-01");
+    const row = crow(UID, { ist_date: "2026-10-01", room_id: "room_blind", layers: { audio_features: { r2_key: k } } });
+    setTrack(k, ftrack([GOOD]));
+    expect(await readAudioFeaturesLayer(row)).toMatchObject({ status: "error", error: "blind_room_day" });
+    expect(reads).not.toContain(k);
+  });
+
+  it("a track whose status is not ok is absent; bad_json and read_failed are counted, not fatal", async () => {
+    setTrack(fk("clef"), ftrack([GOOD], { status: "failed" }));
+    withAf({ r2_key: fk("clef") });
+    expect(await af()).toMatchObject({ status: "absent" });
+    setTrack(fk("clef"), ftrack([GOOD]));
+    store.set(fk("talktime"), { body: "{nope", etag: null });
+    failKey = fk("timbre-e2v");
+    withAf([{ r2_key: fk("clef") }, { r2_key: fk("talktime") }, { r2_key: fk("timbre-e2v") }]);
+    const l = await af();
+    expect(l.status).toBe("ok");
+    expect((l.data as Row).errors).toEqual({ bad_json: 1, read_failed: 1 });
+    // every key erroring: the layer errors with the first code
+    store.delete(fk("clef"));
+    store.set(fk("clef"), { body: "{nope", etag: null });
+    withAf([{ r2_key: fk("clef") }, { r2_key: fk("talktime") }]);
+    expect(await af()).toMatchObject({ status: "error", error: "bad_json", data: null });
+  });
+
+  it("rows keep the whitelist only; strings need the pattern, numbers must be finite", async () => {
+    const big = "x".repeat(81);
+    setTrack(fk("talktime"), ftrack([
+      { ...GOOD, transcript: "ZZTEXT", name: "N", extra: 1 },
+      { ...GOOD, speaker: "has space", role: big, stat: "ok/1:2", value: "1", iqr: Number.POSITIVE_INFINITY, reliability: null },
+      { speaker: "spk1", value: 1 },
+      "junk",
+      { ...GOOD, feature: "bad feature" },
+    ]));
+    withAf({ r2_key: fk("talktime") });
+    const d = (await af()).data as { tracks: Array<{ rows: Row[]; n_rows_dropped: number }> };
+    expect(d.tracks[0].n_rows_dropped).toBe(3);
+    expect(d.tracks[0].rows[0]).toEqual(GOOD);
+    expect(d.tracks[0].rows[1]).toMatchObject({ speaker: null, role: null, stat: "ok/1:2", value: null, iqr: null, reliability: null, feature: "f0_mean" });
+    expect(JSON.stringify(d)).not.toContain("ZZTEXT");
+  });
+
+  it("501 rows give 500 plus 1 dropped; 9 keys give too_many_tracks", async () => {
+    setTrack(fk("clef"), ftrack(Array.from({ length: 501 }, () => GOOD)));
+    withAf({ r2_key: fk("clef") });
+    const d = (await af()).data as { tracks: Array<{ rows: Row[]; n_rows_dropped: number }> };
+    expect([d.tracks[0].rows.length, d.tracks[0].n_rows_dropped]).toEqual([500, 1]);
+    withAf(Array.from({ length: 9 }, () => ({ r2_key: fk("clef") })));
+    expect(await af()).toMatchObject({ status: "error", error: "too_many_tracks" });
+    withAf(Array.from({ length: 8 }, () => ({ r2_key: fk("clef") })));
+    expect((await af()).status).toBe("ok");
+  });
+
+  it("search never shows an r2_key for shapes a, b and c", async () => {
+    for (const v of [{ r2_key: fk("clef") }, [{ r2_key: fk("clef") }], { clef: { r2_key: fk("clef") } }, [fk("clef")], [[{ r2_key: fk("clef") }]]]) {
+      withAf(v);
+      resetCatalogCacheForTests();
+      const o = await run({ action: "search", from: "2026-10-05", to: "2026-10-05" });
+      expect(JSON.stringify(o)).not.toContain("features.clef");
+      expect(((o.rows as Row[])[0].layers_present as string[])).toContain("audio_features");
+    }
+  });
+});
+
+describe("CATALOG-9: search scrubs storage keys at any depth", () => {
+  const K = `reb/2026-10-05/room_a/_consults/${UID}/tracks/x__v1__ab12cd34.json`;
+  const search = async (layers: Row, o: Row = {}): Promise<Row> => {
+    resetCatalogCacheForTests();
+    setCatalog([crow(UID, { layers, ...o })]);
+    return ((await run({ action: "search", from: "2026-10-05", to: "2026-10-05" })).rows as Row[])[0]!;
+  };
+  const L = async (v: unknown): Promise<unknown> => ((await search({ lay: v })).layers as Row).lay;
+
+  it("the three INFO-1 shapes show no key", async () => {
+    expect(await L({ status: "ok", x: K })).toEqual({ status: "ok", x: null });
+    expect(await L({ status: "ok", by: { x: { r2_key: K } } })).toEqual({ status: "ok", by: { x: {} } });
+    expect(await L({ status: "ok", x: { key: K, engine: "e1" } })).toEqual({ status: "ok", x: { engine: "e1" } });
+  });
+  it("field names are dropped case-insensitively; url-like and store-like strings become null; plain strings stay", async () => {
+    const out = (await L({ URL: "a", Signed_Url: "b", keys: [1], r2_keys: [2], a: "https://h.example/p", b: "consult-clips/d/s/u/consult.flac", c: "palimpsest/ledger/x", d: "plain text", e: 3, f: true, g: null, version: "v1", n_turns: 4 })) as Row;
+    expect(out).toEqual({ a: null, b: null, c: null, d: "plain text", e: 3, f: true, g: null, version: "v1", n_turns: 4 });
+  });
+  it("depth 7 becomes null; a leaf at depth 7 and any container below it are null; depth 6 survives", async () => {
+    const nest = (n: number): unknown => (n === 0 ? "leaf" : { n: nest(n - 1) });
+    // layer value is depth 0; its sixth nested object holds "leaf" at depth 6
+    expect(JSON.stringify(await L(nest(6)))).toBe('{"n":{"n":{"n":{"n":{"n":{"n":"leaf"}}}}}}');
+    expect(JSON.stringify(await L(nest(7)))).toBe('{"n":{"n":{"n":{"n":{"n":{"n":{"n":null}}}}}}}');
+    const deepObj = JSON.stringify(await L(nest(8)));
+    expect(deepObj).toBe('{"n":{"n":{"n":{"n":{"n":{"n":{"n":null}}}}}}}');
+  });
+  it("a 65-entry array keeps 64", async () => {
+    expect(((await L(Array.from({ length: 65 }, (_, i) => i))) as unknown[]).length).toBe(64);
+  });
+  it("clip in search has no key but keeps its other fields", async () => {
+    const r = await search({});
+    expect(r.clip).toMatchObject({ r2_status: "mirrored", bytes: 1234, minutes: 0.1 });
+    expect(r.clip as Row).not.toHaveProperty("r2_key");
+    expect(JSON.stringify(r)).not.toContain("consult-clips/");
+  });
+  it("a whole search answer over keys in every layer shape holds no reb/, consult-clips/, palimpsest/ or r2_key", async () => {
+    setCatalog([crow(UID, { layers: { stt: layer("stt.sarvam-saaras-v3"), a: { r2_key: K }, b: [{ r2_key: K }, K, [{ r2_key: K }]], c: { e: { r2_key: K } }, d: { by: { x: { r2_key: K } } }, e: { x: { key: K } }, f: { x: K }, g: { u: "https://h.example/" + K, p: "palimpsest/" + K } } })]);
+    const out = JSON.stringify(await run({ action: "search", from: "2026-10-05", to: "2026-10-05" }));
+    for (const bad of ["reb/", "consult-clips/", "palimpsest/", "r2_key", "://"]) expect(out, bad).not.toContain(bad);
+    expect(out).toContain("layers_present");
+  });
+});
+
+describe("CATALOG-9 FIX1: prefixes anywhere, more key field names, the whole row", () => {
+  const K = `reb/2026-10-05/room_a/_consults/${UID}/tracks/x__v1__ab12cd34.json`;
+  const searchRow = async (o: Row): Promise<Row> => {
+    resetCatalogCacheForTests();
+    setCatalog([crow(UID, o)]);
+    return ((await run({ action: "search", from: "2026-10-05", to: "2026-10-05" })).rows as Row[])[0]!;
+  };
+  it("prefixed, embedded and map-key forms show no key", async () => {
+    const r = await searchRow({ layers: { l: { a: " " + K, b: "/" + K, c: "eta-lab-results/" + K, d: "see " + K, e: "r2:" + K, [K]: { status: "ok" }, ok: "debrief/notes", n: "web-reb" } } });
+    const out = JSON.stringify(r);
+    for (const bad of ["reb/", "consult-clips/", "palimpsest/", "r2_key"]) expect(out, bad).not.toContain(bad);
+    expect((r.layers as Row).l).toEqual({ a: null, b: null, c: null, d: null, e: null, ok: "debrief/notes", n: "web-reb" });
+  });
+  it("more key-like field names are dropped, case-insensitive", async () => {
+    const r = await searchRow({ layers: { l: { r2Key: "x", Object_Key: "x", s3_key: "x", clip_key: "x", presigned_url: "x", HREF: "x", uri: "x", path: "x", status: "ok" } } });
+    expect((r.layers as Row).l).toEqual({ status: "ok" });
+  });
+  it("the whole row is scrubbed: a top-level key string and manifest:{r2_key} do not show; ids and dates do", async () => {
+    const r = await searchRow({ stray: K, manifest: { r2_key: K, state: "ok" }, nested: { by: [K] } });
+    expect(JSON.stringify(r)).not.toContain("reb/");
+    expect(r).toMatchObject({ consult_uid: UID, ist_date: "2026-10-05", room_id: "room_a", stray: null, manifest: { state: "ok" }, nested: { by: [null] } });
+  });
+});
+
+describe("CATALOG-9 FIX2: key-named layers, whole-row caps", () => {
+  const K = `reb/2026-10-05/room_a/_consults/${UID}/tracks/x__v1__ab12cd34.json`;
+  const searchRow = async (o: Row): Promise<Row> => {
+    resetCatalogCacheForTests();
+    setCatalog([crow(UID, o)]);
+    return ((await run({ action: "search", from: "2026-10-05", to: "2026-10-05" })).rows as Row[])[0]!;
+  };
+  it("a layer named like a key or a store path is in neither layers nor layers_present", async () => {
+    const r = await searchRow({ layers: { stt: layer("stt.sarvam-saaras-v3"), [K]: { status: "ok" }, r2_key: { status: "ok" }, url: [1] } });
+    expect(JSON.stringify(r)).not.toContain("reb/");
+    expect(Object.keys(r.layers as Row)).toEqual(["stt"]);
+    expect(r.layers_present).toEqual(["stt"]);
+  });
+  it("top-level fields keep arrays past 64 and objects 8 deep; clip too; key rules still apply at depth", async () => {
+    const deep = { a: { b: { c: { d: { e: { f: { g: { h: "leaf", k: K } } } } } } } };
+    const r = await searchRow({ many: Array.from({ length: 70 }, (_, i) => i), deep, clip: { bytes: 5, list: Array.from({ length: 70 }, (_, i) => i) } });
+    expect((r.many as unknown[]).length).toBe(70);
+    expect(JSON.stringify(r.deep)).toBe('{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":"leaf","k":null}}}}}}}}');
+    expect(((r.clip as Row).list as unknown[]).length).toBe(70);
+    // layer values keep the tight caps
+    const l = await searchRow({ layers: { lay: Array.from({ length: 70 }, (_, i) => i) } });
+    expect(((l.layers as Row).lay as unknown[]).length).toBe(64);
+  });
 });
