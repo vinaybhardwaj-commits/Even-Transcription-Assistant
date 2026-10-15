@@ -61,6 +61,37 @@ describe("single-flight and memo", () => {
   });
 });
 
+describe("FIX1: abandoned read and reset generation", () => {
+  it("a never-settling read is abandoned after 10 s: the next poll makes a 2nd read and succeeds, still single-flight", async () => {
+    const read = vi.fn<() => Promise<Coverage>>().mockImplementationOnce(() => new Promise<Coverage>(() => {})).mockResolvedValue(COV);
+    const first = coverageOrNull({ read, timeoutMs: 2_000 });
+    await vi.advanceTimersByTimeAsync(2_001);
+    expect(await first).toBeNull();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const early = coverageOrNull({ read, timeoutMs: 2_000 });
+    await vi.advanceTimersByTimeAsync(2_001);
+    expect(await early).toBeNull();
+    expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(3_000);
+    const r = await Promise.all([coverageOrNull({ read }), coverageOrNull({ read }), coverageOrNull({ read })]);
+    expect(read).toHaveBeenCalledTimes(2);
+    r.forEach((x) => expect(x).toEqual(COV));
+  });
+  it("a read orphaned before a reset never writes the memo", async () => {
+    let resolve!: (c: Coverage) => void;
+    const old = vi.fn(() => new Promise<Coverage>((r) => { resolve = r; }));
+    const p = coverageOrNull({ read: old, timeoutMs: 100 });
+    await vi.advanceTimersByTimeAsync(101);
+    expect(await p).toBeNull();
+    __resetCoverageMemoForTests();
+    resolve({ ...COV, cut: 99 });
+    await vi.advanceTimersByTimeAsync(0);
+    const fresh = vi.fn(async () => COV);
+    expect(await coverageOrNull({ read: fresh })).toEqual(COV);
+    expect(fresh).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("projection", () => {
   it("drops an extra top-level key and an extra nested key", async () => {
     const dirty = { ...COV, secret: "x", jev_done: { ...COV.jev_done, extra: 3 }, no_state: { ...COV.no_state, other: 4 } } as unknown as Coverage;
