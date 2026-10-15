@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""run_router.py -- launchd job com.eta.guardian.router. Runs Router.tick (ack reads, re-pages, V notices, 21:00 list) every TICK_S on the
+"""run_router.py -- launchd job com.eta.guardian.router. Runs Router.tick (ack reads, re-pages, V notices, 21:00 list and the monthly _to_delete size line, all in one batch send) every TICK_S on the
 Mini-local SQLite case store shared with the subscriber. Does NOT run the server-outbox relay (router_relay.py): that would take the relay lock
 and post real server alerts, which is not Phase 0. Routing and ackers come from etc/router.json (re-read every tick)."""
 import os, sys, time
@@ -42,7 +42,8 @@ def main():
         log(f"REFUSING TO START: {e.__class__.__name__}: {str(e)[:160]}")
         return 2
     store = alert_router.default_store(HOME)
-    router = alert_router.Router(store, ubus_bus.UbusBus, time.time, os.path.join(HOME, "data", "router-local.json"))
+    router = alert_router.Router(store, ubus_bus.UbusBus, time.time, os.path.join(HOME, "data", "router-local.json"),
+                                 lambda: alert_router.folder_size_line(os.path.join(HOME, "backup", "_to_delete")))
     log(f"router started pid={os.getpid()}")
     while True:
         try:

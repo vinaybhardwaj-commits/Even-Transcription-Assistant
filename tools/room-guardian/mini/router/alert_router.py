@@ -12,7 +12,11 @@ case state untouched, so the pages are simply due again on the next tick, and it
 
 Crash rule: each page line carries "room-alert-<id> ... [page N]". Before posting, the router reads the day thread; a page whose marker is
 already there is only written to the store. So a crash between post and state write gives neither a duplicate page nor a lost alert.
+The marker read covers today's AND yesterday's day thread, so a page posted just before IST midnight is not paged again just after it.
 ACKs are read from the day threads (today and yesterday) and from each case's own thread room-alert-<first_id>.
+
+The 21:00 list ("digest") rides in the same batch send, as one block: header line, one line per unacked case (capped), and once per calendar month
+a size line for backup/_to_delete. The block is atomic: if it does not fit the body cap, or the send fails, it stays due for the next tick.
 
 Store interface (see SqliteStore): get_open(room, kind) -> case|None, list_open(), insert(case), update(first_id, **f), add_note(text, now),
 list_notes(), drop_notes(ids).
@@ -53,10 +57,11 @@ def is_clinic(now):
 
 
 class Router:
-    def __init__(self, store, bus_factory, clock, state_path=None):
+    def __init__(self, store, bus_factory, clock, state_path=None, size_line_fn=None):
         self.store, self.bus_factory, self.clock = store, bus_factory, clock
         self.state_path = state_path
-        self.local = {"v_sent": {}, "digest_day": ""}
+        self.size_line_fn = size_line_fn          # () -> str | None: the monthly _to_delete size line; None or an error means no line
+        self.local = {"v_sent": {}, "digest_day": "", "size_month": ""}
         self._load()
 
     # ---- local state: V notices and the digest day. Losing it repeats a V notice at worst.
@@ -69,6 +74,7 @@ class Router:
                 if isinstance(d, dict):
                     self.local["v_sent"] = {str(k): list(v) for k, v in d.get("v_sent", {}).items()}
                     self.local["digest_day"] = str(d.get("digest_day", ""))
+                    self.local["size_month"] = str(d.get("size_month", ""))
             except (OSError, ValueError):
                 pass
 
@@ -130,15 +136,16 @@ class Router:
     def _age_min(self, c):
         return int((self.clock() - c["opened_at"]) // 60)
 
-    def _flush(self, bus, now, pages, vcases, notes, msgs, out):
-        """One send for everything due. State is written only after the send succeeded."""
+    def _flush(self, bus, now, pages, vcases, notes, msgs, out, digest=None):
+        """One send for everything due. State is written only after the send succeeded. `digest` is (lines, day, month|None) or None."""
         tid = batch_tid(now)
         done = set()
-        for m in msgs(tid):
-            for line in f"{m.get('subject', '')}\n{m.get('body', '')}".splitlines():
-                mt = _MARK_RE.search(line)
-                if mt:
-                    done.add((int(mt.group(1)), int(mt.group(2))))
+        for mt_tid in (tid, batch_tid(now - 86400)):          # yesterday's thread too: a page posted before IST midnight is not repeated after it
+            for m in msgs(mt_tid):
+                for line in f"{m.get('subject', '')}\n{m.get('body', '')}".splitlines():
+                    mt = _MARK_RE.search(line)
+                    if mt:
+                        done.add((int(mt.group(1)), int(mt.group(2))))
         lines, send, already = [], [], []
         for c, v in pages:
             n = c["page_count"] + 1
@@ -160,10 +167,17 @@ class Router:
             if used + len(line) + 1 <= budget: keep_v.append((c, line)); used += len(line) + 1
         for nid, text in notes:
             if used + len(text) + 1 <= budget: keep_notes.append((nid, text)); used += len(text) + 1
-        if keep_pages or keep_v or keep_notes:
-            body = head + "\n".join([l for *_, l in keep_pages] + [l for _, l in keep_v] + [t for _, t in keep_notes])
+        keep_digest = None
+        if digest:                                            # last in line: pages, V notices and notes come first; the digest is atomic
+            dtext = "\n".join(digest[0])
+            if used + len(dtext) + 1 <= budget:
+                keep_digest = digest; used += len(dtext) + 1
+        if keep_pages or keep_v or keep_notes or keep_digest:
+            body = head + "\n".join([l for *_, l in keep_pages] + [l for _, l in keep_v] + [t for _, t in keep_notes]
+                                    + (list(keep_digest[0]) if keep_digest else []))
             anyv = any(v for *_, v, _l in keep_pages) or bool(keep_v)
-            subject = (f"ROOM ALERT{' V' if anyv else ''}: {len(keep_pages)} page(s), {len(keep_v)} V, {len(keep_notes)} note(s)")[:120]
+            subject = (f"ROOM ALERT{' V' if anyv else ''}: {len(keep_pages)} page(s), {len(keep_v)} V, {len(keep_notes)} note(s)"
+                       + (", 21:00 list" if keep_digest else ""))[:120]
             urgent = any(c["kind"] in URGENT for c, *_ in keep_pages) or bool(keep_v)
             bus.post(subject, body, "urgent" if urgent else "normal", tid)
         t = self.clock()
@@ -177,6 +191,11 @@ class Router:
             self._v_due(c, now - c["opened_at"], now, mark=True)
         if keep_notes:
             self.store.drop_notes([nid for nid, _ in keep_notes])
+        if keep_digest:
+            self.local["digest_day"] = keep_digest[1]
+            if keep_digest[2]:
+                self.local["size_month"] = keep_digest[2]
+            out["digest"] += 1
         out["paged"] += len(keep_pages) + len(already); out["v"] += len(keep_v) + sum(1 for *_, v, _l in keep_pages if v)
         out["notes"] += len(keep_notes)
 
@@ -212,15 +231,16 @@ class Router:
                 if self._v_due(c, age, now, mark=False):
                     vcases.append(c)
             notes = self.store.list_notes()
-            if pages or vcases or notes:
-                try:
-                    self._flush(bus, now, pages, vcases, notes, msgs, out)
-                except Exception as e:
-                    out["errors"] += 1; out["error"] = f"send: {e.__class__.__name__}: {str(e)[:80]}"
+            digest = None
             try:
-                out["digest"] = self._digest(bus, now)
+                digest = self._digest_block(now)
             except Exception as e:
                 out["errors"] += 1; out["error"] = f"digest: {e.__class__.__name__}"
+            if pages or vcases or notes or digest:
+                try:
+                    self._flush(bus, now, pages, vcases, notes, msgs, out, digest)
+                except Exception as e:
+                    out["errors"] += 1; out["error"] = f"send: {e.__class__.__name__}: {str(e)[:80]}"
             try:
                 self.store.prune_routed(now - ROUTED_KEEP_S)
             except Exception as e:
@@ -271,16 +291,49 @@ class Router:
         return [f"room-alert-{c['first_id']} {c['kind']} {c['room_id']} open {self._age_min(c)} min, pages {c['page_count']}"
                 for c in self.store.list_open() if not c["acked_at"]]
 
-    def _digest(self, bus, now):
+    DIGEST_LINES_CAP = 30
+
+    def _digest_block(self, now):
+        """The 21:00 block for this day, or None (not yet 21:00, already sent today, or nothing to say). Returns (lines, day, month|None); the day and
+        month are recorded only after the batch send succeeded (see _flush). The size line goes out with the first digest run of each calendar month."""
         ist = datetime.fromtimestamp(now, IST)
-        day = ist.strftime("%Y-%m-%d")
+        day, month = ist.strftime("%Y-%m-%d"), ist.strftime("%Y-%m")
         if ist.hour < DIGEST_HOUR_IST or self.local["digest_day"] == day:
-            return 0
+            return None
         lines = self.unacked_list()
-        self.local["digest_day"] = day
+        block = []
         if lines:
-            bus.post(f"ROOM ALERTS unacked at 21:00: {len(lines)}", "\n".join(lines)[:4000], "normal", f"room-alert-digest-{day}")
-        return 1 if lines else 0
+            block.append(f"ROOM ALERTS unacked at 21:00: {len(lines)}")
+            block.extend(lines[:self.DIGEST_LINES_CAP])
+            if len(lines) > self.DIGEST_LINES_CAP:
+                block.append(f"... and {len(lines) - self.DIGEST_LINES_CAP} more")
+        size_month = None
+        if self.size_line_fn and self.local["size_month"] != month:
+            try:
+                sl = self.size_line_fn()
+            except Exception:
+                sl = None
+            if sl:
+                block.append(sl); size_month = month
+        if not block:
+            self.local["digest_day"] = day          # nothing to say today: do not look again until tomorrow
+            return None
+        return block, day, size_month
+
+
+def folder_size_line(path, label="backup/_to_delete"):
+    """The monthly size line for a folder nothing empties. None when the folder is absent. Only counts regular files, top level and below."""
+    import os
+    if not os.path.isdir(path):
+        return None
+    n = size = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                size += os.path.getsize(os.path.join(root, f)); n += 1
+            except OSError:
+                pass
+    return f"{label}: {n} file(s), {size / 1048576:.1f} MB. Reviewer: fleet / herdr-lead. Nothing empties it; move out or remove by hand."
 
 
 LOCAL_ID_BASE = 10 ** 12      # cases opened on the Mini (source=mini) use ids from here; server outbox ids stay far below
