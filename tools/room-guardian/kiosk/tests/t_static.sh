@@ -7,7 +7,7 @@ test_g1_no_kickstart_anywhere() {
   assert_eq "$(SRC_FILES | xargs grep -n 'kickstart' | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' | wc -l | tr -d ' ')" "0" "no kickstart in code"
 }
 test_g4_no_deletes_in_heal_paths() {
-  local n; n="$(code_only "$KDIR/lib/heal.sh" "$KDIR/lib/faulttree.sh" "$KDIR/lib/collect.sh" "$KDIR/bin/guardian-root.sh" "$KDIR/bin/guardian.sh" | grep -E '(^|[^a-z_])(rm|unlink|rmdir|srm|shred)[[:space:]]|DELETE FROM|DROP |truncate' | grep -v -F 'rm -f -- "$f"' | wc -l | tr -d ' ')"
+  local n; n="$(code_only "$KDIR/lib/heal.sh" "$KDIR/lib/faulttree.sh" "$KDIR/lib/collect.sh" "$KDIR/lib/canary.sh" "$KDIR/bin/guardian-root.sh" "$KDIR/bin/guardian.sh" | grep -E '(^|[^a-z_])(rm|unlink|rmdir|srm|shred)[[:space:]]|DELETE FROM|DROP |truncate' | grep -v -F 'rm -f -- "$f"' | wc -l | tr -d ' ')"
   assert_eq "$n" "0" "no delete verbs in heal, tree, collect, helper, main (bar the helper's backup prune)"
   assert_eq "$(grep -c 'rm -f -- "\$f"' "$KDIR/bin/guardian-root.sh")" "1" "the helper deletes in exactly one place: prune_backups"
   assert_eq "$(SRC_FILES | xargs grep -n -i -E 'Cookies|Login Data|Local State|Google/Chrome' | wc -l | tr -d ' ')" "0" "no Chrome cookie or Preferences path"
@@ -27,7 +27,7 @@ test_g7_no_hosts_ips_keys_in_tree() {
   assert_eq "$(grep -rn -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' "$KDIR/tests" | grep -v -E 'PATH|version' | wc -l | tr -d ' ')" "0" "none in tests either"
 }
 test_control_topic_name() {
-  assert_has "$(cat "$KDIR/lib/common.sh")" 'GUARDIAN_CONTROL_TOPIC:=guardian/control' "C4 ruling: topic guardian/control"
+  assert_has "$(cat "$KDIR/lib/common.sh")" 'GUARDIAN_CONTROL_TOPIC guardian/control' "C4 ruling: topic guardian/control"
 }
 test_root_helper_refuses_unknown_user_and_verb() {
   unset GUARDIAN_ROOT_TESTMODE

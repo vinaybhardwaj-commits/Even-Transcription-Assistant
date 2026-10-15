@@ -6,9 +6,15 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
+    <string>-p</string>
     <string>__GUARDIAN_HOME__/bin/guardian.sh</string>
     <string>run</string>
   </array>
+  <!-- R13: bash -p keeps BASH_ENV, SHELLOPTS and exported functions out of the agent itself, and every child that runs a conf command (publish, subscribe,
+       control subscribe, the sudo path) is started by /usr/bin/env -i with an allow-list only: HOME, USER, LOGNAME, TMPDIR, a fixed PATH, GUARDIAN_HOME and
+       GUARDIAN_PIPE_SSH (from the conf), then /bin/bash -p -c. So no variable set here, or by launchctl setenv, reaches those children, and a test seam or tunable
+       set here (GUARDIAN_TESTMODE, GUARDIAN_FAKE_NOW, CONTROL_STALE_S ...) is ignored. The agent reads GUARDIAN_HOME (and HOME, RR_*) from here: paths, inside the
+       trust boundary (README). The safety numbers are constants in code. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>GUARDIAN_HOME</key><string>__GUARDIAN_HOME__</string>

@@ -4,53 +4,139 @@
 # Sourced, never executed. Every external effect goes through a PATH command or a GUARDIAN_* command
 # variable, so tests can substitute fakes.
 
-GUARDIAN_VERSION="c1-0.1.0"
+GUARDIAN_VERSION="c1-0.3.0-r14"   # bump per release: the audit "guardian start version=" line identifies the tree
+
+# R12. Run mode (guardian.sh run|check, G_RUNMODE=1) reads no test seam and no environment tunable: every name below is assigned its default
+# unconditionally and only guardian.conf (parsed as data by conf.sh, never sourced) can change the allow-listed keys. Library tests source this
+# file without G_RUNMODE and keep the old "environment overrides the default" behaviour.
+g_def() { # NAME DEFAULT
+  if [ "${G_RUNMODE:-}" = 1 ]; then printf -v "$1" '%s' "$2"; else [ -n "${!1:-}" ] || printf -v "$1" '%s' "$2"; fi
+}
+# g_const NAME VALUE: a safety number or a pinned tool. Assigned unconditionally, then readonly. If the name was already readonly with another
+# value (cannot happen from the environment), G_BAD_CONST is set and the kill switch stays engaged.
+g_const() {
+  { printf -v "$1" '%s' "$2"; } 2>/dev/null
+  [ "${!1}" = "$2" ] || G_BAD_CONST=1
+  readonly "$1" 2>/dev/null
+}
+G_BAD_CONST="${G_BAD_CONST:-}"; [ "${G_RUNMODE:-}" = 1 ] && G_BAD_CONST=""
+
+# Safety numbers: constants in code. Not settable from guardian.conf (not an allow-listed key), the environment or a test.
+g_const CONTROL_STALE_S 90      # no control message for longer than this = kill (C4); also the age limit on the message's own ts
+g_const CONTROL_SKEW_S 30       # a ts further ahead than this = kill
+g_const CONTROL_MAX_BYTES 4096  # payload cap
+g_const CONTROL_LINE_MAX 4200   # read cap per line in control_pump
+g_const FLAG_FETCH_S 10
+# External tools on the control and flag paths are pinned to absolute paths (R10, R11, R12): a PATH change or a planted binary cannot turn a kill into a clear.
+# bash itself and the transport commands run through PATH; the conf is data, so only whoever can write the agent directory controls those.
+g_const G_TR /usr/bin/tr
+g_const G_WC /usr/bin/wc
+g_const G_SED /usr/bin/sed
+g_const G_TAIL /usr/bin/tail
+g_const G_HEAD /usr/bin/head
+g_const G_CAT /bin/cat
+g_const G_PS /bin/ps
+g_const G_DATE /bin/date
+g_const G_MV /bin/mv
+g_const G_MKDIR /bin/mkdir
+g_const G_GREP /usr/bin/grep
+g_const G_ENV /usr/bin/env
+g_const G_BASH /bin/bash
+g_const G_ID /usr/bin/id
+g_const G_STAT /usr/bin/stat
+g_const G_LS /bin/ls
+# The PATH every conf command (transport, sudo path) is started with in run mode (R13): a constant, never the caller's PATH.
+# R14 A4: system directories only. /opt/homebrew/bin is writable by the agent's uid (and group admin) on a kiosk, so a planted file there would replace a
+# transport binary. A conf command that needs a tool outside these four directories names it by absolute path.
+g_const G_CHILD_PATH /usr/bin:/bin:/usr/sbin:/sbin
 
 : "${GUARDIAN_HOME:=$HOME/Library/Application Support/EvenScribe/Guardian}"
 : "${RR_ROOT:=$HOME/Library/Application Support/EvenScribe/RoomRecorder}"
 : "${RR_LABEL:=com.evenscribe.room-recorder}"
 : "${RR_PLIST:=$HOME/Library/LaunchAgents/$RR_LABEL.plist}"
 : "${RR_APP:=/Applications/EvenScribe Room Recorder.app}"
-: "${GUARDIAN_ROOM:=}"
-: "${GUARDIAN_PUBLISH_CMD:=}"
-: "${GUARDIAN_SUBSCRIBE_CMD:=}"
-: "${GUARDIAN_FLAG_CMD:=}"
-: "${GUARDIAN_CONTROL_SUB_CMD:=}"
-: "${GUARDIAN_CONTROL_TOPIC:=guardian/control}"
-: "${GUARDIAN_SUDO:=}"
-: "${GUARDIAN_ROOT_HELPER:=/usr/local/libexec/eta-guardian-root}"
-: "${USB_MIC_PATTERN:=C270}"
-: "${PRESENCE_FILE:=}"
-: "${CLINIC_START:=0800}"
-: "${CLINIC_END:=2135}"
-: "${NIGHT_START:=2135}"
-: "${NIGHT_END:=0600}"
-: "${HUNG_AFTER_S:=600}"
-: "${PRESENCE_STALE_S:=300}"
-: "${FLAG_MAX_AGE_S:=30}"
-: "${CONFIRM_TIMEOUT_S:=30}"
-: "${HEAL_MAX_PER_HOUR:=3}"
-: "${IDLE_MIN_S:=600}"
-: "${SPEECH_GATE_DBFS:=-50}"   # INFERRED: tape RMS at or above this is speech
-: "${SPEECH_QUIET_S:=600}"
-: "${FLAG_FETCH_S:=10}"
-: "${CONTROL_STALE_S:=90}"   # no control message for longer than this = kill (C4)
-: "${PUBLISH_CAP_S:=4}"
+# guardian.conf keys (allow-listed in conf.sh)
+g_def GUARDIAN_ROOM ""
+g_def GUARDIAN_PUBLISH_CMD ""
+g_def GUARDIAN_SUBSCRIBE_CMD ""
+g_def GUARDIAN_CONTROL_SUB_CMD ""
+g_def GUARDIAN_SUDO ""
+g_def GUARDIAN_ROOT_HELPER /usr/local/libexec/eta-guardian-root
+g_def USB_MIC_PATTERN C270
+g_def PRESENCE_FILE ""
+g_def CANARY_VOLUME 0.3   # afplay -v; the system volume is never changed
+# not conf keys: fixed defaults in run mode (the heal cap and the canary window / idle limit are constants)
+g_def GUARDIAN_FLAG_CMD ""   # old flag path; run mode never uses it (killswitch.sh)
+g_def GUARDIAN_CONTROL_TOPIC guardian/control
+g_def CLINIC_START 0800
+g_def CLINIC_END 2135
+g_def NIGHT_START 2135
+g_def NIGHT_END 0600
+g_def HUNG_AFTER_S 600
+g_def PRESENCE_STALE_S 300
+g_def FLAG_MAX_AGE_S 30
+g_def CONFIRM_TIMEOUT_S 30
+g_const HEAL_MAX_PER_HOUR 3
+g_def IDLE_MIN_S 600
+g_def SPEECH_GATE_DBFS -50   # INFERRED: tape RMS at or above this is speech
+g_def SPEECH_QUIET_S 600
+g_def PUBLISH_CAP_S 4
+g_def CANARY_ENABLED 1
+g_const CANARY_START 2135
+g_const CANARY_END 0700
+g_const CANARY_IDLE_MIN_S 600
+g_def CANARY_PASS_DB 20   # tone window must rise this far above the 5 s before it
+g_def CANARY_SAMPLE_S 7   # seconds after the start at which the tape is read (checkpoint lag)
+g_def GUARDIAN_SETTLE_S 1
 
 STATE_DIR="$GUARDIAN_HOME/state"
 AUDIT_LOG="$GUARDIAN_HOME/audit.log"
 FLAG_DIR="$GUARDIAN_HOME/flags"
 
+# g_clean_exec <argv...> (R13 M1): run a child that executes a conf command. In run mode the child gets an ALLOW-LISTED environment:
+# `env -i` plus HOME, USER, LOGNAME, TMPDIR (if set), the pinned PATH, GUARDIAN_HOME and GUARDIAN_PIPE_SSH (if the conf set it).
+# So no BASH_ENV, ENV, BASH_FUNC_*, SHELLOPTS, BASHOPTS, PS4 or IFS from outside reaches the child. SSH_AUTH_SOCK is not passed: the pipe uses the key
+# file in the agent directory (GUARDIAN_PIPE_SSH names it), so no current code path needs an agent socket.
+# Library tests (G_RUNMODE unset) keep the caller's environment, because the fakes and sandbox paths travel in it.
+g_clean_envv() { # fills the array G_CLEAN_ENV with the allow-listed environment (run mode)
+  G_CLEAN_ENV=("HOME=$HOME" "USER=${USER:-$("$G_ID" -un)}" "LOGNAME=${LOGNAME:-${USER:-$("$G_ID" -un)}}" "PATH=$G_CHILD_PATH" "GUARDIAN_HOME=$GUARDIAN_HOME")
+  [ -z "${TMPDIR:-}" ] || G_CLEAN_ENV+=("TMPDIR=$TMPDIR")
+  [ -z "${GUARDIAN_PIPE_SSH+x}" ] || G_CLEAN_ENV+=("GUARDIAN_PIPE_SSH=$GUARDIAN_PIPE_SSH")
+}
+g_clean_exec() {
+  if [ "${G_RUNMODE:-}" != 1 ]; then "$@"; return; fi
+  local -a G_CLEAN_ENV
+  g_clean_envv
+  "$G_ENV" -i "${G_CLEAN_ENV[@]}" "$@"
+}
+# g_ppid (R14 A3): print the pid of the shell that called this (run inside $(...)). The one `sh -c` start that is not a conf command: in run mode it gets the same
+# allow-listed environment, so an exported BASH_FUNC_echo (sh imports functions) cannot forge the pid. The exec keeps sh's parent = the caller's shell.
+g_ppid() {
+  if [ "${G_RUNMODE:-}" = 1 ]; then
+    local -a G_CLEAN_ENV
+    g_clean_envv
+    # shellcheck disable=SC2016
+    exec "$G_ENV" -i "${G_CLEAN_ENV[@]}" /bin/sh -c 'echo $PPID'
+  fi
+  exec sh -c 'echo $PPID'   # library tests: the caller's PATH, so a fake sh can stand in
+}
+# g_conf_cmd <command string> <args...>: the one way a conf command is run. bash -p (no startup file, no imported function) under the clean env.
+g_conf_cmd() {
+  local c="$1"; shift
+  g_clean_exec "$G_BASH" -p -c "$c" _ "$@"
+}
+
 gsleep() { sleep "$1"; }
 
 now_epoch() {
-  if [ -n "${GUARDIAN_FAKE_NOW:-}" ]; then echo "$GUARDIAN_FAKE_NOW"; else date +%s; fi
+  # GUARDIAN_FAKE_NOW is a library-test seam: never in run mode (G_RUNMODE=1, readonly), where a frozen clock would disable the 90 s kill.
+  if [ "${G_RUNMODE:-}" != 1 ] && [ "${GUARDIAN_TESTMODE:-}" = 1 ] && [ -n "${GUARDIAN_FAKE_NOW:-}" ]; then echo "$GUARDIAN_FAKE_NOW"; else "$G_DATE" +%s; fi
 }
 
 # HHMM in Asia/Kolkata for an epoch (default now).
 ist_hhmm() {
   local e="${1:-$(now_epoch)}"
-  TZ=Asia/Kolkata date -r "$e" +%H%M 2>/dev/null || TZ=Asia/Kolkata date -d "@$e" +%H%M
+  TZ=Asia/Kolkata "$G_DATE" -r "$e" +%H%M 2>/dev/null || TZ=Asia/Kolkata "$G_DATE" -d "@$e" +%H%M
 }
 
 # 0 when HHMM is inside [start,end) (end may wrap past midnight).
@@ -67,7 +153,7 @@ in_clinic_hours() { hhmm_in_window "$(ist_hhmm)" "$CLINIC_START" "$CLINIC_END"; 
 in_night_window() { hhmm_in_window "$(ist_hhmm)" "$NIGHT_START" "$NIGHT_END"; }
 
 # ---- JSON out (hand built; escape \ " and control characters) ----
-jesc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n\t\r' '   '; }
+jesc() { printf '%s' "$1" | "$G_SED" -e 's/\\/\\\\/g' -e 's/"/\\"/g' | "$G_TR" '\n\t\r' '   '; }
 jstr() { if [ -z "$1" ]; then printf 'null'; else printf '"%s"' "$(jesc "$1")"; fi; }
 # Same output as jstr, no subshell and no external process: jstr_v <value> sets JSTR_V. For hot paths under load.
 jstr_v() {
@@ -83,7 +169,7 @@ jbool() { case "$1" in true|false) printf '%s' "$1" ;; *) printf 'null' ;; esac;
 json_get() {
   local f="$1" k="$2" v
   [ -r "$f" ] || return 0
-  v="$(tr -d '\n' <"$f" | sed -nE 's/.*"'"$k"'"[[:space:]]*:[[:space:]]*("([^"]*)"|([^,}[:space:]]*)).*/\2\3/p' | head -n1)"
+  v="$("$G_TR" -d '\n' <"$f" | "$G_SED" -nE 's/.*"'"$k"'"[[:space:]]*:[[:space:]]*("([^"]*)"|([^,}[:space:]]*)).*/\2\3/p' | "$G_HEAD" -n1)"
   [ "$v" = "null" ] && v=""
   printf '%s' "$v"
 }
@@ -109,7 +195,7 @@ etime_to_s() {
 
 # ---- local audit (append only; G4 no deletes) ----
 audit() {
-  mkdir -p "$GUARDIAN_HOME" 2>/dev/null
+  "$G_MKDIR" -p "$GUARDIAN_HOME" 2>/dev/null
   printf '{"ts":%s,"room_id":%s,"msg":%s}\n' "$(now_epoch)" "$(jstr "$GUARDIAN_ROOM")" "$(jstr "$*")" >>"$AUDIT_LOG" 2>/dev/null
 }
 
@@ -137,7 +223,7 @@ publish() {
   mkdir -p "$STATE_DIR" 2>/dev/null
   tmp="$STATE_DIR/pub.$$.out"
   printf '%s\n' "$line" >"$tmp.in"
-  RC_STDIN="$tmp.in" run_capped "$PUBLISH_CAP_S" "$tmp" bash -c "$GUARDIAN_PUBLISH_CMD" _ "$topic"
+  RC_STDIN="$tmp.in" run_capped "$PUBLISH_CAP_S" "$tmp" g_conf_cmd "$GUARDIAN_PUBLISH_CMD" "$topic"
   local rc=$?
   rm -f "$tmp" "$tmp.in"
   [ "$rc" -eq 0 ] || audit "publish_failed topic=$topic rc=$rc"
@@ -147,7 +233,8 @@ publish() {
 # sudo only through the configured kiosk-sudo path, only the root helper (G5).
 root_do() {
   if [ -z "$GUARDIAN_SUDO" ]; then audit "root_do refused: no sudo path"; return 97; fi
-  $GUARDIAN_SUDO "$GUARDIAN_ROOT_HELPER" "$@"
+  # shellcheck disable=SC2086
+  g_clean_exec $GUARDIAN_SUDO "$GUARDIAN_ROOT_HELPER" "$@"
 }
 
 # stamp files: once_per <key> <secs> -> 0 when allowed (and records), 1 when still inside the window

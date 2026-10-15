@@ -16,7 +16,7 @@ rms_dbfs_2s() {
   [ -n "$f" ] || return 0
   now="$(now_epoch)"; mt="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null)"
   [ -n "$mt" ] || return 0
-  [ "$((now - mt))" -lt 5 ] || return 0
+  [ "$((now - mt))" -ge -2 ] && [ "$((now - mt))" -lt 5 ] || return 0   # a tape mtime in the future is not advancing
   size="$(stat -f %z "$f" 2>/dev/null || stat -c %s "$f" 2>/dev/null)"
   [ -n "$size" ] && [ "$size" -ge 2 ] || return 0
   off=$((size - 64000)); [ "$off" -lt 0 ] && off=0
