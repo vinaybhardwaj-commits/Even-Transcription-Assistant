@@ -1081,8 +1081,12 @@ def _name_source(m: dict, art: dict | None) -> str:
     return "pulse_catalogue" if _is_catalogue(m) else "pulse_extraction"
 
 
+def _names_equal(a: set[str], b: set[str]) -> bool:
+    return bool({x for x in a if len(x) >= 3} & {y for y in b if len(y) >= 3})
+
+
 def _said_by_doctor(names: set[str], art: dict | None, consult: Consult) -> bool:
-    """True when a name (>= 3 chars after _norm_name, whole word, case-insensitive, whitespace collapsed) occurs in a turn of `consult` whose
+    """True when a name (>= 3 chars after _norm_name, whole word where a hyphen is part of the word, case-insensitive, whitespace collapsed) occurs in a turn of `consult` whose
     role is doctor (Turn.role, with a resolved Turn.role_source) and whose Turn.idx is not in art["clip_boundary"]["quarantined_turns"]."""
     quarantined = set(((art or {}).get("clip_boundary") or {}).get("quarantined_turns") or [])
     names = {n for n in names if len(n) >= 3}
@@ -1090,18 +1094,18 @@ def _said_by_doctor(names: set[str], art: dict | None, consult: Consult) -> bool
         if t.role != "doctor" or t.role_source == "none" or t.idx in quarantined:
             continue
         text = re.sub(r"\s+", " ", (t.text or "").lower())
-        if any(re.search(r"(?<!\w)" + re.escape(n) + r"(?!\w)", text) for n in names):
+        if any(re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", text) for n in names):
             return True
     return False
 
 
 def _ordered_not_supported(m: dict, signed_rx: dict | None, art: dict | None, consult: Consult | None) -> bool:
-    """An unsupported replayed medicine that is in the doctor's signed Rx (_names_match over _rx_names, as for every medicine) and that the
-    doctor said in an unquarantined turn. Needs both; without a consult or a signed Rx the rule does not apply."""
+    """An unsupported replayed medicine that is in the doctor's signed Rx (a normalised name EQUAL to one of a signed medicine's, each >= 3 chars;
+    no containment, so Pan is not Pan-D) and that the doctor said in an unquarantined turn. Needs both; without a consult or a signed Rx the rule does not apply."""
     if consult is None or signed_rx is None:
         return False
     names = _rx_names(m)
-    if not any(_names_match(names, _rx_names(sm)) for sm in signed_rx.get("medicines") or [] if isinstance(sm, dict)):
+    if not any(_names_equal(names, _rx_names(sm)) for sm in signed_rx.get("medicines") or [] if isinstance(sm, dict)):
         return False
     return _said_by_doctor(names, art, consult)
 

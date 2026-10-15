@@ -139,10 +139,10 @@ def test_legacy_equivalence_and_monotone_against_the_oracle(old, scope):
         if n == "ordered_not_supported":
             moved += 1
             assert floors._ordered_not_supported(m, {"medicines": signed}, art, c)
-            assert any(floors._names_match(floors._rx_names(m), floors._rx_names(s)) for s in signed)      # (i)
+            assert any(floors._rx_names(m) & floors._rx_names(s) for s in signed)      # (i) FIX1: equality, not containment
             q = set((art.get("clip_boundary") or {}).get("quarantined_turns") or [])
             names = {x for x in floors._rx_names(m) if len(x) >= 3}
-            assert any(t.role == "doctor" and t.idx not in q and any(__import__("re").search(r"(?<!\w)" + x + r"(?!\w)", t.text.lower()) for x in names)
+            assert any(t.role == "doctor" and t.idx not in q and any(__import__("re").search(r"(?<![\w-])" + x + r"(?![\w-])", t.text.lower()) for x in names)
                        for t in c.turns)                                                # (ii)
         elif o == "eta":
             stayed += 1
@@ -207,3 +207,124 @@ def test_consult_floors_end_to_end_both_scopes_count_unchanged(frozen, tmp_path)
     for a in [rec["attribution"]] + list(rec["attribution_by_scope"].values()):
         u = a["unsupported_drugs"]
         assert (u["ordered_not_supported"], u["eta"]) == (1, 1)                         # Dolo: doctor said it; Zorbex: only the patient did
+
+
+# ---- FIX1 (15 Oct 2026): condition (i) is name EQUALITY, condition (ii) treats a hyphen as part of the word ------------------
+import re  # noqa: E402
+
+FIX_BASE = "df3c6dd0"  # the first ONS commit: _names_match for (i), (?<!\w)/(?!\w) for (ii)
+
+
+@pytest.fixture(scope="module")
+def v1():
+    src = subprocess.run(["git", "show", f"{FIX_BASE}:tools/eta2freescript/eval/pdqi9/floors.py"], cwd=Path(__file__).resolve().parent,
+                         capture_output=True, text=True, check=True).stdout
+    mod = types.ModuleType("tools.eta2freescript.eval.pdqi9.floors_v1")
+    mod.__package__ = "tools.eta2freescript.eval.pdqi9"
+    exec(compile(src, f"floors@{FIX_BASE}", "exec"), mod.__dict__)
+    return mod
+
+
+def _p4_cases():
+    """The refuter's F1 (a family relative signed, not the drug ETA wrote) and F2 (hyphen-glued doctor text)."""
+    f1 = [("Pan 40", "Pan-D"), ("Telma", "Telma-H"), ("Dolo", "Dolonex")]
+    for wrote, signed in f1:
+        yield {"name": wrote}, [{"name": signed}], _art(f"Medication:\n{wrote}"), _c(("0", f"start {wrote.split()[0].lower()} {signed.lower()} now"))
+    f2 = [("Pan", "Pan"), ("Telma", "Telma"), ("Dolo", "Dolo")]
+    for wrote, signed in f2:
+        yield {"name": wrote}, [{"name": signed}], _art(f"Medication:\n{wrote}"), _c(("0", f"start {wrote.lower()}-d now"), ("0", f"x-{wrote.lower()} later"))
+
+
+def test_p4_refuter_examples_were_ons_and_are_eta(v1):
+    n = 0
+    for m, signed, art, c in _p4_cases():
+        before = _src_mod(v1, m, signed, art, c)
+        after = _src(m, signed, art, c)
+        assert before == "ordered_not_supported", (m, signed)                           # non-vacuous: df3c6dd0 got it wrong
+        assert after == "eta", (m, signed)
+        n += 1
+    assert n == 6
+
+
+def _src_mod(mod, m, signed, art, consult, scope="medicine"):
+    its = floors.numbered_items({"medicines": [m]})
+    out = mod._judge_attribution([item(1, said="no")], its, art, scope, consult=consult, signed_rx={"medicines": signed})["unsupported_drugs"]
+    return next(k for k in mod.SOURCES if out.get(k))
+
+
+def test_r1_equality_of_names():
+    said = _c(("0", "start pan now"))
+    assert _src({"name": "Pan 40"}, [{"name": "Pan 20"}], _art("Medication:\nPan"), said) == "ordered_not_supported"   # strength is another floor's job
+    assert _src({"name": "Pan"}, [{"name": "Pan-D"}], _art("Medication:\nPan"), said) == "eta"
+    assert _src({"name": "Pan"}, [{"name": "Pan D"}], _art("Medication:\nPan"), said) == "eta"
+    assert _src({"name": "Pan"}, [{"name": "Pantoprazole"}], _art("Medication:\nPan"), said) == "eta"
+    assert _src({"name": "Pan", "generic": "pantoprazole"}, [{"name": "Other", "generic": "Pantoprazole"}], _art("Medication:\nPan"),
+                _c(("0", "start pantoprazole"))) == "ordered_not_supported"                      # any equal name pair, brand or generic
+    assert floors._names_equal({"ab"}, {"ab"}) is False                                  # under 3 chars never equal
+
+
+FAMILY_BASES = ["pan", "telma", "dolo", "zorbex", "amlo", "cefix", "qualix", "metformin"]
+FAMILY_MODS = [("suffix_token", lambda b: f"{b} d"), ("hyphen_suffix", lambda b: f"{b}-d"), ("strength", lambda b: f"{b} 40"),
+               ("form", lambda b: f"{b} tablet"), ("same", lambda b: b)]
+
+
+def _fam(rng):
+    base = rng.choice(FAMILY_BASES)
+    (kr, fr), (ks, fs) = rng.choice(FAMILY_MODS), rng.choice(FAMILY_MODS)
+    replay, signed = fr(base), fs(base)
+    if rng.random() < 0.5:
+        replay, signed = signed, replay
+        kr, ks = ks, kr
+    return base, kr, ks, replay, signed
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_p1_p2_p3_generated_against_df3c6dd0(v1, scope):
+    rng = random.Random(15102627)
+    n_ons = n_fam_eta = n_hyph_eta = n_word = 0
+    for _ in range(6000):
+        base, kr, ks, replay, signed = _fam(rng)
+        glue = rng.choice(["whole", "hyph_after", "hyph_before", "inside", "punct"])
+        core = floors._norm_name(replay)                                                # what the doctor must say, as a whole word
+        txt = {"whole": f"start {core} now", "hyph_after": f"start {core}-x now", "hyph_before": f"start x-{core} now",
+               "inside": f"start pre{core}post now", "punct": f"{core}, twice"}[glue]
+        art, c = _art(f"Medication:\n{replay}"), _c(("0", txt))
+        o = _src_mod(v1, {"name": replay}, [{"name": signed}], art, c, scope)
+        n = _src({"name": replay}, [{"name": signed}], art, c, scope)
+        # P1: FIX1 only moves ONS -> eta
+        if n == "ordered_not_supported":
+            assert o == "ordered_not_supported"
+            n_ons += 1
+        if o != "ordered_not_supported":
+            assert n == o
+        assert (o in ("eta", "ordered_not_supported")) == (n in ("eta", "ordered_not_supported"))     # same legacy-eta set
+        # P2: a suffix token or hyphen suffix on exactly one side is never ONS
+        # (_norm_name erases the hyphen, so token and hyphen suffixes on both sides are the same normalised name: equal, by R1)
+        suf = {"suffix_token", "hyphen_suffix"}
+        differs = (kr in suf) != (ks in suf)
+        if differs:
+            assert n == "eta", (replay, signed)
+            n_fam_eta += 1
+        else:
+            # strength / form / same: ONS iff the doctor said it as a whole word
+            assert (n == "ordered_not_supported") == (glue in ("whole", "punct")), (replay, signed, glue, n)
+            n_word += 1
+        # P3: only whole-word text satisfies (ii)
+        said = floors._said_by_doctor({core}, art, c)
+        assert said == (glue in ("whole", "punct")), (glue, txt)
+        if glue in ("hyph_after", "hyph_before"):
+            assert n == "eta"
+            n_hyph_eta += 1
+    assert n_ons > 500 and n_fam_eta > 500 and n_hyph_eta > 500 and n_word > 500
+
+
+def test_r3_nothing_becomes_eta_that_base_did_not_call_eta(old):
+    rng = random.Random(15102628)
+    for _ in range(5000):
+        base, kr, ks, replay, signed = _fam(rng)
+        art = _art(rng.choice([f"Medication:\n{replay}", "Medication: nothing"]))
+        c = _c(("0", rng.choice([f"start {base}", f"{base}-d", "rest"])))
+        m = rng.choice([{"name": replay}, {"uid": "u", "name": replay, "other": False}])
+        o, n = _src(m, [{"name": signed}], art, c, "medicine", old), _src(m, [{"name": signed}], art, c)
+        assert not (n == "eta" and o != "eta")
+        assert (o == "eta") == (n in ("eta", "eta_coincidence", "ordered_not_supported"))
