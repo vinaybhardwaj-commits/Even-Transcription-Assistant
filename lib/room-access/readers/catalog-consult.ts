@@ -113,7 +113,7 @@ export function searchView(row: Row): Row {
       const rec = asRec(l);
       if (Array.isArray(l)) {
         present.push(name);
-        slim[name] = l.map(stripKeys);
+        slim[name] = l.map((e) => (asRec(e) ? stripKeys(e) : null));
         continue;
       }
       if (!rec) {

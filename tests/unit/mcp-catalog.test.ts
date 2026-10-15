@@ -1524,7 +1524,7 @@ describe("CATALOG-8: layers.audio_features", () => {
   });
 
   it("search never shows an r2_key for shapes a, b and c", async () => {
-    for (const v of [{ r2_key: fk("clef") }, [{ r2_key: fk("clef") }], { clef: { r2_key: fk("clef") } }]) {
+    for (const v of [{ r2_key: fk("clef") }, [{ r2_key: fk("clef") }], { clef: { r2_key: fk("clef") } }, [fk("clef")], [[{ r2_key: fk("clef") }]]]) {
       withAf(v);
       resetCatalogCacheForTests();
       const o = await run({ action: "search", from: "2026-10-05", to: "2026-10-05" });
