@@ -44,7 +44,7 @@ vi.mock("@/lib/encounter-catalog/store", async (orig) => {
 import { QUESTION_SET_FILES } from "@/jev/question-sets";
 import { setSha, validateSetFile } from "@/lib/jev/worker/sets";
 import { validateBatch } from "@/lib/encounter-catalog/store";
-import { labelOf, runCatalogC4Sync, buildClef, zeroCounts, NOUL_YES_THRESHOLD } from "@/lib/jev/worker/catalog-sync";
+import { labelOf, runCatalogC4Sync, buildClef, zeroCounts, NOUL_YES_THRESHOLD, CATALOG_SYNC_BUDGET_MS } from "@/lib/jev/worker/catalog-sync";
 
 const HAVE = dockerAvailable();
 const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
@@ -272,6 +272,92 @@ suite("CATALOG-C4-SYNC — Jev and Clef into encounter_catalog", () => {
       expect(r.posted).toBe(0);
     } finally { pg.exec("ALTER TABLE jev_question_set_gone RENAME TO jev_question_set"); }
     expect((await catalogOf("u_0001"))!.jev).toBeNull();
+  });
+
+  // ---- CATALOG-C4-SYNC-FU1: CS-2 time budget, CS-5 scan ceiling ----
+  /** A scripted clock: each call returns the next value (the last one repeats). */
+  const clock = (...v: number[]) => { let i = 0; return () => v[Math.min(i++, v.length - 1)]!; };
+  const OVER = CATALOG_SYNC_BUDGET_MS + 1;
+  const bulkWins = (prefix: string, count: number, daysAgo: number) => pg.exec(
+    `INSERT INTO eta_encounter_windows (consult_key, consult_uid, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version)
+     SELECT '${prefix}_' || g || '@ma', '${prefix}u_' || lpad(g::text, 4, '0'), 'mc_1', 'rm_a', 'none', ${TODAY0} - interval '${daysAgo} days' + g * interval '1 second', ${TODAY0} - interval '${daysAgo} days' + g * interval '1 second' + interval '1 second', 'endConsult', 'clean', 'v_t'
+       FROM generate_series(1, ${count}) g;
+     INSERT INTO encounter_catalog (consult_uid) SELECT '${prefix}u_' || lpad(g::text, 4, '0') FROM generate_series(1, ${count}) g;`);
+  const bulkDecisions = (prefix: string, count: number, sha: string, version: string, evidence: string) => pg.exec(
+    `INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, question_set_id, question_set_version, question_set_sha256, order_variant, mode, answer, band, outcome, evidence)
+     SELECT 'jd${prefix}_' || g, 'consult', '${prefix}_' || g || '@ma', 'distress', 'pv', 'jev-1.13.0', 'chair-affect', '${version}', '${sha}', 'derived', 'shadow', '{"type":"choice","choice":"low"}', 'review', 'answered', '${evidence}'::jsonb FROM generate_series(1, ${count}) g;`);
+  const OLD_SHA = "e".repeat(64);
+  const withOldVersion = async (fn: () => Promise<void>) => {
+    pg.exec(`INSERT INTO jev_question_set (id, version, use, subject_type, state_schema, model_pin, content_sha256, status, created_by, ratified_by, ratified_at, created_at)
+             VALUES ('chair-affect', 'v_old', '${fileOf("chair-affect").use}', 'consult', 'x', 'jev-1.13.0', '${OLD_SHA}', 'shadow', 'test', 'v', now(), '2020-01-01')`);
+    try { await fn(); } finally { pg.exec("DELETE FROM jev_decision; DELETE FROM jev_question_set WHERE version = 'v_old'"); }
+  };
+
+  it("CS-2: the budget gone before the first page: 0 SQL, nothing posted, budget_hit true", async () => {
+    on();
+    win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+    H.sqlCalls = 0;
+    const r = await runCatalogC4Sync(clock(0, OVER));
+    expect(H.sqlCalls).toBe(0);
+    expect(r).toEqual({ ...zeroCounts(), budget_hit: true });
+    expect(H.posted).toHaveLength(0);
+    expect((await catalogOf("u_0001"))!.jev).toBeNull();
+  });
+  it("CS-2: the budget gone mid-paging stops paging and posts what it collected (INFERRED: needs a non-monotonic scripted clock, the ingest check reads in-budget)", async () => {
+    on();
+    bulkWins("p", 520, 3); bulkDecisions("p", 520, SHA["chair-affect"]!, "v0", "{}");
+    expect(await runCatalogC4Sync()).toMatchObject({ posted: 500 });   // first tick: page 1 fills the batch
+    H.posted.length = 0;
+    decide("p_1@ma", "chair-affect", "confusion", { type: "choice", choice: "high" });   // page 1 now holds 1 changed row and 499 unchanged, so page 2 would be read
+    // clock calls: start, page-1 check, page-2 check (over), ingest check (in budget)
+    const r = await runCatalogC4Sync(clock(0, 0, OVER, 0));
+    expect(r).toMatchObject({ posted: 1, updated: 1, unchanged: 499, budget_hit: true, error_class: null });
+    expect(H.posted).toHaveLength(1);
+    expect((H.posted[0] as Array<{ consult_uid: string }>).map((x) => x.consult_uid)).toEqual(["pu_0001"]);
+  });
+  it("CS-2: the budget gone before the ingest posts nothing and writes nothing", async () => {
+    on();
+    win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+    const r = await runCatalogC4Sync(clock(0, 0, OVER));   // start, page-1 check, ingest check
+    expect(r).toMatchObject({ posted: 0, updated: 0, budget_hit: true, error_class: null });
+    expect(H.posted).toHaveLength(0);
+    expect((await catalogOf("u_0001"))!.jev).toBeNull();
+  });
+  it("CS-2: a tick inside the budget leaves budget_hit false", async () => {
+    on();
+    win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+    expect(await runCatalogC4Sync(clock(0, 1, 2))).toMatchObject({ posted: 1, budget_hit: false, capped: 0 });
+  });
+  it("CS-2: the >50-entry drop count is in the response", async () => {
+    on();
+    win("cx_0001@ma", "u_0001");
+    pg.exec(`INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, question_set_id, question_set_version, question_set_sha256, order_variant, mode, answer, band, outcome, evidence, created_at)
+             SELECT 'jdm_' || g, 'consult', 'cx_0001@ma', 'q' || lpad(g::text, 2, '0'), 'pv', 'jev-1.13.0', 'chair-affect', 'v0', '${SHA["chair-affect"]}', 'derived', 'shadow', '{"type":"choice","choice":"low"}', 'review', 'answered', '{}', '2026-10-01'::timestamptz + g * interval '1 minute' FROM generate_series(1, 55) g;`);
+    expect(await runCatalogC4Sync()).toMatchObject({ posted: 1, capped: 5, budget_hit: false });
+  });
+  it("CS-5: a consult whose only decisions are no_state markers, or sit on an old sha, is not a candidate (unless it has a clef row)", async () => {
+    on();
+    await withOldVersion(async () => {
+      win("cx_0001@ma", "u_0001"); decide("cx_0001@ma", "chair-affect", "distress", { type: "choice", choice: "low" }, { evidence: { no_state: "x" } });
+      win("cx_0002@ma", "u_0002");
+      pg.exec(`INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, question_set_id, question_set_version, question_set_sha256, order_variant, mode, answer, band, outcome, evidence)
+               VALUES ('jd_oldv', 'consult', 'cx_0002@ma', 'distress', 'pv', 'jev-1.13.0', 'chair-affect', 'v_old', '${OLD_SHA}', 'derived', 'shadow', '{"type":"choice","choice":"low"}', 'review', 'answered', '{}')`);
+      expect(await runCatalogC4Sync()).toMatchObject({ posted: 0, unchanged: 0, error_class: null });   // unchanged 0: never a candidate, so no page spent
+      win("cx_0003@ma", "u_0003"); decide("cx_0003@ma", "chair-affect", "distress", { type: "choice", choice: "low" }, { evidence: { no_state: "x" } }); affect("u_0003");
+      expect(await runCatalogC4Sync()).toMatchObject({ posted: 1 });
+      expect(Object.keys(H.posted[0]![0] as object).sort()).toEqual(["clef_affect", "consult_uid"]);
+    });
+  });
+  it("CS-5: 600 no_state-only or old-sha-only consults ahead of one real consult: the real one is still posted", async () => {
+    on();
+    await withOldVersion(async () => {
+      bulkWins("n", 300, 3); bulkDecisions("n", 300, SHA["chair-affect"]!, "v0", '{"no_state":"x"}');
+      bulkWins("o", 300, 3); bulkDecisions("o", 300, OLD_SHA, "v_old", "{}");
+      win("cx_real@ma", "u_real", { daysAgo: 0 }); decide("cx_real@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+      const r = await runCatalogC4Sync();
+      expect(r).toMatchObject({ posted: 1, updated: 1, unchanged: 0, budget_hit: false, error_class: null });
+      expect((H.posted[0] as Array<{ consult_uid: string }>).map((x) => x.consult_uid)).toEqual(["u_real"]);
+    });
   });
 });
 

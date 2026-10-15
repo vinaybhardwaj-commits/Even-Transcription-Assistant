@@ -14,12 +14,13 @@ export type Candidate = { consult_uid: string; t0: string; stored_jev: unknown; 
 
 /**
  * One page of candidate consults, OLDEST FIRST (keyset on (first t_open, consult_uid)). D4: ONLY a consult_uid that ALREADY has an encounter_catalog row (the INNER JOIN);
- * this file never creates one. A candidate must also hold something to send (a Jev decision in a shadow or live set, or an affect_consult_latest row), so a page is never
+ * this file never creates one. A candidate must also hold something to send (CS-5: a Jev decision that selectJevPicks would return, i.e. answered, derived, shadow/live mode, pinned to the CURRENT version's sha (`cur`) and not a no_state marker; or an affect_consult_latest row), so a page is never
  * spent on a consult that has nothing. Window: the consult's first t_open within the last `days` IST days (same bound as consult-select.ts).
  * stored_jev / stored_clef are the catalog's current columns, for the unchanged test.
  */
 export async function selectC4Candidates(days: number, cursor: Cursor, limit: number): Promise<Candidate[]> {
   const rows = (await sql`
+    WITH cur AS (SELECT DISTINCT ON (s.id) s.id, s.version, s.content_sha256 FROM jev_question_set s WHERE s.status IN ('shadow', 'live') ORDER BY s.id, s.created_at DESC, s.version DESC)
     SELECT g.consult_uid, to_char(g.t0 AT TIME ZONE 'UTC', ${ISO_US}::text) AS t0, ec.jev AS stored_jev, ec.clef_affect AS stored_clef
       FROM (SELECT w.consult_uid, min(w.t_open) AS t0 FROM eta_encounter_windows w
              WHERE w.consult_uid IS NOT NULL
@@ -28,8 +29,9 @@ export async function selectC4Candidates(days: number, cursor: Cursor, limit: nu
       JOIN encounter_catalog ec ON ec.consult_uid = g.consult_uid
      WHERE (${cursor?.t0 ?? null}::timestamptz IS NULL OR (g.t0, g.consult_uid) > (${cursor?.t0 ?? null}::timestamptz, ${cursor?.uid ?? null}::text))
        AND (EXISTS (SELECT 1 FROM eta_encounter_windows x JOIN jev_decision d ON d.subject_id = x.consult_key
-                     JOIN jev_question_set s ON s.id = d.question_set_id AND s.content_sha256 = d.question_set_sha256 AND s.status IN ('shadow', 'live')
-                    WHERE x.consult_uid = g.consult_uid AND d.subject_type = 'consult' AND d.order_variant = 'derived' AND d.mode IN ('shadow', 'live') AND d.outcome = 'answered')
+                     JOIN cur ON cur.id = d.question_set_id AND cur.content_sha256 = d.question_set_sha256
+                    WHERE x.consult_uid = g.consult_uid AND d.subject_type = 'consult' AND d.order_variant = 'derived' AND d.mode IN ('shadow', 'live') AND d.outcome = 'answered'
+                      AND NOT (coalesce(d.evidence, '{}'::jsonb) ? 'no_state'))
             OR EXISTS (SELECT 1 FROM affect_consult_latest a WHERE a.consult_uid = g.consult_uid))
      ORDER BY g.t0 ASC, g.consult_uid ASC
      LIMIT ${limit}::int
