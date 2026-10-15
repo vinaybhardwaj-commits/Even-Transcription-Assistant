@@ -136,6 +136,8 @@ CONTROL_TOPIC = "guardian/control"
 # FROZEN CONTRACT (see etc/README.md "Control topic contract"): the kiosk accepts only this exact form; anything else kills every kiosk.
 # Changing any of it needs a coordinated kiosk release (guardian-lead) FIRST. Regex is the kiosk's, verbatim from FR1-C1-CONTROL-CC-KICKOFF "## R7".
 CONTROL_RE = re.compile(r'^\{"kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$')
+# consult_open form (FR1 2.4 d', contract CONTROL-CONSULT-OPEN-SHAPE-15OCT): sorted keys put consult_open first. Used only when the flag consult_open_publish is on.
+CONTROL_RE_V2 = re.compile(r'^\{"consult_open": \{("[a-z0-9_-]{1,64}": (true|false)(, "[a-z0-9_-]{1,64}": (true|false)){0,63})?\}, "kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$')
 SLUG_RE = re.compile(r"[a-z0-9_-]{1,64}")
 # The contract limit is 4096 (kiosk R8: payload line <= 4096, file <= 4096+17); the Mini caps itself at 4000 as extra margin.
 CONTROL_MAX_BYTES, CONTROL_MAX_ROOMS = 4000, 64
@@ -149,12 +151,12 @@ def canonical_control(payload):
         raise ValueError("control payload over 4000 bytes")
     if any(not (0x20 <= ord(ch) <= 0x7E) for ch in msg):
         raise ValueError("control payload has a byte outside 0x20-0x7E")
-    if not CONTROL_RE.fullmatch(msg):
+    if not (CONTROL_RE_V2 if isinstance(payload, dict) and "consult_open" in payload else CONTROL_RE).fullmatch(msg):
         raise ValueError("control payload is not the canonical form")
     return msg
 
 
-def validate_rooms(rooms):
+def validate_rooms(rooms, consult_open=False):
     """Startup check for rooms.json: every slug ^[a-z0-9_-]{1,64}$, at most 64 distinct rooms, and the worst-case payload (every mode shadow, 15-digit ts)
     still within the contract (<= 4000 bytes). Returns an error string, or None."""
     if not isinstance(rooms, list):                  # a bare string would iterate as one room per character
@@ -167,7 +169,10 @@ def validate_rooms(rooms):
     if len(rooms) > CONTROL_MAX_ROOMS:
         return f"{len(rooms)} rooms; the control contract allows at most {CONTROL_MAX_ROOMS}"
     try:
-        canonical_control({"kill": False, "modes": {r: "shadow" for r in rooms}, "ts": 10 ** 14})
+        worst = {"kill": False, "modes": {r: "shadow" for r in rooms}, "ts": 10 ** 14}
+        if consult_open:
+            worst["consult_open"] = {r: False for r in rooms}      # "false" is the longer word
+        canonical_control(worst)
     except ValueError as e:
         return f"worst-case control payload: {e}"
     return None
@@ -216,6 +221,15 @@ class RouterSink:
     def heal_invalid(self, room, now):
         self._open(room, "heal_message_invalid", now)
 
+    def consult_hold_source_down(self, now):
+        self._open("mini", "consult_hold_source_down", now)
+
+    def consult_hold_source_up(self, now):
+        self.router.close_room(None, "mini", "source recovered", kind="consult_hold_source_down")
+
+    def start_day_failed(self, room, now):
+        self._open(room, "start_day_failed", now)
+
     def capture_recovered(self, room, now):
         """Health zero_ratio back under 0.05: close the audio cases of this room. recorder_changed is NOT closed here (audio back says nothing about the recorder)."""
         kinds = {"capture_dead", "capture_muted", "coreaudio_heal_failed"}
@@ -224,8 +238,9 @@ class RouterSink:
 
 
 class Subscriber:
-    def __init__(self, data_dir, control_dir, rooms, sink, clock=time.time, quiet_after_s=QUIET_AFTER_S, quiet_seed=()):
+    def __init__(self, data_dir, control_dir, rooms, sink, clock=time.time, quiet_after_s=QUIET_AFTER_S, quiet_seed=(), consult=None, start_day=None):
         self.data, self.ctl, self.rooms, self.sink, self.clock, self.quiet_after = data_dir, control_dir, list(rooms), sink, clock, quiet_after_s
+        self.consult, self.start_day = consult, start_day     # FR1 2.4 d': both None (off) unless their flag is on
         os.makedirs(data_dir, exist_ok=True)
         t0 = clock()
         self.last_seen = {r: t0 for r in self.rooms}
@@ -253,6 +268,8 @@ class Subscriber:
         if stream == "heal":
             self._on_heal(room, obj, now)
         if stream == "health":
+            if self.start_day is not None:
+                self.start_day.on_health(room, obj, now)
             zr = zero_ratio(obj)
             if zr is not None and zr < ZERO_RATIO_OK:
                 self.ok_streak[room] = self.ok_streak.get(room, 0) + 1
@@ -343,7 +360,15 @@ class Subscriber:
             except OSError:
                 pass
             modes[r] = m
-        return {"kill": kill, "modes": modes}
+        snap = {"kill": kill, "modes": modes}
+        if self.consult is not None:                 # flag consult_open_publish: every room in rooms.json, fail closed (true) inside ConsultHold
+            hold = self.consult.hold(self.clock())
+            snap["consult_open"] = {r: hold.get(r, True) is not False for r in self.rooms}
+        return snap
+
+    def check_start_day(self):
+        if self.start_day is not None:
+            self.start_day.check(self.clock())
 
     def control_payload(self):
         """control_snapshot() plus ts = publish epoch seconds (int), so a consumer can reject replayed or stale control by payload time. Additive."""

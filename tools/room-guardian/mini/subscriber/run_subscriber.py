@@ -43,7 +43,12 @@ def main():
     with open(os.path.join(HOME, "etc", "rooms.json")) as f:
         cfg = json.load(f)
     rooms = cfg["rooms"]
-    err = validate_rooms(rooms)
+    try:
+        flags = ubus_bus.load_cfg()
+    except Exception:
+        flags = {}
+    consult_on, start_on = flags.get("consult_open_publish") is True, flags.get("start_day_after_boot") is True
+    err = validate_rooms(rooms, consult_open=consult_on)
     if err:                                          # frozen control contract: a room the kiosk regex would reject kills every kiosk, so refuse to start
         log(f"REFUSING TO START: rooms.json: {err}")
         return 2
@@ -55,7 +60,23 @@ def main():
     alert_router.ACKERS = set(router_cfg["ackers"])
     router = alert_router.Router(alert_router.default_store(HOME), ubus_bus.UbusBus, time.time)   # opens/closes cases; the router job pages and reads acks
     sink = RouterSink(router, router.bus_factory)
-    s = Subscriber(os.path.join(HOME, "data"), os.path.join(HOME, "etc"), rooms, sink, quiet_after_s=cfg.get("quiet_after_s", 120), quiet_seed=sink.open_quiet_rooms())
+    consult = start_day = None
+    if consult_on:                                   # FR1 2.4 d' flags: default off, so today's control bytes and behaviour are unchanged
+        from consult_hold import ConsultHold, pg_loader
+        consult = ConsultHold(rooms, flags.get("consult_room_map"), pg_loader(flags.get("consult_db_url_file")), time.time,
+                              audit_path=os.path.join(HOME, "logs", "consult-hold-audit.jsonl"), sink=sink)
+    if start_on:
+        from start_day import StartDayAfterBoot
+        cmd = flags.get("start_day_cmd") or []
+        if not cmd:                                  # no existing admin path is wired by this code: refuse rather than page start_day_failed forever
+            log("REFUSING TO START: start_day_after_boot is true but router.json has no start_day_cmd")
+            return 2
+
+        def sender(room):
+            subprocess.run(cmd + [room], check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=LOG)
+        start_day = StartDayAfterBoot(sender, os.path.join(HOME, "data", "start-day-state.json"), sink, time.time, os.path.join(HOME, "logs", "start-day-audit.jsonl"))
+    s = Subscriber(os.path.join(HOME, "data"), os.path.join(HOME, "etc"), rooms, sink, quiet_after_s=cfg.get("quiet_after_s", 120), quiet_seed=sink.open_quiet_rooms(),
+                   consult=consult, start_day=start_day)
     q = queue.Queue()
     for r in rooms:
         for st in STREAMS:
@@ -72,6 +93,7 @@ def main():
         try:
             alert_router.ACKERS = set(ubus_bus.load_cfg()["ackers"])
             s.check_quiet()
+            s.check_start_day()
         except Exception as e:                                # a bus fault must not drop the quiet edge: Subscriber marked it raised, so log loudly
             log(f"check_quiet failed: {e.__class__.__name__}: {str(e)[:120]}")
         now = time.time()

@@ -19,7 +19,12 @@ def load_cfg(path=None):
     path = path or os.path.join(HOME, "etc", "router.json")
     with open(path) as f:
         c = json.load(f)
-    cfg = {"to": list(c["to"]), "ackers": list(c["ackers"]), "subject_prefix": str(c.get("subject_prefix", "")), "wake": bool(c.get("wake", False))}
+    cfg = {"to": list(c["to"]), "ackers": list(c["ackers"]), "subject_prefix": str(c.get("subject_prefix", "")), "wake": bool(c.get("wake", False)),
+           # FR1 2.4 d' (all default off / empty; only a literal true turns a flag on)
+           "consult_open_publish": c.get("consult_open_publish") is True, "start_day_after_boot": c.get("start_day_after_boot") is True,
+           "consult_room_map": dict(c["consult_room_map"]) if isinstance(c.get("consult_room_map"), dict) else {},
+           "consult_db_url_file": c.get("consult_db_url_file") if isinstance(c.get("consult_db_url_file"), str) else None,
+           "start_day_cmd": [str(a) for a in c["start_day_cmd"]] if isinstance(c.get("start_day_cmd"), list) else []}
     stray = sorted(set(cfg["ackers"]) - set(cfg["to"]))
     if stray:    # gate C2: an acker who never receives the page cannot see the instruction to ack; refuse the whole config
         raise ValueError(f"router.json: ackers not in to: {', '.join(stray)}")
