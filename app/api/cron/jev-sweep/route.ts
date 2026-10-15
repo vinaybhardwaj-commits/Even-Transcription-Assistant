@@ -13,6 +13,7 @@ import { syncQuestionSets } from "@/lib/jev/worker/sync";
 import "@/lib/jev/worker/register";   // the P2 uses: without this import the sweeper's registry is EMPTY in this module graph and the cron enqueues nothing
 import { sweepJev } from "@/lib/jev/worker/sweeper";
 import { classifyDbError } from "@/lib/jev/worker/errors";
+import { runCatalogC4Sync, zeroCounts, type CatalogCounts } from "@/lib/jev/worker/catalog-sync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,14 +36,25 @@ export async function GET(req: NextRequest) {
     return respondError("PIPELINE_FAILED", "JEV_WORKER_ENABLED has an unrecognised value");
   }
   if (!enabled) return respondOk({ skipped: "worker_disabled" });
+  let body: Record<string, unknown> | null = null;
+  let failure: string | null = null;
   try {
     const sync = await syncQuestionSets();
     const sweep = await sweepJev();
-    return respondOk({
+    body = {
       synced: sync.map((s) => ({ id: s.id, version: s.version, result: s.result })),
       uses: sweep.uses, drift_enqueued: sweep.drift_enqueued,
-    });
+    };
   } catch (e) {
-    return respondError("PIPELINE_FAILED", `jev sweep failed: ${classifyDbError(e)}`);
+    failure = `jev sweep failed: ${classifyDbError(e)}`;
   }
+  // CATALOG-C4-SYNC: its own step, after the sweep and whatever the sweep did. A failure here only sets catalog.error_class; it never changes the sweep's result or status.
+  let catalog: CatalogCounts;
+  try {
+    catalog = await runCatalogC4Sync();
+  } catch {
+    catalog = { ...zeroCounts(), error_class: "step_failed" };
+  }
+  if (failure !== null) return respondError("PIPELINE_FAILED", failure);
+  return respondOk({ ...body, catalog });
 }

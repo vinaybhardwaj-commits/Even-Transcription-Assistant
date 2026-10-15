@@ -63,3 +63,6 @@ function numEnv(name: string, def: number): number {
   const n = Number(process.env[name]);
   return Number.isFinite(n) && n > 0 ? n : def;
 }
+
+/** C4 sync (newcat): copy Jev answers and Clef affect into encounter_catalog from the jev-sweep cron. Ships DARK. A caller that must not throw on a typo catches FlagValueError (catalog-sync.ts reads an unrecognised value as off and counts it). */
+export const catalogC4SyncEnabled = (): boolean => parseFlag("CATALOG_C4_SYNC_ENABLED");
