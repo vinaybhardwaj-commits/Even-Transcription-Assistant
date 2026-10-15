@@ -21,6 +21,7 @@ describe("coverageOrNull", () => {
   let actual: typeof import("@/lib/jev/worker/coverage-view");
   beforeEach(async () => {
     actual = await vi.importActual("@/lib/jev/worker/coverage-view");
+    actual.__resetCoverageMemoForTests(); // JB3-1: the 10 s memo would otherwise carry one test's result into the next
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
   afterEach(() => vi.restoreAllMocks());
