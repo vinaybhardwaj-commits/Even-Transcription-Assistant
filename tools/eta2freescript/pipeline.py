@@ -24,7 +24,7 @@ from .guard import guard
 from .ingest import Consult, apply_inferred_roles, format_transcript
 from .mapper import build
 from .models import ModelClient, cost_for_uid
-from .note import FILLER, HEADINGS, combination_groups, flags_by_pointer, render_note, repair_note, sanitize_note
+from .note import FILLER, HEADINGS, combination_groups, flags_by_pointer, render_note, repair_note, sanitize_note_ex, span_errors
 from .prompts import clean_text, code_paths, load_prompt, parse_json, prompt_path, sha
 from .validate import check, to_v01
 
@@ -39,13 +39,17 @@ class Options:
 
 
 def _fallback_note(art: dict, flags: dict, banned: list[str]) -> str:
-    """Deterministic note. If carried-over free text still names a kept-out order, drop that free text and render again.
+    return _fallback_note_ex(art, flags, banned)[0]
+
+
+def _fallback_note_ex(art: dict, flags: dict, banned: list[str]) -> tuple[str, list]:
+    """Deterministic note, and the spans the sanitiser removed from it. If carried-over free text still names a kept-out order, drop that free text and render again.
     The fallback must not fail C4: a C4 failure used to mean no artifact was written at all."""
-    det = sanitize_note(render_note(art["gp_extraction"], flags, banned, combination_groups(art)))
+    det, rem = sanitize_note_ex(render_note(art["gp_extraction"], flags, banned, combination_groups(art)))
     shadow = dict(art)
     shadow["note_text"] = det
     if not any(e.startswith("C4") for e in check(shadow)):
-        return det
+        return det, rem
     gx = copy.deepcopy(art["gp_extraction"])
     for m in gx.get("medicines") or []:
         m.pop("instructions", None)
@@ -53,7 +57,7 @@ def _fallback_note(art: dict, flags: dict, banned: list[str]) -> str:
         inv.pop("instruction", None)
     for ref in gx.get("referrals") or []:
         ref.pop("notes", None)
-    return sanitize_note(render_note(gx, flags, groups=combination_groups(art)))
+    return sanitize_note_ex(render_note(gx, flags, groups=combination_groups(art)))
 
 
 def spoken_brands_text(art: dict) -> str:
@@ -112,7 +116,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     art = build(c, enc, bnd, model_id, sha(*prompts), sha(*code_paths()), specialty)
     flags = flags_by_pointer(art)
     banned = [n for p in art["provenance"] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
-    det = _fallback_note(art, flags, banned)
+    det, det_rem = _fallback_note_ex(art, flags, banned)
     log = {"uid": c.uid, "speaker_source": c.speaker_source, "english_source": c.english_source,
            "boundary": art["clip_boundary"], "completion_required": len(art["completion_required"]),
            "guard_issues": enc["_guard"]["issues"]}
@@ -127,11 +131,11 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
             (od / "note_text.llm.txt").write_text(txt + "\n", encoding="utf-8")
             log["raw_llm_note_has_filler"] = any(FILLER.match(l.partition(":")[2]) for l in txt.split("\n")
                                                  if l.partition(":")[0] in HEADINGS and l.partition(":")[2].strip())
-            art["note_text"] = sanitize_note(txt)
-            llm_errs = check(art)
-            if llm_errs:
-                art["note_text"] = sanitize_note(repair_note(txt, art["gp_extraction"], flags, banned, combination_groups(art)))
-                repaired = check(art)
+            art["note_text"], llm_rem = sanitize_note_ex(txt)
+            llm_errs = check(art) + span_errors(llm_rem)
+            if llm_errs and not span_errors(llm_rem):  # a note that lost a span on an order line is not repaired: it goes to the fallback
+                art["note_text"], llm_rem = sanitize_note_ex(repair_note(txt, art["gp_extraction"], flags, banned, combination_groups(art)))
+                repaired = check(art) + span_errors(llm_rem)
                 log["note_repaired"] = not repaired
                 if not repaired:
                     llm_errs = []
@@ -141,6 +145,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
             llm_errs = [f"stageB call failed: {type(e).__name__}"]
     if llm_errs is None or llm_errs:
         art["note_text"] = det
+        llm_rem = det_rem
     log["llm_note_errors"] = llm_errs
     log["llm_note_valid"] = llm_errs == []
     log["note_source"] = f"llm_{opts.stage_b}" if llm_errs == [] else "deterministic_fallback"
@@ -151,9 +156,11 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     if recovered:
         flags = flags_by_pointer(art)
         banned = [n for p in art["provenance"] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
-        art["note_text"] = _fallback_note(art, flags, banned)
+        art["note_text"], llm_rem = _fallback_note_ex(art, flags, banned)
         log["field_recovery"] = recovered
-    final = check(art)
+    final = check(art) + span_errors(llm_rem)
+    if llm_rem:  # only when a span was removed, so a consult with none keeps a byte-identical log
+        log["sanitize_removed"] = len(llm_rem)
     log.update({"final_errors": final, "final_valid": not final, "written": not final,
                 "secs_stageA": round(secs_a, 1), "secs_stageB": round(time.time() - t1, 1), "secs_total": round(time.time() - t0, 1)})
     if not final:

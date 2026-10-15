@@ -7,6 +7,7 @@ it does not smuggle a kept-out name or an identity pattern.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 HEADINGS = ["Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses", "Plan of Management",
             "Surgery or Procedure", "Medication", "Further Investigation", "Follow up", "Refer to", "General Advice"]
@@ -21,20 +22,124 @@ DOSE_ONLY = re.compile(r"^\s*\[dose not stated — doctor to verify\]\s*(\[\?\])
 BRACKET_SPAN = re.compile(r"\s*\[[^\]]*\]")
 
 
-def sanitize_note(note: str) -> str:
+ORDER_HEADINGS = frozenset({"Medication", "Further Investigation", "Refer to", "Follow up", "Surgery or Procedure"})
+
+
+# --- line classification (FRX-L1, fail-closed). Used to ATTRIBUTE removed spans only; the posted text never comes from it. ---
+_COLONS = str.maketrans({c: ":" for c in "\uff1a\ufe55\ufe13\u02d0\ua789\u2236\u0589\u05c3\u0703\u0704\u1803\u1809"})
+_MARKUP = re.compile(r"</?[a-z][a-z0-9]*[^>]*>|[*_~`]")  # inline emphasis / html tags: never part of a heading
+_LEAD = re.compile(r"^(?:[\s\-\u2010-\u2015\u2212>#+|:;.,\u2022\u2023\u25e6\u25aa\u25cf\u00b7\"'\u201c\u201d\u2018\u2019]+"
+                   r"|\(?(?:\d{1,3}|[a-z])[.)]|\([a-z0-9]{1,3}\)|\[[^\]]*\])")
+_HEADINGS_CF = {h: h.casefold() for h in HEADINGS}
+
+
+def _norm_view(line: str) -> str:
+    """NFKC, no Cf characters, lookalike colons as ':', whitespace collapsed, casefolded, nothing before ':', and with leading
+    list / quote markup and leading [..] spans stripped. For classification only."""
+    s = unicodedata.normalize("NFKC", "".join(c for c in line if unicodedata.category(c) != "Cf"))
+    s = "".join(c for c in s if unicodedata.category(c) != "Cf").translate(_COLONS)
+    s = _MARKUP.sub("", s)
+    s = re.sub(r"\s+", " ", s).casefold()
+    s = re.sub(r"\s+:", ":", s)
+    prev = None
+    while prev != s:
+        prev, s = s, _LEAD.sub("", s).lstrip()
+    return s
+
+
+def _line_heading(view: str) -> str | None:
+    """The heading a normalised view STARTS with (N1), else None."""
+    for h, hc in _HEADINGS_CF.items():
+        if view.startswith(hc + ":"):
+            return h
+    return None
+
+
+def _order_heading_inside(view: str) -> str | None:
+    """N2a: the earliest order heading followed by ':' ANYWHERE in the normalised view."""
+    best = None
+    for h in ORDER_HEADINGS:
+        i = view.find(_HEADINGS_CF[h] + ":")
+        if i >= 0 and (best is None or i < best[0]):
+            best = (i, h)
+    return best[1] if best else None
+
+
+def _bounded(line: str, m: re.Match) -> bool:
+    """FIX4 (b): the removed span (BRACKET_SPAN match `m`, which also ate the whitespace before it) is bounded on BOTH sides by the
+    start / end of the line or by Unicode whitespace. A letter, digit, punctuation or Cf character touching it on either side is not."""
+    left = m.group(0)[:1].isspace() or m.start() == 0
+    right = m.end() == len(line) or line[m.end()].isspace()
+    return left and right
+
+
+def sanitize_note_ex(note: str) -> tuple[str, list[tuple[str | None, str, bool]]]:
+    """sanitize_note plus what it removed: (text, [(heading, removed span, bounded), ...]).
+
+    The heading is where the line sits, decided fail-closed on a normalised view of the line (see _norm_view):
+    an order heading if the view holds one anywhere (N2a) or the line continues a section opened by one (N2b); otherwise the
+    non-order heading the line is positively under; None when no heading has been seen yet (N2c)."""
     out = []
+    removed: list[tuple[str | None, str, bool]] = []
+    cur: str | None = None
     for line in note.split("\n"):
+        spans = [(m.group(0).strip(), _bounded(line, m)) for m in BRACKET_SPAN.finditer(line)]
         line = BRACKET_SPAN.sub("", line)
+        head, sep, body = line.partition(":")
+        view = _norm_view(line)
+        cur = _line_heading(view) or cur
+        attr = _order_heading_inside(view) or cur
+        removed += [(attr, sp, ok) for sp, ok in spans]
         if not line.strip():
             continue
-        head, sep, body = line.partition(":")
         if sep and head in HEADINGS:
             out.append(f"{head}:" if FILLER.match(body) or DOSE_ONLY.match(body) else line.rstrip())
         elif FILLER.match(line):
             continue
         else:
             out.append(line.rstrip())
-    return "\n".join(out)
+    return "\n".join(out), removed
+
+
+def sanitize_note(note: str) -> str:
+    return sanitize_note_ex(note)[0]
+
+
+# FRX-L1 allowlist (FIX3). A removed span is benign only if its content fully matches this, after _span_key.
+SPAN_ALLOWLIST = re.compile(r"s[0-9]{1,3}")
+"""SPAN_ALLOWLIST: the ONLY known-harmless bracket content, a speaker label `s` + 1-3 ASCII digits (`[S1]`, `[ s12 ]`).
+It may grow only by a lead/fable decision. Every other removed span rejects the consult, wherever it sits."""
+
+
+def _span_key(span: str) -> str:
+    """The content of a removed `[...]` span, NFKC, Cf removed, whitespace collapsed, casefolded. For the allowlist check only."""
+    s = span.strip()
+    if s.startswith("["):
+        s = s[1:]
+    if s.endswith("]"):
+        s = s[:-1]
+    s = unicodedata.normalize("NFKC", "".join(c for c in s if unicodedata.category(c) != "Cf"))
+    s = "".join(c for c in s if unicodedata.category(c) != "Cf")
+    return re.sub(r"\s+", " ", s).strip().casefold()
+
+
+# FRX-L1 (FIX4). A speaker-label span is benign only under these headings, where a dictated label can appear and S1-S4 are not clinical
+# findings (S3 gallop and sacral S1 live under Examination and Diagnoses).
+SPAN_BENIGN_HEADINGS = frozenset({"General Advice", "Presenting Complaint"})
+"""SPAN_BENIGN_HEADINGS: the ONLY headings under which a removed speaker label is benign. It grows only by a lead/fable decision."""
+
+
+def span_errors(removed: list[tuple[str | None, str, bool]]) -> list[str]:
+    """FRX-L1, fail-closed on the SPAN. A removed span is benign only if ALL hold: its content is on SPAN_ALLOWLIST (a speaker label);
+    its line is attributed to a heading in SPAN_BENIGN_HEADINGS; and it is bounded on both sides by line edge or whitespace (FIX4 b).
+    Every other span rejects: any other heading, an order line, or before any heading ("unattributed")."""
+    heads: list[str] = []
+    for head, span, bounded in removed:
+        if head not in SPAN_BENIGN_HEADINGS or not bounded or not SPAN_ALLOWLIST.fullmatch(_span_key(span)):
+            h = head or "unattributed"
+            if h not in heads:
+                heads.append(h)
+    return [f"FRX-L1 bracket span removed from {h}" for h in heads]
 
 
 def drop_clauses(text: str, drop) -> str:
