@@ -247,7 +247,11 @@ function evalRoom(room, st) {
       const p25 = b.P25.get(room.id) || 0;
       const thr = Math.max(0.012, 1.5 * p25);
       const talk = (b.TALK.get(room.id) || []).some((v) => v >= thr) || Number(Lr.mic_peak) >= thr;
-      mic = talk ? { text: 'voices', color: 'green' } : { text: 'quiet', color: 'dim' };
+      // live = mic sending normal room sound; speech = peaks above the room's baseline; SILENT (above) = digital silence only
+      const pk = Math.max(Number(Lr.mic_peak) || 0, ...(b.TALK.get(room.id) || []).filter(Number.isFinite));
+      const bar = '▁▂▃▄▅▆▇█'[Math.min(7, Math.floor(Math.sqrt(Math.max(0, pk)) * 8))];
+      const lvl = bar + ' ' + (pk >= 1 ? '1.0' : pk.toFixed(2).replace(/^0/, ''));
+      mic = talk ? { text: 'speech ' + lvl, color: 'green' } : { text: 'live ' + lvl, color: 'green' };
     }
   }
   out.mic = mic;
