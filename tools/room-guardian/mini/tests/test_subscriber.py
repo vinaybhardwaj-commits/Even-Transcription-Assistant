@@ -367,7 +367,8 @@ class CAInvalidTests(unittest.TestCase):
         kinds = [c["kind"] for c in e.router.store.list_open()]
         self.assertNotIn("heal_message_invalid", kinds)
         self.assertEqual(kinds, ["heal_escalated"])                                  # only the one with result "escalated", by the older rule, as before
-        self.assertEqual(e.router.store.list_inbox_pending(), [])
+        queued = [t for _i, t, _c in e.router.store.list_inbox_pending()]             # only the two real restart attempts (ok, no_restart_seen) go to the INBOX
+        self.assertEqual([x.split("result=")[1].split()[0] for x in queued], ["ok", "no_restart_seen"])
         lines = open(os.path.join(e.sub.data, "2026-10-13", "r1.heal.jsonl")).read().splitlines()
         self.assertEqual(len(lines), len(self.HEAL_SH_COREAUDIO)); self.assertEqual(lines[0], self.hs_line(self.HEAL_SH_COREAUDIO[0]))
 
@@ -495,6 +496,45 @@ class CAInboxTests(unittest.TestCase):
 
     def test_heal_inbox_stuck_is_not_a_v_kind(self):
         self.assertNotIn("heal_inbox_stuck", ar.V_KINDS); self.assertIn("heal_inbox_stuck", ar.URGENT)
+
+
+class CAR9InboxTests(unittest.TestCase):
+    """CA-C6 for the kiosk's R9 coreaudio heal (heal.sh): layer coreaudio AND action heal, no kind, not WOULD-DO / shadow."""
+    def line(self, **kw):
+        base = {"room_id": "opd6", "ts": 1760500000, "action": "heal", "layer": "coreaudio", "reason": "coreaudiod_wedged", "before": "usb=true engine=false coreaudiod_pid=412",
+                "after": "coreaudiod_pid_changed=true", "result": "ok", "shadow": False, "target": "", "severity": ""}
+        base.update(kw); return base
+
+    def queued(self, e): return [t for _i, t, _c in e.router.store.list_inbox_pending()]
+
+    def test_a_real_r9_coreaudio_heal_is_queued_in_the_same_record_format(self):
+        e = CAEnv(); e.heal(self.line())
+        self.assertEqual(self.queued(e), ["- 13 Oct 11:00 IST pico-router HEAL: room=r1 result=ok zero_ratio_before=? zero_ratio_after=? recorder_pid_same=? coreaudiod_pid_changed=y"])
+        e = CAEnv(); e.heal(self.line(after="coreaudiod_pid_changed=false", result="no_restart_seen", target="fleet", severity="page"))
+        self.assertEqual(self.queued(e), ["- 13 Oct 11:00 IST pico-router HEAL: room=r1 result=no_restart_seen zero_ratio_before=? zero_ratio_after=? recorder_pid_same=? coreaudiod_pid_changed=n"])
+        e = CAEnv(); e.heal(self.line(after="")); self.assertTrue(self.queued(e)[0].endswith("coreaudiod_pid_changed=?"))
+
+    def test_would_do_shadow_other_actions_and_other_layers_are_not_queued(self):
+        e = CAEnv()
+        for kw in ({"result": "WOULD-DO"}, {"result": "WOULD-DO blocked=killswitch"}, {"result": "would_do"}, {"shadow": True}, {"action": "would_do"}, {"action": "abort", "result": "aborted_killswitch"},
+                   {"action": "escalate", "result": "escalated"}, {"layer": "recorder"}, {"layer": "tcc"}, {"layer": "Coreaudio"}, {"result": None}, {"result": 5}, {"action": None}):
+            e.heal(self.line(**kw))
+        self.assertEqual(self.queued(e), [])
+
+    def test_no_kiosk_free_text_reaches_the_line(self):
+        e = CAEnv(); e.heal(self.line(result="ok; echo SECRET", reason="SECRET reason", before="SECRET before", after="SECRET after coreaudiod_pid_changed=true", target="SECRET"))
+        q = self.queued(e); self.assertEqual(len(q), 1); self.assertNotIn("SECRET", q[0]); self.assertIn("result=other", q[0]); self.assertEqual(len(q[0].splitlines()), 1)
+        e = CAEnv(); e.heal(self.line(result="x" * 40)); self.assertIn("result=other", self.queued(e)[0])
+
+    def test_r9_lines_still_open_no_case_and_a_kind_line_is_not_queued_twice(self):
+        e = CAEnv(); e.heal(self.line()); self.assertEqual(e.router.store.list_open(), [])
+        e.heal(dict(self.line(), kind="capture_dead", action="coreaudiod_restart", result="healed"))
+        self.assertEqual(len(self.queued(e)), 2)                                    # one R9 line + one kind line, each once
+
+    def test_the_router_appends_it_to_the_inbox(self):
+        e = CAEnv(); d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
+        e.router.inbox_path = os.path.join(d.name, "INBOX.md"); e.heal(self.line()); e.router.tick(e.bus)
+        self.assertEqual(len(open(e.router.inbox_path).read().splitlines()), 1); self.assertIn("coreaudiod_pid_changed=y", open(e.router.inbox_path).read())
 
 
 class CAResultGateTests(unittest.TestCase):

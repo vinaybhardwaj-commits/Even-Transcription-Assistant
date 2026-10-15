@@ -13,12 +13,22 @@ umask 077
 mkdir -p "$LOCAL/_to_delete"
 export PATH="${PG_BIN:-/opt/homebrew/opt/postgresql@16/bin}:$PATH"      # PG_BIN: tests only
 PY=/opt/homebrew/bin/python3
+IN_FAIL=""
+aside() {                                   # aside <file> [suffix]: move to _to_delete/<name><suffix>; a name clash gets .1, .2 ... (never overwrites, never deletes)
+  local base dst n=0
+  base="$LOCAL/_to_delete/$(basename "$1")${2:-}"; dst="$base"
+  while [ -e "$dst" ]; do n=$((n + 1)); dst="$base.$n"; done
+  mv "$1" "$dst"
+}
 fail() {
-  trap - ERR TERM INT
+  [ -z "$IN_FAIL" ] || return 0           # re-entry guard: a second signal or error during the clean-up must not start it again
+  IN_FAIL=1
+  trap - ERR
+  trap '' TERM INT                        # and a second TERM / INT while files are being moved is ignored, so the clean-up finishes
   echo "pgdump: FAILED near line $1" >&2
   # A failed run must never count toward keep-14 and must leave no half file: move (never delete) its files aside, a dump as .bad.
   for f in "${OUT:-}.part" "${OUT:-}" "$LOCAL/cases-${STAMP:-none}.sqlite"; do
-    if [ -f "$f" ] && [ "$f" != ".part" ]; then mv "$f" "$LOCAL/_to_delete/$(basename "$f").bad" || true; fi
+    if [ -f "$f" ] && [ "$f" != ".part" ]; then aside "$f" .bad || true; fi
   done
   GUARDIAN_HOME="$GH" "$PY" -I "$GH/scripts/backup-case.py" open || echo "pgdump: could not open the backup_failed case" >&2
   exit "${2:-1}"
@@ -43,7 +53,7 @@ src.backup(dst); dst.close(); src.close()
 PY
 fi
 for pat in 'pipe-*.dump' 'cases-*.sqlite'; do
-  find "$LOCAL" -maxdepth 1 -type f -name "$pat" | sort | awk -v k="$KEEP" '{a[NR]=$0} END{for(i=1;i<=NR-k;i++)print a[i]}' | while IFS= read -r f; do mv "$f" "$LOCAL/_to_delete/"; done
+  find "$LOCAL" -maxdepth 1 -type f -name "$pat" | sort | awk -v k="$KEEP" '{a[NR]=$0} END{for(i=1;i<=NR-k;i++)print a[i]}' | while IFS= read -r f; do aside "$f"; done
 done
 trap - ERR TERM INT
 GUARDIAN_HOME="$GH" "$PY" -I "$GH/scripts/backup-case.py" close || echo "pgdump: could not close the backup_failed case" >&2

@@ -44,7 +44,7 @@ def main():
         return 2
     store = alert_router.default_store(HOME)
     router = alert_router.Router(store, ubus_bus.UbusBus, time.time, os.path.join(HOME, "data", "router-local.json"),
-                                 lambda: alert_router.folder_size_line(os.path.join(HOME, "backup", "_to_delete")))
+                                 lambda: alert_router.guardian_size_lines(HOME))
     log(f"router started pid={os.getpid()}")
     while True:
         try:

@@ -168,7 +168,7 @@ class Router:
         return int((self.clock() - c["opened_at"]) // 60)
 
     def _flush(self, bus, now, pages, vcases, notes, msgs, out, digest=None):
-        """One send for everything due. State is written only after the send succeeded. `digest` is (lines, day, month|None) or None."""
+        """One send for everything due. State is written only after the send succeeded. `digest` is (unacked cases, size lines, day, month|None) or None."""
         tid = batch_tid(now)
         done = set()
         for mt_tid in (tid, batch_tid(now - 86400)):          # yesterday's thread too: a page posted before IST midnight is not repeated after it
@@ -200,9 +200,12 @@ class Router:
             if used + len(text) + 1 <= budget: keep_notes.append((nid, text)); used += len(text) + 1
         keep_digest = None
         if digest:                                            # last in line: pages, V notices and notes come first; the digest is atomic
-            dtext = "\n".join(digest[0])
+            paged_now = {c["first_id"]: n for c, n, _v, _l in keep_pages}
+            paged_now.update({c["first_id"]: n for c, n in already})
+            dlines = self._render_digest(digest[0], digest[1], paged_now)
+            dtext = "\n".join(dlines)
             if used + len(dtext) + 1 <= budget:
-                keep_digest = digest; used += len(dtext) + 1
+                keep_digest = (dlines, digest[2], digest[3]); used += len(dtext) + 1
         if keep_pages or keep_v or keep_notes or keep_digest:
             body = head + "\n".join([l for *_, l in keep_pages] + [l for _, l in keep_v] + [t for _, t in keep_notes]
                                     + (list(keep_digest[0]) if keep_digest else []))
@@ -348,38 +351,56 @@ class Router:
         return False
 
     # ---- end-of-day list
+    def unacked_cases(self):
+        return [c for c in self.store.list_open() if not c["acked_at"]]
+
+    def _unacked_line(self, c, pages=None):
+        return f"room-alert-{c['first_id']} {c['kind']} {c['room_id']} open {self._age_min(c)} min, pages {c['page_count'] if pages is None else pages}"
+
     def unacked_list(self):
-        return [f"room-alert-{c['first_id']} {c['kind']} {c['room_id']} open {self._age_min(c)} min, pages {c['page_count']}"
-                for c in self.store.list_open() if not c["acked_at"]]
+        return [self._unacked_line(c) for c in self.unacked_cases()]
+
+    def _render_digest(self, cases, tail, paged_now):
+        """The digest lines. `paged_now` = {first_id: page_count after this send}: a case paged in the same batch shows the count that batch makes it (S1: it was one behind)."""
+        block = []
+        if cases:
+            block.append(f"ROOM ALERTS unacked at 21:00: {len(cases)}")
+            block.extend(self._unacked_line(c, paged_now.get(c["first_id"])) for c in cases[:self.DIGEST_LINES_CAP])
+            if len(cases) > self.DIGEST_LINES_CAP:
+                block.append(f"... and {len(cases) - self.DIGEST_LINES_CAP} more")
+        return block + list(tail)
 
     DIGEST_LINES_CAP = 30
 
     def _digest_block(self, now):
-        """The 21:00 block for this day, or None (not yet 21:00, already sent today, or nothing to say). Returns (lines, day, month|None); the day and
-        month are recorded only after the batch send succeeded (see _flush). The size line goes out with the first digest run of each calendar month."""
+        """The 21:00 block for this day, or None (not yet 21:00, already sent today, or nothing to say). Returns (unacked cases, size lines, day, month|None);
+        _flush renders it (see _render_digest) and records the day and month only after the batch send succeeded. The size lines (backup, data and logs
+        _to_delete) go out with the first digest run of each calendar month; size_line_fn may return one string or a list of strings."""
         ist = datetime.fromtimestamp(now, IST)
         day, month = ist.strftime("%Y-%m-%d"), ist.strftime("%Y-%m")
         if ist.hour < DIGEST_HOUR_IST or self.local["digest_day"] == day:
             return None
-        lines = self.unacked_list()
-        block = []
-        if lines:
-            block.append(f"ROOM ALERTS unacked at 21:00: {len(lines)}")
-            block.extend(lines[:self.DIGEST_LINES_CAP])
-            if len(lines) > self.DIGEST_LINES_CAP:
-                block.append(f"... and {len(lines) - self.DIGEST_LINES_CAP} more")
+        cases, tail = self.unacked_cases(), []
         size_month = None
         if self.size_line_fn and self.local["size_month"] != month:
             try:
                 sl = self.size_line_fn()
             except Exception:
                 sl = None
-            if sl:
-                block.append(sl); size_month = month
-        if not block:
+            tail = [x for x in ([sl] if isinstance(sl, str) else list(sl or [])) if x]
+            if tail:
+                size_month = month
+        if not cases and not tail:
             self.local["digest_day"] = day          # nothing to say today: do not look again until tomorrow
             return None
-        return block, day, size_month
+        return cases, tail, day, size_month
+
+
+def guardian_size_lines(home):
+    """The three _to_delete size lines the monthly digest carries (backup, data, logs); a folder that is not there is left out."""
+    import os
+    lines = [folder_size_line(os.path.join(home, *sub), f"{'/'.join(sub)}") for sub in (("backup", "_to_delete"), ("data", "_to_delete"), ("logs", "_to_delete"))]
+    return [x for x in lines if x]
 
 
 def folder_size_line(path, label="backup/_to_delete"):
@@ -486,7 +507,7 @@ class SqliteStore:
         return LOCAL_ID_BASE + seq
 
     def backup_to(self, dest_dir, keep=14, stamp=None):
-        """Online copy via the sqlite backup API (safe with WAL). Keeps the newest `keep` files named cases-YYYYMMDD-HHMMSS.sqlite."""
+        """Online copy via the sqlite backup API (safe with WAL). Keeps the newest `keep` files named cases-YYYYMMDD-HHMMSS.sqlite; older ones are MOVED to _to_delete/."""
         import os, sqlite3
         os.makedirs(dest_dir, exist_ok=True)
         stamp = stamp or datetime.now(IST).strftime("%Y%m%d-%H%M%S")
@@ -497,8 +518,13 @@ class SqliteStore:
         finally:
             out.close()
         files = sorted(f for f in os.listdir(dest_dir) if f.startswith("cases-") and f.endswith(".sqlite"))
-        for f in files[:-keep]:
-            os.remove(os.path.join(dest_dir, f))
+        for f in files[:-keep]:                  # no hard deletes: rotation moves the oldest to <dest_dir>/_to_delete/, a name clash gets a numeric suffix
+            os.makedirs(os.path.join(dest_dir, "_to_delete"), exist_ok=True)
+            target = os.path.join(dest_dir, "_to_delete", f)
+            n = 0
+            while os.path.exists(target):
+                n += 1; target = os.path.join(dest_dir, "_to_delete", f"{f}.{n}")
+            os.rename(os.path.join(dest_dir, f), target)
         return dest
 
 

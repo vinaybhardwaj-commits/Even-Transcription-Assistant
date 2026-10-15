@@ -335,6 +335,75 @@ def _pgdump_script():
     return None
 
 
+class FUDigestPagesCount(unittest.TestCase):
+    def test_pages_in_the_digest_is_not_one_behind_when_the_same_batch_pages_the_case(self):
+        clock, bus, store = Clock(ist_s(2026, 10, 13, 20, 50)), FakeBus(), ar.SqliteStore()
+        r = ar.Router(store, lambda: bus, clock); r.on_row(bus, row(100)); r.tick(bus)                     # page 1 at 20:50
+        clock.t = ist_s(2026, 10, 13, 21, 1); r.on_row(bus, row(200, "offline", "r2"))                      # 100 is due again (page 2); 200 is new (page 1)
+        r.tick(bus); body = bus.real[-1]["body"]
+        self.assertIn("room-alert-100 recorder_off in r1.", body); self.assertIn("[page 2]", body)
+        self.assertIn("room-alert-100 recorder_off r1 open 11 min, pages 2", body)
+        self.assertIn("room-alert-200 offline r2 open 0 min, pages 1", body)
+
+    def test_digest_alone_shows_the_stored_count(self):
+        clock, bus, store = Clock(ist_s(2026, 10, 13, 20, 58)), FakeBus(), ar.SqliteStore()
+        r = ar.Router(store, lambda: bus, clock); r.on_row(bus, row(100)); r.tick(bus)
+        clock.t = ist_s(2026, 10, 13, 21, 1); r.tick(bus)
+        self.assertIn("pages 1", bus.real[-1]["body"]); self.assertNotIn("[page 2]", bus.real[-1]["body"])
+
+    def test_a_page_found_already_posted_counts_too(self):
+        clock, bus, store = Clock(ist_s(2026, 10, 13, 20, 58)), FakeBus(), ar.SqliteStore()
+        r = ar.Router(store, lambda: bus, clock); r.on_row(bus, row(100))
+        orig = store.update; store.update = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("crash"))
+        r.tick(bus); store.update = orig                                    # posted page 1 but the state write was lost (page_count still 0)
+        clock.t = ist_s(2026, 10, 13, 21, 1); ar.Router(store, lambda: bus, clock).tick(bus)
+        self.assertIn("pages 1", bus.real[-1]["body"])                      # marker found: counted as page 1, not "pages 0"
+
+
+class FUSizeLines(unittest.TestCase):
+    def test_three_folders_and_a_list_from_the_size_function(self):
+        with tempfile.TemporaryDirectory() as t:
+            for sub, n in (("backup", 1), ("data", 2)):
+                os.makedirs(os.path.join(t, sub, "_to_delete"))
+                for i in range(n): open(os.path.join(t, sub, "_to_delete", f"f{i}"), "wb").write(b"x")
+            lines = ar.guardian_size_lines(t)                                # logs/_to_delete is absent: left out
+            self.assertEqual([l.split(":")[0] for l in lines], ["backup/_to_delete", "data/_to_delete"]); self.assertIn("2 file(s)", lines[1])
+            os.makedirs(os.path.join(t, "logs", "_to_delete")); self.assertEqual(len(ar.guardian_size_lines(t)), 3)
+            clock, bus = Clock(ist_s(2026, 10, 13, 21, 1)), FakeBus()
+            r = ar.Router(ar.SqliteStore(), lambda: bus, clock, size_line_fn=lambda: ar.guardian_size_lines(t))
+            self.assertEqual(r.tick(bus)["digest"], 1)
+            body = bus.real[-1]["body"]
+            for label in ("backup/_to_delete", "data/_to_delete", "logs/_to_delete"): self.assertIn(label + ":", body)
+            self.assertEqual(r.local["size_month"], "2026-10")
+
+    def test_a_string_from_the_size_function_still_works(self):
+        clock, bus = Clock(ist_s(2026, 10, 13, 21, 1)), FakeBus()
+        r = ar.Router(ar.SqliteStore(), lambda: bus, clock, size_line_fn=lambda: "ONE-LINE"); r.tick(bus)
+        self.assertIn("ONE-LINE", bus.real[-1]["body"])
+
+
+class FUBackupRotationNeverDeletes(unittest.TestCase):
+    def test_a_name_clash_in_to_delete_gets_a_suffix_and_nothing_is_removed(self):
+        with tempfile.TemporaryDirectory() as t:
+            st = ar.SqliteStore(os.path.join(t, "cases.sqlite")); dest = os.path.join(t, "backup")
+            os.makedirs(os.path.join(dest, "_to_delete")); open(os.path.join(dest, "_to_delete", "cases-20261001-020000.sqlite"), "w").write("older")
+            for i in range(16): st.backup_to(dest, keep=14, stamp=f"202610{i + 1:02d}-020000")
+            moved = sorted(os.listdir(os.path.join(dest, "_to_delete")))
+            self.assertEqual(moved, ["cases-20261001-020000.sqlite", "cases-20261001-020000.sqlite.1", "cases-20261002-020000.sqlite"])
+            self.assertEqual(open(os.path.join(dest, "_to_delete", "cases-20261001-020000.sqlite")).read(), "older")     # the clash did not overwrite it
+
+    def test_no_file_delete_calls_in_the_router_tools(self):
+        import re
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        for sub in ("router", "subscriber"):
+            d = os.path.join(here, sub)
+            if not os.path.isdir(d): continue
+            for f in os.listdir(d):
+                if f.endswith(".py"):
+                    src = open(os.path.join(d, f)).read()
+                    self.assertIsNone(re.search(r"os\.remove\(|os\.unlink\(|shutil\.rmtree\(|\.unlink\(", src), f)
+
+
 @unittest.skipUnless(_pgdump_script() and os.path.exists("/opt/homebrew/bin/python3"), "pgdump.sh or the Mini python is not here")
 class SF3PgdumpSignals(unittest.TestCase):
     """pgdump.sh against a temp GUARDIAN_HOME and a fake pg_dump / pg_restore (PG_BIN). Never touches the real database."""
@@ -396,12 +465,101 @@ class SF3PgdumpSignals(unittest.TestCase):
         p = self.start(3); self.wait_part(); p.send_signal(signal.SIGINT); p.communicate(timeout=30)
         self.assertEqual(p.returncode, 130); self.assertEqual([x for x in self.files() if x.endswith(".part")], [])
 
+    def test_repeated_term_during_the_clean_up_still_finishes_it(self):
+        import signal, time
+        bc = os.path.join(self.gh, "scripts", "backup-case.py")
+        orig = open(bc).read()
+        open(bc, "w").write("import time; time.sleep(1.5)\n" + orig)                    # a slow case-open step: the clean-up takes > 1.5 s, so there is a window to hit
+        p = self.start(1); self.wait_part(); p.send_signal(signal.SIGTERM)
+        for _ in range(200):                                                          # wait until the clean-up has begun (the .part was moved aside)
+            if any(x.endswith(".bad") for x in self.files("_to_delete")) or p.poll() is not None: break
+            time.sleep(0.05)
+        for _ in range(4):
+            if p.poll() is None: p.send_signal(signal.SIGTERM); time.sleep(0.1)       # more TERMs land in the clean-up
+        p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 143)                                          # not -15: the clean-up was not killed halfway
+        self.assertEqual([x for x in self.files() if x.endswith(".part")], [])
+        self.assertTrue(any(x.endswith(".bad") for x in self.files("_to_delete"))); self.assertEqual(self.case_open(), ["backup_failed"])
+
+    def fixed_date(self):
+        with open(os.path.join(self.bin, "date"), "w") as f: f.write("#!/bin/sh\necho 20261015-000000\n")      # PG_BIN comes first on PATH: the script's STAMP is now known
+        os.chmod(os.path.join(self.bin, "date"), 0o755)
+
+    def test_a_name_clash_in_to_delete_gets_a_suffix_on_failure(self):
+        import signal
+        self.fixed_date(); td = os.path.join(self.gh, "backup", "_to_delete"); os.makedirs(td)
+        open(os.path.join(td, "pipe-20261015-000000.dump.part.bad"), "w").write("OLD")
+        p = self.start(2); self.wait_part(); p.send_signal(signal.SIGTERM); p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 143)
+        self.assertEqual(sorted(self.files("_to_delete")), ["pipe-20261015-000000.dump.part.bad", "pipe-20261015-000000.dump.part.bad.1"])
+        self.assertEqual(open(os.path.join(td, "pipe-20261015-000000.dump.part.bad")).read(), "OLD")             # not overwritten
+
+    def test_a_name_clash_in_to_delete_gets_a_suffix_on_rotation(self):
+        self.fixed_date(); bk = os.path.join(self.gh, "backup"); td = os.path.join(bk, "_to_delete"); os.makedirs(td)
+        for i in range(1, 16): open(os.path.join(bk, f"pipe-20260101-{i:06d}.dump"), "w").write(f"d{i}")
+        open(os.path.join(td, "pipe-20260101-000001.dump"), "w").write("OLD")
+        p = self.start(0); p.communicate(timeout=30); self.assertEqual(p.returncode, 0)
+        self.assertEqual(len([x for x in self.files() if x.startswith("pipe-")]), 14)
+        self.assertEqual(sorted(self.files("_to_delete")), ["pipe-20260101-000001.dump", "pipe-20260101-000001.dump.1", "pipe-20260101-000002.dump"])
+        self.assertEqual(open(os.path.join(td, "pipe-20260101-000001.dump")).read(), "OLD"); self.assertEqual(open(os.path.join(td, "pipe-20260101-000001.dump.1")).read(), "d1")
+
     def test_term_to_the_whole_process_group_leaves_no_part(self):
         import signal
         p = self.start(30); self.wait_part(); os.killpg(p.pid, signal.SIGTERM); p.communicate(timeout=30)   # what launchd does on unload
         self.assertIn(p.returncode, (1, 143))
         self.assertEqual([x for x in self.files() if x.endswith(".part")], [])
         self.assertEqual([x for x in self.files() if x.startswith("pipe-")], [])
+
+
+def _deploy_script():
+    here = os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(here, "..", "ops", "deploy.sh")
+    return p if os.path.exists(p) else None
+
+
+@unittest.skipUnless(_deploy_script() and os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ops", "check-deployed.sh")), "ops/deploy.sh is not in this layout")
+class FUDeployStep(unittest.TestCase):
+    def run_deploy(self, gh):
+        import subprocess
+        return subprocess.run(["/bin/bash", _deploy_script()], env=dict(os.environ, GUARDIAN_HOME=gh), capture_output=True, text=True, timeout=60)
+
+    def test_deploy_copies_writes_source_sha_and_the_result_matches_check_deployed(self):
+        import re
+        with tempfile.TemporaryDirectory() as gh:
+            r = self.run_deploy(gh)
+            self.assertEqual(r.returncode, 0, r.stderr); self.assertIn("deployed copy matches", r.stdout); self.assertIn("no job restarted", r.stdout)
+            sha = open(os.path.join(gh, "app", "SOURCE-SHA")).read()
+            self.assertRegex(sha, r"^([0-9a-f]{12}(\+dirty)?|unknown) tools/room-guardian/mini\n$")
+            r2 = self.run_deploy(gh); self.assertIn("0 file(s) updated", r2.stdout)          # second run changes nothing
+            live = os.path.join(gh, "app", "router", "alert_router.py"); open(live, "a").write("# drift\n")
+            r3 = self.run_deploy(gh); self.assertIn("1 file(s) updated", r3.stdout)
+            bk = [d for d in os.listdir(os.path.join(gh, "backup-src")) if d.startswith("deploy-")]
+            self.assertEqual(len(bk), 1); self.assertTrue(open(os.path.join(gh, "backup-src", bk[0], "app", "router", "alert_router.py")).read().endswith("# drift\n"))   # replaced file was kept
+            self.assertNotIn("# drift", open(live).read())
+
+    def test_a_missing_source_stops_the_deploy_before_anything_is_copied(self):
+        import shutil, subprocess
+        with tempfile.TemporaryDirectory() as t:
+            tree = os.path.join(t, "mini"); shutil.copytree(os.path.join(os.path.dirname(_deploy_script()), ".."), tree, ignore=shutil.ignore_patterns("__pycache__"))
+            os.remove(os.path.join(tree, "router", "ubus_bus.py"))              # the LAST-but-one file in the copy order would have left a partial deploy before
+            os.remove(os.path.join(tree, "tests", "selftest", "selftest3.py"))
+            live = os.path.join(t, "live"); os.makedirs(live)
+            r = subprocess.run(["/bin/bash", os.path.join(tree, "ops", "deploy.sh")], env=dict(os.environ, GUARDIAN_HOME=live), capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 1); self.assertIn("2 source file(s) missing; nothing was copied", r.stderr)
+            self.assertIn("ubus_bus.py", r.stderr); self.assertIn("selftest3.py", r.stderr)
+            self.assertEqual(os.listdir(live), [])                              # nothing was copied, no SOURCE-SHA, no backup folder
+
+    def test_each_deploy_gets_its_own_backup_folder(self):
+        import re
+        with tempfile.TemporaryDirectory() as gh:
+            self.run_deploy(gh); open(os.path.join(gh, "app", "router", "alert_router.py"), "a").write("# d1\n"); self.run_deploy(gh)
+            open(os.path.join(gh, "app", "router", "alert_router.py"), "a").write("# d2\n"); self.run_deploy(gh)
+            names = sorted(os.listdir(os.path.join(gh, "backup-src"))); self.assertEqual(len(names), 2)
+            for n in names: self.assertRegex(n, r"^deploy-\d{8}-\d{6}-\d+$")
+
+    def test_deploy_restarts_nothing(self):
+        src = open(_deploy_script()).read()
+        self.assertNotIn("launchctl", src.replace("# It restarts NOTHING", "").split("set -euo")[1])
 
 
 if __name__ == "__main__":
