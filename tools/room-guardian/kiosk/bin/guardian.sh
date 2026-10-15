@@ -14,7 +14,15 @@
 # re-exec. The one re-exec carries a marker ARGUMENT (an argument cannot come from the environment); if p is still missing after it, exit killed.
 G_REEXEC=0
 if [[ ${1:-} == --reexec ]]; then G_REEXEC=1; shift; fi
-if [[ $- != *p* ]] && [[ ${1:-run} == run || ${1:-} == check ]]; then
+# R15 (N3): once and handle re-exec under bash -p exactly as run and check do (BASH_ENV and ENV are then never read), unless this is the test entry: the harness
+# marker, a once|handle mode, and tests/run.sh next to the script tree (the same condition as below, built from keywords and builtins only).
+G_SRCDIR=.; [[ ${BASH_SOURCE[0]} == */* ]] && G_SRCDIR="${BASH_SOURCE[0]%/*}"
+G_NEED_P=0
+case "${1:-run}" in
+  run|check) G_NEED_P=1 ;;
+  once|handle) if ! { [[ ${GUARDIAN_TEST_ENTRY:-} == 1 ]] && [ -f "$G_SRCDIR/../tests/run.sh" ]; }; then G_NEED_P=1; fi ;;
+esac
+if [[ $- != *p* ]] && [[ $G_NEED_P == 1 ]]; then
   if [[ $G_REEXEC == 1 ]]; then echo "guardian: bash -p could not be set: KILLED" >&2; exit 3; fi
   exec /bin/bash -p "$0" --reexec "$@"
 fi
@@ -29,12 +37,13 @@ G_MODE_ARG="${1:-run}"
 # R13 S5. The test entry is honoured only for once|handle, with GUARDIAN_TEST_ENTRY=1, and only when the test harness file sits next to this
 # script tree. install.sh never copies tests/, so an installed tree has no such file and ignores the variable.
 if [ "${GUARDIAN_TEST_ENTRY:-}" = 1 ] && { [ "$G_MODE_ARG" = once ] || [ "$G_MODE_ARG" = handle ]; } && [ -f "$HERE/tests/run.sh" ]; then
-  unset G_RUNMODE G_CONF_BAD G_BAD_CONST
+  unset G_RUNMODE G_CONF_BAD G_BAD_CONST G_TREE_BAD G_TREE_WHY
   CONF="${GUARDIAN_CONF:-${GUARDIAN_HOME:-$HOME/Library/Application Support/EvenScribe/Guardian}/guardian.conf}"
 else
   unset GUARDIAN_TESTMODE GUARDIAN_FAKE_NOW GUARDIAN_PS GUARDIAN_FLAG_CMD GUARDIAN_CONF GUARDIAN_TEST_ENTRY CANARY_AFPLAY \
-    GUARDIAN_ROOT_TESTMODE GUARDIAN_ROOT_TEST_DB FAKE_SP_SLEEP G_CONF_BAD G_BAD_CONST GUARDIAN_PIPE_SSH HEAL_EXTRA USB_REBOOT_ISSUED GUARDIAN_TEST_DPRIME_HEAL USB_DPRIME_HEAL
+    GUARDIAN_ROOT_TESTMODE GUARDIAN_ROOT_TEST_DB FAKE_SP_SLEEP G_CONF_BAD G_BAD_CONST G_TREE_BAD G_TREE_WHY GUARDIAN_PIPE_SSH HEAL_EXTRA USB_REBOOT_ISSUED GUARDIAN_TEST_DPRIME_HEAL USB_DPRIME_HEAL
   G_RUNMODE=1; readonly G_RUNMODE
+  G_TREE_BAD=1   # R15: killed until tree_check has passed (a path that never ran the check stays killed)
   CONF="${GUARDIAN_HOME:-$HOME/Library/Application Support/EvenScribe/Guardian}/guardian.conf"
 fi
 # shellcheck source=../lib/common.sh
@@ -209,6 +218,7 @@ run() {
   audit "guardian start version=$GUARDIAN_VERSION"
   [ -n "$GUARDIAN_ROOM" ] || { audit "running KILLED: no room (guardian.conf has no valid GUARDIAN_ROOM)"; echo "GUARDIAN_ROOM not set" >&2; exit 2; }
   if [ "${G_CONF_BAD:-}" = 1 ]; then audit "guardian.conf rejected: running KILLED (shadow, no actions); health continues"; fi
+  tree_check || true
   MAIN_PID="$(g_ppid)"
   [ -n "$MAIN_PID" ] || MAIN_PID=$$
   trap 'exit 0' TERM INT HUP
@@ -220,6 +230,7 @@ run() {
   set +m
   while :; do
     t0="$(now_epoch)"
+    tree_check || true   # R15: before any act path, every tick
     flag_poll
     tick
     t1="$(now_epoch)"
@@ -231,6 +242,7 @@ run() {
 # check: the state the kill switch would give right now (same parse the actions use). Prints "killswitch=engaged|clear mode=shadow|heal why=<reason>".
 check() {
   local ks=clear
+  tree_check || true
   flag_fetch
   killswitch_engaged && ks=engaged
   echo "killswitch=$ks mode=$(current_mode) why=${CTRL_WHY:-none}"
@@ -244,7 +256,7 @@ fi
 case "$G_MODE_ARG" in
   run) run ;;
   check) check ;;
-  once) flag_fetch; tick ;;
+  once) tree_check || true; flag_fetch; tick ;;
   handle) handle_message "$2" "$3" ;;
   *) echo "usage: guardian.sh run|check|once|handle" >&2; exit 2 ;;
 esac

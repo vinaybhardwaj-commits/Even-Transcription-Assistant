@@ -333,7 +333,7 @@ test_usb_control_64_rooms_parse_and_exactly_one_false_is_clear() {
 
 test_usb_static_c3_and_version() {
   assert_eq "$(grep -rn -E "start_""recording|stop_""recording|scribe_""room_command|rec_""start|rec_""stop|$SD_TOK" "$KDIR"/bin "$KDIR"/lib "$KDIR"/install.sh "$KDIR"/uninstall.sh | wc -l | tr -d ' ')" "0" "C3 grep (with the day-start command) over the kiosk tree is 0"
-  assert_has "$(cat "$KDIR/lib/common.sh")" 'GUARDIAN_VERSION="c1-0.4.0-d2"' "version"
+  assert_has "$(cat "$KDIR/lib/common.sh")" 'GUARDIAN_VERSION="c1-0.4.1-r15"' "version"
   assert_has "$(grep -n 'USB_LOG_PREDICATE' "$KDIR/lib/common.sh" | head -n1)" 'process == "kernel" AND processID == 0 AND subsystem' "S8: predicate pins processID == 0"
   assert_eq "$(cat "$KDIR/lib/heal.sh" "$KDIR/lib/collect.sh" "$KDIR/lib/faulttree.sh" "$KDIR/bin/guardian.sh" | grep -v '^[[:space:]]*#' | grep -c 'shutdown')" "0" "the agent code never names shutdown: only the root helper does"
   assert_eq "$(grep -n 'shutdown' "$KDIR/bin/guardian-root.sh" | grep -v '^[0-9]*:#' | wc -l | tr -d ' ')" "1" "the helper's only code line naming shutdown is the absolute default path"
@@ -566,4 +566,138 @@ test_usb_d_log_line_must_be_from_the_kernel() {
     assert_not "$(fault_tree)" 'usb_power_off' "D $c: no trigger"
     assert_eq "$(n_reboot_calls)" "0" "D $c: no reboot"
   done
+}
+
+# ---- R15 (d2 refute SHOULDs S-1, S-2 and notes N1) ----
+# S-1: an epoch with a leading zero (octal to bash arithmetic) or one that fails arithmetic is "bad"; only exactly "none" may reach the reboot.
+test_usb_r15_s1_leading_zero_epoch_is_bad_and_only_none_reboots() {
+  load_libs
+  local c ep
+  for c in lz1 lz2 long; do
+    usb_reset
+    case "$c" in
+      lz1) ep="0$((GUARDIAN_FAKE_NOW - 600))" ;;
+      lz2) ep="0000000001" ;;
+      long) ep="99999999999999999999" ;;
+    esac
+    printf 'date=00000000\nepoch=%s\nverify=healed_pending\n' "$ep" >"$STATE_DIR/usb-reboot"
+    assert_eq "$(usb_budget_state)" "bad" "S-1 $c: the state is bad"
+    usb_go "$U_CLEAR"
+    assert_eq "$(n_reboot_calls)" "0" "S-1 $c: no reboot"
+    usb_esc "S-1 $c"
+  done
+  # an epoch that is plain digits and old enough is still none (the positive control: the same fixture without the zero reboots)
+  usb_reset; printf 'date=00000000\nepoch=%s\nverify=healed_pending\n' "$((GUARDIAN_FAKE_NOW - 2 * 86400))" >"$STATE_DIR/usb-reboot"
+  assert_eq "$(usb_budget_state)" "none" "S-1 control: an old plain epoch is none"
+  usb_go "$U_CLEAR"
+  assert_eq "$(n_reboot_calls)" "1" "S-1 control: none reboots"
+  # any answer other than exactly none (an empty or unknown one, as a failed arithmetic read gives) is no reboot, and still escalates the rung d page
+  for c in empty unknown; do
+    usb_reset
+    eval "usb_budget_state_real() $(declare -f usb_budget_state | sed 1d)"
+    if [ "$c" = empty ]; then usb_budget_state() { echo ""; }; else usb_budget_state() { echo "weird"; }; fi
+    usb_go "$U_CLEAR"
+    assert_eq "$(n_reboot_calls)" "0" "S-1 $c answer: no reboot"
+    usb_esc "S-1 $c answer"
+    eval "usb_budget_state() $(declare -f usb_budget_state_real | sed 1d)"
+  done
+  # the verify path never reads a leading-zero epoch as octal: it leaves the state pending and publishes nothing
+  usb_reset; printf 'date=%s\nepoch=0%s\nverify=pending\nport=p\n' "$(ist_date)" "$((GUARDIAN_FAKE_NOW - 700))" >"$STATE_DIR/usb-reboot"
+  : >"$T/pub.log"; usb_reboot_verify
+  assert_eq "$(events | wc -l | tr -d ' ')" "0" "S-1: verify with a leading-zero epoch publishes nothing"
+  [ ! -e "$USB_LOCK" ] && ok || fail "S-1: and writes no lock"
+}
+
+# a fake ioreg whose USB read can be slowed (T/slow) and whose reads advance a skew file read by now_epoch (T/bump): the two S-2 probes
+usb_r15_ioreg() {
+  cat >"$T/bin/ioreg" <<'F'
+#!/bin/bash
+case "$*" in
+  *IOUSBHostDevice*) [ -e "$T/slow" ] && sleep 4
+                     if [ -e "$T/bump" ]; then echo $(( $(cat "$T/skew" 2>/dev/null || echo 0) + 2 )) >"$T/skew"; fi
+                     cat "$T/usb.txt" ;;
+  *IOAudioEngine*) cat "$T/engine.txt" ;;
+  *IOHIDSystem*) echo "    | |   \"HIDIdleTime\" = $(cat "$T/hid")" ;;
+esac
+F
+  chmod +x "$T/bin/ioreg"
+}
+# usb_go with a hook between the second collect and the heal cycle
+usb_go_pre() { # <payload> <hook command>
+  usb_ctl "$1"; collect_all
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 20)); export GUARDIAN_FAKE_NOW
+  usb_ctl "$1"; collect_all
+  eval "$2"
+  heal_cycle >/dev/null 2>&1
+}
+
+# S-2: the device re-read after the second kill read runs under run_capped 1 (a timeout aborts as device_back), and more than 1 s from that kill read to the root call aborts.
+test_usb_r15_s2_slow_reread_and_slow_to_root_abort() {
+  load_libs; usb_reset; usb_r15_ioreg
+  local t0 t1
+  # control: a fast re-read still reboots exactly once
+  usb_go_pre "$U_CLEAR" ':'
+  assert_eq "$(n_reboot_calls)" "1" "S-2 control: a fast re-read reboots once"
+  # a 4 s ioreg: capped at 1 s, 0 reboots, aborted as device_back, the page kept, the state put back
+  usb_reset; usb_r15_ioreg
+  t0="$(date +%s)"
+  usb_go_pre "$U_CLEAR" ': >"$T/slow"'
+  t1="$(date +%s)"
+  assert_eq "$(n_reboot_calls)" "0" "S-2: a slow re-read: 0 reboots"
+  assert_has "$(events)" 'aborted_device_back' "S-2: aborted as device_back"
+  usb_esc "S-2 slow re-read"
+  [ "$((t1 - t0))" -lt 4 ] && ok || fail "S-2: the heal cycle did not wait out the 4 s read ($((t1 - t0)) s)"
+  assert_eq "$(usb_budget_state)" "none" "S-2: the budget is not spent"
+  rm -f "$T/slow"
+  # the act_step epoch: a re-read that takes 2 s of (fake) clock between the second kill read and the root call aborts and escalates
+  usb_reset; usb_r15_ioreg
+  eval "now_epoch() { echo \$((GUARDIAN_FAKE_NOW + \$(cat \"$T/skew\" 2>/dev/null || echo 0))); }"
+  rm -f "$T/skew"
+  usb_go_pre "$U_CLEAR" ': >"$T/bump"'
+  assert_eq "$(n_reboot_calls)" "0" "S-2: more than 1 s from the kill read to the root call: 0 reboots"
+  assert_has "$(events | grep '"action":"abort"')" '"result":"aborted_before_reboot"' "S-2: aborted with the existing heal-line result name (no new one)"
+  usb_esc "S-2 slow to root"
+  assert_eq "$(usb_budget_state)" "none" "S-2: the state was put back"
+}
+
+# N1: a planted leftover usb-reboot.tmp makes the state rewrite fail every tick. One healed_pending per reboot epoch, and a lock written once whose epoch never moves.
+test_usb_r15_n1_planted_tmp_dedupes_healed_pending_and_the_lock_epoch_is_stable() {
+  load_libs; usb_reset
+  local i n le1 le2
+  usb_go "$U_CLEAR"
+  assert_eq "$(n_reboot_calls)" "1" "reboot issued"
+  # the kiosk comes back; a planted usb-reboot.tmp stops the state from moving on to healed_pending
+  : >"$CALLS"; : >"$T/pub.log"; USB_REBOOT_ISSUED=0
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 120)); export GUARDIAN_FAKE_NOW; export FAKE_BOOT_AGE=40
+  printf 'USB Audio C270 HD\n' >"$T/usb.txt"; printf 'C270 engine\n' >"$T/engine.txt"; echo 7777 >"$T/rec_pid"; echo 5001 >"$T/tapewriters"
+  : >"$STATE_DIR/usb-reboot.tmp"
+  for i in 1 2 3 4 5 6; do
+    usb_ctl "$U_CLEAR"; collect_all; heal_cycle >/dev/null 2>&1
+    GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 10)); export GUARDIAN_FAKE_NOW
+  done
+  n="$(events | grep -c '"result":"healed_pending"')"
+  [ "$n" -le 1 ] && [ "$n" -ge 1 ] && ok || fail "N1: exactly one healed_pending in 6 ticks (got $n)"
+  assert_has "$(cat "$STATE_DIR/usb-reboot")" '^verify=pending$' "N1: the state really could not move on (the planted file is in the way)"
+  # the failed branch: the device never comes back, 10+ min pass, the planted file is still there
+  rm -f "$STATE_DIR/usb-reboot.tmp"; usb_reset; unset FAKE_BOOT_AGE
+  usb_go "$U_CLEAR"
+  : >"$CALLS"; : >"$T/pub.log"; USB_REBOOT_ISSUED=0; : >"$STATE_DIR/usb-reboot.tmp"
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 700)); export GUARDIAN_FAKE_NOW
+  usb_ctl "$U_CLEAR"; collect_all; heal_cycle >/dev/null 2>&1
+  le1="$(sed -n 1p "$USB_LOCK")"
+  [ -n "$le1" ] && ok || fail "N1: the lock was written"
+  for i in 1 2 3 4 5 6; do
+    GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 10)); export GUARDIAN_FAKE_NOW
+    usb_ctl "$U_CLEAR"; collect_all; heal_cycle >/dev/null 2>&1
+  done
+  le2="$(sed -n 1p "$USB_LOCK")"
+  assert_eq "$le2" "$le1" "N1: the lock epoch did not move in 6 more ticks"
+  assert_eq "$(grep -c 'verify failed: rung locked' "$GUARDIAN_HOME/audit.log")" "1" "N1: the lock is audited once"
+  assert_has "$(cat "$STATE_DIR/usb-reboot")" '^verify=pending$' "N1: the planted file kept the state pending"
+  # a later reboot's failure still gets its own lock (the lock is per reboot epoch, not once for ever)
+  rm -f "$STATE_DIR/usb-reboot.tmp"
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 800)); export GUARDIAN_FAKE_NOW
+  printf 'date=%s\nepoch=%s\nverify=pending\nport=p\n' "$(ist_date)" "$((GUARDIAN_FAKE_NOW - 700))" >"$STATE_DIR/usb-reboot"
+  usb_ctl "$U_CLEAR"; collect_all; heal_cycle >/dev/null 2>&1
+  [ "$(sed -n 1p "$USB_LOCK")" -gt "$le1" ] && ok || fail "N1: a failure of a later reboot refreshed the lock"
 }

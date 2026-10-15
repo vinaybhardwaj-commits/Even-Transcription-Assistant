@@ -4,7 +4,7 @@
 # Sourced, never executed. Every external effect goes through a PATH command or a GUARDIAN_* command
 # variable, so tests can substitute fakes.
 
-GUARDIAN_VERSION="c1-0.4.0-d2"   # bump per release: the audit "guardian start version=" line identifies the tree
+GUARDIAN_VERSION="c1-0.4.1-r15"   # bump per release: the audit "guardian start version=" line identifies the tree
 
 # R12. Run mode (guardian.sh run|check, G_RUNMODE=1) reads no test seam and no environment tunable: every name below is assigned its default
 # unconditionally and only guardian.conf (parsed as data by conf.sh, never sourced) can change the allow-listed keys. Library tests source this

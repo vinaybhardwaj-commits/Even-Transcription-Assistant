@@ -169,3 +169,131 @@ conf_load() {
   done <<<"$content"
   [ "$CONF_ERR_N" -eq 0 ]
 }
+
+# ---- R15 (G14-3 i, ii): the code tree and every ancestor of it ----
+# The agent's code directory and its ancestors must not be writable by anyone but the agent and root, else another uid could rename the directory and plant bin/guardian.sh.
+# One scanner serves the installer (which repairs what the agent user owns and refuses the rest) and the agent (which is killed on any finding). Read-only.
+# tree_node and tree_walk_anc print findings as "CLASS|what" and "CLASS|what|path": X = not repairable by the installer (refuse), R = owned by the agent user, repairable.
+
+# tree_acl_list <path> <anc|strict>: prints the index of each ACL entry that is not acceptable, one per line; "?" when ls cannot say (fail closed).
+# anc: the macOS default entry "group:everyone deny delete" is acceptable. strict: any entry is not.
+tree_acl_list() {
+  local out line n=0 txt idx
+  out="$("$G_LS" -led "$1" 2>/dev/null)" || { echo '?'; return 0; }
+  [ -n "$out" ] || { echo '?'; return 0; }
+  while IFS= read -r line; do
+    n=$((n + 1))
+    [ "$n" -gt 1 ] || continue
+    txt="${line#"${line%%[![:space:]]*}"}"
+    idx="${txt%%:*}"
+    case "$idx" in ''|*[!0-9]*) echo '?'; continue ;; esac
+    if [ "$2" = anc ] && [ "${txt#*: }" = "group:everyone deny delete" ]; then continue; fi
+    echo "$idx"
+  done <<<"$out"
+}
+
+# tree_node <path> <d|f> <anc|strict>: no output = acceptable. A symlink is never acceptable, except a root-owned one on an ancestor path (/var, /tmp, /etc on macOS).
+tree_node() {
+  local p="$1" want="$2" kind="$3" out uid mode typ me g o acl
+  out="$(conf_path_stat "$p" P)" || { echo "X|stat"; return 0; }
+  uid="${out%% *}"; out="${out#* }"; mode="${out%% *}"; typ="${out#* }"
+  case "$typ" in
+    [Ss]ymbolic*|[Ss]ymlink*)
+      if [ "$kind" = anc ] && [ "$uid" = 0 ]; then return 0; fi
+      echo "X|symlink"; return 0 ;;
+  esac
+  case "$want" in
+    d) case "$typ" in [Dd]irectory*) ;; *) echo "X|not a directory"; return 0 ;; esac ;;
+    f) case "$typ" in [Rr]egular*) ;; *) echo "X|not a regular file"; return 0 ;; esac ;;
+  esac
+  me="$("$G_ID" -u)"
+  case "$uid" in ''|*[!0-9]*) echo "X|owner"; return 0 ;; esac
+  if [ "$uid" != 0 ] && [ "$uid" != "$me" ]; then echo "X|owner"; return 0; fi
+  case "$mode" in ''|*[!0-7]*) echo "X|mode"; return 0 ;; esac
+  mode=$((8#$mode)); g=$(((mode >> 3) & 7)); o=$((mode & 7))
+  if [ $((g & 2)) -ne 0 ] || [ $((o & 2)) -ne 0 ]; then
+    if [ "$uid" = 0 ]; then echo "X|writable"; else echo "R|writable"; fi
+    return 0
+  fi
+  acl="$(tree_acl_list "$p" "$kind" | "$G_TR" '\n' ' ')"
+  if [ -n "${acl// /}" ]; then
+    if [ "$uid" = 0 ]; then echo "X|acl"; else echo "R|acl:${acl% }"; fi
+  fi
+  return 0
+}
+
+# tree_walk_chain <absolute path> <allow-missing 0|1>: every prefix of the path from / down, each through tree_node (anc). The path itself is included.
+tree_walk_chain() {
+  local p="$1" miss="$2" cur="" rest comp r
+  rest="${p#/}"
+  r="$(tree_node / d anc)"; [ -z "$r" ] || echo "$r|/"
+  while [ -n "$rest" ]; do
+    case "$rest" in */*) comp="${rest%%/*}"; rest="${rest#*/}" ;; *) comp="$rest"; rest="" ;; esac
+    case "$comp" in '') continue ;; .) continue ;; ..) echo "X|dot-dot component|$p"; return 0 ;; esac
+    cur="$cur/$comp"
+    if [ ! -e "$cur" ] && [ ! -L "$cur" ]; then
+      [ "$miss" = 1 ] || echo "X|missing|$cur"
+      return 0
+    fi
+    r="$(tree_node "$cur" d anc)"; [ -z "$r" ] || echo "$r|$cur"
+  done
+  return 0
+}
+
+# tree_walk_anc <absolute path> [allow-missing]: the logical chain, then (when a link was crossed) the physical chain of the nearest existing directory.
+# A root-owned link is followed and its target is walked too. An agent-owned link on the way is refused.
+tree_walk_anc() {
+  local p="$1" miss="${2:-0}" ex phys
+  case "$p" in /*) ;; *) echo "X|not absolute|$p"; return 0 ;; esac
+  tree_walk_chain "$p" "$miss"
+  ex="$p"
+  while [ ! -d "$ex" ] && [ "$ex" != / ] && [ -n "$ex" ]; do ex="${ex%/*}"; done
+  [ -n "$ex" ] || ex=/
+  phys="$(cd -P "$ex" 2>/dev/null && pwd -P)" || phys=""
+  if [ -z "$phys" ]; then echo "X|unresolvable|$ex"; return 0; fi
+  if [ "$phys" != "$ex" ]; then tree_walk_chain "$phys" 0; fi
+  return 0
+}
+
+# tree_check_paths <code dir> <agent home>: rc 0 when the code directory, bin/, lib/, each file the agent sources or runs from its tree (strict: regular file or directory,
+# owner root or the agent, not group/world-writable, no ACL at all) and every ancestor of the code directory and of the agent home (tree_walk_anc) pass. Sets G_TREE_WHY on a finding.
+tree_check_paths() {
+  local here="$1" home="$2" rel p r f first
+  G_TREE_WHY=""
+  for rel in "" bin lib; do
+    p="$here${rel:+/$rel}"
+    r="$(tree_node "$p" d strict)"
+    if [ -n "$r" ]; then G_TREE_WHY="dir ${r#*|}: ${rel:-.}"; return 1; fi
+  done
+  for f in bin/guardian.sh lib/common.sh lib/conf.sh lib/collect.sh lib/killswitch.sh lib/faulttree.sh lib/heal.sh lib/probe.sh lib/canary.sh; do
+    p="$here/$f"
+    # an older install has no canary.sh and the tick then skips it
+    if [ "$f" = lib/canary.sh ] && [ ! -e "$p" ] && [ ! -L "$p" ]; then continue; fi
+    r="$(tree_node "$p" f strict)"
+    if [ -n "$r" ]; then G_TREE_WHY="file ${r#*|}: $f"; return 1; fi
+  done
+  first="$(tree_walk_anc "$here" 0 | "$G_HEAD" -n1)"
+  if [ -z "$first" ] && [ "$home" != "$here" ]; then first="$(tree_walk_anc "$home" 0 | "$G_HEAD" -n1)"; fi
+  if [ -n "$first" ]; then
+    r="${first#*|}"
+    G_TREE_WHY="ancestor ${r%%|*}: ${r#*|}"
+    return 1
+  fi
+  return 0
+}
+
+# tree_check: the agent's run-time self-check, called at start and on every tick before any act path. Run mode only; library tests skip it (G_TREE_BAD=0).
+# G_TREE_BAD is 1 until the check passes, so a path that never ran it is killed too. One audit line per state change, never per tick.
+tree_check() {
+  local cur prev f="$STATE_DIR/tree_state"
+  if [ "${G_RUNMODE:-}" != 1 ]; then G_TREE_BAD=0; return 0; fi
+  # shellcheck disable=SC2153
+  if tree_check_paths "$HERE" "$GUARDIAN_HOME"; then G_TREE_BAD=0; cur="ok"; else G_TREE_BAD=1; cur="bad $G_TREE_WHY"; fi
+  "$G_MKDIR" -p "$STATE_DIR" 2>/dev/null
+  prev="$("$G_CAT" "$f" 2>/dev/null)"
+  if [ "$prev" != "$cur" ]; then
+    printf '%s\n' "$cur" >"$f" 2>/dev/null
+    audit "code tree check ${prev:-none} -> $cur"
+  fi
+  [ "$G_TREE_BAD" = 0 ]
+}

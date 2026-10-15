@@ -56,6 +56,8 @@ control_parse() {
   # R12: a bad guardian.conf or a safety constant that could not be pinned = killed, whatever control.last says
   if [ "${G_CONF_BAD:-}" = 1 ]; then CTRL_WHY=conf; return 1; fi
   if [ -n "${G_BAD_CONST:-}" ]; then CTRL_WHY=constants; return 1; fi
+  # R15: the code tree or an ancestor of it is not safe (tree_check in conf.sh): killed, whatever control.last says
+  if [ "${G_TREE_BAD:-}" = 1 ]; then CTRL_WHY=tree; return 1; fi
   [ -r "$CONTROL_LAST" ] || return 1
   # 1. raw bytes, as a file
   size="$("$G_WC" -c <"$CONTROL_LAST" 2>/dev/null | "$G_TR" -d " ")"
@@ -148,6 +150,7 @@ flag_fetch() {
   if [ "${G_RUNMODE:-}" = 1 ] && [ -z "$GUARDIAN_CONTROL_SUB_CMD" ]; then
     # run mode needs the control subscription; the old flag command is not used there (R12)
     CTRL_FLEET=unreachable; CTRL_MODE=shadow; CTRL_WHY=no_control_cmd; CTRL_AGE=""
+    [ "${G_TREE_BAD:-}" = 1 ] && CTRL_WHY=tree
     [ "${G_CONF_BAD:-}" = 1 ] && CTRL_WHY=conf
     control_audit_change
     printf '%s\nfleet=unreachable\n' "$now" >"$FLAG_CACHE"; return 1
@@ -176,6 +179,7 @@ killswitch_engaged() {
   [ -e "$FLAG_DIR/heal-off" ] && return 0
   [ "${G_CONF_BAD:-}" = 1 ] && return 0
   [ -n "${G_BAD_CONST:-}" ] && return 0
+  [ "${G_TREE_BAD:-}" = 1 ] && return 0
   [ "${G_RUNMODE:-}" = 1 ] && [ -z "$GUARDIAN_CONTROL_SUB_CMD" ] && return 0
   [ -r "$FLAG_CACHE" ] || return 0
   fetched="$("$G_SED" -n '1p' "$FLAG_CACHE")"

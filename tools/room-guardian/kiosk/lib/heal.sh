@@ -270,9 +270,11 @@ usb_budget_state() {
   ep="$(usb_state_get epoch)"
   case "$ep" in
     ''|*[!0-9]*) ;;
-    *) if [ "$ep" -gt "$(( $(now_epoch) + 300 ))" ]; then echo bad; return; fi
+    0*) echo bad; return ;;   # R15 S-1: a leading zero is octal to bash arithmetic (or an error): the budget cannot be shown to be unspent
+    *) if [ "${#ep}" -gt 15 ]; then echo bad; return; fi
+       if [ "$((10#$ep))" -gt "$(( $(now_epoch) + 300 ))" ]; then echo bad; return; fi
        # B: spent when the epoch is later than now, or less than USB_BUDGET_S ago (stricter than "1 per IST day")
-       if [ "$ep" -gt "$(now_epoch)" ] || [ "$(( $(now_epoch) - ep ))" -lt "$USB_BUDGET_S" ]; then echo today; return; fi ;;
+       if [ "$((10#$ep))" -gt "$(now_epoch)" ] || [ "$(( $(now_epoch) - 10#$ep ))" -lt "$USB_BUDGET_S" ]; then echo today; return; fi ;;
   esac
   if [ "$d" = "$today" ]; then echo today; else echo none; fi
 }
@@ -345,7 +347,7 @@ usb_noreboot() { # before why
 }
 
 heal_usb_power_off() { # evidence (unused: the guards are re-read here)
-  local idle hold port ticks age before bstate prior now rc idate
+  local idle hold port ticks age before bstate prior now rc idate t_act
   HEAL_EXTRA=""
   now="$(now_epoch)"
   ticks="${S_usb_ticks:-0}"; age="${S_cc_age:-}"; port="${S_cc_port:-unknown}"
@@ -364,9 +366,11 @@ heal_usb_power_off() { # evidence (unused: the guards are re-read here)
   # C: while the post-boot verify is pending the reboot is still being proven: no d' at all (the verify path rules)
   if [ -f "$USB_STATE" ] && [ "$(usb_state_get verify)" = "pending" ]; then usb_noreboot "$before" verify_pending; return 0; fi
   bstate="$(usb_budget_state "$idate")"
+  # R15 S-1: exactly "none" may go on. today = recurring page; anything else (bad, or an empty or unknown answer from a failed read) = no reboot.
   case "$bstate" in
+    none) ;;
     today) escalate usb_power_off_recurring usb "$before"; HEAL_EXTRA=""; return 0 ;;
-    bad) usb_noreboot "$before" state_unreadable; return 0 ;;
+    *) usb_noreboot "$before" state_unreadable; return 0 ;;
   esac
   # the consult hold: set, missing, unreadable or true = no reboot (would_do only, and not counted against the G6 cap)
   if [ "$hold" != "clear" ]; then
@@ -391,12 +395,21 @@ heal_usb_power_off() { # evidence (unused: the guards are re-read here)
     heal_event abort usb usb_power_off "$before" "" "aborted_before_reboot" false
     usb_noreboot "$before" aborted; return 1
   fi
+  t_act="$(now_epoch)"
   # S3: the C270 may have been replugged since the collector read it (up to ~10 s ago). Present, or the read failing, = no reboot.
-  usb_present_now; rc=$?
+  # R15 S-2: the re-read runs under run_capped 1; a timeout (rc 124) is not "absent", so it aborts as device_back. It sits between the second kill read and root_do.
+  run_capped 1 "$STATE_DIR/usb_present.out" usb_present_now; rc=$?
+  : >"$STATE_DIR/usb_present.out" 2>/dev/null
   if [ "$rc" -ne 1 ]; then
     usb_state_restore "$prior"
     heal_event abort usb usb_power_off "$before" "" "aborted_device_back" false
     usb_noreboot "$before" device_back; return 1
+  fi
+  # R15 S-2: the kill read is only good for about a second. More than 1 s from the second kill read to the root call = abort and escalate.
+  if [ "$(( $(now_epoch) - t_act ))" -gt 1 ]; then
+    usb_state_restore "$prior"
+    heal_event abort usb usb_power_off "$before" "" "aborted_before_reboot" false
+    usb_noreboot "$before" slow_to_root; return 1
   fi
   root_do reboot >/dev/null 2>&1; rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -415,21 +428,28 @@ heal_usb_power_off() { # evidence (unused: the guards are re-read here)
 # Post-boot verify, kiosk side (the Mini checks the day start, a fresh piece and zero_ratio). Runs every tick while the state says verify=pending. Reporting and the lock only: no action on the room.
 # healed_pending: the device is back, the recorder runs with one tapewriter, and the boot is newer than the reboot. Failed: not so within 10 min of the reboot -> escalate usb_reboot_failed and lock 24 h.
 usb_reboot_verify() {
-  local ep now bb rp before
+  local ep now bb rp before le
   [ -f "$USB_STATE" ] && [ -r "$USB_STATE" ] || return 0
   [ "$(usb_state_get verify)" = "pending" ] || return 0
-  ep="$(usb_state_get epoch)"; case "$ep" in ''|*[!0-9]*) return 0 ;; esac
+  ep="$(usb_state_get epoch)"; case "$ep" in ''|*[!0-9]*|0*) return 0 ;; esac   # R15 S-1: a leading-zero epoch is not read as octal; the state stays pending and d' stays blocked
+  [ "${#ep}" -le 15 ] || return 0
   now="$(now_epoch)"
   bb="$(usb_state_get boot_age_s)"; rp="$(usb_state_get recorder_pid)"
   before="usb_mic_present=${S_usb:-null} recorder_running=${S_rec_running:-null} tapewriters=$(tapewriter_count) boot_age_s=${S_boot_age:-null} reboot_age_s=$((now - ep))"
   HEAL_EXTRA="$(usb_extra "" "" "" "" "$(usb_state_get port)" "$bb" "$S_boot_age" "$rp" "$S_rec_pid")"
   if [ -n "$S_boot_age" ] && [ "$S_boot_age" -lt "$((now - ep))" ] 2>/dev/null && [ "$S_usb" = "true" ] && [ "$S_rec_running" = "true" ] && [ "$(tapewriter_count)" = "1" ]; then
     usb_state_set_verify healed_pending
-    heal_event kiosk_reboot usb usb_power_off "$before" "healed_pending" "healed_pending" false "$(target_for usb_power_off)" info
+    # R15 N1: when the state cannot be rewritten (a leftover temp file) it stays pending, so this branch repeats: one healed_pending event per reboot epoch
+    once_per "usb:healed_pending:$ep" "$USB_LOCK_S" && heal_event kiosk_reboot usb usb_power_off "$before" "healed_pending" "healed_pending" false "$(target_for usb_power_off)" info
   elif [ "$((now - ep))" -gt "$USB_VERIFY_S" ]; then
     usb_state_set_verify failed
-    printf '%s\n' "$now" >"$USB_LOCK" 2>/dev/null
-    audit "usb-reboot verify failed: rung locked for ${USB_LOCK_S}s"
+    # R15 N1: the lock is written once per reboot epoch (its epoch is never refreshed by a later tick); a lock at or after this reboot's epoch is already this failure's lock
+    le="$("$G_SED" -n '1p' "$USB_LOCK" 2>/dev/null)"
+    case "$le" in ''|*[!0-9]*) le=0 ;; esac
+    if [ "${#le}" -gt 15 ] || [ "$((10#$le))" -lt "$ep" ]; then
+      printf '%s\n' "$now" >"$USB_LOCK" 2>/dev/null
+      audit "usb-reboot verify failed: rung locked for ${USB_LOCK_S}s"
+    fi
     escalate usb_reboot_failed usb "$before"
   fi
   HEAL_EXTRA=""
