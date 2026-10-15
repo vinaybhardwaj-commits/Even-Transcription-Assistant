@@ -161,7 +161,8 @@ def _judge_json(client: ModelClient, frozen: Frozen, name: str, user: str, parse
 _ZERO = ("unsupported_drugs", "leak_items", "invented_fields", "dose_precedence_errors", "hallucinations", "unclear_items")
 
 
-def _judge_attribution(res: list[dict], items: list[dict], art: dict | None, scope: str | None = None) -> dict:
+def _judge_attribution(res: list[dict], items: list[dict], art: dict | None, scope: str | None = None,
+                       consult: Consult | None = None, signed_rx: dict | None = None) -> dict:
     """Source tallies for the three judged floors that name a replayed medicine or field."""
     by_n = {it["n"]: it for it in items}
     unsupported, invented, dose, wrote_nothing = [], [], [], 0
@@ -170,7 +171,8 @@ def _judge_attribution(res: list[dict], items: list[dict], art: dict | None, sco
         m = it.get("med")
         prov = _prov_for(m, art) if m is not None else None
         if it["kind"] == "medicine" and x["said"] == "no":
-            unsupported.append(_name_source(m, art))
+            src = _name_source(m, art)
+            unsupported.append("ordered_not_supported" if src == "eta" and _ordered_not_supported(m, signed_rx, art, consult) else src)
         if it["kind"] == "medicine" and x["invented"]:
             src, moved = _field_hit(m, x["invented"], art, prov, scope)
             invented.append(src)
@@ -187,7 +189,8 @@ def _judge_attribution(res: list[dict], items: list[dict], art: dict | None, sco
 
 
 def judge_items(client, frozen, items: list[dict], transcript: str, cache_dir: Path, uid: str, arm_kind: str, shape_log: Path | None = None,
-                art: dict | None = None, attr_out: dict | None = None, scope: str | None = None) -> dict:
+                art: dict | None = None, attr_out: dict | None = None, scope: str | None = None,
+                consult: Consult | None = None, signed_rx: dict | None = None) -> dict:
     """`attr_out`, when given, receives the per-source tallies of the judged floors (the returned counts are unchanged)."""
     """Counts from floor-items-v1 over the numbered replayed items. All None when the judge could not be parsed twice.
     `transcript` is format_transcript output (T<n> ids, roles, QUARANTINED marks)."""
@@ -202,8 +205,8 @@ def judge_items(client, frozen, items: list[dict], transcript: str, cache_dir: P
     if res is None:
         return {**dict.fromkeys(_ZERO), "parse_failure": True}
     if attr_out is not None:
-        attr_out.update(_judge_attribution(res, items, art, scope))
-        attr_out["by_scope"] = {sc: _judge_attribution(res, items, art, sc) for sc in FLOOR_SCOPES}
+        attr_out.update(_judge_attribution(res, items, art, scope, consult, signed_rx))
+        attr_out["by_scope"] = {sc: _judge_attribution(res, items, art, sc, consult, signed_rx) for sc in FLOOR_SCOPES}
     kind = {it["n"]: it["kind"] for it in items}
     med = [x for x in res if kind[x["n"]] == "medicine"]
     return {"unsupported_drugs": sum(1 for x in med if x["said"] == "no"),
@@ -528,11 +531,11 @@ def floor_scope(scope: str | None = None) -> str:
 
 # ---- attribution (FLOOR-ATTRIBUTION kickoff, 14 Oct 2026) -------------------------------------------------------
 # Every floor hit gets a source, decided deterministically. Priority when one hit has several parts: eta > eta_coincidence >
-# pulse_catalogue > pulse_extraction > check. eta_coincidence is a digit run that occurs in ETA's text only by coincidence (fewer than
+# ordered_not_supported > pulse_catalogue > pulse_extraction > check. eta_coincidence is a digit run that occurs in ETA's text only by coincidence (fewer than
 # 3 digits and not the same unit); old eta == new eta + new eta_coincidence, for every floor. A medicine row with a uid and other=False carries the resolved catalogue entity's name, brand, generic
 # and strength (replay.build copies them); frequency, duration and instructions come from the Pulse LLM extraction.
 
-SOURCES = ("eta", "eta_coincidence", "pulse_catalogue", "pulse_extraction", "check")
+SOURCES = ("eta", "eta_coincidence", "ordered_not_supported", "pulse_catalogue", "pulse_extraction", "check")
 FLOOR_BASES = ("all", "eta")
 DEFAULT_FLOOR_BASIS = "eta"
 ATTRIBUTED = {"unsupported drugs": "unsupported_drugs", "invented fields": "invented_fields",
@@ -1078,6 +1081,35 @@ def _name_source(m: dict, art: dict | None) -> str:
     return "pulse_catalogue" if _is_catalogue(m) else "pulse_extraction"
 
 
+def _names_equal(a: set[str], b: set[str]) -> bool:
+    return bool({x for x in a if len(x) >= 3} & {y for y in b if len(y) >= 3})
+
+
+def _said_by_doctor(names: set[str], art: dict | None, consult: Consult) -> bool:
+    """True when a name (>= 3 chars after _norm_name, whole word where a hyphen is part of the word, case-insensitive, whitespace collapsed) occurs in a turn of `consult` whose
+    role is doctor (Turn.role, with a resolved Turn.role_source) and whose Turn.idx is not in art["clip_boundary"]["quarantined_turns"]."""
+    quarantined = set(((art or {}).get("clip_boundary") or {}).get("quarantined_turns") or [])
+    names = {n for n in names if len(n) >= 3}
+    for t in consult.turns:
+        if t.role != "doctor" or t.role_source == "none" or t.idx in quarantined:
+            continue
+        text = re.sub(r"\s+", " ", (t.text or "").lower())
+        if any(re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", text) for n in names):
+            return True
+    return False
+
+
+def _ordered_not_supported(m: dict, signed_rx: dict | None, art: dict | None, consult: Consult | None) -> bool:
+    """An unsupported replayed medicine that is in the doctor's signed Rx (a normalised name EQUAL to one of a signed medicine's, each >= 3 chars;
+    no containment, so Pan is not Pan-D) and that the doctor said in an unquarantined turn. Needs both; without a consult or a signed Rx the rule does not apply."""
+    if consult is None or signed_rx is None:
+        return False
+    names = _rx_names(m)
+    if not any(_names_equal(names, _rx_names(sm)) for sm in signed_rx.get("medicines") or [] if isinstance(sm, dict)):
+        return False
+    return _said_by_doctor(names, art, consult)
+
+
 def _prov_for(m: dict, art: dict | None) -> dict | None:
     return next((p for p in _prov_medicines(art) if _names_match(_rx_names(m), _prov_names(p))), None)
 
@@ -1344,7 +1376,7 @@ def consult_floors(client, frozen, *, uid: str, arm_kind: str, rx: dict, signed_
     scope = floor_scope(scope)
     items, signed = numbered_items(rx), numbered_items(signed_rx)
     judged_attr: dict = {}
-    j = judge_items(client, frozen, items, transcript, cache_dir, uid, arm_kind, shape_log, art, judged_attr, scope)
+    j = judge_items(client, frozen, items, transcript, cache_dir, uid, arm_kind, shape_log, art, judged_attr, scope, consult, signed_rx)
     inv = _invented_core(rx, art, consult, scope)
     dps = dose_precedence_sources(rx, art)
     pa = printable_attribution(rx, art)

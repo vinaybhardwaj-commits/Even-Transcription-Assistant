@@ -165,7 +165,7 @@ def test_field_source_legacy_equivalence(scope):
 
 
 def test_worst_priority():
-    assert floors.SOURCES == ("eta", "eta_coincidence", "pulse_catalogue", "pulse_extraction", "check")
+    assert floors.SOURCES == ("eta", "eta_coincidence", "ordered_not_supported", "pulse_catalogue", "pulse_extraction", "check")
     assert floors._worst(["pulse_extraction", "eta_coincidence", "pulse_catalogue"]) == "eta_coincidence"
     assert floors._worst(["eta_coincidence", "eta"]) == "eta"
     assert floors._worst(["check", "pulse_catalogue"]) == "pulse_catalogue"
