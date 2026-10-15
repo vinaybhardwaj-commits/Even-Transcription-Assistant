@@ -30,6 +30,7 @@ const sql = neon(url);
 // room_id -> label; machine = the Pulse-extension machine id (the resolver is keyed by machine); hours = [open, close] in IST minutes (close < open wraps past midnight)
 const CLINIC = [450, 1290];   // 07:30–21:30
 const ORB2H = [360, 240];     // 06:00–04:00
+const TRK_DAY = [570, 1020];  // 09:30–17:00: tracker judged only then (these Macs power off in the evening)
 const ROOMS = [
   { id: 'room_yh3etjpf', label: 'OPD 1',       machine: 'EHRC-CONSUL2s-Mac-mini-2',   hours: CLINIC },
   { id: 'room_87frpus9', label: 'OPD 3',       machine: 'EHRC-CONSUL4s-Mac-mini',     hours: CLINIC },
@@ -37,8 +38,8 @@ const ROOMS = [
   { id: 'room_4ggnkg5x', label: 'OPD 5',       machine: 'EHRC-CONSUL5s-Mac-mini',     hours: CLINIC },
   { id: 'room_pnyc9u49', label: 'OPD 6',       machine: 'EHRC-CONSUL6s-Mac-mini',     hours: CLINIC },
   { id: 'room_qyzghzaf', label: 'OPD 7',       machine: 'EHRC-CONSUL7s-Mac-mini',     hours: CLINIC },
-  { id: 'room_ymch4bxu', label: 'Dietary',     machine: 'EHRC-DISCUSSIONs-Mac-mini',  hours: CLINIC },
-  { id: 'room_bh6jtq4t', label: 'Cardiology',  machine: 'EHRC-ECHOs-Mac-mini',        hours: CLINIC },
+  { id: 'room_ymch4bxu', label: 'Dietary',     machine: 'EHRC-DISCUSSIONs-Mac-mini',  hours: CLINIC, trackerHours: TRK_DAY },
+  { id: 'room_bh6jtq4t', label: 'Cardiology',  machine: 'EHRC-ECHOs-Mac-mini',        hours: CLINIC, trackerHours: TRK_DAY },
   { id: 'room_mah3aspr', label: 'ORB2 (OT2)',  machine: null,                         hours: ORB2H, noTracker: true },
 ];
 const ROOM_IDS = ROOMS.map((r) => r.id);
@@ -196,6 +197,7 @@ function trackerOf(room, byMachine, facts) {
     if (f && f.ver && compareVer(f.ver, MIN_EXT) < 0) return { text: 'old version', color: 'yellow', down: false };
     return { text: 'ok', color: 'green', down: false };
   }
+  if (room.trackerHours && !inHours({ hours: room.trackerHours })) return { text: 'after hours', color: 'dim', down: false };
   return { text: Number.isFinite(sig) ? `no signal ${ageStr(new Date(Date.now() - sig * 1000))}` : 'no signal', color: 'yellow', down: true, secs: sig };
 }
 
@@ -247,7 +249,11 @@ function evalRoom(room, st) {
       const p25 = b.P25.get(room.id) || 0;
       const thr = Math.max(0.012, 1.5 * p25);
       const talk = (b.TALK.get(room.id) || []).some((v) => v >= thr) || Number(Lr.mic_peak) >= thr;
-      mic = talk ? { text: 'voices', color: 'green' } : { text: 'quiet', color: 'dim' };
+      // live = mic sending normal room sound; speech = peaks above the room's baseline; SILENT (above) = digital silence only
+      const pk = Math.max(Number(Lr.mic_peak) || 0, ...(b.TALK.get(room.id) || []).filter(Number.isFinite));
+      const bar = '▁▂▃▄▅▆▇█'[Math.min(7, Math.floor(Math.sqrt(Math.max(0, pk)) * 8))];
+      const lvl = bar + ' ' + (pk >= 1 ? '1.0' : pk.toFixed(2).replace(/^0/, ''));
+      mic = talk ? { text: 'speech ' + lvl, color: 'green' } : { text: 'live ' + lvl, color: 'green' };
     }
   }
   out.mic = mic;
