@@ -24,6 +24,14 @@ const GROUPS: Array<{ g: Group; title: string; note?: string }> = [
   { g: "nodoctor", title: "No doctor signed in", note: "Rooms with nobody signed in. A problem here is not urgent." },
 ];
 
+/** The "Today: …" line. Every nested read is guarded, so a malformed coverage shows 0s and never throws; null or absent shows "Coverage unavailable". */
+export function coverageLineText(cov: unknown): string {
+  if (!cov) return "Coverage unavailable";
+  const c = cov as { cut?: number; transcribed?: number; clef_done?: number; jev_done?: Record<string, number>; no_state?: Record<string, number> };
+  const noState = (c.no_state?.["pitch-detect"] ?? 0) + (c.no_state?.["chair-affect"] ?? 0);
+  return `Today: cut ${c.cut ?? 0} · transcribed ${c.transcribed ?? 0} · Jev pitch ${c.jev_done?.["pitch-detect"] ?? 0} / affect ${c.jev_done?.["chair-affect"] ?? 0} · Clef ${c.clef_done ?? 0}${noState > 0 ? ` · no state ${noState}` : ""}`;
+}
+
 export default function RoomsLiveClient({ who }: { who: { kind: "admin" | "staff" | "open"; name: string } }) {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [err, setErr] = useState(false);
@@ -154,10 +162,7 @@ export default function RoomsLiveClient({ who }: { who: { kind: "admin" | "staff
   const strip = stripView(snap?.steward_status, now);
   const stripColors = { ok: { bg: "#E6F1EC", fg: "#1D6B57" }, amber: { bg: "#FBE9D6", fg: "#8A3F05" }, red: { bg: "#7A1410", fg: "#FFFFFF" }, off: { bg: "#ECEBE6", fg: "#22262B" }, unavailable: { bg: "#ECEBE6", fg: "#4F535A" } }[strip.tone];
   const cov = snap?.coverage;
-  const noState = cov ? cov.no_state["pitch-detect"] + cov.no_state["chair-affect"] : 0;
-  const coverageLine = cov
-    ? `Today: cut ${cov.cut} · transcribed ${cov.transcribed} · Jev pitch ${cov.jev_done["pitch-detect"]} / affect ${cov.jev_done["chair-affect"]} · Clef ${cov.clef_done}${noState > 0 ? ` · no state ${noState}` : ""}`
-    : "Coverage unavailable";
+  const coverageLine = coverageLineText(cov);
   const changes = snap?.changes_today ?? [];
   const stamp = new Date(now).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
