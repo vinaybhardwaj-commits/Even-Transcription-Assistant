@@ -9,15 +9,14 @@
  *   pitch-uptake / doubt           need the agent's enumeration of pitches and doubts (P4)
  * so those are bench-by-explicit-list only. Nothing here is imported by any capture, upload, STT or note path.
  */
-import { selectEvrWindows } from "@/lib/room-access/evr-select";
+import { allTranscribedConsults } from "./consult-eligible";
 import { buildTimelineState, resolveTimelineAnswer } from "./builders/timeline";
 import { buildSttPairState, buildSttRunState, resolveSttPick } from "./builders/stt";
 import { buildConsultState, buildDoubtState, buildPitchState } from "./builders/locators";
 import { registerUse, usesOf, type JevUseDef } from "./uses";
 
-const istDaySeed = (): number => Number(new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10).replace(/-/g, ""));
 const noneEligible = async (): Promise<string[]> => [];
-const consultEligible = (limit: number): Promise<string[]> => selectEvrWindows(Math.min(limit, 200), istDaySeed());
+const consultEligible = (limit: number, ctx?: { sha: string; mode: string }): Promise<string[]> => allTranscribedConsults(limit, ctx);
 
 export const P2_USES: JevUseDef[] = [
   { use: "encounter_timeline", setId: "u10-timeline", subjectType: "encounter", eligible: noneEligible, build: (id) => buildTimelineState(id), resolve: resolveTimelineAnswer },

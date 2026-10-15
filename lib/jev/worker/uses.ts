@@ -28,7 +28,8 @@ export interface JevUseDef {
   setId: string;
   subjectType: JevSubjectType;
   /** Subject ids whose evidence is ready, oldest first, at most `limit`. The sweeper drops those that already hold a decision for the current hash. */
-  eligible(limit: number): Promise<string[]>;
+  /** `ctx` (the sweeper passes it) lets a source exclude already-decided subjects in SQL; sources that ignore it stay valid. */
+  eligible(limit: number, ctx?: { sha: string; mode: string }): Promise<string[]>;
   /** Null = the subject is no longer buildable (evidence withdrawn): recorded as no opinion, never a fabricated state. */
   build(subjectId: string): Promise<StateBuild | null>;
   /**
