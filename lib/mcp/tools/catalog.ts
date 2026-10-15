@@ -32,8 +32,8 @@ const HELP = [
   "Read-only; touches no room. Times UTC; from/to are IST dates. Encounter Explorer catalog (palimpsest C1) of consults since 2026-09-09. Internal admins only; NO PHI removal: include_text=true returns transcript text; include_identity=true and the prescription_uid / individual_uid filters need the admin scope; they return names, ids and the Pulse link (rx.prescription only with include_text too).",
   "action=search {doctor_uid?, room?, from?, to? (span <= 92 days, clamped to 2026-09-09), source? cutter|caa, limit<=200 (default 50), cursor?}: newest first, layers without keys plus layers_present, next_cursor, total_matched, n_bad_lines, n_blind_excluded. Filters has_prescription (alias has_rx), prescription_uid, individual_uid join encounter_catalog (identity_rows says how many consults had a row; an empty table returns no rows, never a false has_prescription=false). include_identity=true adds identity per row.",
   "action=get {consult_uid, include_text?, include_identity?}: the full row and layers {transcript, parts, audio_features (timbre/talktime/clef rows), freescript, rubric, jev, identity, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call.",
-  "action=clip_audio_url {consult_uid}: presigned GET of the clip, 900 s, {url, expires_at, bytes, minutes, signature_sha256}. The URL is never audited or logged.",
-  "action=clip_audio_chunk {consult_uid, offset?, length? <= 1 MiB}: the stored FLAC bytes as base64, {offset, length, total_bytes, content_type, base64, done, signature_sha256}; bad_range past the end.",
+  "action=clip_audio_url {consult_uid}: presigned GET of the clip, 900 s, {url, expires_at, bytes, minutes, audio_sha256, cut_signature_sha256}; audio_sha256 is the hash of the FLAC bytes (null when absent), cut_signature_sha256 hashes the cut metadata, not the audio. The URL is never audited or logged.",
+  "action=clip_audio_chunk {consult_uid, offset?, length? <= 1 MiB}: the stored FLAC bytes as base64, {offset, length, total_bytes, content_type, base64, done, audio_sha256 (FLAC bytes hash, null when absent), cut_signature_sha256 (cut metadata, not the audio)}; bad_range past the end.",
   "Held-out room-days are refused blind_room_day on get, clip_audio_url and clip_audio_chunk and left out of search.",
 ].join(" ");
 
@@ -304,6 +304,9 @@ function intArg(args: ToolArgs, key: string, def: number, min: number, max: numb
   return Number.isInteger(n) && n >= min && n <= max ? n : null;
 }
 
+/** A 64-char lowercase hex string, else null (a CAA clip has no audio_sha256). */
+const hex64 = (v: unknown): string | null => (typeof v === "string" && /^[0-9a-f]{64}$/.test(v) ? v : null);
+
 async function clipAudioChunk(args: ToolArgs): Promise<Row> {
   const uid = argStr(args, "consult_uid", 64);
   if (!uid || !UID.test(uid)) return badArgs("consult_uid must match [A-Za-z0-9_-]{6,64}");
@@ -323,7 +326,7 @@ async function clipAudioChunk(args: ToolArgs): Promise<Row> {
   const clip = (row.clip ?? {}) as Row;
   return {
     ok: true, consult_uid: uid, offset, length: got.bytes.length, total_bytes: got.total_bytes, content_type: "audio/flac",
-    base64: Buffer.from(got.bytes).toString("base64"), done: offset + got.bytes.length >= got.total_bytes, signature_sha256: clip.signature_sha256 ?? null,
+    base64: Buffer.from(got.bytes).toString("base64"), done: offset + got.bytes.length >= got.total_bytes, audio_sha256: hex64(clip.audio_sha256), cut_signature_sha256: hex64(clip.signature_sha256),
   };
 }
 
@@ -344,7 +347,7 @@ async function clipAudioUrl(args: ToolArgs): Promise<Row> {
     return { ok: false, error: "presign_failed" };
   }
   const clip = (row.clip ?? {}) as Row;
-  return { ok: true, url: signed.url, expires_at: signed.expires_at, bytes: clip.bytes ?? null, minutes: clip.minutes ?? null, signature_sha256: clip.signature_sha256 ?? null };
+  return { ok: true, url: signed.url, expires_at: signed.expires_at, bytes: clip.bytes ?? null, minutes: clip.minutes ?? null, audio_sha256: hex64(clip.audio_sha256), cut_signature_sha256: hex64(clip.signature_sha256) };
 }
 
 export const catalogTool: McpTool = {

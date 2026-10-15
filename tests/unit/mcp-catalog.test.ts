@@ -114,7 +114,7 @@ const tk = (kind: string, uid = UID, room = "room_a", day = "2026-10-05", cfg = 
 const layer = (kind: string, uid = UID, status = "ok", extra: Row = {}) => ({ r2_key: tk(kind, uid), status, ...extra });
 const crow = (uid: string, o: Row = {}): Row => ({
   consult_uid: uid, ist_date: "2026-10-05", doctor_uid: "doc00001", room_id: "room_a", t_open: 1_000_000, t_close: 1_000_000 + 600_000, source: "cutter",
-  clip: { r2_key: `consult-clips/2026-10-05/opd-a/${uid}/consult.flac`, r2_status: "mirrored", signature_sha256: "s".repeat(64), audio_sha256: "a".repeat(64), bytes: 1234, minutes: 0.1 },
+  clip: { r2_key: `consult-clips/2026-10-05/opd-a/${uid}/consult.flac`, r2_status: "mirrored", signature_sha256: "c".repeat(64), audio_sha256: "a".repeat(64), bytes: 1234, minutes: 0.1 },
   layers: { stt: layer("stt.sarvam-saaras-v3", uid), translate: layer("translate.sarvam-saaras-v3", uid), diar_sarvam: null, diar_nemotron: null, role: layer("role.llm-roles", uid), parts: null },
   freescript: { artifact_id: 4, state: "ok" }, stages: { stt: { state: "ok", reason: null } }, first_gap: null, allowance: { earned_min: 1, spent_min: 1 },
   catalog_version: "c1", generated_at: "2026-10-14T01:00:00Z", extra_field: { keep: "me" }, ...o,
@@ -598,8 +598,8 @@ describe("clip_audio_url", () => {
   it("presigns the row's own clip key for 900 s and returns the documented shape", async () => {
     setCatalog([crow(UID)]);
     const o = await run({ action: "clip_audio_url", consult_uid: UID });
-    expect(o).toMatchObject({ ok: true, url: expect.stringContaining("https://signed.example/"), bytes: 1234, minutes: 0.1, signature_sha256: "s".repeat(64) });
-    expect(Object.keys(o).sort()).toEqual(["bytes", "expires_at", "minutes", "ok", "signature_sha256", "url"]);
+    expect(o).toMatchObject({ ok: true, url: expect.stringContaining("https://signed.example/"), bytes: 1234, minutes: 0.1, audio_sha256: "a".repeat(64), cut_signature_sha256: "c".repeat(64) });
+    expect(Object.keys(o).sort()).toEqual(["audio_sha256", "bytes", "cut_signature_sha256", "expires_at", "minutes", "ok", "url"]);
     expect(H.signCalls).toEqual([{ key: `consult-clips/2026-10-05/opd-a/${UID}/consult.flac`, expiresInSeconds: 900 }]);
     const ttl = Date.parse(o.expires_at as string) - Date.now();
     expect(ttl).toBeGreaterThan(890_000);
@@ -982,7 +982,7 @@ describe("the door", () => {
     const row = lastAudit();
     expect(row.args).toEqual({ action: "clip_audio_url", consult_uid: UID });
     const text = JSON.stringify(auditRows());
-    for (const needle of ["https://", "SECRETSIG", "signature", "signature_sha256", "X-Amz", "signed.example", "s".repeat(64)]) expect(text, needle).not.toContain(needle);
+    for (const needle of ["https://", "SECRETSIG", "signature", "signature_sha256", "X-Amz", "signed.example", "c".repeat(64)]) expect(text, needle).not.toContain(needle);
   });
   it("CATALOG-3 Z2: the audit row of a search holds action (and the allow-listed room/limit), not the other filters", async () => {
     setCatalog([crow(UID)]);
@@ -1320,7 +1320,7 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
     });
     it("first chunk: offset 0, the exact Range, base64 of the stored bytes, done false; the shape", async () => {
       const o = await chunk({ offset: 0, length: 1000 });
-      expect(o).toEqual({ ok: true, consult_uid: UID, offset: 0, length: 1000, total_bytes: 2500, content_type: "audio/flac", base64: Buffer.from(bytes(2500).slice(0, 1000)).toString("base64"), done: false, signature_sha256: "s".repeat(64) });
+      expect(o).toEqual({ ok: true, consult_uid: UID, offset: 0, length: 1000, total_bytes: 2500, content_type: "audio/flac", base64: Buffer.from(bytes(2500).slice(0, 1000)).toString("base64"), done: false, audio_sha256: "a".repeat(64), cut_signature_sha256: "c".repeat(64) });
       expect(H.rangeCalls).toEqual([{ key: CLIPKEY, start: 0, end: 999 }]);
     });
     it("a middle chunk and the last partial chunk (done:true); the bytes reassemble to the whole clip", async () => {
@@ -1652,5 +1652,29 @@ describe("CATALOG-9 FIX2: key-named layers, whole-row caps", () => {
     // layer values keep the tight caps
     const l = await searchRow({ layers: { lay: Array.from({ length: 70 }, (_, i) => i) } });
     expect(((l.layers as Row).lay as unknown[]).length).toBe(64);
+  });
+});
+
+describe("CATALOG-11: clip replies carry the audio bytes hash", () => {
+  const withClip = (clip: Row) => { resetCatalogCacheForTests(); setCatalog([crow(UID, { clip: { ...(crow(UID).clip as Row), ...clip } })]); H.clip = new Uint8Array(100).fill(7); };
+  it("a row without audio_sha256 gives null; a non-hex (wrong length, upper case, junk) audio_sha256 or cut signature gives null", async () => {
+    const { audio_sha256: _drop, ...noAudio } = crow(UID).clip as Row;
+    resetCatalogCacheForTests();
+    setCatalog([crow(UID, { clip: noAudio })]);
+    H.clip = new Uint8Array(100).fill(7);
+    for (const o of [await run({ action: "clip_audio_url", consult_uid: UID }), await run({ action: "clip_audio_chunk", consult_uid: UID })]) {
+      expect(o).toMatchObject({ ok: true, audio_sha256: null, cut_signature_sha256: "c".repeat(64) });
+      expect(o).not.toHaveProperty("signature_sha256");
+    }
+    for (const bad of ["a".repeat(63), "A".repeat(64), "z".repeat(64), 5, null, `${"a".repeat(63)}\n`]) {
+      withClip({ audio_sha256: bad, signature_sha256: bad });
+      for (const o of [await run({ action: "clip_audio_url", consult_uid: UID }), await run({ action: "clip_audio_chunk", consult_uid: UID })]) expect(o, String(bad)).toMatchObject({ ok: true, audio_sha256: null, cut_signature_sha256: null });
+    }
+  });
+  it("neither hash reaches the audit row or the console", async () => {
+    withClip({});
+    await run({ action: "clip_audio_chunk", consult_uid: UID });
+    await run({ action: "clip_audio_url", consult_uid: UID });
+    expect([...logs].join("\n")).not.toMatch(/a{64}|c{64}/);
   });
 });
