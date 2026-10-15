@@ -99,7 +99,7 @@ vi.mock("@/lib/rubrics/blind-room-days", () => ({
 
 import { setLabStoreForTests, ENCOUNTER_CATALOG_KEY, labReadable, type LabStore } from "@/lib/sarvam-lab";
 import { catalogTool } from "@/lib/mcp/tools/catalog";
-import { resetCatalogCacheForTests, selectTrack, parseCatalog, type Track } from "@/lib/room-access/readers/catalog-consult";
+import { resetCatalogCacheForTests, readAudioFeaturesLayer, selectTrack, parseCatalog, type Track } from "@/lib/room-access/readers/catalog-consult";
 import { ROOM_RESTRICTED_ALLOWED_TOOLS, type ToolContext } from "@/lib/mcp/registry";
 import type { McpScope } from "@/lib/mcp/auth";
 
@@ -359,7 +359,7 @@ describe("get: arguments and the row", () => {
     expect((o.row as Row).extra_field).toEqual({ keep: "me" });
     expect(((o.row as Row).layers as Row).stt).toMatchObject({ r2_key: tk("stt.sarvam-saaras-v3") });
     const layers = o.layers as Record<string, Row>;
-    expect(Object.keys(layers)).toEqual(["transcript", "parts", "freescript", "rubric", "jev", "identity", "cdmss", "rx"]);
+    expect(Object.keys(layers)).toEqual(["transcript", "parts", "audio_features", "freescript", "rubric", "jev", "identity", "cdmss", "rx"]);
     for (const l of Object.values(layers)) expect(Object.keys(l).filter((k) => k !== "error").sort()).toEqual(["data", "source", "status"]);
     expect(layers.cdmss).toEqual({ status: "not_available", source: ["consult-audit S5 (pending)"], data: null });
   });
@@ -1416,4 +1416,120 @@ describe("CATALOG-5: identity and prescription from encounter_catalog", () => {
     });
   });
 });
+});
+
+describe("CATALOG-8: layers.audio_features", () => {
+  const fk = (engine: string, ver = "v1", uid = UID, room = "room_a", day = "2026-10-05", cfg = "ab12cd34") => `reb/${day}/${room}/_consults/${uid}/tracks/features.${engine}__${ver}__${cfg}.json`;
+  const ftrack = (features: unknown, o: Row = {}): Row => ({ layer: "features", engine: "x", version: "v1", status: "ok", config: {}, segments: [], extras: { features }, ...o });
+  const GOOD = { speaker: "spk0", role: "doctor", role_source: "llm", feature: "f0_mean", stat: "median", value: 1.5, iqr: 0.2, n_turns: 4, seconds: 12.5, overlap_excluded_s: 0, reliability: 0.9, model_id: "m1", model_rev: "r1" };
+  const withAf = (af: unknown, uid = UID, o: Row = {}) => (resetCatalogCacheForTests(), setCatalog([crow(uid, { layers: { stt: null, translate: null, role: null, parts: null, audio_features: af }, ...o })]));
+  const af = async (): Promise<Row> => (((await run({ action: "get", consult_uid: UID })).layers as Record<string, Row>).audio_features)!;
+
+  it("a row without audio_features is absent, and a get with every key absent is still ok", async () => {
+    setCatalog([crow(UID)]);
+    seedLayers();
+    expect(await af()).toEqual({ status: "absent", source: [], data: null });
+    withAf({ r2_key: fk("timbre-e2v") });
+    const o = await run({ action: "get", consult_uid: UID });
+    expect(o.ok).toBe(true);
+    expect((o.layers as Record<string, Row>).audio_features).toEqual({ status: "absent", source: [fk("timbre-e2v")], data: null });
+  });
+
+  it("shapes a, b and c each read", async () => {
+    setTrack(fk("timbre-e2v"), ftrack([GOOD]));
+    setTrack(fk("talktime", "v2"), ftrack([{ ...GOOD, feature: "talk_share" }]));
+    const a = { r2_key: fk("timbre-e2v"), status: "ok" };
+    const b2 = { r2_key: fk("talktime", "v2") };
+    for (const [shape, v, n] of [["a", a, 1], ["b", [a, b2], 2], ["c", { "timbre-e2v": a, talktime: b2 }, 2]] as const) {
+      withAf(v);
+      resetCatalogCacheForTests();
+      const l = await af();
+      expect(l.status, shape).toBe("ok");
+      const d = l.data as { tracks: Row[]; n_skipped: number };
+      expect(d.tracks.length, shape).toBe(n);
+      expect(d.n_skipped).toBe(0);
+      expect(d.tracks[0]).toEqual({ engine: "timbre-e2v", version: "v1", rows: [GOOD], n_rows_dropped: 0 });
+    }
+  });
+
+  it("an unknown engine is skipped and counted, never read", async () => {
+    setTrack(fk("clef"), ftrack([GOOD]));
+    withAf([{ r2_key: fk("clef") }, { r2_key: fk("mystery") }, { r2_key: fk("clef", "v1").replace("features.", "other.") }]);
+    const l = await af();
+    expect((l.data as Row).n_skipped).toBe(2);
+    expect(((l.data as Row).tracks as Row[]).length).toBe(1);
+    expect(reads.filter((r) => r.includes("mystery") || r.includes("other."))).toEqual([]);
+  });
+
+  it("a key bound to another consult is key_not_readable; a non-string key too", async () => {
+    withAf({ r2_key: fk("clef", "v1", "OTHERUID0001") });
+    expect(await af()).toMatchObject({ status: "error", error: "key_not_readable" });
+    withAf({ r2_key: 42 });
+    expect(await af()).toMatchObject({ status: "error", error: "key_not_readable" });
+    expect(reads.filter((r) => r.includes("OTHERUID0001"))).toEqual([]);
+  });
+
+  it("a blind room-day key is refused", async () => {
+    const k = fk("clef", "v1", UID, "room_blind", "2026-10-01");
+    const row = crow(UID, { ist_date: "2026-10-01", room_id: "room_blind", layers: { audio_features: { r2_key: k } } });
+    setTrack(k, ftrack([GOOD]));
+    expect(await readAudioFeaturesLayer(row)).toMatchObject({ status: "error", error: "blind_room_day" });
+    expect(reads).not.toContain(k);
+  });
+
+  it("a track whose status is not ok is absent; bad_json and read_failed are counted, not fatal", async () => {
+    setTrack(fk("clef"), ftrack([GOOD], { status: "failed" }));
+    withAf({ r2_key: fk("clef") });
+    expect(await af()).toMatchObject({ status: "absent" });
+    setTrack(fk("clef"), ftrack([GOOD]));
+    store.set(fk("talktime"), { body: "{nope", etag: null });
+    failKey = fk("timbre-e2v");
+    withAf([{ r2_key: fk("clef") }, { r2_key: fk("talktime") }, { r2_key: fk("timbre-e2v") }]);
+    const l = await af();
+    expect(l.status).toBe("ok");
+    expect((l.data as Row).errors).toEqual({ bad_json: 1, read_failed: 1 });
+    // every key erroring: the layer errors with the first code
+    store.delete(fk("clef"));
+    store.set(fk("clef"), { body: "{nope", etag: null });
+    withAf([{ r2_key: fk("clef") }, { r2_key: fk("talktime") }]);
+    expect(await af()).toMatchObject({ status: "error", error: "bad_json", data: null });
+  });
+
+  it("rows keep the whitelist only; strings need the pattern, numbers must be finite", async () => {
+    const big = "x".repeat(81);
+    setTrack(fk("talktime"), ftrack([
+      { ...GOOD, transcript: "ZZTEXT", name: "N", extra: 1 },
+      { ...GOOD, speaker: "has space", role: big, stat: "ok/1:2", value: "1", iqr: Number.POSITIVE_INFINITY, reliability: null },
+      { speaker: "spk1", value: 1 },
+      "junk",
+      { ...GOOD, feature: "bad feature" },
+    ]));
+    withAf({ r2_key: fk("talktime") });
+    const d = (await af()).data as { tracks: Array<{ rows: Row[]; n_rows_dropped: number }> };
+    expect(d.tracks[0].n_rows_dropped).toBe(3);
+    expect(d.tracks[0].rows[0]).toEqual(GOOD);
+    expect(d.tracks[0].rows[1]).toMatchObject({ speaker: null, role: null, stat: "ok/1:2", value: null, iqr: null, reliability: null, feature: "f0_mean" });
+    expect(JSON.stringify(d)).not.toContain("ZZTEXT");
+  });
+
+  it("501 rows give 500 plus 1 dropped; 9 keys give too_many_tracks", async () => {
+    setTrack(fk("clef"), ftrack(Array.from({ length: 501 }, () => GOOD)));
+    withAf({ r2_key: fk("clef") });
+    const d = (await af()).data as { tracks: Array<{ rows: Row[]; n_rows_dropped: number }> };
+    expect([d.tracks[0].rows.length, d.tracks[0].n_rows_dropped]).toEqual([500, 1]);
+    withAf(Array.from({ length: 9 }, () => ({ r2_key: fk("clef") })));
+    expect(await af()).toMatchObject({ status: "error", error: "too_many_tracks" });
+    withAf(Array.from({ length: 8 }, () => ({ r2_key: fk("clef") })));
+    expect((await af()).status).toBe("ok");
+  });
+
+  it("search never shows an r2_key for shapes a, b and c", async () => {
+    for (const v of [{ r2_key: fk("clef") }, [{ r2_key: fk("clef") }], { clef: { r2_key: fk("clef") } }]) {
+      withAf(v);
+      resetCatalogCacheForTests();
+      const o = await run({ action: "search", from: "2026-10-05", to: "2026-10-05" });
+      expect(JSON.stringify(o)).not.toContain("features.clef");
+      expect(((o.rows as Row[])[0].layers_present as string[])).toContain("audio_features");
+    }
+  });
 });

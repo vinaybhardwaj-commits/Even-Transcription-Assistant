@@ -11,7 +11,7 @@ import { istDateOf } from "@/lib/sarvam-lab";
 import { listJevDecisions } from "@/lib/room-access/tool-reads";
 import { listResults } from "@/lib/rubrics/store";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
-import { fetchManifest, clipKeyOf, CLIP_CHUNK_MAX, readClipChunk, decodeCursor, encodeCursor, layerAbsent, layerError, layerNotAvailable, layerOk, loadCatalog, presignClip, readPartsLayer, readTranscriptLayer, searchView, CATALOG_MIN_DATE, type Layer, type Row } from "@/lib/room-access/readers/catalog-consult";
+import { fetchManifest, clipKeyOf, CLIP_CHUNK_MAX, readClipChunk, decodeCursor, encodeCursor, layerAbsent, layerError, layerNotAvailable, layerOk, loadCatalog, presignClip, readAudioFeaturesLayer, readPartsLayer, readTranscriptLayer, searchView, CATALOG_MIN_DATE, type Layer, type Row } from "@/lib/room-access/readers/catalog-consult";
 import { consultsByIdentity, hasAnyIdentity, IDENTITY_CHUNK, IDENTITY_ID, identityFor, identityView, pulseUrl, type IdentityRow } from "@/lib/room-access/readers/catalog-identity";
 import { ADMIN_ACTOR_PREFIX } from "../auth";
 import { argBool, argInt, argStr, failSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext } from "../registry";
@@ -31,7 +31,7 @@ const DAY_MS = 86_400_000;
 const HELP = [
   "Read-only; touches no room. Times UTC; from/to are IST dates. Encounter Explorer catalog (palimpsest C1) of consults since 2026-09-09. Internal admins only; NO PHI removal: include_text=true returns transcript text; include_identity=true and the prescription_uid / individual_uid filters need the admin scope; they return names, ids and the Pulse link (rx.prescription only with include_text too).",
   "action=search {doctor_uid?, room?, from?, to? (span <= 92 days, clamped to 2026-09-09), source? cutter|caa, limit<=200 (default 50), cursor?}: newest first, layers without keys plus layers_present, next_cursor, total_matched, n_bad_lines, n_blind_excluded. Filters has_prescription (alias has_rx), prescription_uid, individual_uid join encounter_catalog (identity_rows says how many consults had a row; an empty table returns no rows, never a false has_prescription=false). include_identity=true adds identity per row.",
-  "action=get {consult_uid, include_text?, include_identity?}: the full row and layers {transcript, parts, freescript, rubric, jev, identity, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call.",
+  "action=get {consult_uid, include_text?, include_identity?}: the full row and layers {transcript, parts, audio_features (timbre/talktime/clef rows), freescript, rubric, jev, identity, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call.",
   "action=clip_audio_url {consult_uid}: presigned GET of the clip, 900 s, {url, expires_at, bytes, minutes, signature_sha256}. The URL is never audited or logged.",
   "action=clip_audio_chunk {consult_uid, offset?, length? <= 1 MiB}: the stored FLAC bytes as base64, {offset, length, total_bytes, content_type, base64, done, signature_sha256}; bad_range past the end.",
   "Held-out room-days are refused blind_room_day on get, clip_audio_url and clip_audio_chunk and left out of search.",
@@ -280,9 +280,10 @@ async function get(args: ToolArgs): Promise<Row> {
   if (!row) return { ok: false, error: "not_found" };
   if (blind(row)) return { ok: false, error: "blind_room_day" };
   const mf = fetchManifest(row); // C4c: one manifest read shared by transcript and parts
-  const [transcript, parts, freescript, rubric, jev, idl] = await Promise.all([
+  const [transcript, parts, audioFeatures, freescript, rubric, jev, idl] = await Promise.all([
     guard([], () => readTranscriptLayer(row, includeText, mf)),
     guard([], () => readPartsLayer(row, mf)),
+    guard([], () => readAudioFeaturesLayer(row)),
     guard(["freescript_latest"], () => freescriptLayer(uid, includeText)),
     guard(["rubric_result"], () => rubricLayer(uid)),
     guard(["jev_decision"], () => jevLayer(uid)),
@@ -291,7 +292,7 @@ async function get(args: ToolArgs): Promise<Row> {
   return {
     ok: true,
     row,
-    layers: { transcript, parts, freescript, rubric, jev, identity: idl.identity, cdmss: layerNotAvailable(["consult-audit S5 (pending)"]), rx: idl.rx },
+    layers: { transcript, parts, audio_features: audioFeatures, freescript, rubric, jev, identity: idl.identity, cdmss: layerNotAvailable(["consult-audit S5 (pending)"]), rx: idl.rx },
   };
 }
 

@@ -89,6 +89,19 @@ export function decodeCursor(c: string): number | null {
 }
 const asRec = (v: unknown): Row | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Row) : null);
 
+/** A layer record without its r2_key; an engine-keyed map of records (audio_features shape c) loses the key of each value. */
+function stripKeys(v: unknown): unknown {
+  const rec = asRec(v);
+  if (!rec) return v;
+  const out: Row = {};
+  for (const [k, x] of Object.entries(rec)) {
+    if (k === "r2_key") continue;
+    const inner = asRec(x);
+    out[k] = inner && "r2_key" in inner ? stripKeys(inner) : x;
+  }
+  return out;
+}
+
 /** A search row: the C1 row with each layer reduced to {status, engine?} (its r2_key dropped), plus the names of the layers that exist. */
 export function searchView(row: Row): Row {
   const layers = asRec(row.layers);
@@ -98,13 +111,17 @@ export function searchView(row: Row): Row {
     slim = {};
     for (const [name, l] of Object.entries(layers)) {
       const rec = asRec(l);
+      if (Array.isArray(l)) {
+        present.push(name);
+        slim[name] = l.map(stripKeys);
+        continue;
+      }
       if (!rec) {
         slim[name] = null;
         continue;
       }
       present.push(name);
-      const { r2_key: _k, ...rest } = rec;
-      slim[name] = rest;
+      slim[name] = stripKeys(rec);
     }
   }
   return { ...row, ...(slim ? { layers: slim } : {}), layers_present: present };
@@ -401,6 +418,78 @@ export async function readPartsLayer(row: Row, manifest?: Promise<ManifestResult
   const track = conv.track;
   // n_clamped sits on the layer object beside `data` (data stays an array)
   return { ...layerOk(source, segs(track).map((s) => ({ part: s.part ?? null, t0_ms: num(s.t0_ms), t1_ms: num(s.t1_ms), score: s.score ?? null, confidence: s.confidence ?? null, source: typeof s.source === "string" && PART_SOURCE.test(s.source) ? s.source : null }))), n_clamped: conv.n_clamped };
+}
+
+// --- audio_features ---------------------------------------------------------------------------------------------------------------------------
+const FEATURES_FILE = /^features\.(timbre-odyssey|timbre-e2v|talktime|clef)__([A-Za-z0-9._-]{1,40})__[A-Za-z0-9]{8}\.json$/;
+const FEATURE_STR = /^[A-Za-z0-9_.:/-]{1,80}$/;
+const FEATURE_STR_FIELDS = ["speaker", "role", "role_source", "feature", "stat", "model_id", "model_rev"] as const;
+const FEATURE_NUM_FIELDS = ["value", "iqr", "n_turns", "seconds", "overlap_excluded_s", "reliability"] as const;
+export const AUDIO_FEATURES_MAX_KEYS = 8;
+export const AUDIO_FEATURES_MAX_ROWS = 500;
+export type FeatureRow = Record<(typeof FEATURE_STR_FIELDS)[number], string | null> & Record<(typeof FEATURE_NUM_FIELDS)[number], number | null>;
+export type FeatureTrack = { engine: string; version: string; rows: FeatureRow[]; n_rows_dropped: number };
+export type AudioFeaturesData = { tracks: FeatureTrack[]; n_skipped: number; errors?: Record<string, number> };
+
+/** The record(s) the catalog row names under layers.audio_features: one record, an array of records, or an engine-keyed map of records. null = the layer is not on the row. */
+function audioFeatureKeys(row: Row): unknown[] | null {
+  const raw = asRec(row.layers)?.audio_features;
+  if (raw === undefined || raw === null) return null;
+  const keyOf = (r: unknown): unknown => asRec(r)?.r2_key ?? "";
+  if (Array.isArray(raw)) return raw.map(keyOf);
+  const rec = asRec(raw);
+  if (!rec) return [""];
+  if ("r2_key" in rec) return [rec.r2_key];
+  return Object.values(rec).map(keyOf);
+}
+
+const featureStr = (v: unknown): string | null => (typeof v === "string" && FEATURE_STR.test(v) ? v : null);
+
+/** PURE. The whitelisted rows of one features track: every other field dropped, a row with no valid feature string dropped and counted. */
+export function featureRows(extras: unknown): { rows: FeatureRow[]; n_rows_dropped: number } {
+  const list = asRec(extras)?.features;
+  if (!Array.isArray(list)) return { rows: [], n_rows_dropped: 0 };
+  const rows: FeatureRow[] = [];
+  let dropped = 0;
+  for (const item of list) {
+    const r = asRec(item);
+    if (!r || featureStr(r.feature) === null || rows.length >= AUDIO_FEATURES_MAX_ROWS) {
+      dropped++;
+      continue;
+    }
+    const out: Record<string, string | number | null> = {};
+    for (const k of FEATURE_STR_FIELDS) out[k] = featureStr(r[k]);
+    for (const k of FEATURE_NUM_FIELDS) out[k] = num(r[k]);
+    rows.push(out as FeatureRow);
+  }
+  return { rows, n_rows_dropped: dropped };
+}
+
+export async function readAudioFeaturesLayer(row: Row): Promise<Layer<AudioFeaturesData>> {
+  const keys = audioFeatureKeys(row);
+  if (keys === null || keys.length === 0) return layerAbsent([]) as Layer<AudioFeaturesData>;
+  const source = keys.filter((k): k is string => typeof k === "string" && k !== "");
+  if (keys.length > AUDIO_FEATURES_MAX_KEYS) return layerError([], "too_many_tracks") as Layer<AudioFeaturesData>;
+  let skipped = 0;
+  const reads: Array<{ engine: string; version: string; key: unknown }> = [];
+  for (const k of keys) {
+    const m = typeof k === "string" ? FEATURES_FILE.exec(k.slice(k.lastIndexOf("/") + 1)) : null;
+    if (typeof k === "string" && k !== "" && !m) skipped++;
+    else reads.push({ engine: m?.[1] ?? "", version: m?.[2] ?? "", key: k });
+  }
+  const got = await Promise.all(reads.map((r) => fetchTrack(r.key, row)));
+  const tracks: FeatureTrack[] = [];
+  const errors: Record<string, number> = {};
+  let firstError: string | null = null;
+  got.forEach((f, i) => {
+    if (f.kind === "error") {
+      errors[f.code] = (errors[f.code] ?? 0) + 1;
+      firstError ??= f.code;
+    } else if (f.kind === "track") tracks.push({ engine: reads[i].engine, version: reads[i].version, ...featureRows(f.track.body.extras) });
+  });
+  if (tracks.length === 0) return (firstError !== null ? layerError(source, firstError) : layerAbsent(source)) as Layer<AudioFeaturesData>;
+  const data: AudioFeaturesData = { tracks, n_skipped: skipped, ...(firstError !== null ? { errors } : {}) };
+  return layerOk(source, data);
 }
 
 // --- clip -----------------------------------------------------------------------------------------------------------------------------------
