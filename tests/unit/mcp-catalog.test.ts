@@ -1533,3 +1533,46 @@ describe("CATALOG-8: layers.audio_features", () => {
     }
   });
 });
+
+describe("CATALOG-9: search scrubs storage keys at any depth", () => {
+  const K = `reb/2026-10-05/room_a/_consults/${UID}/tracks/x__v1__ab12cd34.json`;
+  const search = async (layers: Row, o: Row = {}): Promise<Row> => {
+    resetCatalogCacheForTests();
+    setCatalog([crow(UID, { layers, ...o })]);
+    return ((await run({ action: "search", from: "2026-10-05", to: "2026-10-05" })).rows as Row[])[0]!;
+  };
+  const L = async (v: unknown): Promise<unknown> => ((await search({ lay: v })).layers as Row).lay;
+
+  it("the three INFO-1 shapes show no key", async () => {
+    expect(await L({ status: "ok", x: K })).toEqual({ status: "ok", x: null });
+    expect(await L({ status: "ok", by: { x: { r2_key: K } } })).toEqual({ status: "ok", by: { x: {} } });
+    expect(await L({ status: "ok", x: { key: K, engine: "e1" } })).toEqual({ status: "ok", x: { engine: "e1" } });
+  });
+  it("field names are dropped case-insensitively; url-like and store-like strings become null; plain strings stay", async () => {
+    const out = (await L({ URL: "a", Signed_Url: "b", keys: [1], r2_keys: [2], a: "https://h.example/p", b: "consult-clips/d/s/u/consult.flac", c: "palimpsest/ledger/x", d: "plain text", e: 3, f: true, g: null, version: "v1", n_turns: 4 })) as Row;
+    expect(out).toEqual({ a: null, b: null, c: null, d: "plain text", e: 3, f: true, g: null, version: "v1", n_turns: 4 });
+  });
+  it("depth 7 becomes null; a leaf at depth 7 and any container below it are null; depth 6 survives", async () => {
+    const nest = (n: number): unknown => (n === 0 ? "leaf" : { n: nest(n - 1) });
+    // layer value is depth 0; its sixth nested object holds "leaf" at depth 6
+    expect(JSON.stringify(await L(nest(6)))).toBe('{"n":{"n":{"n":{"n":{"n":{"n":"leaf"}}}}}}');
+    expect(JSON.stringify(await L(nest(7)))).toBe('{"n":{"n":{"n":{"n":{"n":{"n":{"n":null}}}}}}}');
+    const deepObj = JSON.stringify(await L(nest(8)));
+    expect(deepObj).toBe('{"n":{"n":{"n":{"n":{"n":{"n":{"n":null}}}}}}}');
+  });
+  it("a 65-entry array keeps 64", async () => {
+    expect(((await L(Array.from({ length: 65 }, (_, i) => i))) as unknown[]).length).toBe(64);
+  });
+  it("clip in search has no key but keeps its other fields", async () => {
+    const r = await search({});
+    expect(r.clip).toMatchObject({ r2_status: "mirrored", bytes: 1234, minutes: 0.1 });
+    expect(r.clip as Row).not.toHaveProperty("r2_key");
+    expect(JSON.stringify(r)).not.toContain("consult-clips/");
+  });
+  it("a whole search answer over keys in every layer shape holds no reb/, consult-clips/, palimpsest/ or r2_key", async () => {
+    setCatalog([crow(UID, { layers: { stt: layer("stt.sarvam-saaras-v3"), a: { r2_key: K }, b: [{ r2_key: K }, K, [{ r2_key: K }]], c: { e: { r2_key: K } }, d: { by: { x: { r2_key: K } } }, e: { x: { key: K } }, f: { x: K }, g: { u: "https://h.example/" + K, p: "palimpsest/" + K } } })]);
+    const out = JSON.stringify(await run({ action: "search", from: "2026-10-05", to: "2026-10-05" }));
+    for (const bad of ["reb/", "consult-clips/", "palimpsest/", "r2_key", "://"]) expect(out, bad).not.toContain(bad);
+    expect(out).toContain("layers_present");
+  });
+});

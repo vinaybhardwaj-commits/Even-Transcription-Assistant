@@ -89,20 +89,23 @@ export function decodeCursor(c: string): number | null {
 }
 const asRec = (v: unknown): Row | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Row) : null);
 
-/** A layer record without its r2_key; an engine-keyed map of records (audio_features shape c) loses the key of each value. */
-function stripKeys(v: unknown): unknown {
+const SCRUB_DROP_FIELD = /^(r2_key|key|keys|r2_keys|url|signed_url)$/i;
+const SCRUB_KEY_STRING = /^(reb\/|consult-clips\/|palimpsest\/)|:\/\//;
+export const SCRUB_MAX_DEPTH = 6;
+export const SCRUB_MAX_ARRAY = 64;
+/** PURE. Search never shows a storage key: fields named like a key or url are dropped, strings that look like a store path or URL become null, depth is capped at 6 (deeper = null) and arrays at 64. */
+export function scrubKeys(v: unknown, depth = 0): unknown {
+  if (depth > SCRUB_MAX_DEPTH) return null;
+  if (typeof v === "string") return SCRUB_KEY_STRING.test(v) ? null : v;
+  if (Array.isArray(v)) return v.slice(0, SCRUB_MAX_ARRAY).map((e) => scrubKeys(e, depth + 1));
   const rec = asRec(v);
   if (!rec) return v;
   const out: Row = {};
-  for (const [k, x] of Object.entries(rec)) {
-    if (k === "r2_key") continue;
-    const inner = asRec(x);
-    out[k] = inner && "r2_key" in inner ? stripKeys(inner) : x;
-  }
+  for (const [k, x] of Object.entries(rec)) if (!SCRUB_DROP_FIELD.test(k)) out[k] = scrubKeys(x, depth + 1);
   return out;
 }
 
-/** A search row: the C1 row with each layer reduced to {status, engine?} (its r2_key dropped), plus the names of the layers that exist. */
+/** A search row: the C1 row with each layer reduced to {status, engine?} (storage keys scrubbed at any depth), plus the names of the layers that exist. */
 export function searchView(row: Row): Row {
   const layers = asRec(row.layers);
   const present: string[] = [];
@@ -113,7 +116,7 @@ export function searchView(row: Row): Row {
       const rec = asRec(l);
       if (Array.isArray(l)) {
         present.push(name);
-        slim[name] = l.map((e) => (asRec(e) ? stripKeys(e) : null));
+        slim[name] = scrubKeys(l);
         continue;
       }
       if (!rec) {
@@ -121,10 +124,10 @@ export function searchView(row: Row): Row {
         continue;
       }
       present.push(name);
-      slim[name] = stripKeys(rec);
+      slim[name] = scrubKeys(rec);
     }
   }
-  return { ...row, ...(slim ? { layers: slim } : {}), layers_present: present };
+  return { ...row, ...("clip" in row ? { clip: scrubKeys(row.clip) } : {}), ...(slim ? { layers: slim } : {}), layers_present: present };
 }
 
 // --- layers ---------------------------------------------------------------------------------------------------------------------------------
