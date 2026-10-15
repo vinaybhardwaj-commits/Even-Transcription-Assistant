@@ -125,6 +125,27 @@ describe("FIX1: abandoned read and reset generation", () => {
     expect((await coverageOrNull({ read: peek }))?.cut).toBe(200);
     expect(peek).not.toHaveBeenCalled();
   });
+  it("FIX3: a caller joined to an orphan is served the later-started read's value, not the orphan's", async () => {
+    let resA!: (c: Coverage) => void;
+    let resB!: (c: Coverage) => void;
+    const readA = vi.fn(() => new Promise<Coverage>((r) => { resA = r; }));
+    const readB = vi.fn(() => new Promise<Coverage>((r) => { resB = r; }));
+    const first = coverageOrNull({ read: readA, timeoutMs: 2_000 });
+    await vi.advanceTimersByTimeAsync(2_001);
+    expect(await first).toBeNull();
+    await vi.advanceTimersByTimeAsync(7_499); // t = 9.5 s: A is still under 10 s old, so X joins it
+    const x = coverageOrNull({ read: readB, timeoutMs: 2_000 });
+    await vi.advanceTimersByTimeAsync(501); // t = 10 s: A is abandoned, the next caller starts B
+    const y = coverageOrNull({ read: readB, timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(readB).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(500); // t = 10.5 s
+    resB({ ...COV, cut: 2 });
+    expect((await y)?.cut).toBe(2);
+    await vi.advanceTimersByTimeAsync(500); // t = 11 s
+    resA({ ...COV, cut: 1 });
+    expect((await x)?.cut).toBe(2);
+  });
   it("a read orphaned before a reset never writes the memo", async () => {
     let resolve!: (c: Coverage) => void;
     const old = vi.fn(() => new Promise<Coverage>((r) => { resolve = r; }));
