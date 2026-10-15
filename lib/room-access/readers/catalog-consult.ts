@@ -430,7 +430,7 @@ export async function readPartsLayer(row: Row, manifest?: Promise<ManifestResult
 // --- audio_features ---------------------------------------------------------------------------------------------------------------------------
 const FEATURES_FILE = /^features\.(timbre-odyssey|timbre-e2v|talktime|flags|clef)__([A-Za-z0-9._-]{1,40})__[A-Za-z0-9]{8}\.json$/;
 const FEATURE_STR = /^[A-Za-z0-9_.:/-]{1,80}$/;
-const FEATURE_STR_FIELDS = ["speaker", "role", "role_source", "feature", "stat", "model_id", "model_rev"] as const;
+const FEATURE_STR_FIELDS = ["speaker", "role", "role_source", "feature", "stat", "unit", "model", "model_version", "model_id", "model_rev"] as const;
 const FEATURE_NUM_FIELDS = ["value", "iqr", "n_turns", "seconds", "overlap_excluded_s", "reliability"] as const;
 export const AUDIO_FEATURES_MAX_KEYS = 8;
 export const AUDIO_FEATURES_MAX_ROWS = 500;
