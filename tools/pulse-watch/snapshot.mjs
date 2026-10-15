@@ -18,6 +18,12 @@ export function compareVer(a, b) {
 // the poller's pre-5-Oct short key for an extension machine id (consul4 for EHRC-CONSUL4s-Mac-mini); same map as occupancy.mjs POLLER_LEGACY_KEYS
 const legacyKey = (machine) => { const m = /^EHRC-([A-Z0-9]+)s-Mac-mini$/.exec(machine); return m ? m[1].toLowerCase() : null; };
 
+export const LAST_EVT_SQL = `select distinct on (machine) machine, event, ts, payload->>'reason' as reason, coalesce(payload->>'doctor_uid', '') as doctor_uid
+      from pulse_presence_events
+      where machine = any($1::text[]) and source = 'ext' and ts > now() - ($2::int * interval '1 hour')
+        and (event in ('login', 'logout') or coalesce(payload->>'doctor_uid', '') <> '')
+      order by machine, ts desc`;
+
 // rows (any order) -> Map<machine, newest meaningful row>; same predicate as the SQL filter above, applied again so the rule is testable
 export const isMeaningfulEvt = (r) => r.event === 'login' || r.event === 'logout' || !!(r.doctor_uid && String(r.doctor_uid).length);
 export function pickLastEvt(rows) {
@@ -55,11 +61,7 @@ export async function fetchFacts(sql, machines) {
   // A failed read leaves lastEvt* null (board shows 'no signal' as before).
   const lastEvt = new Map();
   try {
-    const q2 = `select machine, event, ts, payload->>'reason' as reason, coalesce(payload->>'doctor_uid', '') as doctor_uid
-      from pulse_presence_events
-      where machine = any($1::text[]) and source = 'ext' and ts > now() - ($2::int * interval '1 hour')
-        and (event in ('login', 'logout') or coalesce(payload->>'doctor_uid', '') <> '')
-      order by machine, ts desc`;
+    const q2 = LAST_EVT_SQL;
     const rows2 = await (sql.query ? sql.query(q2, [[...keys], LAST_EVT_HOURS]) : sql(q2, [[...keys], LAST_EVT_HOURS]));
     for (const [m, r] of pickLastEvt(rows2)) lastEvt.set(m, r);
   } catch { /* keep going without it */ }

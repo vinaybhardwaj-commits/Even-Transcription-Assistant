@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pickLastEvt } from './snapshot.mjs';
+import { pickLastEvt, LAST_EVT_SQL } from './snapshot.mjs';
 import { trackerOf } from './tracker.mjs';
 
 // live shape: logout, then a doctor-less heartbeat (reason 'none') 2 ms later, same machine
@@ -29,4 +29,10 @@ test('rows in any order; other machine ignored', () => {
   const rows = [R('heartbeat', 2, { reason: 'none' }), { ...R('login', 99000, { doctor_uid: 'd2' }), machine: 'M2' }, R('logout', 0, { reason: 'tab_closed' })];
   assert.equal(pickLastEvt(rows).get('M1').event, 'logout');
   assert.equal(pickLastEvt(rows).get('M2').event, 'login');
+});
+
+test('last-event SQL keeps distinct on (machine), the meaningful-event filter and the ordering', () => {
+  assert.match(LAST_EVT_SQL, /distinct on \(machine\)/);
+  assert.match(LAST_EVT_SQL, /order by machine, ts desc/);
+  assert.match(LAST_EVT_SQL, /event in \('login', 'logout'\)/);
 });
