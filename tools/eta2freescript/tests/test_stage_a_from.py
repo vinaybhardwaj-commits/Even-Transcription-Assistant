@@ -434,7 +434,8 @@ def test_all_six_delegated_arguments_equal_an_unwrapped_call(tmp_path):
     (tmp_path / "u1" / "stageA.raw.txt").write_text("{}")
     wrapped_inner, plain = RecordingClient(), RecordingClient()
     w = StageAFromClient(wrapped_inner, tmp_path)
-    tags = ["stageB-v9:u1", "judge-v1:u1", "judge-v1:stageA-x:u1", "xstageA-v2:u1", "", "stageB-v9", "stageAv2:u1"]
+    tags = ["stageB-v9:u1", "judge-v1:u1", "judge-v1:stageA-x:u1", "xstageA-v2:u1", "", "stageB-v9", "stageAv2:u1",
+            " stageB-v9:u1", "stageB-v9:u1 ", "stageB-v9:u1\n", "\tjudge-v1:u1", " stageA-v2:u1"]
     seen_mt, seen_t = set(), set()
     for k in range(60):
         args = (rng.choice(["sonnet", "opus", "haiku"]), f"prompt-{k}-{rng.random()}", f"system-{rng.random()}")
@@ -452,3 +453,146 @@ def test_all_six_delegated_arguments_equal_an_unwrapped_call(tmp_path):
     # a Stage A call adds nothing to the inner client's record
     w.chat("sonnet", "P", "S", max_tokens=1234, temperature=0.9, tag="stageA-v2:u1")
     assert len(wrapped_inner.calls) == 61
+
+
+# ---- FIX2: every way the stored Stage A file can fail is caught at StageAFromClient itself (not via pipeline or parse_json) ----
+# The rule, as a property: the client raises, the type is one R2 allows, and the inner client gets 0 calls (no live fallback).
+
+import os
+import random as _random
+
+_R2_TYPES = (FileNotFoundError, ValueError, PermissionError)
+_NEEDS_NON_ROOT = pytest.mark.skipif(os.geteuid() == 0, reason="root reads a chmod 000 file, so the case proves nothing")
+
+
+def _bad_utf8_bodies():
+    """Byte strings that are not valid UTF-8, in several shapes. Each is checked to really fail strict decoding."""
+    json_a, json_b = b'{"a": "', b'", "b": [1, 2]}'
+    fixed = [
+        b"\xff", b"\xfe\xff", b"\x80", b"\xc3", b"\xe2\x82", b"\xf0\x9f\x98", b"\xc0\xaf", b"\xed\xa0\x80", b"\xf8\x88\x80\x80\x80",
+        json_a + b"\xff" + json_b,  # invalid byte inside otherwise valid JSON: a lenient decode would parse it
+        json_a + b"\xe2\x82" + json_b,  # truncated multibyte sequence inside valid JSON
+        json_a + b"\xc0\xaf" + json_b,  # overlong encoding inside valid JSON
+        b"\xff" + json_a + b"x" + json_b,  # at the start
+        json_a + b"x" + json_b + b"\xff",  # at the end
+        "{}".encode("utf-16"),  # UTF-16 with BOM
+        '{"a": "\u00e9"}'.encode("utf-16-be"),  # UTF-16 without a BOM, with a non-ASCII char
+        "{\"a\": \"café\"}".encode("latin-1"),  # latin-1 text where UTF-8 is required
+    ]
+    rng = _random.Random(f"{SEED}-badutf8")
+    pieces = [b"\xff", b"\xfe", b"\xc3", b"\xe2\x82", b"\x80", b"\xc0\xaf", b"\xed\xa0\x80", b"\xf5\x80\x80\x80"]
+    out = list(fixed)
+    while len(out) < len(fixed) + 40:
+        body = json_a + rng.choice([b"", b"abc ", "café ".encode()]) + rng.choice(pieces) + rng.choice([b"", b" tail"]) + json_b
+        out.append(rng.choice([b"", b"\n", b"  "]) + body + rng.choice([b"", b"\n"]))
+    for b in out:
+        try:
+            b.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        raise AssertionError(f"not invalid UTF-8: {b!r}")
+    return out
+
+
+def _mk_file(root, uid, data):
+    (root / uid).mkdir(parents=True, exist_ok=True)
+    (root / uid / "stageA.raw.txt").write_bytes(data)
+
+
+def _case_root_missing(root, uid):
+    pass  # root itself is never created
+
+
+def _case_uid_dir_missing(root, uid):
+    root.mkdir(parents=True, exist_ok=True)
+
+
+def _case_file_missing(root, uid):
+    (root / uid).mkdir(parents=True, exist_ok=True)
+    (root / uid / "stageA.json").write_text("{}")  # a neighbour file, not the one asked for
+
+
+def _case_dir(root, uid):
+    (root / uid / "stageA.raw.txt").mkdir(parents=True)
+    (root / uid / "stageA.raw.txt" / "inside").write_text("{}")
+
+
+def _case_dangling_symlink(root, uid):
+    (root / uid).mkdir(parents=True, exist_ok=True)
+    (root / uid / "stageA.raw.txt").symlink_to(root / "nowhere")
+
+
+def _case_chmod_file(root, uid):
+    _mk_file(root, uid, b'{"consult_boundary": {"foreign_turns": []}}')
+    (root / uid / "stageA.raw.txt").chmod(0o000)
+
+
+def _case_chmod_dir(root, uid):
+    _mk_file(root, uid, b'{"consult_boundary": {"foreign_turns": []}}')
+    (root / uid).chmod(0o000)
+
+
+_FAIL_CASES = [
+    ("root-missing", _case_root_missing, (FileNotFoundError,), False),
+    ("uid-dir-missing", _case_uid_dir_missing, (FileNotFoundError,), False),
+    ("file-missing", _case_file_missing, (FileNotFoundError,), False),
+    ("is-a-directory", _case_dir, (FileNotFoundError,), False),
+    ("dangling-symlink", _case_dangling_symlink, (FileNotFoundError,), False),
+    ("chmod-000-file", _case_chmod_file, (PermissionError,), True),
+    ("chmod-000-dir", _case_chmod_dir, (PermissionError,), True),
+] + [(f"empty-{i}", (lambda root, uid, b=b: _mk_file(root, uid, b)), (ValueError,), False)
+     for i, b in enumerate([b"", b" ", b"\n", b"\r\n", b"\t", b"\r", b" \n \r\n ", b"\n" * 500, " ".encode(), "  ".encode(), b"\x0b\x0c"])] \
+  + [(f"bad-utf8-{i}", (lambda root, uid, b=b: _mk_file(root, uid, b)), (UnicodeDecodeError,), False)
+     for i, b in enumerate(_bad_utf8_bodies())]
+
+
+@pytest.mark.parametrize("name,build,expected,needs_non_root", _FAIL_CASES, ids=[c[0] for c in _FAIL_CASES])
+def test_every_stored_stage_a_failure_raises_at_the_client_with_zero_inner_calls(tmp_path, name, build, expected, needs_non_root):
+    if needs_non_root and os.geteuid() == 0:
+        pytest.skip("root reads a chmod 000 file, so the case proves nothing")
+    root = tmp_path / "root"
+    build(root, "u1")
+    inner = RecordingClient()
+    w = StageAFromClient(inner, root)
+    calls = (lambda: w.stage_a_text("u1"), lambda: w.stage_a_sha12("u1"), lambda: w.chat("sonnet", "P", "S", tag="stageA-v2:u1"),
+             lambda: w.chat("sonnet", "P", "S", max_tokens=99, temperature=0.3, tag="stageA-v9:run7:u1"))
+    try:
+        for call in calls:
+            with pytest.raises(_R2_TYPES) as ei:
+                call()
+            assert isinstance(ei.value, expected), f"{name}: got {type(ei.value).__name__}, wanted {expected}"
+        assert inner.calls == [], f"{name}: the inner client was called, which is a live Stage A fallback"
+    finally:  # let pytest delete the tree
+        for p in (root / "u1", root / "u1" / "stageA.raw.txt"):
+            if p.exists() and not p.is_symlink():
+                p.chmod(0o755 if p.is_dir() else 0o644)
+
+
+def test_failure_cases_cover_every_class_the_rule_names():
+    names = " ".join(c[0] for c in _FAIL_CASES)
+    for needed in ("root-missing", "file-missing", "is-a-directory", "chmod-000-file", "bad-utf8-", "empty-"):
+        assert needed in names
+    assert sum(c[0].startswith("bad-utf8-") for c in _FAIL_CASES) >= 40
+
+
+def test_a_good_file_is_not_caught_by_the_failure_property(tmp_path):
+    """Non-vacuity: the same four calls on a valid file return text and make 0 inner calls, so the cases above fail for their own reason."""
+    _mk_file(tmp_path, "u1", b'{"a": "caf\xc3\xa9"}')
+    inner = RecordingClient()
+    w = StageAFromClient(inner, tmp_path)
+    assert w.stage_a_text("u1") == '{"a": "café"}'
+    assert w.chat("sonnet", "P", "S", tag="stageA-v2:u1") == '{"a": "café"}'
+    assert len(w.stage_a_sha12("u1")) == 12
+    assert inner.calls == []
+
+
+def test_a_utf8_bom_is_kept_byte_for_byte(tmp_path):
+    """A valid UTF-8 file that starts with a BOM must come back with the BOM (utf-8-sig would drop it and break byte-equality)."""
+    inner = RecordingClient()
+    w = StageAFromClient(inner, tmp_path)
+    for i, raw in enumerate([b"\xef\xbb\xbf{}", b"\xef\xbb\xbf" + b'{"a": "caf\xc3\xa9"}\r\n', b"{}\xef\xbb\xbf", b"\xef\xbb\xbf\xef\xbb\xbf{}"]):
+        _mk_file(tmp_path, f"u{i}", raw)
+        for got in (w.stage_a_text(f"u{i}"), w.chat("sonnet", "P", "S", tag=f"stageA-v2:u{i}")):
+            assert got.encode("utf-8") == raw
+        assert w.stage_a_sha12(f"u{i}") == hashlib.sha256(raw).hexdigest()[:12]
+    assert inner.calls == []
