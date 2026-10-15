@@ -15,7 +15,7 @@ CRED_FILE = os.environ.get("CONSULT_MIRROR_CRED_FILE") or f"{H}/.config/consult-
 HELDOUT_PY = f"{E}/drtpqma/heldout.py"                        # the cutter's own held-out union (C.HELDOUT); the blind config is cross-checked against it
 UNION_SHA16 = "f07171dcb708d080"                               # pinned: the union the blind config must come from (heldout.py load_union() returns the same)
 DATE_RE, ROOM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$"), re.compile(r"^room_[a-z0-9]+$")
-TITLE_TOKENS = {"doctor", "prof", "professor", "mister", "madam"}   # name tokens too generic to match a room_slug on
+TITLE_WORDS = {"doctor", "prof", "professor", "mister", "madam"}   # name tokens too generic to match a room_slug on
 BUCKET, KEY_LATEST, KEY_MANIFEST = "eta-lab-results", "consult/index/latest.jsonl", "consult/index/manifest.json"
 ALLOW = ("consult_uid", "window_id", "ist_date", "room_id", "room_slug", "span_start", "span_end", "span_end_epoch", "t_open", "t_close", "minutes", "bytes", "quality", "flags", "coverage",
          "voice_isolated", "doctor_uid", "doctor_identified", "cut_at", "code_commit", "signature", "r2",
@@ -140,7 +140,7 @@ def leak_check(pairs, names=()):
 
 def slug_name_hits(pairs, names):
     """kept rows whose room_slug shares a token (>= 4 letters, not a title) with ANY doctor_name of the index: a count of rows, never the names."""
-    toks = {t for n in names if isinstance(n, str) for t in re.split(r"[^a-z0-9]+", base(n)) if len(t) >= 4 and t not in TITLE_TOKENS}
+    toks = {t for n in names if isinstance(n, str) for t in re.split(r"[^a-z0-9]+", base(n)) if len(t) >= 4 and t not in TITLE_WORDS}
     return sum(1 for _, p in pairs if toks & set(re.split(r"[^a-z0-9]+", base(p.get("room_slug") or ""))))
 
 def code_commit():
