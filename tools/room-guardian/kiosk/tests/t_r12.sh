@@ -8,11 +8,13 @@ PROD_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 assert_lit() { case "$1" in *"$2"*) ok ;; *) fail "$3: [$2] not found in [$(printf %s "$1" | head -c 300)]" ;; esac; }
 
 # prod <env k=v ...> -- <guardian.sh args>: production shape. Only HOME, GUARDIAN_HOME and PATH come from the harness.
+# R14 A5: every production-shape call is capped (a perl alarm survives the exec), so a broken gate fails (rc 142) instead of hanging.
+R14_CAP=(/usr/bin/perl -e 'alarm shift; exec @ARGV' 60)
 prod() {
   local envs=() a
   while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
   shift
-  /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" ${envs[@]+"${envs[@]}"} /bin/bash "$KDIR/bin/guardian.sh" "$@" 2>/dev/null
+  "${R14_CAP[@]}" /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" ${envs[@]+"${envs[@]}"} /bin/bash "$KDIR/bin/guardian.sh" "$@" 2>/dev/null
   a=$?; return "$a"
 }
 
@@ -374,11 +376,16 @@ F
   chmod +x "$d/bin/launchctl" "$d/bin/ioreg" "$d/bin/pgrep"
   : >"$d/calls.ts"
   printf '%s\n' "$body" >"$d/ctl.sh"
+  # R14 A5: R14_PLANT = a script body planted as `sleep` in the PATH the Guardian itself is started with (the fakes' bin dir is first in that PATH)
+  if [ -n "${R14_PLANT:-}" ]; then printf '%s\n' "$R14_PLANT" >"$d/bin/sleep"; chmod +x "$d/bin/sleep"; fi
   {
     printf 'GUARDIAN_ROOM="opd9"\n'
     printf "GUARDIAN_PUBLISH_CMD='cat >>%s/pub.log'\n" "$d"
     printf "GUARDIAN_SUBSCRIBE_CMD='sleep 1013'\n"
-    printf "GUARDIAN_CONTROL_SUB_CMD='/bin/bash -p %s/ctl.sh'\n" "$d"
+    case "$body" in
+      RAW:*) printf "GUARDIAN_CONTROL_SUB_CMD='%s'\n" "${body#RAW:}" ;;   # R14 A5: the conf command is run directly, no wrapper script
+      *) printf "GUARDIAN_CONTROL_SUB_CMD='/bin/bash -p %s/ctl.sh'\n" "$d" ;;
+    esac
     printf 'GUARDIAN_SUDO=""\nGUARDIAN_ROOT_HELPER="/usr/local/libexec/eta-guardian-root"\nUSB_MIC_PATTERN="C270"\n'
   } >"$h/guardian.conf"
   chmod 600 "$h/guardian.conf"
@@ -438,28 +445,31 @@ test_r12_live_wedged_subscriber_no_action_after_91_s() {
   r13_live_stop wedge fresh
 }
 
-# M1. An exported function or a BASH_ENV file named sleep (the refuter's repro) used to reach the transport child. Through the real run, the wedged feed must
-# still go stale at +91 s: 0 mutating calls after, and the forged feed never keeps the switch clear.
+# M1 (R14 A5). The refuter's repro: the control command is `sleep 1000` itself, run directly, and an exported function or a BASH_ENV file named sleep forges a
+# fresh heal feed when it reaches the child. With the clean environment the real sleep runs: no message ever arrives, the switch stays engaged, 0 mutating calls.
+# The test must fail when `env -i` is taken out of g_conf_cmd (the gate shows that mutation run).
 test_r13_live_env_injection_into_the_transport_child_is_inert() {
-  local tf tb a b
+  local i a b c nf nb np
   printf 'sleep%s\n' "$R13_FORGE" >"$T/benv.sh"
-  r13_live_start bashfunc "$R13_WEDGE" 'BASH_FUNC_sleep%%'"$R13_FORGE"
-  r13_live_start bashenv "$R13_WEDGE" BASH_ENV="$T/benv.sh" ENV="$T/benv.sh"
-  tf="$(r13_wait_msg bashfunc)"; tb="$(r13_wait_msg bashenv)"
-  [ -n "$tf" ] && [ -n "$tb" ] && ok || { fail "no control message arrived"; r13_live_stop bashfunc bashenv; return; }
-  # +15 s: the repro showed "clear heal" here, from a forged feed
-  r13_wait_until "$tf" 15
-  r13_wait_until "$tb" 15
-  r13_wait_until "$tf" 93
-  assert_has "$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$T/bashfunc/home" PATH="$PROD_PATH" 'BASH_FUNC_sleep%%'"$R13_FORGE" /bin/bash -p "$KDIR/bin/guardian.sh" check 2>/dev/null)" "killswitch=engaged mode=shadow why=stale" "BASH_FUNC_sleep: stale at +93 s"
-  assert_has "$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$T/bashenv/home" PATH="$PROD_PATH" BASH_ENV="$T/benv.sh" /bin/bash -p "$KDIR/bin/guardian.sh" check 2>/dev/null)" "killswitch=engaged mode=shadow why=stale" "BASH_ENV: stale at +93 s"
-  r13_wait_until "$tf" 125; r13_wait_until "$tb" 125
-  a="$(r13_mut_count bashfunc $((tf + 91)))"; b="$(r13_mut_count bashenv $((tb + 91)))"
-  assert_eq "$a" "0" "BASH_FUNC_sleep%%: 0 mutating calls after +91 s"
-  assert_eq "$b" "0" "BASH_ENV: 0 mutating calls after +91 s"
-  [ "$(r13_mut_count bashfunc 0 $((tf + 90)))" -ge 1 ] && ok || fail "BASH_FUNC run did not act while the legit heal was fresh (harness check)"
-  [ "$(r13_mut_count bashenv 0 $((tb + 90)))" -ge 1 ] && ok || fail "BASH_ENV run did not act while the legit heal was fresh (harness check)"
-  r13_live_stop bashfunc bashenv
+  r13_live_start bashfunc 'RAW:sleep 1000' 'BASH_FUNC_sleep%%'"$R13_FORGE"
+  r13_live_start bashenv 'RAW:sleep 1000' BASH_ENV="$T/benv.sh" ENV="$T/benv.sh"
+  # the one vector that bash -p does not stop: the caller's PATH. A `sleep` planted ahead of /bin in the Guardian's own PATH answers 1000 with a forged feed.
+  R14_PLANT=$'#!/bin/bash\nif [ "$1" = 1000 ]; then while :; do printf \'{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}\\n\' "$(/bin/date +%s)"; /bin/sleep 5; done; else exec /bin/sleep "$@"; fi' \
+    r13_live_start pathplant 'RAW:sleep 1000'
+  # the forged feed (when it leaks) writes control.last within a second or two and the Guardian then acts at once
+  i=0; while [ "$i" -lt 24 ]; do sleep 0.5; i=$((i + 1)); done
+  nf="$(r13_msg_epoch bashfunc)"; nb="$(r13_msg_epoch bashenv)"; np="$(r13_msg_epoch pathplant)"
+  assert_eq "$nf" "" "BASH_FUNC_sleep%%: no control message arrived (the real sleep ran)"
+  assert_eq "$nb" "" "BASH_ENV: no control message arrived (the real sleep ran)"
+  assert_eq "$np" "" "planted sleep in the caller's PATH: no control message arrived (the pinned PATH ran the real sleep)"
+  a="$(r13_mut_count bashfunc 0)"; b="$(r13_mut_count bashenv 0)"; c="$(r13_mut_count pathplant 0)"
+  assert_eq "$c" "0" "planted sleep: 0 mutating calls"
+  assert_eq "$a" "0" "BASH_FUNC_sleep%%: 0 mutating calls"
+  assert_eq "$b" "0" "BASH_ENV: 0 mutating calls"
+  assert_has "$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$T/bashfunc/home" PATH="$PROD_PATH" 'BASH_FUNC_sleep%%'"$R13_FORGE" /bin/bash -p "$KDIR/bin/guardian.sh" check 2>/dev/null)" "killswitch=engaged mode=shadow" "BASH_FUNC_sleep: engaged"
+  assert_has "$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$T/bashenv/home" PATH="$PROD_PATH" BASH_ENV="$T/benv.sh" /bin/bash -p "$KDIR/bin/guardian.sh" check 2>/dev/null)" "killswitch=engaged mode=shadow" "BASH_ENV: engaged"
+  kill -0 "$(cat "$T/bashfunc/main.pid")" 2>/dev/null && ok || fail "BASH_FUNC run: the Guardian itself is not running (harness check)"
+  r13_live_stop bashfunc bashenv pathplant
 }
 
 # M1. The children of a conf command (publish, subscribe, control subscribe, the sudo path) get an allow-listed environment and bash -p.
@@ -489,7 +499,7 @@ test_r13_conf_command_children_get_an_allow_listed_environment() {
     for k in BASH_ENV ENV SHELLOPTS BASHOPTS PS4 IFS FOO SSH_AUTH_SOCK BASH_FUNC_evil%% ; do
       case " $keys " in *" $k "*) fail "$f child has $k" ;; *) ok ;; esac
     done
-    assert_has "$(cat "$d/$f.env")" '^PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin$' "$f child: the pinned PATH"
+    assert_has "$(cat "$d/$f.env")" '^PATH=/usr/bin:/bin:/usr/sbin:/sbin$' "$f child: the pinned PATH"
     assert_has "$(cat "$d/$f.env")" "^GUARDIAN_HOME=$h\$" "$f child: GUARDIAN_HOME"
     assert_has "$(cat "$d/$f.env")" '^GUARDIAN_PIPE_SSH=-i /k/id -o ConnectTimeout=5 pipe@host$' "$f child: GUARDIAN_PIPE_SSH is the conf value, not the environment's"
     assert_has "$(cat "$d/$f.flags")" 'p' "$f child: bash -p"
@@ -509,7 +519,7 @@ test_r13_sudo_path_runs_under_the_clean_environment() {
   out="$( G_RUNMODE=1; . "$KDIR/lib/common.sh"; GUARDIAN_SUDO="$T/bin/envsudo"; export BASH_ENV=/x FOO=bar 'BASH_FUNC_zz%%=() { :; }'; root_do tcc-row u 2>&1 )"
   assert_not "$out" "BASH_ENV" "sudo child: no BASH_ENV"
   assert_not "$out" "FOO=" "sudo child: no FOO"
-  assert_has "$out" "^PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin$" "sudo child: pinned PATH"
+  assert_has "$out" "^PATH=/usr/bin:/bin:/usr/sbin:/sbin$" "sudo child: pinned PATH"
 }
 
 # the one place conf commands start is g_conf_cmd: no bare bash -c anywhere in the code
@@ -533,7 +543,7 @@ test_r13_check_without_bash_p_reexecs_and_holds() {
   out="$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" /bin/bash "$KDIR/bin/guardian.sh" --reexec run 2>/dev/null)"; assert_rc $? 3 "run, marker without p: exit killed"
   # a hand-run `run` without -p re-execs under -p (no conf: it stops at "no room", rc 2, instead of looping)
   rm -f "$GUARDIAN_HOME/guardian.conf"
-  /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" /bin/bash "$KDIR/bin/guardian.sh" run >/dev/null 2>&1; assert_rc $? 2 "run without -p reached the room check through the re-exec"
+  "${R14_CAP[@]}" /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" /bin/bash "$KDIR/bin/guardian.sh" run >/dev/null 2>&1; assert_rc $? 2 "run without -p reached the room check through the re-exec"
 }
 
 # S1. A byte error rejects its own line only; the room survives and health keeps flowing. If no room can be read, `run` audits it and exits 2.

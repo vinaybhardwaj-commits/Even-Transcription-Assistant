@@ -80,7 +80,7 @@ LOOP_MISS=0
 loop_init() {
   set +m
   if [ -z "$MAIN_PID" ]; then audit "loop exits: MAIN_PID empty"; exit 0; fi
-  LOOP_ME="$(exec sh -c 'echo $PPID')"
+  LOOP_ME="$(g_ppid)"
   LOOP_MISS=0
 }
 
@@ -207,7 +207,7 @@ run() {
   audit "guardian start version=$GUARDIAN_VERSION"
   [ -n "$GUARDIAN_ROOM" ] || { audit "running KILLED: no room (guardian.conf has no valid GUARDIAN_ROOM)"; echo "GUARDIAN_ROOM not set" >&2; exit 2; }
   if [ "${G_CONF_BAD:-}" = 1 ]; then audit "guardian.conf rejected: running KILLED (shadow, no actions); health continues"; fi
-  MAIN_PID="$(exec sh -c 'echo $PPID')"
+  MAIN_PID="$(g_ppid)"
   [ -n "$MAIN_PID" ] || MAIN_PID=$$
   trap 'exit 0' TERM INT HUP
   # Job control gives each loop a process group of its own, which the loop signals itself (see loop_orphaned) when main is gone.

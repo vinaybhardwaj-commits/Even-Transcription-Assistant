@@ -4,7 +4,7 @@
 # Sourced, never executed. Every external effect goes through a PATH command or a GUARDIAN_* command
 # variable, so tests can substitute fakes.
 
-GUARDIAN_VERSION="c1-0.3.0-r13"   # bump per release: the audit "guardian start version=" line identifies the tree
+GUARDIAN_VERSION="c1-0.3.0-r14"   # bump per release: the audit "guardian start version=" line identifies the tree
 
 # R12. Run mode (guardian.sh run|check, G_RUNMODE=1) reads no test seam and no environment tunable: every name below is assigned its default
 # unconditionally and only guardian.conf (parsed as data by conf.sh, never sourced) can change the allow-listed keys. Library tests source this
@@ -44,8 +44,11 @@ g_const G_ENV /usr/bin/env
 g_const G_BASH /bin/bash
 g_const G_ID /usr/bin/id
 g_const G_STAT /usr/bin/stat
+g_const G_LS /bin/ls
 # The PATH every conf command (transport, sudo path) is started with in run mode (R13): a constant, never the caller's PATH.
-g_const G_CHILD_PATH /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+# R14 A4: system directories only. /opt/homebrew/bin is writable by the agent's uid (and group admin) on a kiosk, so a planted file there would replace a
+# transport binary. A conf command that needs a tool outside these four directories names it by absolute path.
+g_const G_CHILD_PATH /usr/bin:/bin:/usr/sbin:/sbin
 
 : "${GUARDIAN_HOME:=$HOME/Library/Application Support/EvenScribe/Guardian}"
 : "${RR_ROOT:=$HOME/Library/Application Support/EvenScribe/RoomRecorder}"
@@ -95,13 +98,27 @@ FLAG_DIR="$GUARDIAN_HOME/flags"
 # So no BASH_ENV, ENV, BASH_FUNC_*, SHELLOPTS, BASHOPTS, PS4 or IFS from outside reaches the child. SSH_AUTH_SOCK is not passed: the pipe uses the key
 # file in the agent directory (GUARDIAN_PIPE_SSH names it), so no current code path needs an agent socket.
 # Library tests (G_RUNMODE unset) keep the caller's environment, because the fakes and sandbox paths travel in it.
+g_clean_envv() { # fills the array G_CLEAN_ENV with the allow-listed environment (run mode)
+  G_CLEAN_ENV=("HOME=$HOME" "USER=${USER:-$("$G_ID" -un)}" "LOGNAME=${LOGNAME:-${USER:-$("$G_ID" -un)}}" "PATH=$G_CHILD_PATH" "GUARDIAN_HOME=$GUARDIAN_HOME")
+  [ -z "${TMPDIR:-}" ] || G_CLEAN_ENV+=("TMPDIR=$TMPDIR")
+  [ -z "${GUARDIAN_PIPE_SSH+x}" ] || G_CLEAN_ENV+=("GUARDIAN_PIPE_SSH=$GUARDIAN_PIPE_SSH")
+}
 g_clean_exec() {
-  local -a envv
   if [ "${G_RUNMODE:-}" != 1 ]; then "$@"; return; fi
-  envv=("HOME=$HOME" "USER=${USER:-$("$G_ID" -un)}" "LOGNAME=${LOGNAME:-${USER:-$("$G_ID" -un)}}" "PATH=$G_CHILD_PATH" "GUARDIAN_HOME=$GUARDIAN_HOME")
-  [ -z "${TMPDIR:-}" ] || envv+=("TMPDIR=$TMPDIR")
-  [ -z "${GUARDIAN_PIPE_SSH+x}" ] || envv+=("GUARDIAN_PIPE_SSH=$GUARDIAN_PIPE_SSH")
-  "$G_ENV" -i "${envv[@]}" "$@"
+  local -a G_CLEAN_ENV
+  g_clean_envv
+  "$G_ENV" -i "${G_CLEAN_ENV[@]}" "$@"
+}
+# g_ppid (R14 A3): print the pid of the shell that called this (run inside $(...)). The one `sh -c` start that is not a conf command: in run mode it gets the same
+# allow-listed environment, so an exported BASH_FUNC_echo (sh imports functions) cannot forge the pid. The exec keeps sh's parent = the caller's shell.
+g_ppid() {
+  if [ "${G_RUNMODE:-}" = 1 ]; then
+    local -a G_CLEAN_ENV
+    g_clean_envv
+    # shellcheck disable=SC2016
+    exec "$G_ENV" -i "${G_CLEAN_ENV[@]}" /bin/sh -c 'echo $PPID'
+  fi
+  exec sh -c 'echo $PPID'   # library tests: the caller's PATH, so a fake sh can stand in
 }
 # g_conf_cmd <command string> <args...>: the one way a conf command is run. bash -p (no startup file, no imported function) under the clean env.
 g_conf_cmd() {

@@ -1,6 +1,6 @@
 #!/bin/bash
 # shellcheck disable=SC2034,SC2154
-# Kiosk Guardian: guardian.conf as DATA (R12). The file is never sourced and never evaluated. bash 3.2 compatible, pure bash plus the pinned tr/wc.
+# Kiosk Guardian: guardian.conf as DATA (R12). The file is never sourced and never evaluated. bash 3.2 compatible, pure bash plus the pinned tr/head/ls/stat.
 #
 # Accepted lines (leading blanks allowed), nothing else:
 #   blank line, or a line whose first non-blank character is #
@@ -56,13 +56,48 @@ conf_key_known() {
 }
 
 # R13 (C3 rerun 11 MUST 2): the conf must be a regular file (lstat: not a symlink), owned by root or by the agent's own uid, and not group- or world-writable.
-# Otherwise a hard stop like the size cap: no key is read, G_CONF_BAD=1, one audit line "conf rejected: <symlink|not regular|owner|mode>" (never a path's contents).
+# R14 A1: and carry no ACL entry at all (an ACL can make a 0600 file writable by others). R14 A2: and its parent directory (and GUARDIAN_HOME) must be owned by
+# root or the agent, not group- or world-writable, and carry no ACL either; else a file in a writable directory could be swapped under the checks.
+# Otherwise a hard stop like the size cap: no key is read, G_CONF_BAD=1, one audit line "conf rejected: <symlink|not regular|owner|mode|acl|dir>" (never a path's contents).
 # rc 0 = acceptable. macOS stat -f first, GNU stat -c as the fallback for a portable harness. A path that does not exist is left to conf_load's own "unreadable".
+# conf_path_stat <path> <L|P>: prints "uid mode type" (L follows a symlink, for the directory checks; P does not). rc 1 when stat cannot say.
+conf_path_stat() {
+  local f="$1" fl="" out
+  [ "$2" = L ] && fl="-L"
+  # shellcheck disable=SC2086
+  out="$("$G_STAT" $fl -f '%u %Lp %HT' "$f" 2>/dev/null)" || out=""
+  # shellcheck disable=SC2086
+  if [ -z "$out" ]; then out="$("$G_STAT" $fl -c '%u %a %F' "$f" 2>/dev/null)" || out=""; fi
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+# conf_has_acl <path>: rc 0 when `ls -led` shows any line after the first (an ACL entry). If ls cannot say, the answer is "yes" (fail closed).
+conf_has_acl() {
+  local out n
+  out="$("$G_LS" -ledL "$1" 2>/dev/null)" || return 0
+  [ -n "$out" ] || return 0
+  n="$(printf '%s\n' "$out" | "$G_WC" -l | "$G_TR" -d ' ')"
+  [ "${n:-2}" -gt 1 ]
+}
+# conf_dir_ok <dir>: 0 when the directory is root- or agent-owned, not group/world-writable, no ACL.
+conf_dir_ok() {
+  local out uid mode typ me g o
+  out="$(conf_path_stat "$1" L)" || return 1
+  uid="${out%% *}"; out="${out#* }"; mode="${out%% *}"; typ="${out#* }"
+  case "$typ" in [Dd]irectory*) ;; *) return 1 ;; esac
+  me="$("$G_ID" -u)"
+  case "$uid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$uid" != 0 ] && [ "$uid" != "$me" ]; then return 1; fi
+  case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+  mode=$((8#$mode)); g=$(((mode >> 3) & 7)); o=$((mode & 7))
+  if [ $((g & 2)) -ne 0 ] || [ $((o & 2)) -ne 0 ]; then return 1; fi
+  if conf_has_acl "$1"; then return 1; fi
+  return 0
+}
 conf_perms_ok() { # <file>
-  local f="$1" out typ uid mode me g o
+  local f="$1" out typ uid mode me g o d
   { [ -e "$f" ] || [ -L "$f" ]; } || return 0
-  out="$("$G_STAT" -f '%u %Lp %HT' "$f" 2>/dev/null)" || out=""
-  if [ -z "$out" ]; then out="$("$G_STAT" -c '%u %a %F' "$f" 2>/dev/null)" || out=""; fi
+  out="$(conf_path_stat "$f" P)" || out=""
   if [ -z "$out" ]; then conf_reject "not regular"; return 1; fi
   uid="${out%% *}"; out="${out#* }"; mode="${out%% *}"; typ="${out#* }"
   case "$typ" in [Ss]ymbolic*|[Ss]ymlink*) conf_reject "symlink"; return 1 ;; esac
@@ -73,6 +108,10 @@ conf_perms_ok() { # <file>
   case "$mode" in ''|*[!0-7]*) conf_reject "mode"; return 1 ;; esac
   mode=$((8#$mode)); g=$(((mode >> 3) & 7)); o=$((mode & 7))
   if [ $((g & 2)) -ne 0 ] || [ $((o & 2)) -ne 0 ]; then conf_reject "mode"; return 1; fi
+  if conf_has_acl "$f"; then conf_reject "acl"; return 1; fi
+  case "$f" in */*) d="${f%/*}"; [ -n "$d" ] || d=/ ;; *) d=. ;; esac
+  if ! conf_dir_ok "$d"; then conf_reject "dir"; return 1; fi
+  if [ -n "${GUARDIAN_HOME:-}" ] && [ "$GUARDIAN_HOME" != "$d" ] && ! conf_dir_ok "$GUARDIAN_HOME"; then conf_reject "dir"; return 1; fi
   return 0
 }
 conf_reject() { CONF_ERR_N=$((CONF_ERR_N + 1)); G_CONF_BAD=1; audit "conf rejected: $1"; }
@@ -80,7 +119,7 @@ conf_reject() { CONF_ERR_N=$((CONF_ERR_N + 1)); G_CONF_BAD=1; audit "conf reject
 # conf_load <file> [noperm]: parse and apply. rc 0 only when the whole file was clean. "noperm" (install.sh's lint of a --config source) skips the owner/mode check.
 conf_load() {
   local LC_ALL=C
-  local file="$1" line key val inner lineno=0 seen=" " size
+  local file="$1" line key val inner lineno=0 seen=" " content rdrc
   local re_line='^([[:space:]]*)(export[[:space:]]+)?([A-Z][A-Z0-9_]*)=(.*)$'
   local re_single="^'([^']*)'([[:space:]]*|[[:space:]]*#.*)\$"
   local re_double='^"(([^"\\]|\\.)*)"([[:space:]]*|[[:space:]]*#.*)$'
@@ -94,9 +133,12 @@ conf_load() {
     if [ -r "$file" ] && [ ! -d "$file" ]; then return 0; fi
     conf_err 0 "unreadable"; return 1
   fi
-  size="$("$G_WC" -c <"$file" 2>/dev/null | "$G_TR" -d ' ')"
-  case "$size" in ''|*[!0-9]*) conf_err 0 "size unreadable"; return 1 ;; esac
-  if [ "$size" -gt 16384 ]; then conf_err 0 "file over 16 KiB"; return 1; fi
+  # R14 A2: the file is opened ONCE, here. Its bytes (at most 16 KiB + 1, NUL mapped to 0x01 because bash drops NUL) are read into memory in one read;
+  # the size, byte and parse checks all run on that copy, never on the path again. The trailing "x<rc>" keeps trailing newlines and the reader's status.
+  content="$("$G_HEAD" -c 16385 2>/dev/null <"$file" | "$G_TR" '\000' '\001'; printf 'x%s' "${PIPESTATUS[0]}")"
+  rdrc="${content##*x}"; content="${content%x"$rdrc"}"
+  if [ "$rdrc" != 0 ]; then conf_err 0 "unreadable"; return 1; fi
+  if [ "${#content}" -gt 16384 ]; then conf_err 0 "file over 16 KiB"; return 1; fi
   # R13 S1: a byte error rejects only its own line (NUL is mapped to 0x01 first, because bash drops NUL on read, so the line check sees it).
   # The size cap above stays a hard stop.
   while IFS= read -r line || [ -n "$line" ]; do
@@ -124,6 +166,6 @@ conf_load() {
     if ! conf_value_ok "$key" "$inner"; then conf_err "$lineno" "value rejected: $key"; continue; fi
     printf -v "$key" '%s' "$inner"
     if [ "$key" = GUARDIAN_PIPE_SSH ]; then export GUARDIAN_PIPE_SSH; fi
-  done < <("$G_TR" '\000' '\001' <"$file")
+  done <<<"$content"
   [ "$CONF_ERR_N" -eq 0 ]
 }
