@@ -820,7 +820,8 @@ def _strict_run(run: str, own_text: str, eta_text: str, own_raw: str | None = No
 # ---- FIX6: unit sameness, third reading ------------------------------------------------------------------------------------------
 # A synonym map applied after _unit_norm on both sides, OR'd beside the FIX3 and FIX4/5 readings, so it can only add matches.
 _UNIT_SYN = {"tab": "tablet", "cap": "capsule", "d": "day", "wk": "week", "hr": "hour", "hrly": "hour", "hourly": "hour", "cc": "ml",
-             "iu": "unit", "mcg": "microgram", "\u00b5g": "microgram", "\u03bcg": "microgram", "mg": "milligram", "g": "gram"}
+             "iu": "unit", "mcg": "microgram", "\u00b5g": "microgram", "\u03bcg": "microgram", "mg": "milligram", "g": "gram",
+             "gm": "gram", "u": "unit", "tsp": "teaspoon", "gtt": "drop", "mo": "month", "mnth": "month", "mth": "month", "dy": "day", "din": "day"}  # keys are post-_unit_norm: "dys" arrives as "dy"
 _DEVANAGARI_DAY = re.compile("\u0926\u093f\u0928")
 
 
@@ -932,8 +933,8 @@ def _prov_strength_pieces(node, out: list[str]) -> None:
 
 
 _STARTS_NUMBER_FIX4 = re.compile(rf"[\s(\[]*(?:\d|(?:{_NW})\b)", re.I)
-# FIX5: a leading bullet and an optional short label ("- 650 mg", "Strength: 650 mg") also start a continuation line
-_STARTS_NUMBER = re.compile(rf"[\s(\[]*(?:[-\u2022*\u00b7][\s(\[]*)?(?:[A-Za-z ]{{1,15}}:[\s(\[]*)?(?:\d|(?:{_NW})\b)", re.I)
+# FIX5: a leading bullet and an optional short label ("- 650 mg", "Strength: 650 mg") also start a continuation line; FIX8: a strength label (strength, dose, potency, qty, optionally after tablet/tab/cap/capsule) may end in "-" or whitespace ("Dose 40 mg", "Strength - 40 mg"); any other label still needs ":" (a bare "Metformin 500 mg" or "BP 120 mmHg" line is not a continuation)
+_STARTS_NUMBER = re.compile(rf"[\s(\[]*(?:[-\u2022*\u00b7][\s(\[]*)?(?:(?:[A-Za-z ]{{1,15}}:|(?:(?:tablet |tab |cap |capsule )?(?:strength|dose|potency)s?|qty|quantity)\s*-?)[\s(\[]*)?(?:\d|(?:{_NW})\b)", re.I)
 _ENDS_NUMBER = re.compile(rf"(?:\d|\b(?:{_NW}))[\s.]*$", re.I)
 _STARTS_WORD = re.compile(r"[\s(\[]*[^\W\d_]")
 

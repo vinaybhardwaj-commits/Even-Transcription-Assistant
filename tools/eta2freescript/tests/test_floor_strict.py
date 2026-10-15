@@ -1149,3 +1149,142 @@ def test_fix6_the_new_probes_fail_on_fix5(prev5):
         art = _syn(_para(et), [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
         bad += any(prev5._run_source(m, "duration", r, art, prev5._prov_for(m, art), "global") == "eta_coincidence" for r in floors._DIGITS.findall(value))
     assert bad >= 10
+
+
+# ---- FIX8 (15 Oct 2026): VERDICT5 findings 1, 2 and 3 --------------------------------------------------------------------------
+PREV6 = "66ccda0a"  # FIX7: the fifth oracle
+
+
+@pytest.fixture(scope="module")
+def prev6():
+    src = subprocess.run(["git", "show", f"{PREV6}:tools/eta2freescript/eval/pdqi9/floors.py"], cwd=Path(__file__).resolve().parent,
+                         capture_output=True, text=True, check=True).stdout
+    mod = types.ModuleType("tools.eta2freescript.eval.pdqi9.floors_prev6")
+    mod.__package__ = "tools.eta2freescript.eval.pdqi9"
+    exec(compile(src, f"floors@{PREV6}", "exec"), mod.__dict__)
+    return mod
+
+
+# finding 1 ("gm") and finding 2 (abbreviations): the same unit, so eta (each pair, both ways)
+SYN8 = [
+    ("1 g", "1 gm"), ("1 gm", "1 gram"), ("2 gm", "2 g"), ("10 U", "10 units"), ("10 u", "10 IU"), ("1 tsp", "1 teaspoon"), ("2 gtt", "2 drops"),
+    ("1 mo", "1 month"), ("1 mnth", "1 month"), ("1 mth", "1 month"), ("1 month", "one mnth"), ("3 dys", "3 days"), ("5 din", "5 days"),
+    ("5 din", "5 d"), ("2 mo", "2 months"),
+]
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+@pytest.mark.parametrize("value,eta_text", SYN8 + [(b, a) for a, b in SYN8 if any(c.isdigit() for c in b)])
+def test_fix8_unit_synonyms_are_eta(scope, value, eta_text):
+    runs, whole = _eta_both_paths(value, eta_text, scope)
+    assert runs and set(runs) <= {"eta"}, (value, eta_text, runs)
+    assert whole == "eta", (value, eta_text, whole)
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix8_different_units_stay_coincidence(scope):
+    # "u" is read only as the whole unit token after the number, so a word that starts with u is not the unit u
+    for value, eta_text in [("1 g", "1 mg"), ("5 g", "5 mg"), ("10 u", "10 ml"), ("10 units", "10 ml"), ("2 gtt", "2 ml"), ("1 mo", "1 day"),
+                            ("1 month", "1 day"), ("3 dys", "3 weeks"), ("10 u", "10 mg"), ("10 u", "10 uses"), ("1 tsp", "1 ml"), ("5 din", "5 hours"),
+                            ("1 gm", "1 mg")]:
+        runs, whole = _eta_both_paths(value, eta_text, scope)
+        assert runs == ["eta_coincidence"] and whole == "eta_coincidence", (value, eta_text, runs, whole)
+
+
+# finding 3: a label that ends in a colon, a hyphen or plain whitespace still starts a continuation line
+WROTE8 = ["Tab Pan\nTablet strength 40 mg", "Tab Pan\nQty - 40", "Tab Pan\nDose 40 mg", "Tab Pan\nStrength - 40 mg", "Tab Pan\nStrength: 40 mg", "Tab Pan\nStrength-40 mg", "Tab Pan\nDose  40", "Tab Pan\n- Dose 40 mg"]
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+@pytest.mark.parametrize("note", WROTE8)
+def test_fix8_label_before_a_continuation_number(scope, note):
+    prov = [{"kind": "medicine", "name": "Pan", "text": "Pan", "names": ["Pan"]}]
+    assert _wrote("Pan", f"Medication:\n{note}", prov, scope) == ("eta", False), note
+    m = {"name": "Pan"}
+    art = _syn(f"Medication:\n{note}", prov)
+    assert floors._eta_wrote_strength(m, art, floors._prov_for(m, art)) is True
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+@pytest.mark.parametrize("note", ["Dolo\nMetformin 500 mg", "Dolo\nBP 120 mmHg", "Dolo\nMetformin - 500 mg", "Dolo\nBP - 120 mmHg"])
+def test_fix8_other_unlabelled_lines_are_not_continuations(scope, note):
+    prov = [{"kind": "medicine", "name": "Dolo", "text": "Dolo", "names": ["Dolo"]}]
+    assert _wrote("Dolo", f"Medication:\n{note}", prov, scope, CAT) == ("check", True), note
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix8_dolo_x_5_days_still_wrote_nothing(scope):
+    assert _wrote("Dolo", "Medication:\nDolo x 5 days", [{"kind": "medicine", "name": "Dolo", "text": "Dolo", "names": ["Dolo"]}], scope, CAT) == ("check", True)
+
+
+def gen_any8(rng):
+    r = rng.random()
+    if r < 0.3:
+        brand = rng.choice(["Pan", "Ecosprin", "Dolo"])
+        label = rng.choice(["Dose", "Strength", "Qty", "Dose:", "Strength -", "Strength - ", "Dose "])
+        tail = rng.choice([" mg", " daily", " x 5 days", " days", " gm", ""])
+        return {"name": brand}, f"Medication:\nTab {brand}\n{label}{rng.choice([' ', ''])}{rng.choice(['40', '5', 'forty'])}{tail}", brand
+    if r < 0.6:
+        a, b = rng.choice(SYN8)
+        if rng.random() < 0.5:
+            a, b = b, a
+        return {"name": "Paracetamol", rng.choice(["strength", "frequency", "duration"]): a}, _para(b), "Paracetamol"
+    return gen_any6(rng)
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix8_moves_no_hit_away_from_eta_vs_66ccda0a(scope, prev6):
+    """Property: no FIX8 change moves a hit away from eta compared with 66ccda0a. Non-vacuity bounds are asserted."""
+    rng = random.Random(15102810)
+    better = worse = same = wrote_up = 0
+    for _ in range(6000):
+        m, note, brand = gen_any8(rng)
+        art = _syn(note, [{"kind": "medicine", "name": brand, "text": brand, "names": [brand]}])
+        field = "strength"
+        for k in ("strength", "frequency", "duration"):
+            if _s(m.get(k)):
+                field = k
+        pn, po = floors._prov_for(m, art), prev6._prov_for(m, art)
+        new, old = floors._field_hit1(m, field, art, pn, scope), prev6._field_hit1(m, field, art, po, scope)
+        assert _rank(*new) <= _rank(*old), (m, note, new, old)
+        for r in floors._DIGITS.findall(_s(m.get(field))):
+            assert _rank(floors._run_source(m, field, r, art, pn, scope), False) <= _rank(prev6._run_source(m, field, r, art, po, scope), False), (m, note, r)
+        assert (not prev6._eta_wrote_strength(m, art, po)) or floors._eta_wrote_strength(m, art, pn), (m, note)
+        if floors._is_catalogue(m):
+            assert (not prev6._catalogue_name_has_strength(m)) or floors._catalogue_name_has_strength(m)
+        better += _rank(*new) < _rank(*old)
+        worse += _rank(*new) > _rank(*old)
+        same += _rank(*new) == _rank(*old)
+        wrote_up += floors._eta_wrote_strength(m, art, pn) and not prev6._eta_wrote_strength(m, art, po)
+    assert worse == 0 and better > 100 and same > 300 and wrote_up > 100, (better, worse, same, wrote_up)
+
+
+@pytest.mark.parametrize("scope", ["global", "medicine"])
+def test_fix8_legacy_equivalence(scope):
+    """origin/main oracle (private copy above) over the FIX8 generators: old eta <=> new eta, eta_coincidence or flagged."""
+    rng = random.Random(15102820)
+    for _ in range(5000):
+        m, note, brand = gen_any8(rng)
+        art = _syn(note, [{"kind": "medicine", "name": brand, "text": brand, "names": [brand]}])
+        prov = floors._prov_for(m, art)
+        for field in ("strength", "frequency", "duration"):
+            new, moved = floors._field_hit1(m, field, art, prov, scope)
+            old = old_field_source(m, field, art, prov, scope)
+            assert (old == "eta") == (new in ("eta", "eta_coincidence") or moved), (m, note, field, old, new, moved)
+            for r in floors._DIGITS.findall(_s(m.get(field))):
+                nr, orr = floors._run_source(m, field, r, art, prov, scope), old_run_source(m, field, r, art, prov, scope)
+                assert (orr == "eta") == (nr in ("eta", "eta_coincidence")), (m, note, field, r, orr, nr)
+                if orr != "eta":
+                    assert nr == orr
+
+
+def test_fix8_the_new_probes_fail_on_66ccda0a(prev6):
+    bad = 0
+    for value, et in SYN8:
+        m = {"name": "Paracetamol", "duration": value}
+        art = _syn(_para(et), [{"kind": "medicine", "name": "Paracetamol", "text": "Paracetamol"}])
+        bad += any(prev6._run_source(m, "duration", r, art, prev6._prov_for(m, art), "global") == "eta_coincidence" for r in floors._DIGITS.findall(value))
+    assert bad >= 8
+    prov = [{"kind": "medicine", "name": "Pan", "text": "Pan", "names": ["Pan"]}]
+    wrong = sum(not prev6._eta_wrote_strength({"name": "Pan"}, _syn(f"Medication:\n{n}", prov), None) for n in WROTE8)
+    assert wrong >= 2
