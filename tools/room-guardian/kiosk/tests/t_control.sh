@@ -894,7 +894,7 @@ test_kiosk_code_has_no_perl_python_osascript_or_jq() {
 test_guardian_version_is_bumped_and_identifies_the_tree() {
   load_libs
   [ "$GUARDIAN_VERSION" != "c1-0.1.0" ] && ok || fail "GUARDIAN_VERSION is still c1-0.1.0"
-  assert_eq "$GUARDIAN_VERSION" "c1-0.2.0-r10" "R10 version string"
+  assert_eq "$GUARDIAN_VERSION" "c1-0.2.1-r11" "R11 version string"
 }
 
 # a fake tr, wc, sed, ps, tail, head or cat first on PATH must not be used on the control path
@@ -902,17 +902,23 @@ test_pinned_tools_ignore_fakes_earlier_on_path() {
   use_ctl
   local t funcs
   funcs="$(guardian_funcs)"
-  for t in tr wc sed tail head cat ps; do
+  put_ctl 1 "$HEAL"
+  for t in tr wc sed tail head cat ps date mv mkdir; do
     printf '#!/bin/bash\necho %s >>"%s/fake_used"\necho 99999\nexit 1\n' "$t" "$T" >"$T/bin/$t"; chmod +x "$T/bin/$t"
   done
   assert_eq "$(command -v tr)" "$T/bin/tr" "the fake tr is first on PATH"
-  put_ctl 1 "$HEAL"; flag_fetch; killswitch_engaged; assert_rc $? 1 "fresh heal payload is clear with fakes on PATH"
+  flag_fetch; killswitch_engaged; assert_rc $? 1 "fresh heal payload is clear with fakes on PATH"
   assert_eq "$(current_mode)" "heal" "mode read with fakes on PATH"
   [ ! -e "$T/fake_used" ] && ok || fail "a fake tool ran: $(cat "$T/fake_used")"
   assert_eq "$G_TR" "/usr/bin/tr" "tr pinned"
   assert_eq "$G_WC" "/usr/bin/wc" "wc pinned"
   assert_eq "$G_SED" "/usr/bin/sed" "sed pinned"
   assert_eq "$G_PS" "/bin/ps" "ps pinned"
+  assert_eq "$G_DATE" "/bin/date" "date pinned"
+  assert_eq "$G_MV" "/bin/mv" "mv pinned"
+  assert_eq "$G_MKDIR" "/bin/mkdir" "mkdir pinned"
+  assert_eq "$(flag_poll; echo ran)" "ran" "flag_poll with fakes on PATH"
+  [ ! -e "$T/fake_used" ] && ok || fail "a fake tool ran in flag_poll: $(cat "$T/fake_used")"
   # the NUL filter and the loop supervision, from the real guardian.sh
   ( eval "$funcs"; printf 'a\000b' | nul_to_soh | /usr/bin/od -An -tx1 | /usr/bin/tr -d ' \n' ) >"$T/nul.out" 2>&1
   assert_eq "$(cat "$T/nul.out")" "610162" "nul_to_soh did not use the fake tr"
@@ -921,8 +927,9 @@ test_pinned_tools_ignore_fakes_earlier_on_path() {
 
 test_control_path_code_has_no_bare_tr_wc_sed_ps() {
   local n
-  n="$(sed -n '/^control_parse()/,/^control_audit_change/p;/^killswitch_engaged()/,/^current_mode/p' "$KDIR/lib/killswitch.sh" | grep -v '^[[:space:]]*#' | grep -cE '(^|[|;&(`[:space:]])(tr|wc|sed|ps|tail|head|cat)[[:space:]]')"
-  assert_eq "$n" "0" "no bare tool name in control_parse / killswitch_engaged"
+  n="$(sed -n '/^control_parse()/,/^control_audit_change/p;/^flag_fetch()/,$p' "$KDIR/lib/killswitch.sh" | grep -v '^[[:space:]]*#' | grep -v 'run_capped\|grep -' | grep -cE '(^|[|;&(`[:space:]])(tr|wc|sed|ps|tail|head|cat|mv|mkdir|date)[[:space:]]')"
+  assert_eq "$n" "0" "no bare tool name in control_parse / flag_fetch / killswitch_engaged / current_mode / flag_poll"
+  assert_eq "$(sed -n "/^now_epoch()/,/^}/p;/^ist_hhmm()/,/^}/p" "$KDIR/lib/common.sh" | grep -v "^[[:space:]]*#" | grep -cE "(^|[ |;(])date ")" "0" "no bare date in now_epoch / ist_hhmm"
   n="$(sed -n '/^loop_parent_ok()/,/^loop_nap/p;/^nul_to_soh()/,/^}/p' "$KDIR/bin/guardian.sh" | grep -v '^[[:space:]]*#' | grep -v 'audit ' | grep -cE '(^|[|;&(`[:space:]=])(tr|wc|sed|ps|/bin/ps)[[:space:]]')"
   assert_eq "$n" "0" "no bare tool name in the loop helpers"
 }
@@ -1007,8 +1014,8 @@ test_endless_line_without_lf_keeps_memory_bounded_and_stores_nothing() {
 }
 
 # ---- R10: exact canonical modes (payloads from the real json.dumps, tests only) ----
-ctl_json() { # <ts> <kill py literal> <modes as py dict literal> [sort|nosort]
-  python3 -c 'import json,sys; print(json.dumps({"kill": sys.argv[2]=="True", "modes": eval(sys.argv[3]), "ts": int(sys.argv[1])}, sort_keys=(sys.argv[4]=="sort")))' "$1" "$2" "$3" "${4:-sort}"
+ctl_json() { # <ts> <kill py literal> <modes as py dict literal> [sort|nosort]; isolated python, literal parse only (no eval)
+  python3 -I -c 'import ast,json,sys; print(json.dumps({"kill": sys.argv[2]=="True", "modes": ast.literal_eval(sys.argv[3]), "ts": int(sys.argv[1])}, sort_keys=(sys.argv[4]=="sort")))' "$1" "$2" "$3" "${4:-sort}"
 }
 
 test_json_dumps_sorted_modes_are_accepted() {
@@ -1047,4 +1054,77 @@ test_flag_max_age_does_not_abort_a_long_heal_action_under_the_control_subscripti
   GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 100)); killswitch_engaged; assert_rc $? 0 "live file stale: still engaged"
   # the flag-command path keeps its age limit
   GUARDIAN_CONTROL_SUB_CMD=""; go_heal; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 40)); killswitch_engaged; assert_rc $? 0 "flag cmd path: a 40 s old cache is engaged"
+}
+
+# ---- R11: the clock is pinned, and a fake clock exists only in test mode ----
+real_now() { /bin/date +%s; }
+
+test_planted_date_on_path_is_not_used_and_the_90s_rule_still_fires() {
+  use_ctl
+  unset GUARDIAN_FAKE_NOW GUARDIAN_TESTMODE
+  local rn; rn="$(real_now)"
+  # a fake date that always reports 100 s before the real time: if it were used, a 100 s old message would look fresh
+  printf '#!/bin/bash\necho %s\n' "$((rn - 100))" >"$T/bin/date"; chmod +x "$T/bin/date"
+  assert_eq "$(PATH="$T/bin:$PATH" command -v date)" "$T/bin/date" "the planted date is first on PATH"
+  local n; n="$(now_epoch)"
+  [ "$n" -ge "$rn" ] && [ "$n" -le "$((rn + 3))" ] && ok || fail "now_epoch used the planted date: $n vs real $rn"
+  put_epoch() { { printf '%s\n' "$1"; printf '%s\n' "${HEAL//@TS@/$1}"; } >"$STATE_DIR/control.last"; }
+  put_epoch "$((rn - 100))"; flag_fetch; killswitch_engaged; assert_rc $? 0 "100 s old message is stale, planted date ignored"
+  assert_eq "$CTRL_WHY" "stale" "reason is stale"
+  put_epoch "$rn"; rm -f "$STATE_DIR/control_latch"; flag_fetch; killswitch_engaged; assert_rc $? 1 "a fresh message is still clear"
+}
+
+test_fake_now_is_ignored_outside_test_mode() {
+  use_ctl
+  unset GUARDIAN_TESTMODE
+  local rn; rn="$(real_now)"
+  GUARDIAN_FAKE_NOW=5
+  local n; n="$(now_epoch)"
+  [ "$n" -ge "$rn" ] && [ "$n" -le "$((rn + 3))" ] && ok || fail "env GUARDIAN_FAKE_NOW honoured without test mode: $n"
+  GUARDIAN_TESTMODE=1; assert_eq "$(now_epoch)" "5" "honoured with GUARDIAN_TESTMODE=1"
+  GUARDIAN_TESTMODE=0; n="$(now_epoch)"
+  [ "$n" -ge "$rn" ] && [ "$n" -le "$((rn + 3))" ] && ok || fail "TESTMODE=0 honoured the fake clock: $n"
+  # a frozen clock must not disable the kill: message 200 s old by the real clock
+  GUARDIAN_TESTMODE=""; unset GUARDIAN_TESTMODE
+  { printf '%s\n' "$((rn - 200))"; printf '%s\n' "${HEAL//@TS@/$((rn - 200))}"; } >"$STATE_DIR/control.last"
+  GUARDIAN_FAKE_NOW="$((rn - 200))"
+  flag_fetch; killswitch_engaged; assert_rc $? 0 "frozen fake clock in env does not keep a stale message alive"
+}
+
+test_fake_now_in_guardian_conf_is_ignored_without_test_mode() {
+  load_libs; mk_tcc 2
+  local conf="$T/guardian.conf" ts
+  printf 'GUARDIAN_FAKE_NOW=5\nGUARDIAN_TESTMODE=1\n' >"$conf"
+  unset GUARDIAN_TESTMODE GUARDIAN_FAKE_NOW
+  GUARDIAN_CONF="$conf" bash "$KDIR/bin/guardian.sh" handle "kiosk/opd9/probe" "probe opd9 c1"
+  ts="$(grep -o '"ts":[0-9]*' "$T/pub.log" | head -n1 | cut -d: -f2)"
+  [ -n "$ts" ] && [ "$ts" != "5" ] && ok || fail "probe ts from guardian.conf fake clock: [$ts]"
+  printf 'GUARDIAN_FAKE_NOW=5\n' >"$conf"; : >"$T/pub.log"
+  GUARDIAN_CONF="$conf" bash "$KDIR/bin/guardian.sh" handle "kiosk/opd9/probe" "probe opd9 c2"
+  ts="$(grep -o '"ts":[0-9]*' "$T/pub.log" | head -n1 | cut -d: -f2)"
+  [ -n "$ts" ] && [ "$ts" != "5" ] && ok || fail "probe ts from conf FAKE_NOW only: [$ts]"
+  # and with the environment's own test mode the fake clock is used
+  : >"$T/pub.log"
+  GUARDIAN_TESTMODE=1 GUARDIAN_CONF=/dev/null GUARDIAN_FAKE_NOW=5 bash "$KDIR/bin/guardian.sh" handle "kiosk/opd9/probe" "probe opd9 c3"
+  ts="$(grep -o '"ts":[0-9]*' "$T/pub.log" | head -n1 | cut -d: -f2)"
+  assert_eq "$ts" "5" "test mode from the environment honours the fake clock"
+}
+
+# ---- R11: the modes loop is cheap at 64 rooms ----
+test_modes_walk_64_rooms_single_pass_is_correct_and_fast() {
+  use_ctl
+  local m="" i
+  for i in $(seq 100 163); do m="$m\"r$i\": \"shadow\", "; done
+  m="${m%, }"
+  GUARDIAN_ROOM="r107"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {$m}, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 1 "64 sorted rooms accepted"
+  m="${m/\"r150\": \"shadow\", \"r151\"/\"r151\": \"shadow\", \"r150\"}"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {$m}, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 0 "one adjacent swap among 64 killed"
+  m="${m/\"r151\": \"shadow\", \"r150\"/\"r150\": \"shadow\", \"r150\"}"
+  ctl_engaged 1 "{\"kill\": false, \"modes\": {$m}, \"ts\": $GUARDIAN_FAKE_NOW}"; assert_rc $? 0 "a duplicate among 64 killed"
+}
+
+test_no_sandbox_leaks_under_the_runner_parent() {
+  case "$T" in "$SBROOT"/sb.*) ok ;; *) fail "sandbox $T is not under SBROOT [$SBROOT]" ;; esac
+  assert_eq "$(find "$SBROOT" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" "1" "only this test's sandbox exists"
 }

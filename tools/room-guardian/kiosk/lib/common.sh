@@ -4,8 +4,8 @@
 # Sourced, never executed. Every external effect goes through a PATH command or a GUARDIAN_* command
 # variable, so tests can substitute fakes.
 
-GUARDIAN_VERSION="c1-0.2.0-r10"   # bump per release: the audit "guardian start version=" line identifies the tree
-# External tools on the control path are pinned to absolute paths (R10): a PATH change or a planted binary cannot turn a kill into a clear.
+GUARDIAN_VERSION="c1-0.2.1-r11"   # bump per release: the audit "guardian start version=" line identifies the tree
+# External tools on the control and flag paths (the clock, cat, sed, head, mv, mkdir included) are pinned to absolute paths (R10, R11): a PATH change or a planted binary cannot turn a kill into a clear or freeze the 90 s stale rule.
 G_TR=/usr/bin/tr
 G_WC=/usr/bin/wc
 G_SED=/usr/bin/sed
@@ -13,6 +13,9 @@ G_TAIL=/usr/bin/tail
 G_HEAD=/usr/bin/head
 G_CAT=/bin/cat
 G_PS=/bin/ps
+G_DATE=/bin/date
+G_MV=/bin/mv
+G_MKDIR=/bin/mkdir
 
 : "${GUARDIAN_HOME:=$HOME/Library/Application Support/EvenScribe/Guardian}"
 : "${RR_ROOT:=$HOME/Library/Application Support/EvenScribe/RoomRecorder}"
@@ -52,13 +55,14 @@ FLAG_DIR="$GUARDIAN_HOME/flags"
 gsleep() { sleep "$1"; }
 
 now_epoch() {
-  if [ -n "${GUARDIAN_FAKE_NOW:-}" ]; then echo "$GUARDIAN_FAKE_NOW"; else date +%s; fi
+  # GUARDIAN_FAKE_NOW is honoured only in test mode: a frozen clock set in guardian.conf or the environment would disable the 90 s kill.
+  if [ "${GUARDIAN_TESTMODE:-}" = 1 ] && [ -n "${GUARDIAN_FAKE_NOW:-}" ]; then echo "$GUARDIAN_FAKE_NOW"; else "$G_DATE" +%s; fi
 }
 
 # HHMM in Asia/Kolkata for an epoch (default now).
 ist_hhmm() {
   local e="${1:-$(now_epoch)}"
-  TZ=Asia/Kolkata date -r "$e" +%H%M 2>/dev/null || TZ=Asia/Kolkata date -d "@$e" +%H%M
+  TZ=Asia/Kolkata "$G_DATE" -r "$e" +%H%M 2>/dev/null || TZ=Asia/Kolkata "$G_DATE" -d "@$e" +%H%M
 }
 
 # 0 when HHMM is inside [start,end) (end may wrap past midnight).
@@ -117,7 +121,7 @@ etime_to_s() {
 
 # ---- local audit (append only; G4 no deletes) ----
 audit() {
-  mkdir -p "$GUARDIAN_HOME" 2>/dev/null
+  "$G_MKDIR" -p "$GUARDIAN_HOME" 2>/dev/null
   printf '{"ts":%s,"room_id":%s,"msg":%s}\n' "$(now_epoch)" "$(jstr "$GUARDIAN_ROOM")" "$(jstr "$*")" >>"$AUDIT_LOG" 2>/dev/null
 }
 

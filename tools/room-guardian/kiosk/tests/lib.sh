@@ -16,13 +16,14 @@ lineno() { grep -n -- "$2" "$1" 2>/dev/null | head -n1 | cut -d: -f1 | sed 's/^$
 ist_epoch() { TZ=Asia/Kolkata date -j -f '%Y-%m-%d %H:%M' "2026-10-14 $1" +%s; }
 
 mk_sandbox() { # sets T and the whole environment; PATH gets the fake bin dir first
-  T="$(mktemp -d)"
+  T="$(mktemp -d "${SBROOT:-${TMPDIR:-/tmp}}/sb.XXXXXX")"
   export T
   export HOME="$T/home"; mkdir -p "$HOME/Library/LaunchAgents" "$T/bin" "$T/rr/captures" "$T/app/Contents/MacOS"
   export GUARDIAN_HOME="$HOME/Library/Application Support/EvenScribe/Guardian"
   export RR_ROOT="$T/rr" RR_PLIST="$HOME/Library/LaunchAgents/com.evenscribe.room-recorder.plist" RR_APP="$T/app"
   : >"$RR_PLIST"
   export GUARDIAN_ROOM="opd9"
+  export GUARDIAN_TESTMODE=1   # GUARDIAN_FAKE_NOW is honoured only in test mode (R11)
   export GUARDIAN_FAKE_NOW; GUARDIAN_FAKE_NOW="$(ist_epoch 11:00)"
   export CONFIRM_TIMEOUT_S=2 GUARDIAN_SETTLE_S=0 PROBE_CAP_S=1
   export GUARDIAN_PUBLISH_CMD='{ printf "%s\t" "$1"; cat; } >>"$T/pub.log"'
@@ -161,4 +162,13 @@ reap_tracked() {
       case "$c" in "sleep "*|*guardian.sh*) kill "$p" 2>/dev/null ;; esac
     done
   done
+}
+
+# teardown_sandbox <sandbox>: reap the test's own pids, give orphaned loops the 2 s they need to notice (they audit, and an audit recreates
+# the sandbox path), then remove it. Retries until it stays gone (R11: no sandbox may be left behind).
+teardown_sandbox() {
+  local d="$1" i=0
+  reap_tracked "$d"
+  if ls "$d"/*.pid >/dev/null 2>&1; then sleep 3; fi
+  while [ -e "$d" ] && [ "$i" -lt 10 ]; do rm -rf "$d"; [ -e "$d" ] && sleep 0.3; i=$((i + 1)); done
 }

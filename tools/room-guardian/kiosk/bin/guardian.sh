@@ -7,8 +7,10 @@
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONF="${GUARDIAN_CONF:-${GUARDIAN_HOME:-$HOME/Library/Application Support/EvenScribe/Guardian}/guardian.conf}"
+_G_TM="${GUARDIAN_TESTMODE:-}"   # test mode comes from the environment only: guardian.conf cannot turn it on
 # shellcheck disable=SC1090
 [ -r "$CONF" ] && . "$CONF"
+GUARDIAN_TESTMODE="$_G_TM"; unset _G_TM
 # shellcheck source=../lib/common.sh
 . "$HERE/lib/common.sh"
 # shellcheck source=../lib/collect.sh
@@ -22,7 +24,7 @@ CONF="${GUARDIAN_CONF:-${GUARDIAN_HOME:-$HOME/Library/Application Support/EvenSc
 # shellcheck source=../lib/probe.sh
 . "$HERE/lib/probe.sh"
 
-mkdir -p "$STATE_DIR" "$FLAG_DIR" 2>/dev/null
+"$G_MKDIR" -p "$STATE_DIR" "$FLAG_DIR" 2>/dev/null
 
 tick() {
   collect_all
@@ -118,8 +120,8 @@ subscriber_loop() {
 # Store one control line atomically (tmp + mv): line 1 = receive epoch, line 2 = payload.
 control_store() {
   local tmp="$STATE_DIR/control.last.tmp.$$"
-  mkdir -p "$STATE_DIR" 2>/dev/null
-  { printf '%s\n' "$(now_epoch)"; printf '%s\n' "$1"; } >"$tmp" && mv -f "$tmp" "$STATE_DIR/control.last"
+  "$G_MKDIR" -p "$STATE_DIR" 2>/dev/null
+  { printf '%s\n' "$(now_epoch)"; printf '%s\n' "$1"; } >"$tmp" && "$G_MV" -f "$tmp" "$STATE_DIR/control.last"
 }
 
 # NUL -> 0x01 filter. tr -u (BSD tr: unbuffered) matters: a plain tr holds a message back on a pipe until EOF.

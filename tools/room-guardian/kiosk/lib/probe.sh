@@ -94,7 +94,7 @@ probe_run() { # id
   local id="$1" dir ts name v verdict first=1 body="" t0 deadline payload pubcap planned_end late=0 now_ms
   t0="$(mono_ms)"; deadline=$((t0 + PROBE_BUDGET_MS))
   dir="$(mktemp -d "$STATE_DIR/probe.XXXXXX" 2>/dev/null)" || return 1
-  ts="${GUARDIAN_FAKE_NOW:-$((t0 / 1000))}"
+  ts="$((t0 / 1000))"; [ "${GUARDIAN_TESTMODE:-}" = 1 ] && [ -n "${GUARDIAN_FAKE_NOW:-}" ] && ts="$GUARDIAN_FAKE_NOW"
   probe_start_hook
   now_ms="$(mono_ms)"
   probe_check_cap_v $((deadline - now_ms)); PROBE_CHECK_CAP="$PSECS"

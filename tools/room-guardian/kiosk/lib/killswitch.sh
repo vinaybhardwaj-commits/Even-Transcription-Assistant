@@ -26,9 +26,21 @@ CONTROL_RE='^\{"kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|he
 CONTROL_RECV_RE='^[1-9][0-9]{0,14}$'
 CONTROL_ROOM_RE='^[a-z0-9_-]{1,64}$'
 
+# 0 when the keys of a validated modes body ('"a": "heal", "b": "shadow"', no braces) are strictly ascending bytewise, so none repeats.
+# One split on "," and two expansions per room (R11: the old pattern walk was quadratic). Keys and values hold no comma and no glob character (the regex proved it).
+modes_keys_ascending() {
+  local LC_ALL=C IFS=, item key prev=""
+  for item in $1; do
+    key="${item#*\"}"; key="${key%%\"*}"
+    if [ -n "$prev" ] && ! [[ $key > $prev ]]; then return 1; fi
+    prev="$key"
+  done
+  return 0
+}
+
 control_parse() {
   local LC_ALL=C
-  local recv payload now latch size bad nl ts modes_part pat rest cnt prev key
+  local recv payload now latch size bad nl ts modes_part pat rest cnt
   CTRL_FLEET=unreachable; CTRL_MODE=shadow; CTRL_WHY=missing; CTRL_AGE=""
   [ -r "$CONTROL_LAST" ] || return 1
   # 1. raw bytes, as a file
@@ -50,7 +62,7 @@ control_parse() {
   latch="$("$G_CAT" "$STATE_DIR/control_latch" 2>/dev/null)"
   if [ "$latch" = "$recv" ]; then CTRL_WHY=stale; return 1; fi
   if [ "$CTRL_AGE" -gt "$CONTROL_STALE_S" ]; then
-    mkdir -p "$STATE_DIR" 2>/dev/null; printf '%s\n' "$recv" >"$STATE_DIR/control_latch"
+    "$G_MKDIR" -p "$STATE_DIR" 2>/dev/null; printf '%s\n' "$recv" >"$STATE_DIR/control_latch"
     CTRL_WHY=stale; return 1
   fi
   # 3. the payload: one anchored regex
@@ -60,18 +72,14 @@ control_parse() {
   ts=$((10#$ts))
   if [ "$((ts - 10#$now))" -gt 30 ]; then CTRL_WHY=skew; return 1; fi
   if [ "$((10#$now - ts))" -gt "$CONTROL_STALE_S" ]; then
-    mkdir -p "$STATE_DIR" 2>/dev/null; printf '%s\n' "$recv" >"$STATE_DIR/control_latch"
+    "$G_MKDIR" -p "$STATE_DIR" 2>/dev/null; printf '%s\n' "$recv" >"$STATE_DIR/control_latch"
     CTRL_WHY=stale; return 1
   fi
   # Exact canonical modes (R10): keys strictly ascending bytewise (json.dumps sort_keys), so no key repeats, for ALL rooms.
   modes_part="${payload#*\"modes\": }"; modes_part="${modes_part%, \"ts\": *}"
-  rest="${modes_part#\{}"; rest="${rest%\}}"; prev=""
-  while [ -n "$rest" ]; do
-    key="${rest#\"}"; key="${key%%\"*}"
-    if [ -n "$prev" ] && ! [[ $key > $prev ]]; then CTRL_WHY=unparseable; return 1; fi
-    prev="$key"
-    rest="${rest#\"*\": \"*\"}"; rest="${rest#, }"
-  done
+  # The anchored regex above already proved the shape, so one split on "," (in a helper with its own IFS) is enough.
+  rest="${modes_part#\{}"; rest="${rest%\}}"
+  modes_keys_ascending "$rest" || { CTRL_WHY=unparseable; return 1; }
   CTRL_FLEET=on; CTRL_WHY=ok
   if [[ $GUARDIAN_ROOM =~ $CONTROL_ROOM_RE ]]; then
     modes_part="${payload#*\"modes\": }"; modes_part="${modes_part%, \"ts\": *}"
@@ -95,12 +103,12 @@ control_audit_change() {
 
 flag_fetch() {
   local out="$STATE_DIR/flags.fetch" now rc
-  mkdir -p "$STATE_DIR" "$FLAG_DIR" 2>/dev/null
+  "$G_MKDIR" -p "$STATE_DIR" "$FLAG_DIR" 2>/dev/null
   now="$(now_epoch)"
   if [ -n "$GUARDIAN_CONTROL_SUB_CMD" ]; then
     control_parse; rc=$?
     control_audit_change
-    printf '%s\nfleet=%s\nmode=%s\n' "$now" "$CTRL_FLEET" "$CTRL_MODE" >"$FLAG_CACHE.tmp" && mv "$FLAG_CACHE.tmp" "$FLAG_CACHE"
+    printf '%s\nfleet=%s\nmode=%s\n' "$now" "$CTRL_FLEET" "$CTRL_MODE" >"$FLAG_CACHE.tmp" && "$G_MV" "$FLAG_CACHE.tmp" "$FLAG_CACHE"
     return "$rc"
   fi
   if [ -z "$GUARDIAN_FLAG_CMD" ]; then
@@ -142,18 +150,18 @@ current_mode() {
   if killswitch_engaged; then echo shadow; return; fi
   # With the control subscription the live parsed mode is used, so heal -> shadow needs no fetch.
   if [ -n "$GUARDIAN_CONTROL_SUB_CMD" ]; then control_parse || { echo shadow; return; }; echo "$CTRL_MODE"; return; fi
-  m="$(sed -n 's/^mode=//p' "$FLAG_CACHE" 2>/dev/null | head -n1)"
+  m="$("$G_SED" -n 's/^mode=//p' "$FLAG_CACHE" 2>/dev/null | "$G_HEAD" -n1)"
   [ "$m" = "heal" ] && echo heal || echo shadow
 }
 
 # Fetch at most once per FLAG_FETCH_S. The cache max age (FLAG_MAX_AGE_S) is longer, so one missed fetch is not yet OFF.
 flag_poll() {
   local f="$STATE_DIR/flag_last" last now
-  now="$(now_epoch)"; last="$(cat "$f" 2>/dev/null)"
+  now="$(now_epoch)"; last="$("$G_CAT" "$f" 2>/dev/null)"
   case "$last" in ''|*[!0-9]*) last="" ;; esac
   [ "${#last}" -le 15 ] || last=""
   if [ -z "$last" ] || [ "$((10#$now - 10#$last))" -ge "$FLAG_FETCH_S" ]; then
-    mkdir -p "$STATE_DIR" 2>/dev/null
+    "$G_MKDIR" -p "$STATE_DIR" 2>/dev/null
     printf '%s\n' "$now" >"$f"
     flag_fetch
   fi
