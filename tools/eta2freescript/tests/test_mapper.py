@@ -325,7 +325,7 @@ def test_spoken_regimen_is_carried_and_a_missing_one_is_completion_required():
 
 def test_stage_a_prompt_names_surgery_combinations_and_routine_panels():
     from pathlib import Path
-    text = Path("tools/eta2freescript/prompts/stageA-v2.md").read_text()
+    text = (Path(__file__).resolve().parents[1] / "prompts" / "stageA-v2.md").read_text()
     assert "procedures" in text and "components" in text and "routine panel" in text
     assert "verbatim" in text and "coarser parent" in text
     assert "NATIVE text first" in text and "turn 40 into 940" in text
