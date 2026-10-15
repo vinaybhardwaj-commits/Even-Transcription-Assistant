@@ -64,7 +64,9 @@ def main():
     if consult_on:                                   # FR1 2.4 d' flags: default off, so today's control bytes and behaviour are unchanged
         from consult_hold import ConsultHold, pg_sources
         consult = ConsultHold(rooms, flags.get("consult_room_map"), pg_sources(flags.get("consult_db_url_file")), time.time,
-                              audit_path=os.path.join(HOME, "logs", "consult-hold-audit.jsonl"), sink=sink)
+                              audit_path=os.path.join(HOME, "logs", "consult-hold-audit.jsonl"), sink=sink,
+                              capture_closed_counts_quiet=flags.get("capture_closed_counts_quiet") is not False,
+                              open_session_requires_levels=flags.get("open_session_requires_levels") is not False)
     if start_on:
         import start_day as start_day_mod
         try:

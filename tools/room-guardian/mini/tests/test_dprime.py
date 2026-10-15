@@ -28,21 +28,27 @@ class Sink:
 
 ROOMS = ["opd-6", "opd-7"]
 MAP = {"opd-6": {"machine": "M6", "room_id": "b6", "slug": "s6"}, "opd-7": {"machine": ["M7", "m7legacy"], "room_id": "b7", "slug": "s7"}}
-QUIET = {"capture_open": False}
+QUIET = {"capture_open": True, "zero_ratio": 1.0}                 # digital silence: the only quiet line unless capture_closed_counts_quiet is on
 
 
 class Src:
     """Injected live sources. Each value is data or an exception instance to raise; calls counts invocations per source."""
-    def __init__(self, presence=None, session=None, windows=None):
-        self.v = {"presence": [("M6", T - 10, None), ("M7", T - 10, None)] if presence is None else presence,
+    def __init__(self, presence=None, session=None, windows=None, levels=None):
+        self.v = {"presence": [("M6", T - 10, None), ("M7", T - 10, None)] if presence is None else presence, "levels": [] if levels is None else levels,
                   "session": set() if session is None else session, "windows": [] if windows is None else windows}
-        self.calls = {"presence": 0, "session": 0, "windows": 0}
+        self.calls = {"presence": 0, "session": 0, "windows": 0, "levels": 0}
     def __getitem__(self, name):
         def f(now, arg):
             self.calls[name] += 1
-            if isinstance(self.v[name], BaseException):
-                raise self.v[name]
-            return self.v[name]
+            v = self.v[name]
+            if isinstance(v, BaseException):
+                raise v
+            if name == "presence" and isinstance(v, list) and v and all(isinstance(x, tuple) and len(x) == 3 for x in v):
+                # shorthand (machine, heartbeat ts, encounter marker): a heartbeat row, plus an encounter_open when the marker is set
+                return {"hb": [(m, t) for m, t, _e in v], "enc": [(m, "encounter_open", t) for m, t, e in v if e]}
+            if name == "presence" and isinstance(v, list) and not v:
+                return {"hb": [], "enc": []}
+            return v
         return f
 
 
@@ -121,10 +127,9 @@ class HoldSemantics(unittest.TestCase):
             "presence stale (121 s)": dict(src=Src(presence=[("M6", T - 121, None), ("M7", T - 5, None)])),
             "presence consulting": dict(src=Src(presence=[("M6", T - 5, "enc-1"), ("M7", T - 5, None)])),
             "presence error": dict(src=Src(presence=RuntimeError("down"))),
-            "session open": dict(src=Src(session={"b6"})),
+            "session open with level activity": dict(src=Src(session={"b6"}, levels=[("b6", T - 5)])),
             "session error": dict(src=Src(session=RuntimeError("down"))),
             "windows open": dict(src=Src(windows=[("s6", "b6", T - 600, None)])),
-            "windows error": dict(src=Src(windows=RuntimeError("down"))),
         }
         for name, kw in cases.items():
             with self.subTest(name):
@@ -134,7 +139,10 @@ class HoldSemantics(unittest.TestCase):
         for name, feed, want in (("missing", None, True), ("active capture", {"capture_open": True, "zero_ratio": 0.2}, True), ("capture, no ratio", {"capture_open": True}, True),
                                  ("capture, NaN ratio", {"capture_open": True, "zero_ratio": float("nan")}, True), ("capture, bool ratio", {"capture_open": True, "zero_ratio": True}, True),
                                  ("capture_open missing", {"zero_ratio": 1.0}, True), ("capture_open str", {"capture_open": "false"}, True),
-                                 ("digital silence", {"capture_open": True, "zero_ratio": 0.99}, False), ("capture closed", {"capture_open": False}, False)):
+                                 ("digital silence", {"capture_open": True, "zero_ratio": 0.99}, False), ("capture closed (quiet, fable 17:16)", {"capture_open": False}, False),
+                                 ("inf ratio", {"capture_open": True, "zero_ratio": float("inf")}, True), ("ratio above 1", {"capture_open": True, "zero_ratio": 5}, True),
+                                 ("negative ratio", {"capture_open": True, "zero_ratio": -1}, True), ("str ratio", {"capture_open": True, "zero_ratio": "1.0"}, True),
+                                 ("ratio exactly 1", {"capture_open": True, "zero_ratio": 1}, False), ("ratio 0.98", {"capture_open": True, "zero_ratio": 0.98}, False)):
             with self.subTest(name):
                 h, _, _ = mk(health=False)
                 if feed is not None: h.note_health("opd-6", feed, T)
@@ -167,17 +175,21 @@ class HoldSemantics(unittest.TestCase):
         h, _, _ = mk(Src(windows=[("s6", "b6", T - 600, None)])); self.assertEqual(h.hold(), {"opd-6": True, "opd-7": False})
         h, _, _ = mk(Src(windows=[("s6", "b6", T - 9000, T - 8000)])); self.assertEqual(h.hold(), {"opd-6": False, "opd-7": False})
         h, _, _ = mk(Src(presence=[], windows=[])); self.assertEqual(h.hold(), {"opd-6": True, "opd-7": True})        # quiet windows cannot rescue a stale presence
-        h, _, _ = mk(Src(session={"b6"}, windows=[])); self.assertTrue(h.hold()["opd-6"])
+        h, _, _ = mk(Src(session={"b6"}, levels=[("b6", T - 5)], windows=[])); self.assertTrue(h.hold()["opd-6"])
         self.assertTrue(ch.window_open(T - 900, T - 60, T)); self.assertFalse(ch.window_open(T - 900, T - 300, T)); self.assertFalse(ch.window_open(T - 5 * 3600, None, T))
         for bad in ((None, None), (float("nan"), None), (True, None), ("x", None), (T - 900, float("nan")), (T - 900, "x"), (float("inf"), None), (T + 500, None)):
             self.assertTrue(ch.window_open(bad[0], bad[1], T), bad)
 
     def test_garbage_replies_hold_and_never_raise(self):
         for bad in (None, 5, "x", [("a",)], [("M6", T)], [1, 2], (1, 2, 3)):
-            for name in ("presence", "session", "windows"):
-                src = Src(); src.v[name] = bad
+            for name in ("presence", "session", "levels"):
+                if name == "levels" and isinstance(bad, list):
+                    continue                                                                         # a list of odd rows is a valid reply: rows for unknown rooms are dropped
+                src = Src(session={"b6", "b7"} if name == "levels" else None); src.v[name] = bad        # levels only matter for a room with an open session
                 h, _, _ = mk(src)
-                out = h.hold(); self.assertEqual(out["opd-6"], True, (name, bad))                  # each of the three sources is required for a false
+                out = h.hold(); self.assertEqual(out["opd-6"], True, (name, bad))                  # each of these sources is required for a false
+            src = Src(windows=bad); out = mk(src)[0].hold()                                         # the optional windows source: garbage changes nothing, never raises
+            self.assertEqual(out, {"opd-6": False, "opd-7": False}, bad)
 
     def test_timeout_and_no_pileup_of_fetch_threads(self):
         gate = threading.Event(); self.addCleanup(gate.set); calls = []
@@ -189,7 +201,7 @@ class HoldSemantics(unittest.TestCase):
         self.assertEqual(h.hold(), {"opd-6": True, "opd-7": True})
         for _ in range(10):
             clock.adv(31); h.hold(clock())
-        self.assertEqual(sorted(calls), ["presence", "session", "windows"])           # one thread per source; none started while one was alive
+        self.assertEqual(sorted(calls), ["levels", "presence", "session", "windows"])           # one thread per source; none started while one was alive
 
     def test_cache_is_30_s(self):
         h, clock, src = mk(); h.hold(); clock.adv(29); h.hold(clock()); self.assertEqual(src.calls["presence"], 1)
@@ -206,7 +218,7 @@ class HoldSemantics(unittest.TestCase):
         src.v["presence"] = [("M6", clock() - 1, "e"), ("M7", clock() - 1, None)]; h.hold(clock())
         lines = [json.loads(x) for x in open(path)]; self.assertEqual(len(lines), 3)
         self.assertEqual((lines[2]["room"], lines[2]["consult_open"], lines[2]["why"], lines[2]["signals"], lines[2]["ts"]),
-                         ("opd-6", True, "presence_consulting", ["presence_consulting", "session_open"], int(T + 31)))
+                         ("opd-6", True, "presence_consulting", ["presence_consulting"], int(T + 31)))
 
     def test_audit_write_fault_never_changes_the_hold(self):
         h, _, _ = mk(audit="/nonexistent-dir/x.jsonl"); self.assertEqual(h.hold(), {"opd-6": False, "opd-7": False})
@@ -307,8 +319,8 @@ class PgSources(unittest.TestCase):
         outer = self
         class Conn:
             read_only = False
-            def execute(self, sql, params): outer.calls.append(("execute", sql, params)); return self
-            def fetchall(self): return outer.rows
+            def execute(self, sql, params): outer.calls.append(("execute", sql, params)); self.sql = sql; return self
+            def fetchall(self): return outer.rows[self.sql] if isinstance(outer.rows, dict) else outer.rows
             def close(self): outer.calls.append(("close",))
         self.conn = Conn(); self.rows = []
         class Fake:
@@ -326,12 +338,15 @@ class PgSources(unittest.TestCase):
         self.assertTrue(self.conn.read_only); self.assertEqual(self.calls[-1], ("close",))
 
     def test_sql_is_constant_with_bound_parameters(self):
-        self.rows = [("M6", datetime.fromtimestamp(T - 3, timezone.utc), "e")]
-        out = ch.pg_sources(self.f)["presence"](T, ["M6"]); self.assertEqual(out, [("M6", T - 3, "e")])
-        ex = [c for c in self.calls if c[0] == "execute"][0]; self.assertEqual(ex[1], ch.PRESENCE_SQL); self.assertEqual(ex[2][0], ["M6"])
+        at = datetime.fromtimestamp(T - 3, timezone.utc)
+        self.rows = {ch.HB_SQL: [("M6", at)], ch.ENC_SQL: [("M6", "encounter_open", at)]}
+        out = ch.pg_sources(self.f)["presence"](T, ["M6"])
+        self.assertEqual(out, {"hb": [("M6", T - 3)], "enc": [("M6", "encounter_open", T - 3)]})
+        ex = [c for c in self.calls if c[0] == "execute"]; self.assertEqual([x[1] for x in ex], [ch.HB_SQL, ch.ENC_SQL]); self.assertEqual(ex[0][2][0], ["M6"])
         self.rows = [("b6",)]; self.assertEqual(ch.pg_sources(self.f)["session"](T, ["b6"]), {"b6"})
         self.rows = [("s6", "b6", datetime.fromtimestamp(T - 9, timezone.utc), None)]; self.assertEqual(ch.pg_sources(self.f)["windows"](T, None), [("s6", "b6", T - 9, None)])
-        for q in (ch.PRESENCE_SQL, ch.SESSION_SQL, ch.WIN_SQL):
+        self.rows = [("b6", datetime.fromtimestamp(T - 3, timezone.utc))]; self.assertEqual(ch.pg_sources(self.f)["levels"](T, ["b6"]), [("b6", T - 3)])
+        for q in (ch.HB_SQL, ch.ENC_SQL, ch.SESSION_SQL, ch.LEVEL_SQL, ch.WIN_SQL):
             self.assertIn("%s", q); self.assertNotIn("{", q)
 
     def test_a_missing_credential_file_is_a_source_error_not_a_crash(self):
@@ -436,7 +451,9 @@ class StartDay(unittest.TestCase):
                 if Flaky.n == 1: raise RuntimeError("store locked")
                 super().start_day_failed(room, now)
         s = self.mk(); s.sink = Flaky(); s.on_health("r1", health(100)); self.clock.adv(601)
-        s.check(); self.assertEqual(s.sink.sd_failed, []); s.check(); self.assertEqual(s.sink.sd_failed, ["r1"])
+        s.check(); self.assertEqual(s.sink.sd_failed, [])
+        s.check(); self.assertEqual(s.sink.sd_failed, [])                           # I-e: not retried inside 5 min
+        self.clock.adv(301); s.check(); self.assertEqual(s.sink.sd_failed, ["r1"])
 
     def test_a_corrupt_state_entry_is_dropped_and_never_raises(self):
         t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup); path = os.path.join(t.name, "state.json")
@@ -477,6 +494,170 @@ class StartDay(unittest.TestCase):
                 sd.build(flags, Sink(), tempfile.gettempdir())
         s = sd.build({"start_day_cmd": ["/bin/x"]}, Sink(), tempfile.gettempdir(), runner=lambda *a, **k: None)
         self.assertEqual(s.state_path, os.path.join(tempfile.gettempdir(), "data", "start-day-state.json"))
+
+
+class Round3(unittest.TestCase):
+    def enc(self, *events, hb=(("M6", T - 5), ("M7", T - 5))):
+        return {"hb": list(hb), "enc": list(events)}
+
+    def hold(self, src, **kw):
+        h, _, _ = mk(src, **kw); return h.hold()
+
+    def test_heartbeats_only_ten_minutes_into_a_consult_read_as_consulting(self):                     # R2-M1
+        src = Src(presence=self.enc(("M6", "encounter_open", T - 600), hb=[("M6", T - 5), ("M6", T - 35), ("M6", T - 65), ("M7", T - 5)]))
+        self.assertEqual(self.hold(src), {"opd-6": True, "opd-7": False})
+        h, _, _ = mk(src); h.hold()
+        self.assertIn("presence_consulting", h.last["opd-6"][1])
+
+    def test_the_newest_open_or_close_decides(self):
+        for ev, want in ((("M6", "encounter_open", T - 10), True), (("M6", "encounter_close", T - 10), False), (("M6", "encounter_open", T - 3 * 3600), True),
+                         (("M6", "encounter_other", T - 10), True), (("M6", "encounter_open", float("nan")), True), (("M6", "encounter_open", None), True)):
+            with self.subTest(ev=ev):
+                self.assertEqual(self.hold(Src(presence=self.enc(ev)))["opd-6"], want)
+        self.assertEqual(self.hold(Src(presence=self.enc()))["opd-6"], False)                         # no open/close in the lookback and fresh heartbeats: not consulting
+        self.assertEqual(self.hold(Src(presence=self.enc(("M7", "encounter_open", T - 10))))["opd-6"], False)            # another machine's open does not hold this room
+        self.assertEqual(self.hold(Src(presence=self.enc(("m7legacy", "encounter_open", T - 10))))["opd-7"], True)       # any of the room's machine keys
+
+    def test_stale_heartbeats_are_down_even_with_no_events(self):
+        self.assertTrue(self.hold(Src(presence=self.enc(hb=[("M6", T - 121), ("M7", T - 5)])))["opd-6"])
+        self.assertTrue(self.hold(Src(presence=self.enc(hb=[("M7", T - 5)])))["opd-6"])
+        self.assertFalse(self.hold(Src(presence=self.enc(hb=[("M6", T - 120), ("M7", T - 5)])))["opd-6"])
+        self.assertTrue(self.hold(Src(presence=self.enc(hb=[("M6", float("nan")), ("M7", T - 5)])))["opd-6"])
+
+    def test_presence_sql_names_and_has_no_limit_before_the_per_machine_filter(self):                # I-c
+        for q in (ch.HB_SQL, ch.ENC_SQL):
+            self.assertIn("DISTINCT ON (p.machine)", q); self.assertNotIn("LIMIT", q)
+        self.assertIn("'encounter_open'", ch.ENC_SQL); self.assertIn("'encounter_close'", ch.ENC_SQL)
+        self.assertNotIn("p.source", ch.ENC_SQL); self.assertIn("p.source = 'ext'", ch.HB_SQL)             # events from any source; heartbeats from the extension only
+
+    def test_capture_closed_switch_defaults_true(self):                                                # fable 17:16
+        closed = {"capture_open": False}
+        for kw, want in (({}, False), ({"capture_closed_counts_quiet": True}, False), ({"capture_closed_counts_quiet": False}, True), ({"capture_closed_counts_quiet": "false"}, False),
+                         ({"capture_closed_counts_quiet": 0}, False)):
+            with self.subTest(kw=kw):
+                h, _, _ = mk(health=False, **kw); h.note_health("opd-6", closed, T); h.note_health("opd-7", QUIET, T)
+                self.assertEqual(h.hold()["opd-6"], want)                                            # only a literal false turns the switch off
+        h, _, _ = mk(health=False)
+        h.note_health("opd-6", {"capture_open": "no"}, T); h.note_health("opd-7", {}, T)
+        self.assertEqual(h.hold(), {"opd-6": True, "opd-7": True})                                  # the switch only changes a literal false
+
+    def test_fable_17_16_scenarios(self):
+        closed = {"capture_open": False}
+        def room(src, health=closed):
+            h, _, _ = mk(src, health=False); h.note_health("opd-6", health, T); h.note_health("opd-7", QUIET, T); return h.hold()["opd-6"]
+        self.assertFalse(room(Src(presence=self.enc(), session=set())))                              # capture_open false + Presence no-open + no active session
+        self.assertFalse(room(Src(presence=self.enc(("M6", "encounter_close", T - 9)), session={"b6"}, levels=[("b6", None)])))   # open session, but only silence
+        self.assertTrue(room(Src(presence=self.enc(("M6", "encounter_open", T - 9)), session=set())))      # capture_open false + Presence open-without-close
+        self.assertTrue(room(Src(presence=self.enc(), session={"b6"}, levels=[("b6", T - 20)])))           # open session with level activity
+
+    def test_open_session_requires_levels_switch_defaults_true(self):                                # fable 17:16
+        base = dict(session={"b6"})
+        self.assertFalse(self.hold(Src(**base))["opd-6"])                                            # default: an open session with no level activity does not hold
+        self.assertTrue(self.hold(Src(**base), open_session_requires_levels=False)["opd-6"])         # switched off: any open session holds
+        for name, levels, want in (("recent activity", [("b6", T - 30)], True), ("exactly 120 s", [("b6", T - 120)], True), ("activity 121 s ago", [("b6", T - 121)], False),
+                                   ("only silence", [("b6", None)], False), ("no row", [], False), ("other room's activity", [("b7", T - 5)], False),
+                                   ("NaN time", [("b6", float("nan"))], True)):
+            with self.subTest(name):
+                h, _, _ = mk(Src(levels=levels, **base))
+                self.assertEqual(h.hold()["opd-6"], want, name)
+        h, _, _ = mk(Src(levels=RuntimeError("down"), **base)); self.assertTrue(h.hold()["opd-6"])
+        h, _, src = mk(Src(session=set())); self.assertFalse(h.hold()["opd-6"]); self.assertEqual(src.calls["levels"], 1)
+        h, _, src = mk(Src(session={"b6"}), open_session_requires_levels=False); self.assertTrue(h.hold()["opd-6"]); self.assertEqual(src.calls["levels"], 0)   # off: not queried
+
+    def test_level_sql_is_bound_and_counts_null_and_out_of_range_as_activity(self):
+        self.assertIn("session_open = true", ch.LEVEL_SQL); self.assertNotIn("{", ch.LEVEL_SQL); self.assertIn("zero_ratio IS NULL", ch.LEVEL_SQL); self.assertIn("> 1", ch.LEVEL_SQL)
+
+    def test_an_erroring_source_is_down_at_once_not_after_120_s(self):                              # S-a
+        for name, bad in (("presence", RuntimeError("x")), ("session", RuntimeError("x")), ("levels", RuntimeError("x"))):
+            with self.subTest(name):
+                h, clock, src = mk(Src(session={"b6", "b7"}, levels=[("b6", None), ("b7", None)]) if name == "levels" else None)
+                self.assertEqual(h.hold(), {"opd-6": False, "opd-7": False})
+                src.v[name] = bad; clock.adv(31)
+                for r in ROOMS: h.note_health(r, QUIET, clock())
+                if name != "presence": src.v["presence"] = {"hb": [("M6", clock() - 1), ("M7", clock() - 1)], "enc": []}
+                else: src.v["session"] = set()
+                self.assertEqual(h.hold(clock()), {"opd-6": True, "opd-7": True})
+                src.v[name] = {"hb": [("M6", clock() + 29), ("M7", clock() + 29)], "enc": []} if name == "presence" else (set() if name == "session" else [])
+                clock.adv(31)
+                for r in ROOMS: h.note_health(r, QUIET, clock())
+                src.v["presence"] = {"hb": [("M6", clock() - 1), ("M7", clock() - 1)], "enc": []}
+                self.assertEqual(h.hold(clock()), {"opd-6": False, "opd-7": False})                  # and clears on the next good fetch
+
+    def test_session_stale_after_a_good_fetch_is_true(self):                                         # S-b (mutant N9)
+        h, clock, _ = mk(); self.assertEqual(h.hold(T), {"opd-6": False, "opd-7": False})
+        h.cache_s = 10 ** 9                                       # no refetch: only the session data ages (the other three are re-fed fresh)
+        h.data["presence"] = (self.enc(hb=[("M6", T + 125), ("M7", T + 125)]), T + 130); h.data["windows"] = ([], T + 130)
+        for r in ROOMS: h.note_health(r, QUIET, T + 130)
+        self.assertEqual(h.hold(T + 130), {"opd-6": True, "opd-7": True})                            # session data is 130 s old
+        self.assertEqual(h.last["opd-6"][1], ("session_down",))
+
+    def test_the_session_sql_has_no_started_at_upper_bound(self):                                    # S-c
+        self.assertNotIn("<=", ch.SESSION_SQL); self.assertIn("s.started_at > %s", ch.SESSION_SQL)
+
+    def test_health_freshness_is_the_older_of_receive_time_and_line_ts(self):                         # I-a
+        for line_ts, want in ((T - 3600, True), (T - 121, True), (T - 119, False), (T, False), (T + 500, False), (None, False), (float("nan"), False), ("x", False)):
+            with self.subTest(line_ts=line_ts):
+                h, _, _ = mk(health=False); h.note_health("opd-7", QUIET, T)
+                h.note_health("opd-6", dict(QUIET, ts=line_ts) if line_ts is not None else QUIET, T)
+                self.assertEqual(h.hold()["opd-6"], want)
+
+    def test_the_failed_page_retry_is_audited_once_per_5_min_not_every_loop(self):                    # I-e
+        class Broken(Sink):
+            def start_day_failed(self, room, now): raise RuntimeError("store locked")
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup); audit = os.path.join(t.name, "a.jsonl"); clock = Clock(T)
+        s = sd.StartDayAfterBoot(lambda r: None, os.path.join(t.name, "s.json"), Broken(), clock, audit)
+        s.on_health("r1", health(100)); clock.adv(601)
+        for _ in range(720):
+            s.check(); clock.adv(5)                                                                  # one hour of 5 s loops
+        n = sum(1 for l in open(audit) if "start_day_failed_sink_fault" in l)
+        self.assertGreaterEqual(n, 2); self.assertLessEqual(n, 13)
+
+    def test_new_switches_default_true_in_the_config(self):                                          # fable 17:16
+        t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup); p = os.path.join(t.name, "router.json")
+        for extra, want in (({}, (True, True)), ({"capture_closed_counts_quiet": "false", "open_session_requires_levels": 0}, (True, True)),
+                            ({"capture_closed_counts_quiet": False}, (False, True)), ({"open_session_requires_levels": False}, (True, False)),
+                            ({"capture_closed_counts_quiet": True, "open_session_requires_levels": True}, (True, True))):
+            json.dump(dict({"to": ["a"], "ackers": ["a"]}, **extra), open(p, "w")); c = ubus_bus.load_cfg(p)
+            self.assertEqual((c["capture_closed_counts_quiet"], c["open_session_requires_levels"]), want)
+
+    def test_a_read_error_in_one_rooms_source_holds_that_room_only(self):                           # fable 17:16
+        class Picky(Src):
+            """presence and session fail for any batch that includes M7 / b7, but answer for a single item; M7's own query fails."""
+            def __getitem__(self, name):
+                inner = Src.__getitem__(self, name)
+                def f(now, arg):
+                    if name in ("presence", "session", "levels") and len(arg) > 1: raise RuntimeError("batch failed")
+                    if name == "presence" and "M7" in arg: raise RuntimeError("M7 read failed")
+                    return inner(now, arg)
+                return f
+        h, clock, _ = mk(Picky())
+        self.assertEqual(h.hold(), {"opd-6": False, "opd-7": True})                                  # opd-7 only; opd-6 is unaffected
+        self.assertIn("presence_down", h.last["opd-7"][1]); self.assertEqual(h.last["opd-6"][1], ("clear",))
+        # a session read that fails for one room only
+        class PickyS(Src):
+            def __getitem__(self, name):
+                inner = Src.__getitem__(self, name)
+                def f(now, arg):
+                    if name == "session" and (len(arg) > 1 or "b7" in arg): raise RuntimeError("session read failed")
+                    return inner(now, arg)
+                return f
+        h2, _, _ = mk(PickyS()); self.assertEqual(h2.hold(), {"opd-6": False, "opd-7": True}); self.assertIn("session_down", h2.last["opd-7"][1])
+
+    def test_a_malformed_row_for_one_machine_holds_that_room_only(self):
+        pres = {"hb": [("M6", T - 5), ("M7", T - 5), ("M7",)], "enc": [("M6", "encounter_close", T - 9), ("M7", "encounter_open")]}
+        out = self.hold(Src(presence=pres)); self.assertEqual(out, {"opd-6": False, "opd-7": True})
+        pres = {"hb": [("M6", T - 5), ("M7", T - 5), 5, (), None], "enc": []}                       # rows with no readable machine are dropped, nothing breaks
+        self.assertEqual(self.hold(Src(presence=pres)), {"opd-6": False, "opd-7": False})
+        self.assertEqual(self.hold(Src(session={"b6", "b7", 5, None}, levels=[("b6", None), ("b7",), 3])), {"opd-6": False, "opd-7": True})    # b7's malformed level row holds only opd-7
+
+    def test_the_windows_source_down_changes_nothing_either_way(self):
+        h, clock, src = mk(Src(windows=RuntimeError("down"))); self.assertEqual(h.hold(), {"opd-6": False, "opd-7": False})
+        self.assertEqual(h.last["opd-6"][1], ("clear",))
+        sink = Sink(); h2, clock2, _ = mk(Src(windows=RuntimeError("down")), sink=sink)
+        for _ in range(80):
+            h2.hold(clock2()); clock2.adv(30)
+            for r in ROOMS: h2.note_health(r, QUIET, clock2())
+        self.assertEqual(sink.down, 0)                                                               # an optional source being down opens no stuck-source case
 
 
 class ConfigFlags(unittest.TestCase):

@@ -6,7 +6,7 @@ The sender is injected: sender(room) returns on success and raises on failure. N
 the same boot when two epochs are within BOOT_TOL_S. If the room is not capture_open within START_DEADLINE_S after the send, start_day_failed opens (URGENT, V kind)."""
 import json, math, os, subprocess, time
 
-BOOT_MAX_AGE_S, START_DEADLINE_S, BOOT_TOL_S = 600, 600, 120
+BOOT_MAX_AGE_S, START_DEADLINE_S, BOOT_TOL_S, SINK_RETRY_S = 600, 600, 120, 300
 
 
 def _num(v):
@@ -39,6 +39,7 @@ def build(flags, sink, home, clock=time.time, stderr=None, runner=subprocess.run
 class StartDayAfterBoot:
     def __init__(self, sender, state_path=None, sink=None, clock=time.time, audit_path=None):
         self.sender, self.state_path, self.sink, self.clock, self.audit_path = sender, state_path, sink, clock, audit_path
+        self.retry_at = {}                # room -> earliest time the failed-page sink call is tried again after a fault
         self.state = {}                   # room -> {"boot": epoch, "sent_at": t, "send_ok": bool, "started": bool, "failed": bool}
         if state_path and os.path.exists(state_path):
             try:
@@ -107,7 +108,7 @@ class StartDayAfterBoot:
         now = self.clock() if now is None else now
         for room, st in list(self.state.items()):
             try:
-                if st.get("started") or st.get("failed") or now - st["sent_at"] < START_DEADLINE_S:
+                if st.get("started") or st.get("failed") or now - st["sent_at"] < START_DEADLINE_S or now < self.retry_at.get(room, 0):
                     continue
                 st["failed"] = True
                 self._audit(room, "start_day_failed", now, send_ok=bool(st.get("send_ok")))
@@ -116,6 +117,7 @@ class StartDayAfterBoot:
                         self.sink.start_day_failed(room, now)          # the page first, then the save: a state-write fault can never lose it
                     except Exception:  # noqa: BLE001 -- a sink or store fault is retried on the next check
                         st["failed"] = False
+                        self.retry_at[room] = now + SINK_RETRY_S          # I-e: a broken store is retried (and audited) once per 5 min, not every loop
                         self._audit(room, "start_day_failed_sink_fault", now)
                         continue
                 self._save()

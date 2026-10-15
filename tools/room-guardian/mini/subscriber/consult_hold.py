@@ -1,30 +1,46 @@
-"""consult_hold.py -- FR1 2.4 d' (Mini side), Round 2: the per-room `consult_open` hold carried in the control line. Behind the flag consult_open_publish (default false).
+"""consult_hold.py -- FR1 2.4 d' (Mini side), Round 3: the per-room `consult_open` hold carried in the control line. Behind the flag consult_open_publish (default false).
 Contract: ~/oc/herdr-lead/CONTROL-CONSULT-OPEN-SHAPE-15OCT.md. true = a consult may be open in that room (the kiosk never reboots); false = no consult.
-fable 16:51: the hold comes from LIVE sources and fails closed. A room is `false` ONLY if all of these hold:
-  1. Pulse Presence is fresh (an extension event for the room's machine in the last 2 min) and no encounter is attached to any such event;
-  2. the kiosk's own health line for the room is fresh (<= 2 min) and shows no activity (not capture_open with sound);
-  3. the room has no open recorder session in the DB (bench_session, status recording or paused);
-  4. (extra, may only force true) the hourly eta_encounter_windows table shows no open window for the room, when the room has a slug mapped.
-Any source missing, stale (> 2 min), erroring or unmapped gives true. Sources 1, 3 and 4 are Neon reads with the read-only credential file the consult cutter uses
-(read by path, never printed), one thread and one 5 s timeout per source. Every SQL string, table and field name below is INFERRED (copied from lib/rooms-live/read.ts
-and tools/pulse-watch, not run on the Mini).
-Source 2 reads the kiosk health lines the subscriber already stores (rms_dbfs_2s, zero_ratio, capture_open): they are local, 30 s fresh, and exist even when no recorder
-session is open, so a room with a dead recorder still has a fresh quiet answer. Sources 3's session rows already carry the Rooms-board MIC line's level rows
-(bench_level_sample has session_open = true only while a session is open), so a levels query would add nothing and is not made."""
+The hold comes from LIVE sources and fails closed. A room is `false` ONLY if all of these hold:
+  1. Pulse Presence: the extension's heartbeat for the room's machine is fresh (an ext event in the last 2 min) AND the NEWEST encounter_open / encounter_close event
+     of that machine within the last 4 h is not an open. (The extension writes encounter_id only on the consult start/close POST event; heartbeats carry null, so
+     "no encounter id on a heartbeat" says nothing. A consult is open when its encounter_open has no later encounter_close.)
+  2. the kiosk's own health line for the room is fresh (<= 2 min, by the older of receive time and the line's own ts) and shows no activity;
+  3. the room has no open recorder session in the DB (bench_session, status recording or paused), or with open_session_requires_levels true, none with level activity
+     (bench_level_sample, session_open, zero_ratio not digital silence) in the last 2 min;
+  4. (extra, may only force true) the hourly eta_encounter_windows table shows no open window for the room, when the room has a slug mapped. If that source is down
+     it contributes nothing (neither true nor false).
+Any source missing, stale (> 2 min), erroring (down at once, the last good answer is NOT kept) or unmapped gives true FOR THAT ROOM; a batched read that fails is retried
+per room (within an 8 s budget) so one room's read error holds that room only. fable 17:16 ruled both recorder switches default TRUE (config keys, a literal false turns
+one off): capture_closed_counts_quiet (a non-capturing recorder, capture_open false, is quiet) and open_session_requires_levels (an open session holds only with level
+activity, zero_ratio < 0.98, in the last 2 min). The hourly windows signal is optional and may only force true: it being down changes nothing.
+The DB sources are Neon reads with the read-only credential file the consult cutter uses (read by path, never printed), one thread and one 5 s timeout per source.
+Every SQL string, table, field and event name below is INFERRED (copied from lib/rooms-live/read.ts, tools/pulse-watch and extensions/pulse-presence/src/agent.js and
+lib/events.js; not run on the Mini)."""
 import json, math, os, threading, time
 from datetime import datetime, timedelta, timezone
 
 CACHE_S, MAX_AGE_S, QUERY_TIMEOUT_S, STUCK_S, SINK_RETRY_S = 30, 120, 5, 1800, 300
 OPEN_UNCLOSED_MAX_S, OPEN_CLOSED_GRACE_S = 4 * 3600, 120     # Rooms Live rule (pulse-watch occupancy.mjs) for the windows signal
 SESSION_LOOKBACK_S = 7 * 86400                               # Rooms Live bounds open sessions to 7 days; an older row is never read as open
-SILENCE_ZERO_RATIO = 0.98                                    # INFERRED: a health line with zero_ratio >= this (or no sound figure at all) is digital silence
+SILENCE_ZERO_RATIO = 0.98                                    # INFERRED: a health line or level row with zero_ratio >= this is digital silence
+ENC_LOOKBACK_S = 4 * 3600                                    # the windows' bound: the newest encounter_open/close is looked for within this long
+LEVEL_FRESH_S = 120
+FALLBACK_BUDGET_S = 8                                        # the per-room retry after a failed batched read stops after this long
 DEFAULT_URL_FILE = "~/.config/eta-audio/db.url"
 IST = timezone(timedelta(hours=5, minutes=30))
 # INFERRED SQL (read-only session; %s are timestamptz / text[] parameters):
-PRESENCE_SQL = ("SELECT p.machine, p.ts, p.payload->>'encounter_id' AS enc FROM pulse_presence_events p "
-                "WHERE p.source = 'ext' AND p.machine = ANY(%s::text[]) AND p.ts > %s ORDER BY p.ts DESC LIMIT 2000")
+# Presence heartbeat freshness: the newest ext event of each machine (heartbeat, idle, active, ...). DISTINCT ON, so no LIMIT can cut a machine's row (refute I-c).
+HB_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.ts FROM pulse_presence_events p "
+          "WHERE p.source = 'ext' AND p.machine = ANY(%s::text[]) AND p.ts > %s ORDER BY p.machine, p.ts DESC, p.id DESC")
+# The newest encounter_open / encounter_close of each machine (any source: the URL-driven and the POST-driven one both write these event names).
+ENC_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.event, p.ts FROM pulse_presence_events p "
+           "WHERE p.event IN ('encounter_open', 'encounter_close') AND p.machine = ANY(%s::text[]) AND p.ts > %s ORDER BY p.machine, p.ts DESC, p.id DESC")
 SESSION_SQL = ("SELECT DISTINCT s.room_id FROM bench_session s "
-               "WHERE s.room_id = ANY(%s::text[]) AND s.status IN ('recording', 'paused') AND s.started_at <= %s AND s.started_at > %s")
+               "WHERE s.room_id = ANY(%s::text[]) AND s.status IN ('recording', 'paused') AND s.started_at > %s")
+# Only used with open_session_requires_levels: the newest level row that is not digital silence (NULL, below 0.98, or out of range counts as activity).
+LEVEL_SQL = ("SELECT l.room_id, max(l.sampled_at) FILTER (WHERE l.zero_ratio IS NULL OR l.zero_ratio < 0.98 OR l.zero_ratio > 1) AS last_active "
+             "FROM bench_level_sample l WHERE l.room_id = ANY(%s::text[]) AND l.ist_date IN (%s::date, %s::date) AND l.sampled_at > %s AND l.session_open = true "
+             "GROUP BY l.room_id")
 WIN_SQL = "SELECT room_slug, room_id, t_open, t_close FROM eta_encounter_windows WHERE room_slug IS NOT NULL AND t_open >= %s"
 
 
@@ -61,45 +77,69 @@ def _connect(path, timeout):
 
 
 def pg_sources(url_file=None, timeout=QUERY_TIMEOUT_S):
-    """-> {"presence": f, "session": f, "windows": f}; each f(now, arg) returns plain Python data and raises on any fault.
-    presence(now, machine_keys) -> [(machine, ts_epoch, encounter_id|None)]; session(now, room_ids) -> {room_id of an open session};
-    windows(now, None) -> [(room_slug, room_id, t_open_epoch, t_close_epoch|None)]."""
+    """-> {"presence": f, "session": f, "levels": f, "windows": f}; each f(now, arg) returns plain Python data and raises on any fault.
+    presence(now, machine_keys) -> {"hb": [(machine, ts_epoch)], "enc": [(machine, event, ts_epoch)]}; session(now, room_ids) -> {room_id of an open session};
+    levels(now, room_ids) -> [(room_id, last_active_epoch|None)]; windows(now, None) -> [(room_slug, room_id, t_open_epoch, t_close_epoch|None)]."""
     path = url_file or DEFAULT_URL_FILE
     utc = timezone.utc
 
-    def run(sql, params):
+    def run(*queries):
         c = _connect(path, timeout)
         try:
-            return c.execute(sql, params).fetchall()
+            return [c.execute(sql, params).fetchall() for sql, params in queries]
         finally:
             c.close()
 
     def presence(now, keys):
-        rows = run(PRESENCE_SQL, (list(keys), datetime.fromtimestamp(now - MAX_AGE_S, utc)))
-        return [(r[0], _epoch(r[1]), r[2]) for r in rows]
+        hb, enc = run((HB_SQL, (list(keys), datetime.fromtimestamp(now - MAX_AGE_S, utc))),
+                      (ENC_SQL, (list(keys), datetime.fromtimestamp(now - ENC_LOOKBACK_S, utc))))
+        return {"hb": [(r[0], _epoch(r[1])) for r in hb], "enc": [(r[0], r[1], _epoch(r[2])) for r in enc]}
 
     def session(now, ids):
-        rows = run(SESSION_SQL, (list(ids), datetime.fromtimestamp(now, utc), datetime.fromtimestamp(now - SESSION_LOOKBACK_S, utc)))
+        (rows,) = run((SESSION_SQL, (list(ids), datetime.fromtimestamp(now - SESSION_LOOKBACK_S, utc))))
         return {r[0] for r in rows}
 
+    def levels(now, ids):
+        today = datetime.fromtimestamp(now, IST).date()
+        (rows,) = run((LEVEL_SQL, (list(ids), today, today - timedelta(days=1), datetime.fromtimestamp(now - LEVEL_FRESH_S, utc))))
+        return [(r[0], _epoch(r[1])) for r in rows]
+
     def windows(now, _arg):
-        rows = run(WIN_SQL, (datetime.fromtimestamp(now - OPEN_UNCLOSED_MAX_S, utc),))
+        (rows,) = run((WIN_SQL, (datetime.fromtimestamp(now - OPEN_UNCLOSED_MAX_S, utc),)))
         return [(r[0], r[1], _epoch(r[2]), _epoch(r[3])) for r in rows]
-    return {"presence": presence, "session": session, "windows": windows}
+    return {"presence": presence, "session": session, "levels": levels, "windows": windows}
 
 
 def _shape_ok(name, v):
-    """A source reply must have exactly the shape the code reads; anything else is a source error (true)."""
-    try:
-        if name == "presence":
-            return isinstance(v, list) and all(isinstance(x, tuple) and len(x) == 3 for x in v)
-        if name == "session":
-            return isinstance(v, (set, frozenset)) and all(isinstance(x, str) for x in v)
-        if name == "windows":
-            return isinstance(v, list) and all(isinstance(x, tuple) and len(x) == 4 for x in v)
-    except Exception:                      # noqa: BLE001
-        return False
-    return False
+    """Only the overall shape is checked here (a dict of two lists, a list, a set); anything else is a source error (true for every room that uses it).
+    Rows are cleaned one by one in _clean, so one room's bad row holds that room only."""
+    if name == "presence":
+        return isinstance(v, dict) and isinstance(v.get("hb"), list) and isinstance(v.get("enc"), list)
+    if name == "session":
+        return isinstance(v, (set, frozenset))
+    return name in ("levels", "windows") and isinstance(v, list)
+
+
+def _clean(name, v):
+    """-> (clean value, set of items (machine keys / room ids) whose row was malformed). A malformed row with a readable key holds that key's room; one with no
+    readable key cannot be attributed and is dropped."""
+    bad = set()
+
+    def rows(lst, n):
+        out = []
+        for x in lst:
+            if isinstance(x, (tuple, list)) and len(x) == n:
+                out.append(tuple(x))
+            elif isinstance(x, (tuple, list)) and x and isinstance(x[0], str):
+                bad.add(x[0])
+        return out
+    if name == "presence":
+        return {"hb": rows(v["hb"], 2), "enc": rows(v["enc"], 3)}, bad
+    if name == "session":
+        return {x for x in v if isinstance(x, str)}, bad
+    if name == "levels":
+        return rows(v, 2), bad
+    return rows(v, 4), bad
 
 
 def _entry(v):
@@ -116,23 +156,28 @@ def _entry(v):
 
 class ConsultHold:
     def __init__(self, rooms, room_map, sources, clock=time.time, audit_path=None, sink=None, cache_s=CACHE_S, max_age_s=MAX_AGE_S, timeout_s=QUERY_TIMEOUT_S,
-                 stuck_s=STUCK_S):
+                 stuck_s=STUCK_S, capture_closed_counts_quiet=True, open_session_requires_levels=True):
         self.rooms, self.map, self.src, self.clock, self.audit_path, self.sink = list(rooms), dict(room_map or {}), sources, clock, audit_path, sink
         self.cache_s, self.max_age_s, self.timeout_s, self.stuck_s = cache_s, max_age_s, timeout_s, stuck_s
+        self.closed_quiet, self.need_levels = capture_closed_counts_quiet is not False, open_session_requires_levels is not False     # fable 17:16: default true, only a literal false turns one off
         self.data = {}                    # source name -> (value, fetched_at) of its last good fetch
         self.err = {}                     # source name -> True while its latest attempt failed
         self.tried_at = None
-        self.health = {}                  # room -> (ts, obj) of the newest kiosk health line (fed by the subscriber)
+        self.health = {}                  # room -> (effective ts, obj) of the newest kiosk health line (fed by the subscriber)
         self.err_since = None
         self.case_open = False
         self.sink_block_until = 0         # after a sink fault no sink call is tried again for SINK_RETRY_S, so a broken store cannot raise on every tick
+        self.item_bad = {}                # source name -> set of items (machine keys / room ids) whose own read failed in the per-room retry
         self.inflight = {}                # source name -> the fetch thread still running (a new fetch never starts while one is alive)
         self.last = {}                    # room -> (hold, reasons) for the audit line on change
 
     # ---- source 2 feed
     def note_health(self, room, obj, now=None):
+        """Freshness is the OLDER of the receive time and the line's own ts, so a delayed or replayed line cannot read fresh. A future ts counts as the receive time (note I-b)."""
         if isinstance(obj, dict):
-            self.health[room] = (self.clock() if now is None else now, obj)
+            t = self.clock() if now is None else now
+            ts = obj.get("ts")
+            self.health[room] = (min(t, ts) if _finite(ts) else t, obj)
 
     # ---- the DB sources
     def _call(self, name, now, arg):
@@ -159,15 +204,52 @@ class ConsultHold:
         self.tried_at = now
         keys = sorted({k for r in self.rooms for k in (_entry(self.map.get(r))[0] or [])})
         ids = sorted({i for r in self.rooms for i in [_entry(self.map.get(r))[1]] if i})
-        for name, arg in (("presence", keys), ("session", ids), ("windows", None)):
-            if name in ("presence",) and not keys or name == "session" and not ids:
+        todo = [("presence", keys), ("session", ids), ("windows", None)] + ([("levels", ids)] if self.need_levels else [])
+        for name, arg in todo:
+            if name in ("presence", "session", "levels") and not arg:
                 continue                  # nothing is mapped for this source: every room is already true as unmapped
             ok, v = self._call(name, now, arg)
-            self.err[name] = not ok
+            self.item_bad[name] = set()
             if ok:
+                self.err[name] = False
+                v, bad = _clean(name, v)
+                self.item_bad[name] = bad
                 self.data[name] = (v, now)
+                continue
+            self.err[name] = True
+            if name == "windows" or len(arg) < 2:
+                continue
+            # one room's read error must hold that room only: retry each item on its own, within a short budget (the rest stay bad)
+            t0, parts = time.monotonic(), []
+            for item in arg:
+                if time.monotonic() - t0 > FALLBACK_BUDGET_S:
+                    self.item_bad[name].add(item); continue
+                ok1, v1 = self._call(name, now, [item])
+                if ok1:
+                    v1, bad1 = _clean(name, v1)
+                    self.item_bad[name] |= bad1
+                    parts.append(v1)
+                else:
+                    self.item_bad[name].add(item)
+            if parts:
+                self.err[name] = False
+                self.data[name] = (self._merge(name, parts), now)
+
+    @staticmethod
+    def _merge(name, parts):
+        if name == "presence":
+            return {"hb": [x for p in parts for x in p["hb"]], "enc": [x for p in parts for x in p["enc"]]}
+        if name == "session":
+            return set().union(*parts)
+        return [x for p in parts for x in p]
+
+    def _item_ok(self, name, items, now):
+        """A source is usable for a room when it is fresh and none of the room's own items failed in the per-room retry."""
+        return self._fresh(name, now) and not (self.item_bad.get(name, set()) & set(items))
 
     def _fresh(self, name, now):
+        if self.err.get(name):
+            return False                  # an erroring source is down at once; the last good answer is not kept (refute S-a)
         d = self.data.get(name)
         return d is not None and now - d[1] <= self.max_age_s
 
@@ -177,43 +259,46 @@ class ConsultHold:
         reasons = []
         if not keys or not rid:
             return True, ["no_mapping"]
-        # 1. Pulse Presence
-        if not self._fresh("presence", now):
+        # 1. Pulse Presence: heartbeat fresh, and the newest encounter_open/close of the machine is not an open
+        if not self._item_ok("presence", keys, now):
             reasons.append("presence_down")
         else:
-            rows = [x for x in self.data["presence"][0] if x[0] in keys and _finite(x[1]) and now - x[1] <= self.max_age_s]
-            if not rows:
+            pdata = self.data["presence"][0]
+            if not any(x[0] in keys and _finite(x[1]) and now - x[1] <= self.max_age_s for x in pdata["hb"]):
                 reasons.append("presence_stale")                 # no fresh extension event for this room's machine: cannot say nobody is consulting
-            elif any(isinstance(x[2], str) and x[2].strip() for x in rows):
-                reasons.append("presence_consulting")
+            if any(x[0] in keys and x[1] != "encounter_close" for x in pdata["enc"]):
+                reasons.append("presence_consulting")            # newest is an open (or anything that is not a close, or an unreadable ts): a consult is running
         # 2. the kiosk's own health line
         h = self.health.get(r)
         if h is None or now - h[0] > self.max_age_s:
             reasons.append("health_stale")
         elif self._active(h[1]):
             reasons.append("health_active")
-        # 3. open recorder session
-        if not self._fresh("session", now):
+        # 3. open recorder session (with open_session_requires_levels: only with level activity in the last 2 min)
+        if not self._item_ok("session", [rid], now):
             reasons.append("session_down")
         elif rid in self.data["session"][0]:
-            reasons.append("session_open")
+            if not self.need_levels:
+                reasons.append("session_open")
+            elif not self._item_ok("levels", [rid], now):
+                reasons.append("levels_down")
+            elif any(x[0] == rid and x[1] is not None and (not _finite(x[1]) or now - x[1] <= LEVEL_FRESH_S) for x in self.data["levels"][0]):
+                reasons.append("session_open")                   # level activity in the last 2 min (an unreadable time counts as activity)
         # 4. hourly windows: may only force true
-        if not self._fresh("windows", now):
-            reasons.append("windows_down")
-        elif slug and any(w[0] == slug and window_open(w[2], w[3], now) for w in self.data["windows"][0]):
+        if self._fresh("windows", now) and slug and any(w[0] == slug and window_open(w[2], w[3], now) for w in self.data["windows"][0]):
             reasons.append("windows_open")
         return (bool(reasons), reasons or ["clear"])
 
-    @staticmethod
-    def _active(obj):
-        """A health line shows activity unless it is digital silence: capture_open false, or capture_open true with zero_ratio >= SILENCE_ZERO_RATIO.
-        capture_open missing or not a bool, or true with a missing, non-numeric or NaN zero_ratio, counts as active (fail closed)."""
-        if obj.get("capture_open") is False:
-            return False
-        if obj.get("capture_open") is not True:
-            return True                   # missing or not a bool: unknown, so active
+    def _active(self, obj):
+        """A health line shows activity unless it is digital silence. capture_open false is unknown (active) unless capture_closed_counts_quiet is on; capture_open true
+        is quiet only with a finite zero_ratio in 0..1 that is >= SILENCE_ZERO_RATIO. Anything else (missing, non-bool, NaN, inf, out of range, str) is active."""
+        co = obj.get("capture_open")
+        if co is False:
+            return not self.closed_quiet
+        if co is not True:
+            return True
         zr = obj.get("zero_ratio")
-        if _num(zr):
+        if _finite(zr) and 0 <= zr <= 1:
             return zr < SILENCE_ZERO_RATIO
         return True
 
@@ -230,7 +315,7 @@ class ConsultHold:
                 except Exception:         # noqa: BLE001 -- one room's fault holds that room
                     out[r], why[r] = True, ["fault"]
             self._audit(out, why, now)
-            self._stuck(any(not self._fresh(n, now) for n in ("presence", "session", "windows") if self._needed(n)), now)
+            self._stuck(any((not self._fresh(n, now)) or bool(self.item_bad.get(n)) for n in ("presence", "session", "levels") if self._needed(n)), now)
             return out
         except Exception:                 # noqa: BLE001
             return {r: True for r in self.rooms}
@@ -238,6 +323,8 @@ class ConsultHold:
     def _needed(self, name):
         if name == "windows":
             return True
+        if name == "levels" and not self.need_levels:
+            return False
         keyname = 0 if name == "presence" else 1
         return any(_entry(self.map.get(r))[keyname] for r in self.rooms)
 
