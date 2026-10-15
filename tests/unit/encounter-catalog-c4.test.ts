@@ -55,7 +55,7 @@ describe("jev", () => {
     expect(one({ jev: { sets: [], counts: { a: 1 } } })).toEqual({ ok: false, error: "bad_jev" });
   });
   it("refuses a free-text value, a bad instant, a bad sha, a non-array sets and too many sets", () => {
-    for (const bad of [{ band: "has spaces and words" }, { label: "x".repeat(61) }, { model: "m m" }, { at: "yesterday" }, { at: "2026-02-30T00:00:00Z" }, { set_sha: "no sha!" }, { set_id: "" }, { set_id: 5 }]) {
+    for (const bad of [{ band: "has spaces and words" }, { label: "two words" }, { label: "x".repeat(61) }, { model: "m m" }, { at: "yesterday" }, { at: "2026-02-30T00:00:00Z" }, { set_sha: "no sha!" }, { set_id: "" }, { set_id: 5 }]) {
       expect(one({ jev: jev(bad) }), JSON.stringify(bad)).toEqual({ ok: false, error: "bad_jev" });
     }
     expect(one({ jev: { sets: "x" } })).toEqual({ ok: false, error: "bad_jev" });
@@ -89,11 +89,18 @@ describe("presence", () => {
     expect(one({ presence: { boundary_source: "pqm" } }).ok).toBe(true);
     expect(one({ presence: null }).ok).toBe(true);
   });
+  it("allows '+' in boundary_source only (CAA's token+token values); every other token field stays strict", () => {
+    expect(one({ presence: { ...presence, boundary_source: "caa_cut+pqm" } }).ok).toBe(true);
+    expect(one({ presence: { ...presence, boundary_source: "a+b c" } })).toEqual({ ok: false, error: "bad_presence" });
+    expect(one({ presence: { ...presence, close_reason: "a+b" } })).toEqual({ ok: false, error: "bad_presence" });
+    expect(one({ jev: jev({ band: "a+b" }) })).toEqual({ ok: false, error: "bad_jev" });
+    expect(one({ clef_affect: clef({ lane: "a+b" }) })).toEqual({ ok: false, error: "bad_clef_affect" });
+  });
   it("refuses names, free text, bad times and extra keys", () => {
-    expect(one({ presence: { ...presence, close_reason: "Dr Somebody left" } })).toEqual({ ok: false, error: "bad_presence" });
+    expect(one({ presence: { ...presence, close_reason: "left after the visit ended" } })).toEqual({ ok: false, error: "bad_presence" });
     expect(one({ presence: { ...presence, encounter_open: "2026-10-15" } })).toEqual({ ok: false, error: "bad_presence" });
     expect(one({ presence: { ...presence, encounter_open: -1 } })).toEqual({ ok: false, error: "bad_presence" });
-    expect(one({ presence: { ...presence, doctor_name: "x" } })).toEqual({ ok: false, error: "bad_presence" });
+    expect(one({ presence: { ...presence, extra_key: "x" } })).toEqual({ ok: false, error: "bad_presence" });
     expect(one({ presence: { ...presence, note: "x" } })).toEqual({ ok: false, error: "text_key" });
     expect(validPresence({ ...presence, encounter_open: 1.5 })).toBe(false);
   });

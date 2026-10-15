@@ -19,6 +19,7 @@ Three nullable jsonb columns, written by the same ingest route as field-level up
 - `jev` (newcat's upsert job): `{sets: [{set_id, set_sha, band, label, model, at}]}`. `band` and `label` may be null; no question text, no reasons.
 - `clef_affect` (newcat's upsert job): `{lanes: [{lane, scores, model_rev, at}]}`; `scores` is an object of token keys to finite numbers.
 The ingest validates these shapes strictly (only those keys; values are tokens of 1..60 characters `[A-Za-z0-9_:.-]`, `at` a strict ISO instant, at most 50 sets / 20 lanes / 64 scores) and the text-key refusal applies inside them. A bad block answers 400 `bad_jev` / `bad_clef_affect` / `bad_presence`; a present `null` clears the column. A row that carries only `jev` (or only `clef_affect`) never touches the box's columns, and the box's next row (which has no `jev` / `clef_affect` key) never blanks newcat's.
+`presence.boundary_source` may also contain `+` (CAA's values are token+token); no other field may. **newcat's upsert rows must not send `generated_at`**: it belongs to the box feed's stale-write guard, and a partial row without it is never guarded or skipped.
 Turn the feed's `--post-url` on only after 0169 is applied: an older ingest refuses the unknown `presence` key.
 
 ## Logs (by design)

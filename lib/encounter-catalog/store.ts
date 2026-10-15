@@ -22,6 +22,7 @@ const JSON_FIELDS = ["clip", "layers", "freescript", "stages", "allowance", "pre
 /** 0169 (C4): presence (the lab box feed), jev and clef_affect (newcat's upsert job). Strict shapes: ids, tokens, scores and instants only. */
 const C4_FIELDS = ["jev", "clef_affect", "presence"] as const;
 const TOKEN = /^[A-Za-z0-9_:.-]{1,60}$/;
+const BOUNDARY = /^[A-Za-z0-9_:.+-]{1,60}$/;   // presence.boundary_source only: CAA's values are token+token (F1)
 const SHA = /^[A-Za-z0-9]{6,128}$/;
 const MAX_SETS = 50;
 const MAX_LANES = 20;
@@ -73,7 +74,8 @@ export function validClef(v: Record<string, unknown>): boolean {
 export function validPresence(v: Record<string, unknown>): boolean {
   return onlyKeys(v, ["encounter_open", "encounter_close", "boundary_source", "close_reason"])
     && (["encounter_open", "encounter_close"] as const).every((k) => v[k] === undefined || v[k] === null || okMs(v[k]))
-    && (["boundary_source", "close_reason"] as const).every((k) => v[k] === undefined || tokOrNull(v[k]));
+    && (v.boundary_source === undefined || v.boundary_source === null || (typeof v.boundary_source === "string" && BOUNDARY.test(v.boundary_source)))
+    && (v.close_reason === undefined || tokOrNull(v.close_reason));
 }
 
 const C4_VALID: Record<(typeof C4_FIELDS)[number], (v: Record<string, unknown>) => boolean> = { jev: validJev, clef_affect: validClef, presence: validPresence };
