@@ -16,7 +16,10 @@ log "pip install"
 TORCH_BEFORE=$(python -c "import torch;print(torch.__version__)")
 pip install -q --no-cache-dir -r tools/timbre/requirements-turns.txt
 [ "$(python -c 'import torch;print(torch.__version__)')" = "$TORCH_BEFORE" ] || { echo "torch changed by pip install: abort" >&2; exit 3; }
-pip check || { echo "pip check failed: abort" >&2; exit 4; }
+# base image's ninja wheel tag makes pip check emit a known false positive; ignore only that exact line
+PIP_CHECK_OUT=$(pip check 2>&1 || true)
+PIP_CHECK_BAD=$(printf '%s\n' "$PIP_CHECK_OUT" | grep -v -E '^(ninja [^ ]+ is not supported on this platform|No broken requirements found\.)$' | grep -v '^$' || true)
+[ -z "$PIP_CHECK_BAD" ] || { echo "pip check failed: abort" >&2; printf '%s\n' "$PIP_CHECK_BAD" >&2; exit 4; }
 python - <<'PY'
 import torch, torchaudio
 print("torchaudio", torchaudio.__version__)
