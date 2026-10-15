@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import math
 import os
 import subprocess
 import sys
@@ -321,9 +322,30 @@ def _versions(cfg: dict) -> dict:
     return {"pipeline_version": cfg.get("pipeline_version"), "valence_model_rev": cfg.get("valence_model_rev"), "arousal_model_rev": cfg.get("arousal_model_rev")}
 
 
+_LEDGER_VERSION_KEYS = ("pipeline_version", "valence_model_rev", "arousal_model_rev", "cut_version")
+
+
+def _good_ledger_row(row: object) -> bool:
+    """Shape check for one parsed ledger row. cost_usd_est must be a finite number >= 0 (not bool); consult_uid a non-empty str;
+    ist_date a str; the version fields a str or null (a missing key reads as null)."""
+    if not isinstance(row, dict):
+        return False
+    uid, day, cost = row.get("consult_uid"), row.get("ist_date"), row.get("cost_usd_est")
+    if not (isinstance(uid, str) and uid) or not isinstance(day, str):
+        return False
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return False
+    try:
+        if not (math.isfinite(cost) and cost >= 0):
+            return False
+    except OverflowError:
+        return False
+    return all(row.get(k) is None or isinstance(row.get(k), str) for k in _LEDGER_VERSION_KEYS)
+
+
 def read_ledger(path: Path) -> tuple[list[dict], int]:
-    """(usable rows, bad-row count). A row that is not JSON, not an object with a consult_uid, has a non-numeric cost, or has
-    invalid UTF-8 is skipped and counted, never fatal; its consult may be re-scored."""
+    """(usable rows, bad-row count). A row that is not JSON or fails `_good_ledger_row` (bad consult_uid, ist_date, version field, or a
+    cost that is not a finite number >= 0), or has invalid UTF-8, is skipped and counted, never fatal; its consult may be re-scored."""
     rows: list[dict] = []
     bad = 0
     if not path.is_file():
@@ -333,10 +355,10 @@ def read_ledger(path: Path) -> tuple[list[dict], int]:
             continue
         try:
             row = json.loads(raw.decode("utf-8", errors="replace"))
-            if not isinstance(row, dict) or not row.get("consult_uid"):
-                raise ValueError("no consult_uid")
-            float(row.get("cost_usd_est") or 0.0)
-        except (ValueError, TypeError):
+        except (ValueError, RecursionError):
+            bad += 1
+            continue
+        if not _good_ledger_row(row):
             bad += 1
             continue
         rows.append(row)

@@ -35,12 +35,18 @@ manifest has `scope_json.job = "timbre-intraday"`. Nothing reads it for any deci
 - **One tick at a time:** `flock` on `<workdir>/intraday.lock`; a busy lock prints `[timbre-intraday] busy` and exits 0.
 - **Re-cut consults:** `cut_version` (from the consult row `/api/timbre/consults` returns) is part of the ledger key, so a re-cut consult is
   re-scored on the next tick. A row or consult with no `cut_version` is keyed null, which matches only a null.
-- **Bad ledger rows:** an unparseable row (bad JSON, non-numeric cost, bad UTF-8) is skipped, never fatal; each tick prints
-  `[timbre-intraday] ledger_bad_rows=N`. A skipped row's consult may be re-scored.
-- **Backfill (last 7 days):** run as the service user with the service env (as root it would leave root-owned lock and ledger files that
-  stop every later timer tick), values copied from `deploy/timbre-intraday.service`:
-  `for i in 1 2 3 4 5 6 7; do sudo systemd-run --uid=timbre --wait --pipe -p EnvironmentFile=/etc/timbre-nightly.env -p WorkingDirectory=/opt/timbre/eta /opt/timbre/eta/tools/timbre/.venv/bin/python -m tools.timbre.nightly intraday --config /etc/timbre-nightly.json --date $(date -d "-$i day" +%F); done`
+- **Bad ledger rows:** a row that is unparseable (bad JSON, bad UTF-8), has a `cost_usd_est` that is not a finite number >= 0 (NaN, inf,
+  negative, bool, string), a `consult_uid` that is not a non-empty string, an `ist_date` that is not a string, or a version field
+  (`pipeline_version`, `valence_model_rev`, `arousal_model_rev`, `cut_version`) that is neither string nor null, is skipped and never enters
+  the day's spend; never fatal. Each tick prints `[timbre-intraday] ledger_bad_rows=N`. A skipped row's consult may be re-scored.
+- **Backfill (last 7 days):** run as the service user (`eta`) with the service env (as root it would leave root-owned lock and ledger files
+  that stop every later timer tick), values copied from `deploy/timbre-intraday.service`:
+  `for i in 1 2 3 4 5 6 7; do sudo systemd-run --uid=eta --wait --pipe -p EnvironmentFile=/etc/timbre-nightly.env -p WorkingDirectory=/home/eta/timbre-nightly/code /home/eta/timbre-nightly/venv/bin/python -m tools.timbre.nightly intraday --config /etc/timbre-nightly.json --date $(date -d "-$i day" +%F); done`
   (each date has its own daily budget; already-ledgered consults are skipped).
+- **t4 host layout:** user `eta` (there is no `timbre` user), code in `/home/eta/timbre-nightly/code`, venv in `/home/eta/timbre-nightly/venv`.
+  The code there is an exported copy (`git archive` of `tools/timbre`), not a checkout; re-export to update it.
+- **Egress:** no new egress. The Clef-omni extractor already posts 16 kHz patient-window audio to Cloudflare Workers AI, as approved for Timbre on 11 Oct.
+- **Spend:** the budget env is shared by nightly and intraday, and the spend report sums both jobs (`affect_run.scope_json.job`).
 - **Off switch:** `TIMBRE_NIGHTLY_ENABLED=0` (also disables `run`) or `systemctl disable --now timbre-intraday.timer`. Exit codes as `run`.
 - The nightly `run` does not read the ledger, so it still re-scores the previous day in full (a new run row; readers use `affect_consult_latest`).
 
@@ -68,12 +74,13 @@ for an A/B only, until Vinay decommissions it.
 
 ## Install — lab GPU box (systemd)
 ```
-sudo useradd -r -m -d /var/lib/timbre-nightly timbre
-sudo git clone <ETA repo> /opt/timbre/eta && cd /opt/timbre/eta && python3 -m venv tools/timbre/.venv && tools/timbre/.venv/bin/pip install -r tools/timbre/requirements.txt
+# t4: user eta; code is an exported copy (git archive of tools/timbre) in /home/eta/timbre-nightly/code, not a checkout
+mkdir -p /home/eta/timbre-nightly/code && git archive <rev> tools/timbre | tar -x -C /home/eta/timbre-nightly/code
+python3 -m venv /home/eta/timbre-nightly/venv && /home/eta/timbre-nightly/venv/bin/pip install -r /home/eta/timbre-nightly/code/tools/timbre/requirements.txt
 sudo cp tools/timbre/deploy/nightly.example.json /etc/timbre-nightly.json      # set app_url, paths, enabled:true
 sudo install -m 600 /dev/null /etc/timbre-nightly.env                          # TIMBRE_INGEST_SECRET, TIMBRE_GIT_SHA, CF_* (Clef), R2_* (read-only consult clips)
 sudo cp tools/timbre/deploy/timbre-nightly.{service,timer} /etc/systemd/system/ && sudo systemctl daemon-reload
-sudo -u timbre env $(cat /etc/timbre-nightly.env | xargs) tools/timbre/.venv/bin/python -m tools.timbre.nightly plan --config /etc/timbre-nightly.json   # dry run: lists, scores nothing
+cd /home/eta/timbre-nightly/code && env $(sudo cat /etc/timbre-nightly.env | xargs) /home/eta/timbre-nightly/venv/bin/python -m tools.timbre.nightly plan --config /etc/timbre-nightly.json   # dry run: lists, scores nothing
 sudo systemctl enable --now timbre-nightly.timer
 ```
 Speaker evidence for consult clips (voiceprints JSON, Nemotron `.nlp` or segments, frame embeddings) must be staged at the
