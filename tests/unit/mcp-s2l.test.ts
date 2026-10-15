@@ -172,15 +172,23 @@ describe("scribe_steward_command — the kinds", () => {
     for (const bad of [{ actions: { totally_made_up: true } }, { actions: { "ticket:wake": false, scribe_stat: true } }, { global: false, actions: { restart_everything: false } }]) {
       const out = await cmd({ kind: "set_shadow", reason: "r", value: bad });
       expect(out, JSON.stringify(bad)).toMatchObject({ ok: false, error: "unknown_action", kind: "set_shadow" });
-      expect(String(out.detail)).toContain("allowed: scribe_start, ticket:wake");
+      expect(String(out.detail)).toContain("allowed: scribe_start, scribe_stop, ticket:wake");
     }
     expect(writes).toEqual([]);
-    for (const good of ["scribe_start", "ticket:wake", "ticket:open_pulse", "ticket:relaunch_chrome", "ticket:policy_cycle", "ticket:restart_recorder_app", "ticket:restart_kiosk_health", "message"]) {
+    for (const good of ["scribe_start", "scribe_stop", "ticket:wake", "ticket:open_pulse", "ticket:relaunch_chrome", "ticket:policy_cycle", "ticket:restart_recorder_app", "ticket:restart_kiosk_health", "message"]) {
       expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: { [good]: false } } }), good).toMatchObject({ ok: true });
     }
     // the allowlist IS the Steward's own list (config.ts), so it cannot drift
     const { LIVE_CAPABLE_ACTIONS } = await import("@/lib/steward/config");
     expect(LIVE_CAPABLE_ACTIONS).toContain("scribe_start");
+  });
+  it("scribe_stop live 15 Oct: set_shadow {actions:{scribe_stop:false}} is accepted, writes only that key and returns a revert that restores true; scribe_restart:false is still unknown_action", async () => {
+    cfg.shadow = { global: false, actions: { scribe_stop: true, scribe_start: false } };
+    const out = await cmd({ kind: "set_shadow", reason: "stop live", value: { actions: { scribe_stop: false } } });
+    expect(out).toMatchObject({ ok: true, after: { global: false, actions: { scribe_stop: false, scribe_start: false } }, revert: { kind: "set_shadow", value: { actions: { scribe_stop: true } } } });
+    expect(writes).toHaveLength(1);
+    expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: { scribe_restart: false } } })).toMatchObject({ ok: false, error: "unknown_action" });
+    expect(writes).toHaveLength(1);
   });
   it("G17: a legacy unknown key already in the map may be CLEARED with null, but not set", async () => {
     cfg.shadow = { global: true, actions: { legacy_action: true, "ticket:wake": false } };
@@ -195,11 +203,11 @@ describe("scribe_steward_command — the kinds", () => {
     expect(b).toMatchObject({ ok: true, after: { global: true, actions: { "ticket:wake": true, scribe_start: false } } });
     expect((cfg.shadow as { actions: Row }).actions).not.toHaveProperty("message");
     const c = await cmd({ kind: "set_shadow", reason: "r", value: { global: false, actions: { scribe_start: false } } });
-    expect(c).toMatchObject({ ok: true, after: { global: false, actions: { "ticket:wake": true, scribe_start: false, message: true } } }); // every unnamed published action is HELD
+    expect(c).toMatchObject({ ok: true, after: { global: false, actions: { "ticket:wake": true, scribe_start: false, scribe_stop: true, message: true } } }); // every unnamed published action is HELD
     // clearing a key that is not there is a no-op; an empty partial update changes nothing
     expect(await cmd({ kind: "set_shadow", reason: "r", value: { actions: {} } })).toMatchObject({ ok: true, unchanged: true });
   });
-  const PUBLISHED = ["scribe_start", "ticket:wake", "ticket:open_pulse", "ticket:relaunch_chrome", "ticket:policy_cycle", "ticket:restart_recorder_app", "ticket:restart_kiosk_health", "message"];
+  const PUBLISHED = ["scribe_start", "scribe_stop", "ticket:wake", "ticket:open_pulse", "ticket:relaunch_chrome", "ticket:policy_cycle", "ticket:restart_recorder_app", "ticket:restart_kiosk_health", "message"];
   it("SF1: global:false is refused without an actions map naming an action (explicit_actions_required) and writes nothing; null is refused too", async () => {
     cfg.shadow = { global: true, actions: {} };
     for (const v of [{ global: false }, { global: false, actions: {} }]) {

@@ -2,10 +2,11 @@
  * lib/steward/executor.ts — Room Steward part 2: the executor seam.
  *
  * ShadowExecutor records what it WOULD do and does nothing else — it never calls Scribe, never issues a ticket, never sends a message.
- * LiveExecutor implements scribe_start ONLY (the Bench start_day path, re-checked at execution time); every other method throws and the loop records it as shadow.
+ * LiveExecutor implements scribe_start (the Bench start_day path) and scribe_stop (the Bench end_day path, 15 Oct), both re-checked at execution time; every other method throws and the loop records it as shadow.
  * Which executor runs for an action is decided by config.actionMode (kill switch, shadow.global, shadow.actions[action]).
  */
 import { REHOME_NOTE_PREFIX } from "@/lib/bench-reaper-core";
+import { LISTENER_FRESH_MS } from "@/lib/bench-bus-constants";
 import { isNeverLiveRoom, istMidnightOf } from "./config";
 import type { Decision } from "./rules";
 import { START_IN_FLIGHT_S, START_NO_ACK_FAIL_S, startVerdict } from "./start-schedule";
@@ -142,19 +143,105 @@ export async function liveScribeStart(
   return { result: `failed: start_day ${row.status}${row.error ? ` (${String(row.error).slice(0, 80)})` : ""} command_id=${id}` };
 }
 
+/** the ONLY command kind the live stop can queue: the same end_day verb scribe_stop_recording (lib/mcp/tools/bench.ts) sends */
+export const STOP_COMMAND_KIND = "end_day" as const;
+
+/** The slice of lib/bench-commands the live stop needs (the same functions scribe_stop_recording is built from). A test seam. */
+export type StopDeps = {
+  getListener: StartDeps["getListener"];
+  findActiveSession: StartDeps["findActiveSession"];
+  /** this room's end_day commands with source 'steward' created at or after `sinceIso` (the open session's start): the one-send-per-session ledger and the backoff */
+  getStewardStopAttempts: (roomId: string, sinceIso: string) => Promise<import("@/lib/bench-commands").StartAttempt[]>;
+  /** mark this room's steward end_day commands still `pending` and older than `olderThanS` as `expired`: a stale stop must never end a LATER session */
+  expireStaleStops?: (roomId: string, olderThanS: number) => Promise<string[]>;
+  insertCommand: (input: { roomId: string; kind: "end_day"; args?: unknown; source?: string }) => Promise<string>;
+  waitForAck: StartDeps["waitForAck"];
+};
+
+export async function realStopDeps(): Promise<StopDeps> {
+  const b = await import("@/lib/bench-commands");
+  const { sql } = await import("@/lib/db");
+  return {
+    getListener: b.getListener,
+    findActiveSession: b.findActiveSession,
+    getStewardStopAttempts: async (roomId, sinceIso) => {
+      const rows = (await sql`
+        SELECT c.status, c.created_at, c.acked_at
+          FROM bench_command c
+         WHERE c.room_id = ${roomId} AND c.kind = 'end_day' AND c.source = 'steward' AND c.created_at >= ${sinceIso}::timestamptz
+         ORDER BY c.created_at ASC
+      `) as Array<{ status: string; created_at: string | Date; acked_at: string | Date | null }>;
+      // session_started / session_named are start notions: a stop has no session to name, so an acked stop whose session is STILL open counts as failed after the grace (startVerdict)
+      return rows.map((r) => ({ status: r.status, created_at: r.created_at, acked_at: r.acked_at ?? null, session_started: false, session_named: false }));
+    },
+    expireStaleStops: b.expireStaleEndDay,
+    insertCommand: (i) => b.insertCommand(i),
+    waitForAck: (id, o) => b.waitForAck(id, o),
+  };
+}
+
+/**
+ * The live stop, the same path as the MCP tool scribe_stop_recording: ONE end_day command from source 'steward', the kiosk flushes, ends its session, then acks. Mirrors liveScribeStart:
+ * never-live rooms refused first; R5 the consult state of the DECISION must be false unless it is the late stop (params.late), unknown (null) is not false; the room's open session and
+ * the listener are read NOW; no open session = already stopped (success, nothing sent); one send per session (the ledger is the room's steward end_day commands since the session
+ * started) with the start backoff (5 / 15 / 45 min after a failed one) and `maxAttempts` (caps.start_retries) in total; stale pending stops are expired before a resend.
+ * Results: "ok: end_day acked ..." / "failed: ..." (sent: both count against the caps), "skipped: <reason>" (nothing sent). A stop is never "pending": it is ledgered in bench_command.
+ */
+export async function liveScribeStop(
+  d: Decision,
+  deps: StopDeps,
+  opts: { ackTimeoutMs?: number; now?: () => Date; maxAttempts?: number } = {},
+): Promise<ExecResult> {
+  const roomId = d.room_id;
+  if (!roomId) return { result: "skipped: no_room" };
+  if (isNeverLiveRoom(roomId)) return { result: "skipped: never_live_room" };
+  const late = d.params?.late === true;
+  // R5 + M2: a non-late stop needs positive evidence of no consult: consult_open false AND the extension ok (false from a room whose extension is missing is "never looked")
+  if (!late && d.inputs?.consult_open !== false) return { result: `skipped: ${d.inputs?.consult_open === true ? "consult_open" : "consult_unknown"}` };
+  if (!late && d.inputs?.ext_status !== "ok") return { result: "skipped: consult_unknown_ext" };
+  const now = (opts.now ?? (() => new Date()))();
+  const [listener, active] = await Promise.all([deps.getListener(roomId), deps.findActiveSession(roomId)]);
+  if (!active) return { result: "skipped: no_open_session" };
+  if (!listener || now.getTime() - new Date(listener.last_poll_at).getTime() > LISTENER_FRESH_MS) return { result: "skipped: kiosk_not_listening" };
+  if (!active.started_at) return { result: "skipped: no_session_start" }; // L1: the ledger is keyed by the session start; no midnight fallback
+  const sinceIso = active.started_at;
+  let tried: Awaited<ReturnType<StopDeps["getStewardStopAttempts"]>>;
+  try {
+    tried = await deps.getStewardStopAttempts(roomId, sinceIso);
+  } catch {
+    return { result: "skipped: stop_attempts_unreadable" };
+  }
+  const sv = startVerdict(tried, now.getTime(), opts.maxAttempts ?? 3);
+  if (sv.kind === "exhausted") return { result: `skipped: stop_exhausted attempts=${sv.attempts}` };
+  if (sv.kind === "pending") return { result: `skipped: stop_pending attempts=${sv.attempts}` };
+  if (sv.kind === "backoff") return { result: `skipped: stop_backoff attempts=${sv.attempts} retry_after_s=${sv.retry_after_s}` };
+  if (deps.expireStaleStops) { // L2: before the FIRST send too (an unacked steward stop from an earlier session must not be re-delivered)
+    try {
+      await deps.expireStaleStops(roomId, START_NO_ACK_FAIL_S);
+    } catch {
+      return { result: "skipped: stop_expire_failed" };
+    }
+  }
+  const id = await deps.insertCommand({ roomId, kind: STOP_COMMAND_KIND, source: START_SOURCE });
+  const row = await deps.waitForAck(id, { timeoutMs: opts.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS });
+  if (!row) return { result: `failed: end_day no ack in the tick command_id=${id}` };
+  if (row.status === "acked") return { result: `ok: end_day acked command_id=${id}` };
+  return { result: `failed: end_day ${row.status}${row.error ? ` (${String(row.error).slice(0, 80)})` : ""} command_id=${id}` };
+}
+
 /** PURE — did the app ack this start as ACCEPTED-BUT-DEFERRED ({ok:true, deferred:true}, no session yet)? */
 export function isDeferredAck(result: unknown): boolean {
   return !!result && typeof result === "object" && (result as Record<string, unknown>).deferred === true;
 }
 
-/** scribe_start is live; every other method throws, and the loop treats a throw as "stay in shadow". */
+/** scribe_start and scribe_stop are live; every other method throws, and the loop treats a throw as "stay in shadow". */
 export class LiveExecutor implements Executor {
-  constructor(private readonly opts: { ackTimeoutMs?: number; deps?: StartDeps; now?: () => Date; maxAttempts?: number; deferredRecheckMs?: number; sleep?: (ms: number) => Promise<void> } = {}) {}
+  constructor(private readonly opts: { ackTimeoutMs?: number; deps?: StartDeps; stopDeps?: StopDeps; now?: () => Date; maxAttempts?: number; deferredRecheckMs?: number; sleep?: (ms: number) => Promise<void> } = {}) {}
   async scribeStart(d: Decision): Promise<ExecResult> {
     return liveScribeStart(d, this.opts.deps ?? (await realStartDeps()), { ackTimeoutMs: this.opts.ackTimeoutMs, now: this.opts.now, maxAttempts: this.opts.maxAttempts });
   }
-  scribeStop(_d: Decision): Promise<ExecResult> {
-    throw new Error(LIVE_EXECUTOR_DISABLED);
+  async scribeStop(d: Decision): Promise<ExecResult> {
+    return liveScribeStop(d, this.opts.stopDeps ?? (await realStopDeps()), { ackTimeoutMs: this.opts.ackTimeoutMs, now: this.opts.now, maxAttempts: this.opts.maxAttempts });
   }
   scribeRestart(_d: Decision): Promise<ExecResult> {
     throw new Error(LIVE_EXECUTOR_DISABLED);

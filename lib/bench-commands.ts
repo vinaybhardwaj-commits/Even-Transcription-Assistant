@@ -813,6 +813,20 @@ export async function expireStaleStartDay(roomId: string, olderThanS: number): P
   });
 }
 
+/** The stop twin of expireStaleStartDay: this room's steward end_day commands still `pending` and older than `olderThanS` become `expired`, so a stale stop is never delivered to a LATER session. */
+export async function expireStaleEndDay(roomId: string, olderThanS: number): Promise<string[]> {
+  return guarded(async () => {
+    const rows = (await sql`
+      UPDATE bench_command
+         SET status = 'expired'
+       WHERE room_id = ${roomId} AND kind = 'end_day' AND source = 'steward' AND status = 'pending'
+         AND created_at < now() - (${olderThanS}::int * INTERVAL '1 second')
+       RETURNING id
+    `) as Array<{ id: string }>;
+    return rows.map((r) => r.id);
+  });
+}
+
 export async function getCommand(id: string): Promise<CommandRow | null> {
   return guarded(async () => {
     const rows = (await sql`

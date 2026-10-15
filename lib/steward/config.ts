@@ -206,6 +206,7 @@ export async function loadConfig(sql: StewardSql): Promise<{ config: Config; inv
 /** The actions that may EVER leave shadow (one per executor method the live executor implements or will implement). Anything else is always shadow. */
 export const LIVE_CAPABLE_ACTIONS: readonly string[] = [
   "scribe_start",
+  "scribe_stop",
   "ticket:wake",
   "ticket:open_pulse",
   "ticket:relaunch_chrome",
@@ -219,7 +220,7 @@ export const LIVE_CAPABLE_ACTIONS: readonly string[] = [
  * S1 (REL2-R3): the actions LiveExecutor (lib/steward/executor.ts) actually IMPLEMENTS today. Every other live-capable action throws LIVE_EXECUTOR_DISABLED there, and the loop treats a throw as "stay in
  * shadow". A test calls each LiveExecutor method and pins this list to it; the scribe_steward live view reports live:true only for these.
  */
-export const LIVE_IMPLEMENTED_ACTIONS: readonly string[] = ["scribe_start"];
+export const LIVE_IMPLEMENTED_ACTIONS: readonly string[] = ["scribe_start", "scribe_stop"];
 
 export type ActionMode = "kill_switch" | "shadow" | "live";
 

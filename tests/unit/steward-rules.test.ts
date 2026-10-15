@@ -97,7 +97,7 @@ describe("config: parse, roster, windows", () => {
     expect(actionMode(cfgOf(false, false, {}), "ticket:wake")).toBe("live");
     expect(actionMode(cfgOf(false, false, {}), "ticket:made_up")).toBe("shadow");
     expect(actionMode(cfgOf(false, false, { bogus: false }), "bogus")).toBe("shadow");
-    expect(actionMode(cfgOf(false, false, {}), "scribe_stop")).toBe("shadow");
+    expect(actionMode(cfgOf(false, false, {}), "scribe_stop")).toBe("live"); // live-capable since 15 Oct (V GO via fable)
     expect(actionMode(cfgOf(false, false, {}), "scribe_restart")).toBe("shadow");
     // a malformed per-action value parses as shadow (true), never as a lift
     const parsed = parseConfig([{ key: "shadow", value: { global: false, actions: { scribe_start: "no" } } }]);
@@ -159,7 +159,8 @@ describe("windows and the end of the day", () => {
     expect(first(idle(T), T, EMPTY_RECENT, cfg)).toMatchObject({ rule: "closed_day", action: "none" });
     const late = ist("22:30");
     expect(first(idle(late), late, EMPTY_RECENT, cfg)).toMatchObject({ rule: "closed_day", action: "none" });
-    expect(first(healthy(late), late, EMPTY_RECENT, cfg)).toMatchObject({ rule: "end_of_window", action: "scribe_stop" });
+    // FIX1 M1: on a closed day the last window end is the previous day's, so a session started today was not open across it: not the Steward's to stop
+    expect(first(healthy(late), late, EMPTY_RECENT, cfg)).toMatchObject({ rule: "end_of_window", action: "log_only", severity: "info" });
     expect(first(healthy(late), late)).toMatchObject({ rule: "end_of_window", action: "scribe_stop" });
   });
 
