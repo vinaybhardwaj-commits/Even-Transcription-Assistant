@@ -1,0 +1,17 @@
+# hosts-opd.txt -- kh-rollout.sh hosts file for OPD 1, 3, 4, 5, 6, 7. Filled by fable 6 Oct 2026 ~12:20 IST.
+# fields: machine_id ssh_target keychain_svc room_id install_id console_user [ssh_key]
+# Verified from the Air 6 Oct: LocalHostName and console user read over ssh (default key ~/.ssh/id_ecdsa, BatchMode),
+# Keychain item eta-deploy/<keychain_svc> present for all six. Room/install ids from Scribe fleet.
+#
+# OPD 1
+<KIOSK_HOST>-Mac-mini-2   <KIOSK_HOST>@<TAILNET_IP>    eta-sudo-<KIOSK_HOST>-mac-mini-2   room_yh3etjpf   install_f3xjyb5sn2eu   <KIOSK_HOST>
+# OPD 3
+<KIOSK_HOST>-Mac-mini     <KIOSK_HOST>@<TAILNET_IP>     eta-sudo-<KIOSK_HOST>-mac-mini     room_87frpus9   install_fc2jt2zs4x8v   <KIOSK_HOST>
+# OPD 4
+<KIOSK_HOST>-Mac-mini-2   <KIOSK_HOST>@<TAILNET_IP>     eta-sudo-<KIOSK_HOST>-mac-mini-2   room_ux92qpws   install_r97unbuz6zsa   <KIOSK_HOST>
+# OPD 5
+<KIOSK_HOST>-Mac-mini     <KIOSK_HOST>@<TAILNET_IP>   eta-sudo-<KIOSK_HOST>-mac-mini     room_4ggnkg5x   install_e3yjw3ut698x   <KIOSK_HOST>
+# OPD 6
+<KIOSK_HOST>-Mac-mini     <KIOSK_HOST>@<TAILNET_IP>   eta-sudo-<KIOSK_HOST>-mac-mini     room_pnyc9u49   install_d2nkvqcnqb7k   <KIOSK_HOST>
+# OPD 7
+<KIOSK_HOST>-Mac-mini     <KIOSK_HOST>@<TAILNET_IP>    eta-sudo-<KIOSK_HOST>-mac-mini     room_qyzghzaf   install_ukpd4tsvxg6z   <KIOSK_HOST>
