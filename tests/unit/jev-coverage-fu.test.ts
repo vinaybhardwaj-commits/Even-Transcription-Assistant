@@ -77,6 +77,54 @@ describe("FIX1: abandoned read and reset generation", () => {
     expect(read).toHaveBeenCalledTimes(2);
     r.forEach((x) => expect(x).toEqual(COV));
   });
+  it("FIX2: an orphan landing after a later-started read has memoised does NOT replace it", async () => {
+    let resA!: (c: Coverage) => void;
+    let resB!: (c: Coverage) => void;
+    const readA = vi.fn(() => new Promise<Coverage>((r) => { resA = r; }));
+    const readB = vi.fn(() => new Promise<Coverage>((r) => { resB = r; }));
+    const first = coverageOrNull({ read: readA, timeoutMs: 2_000 });
+    await vi.advanceTimersByTimeAsync(2_001);
+    expect(await first).toBeNull();
+    await vi.advanceTimersByTimeAsync(8_000);
+    const second = coverageOrNull({ read: readB });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(readB).toHaveBeenCalledTimes(1);
+    resB({ ...COV, cut: 200 });
+    expect((await second)?.cut).toBe(200);
+    await vi.advanceTimersByTimeAsync(1_000);
+    resA({ ...COV, cut: 100 });
+    await vi.advanceTimersByTimeAsync(0);
+    const never = vi.fn(async () => COV);
+    expect((await coverageOrNull({ read: never }))?.cut).toBe(200);
+    expect(never).not.toHaveBeenCalled();
+    // and the orphan's landing did not re-stamp the memo: it expires 10 s after B landed
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(await coverageOrNull({ read: never })).toEqual(COV);
+    expect(never).toHaveBeenCalledTimes(1);
+  });
+  it("FIX2 reverse: A lands while B is still in flight (A memoises), then B overwrites", async () => {
+    let resA!: (c: Coverage) => void;
+    let resB!: (c: Coverage) => void;
+    const readA = vi.fn(() => new Promise<Coverage>((r) => { resA = r; }));
+    const readB = vi.fn(() => new Promise<Coverage>((r) => { resB = r; }));
+    const first = coverageOrNull({ read: readA, timeoutMs: 2_000 });
+    await vi.advanceTimersByTimeAsync(2_001);
+    expect(await first).toBeNull();
+    await vi.advanceTimersByTimeAsync(8_000);
+    const second = coverageOrNull({ read: readB, timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(readB).toHaveBeenCalledTimes(1);
+    resA({ ...COV, cut: 100 });
+    await vi.advanceTimersByTimeAsync(0);
+    const peek = vi.fn(async () => COV);
+    expect((await coverageOrNull({ read: peek }))?.cut).toBe(100);
+    expect(peek).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    resB({ ...COV, cut: 200 });
+    expect((await second)?.cut).toBe(200);
+    expect((await coverageOrNull({ read: peek }))?.cut).toBe(200);
+    expect(peek).not.toHaveBeenCalled();
+  });
   it("a read orphaned before a reset never writes the memo", async () => {
     let resolve!: (c: Coverage) => void;
     const old = vi.fn(() => new Promise<Coverage>((r) => { resolve = r; }));
