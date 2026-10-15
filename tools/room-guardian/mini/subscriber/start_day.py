@@ -4,7 +4,7 @@ Health-line fields: boot_age_s and usb_mic_present are the kiosk's (collect.sh h
 recorder_pid_age_s being a number (the field is empty when no recorder pid exists), and "started" as capture_open true. Both INFERRED, flagged in the report.
 The sender is injected: sender(room) returns on success and raises on failure. No credential lives here. Once per boot: key = room + boot epoch (now - boot_age_s),
 the same boot when two epochs are within BOOT_TOL_S. If the room is not capture_open within START_DEADLINE_S after the send, start_day_failed opens (URGENT, V kind)."""
-import json, math, os, subprocess, time
+import json, math, os, queue, subprocess, threading, time
 
 BOOT_MAX_AGE_S, START_DEADLINE_S, BOOT_TOL_S, SINK_RETRY_S = 600, 600, 120, 300
 
@@ -27,18 +27,21 @@ def command_sender(cmd, stderr=None, timeout=30, runner=subprocess.run):
     return send
 
 
-def build(flags, sink, home, clock=time.time, stderr=None, runner=subprocess.run):
+def build(flags, sink, home, clock=time.time, stderr=None, runner=subprocess.run, background=False):
     """-> StartDayAfterBoot for the flag-on case. Raises ConfigError (the subscriber then refuses to start) when router.json has no start_day_cmd."""
     cmd = flags.get("start_day_cmd") or []
     if not cmd:
         raise ConfigError("start_day_after_boot is true but router.json has no start_day_cmd")
     return StartDayAfterBoot(command_sender(cmd, stderr, runner=runner), os.path.join(home, "data", "start-day-state.json"), sink, clock,
-                             os.path.join(home, "logs", "start-day-audit.jsonl"))
+                             os.path.join(home, "logs", "start-day-audit.jsonl"), background=background)
 
 
 class StartDayAfterBoot:
-    def __init__(self, sender, state_path=None, sink=None, clock=time.time, audit_path=None):
+    def __init__(self, sender, state_path=None, sink=None, clock=time.time, audit_path=None, background=False):
         self.sender, self.state_path, self.sink, self.clock, self.audit_path = sender, state_path, sink, clock, audit_path
+        self.background = background is True          # True: the send runs in a worker thread (30 s sender timeout), so the loop never waits on it
+        self._lock = threading.RLock()                # guards state and the state file; never held while the sender runs
+        self._q, self._worker = queue.Queue(), None
         self.retry_at = {}                # room -> earliest time the failed-page sink call is tried again after a fault
         self.state = {}                   # room -> {"boot": epoch, "sent_at": t, "send_ok": bool, "started": bool, "failed": bool}
         if state_path and os.path.exists(state_path):
@@ -55,10 +58,11 @@ class StartDayAfterBoot:
         if not self.state_path:
             return
         try:
-            tmp = f"{self.state_path}.tmp{os.getpid()}"
-            with open(tmp, "w") as f:
-                json.dump(self.state, f, sort_keys=True)
-            os.replace(tmp, self.state_path)
+            with self._lock:
+                tmp = f"{self.state_path}.tmp{os.getpid()}"
+                with open(tmp, "w") as f:
+                    json.dump(self.state, f, sort_keys=True)
+                os.replace(tmp, self.state_path)
         except Exception:                 # noqa: BLE001
             self._audit("-", "state_write_fault", self.clock())
 
@@ -94,14 +98,40 @@ class StartDayAfterBoot:
             return                        # start_day was already sent for this boot
         self.state[room] = {"boot": boot, "sent_at": int(now), "send_ok": False, "started": False, "failed": False}
         self._save()                      # written BEFORE the send: a crash mid-send never sends twice for one boot
+        if self.background:
+            self._enqueue(room, boot, now)    # the loop never waits on the send
+        else:
+            self._send(room, boot, now)
+
+    def _send(self, room, boot, now):
         ok = True
         try:
             self.sender(room)
         except Exception:                 # noqa: BLE001 -- a failed send is recorded and surfaces as start_day_failed after the deadline; never a second send for this boot
             ok = False
-        self.state[room]["send_ok"] = ok
+        with self._lock:
+            st = self.state.get(room)
+            if st is not None:
+                st["send_ok"] = ok
         self._save()
         self._audit(room, "start_day_sent" if ok else "start_day_send_error", now, boot=boot)
+
+    def _enqueue(self, room, boot, now):
+        self._q.put((room, boot, now))
+        if self._worker is None or not self._worker.is_alive():      # restarted if it ever died
+            self._worker = threading.Thread(target=self._work, name="start-day-sender", daemon=True)
+            self._worker.start()
+
+    def _work(self):
+        while True:
+            try:
+                room, boot, now = self._q.get(timeout=60)
+            except queue.Empty:
+                return                    # idle: the thread ends and the next send starts a new one
+            try:
+                self._send(room, boot, now)
+            except BaseException:         # noqa: BLE001 -- the worker never dies on a fault
+                pass
 
     def check(self, now=None):
         """Called every loop: a room still not started START_DEADLINE_S after its start_day opens start_day_failed once per boot."""

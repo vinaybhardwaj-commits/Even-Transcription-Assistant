@@ -45,6 +45,7 @@ OPEN_KINDS = URGENT | {"heal_message_invalid", "consult_hold_source_down"}      
 ACK_CLOSE_KINDS = CA_KINDS | START_DAY_KINDS | USB_KINDS | {"heal_message_invalid", "consult_hold_source_down"}
 RECOVERY_KIND = "recovered"
 ACK_ONLY_KINDS = {"recorder_disturbed", "heal_message_invalid", "start_day_failed"} | USB_KINDS     # a server `recovered` row never closes these: only an ACK does
+RECOVERY_KEEP_KINDS = ACK_ONLY_KINDS | {"usb_device_missing"}        # nor this one: it closes only on a health line with usb_mic_present true (or an ACK does not close it either)
 _ACK_RE = re.compile(r"^ACK\s+room-alert-(\d+)\b", re.I)
 _ID_RE = re.compile(r"room-alert-(\d+)\b", re.I)
 _MARK_RE = re.compile(r"room-alert-(\d+) .*\[page (\d+)\]")
@@ -131,7 +132,7 @@ class Router:
             return
         for room in rooms:
             if kind == RECOVERY_KIND:
-                self.close_room(bus, room, "recovery", keep=ACK_ONLY_KINDS)
+                self.close_room(bus, room, "recovery", keep=RECOVERY_KEEP_KINDS)
             elif kind in OPEN_KINDS:
                 self._open_or_bump(bus, room, kind, rid, row)
         self.store.mark_routed(rid, self.clock())    # AFTER the work: a crash before this replays the row (a late duplicate), never loses it

@@ -38,6 +38,7 @@ class Src:
         self.v = {"presence": [("M6", T - 10, None), ("M7", T - 10, None)] if presence is None else presence, "levels": [] if levels is None else levels,
                   "session": set() if session is None else session, "windows": [] if windows is None else windows}
         self.calls = {"presence": 0, "session": 0, "windows": 0, "levels": 0}
+        self.strict = False
     def __getitem__(self, name):
         def f(now, arg):
             self.calls[name] += 1
@@ -46,9 +47,11 @@ class Src:
                 raise v
             if name == "presence" and isinstance(v, list) and v and all(isinstance(x, tuple) and len(x) == 3 for x in v):
                 # shorthand (machine, heartbeat ts, encounter marker): a heartbeat row, plus an encounter_open when the marker is set
-                return {"hb": [(m, t) for m, t, _e in v], "enc": [(m, "encounter_open", t) for m, t, e in v if e]}
+                return {"hb": [(m, t) for m, t, _e in v], "enc": [(m, "encounter_open", t) for m, t, e in v if e], "post": []}
             if name == "presence" and isinstance(v, list) and not v:
-                return {"hb": [], "enc": []}
+                return {"hb": [], "enc": [], "post": []}
+            if name == "presence" and isinstance(v, dict) and "post" not in v and not self.strict:
+                return dict(v, post=[])                                                              # the real source always returns all three keys (PRESENCE_KEYS)
             return v
         return f
 
@@ -819,7 +822,7 @@ class Round5(unittest.TestCase):
 
     def test_run_subscriber_hands_the_flags_to_build(self):
         src = open(os.path.join(HERE, "..", "subscriber", "run_subscriber.py")).read()
-        self.assertIn("consult_hold.build(flags, rooms, sink, HOME, time.time)", src)
+        self.assertIn("consult_hold.build(flags, rooms, sink, home, clock, background=True)", src)
         for name in ("post_open_overrides_url_close", "capture_closed_counts_quiet", "open_session_requires_levels", "consult_windows_enabled"):
             self.assertNotIn(name, src)                                                              # no per-switch wiring left in main() that a mutation could break unseen
 

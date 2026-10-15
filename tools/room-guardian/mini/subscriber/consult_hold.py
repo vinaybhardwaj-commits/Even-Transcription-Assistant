@@ -29,6 +29,8 @@ SILENCE_ZERO_RATIO = 0.98                                    # INFERRED: a healt
 ENC_LOOKBACK_S = 4 * 3600                                    # the windows' bound: the newest encounter_open/close is looked for within this long
 LEVEL_FRESH_S = 120
 FALLBACK_BUDGET_S = 8                                        # the per-room retry after a failed batched read stops after this long
+REFRESH_BUDGET_S = 20                                        # one WHOLE refresh (every source plus every retry) is bounded to this, well under the 30 s publish period
+PRESENCE_KEYS = ("hb", "enc", "post")                        # the batched Presence value always has all three; a value missing one is a source error
 DEFAULT_URL_FILE = "~/.config/eta-audio/db.url"
 IST = timezone(timedelta(hours=5, minutes=30))
 # INFERRED SQL (read-only session; %s are timestamptz / text[] parameters):
@@ -127,7 +129,7 @@ def _shape_ok(name, v):
     """Only the overall shape is checked here (a dict of two lists, a list, a set); anything else is a source error (true for every room that uses it).
     Rows are cleaned one by one in _clean, so one room's bad row holds that room only."""
     if name == "presence":
-        return isinstance(v, dict) and isinstance(v.get("hb"), list) and isinstance(v.get("enc"), list) and isinstance(v.get("post", []), list)
+        return isinstance(v, dict) and all(isinstance(v.get(k), list) for k in PRESENCE_KEYS)
     if name == "session":
         return isinstance(v, (set, frozenset))
     return name in ("levels", "windows") and isinstance(v, list)
@@ -147,7 +149,7 @@ def _clean(name, v):
                 bad.add(x[0])
         return out
     if name == "presence":
-        return {"hb": rows(v["hb"], 2), "enc": rows(v["enc"], 3), "post": rows(v.get("post", []), 3)}, bad
+        return {"hb": rows(v["hb"], 2), "enc": rows(v["enc"], 3), "post": rows(v["post"], 3)}, bad
     if name == "session":
         return {x for x in v if isinstance(x, str)}, bad
     if name == "levels":
@@ -170,7 +172,7 @@ def _entry(v):
 class ConsultHold:
     def __init__(self, rooms, room_map, sources, clock=time.time, audit_path=None, sink=None, cache_s=CACHE_S, max_age_s=MAX_AGE_S, timeout_s=QUERY_TIMEOUT_S,
                  stuck_s=STUCK_S, capture_closed_counts_quiet=True, open_session_requires_levels=True, consult_windows_enabled=False,
-                 post_open_overrides_url_close=True):
+                 post_open_overrides_url_close=True, background=False, refresh_budget_s=REFRESH_BUDGET_S):
         self.rooms, self.map, self.src, self.clock, self.audit_path, self.sink = list(rooms), dict(room_map or {}), sources, clock, audit_path, sink
         self.cache_s, self.max_age_s, self.timeout_s, self.stuck_s = cache_s, max_age_s, timeout_s, stuck_s
         self.closed_quiet, self.need_levels = capture_closed_counts_quiet is not False, open_session_requires_levels is not False     # fable 17:16: default true, only a literal false turns one off
@@ -186,6 +188,10 @@ class ConsultHold:
         self.item_bad = {}                # source name -> set of items (machine keys / room ids) whose own read failed in the per-room retry
         self.inflight = {}                # source name -> the fetch thread still running (a new fetch never starts while one is alive)
         self.last = {}                    # room -> (hold, reasons) for the audit line on change
+        self.budget = refresh_budget_s
+        self.background = background is True      # True: hold() only READS the last snapshot; a refresher thread computes it (never on the publish thread)
+        self._snap = None                 # (out dict, computed_at) of the last completed computation
+        self._thread, self._stop = None, threading.Event()
 
     # ---- source 2 feed
     def note_health(self, room, obj, now=None):
@@ -196,7 +202,7 @@ class ConsultHold:
             self.health[room] = (min(t, ts) if _finite(ts) else t, obj)
 
     # ---- the DB sources
-    def _call(self, name, now, arg):
+    def _call(self, name, now, arg, timeout=None):
         t0 = self.inflight.get(name)
         if t0 is not None and t0.is_alive():
             return False, None            # the previous fetch is hung: do not pile another thread on it
@@ -209,7 +215,7 @@ class ConsultHold:
                 box["e"] = e
         t = threading.Thread(target=run, daemon=True)
         self.inflight[name] = t
-        t.start(); t.join(self.timeout_s)
+        t.start(); t.join(self.timeout_s if timeout is None else max(0.0, timeout))
         if t.is_alive() or "e" in box or "v" not in box or not _shape_ok(name, box["v"]):
             return False, None            # timeout (the thread is abandoned), error, no value or a wrong shape
         return True, box["v"]
@@ -218,14 +224,21 @@ class ConsultHold:
         if self.tried_at is not None and now - self.tried_at < self.cache_s:
             return
         self.tried_at = now
+        t_begin = time.monotonic(); deadline = t_begin + self.budget
+        left = lambda: deadline - time.monotonic()
         keys = sorted({k for r in self.rooms for k in (_entry(self.map.get(r))[0] or [])})
         ids = sorted({i for r in self.rooms for i in [_entry(self.map.get(r))[1]] if i})
         todo = [("presence", keys), ("session", ids)] + ([("windows", None)] if self.windows_on else []) + ([("levels", ids)] if self.need_levels else [])
         for name, arg in todo:
             if name in ("presence", "session", "levels") and not arg:
                 continue                  # nothing is mapped for this source: every room is already true as unmapped
-            ok, v = self._call(name, now, arg)
             self.item_bad[name] = set()
+            if left() <= 0:               # the whole-refresh budget is spent: this source is down for this round (true), not waited for
+                self.err[name] = True
+                if arg:
+                    self.item_bad[name] = set(arg)
+                continue
+            ok, v = self._call(name, now, arg, min(self.timeout_s, left()))
             if ok:
                 self.err[name] = False
                 v, bad = _clean(name, v)
@@ -238,9 +251,9 @@ class ConsultHold:
             # one room's read error must hold that room only: retry each item on its own, within a short budget (the rest stay bad)
             t0, parts = time.monotonic(), []
             for item in arg:
-                if time.monotonic() - t0 > FALLBACK_BUDGET_S:
+                if time.monotonic() - t0 > FALLBACK_BUDGET_S or left() <= 0:
                     self.item_bad[name].add(item); continue
-                ok1, v1 = self._call(name, now, [item])
+                ok1, v1 = self._call(name, now, [item], min(self.timeout_s, left()))
                 if ok1:
                     v1, bad1 = _clean(name, v1)
                     self.item_bad[name] |= bad1
@@ -250,11 +263,13 @@ class ConsultHold:
             if parts:
                 self.err[name] = False
                 self.data[name] = (self._merge(name, parts), now)
+        self.tried_at = max(now, self.clock())      # the cache age counts from the refresh END, so a slow refresh never makes the next one start at once
 
     @staticmethod
     def _merge(name, parts):
+        """Merge the per-item replies. Every key of the batched shape is carried (hb, enc AND post); a part missing one is already refused by _shape_ok."""
         if name == "presence":
-            return {"hb": [x for p in parts for x in p["hb"]], "enc": [x for p in parts for x in p["enc"]]}
+            return {k: [x for p in parts for x in p[k]] for k in PRESENCE_KEYS}
         if name == "session":
             return set().union(*parts)
         return [x for p in parts for x in p]
@@ -323,9 +338,10 @@ class ConsultHold:
             return zr < SILENCE_ZERO_RATIO
         return True
 
-    def hold(self, now=None):
-        """-> {room: bool}, every room in rooms. NEVER raises: any fault anywhere in the hold path gives true for every room (a raise here would drop the control line
-        for every room, which the kiosks read as a kill). One audit line per room whose hold or deciding signals changed; tracks the stuck-source case."""
+    def compute(self, now=None):
+        """-> {room: bool}, every room in rooms: refresh the sources (cached 30 s from the refresh end), then decide each room. NEVER raises: any fault anywhere in the hold
+        path gives true for every room. One audit line per room whose hold or deciding signals changed; tracks the stuck-source case. This can take up to the refresh
+        budget, so in the live process it only ever runs on the refresher thread (background mode), never on the publish thread."""
         try:
             now = self.clock() if now is None else now
             self._refresh(now)
@@ -340,6 +356,43 @@ class ConsultHold:
             return out
         except Exception:                 # noqa: BLE001
             return {r: True for r in self.rooms}
+
+    def hold(self, now=None):
+        """-> {room: bool}, every room. Synchronous (compute) unless background mode, where this only READS the last snapshot and never blocks: no snapshot yet, or one
+        older than max_age_s (the refresher is slow, dead or failing), means true for every room. NEVER raises, so the control line is always published."""
+        try:
+            now = self.clock() if now is None else now
+            if not self.background:
+                return self.compute(now)
+            self.start()                  # a no-op while the refresher thread is alive; restarts it if it died
+            snap = self._snap
+            if snap is None or not _finite(snap[1]) or now - snap[1] > self.max_age_s:
+                return {r: True for r in self.rooms}
+            return {r: snap[0].get(r, True) is not False for r in self.rooms}
+        except Exception:                 # noqa: BLE001
+            return {r: True for r in self.rooms}
+
+    # ---- the background refresher
+    def start(self):
+        if self._stop.is_set():
+            return
+        t = self._thread
+        if t is not None and t.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, name="consult-hold-refresher", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                out = self.compute(self.clock())
+                self._snap = (out, self.clock())      # computed_at is the END of the computation
+            except BaseException:         # noqa: BLE001 -- the refresher never dies on a fault: every room is held until the next good round
+                self._snap = ({r: True for r in self.rooms}, self.clock())
+            self._stop.wait(self.cache_s)
 
     def _needed(self, name):
         if name == "windows":
@@ -385,12 +438,12 @@ class ConsultHold:
             self.case_open = True
 
 
-def build(flags, rooms, sink, home, clock=time.time, sources=None):
+def build(flags, rooms, sink, home, clock=time.time, sources=None, background=False):
     """-> ConsultHold for the flag-on case, exactly as run_subscriber.main() builds it: every switch comes from the router.json flags (ubus_bus.load_cfg). `sources`
-    is injectable for tests; the default is the read-only Neon sources."""
+    is injectable for tests; the default is the read-only Neon sources. background=True (run_subscriber) computes the hold on a refresher thread, off the publish thread."""
     return ConsultHold(rooms, flags.get("consult_room_map"), sources if sources is not None else pg_sources(flags.get("consult_db_url_file")), clock,
                        audit_path=os.path.join(home, "logs", "consult-hold-audit.jsonl"), sink=sink,
                        capture_closed_counts_quiet=flags.get("capture_closed_counts_quiet") is not False,
                        open_session_requires_levels=flags.get("open_session_requires_levels") is not False,
                        consult_windows_enabled=flags.get("consult_windows_enabled") is True,
-                       post_open_overrides_url_close=flags.get("post_open_overrides_url_close") is not False)
+                       post_open_overrides_url_close=flags.get("post_open_overrides_url_close") is not False, background=background)
