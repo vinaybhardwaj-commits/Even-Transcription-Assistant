@@ -8,13 +8,51 @@
   guardian/control. Anything not exactly "heal" is "shadow". An unreadable or missing kill file is kill=true (fail safe).
 Health/heal/probe lines are stored as received. Nothing here prints line content.
 """
-import json, os, shutil, time
+import json, os, re, shutil, time
 from datetime import datetime, timedelta, timezone
 
 IST = timezone(timedelta(hours=5, minutes=30))
 STREAMS = ("health", "heal", "probe-reply")
 QUIET_AFTER_S, KEEP_DAYS = 120, 30
 CONTROL_TOPIC = "guardian/control"
+# FROZEN CONTRACT (see etc/README.md "Control topic contract"): the kiosk accepts only this exact form; anything else kills every kiosk.
+# Changing any of it needs a coordinated kiosk release (guardian-lead) FIRST. Regex is the kiosk's, verbatim from FR1-C1-CONTROL-CC-KICKOFF "## R7".
+CONTROL_RE = re.compile(r'^\{"kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$')
+SLUG_RE = re.compile(r"[a-z0-9_-]{1,64}")
+# The contract limit is 4096 (kiosk R8: payload line <= 4096, file <= 4096+17); the Mini caps itself at 4000 as extra margin.
+CONTROL_MAX_BYTES, CONTROL_MAX_ROOMS = 4000, 64
+
+
+def canonical_control(payload):
+    """The one serialisation the Mini may publish: json.dumps(payload, sort_keys=True) with the default separators. Raises ValueError (and so
+    nothing is published; kiosks go stale and kill) if the result is not exactly the frozen form, or is over 4000 bytes, or has a byte outside 0x20-0x7E."""
+    msg = json.dumps(payload, sort_keys=True)
+    if len(msg.encode("ascii", "replace")) > CONTROL_MAX_BYTES:
+        raise ValueError("control payload over 4000 bytes")
+    if any(not (0x20 <= ord(ch) <= 0x7E) for ch in msg):
+        raise ValueError("control payload has a byte outside 0x20-0x7E")
+    if not CONTROL_RE.fullmatch(msg):
+        raise ValueError("control payload is not the canonical form")
+    return msg
+
+
+def validate_rooms(rooms):
+    """Startup check for rooms.json: every slug ^[a-z0-9_-]{1,64}$, at most 64 distinct rooms, and the worst-case payload (every mode shadow, 15-digit ts)
+    still within the contract (<= 4000 bytes). Returns an error string, or None."""
+    if not isinstance(rooms, list):                  # a bare string would iterate as one room per character
+        return f"rooms must be a JSON list, got {type(rooms).__name__}"
+    bad = [r for r in rooms if not isinstance(r, str) or not SLUG_RE.fullmatch(r)]
+    if bad:
+        return f"{len(bad)} room slug(s) not matching [a-z0-9_-]{{1,64}}"
+    if len(set(rooms)) != len(rooms):
+        return "duplicate room slugs"
+    if len(rooms) > CONTROL_MAX_ROOMS:
+        return f"{len(rooms)} rooms; the control contract allows at most {CONTROL_MAX_ROOMS}"
+    try:
+        canonical_control({"kill": False, "modes": {r: "shadow" for r in rooms}, "ts": 10 ** 14})
+    except ValueError as e:
+        return f"worst-case control payload: {e}"
+    return None
 
 
 def parse_topic(topic):
@@ -142,9 +180,14 @@ class Subscriber:
         """control_snapshot() plus ts = publish epoch seconds (int), so a consumer can reject replayed or stale control by payload time. Additive."""
         snap = self.control_snapshot()
         snap["ts"] = int(self.clock())
+        canonical_control(snap)                      # contract self-check: raises before anything is published
         return snap
+
+    def control_message(self):
+        """The exact string to publish (no trailing newline; the caller adds one line terminator)."""
+        return canonical_control(self.control_payload())
 
     def publish_control(self, publish):
         snap = self.control_payload()
-        publish(CONTROL_TOPIC, json.dumps(snap, sort_keys=True))
+        publish(CONTROL_TOPIC, canonical_control(snap))
         return snap

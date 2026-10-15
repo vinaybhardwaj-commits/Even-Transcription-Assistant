@@ -10,7 +10,7 @@ import json, os, queue, subprocess, sys, threading, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(HERE, "..", "router"))
 import alert_router, ubus_bus
-from subscriber import Subscriber, RouterSink, STREAMS
+from subscriber import Subscriber, RouterSink, STREAMS, validate_rooms
 
 HOME = os.environ.get("GUARDIAN_HOME", os.path.expanduser("~/oc/fleet-access/guardian"))
 PIPE_SSH = os.path.join(HOME, "scripts", "pipe-ssh.sh")
@@ -42,7 +42,11 @@ def publish(room, msg):
 def main():
     with open(os.path.join(HOME, "etc", "rooms.json")) as f:
         cfg = json.load(f)
-    rooms = list(cfg["rooms"])
+    rooms = cfg["rooms"]
+    err = validate_rooms(rooms)
+    if err:                                          # frozen control contract: a room the kiosk regex would reject kills every kiosk, so refuse to start
+        log(f"REFUSING TO START: rooms.json: {err}")
+        return 2
     try:
         router_cfg = ubus_bus.load_cfg()
     except Exception as e:                           # gate C2
@@ -74,7 +78,7 @@ def main():
         if now - last_ctl >= cfg.get("control_publish_s", 30):
             for r in rooms:
                 try:
-                    publish(r, json.dumps(s.control_payload(), sort_keys=True))     # ts is taken per room, at the moment of this publish
+                    publish(r, s.control_message())     # ts is taken per room, at the moment of this publish
                 except Exception as e:
                     log(f"control publish {r} failed: {e.__class__.__name__}")
             last_ctl = now
