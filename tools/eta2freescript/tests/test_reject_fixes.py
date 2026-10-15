@@ -50,7 +50,7 @@ def test_k1_a_written_consult_leaves_no_rejected_file(tmp_path):
 
 
 def test_k1_nothing_reads_the_rejected_file():
-    users = [p.name for p in PKG.rglob("*.py") if "tests" not in p.parts and "vendor" not in p.parts and "artifact.rejected" in p.read_text()]
+    users = sorted(p.name for p in PKG.rglob("*.py") if "tests" not in p.parts and "vendor" not in p.parts and "artifact.rejected" in p.read_text())
     assert users == ["nightly.py", "pipeline.py"]
     hits = [l.strip() for l in (PKG / "nightly.py").read_text().splitlines() if "artifact.rejected" in l]
     assert len(hits) == 1 and hits[0].startswith("for name in (() if error_type else (")  # the keep-list copy, not a read
