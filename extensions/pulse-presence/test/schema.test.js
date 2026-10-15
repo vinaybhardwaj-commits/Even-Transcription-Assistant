@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const E = require('../src/lib/events.js');
 const { createAgent } = require('../src/agent.js');
-const { makeChrome, makeFetch, bytes } = require('./fakes.js');
+const { makeChrome, makeFetch, bytes, DR, F4, lit } = require('./fakes.js');
 
 // The wire schema: 13 base fields (doctor_uid is the primary identity) plus page_name, instance_id, cookie_uid, cookie_name (0.1.1).
 const FIELDS = ['machine_id', 'room', 'doctor_uid', 'email', 'display_name', 'event', 'encounter_id', 'prescription_ref', 'ts', 'tab_focus', 'impersonating', 'ext_version', 'reason', 'page_name', 'instance_id', 'cookie_uid', 'cookie_name', 'identity_age_s', 'last_doctor_uid', 'last_doctor_age_s'];
@@ -39,7 +39,7 @@ test('doctor_uid: nullable string up to 256; null is valid; the old 12-field sha
   assert.equal(nullUid.doctor_uid, null);
   assert.deepEqual(E.validateEvent(nullUid), []);
   assert.deepEqual(E.validateEvent(E.buildEvent({ ...base })), [], 'omitted doctor_uid builds as null');
-  const withUid = E.buildEvent({ ...base, doctor_uid: 'FAKEUID000000000001', email: null, display_name: 'Dr X' });
+  const withUid = E.buildEvent({ ...base, doctor_uid: 'FAKEUID000000000001', email: null, display_name: lit(`${DR} ${F4}`) });
   assert.equal(withUid.doctor_uid, 'FAKEUID000000000001');
   assert.equal(withUid.email, null);
   assert.deepEqual(E.validateEvent(withUid), [], 'email null with a doctor_uid is valid');
@@ -62,7 +62,7 @@ test('every outbound event over a full session matches the 17-field schema exact
   const fetch = makeFetch();
   const agent = createAgent(chrome, { fetch });
   const from = { id: 'ext-id', url: 'https://pulse.even.in/' };
-  const m = (o) => ({ type: 'pulse_state', status: 'present', identity: { doctor_uid: 'DOC-A', display_name: 'A', email: null }, reason: null, page_name: null, impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true, ...o });
+  const m = (o) => ({ type: 'pulse_state', status: 'present', identity: { doctor_uid: 'DOC-A', display_name: lit('A'), email: null }, reason: null, page_name: null, impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true, ...o });
   const go = async (x) => { chrome.runtime.onMessage.fire(x, from); await agent.settled(); };
   await go(m());
   await go(m({ route: { type: 'prescription', prescription_ref: 'RX1' } }));

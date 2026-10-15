@@ -214,7 +214,7 @@
     return tok && tok.length <= 50 ? tok : null;
   }
 
-  // "Hello, Dr Manoj" + emoji -> "Manoj";  "Hello, Prerana" -> "Prerana";  anything else -> null.
+  // "Hello, <title> <first name>" + emoji -> "<first name>";  "Hello, <first name>" -> "<first name>";  anything else -> null.
   function parseGreeting(text) {
     if (typeof text !== 'string' || text.length > 400) return null;
     const m = /^\s*hello\b\s*,?\s*(.+)$/is.exec(text.normalize('NFC'));

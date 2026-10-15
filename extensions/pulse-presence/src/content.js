@@ -29,7 +29,7 @@
       try { return env.sessionStorage.getItem('is-impersonation'); } catch (e) { return null; }
     }
 
-    // First name from the home-page greeting ("Hello, Dr Manoj"), or null when not on home / not rendered yet.
+    // First name from the home-page greeting ("Hello, <title> <first name>"), or null when not on home / not rendered yet.
     function readPageName(route) {
       if (route.type !== 'home') return null;
       try {

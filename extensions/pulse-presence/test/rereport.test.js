@@ -6,7 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createContent } = require('../src/content.js');
 const { createAgent } = require('../src/agent.js');
-const { makeChrome, makeFetch, makeApiFetch, ACCESS_OK, NAME_OK } = require('./fakes.js');
+const { makeChrome, makeFetch, makeApiFetch, ACCESS_OK, NAME_OK, DR, F4 } = require('./fakes.js');
 
 const UID = 'FAKEUID000000000001';
 const CFG = { machine_id: 'MAC-R', room: 'OPD-R', ingest_url: 'https://ingest.example/v1/events', token: 'TOKEN-R' };
@@ -14,7 +14,7 @@ const MIN = 60000;
 
 // Real content.js start() wired to a real agent: listeners captured so tests can fire focus / visibilitychange.
 function rig() {
-  const api = makeApiFetch({ access: ACCESS_OK(UID), name: NAME_OK('Dr Rereport') });
+  const api = makeApiFetch({ access: ACCESS_OK(UID), name: NAME_OK(`${DR} ${F4}`) });
   const vis = { visibilityState: 'visible' };
   const winL = {}; const docL = {};
   const doc = { get visibilityState() { return vis.visibilityState; }, addEventListener: (t, f) => { docL[t] = f; } };

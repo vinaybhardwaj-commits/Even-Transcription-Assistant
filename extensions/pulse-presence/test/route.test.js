@@ -104,7 +104,7 @@ test('exactness: no guessing from other fields or deeper paths', () => {
 });
 
 test('body_keys drops digit runs, id-keyed maps, capitalised names and phone-like keys', () => {
-  const r = parseConsultBody(bytes({ a1234: 1, '9876543210': 2, abc12: 3, Ramesh_Kumar: 4, Zeta: 5, _x: 6, '1abc': 7, '987654': 8, uid_00012345: 9, status: 10, dataKey2: 11 }));
+  const r = parseConsultBody(bytes({ a1234: 1, '9876543210': 2, abc12: 3, Alpha_Sample: 4, Zeta: 5, _x: 6, '1abc': 7, '987654': 8, uid_00012345: 9, status: 10, dataKey2: 11 }));
   assert.deepEqual(r.body_keys, ['abc12', 'dataKey2', 'status']);
   const ids = {}; for (let i = 0; i < 20; i++) ids['id' + (100000 + i)] = 'v';
   assert.deepEqual(parseConsultBody(bytes(ids)).body_keys, []);

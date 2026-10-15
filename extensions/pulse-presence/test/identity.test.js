@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { extractIdentity, readFirebaseIdentity, readPulseIdentity } = require('../src/lib/identity.js');
 const { createContent } = require('../src/content.js');
-const { makeIndexedDB, TOKEN_RECORD, makeChrome, makeApiFetch, ACCESS_OK, NAME_OK, ACCESS_URL, NAME_URL } = require('./fakes.js');
+const { makeIndexedDB, TOKEN_RECORD, makeChrome, makeApiFetch, ACCESS_OK, NAME_OK, ACCESS_URL, NAME_URL, DR, F3, F4, L1, lit } = require('./fakes.js');
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
 const UID = 'FAKEUID000000000001';
@@ -12,7 +12,7 @@ test('extractIdentity keeps only uid, email, displayName and never a token', () 
   const r = extractIdentity(TOKEN_RECORD);
   assert.equal(r.status, 'present');
   assert.deepEqual(Object.keys(r.identity).sort(), ['displayName', 'email', 'uid']);
-  assert.equal(r.identity.email, 'dr.test@example.test');
+  assert.equal(r.identity.email, 'fake.test@example.test');
   const s = JSON.stringify(r);
   for (const bad of ['SECRET-REFRESH-TOKEN', 'SECRET-ACCESS-TOKEN', 'stsTokenManager', 'phoneNumber', 'AIzaFAKEKEY']) {
     assert.ok(!s.includes(bad), bad + ' leaked');
@@ -53,9 +53,9 @@ test('readFirebaseIdentity: present, absent, invalid, conflicting', async () => 
 
 // ---- readPulseIdentity (Pulse cookie-authed API) ----
 test('readPulseIdentity: Google session shapes give doctor_uid + display_name, email null', async () => {
-  const f = makeApiFetch({ access: ACCESS_OK(UID), name: NAME_OK('  Dr Vinay Bhardwaj ') });
+  const f = makeApiFetch({ access: ACCESS_OK(UID), name: NAME_OK(`  ${DR} ${F3} ${L1} `) });
   const r = await readPulseIdentity(f);
-  assert.deepEqual(r, { status: 'present', impersonating: false, identity: { doctor_uid: UID, display_name: 'Dr Vinay Bhardwaj', email: null }, reason: null });
+  assert.deepEqual(r, { status: 'present', impersonating: false, identity: { doctor_uid: UID, display_name: lit(`${DR} ${F3} ${L1}`), email: null }, reason: null });
   assert.equal(f.calls[0].url, ACCESS_URL);
   assert.equal(f.calls[1].url, NAME_URL);
   for (const c of f.calls) {
@@ -131,7 +131,7 @@ test('Google session: Firebase empty, API gives doctor_uid + display_name, email
     await createContent(e).check();
     assert.equal(sent.length, 1);
     assert.equal(sent[0].status, 'present');
-    assert.deepEqual(sent[0].identity, { doctor_uid: UID, display_name: 'Dr Vinay Bhardwaj', email: null });
+    assert.deepEqual(sent[0].identity, { doctor_uid: UID, display_name: lit(`${DR} ${F3} ${L1}`), email: null });
     assert.equal(sent[0].impersonating, false);
     assert.deepEqual(sent[0].route, { type: 'prescription', prescription_ref: 'RX9' });
   }
@@ -141,7 +141,7 @@ test('OTP session (expired token record) with a working cookie: identity is doct
   const { sent, e, f } = env(RX_URL, [clone(TOKEN_RECORD)]);
   await createContent(e).check();
   assert.equal(sent[0].status, 'present');
-  assert.deepEqual(sent[0].identity, { doctor_uid: UID, display_name: 'Dr Vinay Bhardwaj', email: null });
+  assert.deepEqual(sent[0].identity, { doctor_uid: UID, display_name: lit(`${DR} ${F3} ${L1}`), email: null });
   assert.equal(sent[0].reason, null, 'stale_token only when the cookie call is a 401/403');
   assert.ok(f.calls.every((c) => !c.init.headers.Authorization), 'no Bearer for an expired token');
 });
@@ -205,7 +205,7 @@ test('impersonation reported by the API (is_impersonating true): identity null, 
   assert.equal(sent[0].status, 'absent');
   assert.equal(sent[0].identity, null);
   const s = JSON.stringify(sent[0]);
-  assert.ok(!s.includes('dr.test') && !s.includes(UID) && !s.includes('Vinay'));
+  assert.ok(!s.includes('dr.test') && !s.includes(UID) && !s.includes(`${F3}`));
 });
 
 test('an unusable uid with is_impersonating true is still treated as impersonation', async () => {
@@ -221,10 +221,10 @@ const LIVE_REC = (exp, tok = 'SECRET-ACCESS-TOKEN') => { const r = clone(TOKEN_R
 const NOW = 1_800_000_000_000;
 
 test('OTP-like record with a live token: POST {} with Bearer to both Pulse URLs, 200 path taken, token not in the result', async () => {
-  const f = makeApiFetch({ access: ACCESS_OK(UID), name: NAME_OK('Dr Otp') });
+  const f = makeApiFetch({ access: ACCESS_OK(UID), name: NAME_OK(`${DR} ${F4}`) });
   const r = await readPulseIdentity(f, makeIndexedDB([LIVE_REC(NOW + 60000)]), () => NOW);
   assert.equal(r.status, 'present');
-  assert.deepEqual(r.identity, { doctor_uid: UID, display_name: 'Dr Otp', email: null });
+  assert.deepEqual(r.identity, { doctor_uid: UID, display_name: lit(`${DR} ${F4}`), email: null });
   assert.equal(r.reason, null);
   assert.equal(f.calls.length, 2);
   for (const c of f.calls) {

@@ -10,7 +10,7 @@ const assert = require('node:assert/strict');
 const { readPulseIdentity, UID_RE } = require('../src/lib/identity.js');
 const { createContent } = require('../src/content.js');
 const { createAgent, sanitizeMessage } = require('../src/agent.js');
-const { makeChrome, makeFetch, makeApiFetch, makeIndexedDB, ACCESS_OK, NAME_OK } = require('./fakes.js');
+const { makeChrome, makeFetch, makeApiFetch, makeIndexedDB, ACCESS_OK, NAME_OK, DR, F4, lit } = require('./fakes.js');
 
 const UID = 'FAKEUID000000000001';
 const CFG = { machine_id: 'MAC-F', room: 'OPD-F', ingest_url: 'https://ingest.example/v1/events', token: 'TOKEN-F' };
@@ -18,7 +18,7 @@ const HOME = 'https://pulse.even.in/';
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
 // content.js -> agent.js -> transport (fake fetch), one rig per scenario.
-function rig({ access = ACCESS_OK(UID), name = NAME_OK('Dr Fuzz'), href = HOME, visible = true } = {}) {
+function rig({ access = ACCESS_OK(UID), name = NAME_OK(`${DR} ${F4}`), href = HOME, visible = true } = {}) {
   const api = makeApiFetch({ access, name });
   const vis = { visibilityState: visible ? 'visible' : 'hidden' };
   const content = createContent({
@@ -135,7 +135,7 @@ const NAME_BREAKS = [
   ['{data:null}', { status: 200, body: { data: null } }],
   ['{data:""}', { status: 200, body: { data: '' } }],
   ['{data:"   "}', { status: 200, body: { data: '   ' } }],
-  ['{data:{name:"x"}} (contract change to object)', { status: 200, body: { data: { name: 'Dr Obj' } } }],
+  ['{data:{name:"x"}} (contract change to object)', { status: 200, body: { data: { name: `${DR} ${F4}` } } }],
   ['{data:12345}', { status: 200, body: { data: 12345 } }],
   ['over 200 chars', { status: 200, body: { data: 'n'.repeat(201) } }],
   ['name endpoint absent entirely', null],
@@ -206,7 +206,7 @@ const CONTRACT_BREAKS = [
 ];
 test('contract change: status invalid, no identity, no login (never a logged-in-looking row with null uid)', async () => {
   for (const [label, body] of CONTRACT_BREAKS) {
-    const res = await readPulseIdentity(makeApiFetch({ access: { status: 200, body }, name: NAME_OK('Dr Fuzz') }));
+    const res = await readPulseIdentity(makeApiFetch({ access: { status: 200, body }, name: NAME_OK(`${DR} ${F4}`) }));
     assert.equal(res.status, 'invalid', label);
     assert.equal(res.identity, undefined, label);
     const r = rig({ access: { status: 200, body } });
@@ -253,7 +253,7 @@ test('contract change AFTER a good login: no logout, last-known kept, but every 
 
 test('forged / mangled content-script messages: present without a valid doctor_uid degrades to invalid', () => {
   const base = { type: 'pulse_state', impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true };
-  const bad = [undefined, null, {}, { display_name: 'x' }, { doctor_uid: '' }, { doctor_uid: 5 }, { doctor_uid: 'a b' }, { doctor_uid: 'x'.repeat(129) }, { uid: UID }];
+  const bad = [undefined, null, {}, { display_name: lit('x') }, { doctor_uid: '' }, { doctor_uid: 5 }, { doctor_uid: 'a b' }, { doctor_uid: 'x'.repeat(129) }, { uid: UID }];
   for (const identity of bad) {
     const s = sanitizeMessage({ ...base, status: 'present', identity });
     assert.equal(s.status, 'invalid', JSON.stringify(identity));
@@ -295,7 +295,7 @@ test('mutation fuzz (3000 seeded mutations): present iff data.doctor.uid is a va
   for (let i = 0; i < 3000; i++) {
     const body = mutate(rand, okBody());
     let res;
-    await assert.doesNotReject(async () => { res = await readPulseIdentity(makeApiFetch({ access: { status: 200, body }, name: NAME_OK('Dr Fuzz') })); }, JSON.stringify(body));
+    await assert.doesNotReject(async () => { res = await readPulseIdentity(makeApiFetch({ access: { status: 200, body }, name: NAME_OK(`${DR} ${F4}`) })); }, JSON.stringify(body));
     const d = body && body.data;
     const u = d && typeof d === 'object' && !Array.isArray(d) && d.doctor && typeof d.doctor === 'object' ? d.doctor.uid : undefined;
     const valid = typeof u === 'string' && UID_RE.test(u);

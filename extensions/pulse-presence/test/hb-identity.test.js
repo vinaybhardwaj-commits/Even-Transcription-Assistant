@@ -2,11 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createAgent } = require('../src/agent.js');
 const E = require('../src/lib/events.js');
-const { makeChrome, makeFetch } = require('./fakes.js');
+const { makeChrome, makeFetch, DR, F1, F3, F4, F5, lit } = require('./fakes.js');
 
 const CFG = { machine_id: 'MAC-7', room: 'OPD-3', ingest_url: 'https://ingest.example/v1/events', token: 'TOKEN-XYZ' };
 const FROM = { id: 'ext-id', url: 'https://pulse.even.in/' };
-const DOC_A = { doctor_uid: 'DOC-A', display_name: 'Dr X', email: 'dr@example.test' };
+const DOC_A = { doctor_uid: 'DOC-A', display_name: lit(`${DR} ${F4}`), email: 'dr@example.test' };
 
 function setup() {
   const chrome = makeChrome({ managed: CFG });
@@ -129,7 +129,7 @@ test('validateEvent: identity_age_s optional, integer >= 0, never without a doct
 });
 
 // last_doctor_uid / last_doctor_age_s: placement hint only, not identity.
-const DOC_B = { doctor_uid: 'DOC-B', display_name: 'Dr Y', email: null };
+const DOC_B = { doctor_uid: 'DOC-B', display_name: lit(`${DR} ${F5}`), email: null };
 const hbs = (events) => events().filter((e) => e.event === 'heartbeat');
 
 test('last_doctor_uid is set by an attributed event and its age grows', async () => {

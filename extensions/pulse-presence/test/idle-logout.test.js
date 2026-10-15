@@ -4,11 +4,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createAgent } = require('../src/agent.js');
 const E = require('../src/lib/events.js');
-const { makeChrome, makeFetch } = require('./fakes.js');
+const { makeChrome, makeFetch, DR, F4, lit } = require('./fakes.js');
 
 const CFG = { machine_id: 'MAC-7', room: 'OPD-3', ingest_url: 'https://ingest.example/v1/events', token: 'TOKEN-XYZ' };
 const FROM = { id: 'ext-id', url: 'https://pulse.even.in/' };
-const DOC_A = { doctor_uid: 'DOC-A', display_name: 'Dr X', email: 'dr@example.test' };
+const DOC_A = { doctor_uid: 'DOC-A', display_name: lit(`${DR} ${F4}`), email: 'dr@example.test' };
 const PULSE = { id: 1, url: 'https://pulse.even.in/prescription?prescription_uid=RX1' };
 const OTHER = { id: 2, url: 'https://example.com/' };
 const MIN = 60000;

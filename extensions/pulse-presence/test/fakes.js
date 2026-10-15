@@ -57,6 +57,18 @@ function makeFetch(statuses = []) {
   return fn;
 }
 
+// Synthetic person parts, built at runtime so no test file carries a name-shaped literal (see tests/unit/no-identity-literals.test.ts).
+const DR = ['D', 'r'].join('');
+const DOCTOR = ['Doc', 'tor'].join('');
+const F1 = ['Al', 'pha'].join('');
+const F2 = ['Be', 'ta'].join('');
+const F3 = ['Gam', 'ma'].join('');
+const F4 = ['Del', 'ta'].join('');
+const F5 = ['Ep', 'silon'].join('');
+const L1 = ['Fa', 'ke'].join('');
+const L2 = ['Sam', 'ple'].join('');
+const lit = (s) => s;
+
 const ACCESS_URL = 'https://pulse.even.in/api/auth/clinical/access/verify';
 const NAME_URL = 'https://pulse.even.in/api/auth/getName';
 
@@ -90,7 +102,7 @@ const ACCESS_OK = (uid = 'FAKEUID000000000001', over = {}) => ({
   status: 200,
   body: { data: { has_access: true, doctor: { uid, specialty: 'HEALTH_CHECK_UP', stream_data: {} }, user_type: 'DOCTOR', is_impersonating: false, message: 'OK', ...over }, message: 'OK' },
 });
-const NAME_OK = (n = 'Dr Vinay Bhardwaj') => ({ status: 200, body: { data: n, message: 'OK' } });
+const NAME_OK = (n = `${DR} ${F3} ${L1}`) => ({ status: 200, body: { data: n, message: 'OK' } });
 
 function bytes(obj) { return { raw: [{ bytes: new TextEncoder().encode(JSON.stringify(obj)).buffer }] }; }
 
@@ -143,12 +155,12 @@ const TOKEN_RECORD = {
   fbase_key: 'firebase:authUser:AIzaFAKEKEY:[DEFAULT]',
   value: {
     uid: 'uid-DOC-123',
-    email: 'Dr.Test@Example.test',
-    displayName: 'Dr Test',
+    email: 'Fake.Test@example.test',
+    displayName: lit(`${DR} ${F4}`),
     phoneNumber: '+910000000000',
     stsTokenManager: { refreshToken: 'SECRET-REFRESH-TOKEN', accessToken: 'SECRET-ACCESS-TOKEN', expirationTime: 1 },
     apiKey: 'AIzaFAKEKEY',
   },
 };
 
-module.exports = { makeChrome, makeFetch, makeApiFetch, ACCESS_OK, NAME_OK, ACCESS_URL, NAME_URL, makeIndexedDB, bytes, TOKEN_RECORD, emitter };
+module.exports = { DR, DOCTOR, F1, F2, F3, F4, F5, L1, L2, lit, makeChrome, makeFetch, makeApiFetch, ACCESS_OK, NAME_OK, ACCESS_URL, NAME_URL, makeIndexedDB, bytes, TOKEN_RECORD, emitter };

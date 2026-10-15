@@ -10,56 +10,56 @@ const { createAgent, sanitizeMessage } = require('../src/agent.js');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { makeChrome, makeFetch, makeApiFetch, ACCESS_OK, NAME_OK, bytes } = require('./fakes.js');
+const { makeChrome, makeFetch, makeApiFetch, ACCESS_OK, NAME_OK, bytes, DR, DOCTOR, F1, F2, F3, F4, L1, L2, lit } = require('./fakes.js');
 
 const CFG = { machine_id: 'MAC-S', room: 'OPD-S', ingest_url: 'https://ingest.example/v1/events', token: 'TOKEN-S' };
-const UID_A = 'UID-PRERANA';
-const UID_B = 'UID-MANOJ';
+const UID_A = 'UID-A';
+const UID_B = 'UID-B';
 const FROM = { id: 'ext-id', url: 'https://pulse.even.in/' };
 
 // ---- greeting parser ----
 test('parseGreeting: real-looking greetings give the first name; honorifics, emoji and punctuation are dropped', () => {
   const cases = [
-    ['Hello, Dr Manoj 👋', 'Manoj'],
-    ['Hello, Prerana', 'Prerana'],
-    ['Hello, Prerana 👋', 'Prerana'],
-    ['Hello, Dr. Vinay 👋', 'Vinay'],
+    [`Hello, ${DR} ${F1} 👋`, `${F1}`],
+    [`Hello, ${F2}`, `${F2}`],
+    [`Hello, ${F2} 👋`, `${F2}`],
+    [`Hello, ${DR}. ${F3} 👋`, `${F3}`],
     ['  Hello,   Anjali!  ', 'Anjali'],
     ['hello, dr sandhya', 'sandhya'],
     ['Hello, Mary-Ann 👋', 'Mary-Ann'],
     ["Hello, D'Souza", "D'Souza"],
     ['Hello,\n  Kush 👋', 'Kush'],
-    ['Hello Dr Manoj', 'Manoj'],
-    ['Hello, Dr Manoj Kumar 👋', 'Manoj'],
+    [`Hello ${DR} ${F1}`, `${F1}`],
+    [`Hello, ${DR} ${F1} ${L2} 👋`, `${F1}`],
   ];
   for (const [text, want] of cases) assert.equal(parseGreeting(text), want, text);
 });
 
 test('parseGreeting: anything that is not a greeting with a name gives null', () => {
-  for (const t of ['Hello, Doctor 👋', 'Hello, doctor', 'Hello, DOCTOR!', 'Hello,  👋', 'Hello, Dr 👋', 'Hello, Dr. 👋', 'Hello, 👋', 'Hello,', 'Welcome back', 'Helloween', '', '   ', null, undefined, 42, {}, 'Good morning, Manoj', 'Hello, ' + 'x'.repeat(500)]) {
+  for (const t of ['Hello, Doctor 👋', 'Hello, doctor', 'Hello, DOCTOR!', 'Hello,  👋', 'Hello, Dr 👋', 'Hello, Dr. 👋', 'Hello, 👋', 'Hello,', 'Welcome back', 'Helloween', '', '   ', null, undefined, 42, {}, `Good morning, ${F1}`, 'Hello, ' + 'x'.repeat(500)]) {
     assert.equal(parseGreeting(t), null, String(t));
   }
 });
 
 // ---- stale decision ----
 test('isStale: match, mismatch, case and Dr prefix', () => {
-  assert.equal(isStale('Dr Manoj Kumar', 'Manoj'), false, 'first token matches');
-  assert.equal(isStale('Dr Manoj Kumar', 'manoj'), false, 'case-insensitive');
-  assert.equal(isStale('DR. MANOJ', 'Manoj'), false, 'Dr. prefix ignored');
-  assert.equal(isStale('Dr.Manoj', 'Manoj'), false, 'attached Dr. prefix ignored');
-  assert.equal(isStale('  Manoj  ', 'Dr Manoj'), false, 'Dr on the page side ignored too');
-  assert.equal(isStale('Dr Prerana K', 'Manoj'), true, 'different first name is stale');
+  assert.equal(isStale(`${DR} ${F1} ${L2}`, `${F1}`), false, 'first token matches');
+  assert.equal(isStale(`${DR} ${F1} ${L2}`, `${F1.toLowerCase()}`), false, 'case-insensitive');
+  assert.equal(isStale((DR + '. ' + F1).toUpperCase(), `${F1}`), false, 'Dr. prefix ignored');
+  assert.equal(isStale(`Dr.${F1}`, `${F1}`), false, 'attached Dr. prefix ignored');
+  assert.equal(isStale(`  ${F1}  `, `${DR} ${F1}`), false, 'Dr on the page side ignored too');
+  assert.equal(isStale(`${DR} ${F2} K`, `${F1}`), true, 'different first name is stale');
   assert.equal(isStale('Drake Ramsay', 'drake'), false, '"Drake" is a name, not an honorific');
   assert.equal(isStale('Drake Ramsay', 'Ramsay'), true, 'only the first token is compared');
-  assert.equal(isStale('Dr Vinay Bhardwaj', 'Vinay'), false);
+  assert.equal(isStale(`${DR} ${F3} ${L1}`, `${F3}`), false);
 });
 
 test('isStale: no evidence of a mismatch is not a mismatch (either side unknown)', () => {
-  for (const [c, p] of [[null, 'Manoj'], ['Dr Manoj', null], [null, null], ['', 'Manoj'], ['Dr', 'Manoj'], ['Dr Manoj', '']]) {
+  for (const [c, p] of [[null, `${F1}`], [`${DR} ${F1}`, null], [null, null], ['', `${F1}`], ['Dr', `${F1}`], [`${DR} ${F1}`, '']]) {
     assert.equal(isStale(c, p), false, JSON.stringify([c, p]));
   }
   assert.equal(firstName('Dr'), null);
-  assert.equal(firstName('Dr Manoj'), 'Manoj');
+  assert.equal(firstName(`${DR} ${F1}`), `${F1}`);
 });
 
 // ---- reason mapping ----
@@ -88,7 +88,7 @@ test('readPulseIdentity reasons for getName: identity stays present, display_nam
     assert.equal(r.identity.display_name, null);
     assert.equal(r.reason, reason, JSON.stringify(name));
   }
-  const ok = await readPulseIdentity(makeApiFetch({ access: ACCESS_OK(UID_A), name: NAME_OK('Dr Prerana') }));
+  const ok = await readPulseIdentity(makeApiFetch({ access: ACCESS_OK(UID_A), name: NAME_OK(`${DR} ${F2}`) }));
   assert.equal(ok.reason, null);
 });
 
@@ -100,7 +100,7 @@ test('events.validateEvent accepts the new reason codes (sorted sets) and reject
   for (const r of ['absent_4', 'absent_4010', 'absent_', 'stale', 'stale_cookie,body_unavailable', 'a,a', '', 'body_', 'body_bogus']) {
     assert.ok(validateEvent({ ...base, reason: r }).length, r);
   }
-  assert.deepEqual(validateEvent({ ...base, event: 'identity_stale', cookie_uid: 'U', cookie_name: 'Dr X' }), []);
+  assert.deepEqual(validateEvent({ ...base, event: 'identity_stale', cookie_uid: 'U', cookie_name: `${DR} ${F4}` }), []);
 });
 
 // ---- agent: stale decision ----
@@ -109,7 +109,7 @@ function agentRig(chromeOpts = {}, agentOpts = {}) {
   const sink = makeFetch();
   const agent = createAgent(chrome, { fetch: sink, ...agentOpts });
   const msg = (o = {}) => ({
-    type: 'pulse_state', status: 'present', identity: { doctor_uid: UID_A, display_name: 'Dr Prerana K', email: null },
+    type: 'pulse_state', status: 'present', identity: { doctor_uid: UID_A, display_name: lit(`${DR} ${F2} K`), email: null },
     reason: null, page_name: null, impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true, ...o,
   });
   const send = async (o) => { chrome.runtime.onMessage.fire(msg(o), FROM); await agent.settled(); };
@@ -126,18 +126,18 @@ function agentRig(chromeOpts = {}, agentOpts = {}) {
 
 test('stale: greeting names a different doctor -> one identity_stale, no login, then null doctor with reason stale_cookie', async () => {
   const r = agentRig();
-  await r.send({ page_name: 'Manoj' });
+  await r.send({ page_name: `${F1}` });
   let evs = r.events();
   assert.deepEqual(evs.map((e) => e.event), ['identity_stale']);
   const st = evs[0];
   assert.equal(st.cookie_uid, UID_A);
-  assert.equal(st.cookie_name, 'Dr Prerana K');
-  assert.equal(st.page_name, 'Manoj');
+  assert.equal(st.cookie_name, `${DR} ${F2} K`);
+  assert.equal(st.page_name, `${F1}`);
   assert.equal(st.doctor_uid, null);
   assert.equal(st.display_name, null);
   assert.equal(st.reason, 'stale_cookie');
   await r.beat();
-  await r.send({ page_name: 'Manoj' }); // a re-report does not repeat identity_stale
+  await r.send({ page_name: `${F1}` }); // a re-report does not repeat identity_stale
   await r.beat();
   evs = r.events();
   assert.equal(evs.filter((e) => e.event === 'identity_stale').length, 1, 'exactly one identity_stale');
@@ -149,7 +149,7 @@ test('stale: greeting names a different doctor -> one identity_stale, no login, 
     assert.equal(e.display_name, null);
     assert.equal(e.email, null);
     assert.equal(e.reason, 'stale_cookie');
-    assert.equal(e.page_name, 'Manoj');
+    assert.equal(e.page_name, `${F1}`);
     assert.equal(e.cookie_uid, null, 'cookie_* fields appear only on identity_stale');
   }
   for (const e of evs) assert.deepEqual(validateEvent(e), []);
@@ -159,10 +159,10 @@ test('stale: greeting names a different doctor -> one identity_stale, no login, 
 
 test('stale: encounter_open/close under a stale identity keep consult_uid/prescription_ref with doctor null', async () => {
   const r = agentRig();
-  await r.send({ page_name: 'Manoj', route: { type: 'prescription', prescription_ref: 'RX9' } });
+  await r.send({ page_name: `${F1}`, route: { type: 'prescription', prescription_ref: 'RX9' } });
   await r.consult('start', 'C-1');
   await r.consult('end', 'C-1', false); // body not readable
-  await r.send({ page_name: 'Manoj', route: { type: 'home', prescription_ref: null } });
+  await r.send({ page_name: `${F1}`, route: { type: 'home', prescription_ref: null } });
   const evs = r.events();
   const enc = evs.filter((e) => e.event.startsWith('encounter_'));
   assert.deepEqual(enc.map((e) => [e.event, e.encounter_id, e.prescription_ref, e.reason]), [
@@ -174,60 +174,60 @@ test('stale: encounter_open/close under a stale identity keep consult_uid/prescr
   for (const e of enc) {
     assert.equal(e.doctor_uid, null);
     assert.equal(e.display_name, null);
-    assert.equal(e.page_name, 'Manoj');
+    assert.equal(e.page_name, `${F1}`);
   }
 });
 
 test('stale ends with a fresh read whose greeting matches: login for the cookie doctor; later greeting-less reads stay clean', async () => {
   const r = agentRig();
-  await r.send({ page_name: 'Manoj' });
-  await r.send({ identity: { doctor_uid: UID_B, display_name: 'Dr Manoj Kumar', email: null }, page_name: 'Manoj' });
+  await r.send({ page_name: `${F1}` });
+  await r.send({ identity: { doctor_uid: UID_B, display_name: lit(`${DR} ${F1} ${L2}`), email: null }, page_name: `${F1}` });
   await r.beat();
   const evs = r.events();
   assert.deepEqual(evs.map((e) => e.event), ['identity_stale', 'login', 'heartbeat']);
   assert.equal(evs[1].doctor_uid, UID_B, 'login after a real cookie switch; no logout of the withheld stale doctor');
   assert.equal(evs[1].reason, null);
   assert.equal(evs[2].doctor_uid, UID_B);
-  assert.equal(evs[2].page_name, 'Manoj');
+  assert.equal(evs[2].page_name, `${F1}`);
   // same cookie, greeting corrected (page re-rendered for the cookie doctor): also ends the stale state
   const r2 = agentRig();
-  await r2.send({ page_name: 'Manoj' });
-  await r2.send({ page_name: 'Prerana' });
+  await r2.send({ page_name: `${F1}` });
+  await r2.send({ page_name: `${F2}` });
   assert.deepEqual(r2.events().map((e) => e.event), ['identity_stale', 'login']);
   assert.equal(r2.events()[1].doctor_uid, UID_A);
 });
 
 test('match (case, Dr prefix) is not stale: normal login with page_name attached', async () => {
   const r = agentRig();
-  await r.send({ page_name: 'PRERANA' });
+  await r.send({ page_name: F2.toUpperCase() });
   await r.beat();
   const evs = r.events();
   assert.deepEqual(evs.map((e) => e.event), ['login', 'heartbeat']);
-  for (const e of evs) { assert.equal(e.doctor_uid, UID_A); assert.equal(e.reason, null); assert.equal(e.page_name, 'PRERANA'); }
+  for (const e of evs) { assert.equal(e.doctor_uid, UID_A); assert.equal(e.reason, null); assert.equal(e.page_name, F2.toUpperCase()); }
 });
 
 test('stale: a visible logout, idle_timeout and tab close never assert the stale doctor logout', async () => {
   const r = agentRig();
-  await r.send({ page_name: 'Manoj' });
-  await r.send({ status: 'absent', identity: null, reason: 'absent_401', page_name: 'Manoj' });
+  await r.send({ page_name: `${F1}` });
+  await r.send({ status: 'absent', identity: null, reason: 'absent_401', page_name: `${F1}` });
   assert.ok(!r.events().some((e) => e.event === 'logout'), 'no logout for a doctor whose login was never asserted');
-  // after the cookie vanished the page still greets Manoj: absent_401 + page_name, doctor null
+  // after the cookie vanished the page still greets the first doctor: absent_401 + page_name, doctor null
   await r.beat();
   const hb = r.events().filter((e) => e.event === 'heartbeat').pop();
   assert.equal(hb.doctor_uid, null);
   assert.equal(hb.reason, 'absent_401');
-  assert.equal(hb.page_name, 'Manoj');
+  assert.equal(hb.page_name, `${F1}`);
   // idle_timeout while stale
   let t = Date.parse('2026-10-05T08:00:00Z');
   const r3 = agentRig({}, { now: () => t });
-  await r3.send({ page_name: 'Manoj' });
+  await r3.send({ page_name: `${F1}` });
   r3.chrome.idle.onStateChanged.fire('idle'); await r3.agent.settled();
   t += 46 * 60000;
   await r3.beat();
   assert.ok(!r3.events().some((e) => e.event === 'logout'));
   // last Pulse tab closed while stale
   const r4 = agentRig();
-  await r4.send({ page_name: 'Manoj' });
+  await r4.send({ page_name: `${F1}` });
   r4.chrome.tabs.open = [];
   r4.chrome.tabs.onRemoved.fire(1); await r4.agent.settled();
   assert.ok(!r4.events().some((e) => e.event === 'logout'));
@@ -236,7 +236,7 @@ test('stale: a visible logout, idle_timeout and tab close never assert the stale
 test('a doctor asserted BEFORE the greeting rendered: staleness found later emits identity_stale (login already out), then nulls', async () => {
   const r = agentRig();
   await r.send({ page_name: null });
-  await r.send({ page_name: 'Manoj' });
+  await r.send({ page_name: `${F1}` });
   await r.beat();
   assert.deepEqual(r.events().map((e) => [e.event, e.doctor_uid]), [['login', UID_A], ['identity_stale', null], ['heartbeat', null]]);
   assert.equal(r.events()[1].cookie_uid, UID_A, 'the sink can close out the doctor asserted by the earlier login');
@@ -245,7 +245,7 @@ test('a doctor asserted BEFORE the greeting rendered: staleness found later emit
 test('absent cookie + greeting: identity rows carry doctor null, reason absent_<status>, page_name (never promoted to uid)', async () => {
   for (const [status, reason] of [['absent', 'absent_401'], ['absent', 'absent_403']]) {
     const r = agentRig();
-    await r.send({ status, identity: null, reason, page_name: 'Manoj' });
+    await r.send({ status, identity: null, reason, page_name: `${F1}` });
     await r.beat();
     const evs = r.events();
     assert.ok(evs.length >= 1);
@@ -253,24 +253,24 @@ test('absent cookie + greeting: identity rows carry doctor null, reason absent_<
       assert.equal(e.doctor_uid, null);
       assert.equal(e.display_name, null);
       assert.equal(e.reason, reason);
-      assert.equal(e.page_name, 'Manoj');
+      assert.equal(e.page_name, `${F1}`);
     }
   }
   // 500 on verify: fail closed, reason carries the status instead of identity_unreadable
   const r5 = agentRig();
-  await r5.send({ status: 'invalid', identity: null, reason: 'absent_500', page_name: 'Manoj' });
+  await r5.send({ status: 'invalid', identity: null, reason: 'absent_500', page_name: `${F1}` });
   await r5.beat();
-  for (const e of r5.events()) { assert.equal(e.doctor_uid, null); assert.equal(e.reason, 'absent_500'); assert.equal(e.page_name, 'Manoj'); }
+  for (const e of r5.events()) { assert.equal(e.doctor_uid, null); assert.equal(e.reason, 'absent_500'); assert.equal(e.page_name, `${F1}`); }
   // network error: reason stays identity_unreadable
   const rn = agentRig();
-  await rn.send({ status: 'invalid', identity: null, reason: null, page_name: 'Manoj' });
+  await rn.send({ status: 'invalid', identity: null, reason: null, page_name: `${F1}` });
   await rn.beat();
   for (const e of rn.events()) assert.equal(e.reason, 'identity_unreadable');
 });
 
 test('page_name is reset by the login route, ignored during impersonation, and sanitized from forged messages', async () => {
   const r = agentRig();
-  await r.send({ page_name: 'Prerana' });
+  await r.send({ page_name: `${F2}` });
   await r.send({ status: 'absent', identity: null, page_name: null, page_reset: true, visible: true, route: { type: 'login', prescription_ref: null } });
   await r.beat();
   assert.equal(r.events().pop().page_name, null);
@@ -278,7 +278,7 @@ test('page_name is reset by the login route, ignored during impersonation, and s
   await ri.send({ impersonating: true, status: 'absent', identity: null, page_name: 'Zed' });
   await ri.beat();
   for (const e of ri.events()) assert.equal(e.page_name, null, 'impersonated greeting is not reported');
-  for (const bad of ['Manoj 👋', '<b>x</b>', 'a b', '', 'x'.repeat(60), 5, {}, ['Manoj']]) {
+  for (const bad of [`${F1} 👋`, '<b>x</b>', 'a b', '', 'x'.repeat(60), 5, {}, [`${F1}`]]) {
     const s = sanitizeMessage({ type: 'pulse_state', status: 'absent', page_name: bad, route: {}, visible: true });
     assert.equal(s.page_name, null, JSON.stringify(bad));
   }
@@ -295,7 +295,7 @@ test('instance_id: generated once, random hex, persists across worker restarts, 
   const mint = () => { minted++; return 'ab'.repeat(16); };
   const a1 = createAgent(chrome, { fetch: sink, newInstanceId: mint });
   const from = FROM;
-  const m = { type: 'pulse_state', status: 'present', identity: { doctor_uid: UID_A, display_name: 'Dr Prerana', email: null }, impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true };
+  const m = { type: 'pulse_state', status: 'present', identity: { doctor_uid: UID_A, display_name: lit(`${DR} ${F2}`), email: null }, impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true };
   a1.onState(m); await a1.settled();
   assert.equal(chrome.storage.local.data.instance_id, 'ab'.repeat(16));
   // worker restart: a new agent over the same storage reuses the id
@@ -336,7 +336,7 @@ test('instance_id: a malformed stored value is replaced; a storage failure degra
 // ---- content script: greeting read ----
 function contentRig({ href = 'https://pulse.even.in/', greeting, fetch } = {}) {
   const sent = [];
-  const api = fetch || makeApiFetch({ access: ACCESS_OK(UID_A), name: NAME_OK('Dr Prerana K') });
+  const api = fetch || makeApiFetch({ access: ACCESS_OK(UID_A), name: NAME_OK(`${DR} ${F2} K`) });
   const queries = [];
   const doc = {
     visibilityState: 'visible',
@@ -348,12 +348,12 @@ function contentRig({ href = 'https://pulse.even.in/', greeting, fetch } = {}) {
 }
 
 test('content: reads the greeting only on the home route and reports the first name as page_name', async () => {
-  const home = contentRig({ greeting: 'Hello, Dr Manoj 👋' });
+  const home = contentRig({ greeting: `Hello, ${DR} ${F1} 👋` });
   await home.content.check();
-  assert.equal(home.sent[0].page_name, 'Manoj');
+  assert.equal(home.sent[0].page_name, `${F1}`);
   assert.deepEqual(home.queries, ['h1[class*="greeting"]']);
   assert.equal(home.sent[0].identity.doctor_uid, UID_A, 'cookie identity is reported unchanged next to the greeting');
-  const rx = contentRig({ href: 'https://pulse.even.in/prescription?prescription_uid=RX1', greeting: 'Hello, Dr Manoj 👋' });
+  const rx = contentRig({ href: 'https://pulse.even.in/prescription?prescription_uid=RX1', greeting: `Hello, ${DR} ${F1} 👋` });
   await rx.content.check();
   assert.equal(rx.sent[0].page_name, null);
   assert.equal(rx.queries.length, 0, 'no DOM read off the home route');
@@ -363,7 +363,7 @@ test('content: reads the greeting only on the home route and reports the first n
   const junk = contentRig({ greeting: 'Welcome' });
   await junk.content.check();
   assert.equal(junk.sent[0].page_name, null);
-  const login = contentRig({ href: 'https://pulse.even.in/login', greeting: 'Hello, Dr Manoj 👋' });
+  const login = contentRig({ href: 'https://pulse.even.in/login', greeting: `Hello, ${DR} ${F1} 👋` });
   await login.content.check();
   assert.equal(login.sent[0].page_reset, true);
   assert.equal(login.sent[0].page_name, null);
@@ -377,20 +377,20 @@ test('content: carries the HTTP-status reason from the identity read', async () 
     [{ throws: true }, 'invalid', null],
     [{ status: 200, body: { data: {} } }, 'invalid', 'invalid_no_doctor'],
   ]) {
-    const c = contentRig({ greeting: 'Hello, Manoj', fetch: makeApiFetch({ access: spec }) });
+    const c = contentRig({ greeting: `Hello, ${F1}`, fetch: makeApiFetch({ access: spec }) });
     await c.content.check();
     assert.equal(c.sent[0].status, status, JSON.stringify(spec));
     assert.equal(c.sent[0].reason, reason, JSON.stringify(spec));
-    assert.equal(c.sent[0].page_name, 'Manoj');
+    assert.equal(c.sent[0].page_name, `${F1}`);
   }
 });
 
 test('end to end: content + worker, stale cookie then a corrected page', async () => {
-  const api = makeApiFetch({ access: ACCESS_OK(UID_A), name: NAME_OK('Dr Prerana K') });
+  const api = makeApiFetch({ access: ACCESS_OK(UID_A), name: NAME_OK(`${DR} ${F2} K`) });
   const chrome = makeChrome({ managed: CFG });
   const sink = makeFetch();
   const agent = createAgent(chrome, { fetch: sink });
-  let greeting = 'Hello, Dr Manoj 👋';
+  let greeting = `Hello, ${DR} ${F1} 👋`;
   const cc = { runtime: { id: 'ext-id', sendMessage: async (m) => { await agent.onState(m); } } };
   const doc = { visibilityState: 'visible', querySelector: () => ({ textContent: greeting }) };
   const content = createContent({ chrome: cc, location: { href: 'https://pulse.even.in/' }, fetch: api, sessionStorage: { getItem: () => null }, document: doc, setInterval: () => 0, addEventListener: () => {} });
@@ -399,8 +399,8 @@ test('end to end: content + worker, stale cookie then a corrected page', async (
   chrome.alarms.onAlarm.fire({ name: 'pulse-heartbeat' }); await agent.settled();
   const evs = sink.calls.flatMap((c) => c.body.events);
   assert.deepEqual(evs.map((e) => e.event), ['identity_stale', 'heartbeat']);
-  assert.ok(evs.every((e) => e.doctor_uid === null && e.page_name === 'Manoj' && e.reason === 'stale_cookie'));
-  greeting = 'Hello, Prerana 👋';
+  assert.ok(evs.every((e) => e.doctor_uid === null && e.page_name === `${F1}` && e.reason === 'stale_cookie'));
+  greeting = `Hello, ${F2} 👋`;
   await content.check();
   await agent.settled();
   const evs2 = sink.calls.flatMap((c) => c.body.events);
@@ -416,7 +416,7 @@ test('service worker script list loads identity.js before agent.js: the real bac
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(srcDir, 'background.js'), 'utf8').replace('globalThis.PulseLib.createAgent(chrome);', 'globalThis.AGENT = globalThis.PulseLib.createAgent(chrome, { fetch: (...a) => globalThis.fetch(...a) });'), ctx, { filename: 'background.js' });
   const chrome = ctx.chrome;
-  chrome.runtime.onMessage.fire({ type: 'pulse_state', status: 'present', identity: { doctor_uid: UID_A, display_name: 'Dr Prerana K', email: null }, reason: null, page_name: 'Manoj', impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true }, FROM);
+  chrome.runtime.onMessage.fire({ type: 'pulse_state', status: 'present', identity: { doctor_uid: UID_A, display_name: lit(`${DR} ${F2} K`), email: null }, reason: null, page_name: `${F1}`, impersonating: false, route: { type: 'home', prescription_ref: null }, visible: true }, FROM);
   await ctx.AGENT.settled();
   const evs = ctx.fetch.calls.flatMap((c) => c.body.events);
   assert.deepEqual(evs.map((e) => e.event), ['identity_stale']);
@@ -426,7 +426,7 @@ test('service worker script list loads identity.js before agent.js: the real bac
 test('Hello, Doctor placeholder (name still loading) is never a name: no stale verdict against it', async () => {
   assert.equal(parseGreeting('Hello, Doctor 👋'), null);
   assert.equal(parseGreeting('Hello,  👋'), null);
-  assert.equal(parseGreeting('Hello, Doctor Strange'), null, 'first token Doctor is the placeholder');
+  assert.equal(parseGreeting(`Hello, ${DOCTOR} ${F4}`), null, 'first token Doctor is the placeholder');
   assert.equal(parseGreeting('Hello, Doctora'), 'Doctora', 'a real name that merely starts with Doctor');
   const c = contentRig({ greeting: 'Hello, Doctor 👋' });
   await c.content.check();
@@ -440,7 +440,7 @@ test('departIdentity clears pageName: after idle_timeout / tab close the next co
   for (const how of ['idle_timeout', 'tab_closed']) {
     let t = Date.parse('2026-10-05T08:00:00Z');
     const r = agentRig({}, { now: () => t });
-    await r.send({ page_name: 'Prerana' }); // matches cookie A: login
+    await r.send({ page_name: `${F2}` }); // matches cookie A: login
     if (how === 'idle_timeout') {
       r.chrome.idle.onStateChanged.fire('idle'); await r.agent.settled();
       t += 46 * 60000;
@@ -451,8 +451,8 @@ test('departIdentity clears pageName: after idle_timeout / tab close the next co
     }
     assert.equal(r.events().filter((e) => e.event === 'logout').pop().reason, how);
     assert.equal(r.chrome.storage.local.data.state.pageName, null, how + ': persisted pageName cleared');
-    // a different doctor signs in; the greeting has not rendered yet (no page_name): must not be judged against 'Prerana'
-    await r.send({ identity: { doctor_uid: UID_B, display_name: 'Dr Manoj Kumar', email: null }, page_name: null });
+    // a different doctor signs in; the greeting has not rendered yet (no page_name): must not be judged against the earlier first name
+    await r.send({ identity: { doctor_uid: UID_B, display_name: lit(`${DR} ${F1} ${L2}`), email: null }, page_name: null });
     const evs = r.events();
     assert.ok(!evs.some((e) => e.event === 'identity_stale'), how + ': stale verdict against the old greeting');
     const last = evs[evs.length - 1];

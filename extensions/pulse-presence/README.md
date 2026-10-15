@@ -4,7 +4,7 @@ Manifest V3 Chrome extension prototype. It reports which doctor is on Pulse (`ht
 
 ## What it does
 
-- Stale-cookie guard (0.1.1): on the home route the content script also reads the greeting the page renders (`h1[class*="greeting"]`, "Hello, Dr Manoj") and sends only the first name as `page_name`. If the cookie identity's first name differs, the worker emits one `identity_stale` event and reports `doctor_uid: null` with `reason: stale_cookie` until a matching read. See CHANGELOG.md.
+- Stale-cookie guard (0.1.1): on the home route the content script also reads the greeting the page renders (`h1[class*="greeting"]`, "Hello, <title> <first name>") and sends only the first name as `page_name`. If the cookie identity's first name differs, the worker emits one `identity_stale` event and reports `doctor_uid: null` with `reason: stale_cookie` until a matching read. See CHANGELOG.md.
 - Content script (top frame of `pulse.even.in` only) reads the Firebase auth record from IndexedDB (`firebaseLocalStorageDb` / `firebaseLocalStorage`, key prefix `firebase:authUser:`). It keeps only `uid`, `email`, `displayName`. If the record does not match the expected shape, the doctor is reported as null.
 - If the URL has `doctor_email` or `sessionStorage["is-impersonation"] == "true"`, the doctor is null and `impersonating` is true. The Firebase record is not read in that case.
 - Route: `prescription_uid` from `/patient/<x>` or `/prescription` becomes an opaque `prescription_ref`. No URL or query string is sent.

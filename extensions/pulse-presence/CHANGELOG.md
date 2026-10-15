@@ -74,7 +74,7 @@ or sent; the one value written to `chrome.storage.local` for this feature is the
 
 | field | value |
 |---|---|
-| `page_name` | First name from the home greeting (`h1[class*="greeting"]`, "Hello, Dr Manoj" -> `Manoj`). Last value seen, kept across routes, cleared on the login route. Null during impersonation. NEVER a doctor_uid; it is a witness, not an identity. |
+| `page_name` | First name from the home greeting (`h1[class*="greeting"]`, "Hello, <title> <first name>" -> `<first name>`). Last value seen, kept across routes, cleared on the login route. Null during impersonation. NEVER a doctor_uid; it is a witness, not an identity. |
 | `instance_id` | 32 hex chars, random, minted once per extension install (chrome.storage.local), not derived from anything personal. Lets the sink de-dupe several Chrome profiles on one Mac. |
 | `cookie_uid` | Non-null only on `identity_stale`: the doctor_uid the cookie read returned. |
 | `cookie_name` | Non-null only on `identity_stale`: the display_name the cookie read returned. |
