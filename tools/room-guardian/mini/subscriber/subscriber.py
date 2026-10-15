@@ -99,6 +99,22 @@ def inbox_line(room, obj, now):
             f"zero_ratio_before={_num(obj.get('zero_ratio_before'))} zero_ratio_after={_num(obj.get('zero_ratio_after'))} recorder_pid_same={same}")
 
 
+def r9_inbox_line(room, obj, now):
+    """CA-C6 for the kiosk's R9 coreaudio heal (heal.sh, no `kind`): a message with layer "coreaudio" AND action "heal" that is not a WOULD-DO / shadow line, so a
+    real restart attempt (results ok, no_restart_seen). Same record as inbox_line; the numbers R9 does not send print `?`. The result is one lowercase word from the
+    line ([a-z0-9_], at most 32) or `other`, and coreaudiod_pid_changed is read from the `after` text, so no free text from the kiosk reaches the file."""
+    if not isinstance(obj, dict) or obj.get("layer") != "coreaudio" or obj.get("action") != "heal" or obj.get("shadow") is True:
+        return None
+    res = obj.get("result")
+    if not isinstance(res, str) or res.upper().startswith("WOULD"):
+        return None
+    word = res if re.fullmatch(r"[a-z0-9_]{1,32}", res) else "other"
+    after = obj.get("after") if isinstance(obj.get("after"), str) else ""
+    changed = "y" if "coreaudiod_pid_changed=true" in after else "n" if "coreaudiod_pid_changed=false" in after else "?"
+    when = datetime.fromtimestamp(now, IST).strftime("%d %b %H:%M")
+    return (f"- {when} IST pico-router HEAL: room={room} result={word} zero_ratio_before=? zero_ratio_after=? recorder_pid_same=? coreaudiod_pid_changed={changed}")
+
+
 def zero_ratio(obj):
     """The health line's zero_ratio (INFERRED field name) as a float in [0, 1], else None."""
     v = obj.get("zero_ratio") if isinstance(obj, dict) else None
@@ -250,6 +266,9 @@ class Subscriber:
     def _on_heal(self, room, obj, now):
         res = str(obj.get("result", "")).lower() if isinstance(obj, dict) else ""
         if not coreaudio_scope(obj):                       # R9 and every older heal shape: exactly the pre-coreaudio handling, never a new case
+            line = r9_inbox_line(room, obj, now)           # (the one addition: a real R9 coreaudio heal action also goes to the gating INBOX)
+            if line:
+                self.sink.heal_action(room, line, now)
             if res == "escalated":
                 self.sink.heal_escalated(room, now)
             elif res in ("ok", "healed"):

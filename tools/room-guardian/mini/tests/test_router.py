@@ -221,8 +221,9 @@ class DurabilityTests(unittest.TestCase):
             st = ar.SqliteStore(os.path.join(t, "cases.sqlite")); r = ar.Router(st, lambda: FakeBus(), Clock(TUE_11)); r.on_row(FakeBus(), row(100))
             for i in range(16):
                 last = st.backup_to(os.path.join(t, "backup"), keep=14, stamp=f"202610{i + 1:02d}-020000")
-            files = sorted(os.listdir(os.path.join(t, "backup")))
+            files = sorted(f for f in os.listdir(os.path.join(t, "backup")) if f.endswith(".sqlite"))
             self.assertEqual((len(files), files[0]), (14, "cases-20261003-020000.sqlite"))
+            self.assertEqual(sorted(os.listdir(os.path.join(t, "backup", "_to_delete"))), ["cases-20261001-020000.sqlite", "cases-20261002-020000.sqlite"])   # moved, never deleted
             self.assertEqual(ar.SqliteStore(last).get_open("r1", "recorder_off")["first_id"], 100)
 
     def test_local_ids_come_from_a_monotonic_counter_not_from_cases(self):
