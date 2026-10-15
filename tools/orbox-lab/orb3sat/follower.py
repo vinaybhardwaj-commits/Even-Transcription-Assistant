@@ -107,6 +107,7 @@ class Rec:
             err = (self.p.stderr.read() or "")[-300:]
             log(self.a.events, "arecord_exit", rc=self.p.returncode, stderr=err)
             self.pump(final=True); self.p = None
+            if self.wd: self.rm_work_dir(self.wd)
         else:
             self.pump()
         return self.p is not None

@@ -144,3 +144,23 @@ def test_O20_package_zero_fills_gaps(tmp_path):
     assert len(s.pcm("high")) < 28 * RATE                               # raw pcm stays unpadded
     man = json.load(open(out / "manifest.json"))
     assert [x["zero_filled"] for x in man["gaps"]] == [True]
+
+
+def test_O22_dropped_and_never_returned_gets_open_ended_gap(tmp_path):
+    import datetime as dt
+    rec = tmp_path / "rec"; rec.mkdir(); n = 30 * RATE
+    sig = to_i16(0.2 * np.sin(2 * np.pi * 300 * t_arr(n)))
+    mics = [dict(place="corner", port="usb3/3-4/3-4:1.0", gain=41), dict(place="high", port="usb3/3-6/3-6:1.0", gain=41)]
+    s = Sim(rec, [FakeDevice(sig, mics[0]["port"], 0), FakeDevice(sig, mics[1]["port"], 1, down=(10.0, 999.0))], mics=mics, hpf=False); s.run(28)
+    ist0 = dt.datetime.fromtimestamp(BASE_WALL / 1e9, mcrec.IST); fmt = "%Y-%m-%d %H:%M:%S"
+    out = tmp_path / "pkg"; cfgp = tmp_path / "c.json"; json.dump(s.cfg, open(cfgp, "w"))
+    t1 = ist0 + dt.timedelta(seconds=25)
+    mcrec.main(["package", "--config", str(cfgp), "--from", (ist0 + dt.timedelta(seconds=2)).strftime(fmt), "--to", t1.strftime(fmt), "--out", str(out)])
+    man = json.load(open(out / "manifest.json"))
+    assert len(man["gaps"]) == 1
+    g = man["gaps"][0]
+    assert g["place"] == "high" and g["open_ended"] is True and g["zero_filled"] is True
+    assert g["wall_end_ns"] == BASE_WALL + 25 * 10**9 and 14.9 <= g["gap_s"] <= 15.2 and g["wall_start_ns"] < g["wall_end_ns"]
+    assert not any(e["kind"] == "gap" for e in s.jl("events.jsonl"))
+    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(out / "media" / "high.flac"), "-f", "s16le", "-ar", "48000", "-ac", "1", "-"], capture_output=True, check=True).stdout
+    assert len(raw) // 2 == 23 * RATE and not np.frombuffer(raw, dtype="<i2")[9 * RATE:].any()   # tail after the drop is digital zero

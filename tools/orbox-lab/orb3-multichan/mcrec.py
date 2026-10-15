@@ -66,7 +66,7 @@ class Biquad:
 def load_config(path):
     c = json.load(open(path)) if isinstance(path, str) else dict(path)
     c.setdefault("rate", RATE); c.setdefault("block_frames", 4800); c.setdefault("hpf_hz", 80.0)
-    c.setdefault("infra_hz", 20.0); c.setdefault("hpf", True)
+    c.setdefault("infra_hz", 20.0); c.setdefault("hpf", True)   # "hpf": false is for tests only
     if c["rate"] != RATE: raise ConfigError("rate must be 48000 (no resampling anywhere)")
     if RATE % c["block_frames"]: raise ConfigError("block_frames must divide 48000")
     mics = c.get("mics") or []
@@ -169,7 +169,7 @@ class ClapDetector:
         with self.lock:
             self.pending = {p: e for p, e in self.pending.items() if mono_ns - e[1] <= CLAP_WINDOW_NS}
             self.pending[place] = (sample_off, mono_ns)
-            need = set(active) | {place}
+            need = set(active) | {place}     # all ACTIVE mics must hear it; a dropped mic cannot hear the clap (accepted, R16 F1)
             if len(need) < 2 or not need <= set(self.pending): return None
             ev = {p: self.pending[p] for p in need}
             ts = [e[1] for e in ev.values()]
@@ -237,7 +237,7 @@ class MicWorker:
             self.gap_from = dict(wall_ns=self.last_end[0] if self.last_end else self.env.wall_ns(),
                                  mono_ns=self.last_end[1] if self.last_end else self.env.mono_ns(), byte_offset=self.pcm.tell())
             self._flush_win(self.gap_from["wall_ns"], self.gap_from["mono_ns"])
-            self.env.event("drop", place=self.place, why=why, byte_offset=self.pcm.tell())
+            self.env.event("drop", place=self.place, why=why, byte_offset=self.pcm.tell(), gap_wall_ns=self.gap_from["wall_ns"])
         self.next_try = self.env.mono_ns() + REOPEN_EVERY_NS
 
     # -- main step; returns True if it did useful work
@@ -429,6 +429,13 @@ def package(cfg, t0, t1, out):
     open(os.path.join(out, "tracks", "transcript.jsonl"), "w").close()
     gaps = [dict(place=e["place"], wall_start_ns=e["wall_start_ns"], wall_end_ns=e["wall_end_ns"], byte_offset=e["byte_offset"], gap_s=e["gap_s"], zero_filled=True)
             for e in events if e["kind"] == "gap" and e["wall_end_ns"] >= lo and e["wall_start_ns"] <= hi]
+    # a mic that dropped and had not returned by the window end: open-ended gap from the drop to the window end (its flac tail is zero-filled)
+    for e in events:
+        if e["kind"] != "drop" or e["wall_ns"] > hi: continue
+        w0 = e.get("gap_wall_ns", e["wall_ns"])
+        if any(g["kind"] == "gap" and g["place"] == e["place"] and g["wall_start_ns"] >= w0 for g in events): continue   # it came back: already listed above if it overlaps the window
+        w0 = max(w0, lo)
+        gaps.append(dict(place=e["place"], wall_start_ns=w0, wall_end_ns=hi, byte_offset=e["byte_offset"], gap_s=round((hi - w0) / 1e9, 3), zero_filled=True, open_ended=True))
     iso = lambda e, tz: dt.datetime.fromtimestamp(e / 1e9, tz).isoformat(timespec="seconds")
     man = dict(window_start_ist=iso(lo, IST), window_end_ist=iso(hi, IST), window_start_utc=iso(lo, dt.timezone.utc), window_end_utc=iso(hi, dt.timezone.utc),
                sample_rate=RATE, channels=chans, sources=sources, gaps=gaps,

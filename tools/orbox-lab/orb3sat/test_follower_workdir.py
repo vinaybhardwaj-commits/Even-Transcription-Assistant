@@ -35,3 +35,25 @@ def test_finalized_piece_then_dir_removed(tmp_path):
     with open(os.path.join(wd, "rec.wav"), "wb") as f: f.write(b"\0" * 44 + b"\1\0" * 4800)
     r.recover()
     assert not os.path.exists(wd) and "piece" in events(a) and "work_dir_removed" in events(a)
+
+
+def _arecord_exited(r, wd):
+    r.wd = wd; r.epoch = int(os.path.basename(wd)); r.done = set()
+    r.p = types.SimpleNamespace(poll=lambda: 1, returncode=1, stderr=types.SimpleNamespace(read=lambda: ""))
+
+
+def test_arecord_exit_removes_empty_work_dir(tmp_path):
+    r, a = mk(tmp_path)
+    wd = os.path.join(r.work, "1792000000000000000"); os.makedirs(wd)
+    with open(os.path.join(wd, "rec.wav"), "wb") as f: f.write(b"\0" * 44 + b"\1\0" * 4800)
+    _arecord_exited(r, wd)
+    assert r.check() is False
+    assert not os.path.exists(wd) and os.listdir(r.work) == [] and events(a).count("work_dir_removed") == 1
+
+
+def test_arecord_exit_keeps_dir_holding_a_file(tmp_path):
+    r, a = mk(tmp_path)
+    wd = os.path.join(r.work, "1792000000000000001"); os.makedirs(wd); keep = os.path.join(wd, "stray.txt"); open(keep, "w").write("x")
+    _arecord_exited(r, wd)
+    r.check()
+    assert os.path.isfile(keep) and "work_dir_removed" not in events(a)
