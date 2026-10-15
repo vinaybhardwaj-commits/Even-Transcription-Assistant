@@ -85,8 +85,8 @@ class BackgroundRefresher(unittest.TestCase):                                   
         h, clock = self.bg(Src()); h._stop.set()                                              # manual rounds: no thread, so the test controls the snapshot
         self.assertEqual(h.hold(clock()), {"opd-6": True, "opd-7": True})                     # none yet
         h._snap = (h.compute(clock()), clock()); self.assertEqual(h.hold(clock()), {"opd-6": False, "opd-7": False})
-        self.assertEqual(h.hold(clock() + 120), {"opd-6": False, "opd-7": False})             # exactly 120 s old: still usable
-        self.assertEqual(h.hold(clock() + 121), {"opd-6": True, "opd-7": True})               # older than 120 s: every room held
+        self.assertEqual(h.hold(clock() + 60), {"opd-6": False, "opd-7": False})              # exactly 60 s old: still usable (I2: was 120 s)
+        self.assertEqual(h.hold(clock() + 61), {"opd-6": True, "opd-7": True})                # older than 60 s: every room held
         h._snap = ({"opd-6": False, "opd-7": False}, float("nan")); self.assertEqual(h.hold(clock()), {"opd-6": True, "opd-7": True})
         h._snap = ("garbage", clock()); self.assertEqual(h.hold(clock()), {"opd-6": True, "opd-7": True})                # a bad snapshot never raises
 
@@ -260,10 +260,13 @@ class RunSubscriberWiring(unittest.TestCase):                                   
             def check_quiet(self): self._c("check_quiet")
             def check_start_day(self): self._c("check_start_day")
             def check_usb_verify(self): self._c("check_usb_verify")
-        s = S(); self.assertEqual(rs.housekeeping(s), []); self.assertEqual(s.called, ["check_quiet", "check_start_day", "check_usb_verify"])
+            def check_consult_stuck(self): self._c("check_consult_stuck")
+        ALL = ["check_quiet", "check_start_day", "check_usb_verify", "check_consult_stuck"]
+        s = S(); self.assertEqual(rs.housekeeping(s), []); self.assertEqual(s.called, ALL)
         logs = []; s = S(bad=("check_quiet",)); self.assertEqual(rs.housekeeping(s, logs.append), ["check_quiet"])
-        self.assertEqual(s.called, ["check_quiet", "check_start_day", "check_usb_verify"]); self.assertEqual(len(logs), 1)
+        self.assertEqual(s.called, ALL); self.assertEqual(len(logs), 1)
         s = S(bad=("check_start_day", "check_usb_verify")); self.assertEqual(rs.housekeeping(s), ["check_start_day", "check_usb_verify"])
+        s = S(bad=ALL[:3]); self.assertEqual(rs.housekeeping(s), ALL[:3]); self.assertEqual(s.called, ALL)
 
     def test_housekeeping_drives_the_real_subscribers_usb_verify_and_start_day(self):
         e = CAEnv(T0); import usb_verify as uv

@@ -66,7 +66,7 @@ class UsbEscalations(unittest.TestCase):
 
     def test_device_missing_is_urgent_not_v_and_deduped_by_room_and_kind(self):
         k = "usb_device_missing"
-        self.assertTrue(k in ar.URGENT and k not in ar.V_KINDS and k not in ar.ACK_CLOSE_KINDS)
+        self.assertTrue(k in ar.URGENT and k not in ar.V_KINDS and k in ar.ACK_CLOSE_KINDS and k not in ar.ACK_ONLY_KINDS and k in ar.RECOVERY_KEEP_KINDS)    # Round 8: an ACK closes it, a server recovered row never does
         e = CAEnv(T0)
         for _ in range(4): e.heal(esc(k))
         e.heal(esc(k), room="r2")                                                    # another room is its own case

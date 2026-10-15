@@ -42,7 +42,7 @@ URGENT = {"offline", "degraded", "fleet_outage", "install_retired", "recorder_of
           "needs_enrol", "capture_stalled", "guardian_quiet", "heal_escalated", "backup_failed", "heal_inbox_stuck", "usb_device_missing"} | CA_KINDS | START_DAY_KINDS | USB_KINDS
 OPEN_KINDS = URGENT | {"heal_message_invalid", "consult_hold_source_down"}          # kinds that open a case; 'recovered' and 'session_reaped' never do
 # An ACK also CLOSES these (order: "closes on recovery or ACK"). recorder_changed and heal_message_invalid have no recovery signal, so ACK is their only close.
-ACK_CLOSE_KINDS = CA_KINDS | START_DAY_KINDS | USB_KINDS | {"heal_message_invalid", "consult_hold_source_down"}
+ACK_CLOSE_KINDS = CA_KINDS | START_DAY_KINDS | USB_KINDS | {"usb_device_missing"} | {"heal_message_invalid", "consult_hold_source_down"}
 RECOVERY_KIND = "recovered"
 ACK_ONLY_KINDS = {"recorder_disturbed", "heal_message_invalid", "start_day_failed"} | USB_KINDS     # a server `recovered` row never closes these: only an ACK does
 RECOVERY_KEEP_KINDS = ACK_ONLY_KINDS | {"usb_device_missing"}        # nor this one: it closes only on a health line with usb_mic_present true (or an ACK does not close it either)

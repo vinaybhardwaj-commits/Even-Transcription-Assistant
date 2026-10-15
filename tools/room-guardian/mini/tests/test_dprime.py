@@ -822,7 +822,7 @@ class Round5(unittest.TestCase):
 
     def test_run_subscriber_hands_the_flags_to_build(self):
         src = open(os.path.join(HERE, "..", "subscriber", "run_subscriber.py")).read()
-        self.assertIn("consult_hold.build(flags, rooms, sink, home, clock, background=True)", src)
+        self.assertIn("consult_hold.build(flags, rooms, sink, home, clock, sources=consult_sources, background=True)", src)
         for name in ("post_open_overrides_url_close", "capture_closed_counts_quiet", "open_session_requires_levels", "consult_windows_enabled"):
             self.assertNotIn(name, src)                                                              # no per-switch wiring left in main() that a mutation could break unseen
 

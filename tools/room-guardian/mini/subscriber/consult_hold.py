@@ -29,6 +29,7 @@ SILENCE_ZERO_RATIO = 0.98                                    # INFERRED: a healt
 ENC_LOOKBACK_S = 4 * 3600                                    # the windows' bound: the newest encounter_open/close is looked for within this long
 LEVEL_FRESH_S = 120
 FALLBACK_BUDGET_S = 8                                        # the per-room retry after a failed batched read stops after this long
+SNAPSHOT_MAX_AGE_S = 60                                      # the publish thread serves a snapshot at most this old (older or none = every room true); normally <= ~50 s (20 s refresh + 30 s wait)
 REFRESH_BUDGET_S = 20                                        # one WHOLE refresh (every source plus every retry) is bounded to this, well under the 30 s publish period
 PRESENCE_KEYS = ("hb", "enc", "post")                        # the batched Presence value always has all three; a value missing one is a source error
 DEFAULT_URL_FILE = "~/.config/eta-audio/db.url"
@@ -172,7 +173,7 @@ def _entry(v):
 class ConsultHold:
     def __init__(self, rooms, room_map, sources, clock=time.time, audit_path=None, sink=None, cache_s=CACHE_S, max_age_s=MAX_AGE_S, timeout_s=QUERY_TIMEOUT_S,
                  stuck_s=STUCK_S, capture_closed_counts_quiet=True, open_session_requires_levels=True, consult_windows_enabled=False,
-                 post_open_overrides_url_close=True, background=False, refresh_budget_s=REFRESH_BUDGET_S):
+                 post_open_overrides_url_close=True, background=False, refresh_budget_s=REFRESH_BUDGET_S, snapshot_max_age_s=SNAPSHOT_MAX_AGE_S):
         self.rooms, self.map, self.src, self.clock, self.audit_path, self.sink = list(rooms), dict(room_map or {}), sources, clock, audit_path, sink
         self.cache_s, self.max_age_s, self.timeout_s, self.stuck_s = cache_s, max_age_s, timeout_s, stuck_s
         self.closed_quiet, self.need_levels = capture_closed_counts_quiet is not False, open_session_requires_levels is not False     # fable 17:16: default true, only a literal false turns one off
@@ -188,7 +189,7 @@ class ConsultHold:
         self.item_bad = {}                # source name -> set of items (machine keys / room ids) whose own read failed in the per-room retry
         self.inflight = {}                # source name -> the fetch thread still running (a new fetch never starts while one is alive)
         self.last = {}                    # room -> (hold, reasons) for the audit line on change
-        self.budget = refresh_budget_s
+        self.budget, self.snap_max_age = refresh_budget_s, snapshot_max_age_s
         self.background = background is True      # True: hold() only READS the last snapshot; a refresher thread computes it (never on the publish thread)
         self._snap = None                 # (out dict, computed_at) of the last completed computation
         self._thread, self._stop = None, threading.Event()
@@ -352,7 +353,7 @@ class ConsultHold:
                 except Exception:         # noqa: BLE001 -- one room's fault holds that room
                     out[r], why[r] = True, ["fault"]
             self._audit(out, why, now)
-            self._stuck(any((not self._fresh(n, now)) or bool(self.item_bad.get(n)) for n in ("presence", "session", "levels", "windows") if self._needed(n)), now)
+            self._track_down(any((not self._fresh(n, now)) or bool(self.item_bad.get(n)) for n in ("presence", "session", "levels", "windows") if self._needed(n)), now)
             return out
         except Exception:                 # noqa: BLE001
             return {r: True for r in self.rooms}
@@ -363,10 +364,12 @@ class ConsultHold:
         try:
             now = self.clock() if now is None else now
             if not self.background:
-                return self.compute(now)
+                out = self.compute(now)
+                self.check_stuck(now)         # synchronous mode: one thread, so the case is opened here; in background mode the LOOP thread calls check_stuck (housekeeping)
+                return out
             self.start()                  # a no-op while the refresher thread is alive; restarts it if it died
             snap = self._snap
-            if snap is None or not _finite(snap[1]) or now - snap[1] > self.max_age_s:
+            if snap is None or not _finite(snap[1]) or now - snap[1] > self.snap_max_age:
                 return {r: True for r in self.rooms}
             return {r: snap[0].get(r, True) is not False for r in self.rooms}
         except Exception:                 # noqa: BLE001
@@ -426,16 +429,28 @@ class ConsultHold:
             self.sink_block_until = now + SINK_RETRY_S
             return False
 
-    def _stuck(self, down, now):
+    def _track_down(self, down, now):
+        """Record only (called from compute, which runs on the refresher thread): when the sources went down, or None once they are all up. NO sink or store call here: the
+        case store is a sqlite3 connection owned by the loop thread and raises ProgrammingError from any other thread (refute R7-M1)."""
         if not down:
             self.err_since = None
-            if self.case_open and self.sink and self._sink(self.sink.consult_hold_source_up, now):
-                self.case_open = False
-            return
-        if self.err_since is None:
+        elif self.err_since is None:
             self.err_since = now
-        if now - self.err_since >= self.stuck_s and not self.case_open and self.sink and self._sink(self.sink.consult_hold_source_down, now):
-            self.case_open = True
+
+    def check_stuck(self, now=None):
+        """Called on the LOOP thread (housekeeping): opens consult_hold_source_down once when the sources have been down for stuck_s, closes it when they are up again.
+        A store fault is swallowed and retried once per 5 min (never raises)."""
+        try:
+            now = self.clock() if now is None else now
+            since = self.err_since
+            if since is None:
+                if self.case_open and self.sink and self._sink(self.sink.consult_hold_source_up, now):
+                    self.case_open = False
+                return
+            if now - since >= self.stuck_s and not self.case_open and self.sink and self._sink(self.sink.consult_hold_source_down, now):
+                self.case_open = True
+        except Exception:                 # noqa: BLE001
+            pass
 
 
 def build(flags, rooms, sink, home, clock=time.time, sources=None, background=False):

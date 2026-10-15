@@ -53,27 +53,27 @@ def check_rooms(rooms, flags):
     return validate_rooms(rooms, consult_open=flags.get("consult_open_publish") is True)
 
 
-def build_subscriber(cfg, rooms, flags, sink, home, clock=time.time, log_file=None):
+def build_subscriber(cfg, rooms, flags, sink, home, clock=time.time, log_file=None, consult_sources=None):
     """The Subscriber exactly as the live process builds it: the consult hold (background refresher, off the publish thread) when its flag is on, start_day (background
     sender) when its flag is on, the F2 USB verify always, and the usb_device_missing seed from the case store. Raises start_day.ConfigError (the caller refuses to start)."""
     consult = start_day = None
     if flags.get("consult_open_publish") is True:    # FR1 2.4 d' flags: default off, so today's control bytes and behaviour are unchanged
         import consult_hold
-        consult = consult_hold.build(flags, rooms, sink, home, clock, background=True)
+        consult = consult_hold.build(flags, rooms, sink, home, clock, sources=consult_sources, background=True)
         consult.start()
     if flags.get("start_day_after_boot") is True:
         import start_day as start_day_mod
         start_day = start_day_mod.build(flags, sink, home, clock, log_file, background=True)
     import usb_verify
     verify = usb_verify.UsbVerify(sink, os.path.join(home, "data", "usb-verify-state.json"), clock, os.path.join(home, "logs", "usb-verify-audit.jsonl"))
-    return Subscriber(os.path.join(home, "data"), os.path.join(home, "etc"), rooms, sink, quiet_after_s=cfg.get("quiet_after_s", 120), quiet_seed=sink.open_quiet_rooms(),
+    return Subscriber(os.path.join(home, "data"), os.path.join(home, "etc"), rooms, sink, clock=clock, quiet_after_s=cfg.get("quiet_after_s", 120), quiet_seed=sink.open_quiet_rooms(),
                       consult=consult, start_day=start_day, usb_verify=verify, usb_missing_seed=sink.open_rooms("usb_device_missing"))
 
 
 def housekeeping(s, logger=None):
     """The per-iteration checks of the main loop. Each runs on its own, so a fault in one (a bus fault in check_quiet) never skips the others. -> names of the checks that raised."""
     failed = []
-    for name in ("check_quiet", "check_start_day", "check_usb_verify"):
+    for name in ("check_quiet", "check_start_day", "check_usb_verify", "check_consult_stuck"):
         try:
             getattr(s, name)()
         except Exception as e:                       # a bus fault must not drop the quiet edge: Subscriber marked it raised, so log loudly

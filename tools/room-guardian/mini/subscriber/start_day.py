@@ -37,11 +37,12 @@ def build(flags, sink, home, clock=time.time, stderr=None, runner=subprocess.run
 
 
 class StartDayAfterBoot:
-    def __init__(self, sender, state_path=None, sink=None, clock=time.time, audit_path=None, background=False):
+    def __init__(self, sender, state_path=None, sink=None, clock=time.time, audit_path=None, background=False, idle_s=60):
         self.sender, self.state_path, self.sink, self.clock, self.audit_path = sender, state_path, sink, clock, audit_path
         self.background = background is True          # True: the send runs in a worker thread (30 s sender timeout), so the loop never waits on it
         self._lock = threading.RLock()                # guards state and the state file; never held while the sender runs
-        self._q, self._worker = queue.Queue(), None
+        self._q, self._worker, self.idle_s = queue.Queue(), None, idle_s
+        self._wlock = threading.Lock()                # taken by _enqueue and by the worker's idle exit, so an item can never be queued for a worker that is leaving
         self.retry_at = {}                # room -> earliest time the failed-page sink call is tried again after a fault
         self.state = {}                   # room -> {"boot": epoch, "sent_at": t, "send_ok": bool, "started": bool, "failed": bool}
         if state_path and os.path.exists(state_path):
@@ -117,17 +118,28 @@ class StartDayAfterBoot:
         self._audit(room, "start_day_sent" if ok else "start_day_send_error", now, boot=boot)
 
     def _enqueue(self, room, boot, now):
-        self._q.put((room, boot, now))
-        if self._worker is None or not self._worker.is_alive():      # restarted if it ever died
-            self._worker = threading.Thread(target=self._work, name="start-day-sender", daemon=True)
-            self._worker.start()
+        with self._wlock:
+            self._q.put((room, boot, now))
+            if self._worker is None or not self._worker.is_alive():      # restarted if it ever died or has gone idle
+                self._worker = threading.Thread(target=self._work, name="start-day-sender", daemon=True)
+                self._worker.start()
+
+    def _try_exit(self):
+        """The idle exit, under the lock _enqueue takes: -> True (and the worker is cleared) only when nothing is queued."""
+        with self._wlock:
+            if self._q.empty():
+                self._worker = None
+                return True
+            return False
 
     def _work(self):
         while True:
             try:
-                room, boot, now = self._q.get(timeout=60)
+                room, boot, now = self._q.get(timeout=self.idle_s)
             except queue.Empty:
-                return                    # idle: the thread ends and the next send starts a new one
+                if self._try_exit():
+                    return                # idle: the thread ends and the next send starts a new one
+                continue                  # an item arrived while we were leaving: take it
             try:
                 self._send(room, boot, now)
             except BaseException:         # noqa: BLE001 -- the worker never dies on a fault

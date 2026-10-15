@@ -424,6 +424,14 @@ class Subscriber:
                 return True
         return False
 
+    def check_consult_stuck(self):
+        """The loop thread opens / closes the consult_hold_source_down case (the refresher thread only records when the sources went down)."""
+        if self.consult is not None:
+            try:
+                self.consult.check_stuck(self.clock())
+            except Exception:                              # noqa: BLE001
+                pass
+
     def check_usb_verify(self):
         if self.usb_verify is not None:
             try:
