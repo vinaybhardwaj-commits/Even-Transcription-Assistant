@@ -58,7 +58,7 @@ describe("jev", () => {
     expect(one({ jev: jev({ state: "retired" }) }).ok).toBe(true);
     expect(one({ jev: jev({ state: "current" }) }).ok).toBe(true);
     expect(one({ jev: jev() }).ok).toBe(true);
-    for (const bad of ["Retired", "RETIRED", "active", "", "retired ", null, 1, true, {}, ["retired"]]) {
+    for (const bad of ["Retired", "RETIRED", "foo", "active", "", "retired ", null, 1, true, {}, ["retired"]]) {
       expect(one({ jev: jev({ state: bad }) }), JSON.stringify(bad)).toEqual({ ok: false, error: "bad_jev" });
     }
     expect(validJev({ sets: [{ ...jev().sets[0], state: "retired" }] })).toBe(true);

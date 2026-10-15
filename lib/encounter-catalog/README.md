@@ -16,7 +16,7 @@ Ids, UTC times, R2 object keys, per-layer status, stage states with reasons, all
 ## C4: jev, clef_affect, presence (migration 0169, ORDER 23N)
 Three nullable jsonb columns, written by the same ingest route as field-level upserts and returned by the search route to admins only.
 - `presence` (the lab box feed, `catalog_version` 2): `{encounter_open, encounter_close, boundary_source, close_reason}`, UTC ms and two tokens.
-- `jev` (newcat's upsert job): `{sets: [{set_id, set_sha, band, label, model, at}]}`. `band` and `label` may be null; no question text, no reasons.
+- `jev` (newcat's upsert job): `{sets: [{set_id, set_sha, band, label, model, at, state?}]}`. `band` and `label` may be null; `state` is optional and one of `current` | `retired` (anything else is `bad_jev`); no question text, no reasons.
 - `clef_affect` (newcat's upsert job): `{lanes: [{lane, scores, model_rev, at}]}`; `scores` is an object of token keys to finite numbers.
 The ingest validates these shapes strictly (only those keys; values are tokens of 1..60 characters `[A-Za-z0-9_:.-]`, `at` a strict ISO instant, at most 50 sets / 20 lanes / 64 scores) and the text-key refusal applies inside them. A bad block answers 400 `bad_jev` / `bad_clef_affect` / `bad_presence`; a present `null` clears the column. A row that carries only `jev` (or only `clef_affect`) never touches the box's columns, and the box's next row (which has no `jev` / `clef_affect` key) never blanks newcat's.
 `presence.boundary_source` may also contain `+` (CAA's values are token+token); no other field may. **newcat's upsert rows must not send `generated_at`**: it belongs to the box feed's stale-write guard, and a partial row without it is never guarded or skipped.

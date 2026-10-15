@@ -136,9 +136,14 @@ export class ConcurrentIngestError extends Error {
 export async function ingestCatalogRows(rows: CatalogRow[], opts: IngestOpts = {}): Promise<IngestResult> {
   const q = sql as unknown as (text: string, params: unknown[]) => Promise<Array<Record<string, unknown>>>;
   const body = JSON.stringify(rows);
-  if (opts.updateOnly === true) {   // CS-3: UPDATE only. A uid with no row is counted (missing), never inserted, so there is no race to rerun and no 409.
-    const row = (await q(UPDATE_ONLY_SQL, [body]))[0] ?? {};
-    return { updated: Number(row.updated ?? 0), inserted: 0, stale: Number(row.stale ?? 0), missing: Number(row.missing ?? 0) };
+  if (opts.updateOnly === true) {   // CS-3: UPDATE only. A uid with no row is counted (missing), never inserted.
+    const runU = async (): Promise<IngestResult> => {
+      const row = (await q(UPDATE_ONLY_SQL, [body]))[0] ?? {};
+      return { updated: Number(row.updated ?? 0), inserted: 0, stale: Number(row.stale ?? 0), missing: Number(row.missing ?? 0) };
+    };
+    // A row whose UPDATE waited on a lock and then lost the re-check against a NEWER committed generated_at is invisible to the snapshot counts and would read as missing: rerun once, the rerun sees the committed row and counts it stale.
+    const first = await runU();
+    return first.missing ? { ...(await runU()), retried: true } : first;
   }
   const run = async (): Promise<IngestResult> => {
     const out = await q(INGEST_SQL, [body]);
