@@ -7,6 +7,7 @@ import { sql } from "@/lib/db";
 import { readAdminCookie } from "@/lib/cookie";
 import { verifyAdminJwt } from "@/lib/auth";
 import { fleetAudit, fleetCommands, fleetDevices } from "@/lib/fleet/read";
+import { coverageOrNull } from "@/lib/jev/worker/coverage-view";
 import { fleetError, fleetReply } from "@/lib/fleet/http";
 
 export const runtime = "nodejs";
@@ -24,8 +25,8 @@ export async function GET(req: NextRequest) {
   const room = req.nextUrl.searchParams.get("room");
   const roomId = room && /^[A-Za-z0-9_-]{1,64}$/.test(room) ? room : null;
   try {
-    const [devices, commands, audit] = await Promise.all([fleetDevices(sql as never, roomId), fleetCommands(sql as never, { roomId }), fleetAudit(sql as never, 30)]);
-    return fleetReply(200, { ok: true, generated_at: new Date().toISOString(), devices, commands, audit });
+    const [devices, commands, audit, coverage] = await Promise.all([fleetDevices(sql as never, roomId), fleetCommands(sql as never, { roomId }), fleetAudit(sql as never, 30), coverageOrNull()]);
+    return fleetReply(200, { ok: true, generated_at: new Date().toISOString(), devices, commands, audit, coverage });
   } catch (e) {
     console.error("[admin-fleet] database fault:", e instanceof Error ? e.message.slice(0, 200) : "error");
     return fleetError(503, "db");

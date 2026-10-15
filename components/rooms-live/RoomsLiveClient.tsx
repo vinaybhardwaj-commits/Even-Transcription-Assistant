@@ -153,6 +153,11 @@ export default function RoomsLiveClient({ who }: { who: { kind: "admin" | "staff
   const openRow = rows.find((r) => r.room_id === open) ?? null;
   const strip = stripView(snap?.steward_status, now);
   const stripColors = { ok: { bg: "#E6F1EC", fg: "#1D6B57" }, amber: { bg: "#FBE9D6", fg: "#8A3F05" }, red: { bg: "#7A1410", fg: "#FFFFFF" }, off: { bg: "#ECEBE6", fg: "#22262B" }, unavailable: { bg: "#ECEBE6", fg: "#4F535A" } }[strip.tone];
+  const cov = snap?.coverage;
+  const noState = cov ? cov.no_state["pitch-detect"] + cov.no_state["chair-affect"] : 0;
+  const coverageLine = cov
+    ? `Today: cut ${cov.cut} · transcribed ${cov.transcribed} · Jev pitch ${cov.jev_done["pitch-detect"]} / affect ${cov.jev_done["chair-affect"]} · Clef ${cov.clef_done}${noState > 0 ? ` · no state ${noState}` : ""}`
+    : "Coverage unavailable";
   const changes = snap?.changes_today ?? [];
   const stamp = new Date(now).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
@@ -181,6 +186,9 @@ export default function RoomsLiveClient({ who }: { who: { kind: "admin" | "staff
       </header>
       {snap ? (
         <p data-testid="steward-strip" data-tone={strip.tone} role="status" style={{ background: stripColors.bg, color: stripColors.fg, borderRadius: 10, padding: "8px 12px", fontSize: 14, margin: "0 0 12px", fontWeight: strip.tone === "red" ? 700 : 400 }}>{strip.text}</p>
+      ) : null}
+      {snap ? (
+        <p data-testid="coverage-line" style={{ color: "#4F535A", fontSize: 14, margin: "0 0 12px" }}>{coverageLine}</p>
       ) : null}
       {snap && snap.degraded.length > 0 ? <p role="status" style={{ background: "#FBE9D6", color: "#8A3F05", borderRadius: 10, padding: "8px 12px", fontSize: 14 }}>{DEGRADED_NOTE}</p> : null}
       {notice ? <p role="status" style={{ background: "#ECEBE6", borderRadius: 10, padding: "10px 12px", fontSize: 15, fontWeight: 700 }}>{notice}</p> : null}
