@@ -89,11 +89,11 @@ export function decodeCursor(c: string): number | null {
 }
 const asRec = (v: unknown): Row | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Row) : null);
 
-const SCRUB_DROP_FIELD = /^(r2_key|key|keys|r2_keys|url|signed_url)$/i;
-const SCRUB_KEY_STRING = /^(reb\/|consult-clips\/|palimpsest\/)|:\/\//;
+const SCRUB_DROP_FIELD = /^(r2_key|r2key|key|keys|r2_keys|url|signed_url|object_key|s3_key|clip_key|presigned_url|href|uri|path)$/i;
+const SCRUB_KEY_STRING = /(?:^|[^A-Za-z0-9_-])(?:reb|consult-clips|palimpsest)\/|:\/\//;
 export const SCRUB_MAX_DEPTH = 6;
 export const SCRUB_MAX_ARRAY = 64;
-/** PURE. Search never shows a storage key: fields named like a key or url are dropped, strings that look like a store path or URL become null, depth is capped at 6 (deeper = null) and arrays at 64. */
+/** PURE. Search never shows a storage key: fields named like a key or url, or whose name looks like a store path, are dropped, strings that look like a store path or URL become null, depth is capped at 6 (deeper = null) and arrays at 64. */
 export function scrubKeys(v: unknown, depth = 0): unknown {
   if (depth > SCRUB_MAX_DEPTH) return null;
   if (typeof v === "string") return SCRUB_KEY_STRING.test(v) ? null : v;
@@ -101,11 +101,11 @@ export function scrubKeys(v: unknown, depth = 0): unknown {
   const rec = asRec(v);
   if (!rec) return v;
   const out: Row = {};
-  for (const [k, x] of Object.entries(rec)) if (!SCRUB_DROP_FIELD.test(k)) out[k] = scrubKeys(x, depth + 1);
+  for (const [k, x] of Object.entries(rec)) if (!SCRUB_DROP_FIELD.test(k) && !SCRUB_KEY_STRING.test(k)) out[k] = scrubKeys(x, depth + 1);
   return out;
 }
 
-/** A search row: the C1 row with each layer reduced to {status, engine?} (storage keys scrubbed at any depth), plus the names of the layers that exist. */
+/** A search row: the C1 row with storage keys scrubbed at any depth from every field (layers, clip and the rest; no field allowlist), plus the names of the layers that exist. */
 export function searchView(row: Row): Row {
   const layers = asRec(row.layers);
   const present: string[] = [];
@@ -127,7 +127,9 @@ export function searchView(row: Row): Row {
       slim[name] = scrubKeys(rec);
     }
   }
-  return { ...row, ...("clip" in row ? { clip: scrubKeys(row.clip) } : {}), ...(slim ? { layers: slim } : {}), layers_present: present };
+  const rest: Row = {};
+  for (const [k, x] of Object.entries(row)) if (k !== "layers" && !SCRUB_DROP_FIELD.test(k) && !SCRUB_KEY_STRING.test(k)) rest[k] = scrubKeys(x);
+  return { ...rest, ...(slim ? { layers: slim } : {}), layers_present: present };
 }
 
 // --- layers ---------------------------------------------------------------------------------------------------------------------------------

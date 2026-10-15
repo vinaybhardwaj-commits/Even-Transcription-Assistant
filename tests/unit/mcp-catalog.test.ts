@@ -1576,3 +1576,27 @@ describe("CATALOG-9: search scrubs storage keys at any depth", () => {
     expect(out).toContain("layers_present");
   });
 });
+
+describe("CATALOG-9 FIX1: prefixes anywhere, more key field names, the whole row", () => {
+  const K = `reb/2026-10-05/room_a/_consults/${UID}/tracks/x__v1__ab12cd34.json`;
+  const searchRow = async (o: Row): Promise<Row> => {
+    resetCatalogCacheForTests();
+    setCatalog([crow(UID, o)]);
+    return ((await run({ action: "search", from: "2026-10-05", to: "2026-10-05" })).rows as Row[])[0]!;
+  };
+  it("prefixed, embedded and map-key forms show no key", async () => {
+    const r = await searchRow({ layers: { l: { a: " " + K, b: "/" + K, c: "eta-lab-results/" + K, d: "see " + K, e: "r2:" + K, [K]: { status: "ok" }, ok: "debrief/notes", n: "web-reb" } } });
+    const out = JSON.stringify(r);
+    for (const bad of ["reb/", "consult-clips/", "palimpsest/", "r2_key"]) expect(out, bad).not.toContain(bad);
+    expect((r.layers as Row).l).toEqual({ a: null, b: null, c: null, d: null, e: null, ok: "debrief/notes", n: "web-reb" });
+  });
+  it("more key-like field names are dropped, case-insensitive", async () => {
+    const r = await searchRow({ layers: { l: { r2Key: "x", Object_Key: "x", s3_key: "x", clip_key: "x", presigned_url: "x", HREF: "x", uri: "x", path: "x", status: "ok" } } });
+    expect((r.layers as Row).l).toEqual({ status: "ok" });
+  });
+  it("the whole row is scrubbed: a top-level key string and manifest:{r2_key} do not show; ids and dates do", async () => {
+    const r = await searchRow({ stray: K, manifest: { r2_key: K, state: "ok" }, nested: { by: [K] } });
+    expect(JSON.stringify(r)).not.toContain("reb/");
+    expect(r).toMatchObject({ consult_uid: UID, ist_date: "2026-10-05", room_id: "room_a", stray: null, manifest: { state: "ok" }, nested: { by: [null] } });
+  });
+});
