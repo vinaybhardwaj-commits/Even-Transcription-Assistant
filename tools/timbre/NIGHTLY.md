@@ -33,7 +33,13 @@ manifest has `scope_json.job = "timbre-intraday"`. Nothing reads it for any deci
 - **Budget:** `budget_usd_daily` is cumulative per IST date across ticks (today's ledgered `cost_usd_est` plus this tick). Over budget
   gives a partial run, an `ALERT` line and exit 2, same as `run`; the dropped consults are retried by later ticks (and keep alerting).
 - **One tick at a time:** `flock` on `<workdir>/intraday.lock`; a busy lock prints `[timbre-intraday] busy` and exits 0.
-- **Backfill (last 7 days):** `for i in 1 2 3 4 5 6 7; do python -m tools.timbre.nightly intraday --config /etc/timbre-nightly.json --date $(date -d "-$i day" +%F); done`
+- **Re-cut consults:** `cut_version` (from the consult row `/api/timbre/consults` returns) is part of the ledger key, so a re-cut consult is
+  re-scored on the next tick. A row or consult with no `cut_version` is keyed null, which matches only a null.
+- **Bad ledger rows:** an unparseable row (bad JSON, non-numeric cost, bad UTF-8) is skipped, never fatal; each tick prints
+  `[timbre-intraday] ledger_bad_rows=N`. A skipped row's consult may be re-scored.
+- **Backfill (last 7 days):** run as the service user with the service env (as root it would leave root-owned lock and ledger files that
+  stop every later timer tick), values copied from `deploy/timbre-intraday.service`:
+  `for i in 1 2 3 4 5 6 7; do sudo systemd-run --uid=timbre --wait --pipe -p EnvironmentFile=/etc/timbre-nightly.env -p WorkingDirectory=/opt/timbre/eta /opt/timbre/eta/tools/timbre/.venv/bin/python -m tools.timbre.nightly intraday --config /etc/timbre-nightly.json --date $(date -d "-$i day" +%F); done`
   (each date has its own daily budget; already-ledgered consults are skipped).
 - **Off switch:** `TIMBRE_NIGHTLY_ENABLED=0` (also disables `run`) or `systemctl disable --now timbre-intraday.timer`. Exit codes as `run`.
 - The nightly `run` does not read the ledger, so it still re-scores the previous day in full (a new run row; readers use `affect_consult_latest`).

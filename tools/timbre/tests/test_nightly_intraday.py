@@ -91,7 +91,7 @@ def test_ledgered_consults_are_skipped(rig):
     assert rig.tick() == 0
     assert len(rig.runs) == 2 and rig.scored_in_run[-1] == ["c3"]
     row = rig.ledger[0]
-    assert set(row) == {"consult_uid", "ist_date", "pipeline_version", "valence_model_rev", "arousal_model_rev", "run_id", "windows", "cost_usd_est", "ts"}
+    assert set(row) == {"consult_uid", "ist_date", "pipeline_version", "valence_model_rev", "arousal_model_rev", "run_id", "cut_version", "windows", "cost_usd_est", "ts"}
     assert row["ist_date"] == DAY and row["run_id"] == 7 and row["windows"] == 2 and row["cost_usd_est"] == pytest.approx(0.0045)
     assert rig.posted[0]["run"]["scope_json"]["job"] == "timbre-intraday"
 
@@ -219,4 +219,66 @@ def test_torn_ledger_line_is_ignored(rig):
     assert rig.tick() == 0
     p = Path(rig.cfg["workdir"]) / "intraday-ledger.jsonl"
     p.write_text(p.read_text() + '{"consult_uid": "c2", "ist_da')
-    assert nightly.read_ledger(p)[0]["consult_uid"] == "c1" and len(nightly.read_ledger(p)) == 1
+    rows, bad = nightly.read_ledger(p)
+    assert [r["consult_uid"] for r in rows] == ["c1"] and bad == 1
+
+
+def test_torn_tail_does_not_swallow_next_row(rig):  # N1
+    rig.consults = [consult("c1", 1000)]
+    assert rig.tick() == 0
+    p = Path(rig.cfg["workdir"]) / "intraday-ledger.jsonl"
+    p.write_bytes(p.read_bytes() + b'{"consult_uid": "c2", "ist_da')
+    rig.consults.append(consult("c3", 3000))
+    assert rig.tick() == 0
+    rows, bad = nightly.read_ledger(p)
+    assert [r["consult_uid"] for r in rows] == ["c1", "c3"] and bad == 1
+
+
+def test_recut_consult_is_rescored(rig):  # N2
+    rig.consults = [consult("c1", 1000)]
+    assert rig.tick() == 0 and rig.tick() == 0 and len(rig.runs) == 1
+    rig.consults = [consult("c1", 1000, cut_version="sig:y")]
+    assert rig.tick() == 0 and len(rig.runs) == 2
+    assert [r["cut_version"] for r in rig.ledger] == ["sig:x", "sig:y"]
+    assert rig.tick() == 0 and len(rig.runs) == 2
+
+
+def test_null_cut_version_matches_only_null(rig):  # N2
+    rig.consults = [consult("c1", 1000, cut_version=None)]
+    assert rig.tick() == 0 and rig.tick() == 0 and len(rig.runs) == 1
+    rig.consults = [consult("c1", 1000, cut_version="sig:x")]
+    assert rig.tick() == 0 and len(rig.runs) == 2
+
+
+def _bad_ledger_case(rig, capsys, tail: bytes):
+    rig.consults = [consult("c1", 1000)]
+    p = Path(rig.cfg["workdir"]) / "intraday-ledger.jsonl"
+    p.write_bytes(tail)
+    assert rig.tick() == 0
+    assert "[timbre-intraday] ledger_bad_rows=1" in capsys.readouterr().out
+    assert [r["consult_uid"] for r in nightly.read_ledger(p)[0]] == ["c1"]
+
+
+def test_bad_json_row_skipped_and_counted(rig, capsys):  # N3
+    _bad_ledger_case(rig, capsys, b"not json at all\n")
+
+
+def test_non_numeric_cost_row_skipped_and_counted(rig, capsys):  # N3
+    _bad_ledger_case(rig, capsys, b'{"consult_uid": "c9", "cost_usd_est": "abc", "ist_date": "' + DAY.encode() + b'"}\n')
+
+
+def test_bad_utf8_row_skipped_and_counted(rig, capsys):  # N3
+    _bad_ledger_case(rig, capsys, b'{"consult_uid": "c9", "x": "\xff\xfe"}\xff\n')
+
+
+def test_intraday_exception_uses_intraday_tag(monkeypatch, capsys):  # N5
+    monkeypatch.setattr(nightly, "load_config", lambda path: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert nightly.main(["intraday", "--date", DAY]) == 1
+    assert f"ALERT [timbre-intraday] {DAY} failed" in capsys.readouterr().out
+
+
+def test_run_ledger_bookkeeping_tolerates_window_without_consult_uid(tmp_path, monkeypatch):  # N6
+    rig = Rig(tmp_path, monkeypatch)
+    rig.consults = [consult("c1", 1000)]
+    monkeypatch.setattr(store, "build_from_files", lambda *a, **k: {"run": {}, "windows": [{"x": 1}, {"consult_uid": "c1"}]})
+    assert nightly.run(DAY, rig.cfg, runner=rig.runner, fetch=rig.fetch, post=rig.post, preparer=rig.preparer) == 0

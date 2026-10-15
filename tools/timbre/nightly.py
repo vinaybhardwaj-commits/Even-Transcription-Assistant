@@ -274,9 +274,12 @@ def _score_and_store(day: str, cfg: dict, kept: list[dict], info: dict, withheld
     if isinstance(result, dict) and result.get("ok"):
         counts: dict[str, int] = {}
         for w in payload.get("windows") or []:
-            counts[w["consult_uid"]] = counts.get(w["consult_uid"], 0) + 1
+            uid = w.get("consult_uid")
+            if uid:
+                counts[uid] = counts.get(uid, 0) + 1
         by_uid = {c["consult_uid"]: c for c in kept}
-        scored = [{"consult_uid": uid, "windows": n, "run_id": result.get("run_id"), "cost_usd_est": round(estimate_usd(by_uid[uid]["duration_s"]), 6)}
+        scored = [{"consult_uid": uid, "windows": n, "run_id": result.get("run_id"), "cut_version": by_uid[uid].get("cut_version"),
+                   "cost_usd_est": round(estimate_usd(by_uid[uid]["duration_s"]), 6)}
                   for uid, n in sorted(counts.items()) if uid in by_uid]
     if state == "partial":
         print(f"ALERT [{job}] {day} is PARTIAL: {info['dropped_budget']} consult(s) over the daily budget, {info['dropped_max']} over max_consults")
@@ -318,27 +321,41 @@ def _versions(cfg: dict) -> dict:
     return {"pipeline_version": cfg.get("pipeline_version"), "valence_model_rev": cfg.get("valence_model_rev"), "arousal_model_rev": cfg.get("arousal_model_rev")}
 
 
-def read_ledger(path: Path) -> list[dict]:
-    """Every parseable row; a torn last line (crash mid-append) is ignored, never fatal."""
+def read_ledger(path: Path) -> tuple[list[dict], int]:
+    """(usable rows, bad-row count). A row that is not JSON, not an object with a consult_uid, has a non-numeric cost, or has
+    invalid UTF-8 is skipped and counted, never fatal; its consult may be re-scored."""
     rows: list[dict] = []
+    bad = 0
     if not path.is_file():
-        return rows
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            row = json.loads(line)
-        except ValueError:
+        return rows, bad
+    for raw in path.read_bytes().split(b"\n"):
+        if not raw.strip(b"\x00 \t\r"):
             continue
-        if isinstance(row, dict) and row.get("consult_uid"):
-            rows.append(row)
-    return rows
+        try:
+            row = json.loads(raw.decode("utf-8", errors="replace"))
+            if not isinstance(row, dict) or not row.get("consult_uid"):
+                raise ValueError("no consult_uid")
+            float(row.get("cost_usd_est") or 0.0)
+        except (ValueError, TypeError):
+            bad += 1
+            continue
+        rows.append(row)
+    return rows, bad
 
 
 def append_ledger(path: Path, scored: list[dict], day: str, cfg: dict) -> None:
     """Append-only, consult_uids and counts only (no text, no doctor id). Called only after an ok ingest."""
     ts = datetime.now(timezone.utc).isoformat()
+    torn = False
+    if path.is_file() and path.stat().st_size > 0:
+        with path.open("rb") as raw:
+            raw.seek(-1, os.SEEK_END)
+            torn = raw.read(1) != b"\n"
     with path.open("a", encoding="utf-8") as fh:
+        if torn:
+            fh.write("\n")
         for s in scored:
-            fh.write(json.dumps({"consult_uid": s["consult_uid"], "ist_date": day, **_versions(cfg), "run_id": s.get("run_id"), "windows": s["windows"],
+            fh.write(json.dumps({"consult_uid": s["consult_uid"], "ist_date": day, **_versions(cfg), "run_id": s.get("run_id"), "cut_version": s.get("cut_version"), "windows": s["windows"],
                                  "cost_usd_est": s["cost_usd_est"], "ts": ts}, sort_keys=True) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
@@ -357,7 +374,7 @@ def intraday(day: str, cfg: dict, *, dry_run: bool = False, runner=subprocess.ru
 
     workdir = Path(cfg["workdir"])
     workdir.mkdir(parents=True, exist_ok=True)
-    with (workdir / "intraday.lock").open("w") as lock:
+    with (workdir / "intraday.lock").open("a+") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -365,12 +382,13 @@ def intraday(day: str, cfg: dict, *, dry_run: bool = False, runner=subprocess.ru
             return 0
         started = datetime.now(timezone.utc).isoformat()
         ledger_path = workdir / "intraday-ledger.jsonl"
-        rows = read_ledger(ledger_path)
+        rows, bad_rows = read_ledger(ledger_path)
+        print(f"[timbre-intraday] ledger_bad_rows={bad_rows}")
         ver = _versions(cfg)
-        done = {r["consult_uid"] for r in rows if all(r.get(k) == v for k, v in ver.items())}
+        done = {(r["consult_uid"], r.get("cut_version")) for r in rows if all(r.get(k) == v for k, v in ver.items())}
         spent = sum(float(r.get("cost_usd_est") or 0.0) for r in rows if r.get("ist_date") == day)
         body = fetch(cfg["app_url"], day, secret)
-        todo = [c for c in body["consults"] if c.get("consult_uid") not in done]
+        todo = [c for c in body["consults"] if (c.get("consult_uid"), c.get("cut_version")) not in done]
         remaining = max(0.0, float(cfg["budget_usd_daily"]) - spent)
         kept, info = plan(todo, dict(cfg, budget_usd_daily=remaining))
         info.update({"already_done": len(body["consults"]) - len(todo), "spent_usd_before": round(spent, 4)})
@@ -395,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("run", "plan", "intraday"):
         s = sub.add_parser(name)
-        s.add_argument("--date", default=None, help="IST date; default the previous IST day")
+        s.add_argument("--date", default=None, help="IST date; default today (IST) for intraday, the previous IST day for run/plan")
         s.add_argument("--config", default=os.environ.get("TIMBRE_NIGHTLY_CONFIG"))
         if name in ("run", "intraday"):
             s.add_argument("--dry-run", action="store_true")
@@ -408,7 +426,7 @@ def main(argv: list[str] | None = None) -> int:
             return intraday(day, cfg, dry_run=bool(args.dry_run))
         return run(day, cfg, dry_run=(args.cmd == "plan" or bool(getattr(args, "dry_run", False))))
     except Exception as exc:  # noqa: BLE001 — every failure is one ALERT line and exit 1
-        print(f"ALERT [timbre-nightly] {day} failed: {type(exc).__name__}: {str(exc)[:300]}")
+        print(f"ALERT [{'timbre-intraday' if args.cmd == 'intraday' else 'timbre-nightly'}] {day} failed: {type(exc).__name__}: {str(exc)[:300]}")
         return 1
 
 
