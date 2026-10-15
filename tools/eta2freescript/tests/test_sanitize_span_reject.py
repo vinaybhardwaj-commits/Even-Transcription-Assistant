@@ -288,3 +288,195 @@ def test_m11_c4_retry_fallback_returns_its_removed_spans(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "check", lambda a: ["C4 forced"])  # the first render "fails C4", so the retry path runs
     text, rem = pipeline._fallback_note_ex(art, {}, [])
     assert "[dose]" not in text and ("Medication", "[dose]") in rem
+
+
+# --- FIX2: fail-closed line classification on a normalised view (N1-N3) ---
+from tools.eta2freescript.note import _norm_view  # noqa: E402
+
+NON_ORDER = [h for h in HEADINGS if h not in ORDER_HEADINGS]
+CF = ["​", "﻿", "⁠", "­", "‍", "‎", "‏", "‪", "⁦"]
+SP = "[three times a day]"
+PRE = {  # name -> (text written before the heading, case function, text between heading and colon)
+    "col0": "", "indent": "  ", "tab": "\t", "nbsp": " ", "ideo_space": "　", "lead_span": "[S1] ", "lead_span_tight": "[S1]",
+    "bullet": "- ", "dot": "• ", "star": "* ", "quote": "> ", "num": "1. ", "numparen": "1) ", "alpha": "(a) ", "bold": "**",
+    "hash": "## ", "after_text": "Plan: ", "after_sentence": "Rest. ", "after_heading": "General Advice: rest; ",
+    "after_span_list": "[S1] - ",
+}
+CASES = {"same": lambda s: s, "upper": str.upper, "lower": str.lower, "mixed": lambda s: "".join(c.upper() if i % 2 else c.lower() for i, c in enumerate(s))}
+COLONS = {"colon": ":", "space_colon": " :", "fullwidth": "：", "fullwidth_sp": " ：", "bold_close": ":**"}
+
+
+def _placements():
+    for pn, pre in PRE.items():
+        for cn, cf in CASES.items():
+            for kn, colon in COLONS.items():
+                yield pn, cn, kn, pre, cf, colon
+    for c in CF:  # Cf characters: alone, doubled, combined with each other and with the indent / bullet / case / colon variants
+        for pre in ("", "  ", "- ", "[S1] ", "1. "):
+            yield f"cf{ord(c):x}", "same", "colon", pre + c, lambda s: s, ":"
+            yield f"cf{ord(c):x}x2", "mixed", "space_colon", pre + c + c, CASES["mixed"], " :"
+    yield "cf_all", "upper", "fullwidth", "".join(CF), CASES["upper"], "："
+    yield "cf_in_word", "same", "colon", "", lambda s: s[:3] + "​" + s[3:], ":"
+    yield "cf_before_colon", "same", "colon", "", lambda s: s, "​:"
+
+
+def _line(head, pre, cf, colon, body):
+    return f"{pre}{cf(head)}{colon} {body}"
+
+
+@pytest.mark.parametrize("head", sorted(ORDER_HEADINGS))
+def test_fx2_order_line_span_rejects_in_every_placement(head):
+    n = 0
+    for pn, cn, kn, pre, cf, colon in _placements():
+        for before in ("General Advice: rest", "Medication: x", "Presenting Complaint: cough"):
+            text = before + "\n" + _line(head, pre, cf, colon, f"item {SP} x 3 days")
+            _, removed = sanitize_note_ex(text)
+            errs = span_errors(removed)
+            assert any(e.startswith("FRX-L1") for e in errs) and any(sp == SP for _, sp in removed), (pn, cn, kn, before, repr(text))
+            assert f"FRX-L1 bracket span removed from {head}" in errs, (pn, cn, kn, before, repr(text), errs)
+            n += 1
+    assert n > 1000
+
+
+@pytest.mark.parametrize("head", sorted(ORDER_HEADINGS))
+def test_fx2_continuation_of_an_order_section_rejects(head):
+    for pre in ("", "  ", "- ", "​"):
+        for cont in (f"{SP} more", "second line [S1]", "  [dose] x"):
+            _, removed = sanitize_note_ex(f"General Advice: rest\n{pre}{head}: a\n{cont}")
+            assert f"FRX-L1 bracket span removed from {head}" in span_errors(removed), (head, pre, cont)
+
+
+@pytest.mark.parametrize("head", NON_ORDER)
+def test_fx2_speaker_label_on_properly_attributed_non_order_line_still_posts(head):
+    for pre in ("", "  ", "[S1] ", "​", "- ", "："[:0]):
+        text = f"Medication: x\n{pre}{head}: keep warm [S1]\n{head.upper()}​ : and more [S0|doctor]"
+        out, removed = sanitize_note_ex(text)
+        assert removed and all(h == head for h, _ in removed), (head, pre, removed)
+        assert span_errors(removed) == []
+        assert out == base.sanitize_note(text)
+
+
+def test_fx2_span_before_any_heading_rejects():
+    for text in ("[S1] opening words\nGeneral Advice: rest", "preamble [S1]\nMedication: x", "[S1]\nGeneral Advice: rest", "​[S1] hi"):
+        _, removed = sanitize_note_ex(text)
+        assert removed[0][0] is None
+        assert span_errors(removed) == ["FRX-L1 bracket span removed from unattributed"], text
+
+
+def test_fx2_order_heading_anywhere_beats_a_non_order_start():
+    for text in ("General Advice: rest. Medication: x [500 mg]", "Plan of Management: a, Follow up: b [S1]", "Examination: Refer to: ENT [S1]",
+                 "Diagnoses: Surgery or Procedure : knee [x]"):
+        _, removed = sanitize_note_ex(text)
+        assert span_errors(removed) and removed[0][0] in ORDER_HEADINGS, (text, removed)
+
+
+def test_fx2_posted_text_never_depends_on_the_view():
+    r = random.Random(5)
+    for _ in range(300):
+        pn, cn, kn, pre, cf, colon = r.choice(list(_placements()))
+        text = "\n".join(_line(r.choice(HEADINGS), pre, cf, colon, f"w {r.choice(SPANS)} z") for _ in range(4))
+        assert sanitize_note_ex(text)[0] == base.sanitize_note(text)
+
+
+def test_fx2_norm_view():
+    assert _norm_view("[S1] ​**1.  MEDICATION ：** x") == "medication:x" or _norm_view("[S1] ​**1.  MEDICATION ：** x").startswith("medication:")
+    assert _norm_view("­⁠Follow‍ up　: a").startswith("follow up:")
+
+
+# --- VERDICT / VERDICT2 probes as fixed cases, through the full pipeline ---
+_PROBES = [
+    "[S1] Medication: paracetamol 1 g [three times a day] x 3 days",
+    "  Medication: paracetamol 1 g [three times a day] x 3 days",
+    "​Medication: paracetamol 1 g x 3 days [500 mg]",
+    "﻿Medication: paracetamol 1 g x 3 days [500 mg]",
+    "⁠Follow up: review in [one] week",
+    "­Refer to: cardiology [urgent]",
+    "‍Further Investigation: CBC [fasting]",
+    "‎Surgery or Procedure: dressing [left knee]",
+    "- Medication: paracetamol 1 g x 3 days [500 mg]",
+    "• Medication: paracetamol 1 g x 3 days [500 mg]",
+    "1. Medication: paracetamol 1 g x 3 days [500 mg]",
+    "**Medication:** paracetamol 1 g x 3 days [500 mg]",
+    "medication: paracetamol 1 g x 3 days [500 mg]",
+    "MEDICATION: paracetamol 1 g x 3 days [500 mg]",
+    "Medication : paracetamol 1 g x 3 days [500 mg]",
+    "Medication： paracetamol 1 g x 3 days [500 mg]",
+    "Rest. Medication: paracetamol 1 g x 3 days [500 mg]",
+    "General Advice: rest; Medication: paracetamol 1 g x 3 days [500 mg]",
+    "Plan: Medication: paracetamol 1 g x 3 days [500 mg]",
+    " Follow up: review After [one] week",
+    "[S1] Surgery or Procedure: dressing [left knee]",
+]
+
+
+@pytest.mark.parametrize("extra", _PROBES)
+@pytest.mark.parametrize("emptied", [False, True])
+def test_fx2_verdict_probes_never_post_the_trimmed_line(tmp_path, extra, emptied):
+    lg, od = _extra_line(tmp_path, extra, medication="Medication:" if emptied else None)
+    assert any(e.startswith("FRX-L1") for e in lg["llm_note_errors"]), lg["llm_note_errors"]
+    assert lg["note_source"] == "deterministic_fallback" and "note_repaired" not in lg
+    assert lg["final_valid"] and "​" not in lg["artifact"]["note_text"] and "[500 mg]" not in lg["artifact"]["note_text"]
+
+
+def test_fx2_prefixed_general_advice_and_cf_general_advice_still_post(tmp_path):
+    for extra in ("[S1] General Advice: keep warm", "​General Advice: keep warm [S1]", "- general advice : keep warm [S1]"):
+        lg, _ = _extra_line(tmp_path / str(hash(extra)), extra)
+        assert lg["final_valid"] and lg["note_source"].startswith("llm_") and lg["sanitize_removed"] >= 1, extra
+
+
+# --- FIX2 mutations: each one must fail at least one test above ---
+def _mutated(monkeypatch, which):
+    if which == "no_cf":
+        monkeypatch.setattr(note_mod, "_norm_view", _norm_no_cf)
+    elif which == "no_casefold":
+        monkeypatch.setattr(note_mod, "_norm_view", lambda l: _norm_no_casefold(l))
+    elif which == "no_anywhere":
+        monkeypatch.setattr(note_mod, "_order_heading_inside", lambda v: None)
+    elif which == "unattributed_benign":
+        real_se = note_mod.span_errors
+        monkeypatch.setattr(note_mod, "span_errors", lambda rem: real_se([(h, s) for h, s in rem if h is not None]))
+
+
+def _norm_no_cf(line):
+    import re as _re, unicodedata as ud
+    s = ud.normalize("NFKC", line).translate(note_mod._COLONS)
+    s = _re.sub(r"\s+", " ", note_mod._MARKUP.sub("", s)).casefold()
+    s = _re.sub(r"\s+:", ":", s)
+    prev = None
+    while prev != s:
+        prev, s = s, note_mod._LEAD.sub("", s).lstrip()
+    return s
+
+
+def _norm_no_casefold(line):
+    import re as _re, unicodedata as ud
+    s = ud.normalize("NFKC", "".join(c for c in line if ud.category(c) != "Cf")).translate(note_mod._COLONS)
+    s = _re.sub(r"\s+", " ", note_mod._MARKUP.sub("", s))
+    s = _re.sub(r"\s+:", ":", s)
+    prev = None
+    while prev != s:
+        prev, s = s, note_mod._LEAD.sub("", s).lstrip()
+    return s
+
+
+def _kills(monkeypatch, which):
+    _mutated(monkeypatch, which)
+    probes = [
+        ("General Advice: rest\n​Medication: a [500 mg]", "Medication"),
+        ("General Advice: rest\nMEDICATION: a [500 mg]", "Medication"),
+        ("General Advice: rest. Medication: a [500 mg]", "Medication"),
+        ("General Advice: rest\nMed\u200bication: a [500 mg]", "Medication"),
+        ("General Advice: rest\nRefer\u200d to\u2060: ENT [urgent]", "Refer to"),
+        ("[S1] opening\nGeneral Advice: rest", "unattributed"),
+    ]
+    failed = []
+    for text, head in probes:
+        _, rem = sanitize_note_ex(text)
+        if f"FRX-L1 bracket span removed from {head}" not in note_mod.span_errors(rem):
+            failed.append(text)
+    return failed
+
+
+@pytest.mark.parametrize("which", ["no_cf", "no_casefold", "no_anywhere", "unattributed_benign"])
+def test_fx2_mutation_is_caught(monkeypatch, which):
+    assert _kills(monkeypatch, which), f"mutant {which} survived"

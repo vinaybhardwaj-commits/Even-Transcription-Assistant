@@ -7,6 +7,7 @@ it does not smuggle a kept-out name or an identity pattern.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 HEADINGS = ["Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses", "Plan of Management",
             "Surgery or Procedure", "Medication", "Further Investigation", "Follow up", "Refer to", "General Advice"]
@@ -24,9 +25,52 @@ BRACKET_SPAN = re.compile(r"\s*\[[^\]]*\]")
 ORDER_HEADINGS = frozenset({"Medication", "Further Investigation", "Refer to", "Follow up", "Surgery or Procedure"})
 
 
+# --- line classification (FRX-L1, fail-closed). Used to ATTRIBUTE removed spans only; the posted text never comes from it. ---
+_COLONS = str.maketrans({c: ":" for c in "\uff1a\ufe55\ufe13\u02d0\ua789\u2236\u0589\u05c3\u0703\u0704\u1803\u1809"})
+_MARKUP = re.compile(r"</?[a-z][a-z0-9]*[^>]*>|[*_~`]")  # inline emphasis / html tags: never part of a heading
+_LEAD = re.compile(r"^(?:[\s\-\u2010-\u2015\u2212>#+|:;.,\u2022\u2023\u25e6\u25aa\u25cf\u00b7\"'\u201c\u201d\u2018\u2019]+"
+                   r"|\(?(?:\d{1,3}|[a-z])[.)]|\([a-z0-9]{1,3}\)|\[[^\]]*\])")
+_HEADINGS_CF = {h: h.casefold() for h in HEADINGS}
+
+
+def _norm_view(line: str) -> str:
+    """NFKC, no Cf characters, lookalike colons as ':', whitespace collapsed, casefolded, nothing before ':', and with leading
+    list / quote markup and leading [..] spans stripped. For classification only."""
+    s = unicodedata.normalize("NFKC", "".join(c for c in line if unicodedata.category(c) != "Cf"))
+    s = "".join(c for c in s if unicodedata.category(c) != "Cf").translate(_COLONS)
+    s = _MARKUP.sub("", s)
+    s = re.sub(r"\s+", " ", s).casefold()
+    s = re.sub(r"\s+:", ":", s)
+    prev = None
+    while prev != s:
+        prev, s = s, _LEAD.sub("", s).lstrip()
+    return s
+
+
+def _line_heading(view: str) -> str | None:
+    """The heading a normalised view STARTS with (N1), else None."""
+    for h, hc in _HEADINGS_CF.items():
+        if view.startswith(hc + ":"):
+            return h
+    return None
+
+
+def _order_heading_inside(view: str) -> str | None:
+    """N2a: the earliest order heading followed by ':' ANYWHERE in the normalised view."""
+    best = None
+    for h in ORDER_HEADINGS:
+        i = view.find(_HEADINGS_CF[h] + ":")
+        if i >= 0 and (best is None or i < best[0]):
+            best = (i, h)
+    return best[1] if best else None
+
+
 def sanitize_note_ex(note: str) -> tuple[str, list[tuple[str | None, str]]]:
-    """sanitize_note plus what it removed: (text, [(heading, removed span), ...]). The heading is the one the line sits under
-    (a line without its own heading belongs to the last heading seen; None before the first)."""
+    """sanitize_note plus what it removed: (text, [(heading, removed span), ...]).
+
+    The heading is where the line sits, decided fail-closed on a normalised view of the line (see _norm_view):
+    an order heading if the view holds one anywhere (N2a) or the line continues a section opened by one (N2b); otherwise the
+    non-order heading the line is positively under; None when no heading has been seen yet (N2c)."""
     out = []
     removed: list[tuple[str | None, str]] = []
     cur: str | None = None
@@ -34,12 +78,10 @@ def sanitize_note_ex(note: str) -> tuple[str, list[tuple[str | None, str]]]:
         spans = [m.group(0).strip() for m in BRACKET_SPAN.finditer(line)]
         line = BRACKET_SPAN.sub("", line)
         head, sep, body = line.partition(":")
-        # Attribution only: a heading after a removed leading span, spaces or a tab still starts that heading. The posted text
-        # below keeps deciding on the unstripped line, so nothing is reflowed.
-        ahead, asep, _ = line.lstrip().partition(":")
-        if asep and ahead in HEADINGS:
-            cur = ahead
-        removed += [(cur, sp) for sp in spans]
+        view = _norm_view(line)
+        cur = _line_heading(view) or cur
+        attr = _order_heading_inside(view) or cur
+        removed += [(attr, sp) for sp in spans]
         if not line.strip():
             continue
         if sep and head in HEADINGS:
@@ -56,14 +98,15 @@ def sanitize_note(note: str) -> str:
 
 
 def span_errors(removed: list[tuple[str | None, str]]) -> list[str]:
-    """FRX-L1: a removed span on an order line, or a removed span that is a dose / slot field word anywhere, rejects the consult.
-    Any other removed span (e.g. a speaker label) keeps the old behaviour and is only counted."""
+    """FRX-L1: a removed span rejects the consult unless its line is positively under a non-order heading (and the span is not a
+    dose / slot field word). Order lines and unattributed lines (head None) always reject. A speaker label on a General Advice
+    line is only counted."""
     from .validate import _D4_FIELDS  # lazy: validate does not import this module, but keep the import cycle-proof
 
     heads: list[str] = []
     for head, span in removed:
-        if head in ORDER_HEADINGS or span.strip("[] \t").lower() in _D4_FIELDS:
-            h = head or "note text"
+        if head is None or head in ORDER_HEADINGS or span.strip("[] \t").lower() in _D4_FIELDS:
+            h = head or "unattributed"
             if h not in heads:
                 heads.append(h)
     return [f"FRX-L1 bracket span removed from {h}" for h in heads]
