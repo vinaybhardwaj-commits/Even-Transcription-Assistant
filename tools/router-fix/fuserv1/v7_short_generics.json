@@ -1,0 +1,1 @@
+{"lexicon_sha256_prefix": "cd012faed4bc597a", "names": ["coq", "iron", "soap", "urea"], "excluded_unit_keys": ["min", "vit"], "note": "ADDENDUM-8a Change 3 (86a3619599b4): lexicon entries whose consonant skeleton is < 3; exact casefolded match only. min and vit excluded as generic English words / prefixes."}
