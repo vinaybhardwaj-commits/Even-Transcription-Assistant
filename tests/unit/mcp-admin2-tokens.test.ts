@@ -117,4 +117,48 @@ describe("SCRIBE_MCP_TOKENS_ADMIN_2", () => {
     expect(all).not.toContain(sha("t6a").slice(0, 9));
     for (const s of [sha("t6b"), "alpha", "beta", "t6b", "t6c"]) expect(all).not.toContain(s);
   });
+
+  it("F1: a hash that is an INVALID entry in ADMIN still blocks the same hash in ADMIN_2", () => {
+    process.env[MCP_TOKENS_ADMIN_ENV] = json({ [sha("f1h")]: { actor: "admin:bad", scopes: ["read", "write"] }, [sha("f1ok")]: { actor: "admin:ok", scopes: ["admin"] } });
+    process.env[MCP_TOKENS_ADMIN_2_ENV] = json({ [sha("f1h")]: { actor: "admin:two", scopes: ["read", "admin"] } });
+    expect(who("f1h")).toEqual({ fail: 401 });
+    expect(who("f1ok")).toEqual({ actor: "admin:ok", scopes: ["admin"] });
+    const all = logs.join("\n");
+    expect(all).toContain(`${MCP_TOKENS_ADMIN_2_ENV}: entry ${sha("f1h").slice(0, 8)}`);
+    expect(all).not.toContain(sha("f1h").slice(0, 9));
+  });
+
+  it("F2: ADMIN set but not a JSON object ignores ADMIN_2 whole; ADMIN unset or blank lets it apply", () => {
+    process.env.SCRIBE_MCP_TOKENS = json({ [sha("f2p")]: { actor: "watcher", scopes: ["read"] } });
+    process.env[MCP_TOKENS_ADMIN_2_ENV] = json({ [sha("f2k")]: { actor: "admin:two", scopes: ["read", "admin"] } });
+    for (const bad of ["not json", "[]", "\"x\"", "42"]) {
+      process.env[MCP_TOKENS_ADMIN_ENV] = bad;
+      expect(who("f2k"), bad).toEqual({ fail: 401 });
+      expect(who("f2p")).toMatchObject({ actor: "watcher" });
+    }
+    expect(logs.join("\n")).toContain(`${MCP_TOKENS_ADMIN_ENV} is not a readable object; ignoring all 1 entry in ${MCP_TOKENS_ADMIN_2_ENV}`);
+    delete process.env[MCP_TOKENS_ADMIN_ENV];
+    expect(who("f2k")).toEqual({ actor: "admin:two", scopes: ["admin", "read"] });
+    process.env[MCP_TOKENS_ADMIN_ENV] = "  ";
+    expect(who("f2k")).toEqual({ actor: "admin:two", scopes: ["admin", "read"] });
+  });
+
+  it("F3: ADMIN_2 entries blocked by primary/EXTRA name ADMIN_2 (8-char prefix, counts), never ADMIN", () => {
+    process.env.SCRIBE_MCP_TOKENS = json({ [sha("f3p")]: { actor: "admin:prim", scopes: ["read"] } });
+    process.env[MCP_TOKENS_EXTRA_ENV] = json({ [sha("f3e")]: { actor: "relay", scopes: ["read"] } });
+    process.env[MCP_TOKENS_ADMIN_2_ENV] = json({
+      [sha("f3p")]: { actor: "admin:a", scopes: ["admin"] },
+      [sha("f3q")]: { actor: "admin:prim", scopes: ["admin"] },
+      [sha("f3s")]: { actor: "admin:prim", scopes: ["admin"] },
+      [sha("f3r")]: { actor: "admin:fine", scopes: ["admin"] },
+    });
+    expect(who("f3p")).toMatchObject({ scopes: ["read"] });
+    expect(who("f3q")).toEqual({ fail: 401 });
+    expect(who("f3r")).toEqual({ actor: "admin:fine", scopes: ["admin"] });
+    const all = logs.join("\n");
+    expect(all).toContain(`${MCP_TOKENS_ADMIN_2_ENV}: entry ${sha("f3p").slice(0, 8)} collides with a primary/extra token`);
+    expect(all).toContain(`${MCP_TOKENS_ADMIN_2_ENV}: 2 entries dropped: the actor equals a primary/extra actor`);
+    expect(all).not.toContain(sha("f3p").slice(0, 9));
+    expect(logs.filter((l) => l.includes(`${MCP_TOKENS_ADMIN_ENV}:`))).toEqual([]);
+  });
 });
