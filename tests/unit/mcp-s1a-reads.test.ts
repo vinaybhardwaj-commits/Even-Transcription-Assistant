@@ -38,11 +38,10 @@ const ROOM = { id: "room_yh3etjpf", slug: "opd-1", name: "OPD 1", disabled_at: n
 const ctx = { origin: "x", actor: "a", scopes: new Set(["read"]) } as never;
 const tool = (name: string) => S.CALLABLE_TOOLS.get(name)!;
 const run = async (name: string, args: Row) => (await tool(name).handler(args, ctx)) as Row;
-/** JEV-COVERAGE JB-3: the route adds `coverage` (and may name it in `degraded`) on top of the snapshot; the tool serves the snapshot alone */
+/** JEV-COVERAGE JB-3: the route adds `coverage` on top of the snapshot; the tool serves the snapshot alone */
 const snapshotOnly = (routeBody: string) => {
   const b = JSON.parse(routeBody) as Row;
   delete b.coverage;
-  b.degraded = (b.degraded as string[]).filter((d) => d !== "coverage");
   return JSON.stringify(b);
 };
 

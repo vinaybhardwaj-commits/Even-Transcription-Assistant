@@ -20,11 +20,10 @@ const NO_STORE = { "cache-control": "no-store" };
 
 export async function GET(req: Request) {
   await roomsLiveGuard(req); // always ok: access is open (owner ruling 8 Oct 2026)
-  const coveragePromise = coverageOrNull(); // JEV-COVERAGE JB-3: counts only, never throws, own 4 s bound; runs beside the snapshot
+  const coveragePromise = coverageOrNull({ timeoutMs: 2000 }); // JEV-COVERAGE JB-3: counts only, never throws, own 2 s bound; runs beside the snapshot; a null never enters `degraded` (room faults only)
   try {
     const [snapshot, coverage] = await Promise.all([getSnapshot({ db: sql, claims: realClaimsPort(sql as never) }), coveragePromise]);
-    const degraded = coverage === null && !snapshot.degraded.includes("coverage") ? [...snapshot.degraded, "coverage"] : snapshot.degraded;
-    return NextResponse.json({ ...snapshot, degraded, coverage }, { headers: NO_STORE });
+    return NextResponse.json({ ...snapshot, coverage }, { headers: NO_STORE });
   } catch (e) {
     console.error("[rooms-live] snapshot failed:", e instanceof Error ? e.message.slice(0, 160) : "error");
     const empty: Snapshot = {

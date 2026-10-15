@@ -59,20 +59,21 @@ describe("GET /api/rooms-live/now", () => {
     expect(body.rooms).toHaveLength(1);
     expect(JSON.stringify(body.coverage)).not.toMatch(/\b(u|cx)_[A-Za-z0-9]+/);
   });
-  it("null coverage names coverage degraded once and still answers 200 with rooms", async () => {
+  it("null coverage stays out of degraded and still answers 200 with rooms", async () => {
     M.cov.mockResolvedValue(null); M.snap.mockResolvedValue(snapshot(["steward"]));
     const { GET } = await import("@/app/api/rooms-live/now/route");
     const res = await GET(new Request("http://x/api/rooms-live/now"));
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.coverage).toBeNull();
-    expect(body.degraded).toEqual(["steward", "coverage"]);
+    expect(body.degraded).toEqual(["steward"]);
     expect(body.rooms).toHaveLength(1);
   });
-  it("does not duplicate an existing coverage entry in degraded", async () => {
-    M.cov.mockResolvedValue(null); M.snap.mockResolvedValue(snapshot(["coverage"]));
+  it("asks for coverage with a 2000 ms bound", async () => {
+    M.cov.mockResolvedValue(COV); M.snap.mockResolvedValue(snapshot());
     const { GET } = await import("@/app/api/rooms-live/now/route");
-    expect((await (await GET(new Request("http://x/"))).json()).degraded).toEqual(["coverage"]);
+    await GET(new Request("http://x/"));
+    expect(M.cov).toHaveBeenCalledWith({ timeoutMs: 2000 });
   });
   it("a throwing snapshot still answers 200 with coverage null", async () => {
     M.cov.mockResolvedValue(null); M.snap.mockRejectedValue(new Error("boom"));
