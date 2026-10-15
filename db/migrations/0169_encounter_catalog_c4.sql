@@ -1,5 +1,5 @@
 -- =====================================================================
--- Migration 0169 — encounter catalog C4: Jev, Clef (affect) and Presence layers (ORDER 23N; plan ~/oc/palimpsest/CATALOG-C4-PLAN-15OCT.md).
+-- Migration 0169 — encounter catalog C4: Jev, Clef (affect) and Presence layers (ORDER 23N; plan ~/oc/newcat-orch/answers/CATALOG-C4-PLAN-15OCT.md).
 --
 -- WHAT. Three nullable jsonb columns on encounter_catalog (0168), each an object or NULL:
 --   presence     {encounter_open, encounter_close (UTC ms), boundary_source, close_reason (tokens)}      <- the lab box feed (consult_ledger, catalog_version 2)
