@@ -1,0 +1,11 @@
+{
+  "name": "encounter-explorer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "build": "node build.mjs",
+    "check:data": "node scripts/check-no-real-data.mjs",
+    "browser-check": "bash browser-check.sh"
+  }
+}
