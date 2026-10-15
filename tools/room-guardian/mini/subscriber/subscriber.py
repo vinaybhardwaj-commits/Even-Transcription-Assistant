@@ -37,6 +37,35 @@ OPEN_RESULTS = ("failed", "escalated")                            # a kind line 
 INBOX_RESULTS = ("healed", "failed", "escalated")                 # and is queued for the gating INBOX on these, whatever the action (never would_do)
 ZERO_RATIO_OK = 0.05
 RAW_CAP = 2000
+# FR1 2.4 d' (guardian-lead): the kiosk sends NO `kind` on its USB lines; they are keyed on layer + action + reason + result (outside the strict coreaudio scope).
+USB_LAYER = "usb"
+USB_ESCALATIONS = {"usb_reboot_failed": "usb_reboot_failed", "usb_power_off_recurring": "usb_power_off_recurring", "usb_device_missing": "usb_device_missing"}
+USB_REBOOT_ACTION, USB_REBOOT_REASON = "kiosk_reboot", "usb_power_off"
+
+
+class _Dup(Exception):
+    pass
+
+
+def loads_dupcheck(raw):
+    """json.loads that also reports duplicate keys in any object (S2). -> (obj, duplicate_found). The last value wins, as json.loads does."""
+    found = []
+
+    def hook(pairs):
+        keys = [k for k, _ in pairs]
+        if len(keys) != len(set(keys)):
+            found.append(True)
+        return dict(pairs)
+    return json.loads(raw, object_pairs_hook=hook), bool(found)
+
+
+def _w(v):
+    return v.strip().lower() if isinstance(v, str) else ""
+
+
+def usb_scope(obj):
+    """A kiosk d' USB line: a dict with layer "usb" and NO `kind` key (a kind line is the strict coreaudio contract and is handled there)."""
+    return isinstance(obj, dict) and "kind" not in obj and _w(obj.get("layer")) == USB_LAYER
 
 
 def coreaudio_scope(obj):
@@ -136,6 +165,8 @@ CONTROL_TOPIC = "guardian/control"
 # FROZEN CONTRACT (see etc/README.md "Control topic contract"): the kiosk accepts only this exact form; anything else kills every kiosk.
 # Changing any of it needs a coordinated kiosk release (guardian-lead) FIRST. Regex is the kiosk's, verbatim from FR1-C1-CONTROL-CC-KICKOFF "## R7".
 CONTROL_RE = re.compile(r'^\{"kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$')
+# consult_open form (FR1 2.4 d', contract CONTROL-CONSULT-OPEN-SHAPE-15OCT): sorted keys put consult_open first. Used only when the flag consult_open_publish is on.
+CONTROL_RE_V2 = re.compile(r'^\{"consult_open": \{("[a-z0-9_-]{1,64}": (true|false)(, "[a-z0-9_-]{1,64}": (true|false)){0,63})?\}, "kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$')
 SLUG_RE = re.compile(r"[a-z0-9_-]{1,64}")
 # The contract limit is 4096 (kiosk R8: payload line <= 4096, file <= 4096+17); the Mini caps itself at 4000 as extra margin.
 CONTROL_MAX_BYTES, CONTROL_MAX_ROOMS = 4000, 64
@@ -149,12 +180,12 @@ def canonical_control(payload):
         raise ValueError("control payload over 4000 bytes")
     if any(not (0x20 <= ord(ch) <= 0x7E) for ch in msg):
         raise ValueError("control payload has a byte outside 0x20-0x7E")
-    if not CONTROL_RE.fullmatch(msg):
+    if not (CONTROL_RE_V2 if isinstance(payload, dict) and "consult_open" in payload else CONTROL_RE).fullmatch(msg):
         raise ValueError("control payload is not the canonical form")
     return msg
 
 
-def validate_rooms(rooms):
+def validate_rooms(rooms, consult_open=False):
     """Startup check for rooms.json: every slug ^[a-z0-9_-]{1,64}$, at most 64 distinct rooms, and the worst-case payload (every mode shadow, 15-digit ts)
     still within the contract (<= 4000 bytes). Returns an error string, or None."""
     if not isinstance(rooms, list):                  # a bare string would iterate as one room per character
@@ -167,7 +198,10 @@ def validate_rooms(rooms):
     if len(rooms) > CONTROL_MAX_ROOMS:
         return f"{len(rooms)} rooms; the control contract allows at most {CONTROL_MAX_ROOMS}"
     try:
-        canonical_control({"kill": False, "modes": {r: "shadow" for r in rooms}, "ts": 10 ** 14})
+        worst = {"kill": False, "modes": {r: "shadow" for r in rooms}, "ts": 10 ** 14}
+        if consult_open:
+            worst["consult_open"] = {r: False for r in rooms}      # "false" is the longer word
+        canonical_control(worst)
     except ValueError as e:
         return f"worst-case control payload: {e}"
     return None
@@ -216,6 +250,24 @@ class RouterSink:
     def heal_invalid(self, room, now):
         self._open(room, "heal_message_invalid", now)
 
+    def open_rooms(self, kind):
+        return [c["room_id"] for c in self.router.store.list_open() if c["kind"] == kind]
+
+    def usb_case(self, room, kind, now):
+        self._open(room, kind, now)
+
+    def usb_device_back(self, room, now):
+        self.router.close_room(None, room, "recovery", kind="usb_device_missing")
+
+    def consult_hold_source_down(self, now):
+        self._open("mini", "consult_hold_source_down", now)
+
+    def consult_hold_source_up(self, now):
+        self.router.close_room(None, "mini", "source recovered", kind="consult_hold_source_down")
+
+    def start_day_failed(self, room, now):
+        self._open(room, "start_day_failed", now)
+
     def capture_recovered(self, room, now):
         """Health zero_ratio back under 0.05: close the audio cases of this room. recorder_changed is NOT closed here (audio back says nothing about the recorder)."""
         kinds = {"capture_dead", "capture_muted", "coreaudio_heal_failed"}
@@ -224,8 +276,12 @@ class RouterSink:
 
 
 class Subscriber:
-    def __init__(self, data_dir, control_dir, rooms, sink, clock=time.time, quiet_after_s=QUIET_AFTER_S, quiet_seed=()):
+    def __init__(self, data_dir, control_dir, rooms, sink, clock=time.time, quiet_after_s=QUIET_AFTER_S, quiet_seed=(), consult=None, start_day=None, usb_verify=None, usb_missing_seed=()):
         self.data, self.ctl, self.rooms, self.sink, self.clock, self.quiet_after = data_dir, control_dir, list(rooms), sink, clock, quiet_after_s
+        self.consult, self.start_day = consult, start_day     # FR1 2.4 d': both None (off) unless their flag is on
+        self.usb_verify = usb_verify                          # the F2 Mini verify (always on once a healed_pending line arrives)
+        self.usb_missing = set(usb_missing_seed) & set(self.rooms)   # rooms with an open usb_device_missing case: closed by a health line with usb_mic_present true
+        self.last_health = {}                                 # room -> (receive time, obj) of the newest health line
         os.makedirs(data_dir, exist_ok=True)
         t0 = clock()
         self.last_seen = {r: t0 for r in self.rooms}
@@ -239,7 +295,7 @@ class Subscriber:
             return False
         room, stream = pt
         try:
-            obj = json.loads(raw)
+            obj, dup = loads_dupcheck(raw)
         except (TypeError, ValueError):
             if stream == "heal":              # a non-JSON heal line is logged only (own file, capped, JSON-quoted): no case
                 self._log_invalid_heal(room, raw)
@@ -251,8 +307,28 @@ class Subscriber:
         with open(os.path.join(d, f"{room}.{stream}.jsonl"), "a") as f:
             f.write(raw.rstrip("\n") + "\n")
         if stream == "heal":
-            self._on_heal(room, obj, now)
+            self._on_heal(room, obj, now, dup)
         if stream == "health":
+            if isinstance(obj, dict):
+                self.last_health[room] = (now, obj)
+            if self.usb_verify is not None:
+                self.usb_verify.on_health(room, obj, now)
+            if room in self.usb_missing and isinstance(obj, dict) and obj.get("usb_mic_present") is True:
+                try:
+                    self.sink.usb_device_back(room, now)
+                    self.usb_missing.discard(room)
+                except Exception:          # noqa: BLE001 -- retried on the next health line
+                    pass
+            if self.start_day is not None:
+                try:                       # a start_day fault must never stop the rest of the health handling (zero_ratio, last_seen, the quiet edge)
+                    self.start_day.on_health(room, obj, now)
+                except Exception:          # noqa: BLE001
+                    pass
+            if self.consult is not None:
+                try:
+                    self.consult.note_health(room, obj, now)
+                except Exception:          # noqa: BLE001
+                    pass
             zr = zero_ratio(obj)
             if zr is not None and zr < ZERO_RATIO_OK:
                 self.ok_streak[room] = self.ok_streak.get(room, 0) + 1
@@ -274,9 +350,23 @@ class Subscriber:
             f.write(json.dumps({"ts": int(now), "raw": str(raw)[:RAW_CAP]}) + "\n")
 
     # INFERRED heal record shape (FR-1 2.4 and SPEC-COREAUDIO-HEAL section 5/6): {"kind"?, "result"?, "action"?, ...}. Unverified against C1.1.
-    def _on_heal(self, room, obj, now):
+    def _log_dup_keys(self, room, raw_obj, now):
+        d = os.path.join(self.data, datetime.fromtimestamp(now, IST).strftime("%Y-%m-%d"))
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, f"{room}.heal-duplicate-keys.jsonl"), "a") as f:
+            f.write(json.dumps({"ts": int(now), "room": room, "note": "duplicate JSON keys in a heal line; stored, no case"}) + "\n")
+
+    def _on_heal(self, room, obj, now, dup=False):
         res = str(obj.get("result", "")).lower() if isinstance(obj, dict) else ""
-        if not coreaudio_scope(obj):                       # R9 and every older heal shape: exactly the pre-coreaudio handling, never a new case
+        if dup and not coreaudio_scope(obj):
+            try:                                           # S2: out of strict scope, a duplicate-key line is stored (above) plus one audit line, never a case
+                self._log_dup_keys(room, obj, now)
+            except OSError:
+                pass
+            return
+        if not coreaudio_scope(obj):
+            if usb_scope(obj) and self._on_usb(room, obj, now):
+                return                       # R9 and every older heal shape: exactly the pre-coreaudio handling, never a new case
             line = r9_inbox_line(room, obj, now)           # (the one addition: a real R9 coreaudio heal action also goes to the gating INBOX)
             if line:
                 self.sink.heal_action(room, line, now)
@@ -289,6 +379,8 @@ class Subscriber:
         kind = KIND_ALIASES.get(kind_raw, kind_raw) if isinstance(kind_raw, str) else None
         always = kind == ALWAYS_OPEN_KIND                  # CA-C5: a recorder pid change is top severity "even if audio is back": its case opens for ANY result
         ok, _why = validate_heal(obj)
+        if dup:
+            ok = False                                     # S2: duplicate keys in a strict-scope line are an invalid heal line
         if not ok:
             if always:                                     # the recorder alert is never lost to a shape problem; the shape problem still surfaces as its own case
                 self.ok_streak[room] = 0
@@ -302,6 +394,50 @@ class Subscriber:
             self.ok_streak[room] = 0                       # recovery must be seen AFTER the alert, so a good run before it cannot close it at once
             self.sink.heal_kind(room, kind, now)
         # healed / would_do (not recorder_disturbed): stored in the stream file, plus the INBOX line above for a real heal; no case, no page
+
+    def _on_usb(self, room, obj, now):
+        """FR1 2.4 d' routing of the kiosk's USB lines. -> True when the line was routed here, False to let the generic path handle it (so every other line keeps its
+        old handling, and an unknown USB reason or result still reaches the generic heal_escalated case)."""
+        action, reason, res = _w(obj.get("action")), _w(obj.get("reason")), _w(obj.get("result"))
+        if action == "escalate" and res == "escalated" and reason in USB_ESCALATIONS:
+            kind = USB_ESCALATIONS[reason]
+            self.sink.usb_case(room, kind, now)
+            if kind == "usb_device_missing":
+                self.usb_missing.add(room)
+            return True
+        if action == USB_REBOOT_ACTION and reason == USB_REBOOT_REASON:
+            if res == "reboot_issued":
+                return True                                # stored only: the event can be lost to the shutdown; healed_pending is the one to key on
+            if res == "reboot_failed":
+                self.sink.usb_case(room, "usb_reboot_failed", now)
+                return True
+            if res == "healed_pending":
+                if self.usb_verify is not None:
+                    self.usb_verify.start(room, now)       # F2: the Mini-side 15 min verify
+                if self.start_day is not None:             # only with start_day_after_boot on (the object exists only then)
+                    h = self.last_health.get(room)
+                    if h is not None:
+                        try:
+                            self.start_day.on_health(room, h[1], h[0])
+                        except Exception:  # noqa: BLE001
+                            pass
+                return True
+        return False
+
+    def check_consult_stuck(self):
+        """The loop thread opens / closes the consult_hold_source_down case (the refresher thread only records when the sources went down)."""
+        if self.consult is not None:
+            try:
+                self.consult.check_stuck(self.clock())
+            except Exception:                              # noqa: BLE001
+                pass
+
+    def check_usb_verify(self):
+        if self.usb_verify is not None:
+            try:
+                self.usb_verify.check(self.clock())
+            except Exception:                              # noqa: BLE001
+                pass
 
     # ---- quiet detection
     def check_quiet(self):
@@ -343,7 +479,21 @@ class Subscriber:
             except OSError:
                 pass
             modes[r] = m
-        return {"kill": kill, "modes": modes}
+        snap = {"kill": kill, "modes": modes}
+        if self.consult is not None:                 # flag consult_open_publish: every room in rooms.json, fail closed (true) inside ConsultHold
+            try:
+                hold = self.consult.hold(self.clock())
+                snap["consult_open"] = {r: hold.get(r, True) is not False for r in self.rooms}
+            except Exception:              # noqa: BLE001 -- the hold path may never take the control line down: every room is held
+                snap["consult_open"] = {r: True for r in self.rooms}
+        return snap
+
+    def check_start_day(self):
+        if self.start_day is not None:
+            try:
+                self.start_day.check(self.clock())
+            except Exception:              # noqa: BLE001
+                pass
 
     def control_payload(self):
         """control_snapshot() plus ts = publish epoch seconds (int), so a consumer can reject replayed or stale control by payload time. Additive."""

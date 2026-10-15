@@ -431,9 +431,10 @@ class SF3PgdumpSignals(unittest.TestCase):
         return sorted(os.listdir(os.path.join(self.gh, "backup", sub) if sub else os.path.join(self.gh, "backup")))
 
     def start(self, sleep):
-        import subprocess
+        import signal, subprocess
+        # A shell background job starts with SIGINT ignored and the child would inherit that, so the INT test fails when the suite runs as `cmd &`: reset it to default.
         return subprocess.Popen(["/bin/bash", os.path.join(self.gh, "scripts", "pgdump.sh")], env=dict(self.env, FAKE_PGDUMP_SLEEP=str(sleep)),
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
 
     def wait_part(self):
         import time

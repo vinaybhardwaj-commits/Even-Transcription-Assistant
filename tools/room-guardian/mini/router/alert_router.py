@@ -29,20 +29,23 @@ IST = timezone(timedelta(hours=5, minutes=30))
 ACKERS = {"gating-lead", "fleet"}
 REPAGE_CLINIC_S, REPAGE_OFF_S = 600, 1800
 CA_KINDS = {"capture_dead", "capture_muted", "coreaudio_heal_failed", "recorder_disturbed"}     # coreaudio heal rule alerts (kiosk kiosk/<room>/heal lines)
+USB_KINDS = {"usb_reboot_failed", "usb_power_off_recurring"}        # FR1 2.4 d': URGENT V kinds, the V window of the coreaudio kinds, ACK closes; usb_device_missing is URGENT only
+START_DAY_KINDS = {"start_day_failed"}      # FR1 2.4 d': URGENT, V kind, same V window as the coreaudio kinds
 CA_WINDOW_MIN = (7 * 60, 21 * 60 + 35)      # gate CA-C3: V flag for the coreaudio kinds inside 07:00-21:35 IST, every day of the week
 INBOX_DEADLINE_S = 300                       # a queued HEAL action line not appended to INBOX-FROM-GATING.md within 5 min raises heal_inbox_stuck
-V_KINDS = {"recorder_off", "fleet_outage", "no_machine", "install_retired"} | CA_KINDS            # patient-impacting (A6 finding 7)
+V_KINDS = {"recorder_off", "fleet_outage", "no_machine", "install_retired"} | CA_KINDS | START_DAY_KINDS | USB_KINDS            # patient-impacting (A6 finding 7)
 V_FIRST_S, V_REMINDER_S = 1800, 3600
 CLINIC_START_MIN, CLINIC_END_MIN, CLINIC_DAYS = 7 * 60 + 30, 21 * 60 + 30, (1, 2, 3, 4, 5, 6)   # mirrors lib/alerts/clinic-hours.ts
 DIGEST_HOUR_IST = 21
 ROUTED_KEEP_S = 7 * 86400
 URGENT = {"offline", "degraded", "fleet_outage", "install_retired", "recorder_off", "mic_denied", "no_machine", "room_disabled",
-          "needs_enrol", "capture_stalled", "guardian_quiet", "heal_escalated", "backup_failed", "heal_inbox_stuck"} | CA_KINDS
-OPEN_KINDS = URGENT | {"heal_message_invalid"}          # kinds that open a case; 'recovered' and 'session_reaped' never do
+          "needs_enrol", "capture_stalled", "guardian_quiet", "heal_escalated", "backup_failed", "heal_inbox_stuck", "usb_device_missing"} | CA_KINDS | START_DAY_KINDS | USB_KINDS
+OPEN_KINDS = URGENT | {"heal_message_invalid", "consult_hold_source_down"}          # kinds that open a case; 'recovered' and 'session_reaped' never do
 # An ACK also CLOSES these (order: "closes on recovery or ACK"). recorder_changed and heal_message_invalid have no recovery signal, so ACK is their only close.
-ACK_CLOSE_KINDS = CA_KINDS | {"heal_message_invalid"}
+ACK_CLOSE_KINDS = CA_KINDS | START_DAY_KINDS | USB_KINDS | {"usb_device_missing"} | {"heal_message_invalid", "consult_hold_source_down"}
 RECOVERY_KIND = "recovered"
-ACK_ONLY_KINDS = {"recorder_disturbed", "heal_message_invalid"}     # a server `recovered` row never closes these: only an ACK does
+ACK_ONLY_KINDS = {"recorder_disturbed", "heal_message_invalid", "start_day_failed"} | USB_KINDS     # a server `recovered` row never closes these: only an ACK does
+RECOVERY_KEEP_KINDS = ACK_ONLY_KINDS | {"usb_device_missing"}        # nor this one: it closes only on a health line with usb_mic_present true (or an ACK does not close it either)
 _ACK_RE = re.compile(r"^ACK\s+room-alert-(\d+)\b", re.I)
 _ID_RE = re.compile(r"room-alert-(\d+)\b", re.I)
 _MARK_RE = re.compile(r"room-alert-(\d+) .*\[page (\d+)\]")
@@ -56,7 +59,7 @@ def batch_tid(now):
 
 def is_v_window(kind, now):
     """The window in which a V-kind may raise a V notice: the coreaudio kinds use CA-C3's 07:00-21:35 IST; every other kind the general clinic hours."""
-    if kind in CA_KINDS:
+    if kind in CA_KINDS or kind in START_DAY_KINDS or kind in USB_KINDS:
         ist = datetime.fromtimestamp(now, IST)
         return CA_WINDOW_MIN[0] <= ist.hour * 60 + ist.minute < CA_WINDOW_MIN[1]
     return is_clinic(now)
@@ -129,7 +132,7 @@ class Router:
             return
         for room in rooms:
             if kind == RECOVERY_KIND:
-                self.close_room(bus, room, "recovery", keep=ACK_ONLY_KINDS)
+                self.close_room(bus, room, "recovery", keep=RECOVERY_KEEP_KINDS)
             elif kind in OPEN_KINDS:
                 self._open_or_bump(bus, room, kind, rid, row)
         self.store.mark_routed(rid, self.clock())    # AFTER the work: a crash before this replays the row (a late duplicate), never loses it

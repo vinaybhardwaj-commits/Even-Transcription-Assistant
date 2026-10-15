@@ -15,7 +15,16 @@ from subscriber import Subscriber, RouterSink, STREAMS, validate_rooms
 HOME = os.environ.get("GUARDIAN_HOME", os.path.expanduser("~/oc/fleet-access/guardian"))
 PIPE_SSH = os.path.join(HOME, "scripts", "pipe-ssh.sh")
 KEY = os.path.join(HOME, "keys", "subscriber")
-LOG = open(os.path.join(HOME, "logs", "subscriber-ssh.log"), "a")
+
+
+def _open_log():
+    try:
+        return open(os.path.join(HOME, "logs", "subscriber-ssh.log"), "a")
+    except OSError:                                  # (a missing logs dir, e.g. under a test): discard rather than fail to import
+        return open(os.devnull, "a")
+
+
+LOG = _open_log()
 
 
 def log(msg):
@@ -39,11 +48,50 @@ def publish(room, msg):
     subprocess.run([PIPE_SSH, KEY, "pub", "-c", "-b=false", f"/{room}/guardian/control"], input=msg + "\n", text=True, timeout=15, stderr=LOG)
 
 
+def check_rooms(rooms, flags):
+    """Startup check for rooms.json against the control contract; with consult_open_publish on, the worst-case payload includes the hold map. -> error string or None."""
+    return validate_rooms(rooms, consult_open=flags.get("consult_open_publish") is True)
+
+
+def build_subscriber(cfg, rooms, flags, sink, home, clock=time.time, log_file=None, consult_sources=None):
+    """The Subscriber exactly as the live process builds it: the consult hold (background refresher, off the publish thread) when its flag is on, start_day (background
+    sender) when its flag is on, the F2 USB verify always, and the usb_device_missing seed from the case store. Raises start_day.ConfigError (the caller refuses to start)."""
+    consult = start_day = None
+    if flags.get("consult_open_publish") is True:    # FR1 2.4 d' flags: default off, so today's control bytes and behaviour are unchanged
+        import consult_hold
+        consult = consult_hold.build(flags, rooms, sink, home, clock, sources=consult_sources, background=True)
+        consult.start()
+    if flags.get("start_day_after_boot") is True:
+        import start_day as start_day_mod
+        start_day = start_day_mod.build(flags, sink, home, clock, log_file, background=True)
+    import usb_verify
+    verify = usb_verify.UsbVerify(sink, os.path.join(home, "data", "usb-verify-state.json"), clock, os.path.join(home, "logs", "usb-verify-audit.jsonl"))
+    return Subscriber(os.path.join(home, "data"), os.path.join(home, "etc"), rooms, sink, clock=clock, quiet_after_s=cfg.get("quiet_after_s", 120), quiet_seed=sink.open_quiet_rooms(),
+                      consult=consult, start_day=start_day, usb_verify=verify, usb_missing_seed=sink.open_rooms("usb_device_missing"))
+
+
+def housekeeping(s, logger=None):
+    """The per-iteration checks of the main loop. Each runs on its own, so a fault in one (a bus fault in check_quiet) never skips the others. -> names of the checks that raised."""
+    failed = []
+    for name in ("check_quiet", "check_start_day", "check_usb_verify", "check_consult_stuck"):
+        try:
+            getattr(s, name)()
+        except Exception as e:                       # a bus fault must not drop the quiet edge: Subscriber marked it raised, so log loudly
+            failed.append(name)
+            if logger:
+                logger(f"{name} failed: {e.__class__.__name__}: {str(e)[:120]}")
+    return failed
+
+
 def main():
     with open(os.path.join(HOME, "etc", "rooms.json")) as f:
         cfg = json.load(f)
     rooms = cfg["rooms"]
-    err = validate_rooms(rooms)
+    try:
+        flags = ubus_bus.load_cfg()
+    except Exception:
+        flags = {}
+    err = check_rooms(rooms, flags)
     if err:                                          # frozen control contract: a room the kiosk regex would reject kills every kiosk, so refuse to start
         log(f"REFUSING TO START: rooms.json: {err}")
         return 2
@@ -55,7 +103,12 @@ def main():
     alert_router.ACKERS = set(router_cfg["ackers"])
     router = alert_router.Router(alert_router.default_store(HOME), ubus_bus.UbusBus, time.time)   # opens/closes cases; the router job pages and reads acks
     sink = RouterSink(router, router.bus_factory)
-    s = Subscriber(os.path.join(HOME, "data"), os.path.join(HOME, "etc"), rooms, sink, quiet_after_s=cfg.get("quiet_after_s", 120), quiet_seed=sink.open_quiet_rooms())
+    import start_day as start_day_mod
+    try:
+        s = build_subscriber(cfg, rooms, flags, sink, HOME, time.time, LOG)
+    except start_day_mod.ConfigError as e:           # no existing admin path is wired by this code: refuse rather than page start_day_failed forever
+        log(f"REFUSING TO START: {e}")
+        return 2
     q = queue.Queue()
     for r in rooms:
         for st in STREAMS:
@@ -71,9 +124,9 @@ def main():
             log(f"on_line failed: {e.__class__.__name__}: {str(e)[:120]}")
         try:
             alert_router.ACKERS = set(ubus_bus.load_cfg()["ackers"])
-            s.check_quiet()
-        except Exception as e:                                # a bus fault must not drop the quiet edge: Subscriber marked it raised, so log loudly
-            log(f"check_quiet failed: {e.__class__.__name__}: {str(e)[:120]}")
+        except Exception as e:
+            log(f"load_cfg failed: {e.__class__.__name__}: {str(e)[:120]}")
+        housekeeping(s, log)
         now = time.time()
         if now - last_ctl >= cfg.get("control_publish_s", 30):
             for r in rooms:
