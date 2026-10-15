@@ -41,10 +41,11 @@ ENC_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.event, p.ts FROM pulse_p
            "WHERE p.event IN ('encounter_open', 'encounter_close') AND p.machine = ANY(%s::text[]) AND p.ts > %s ORDER BY p.machine, p.id DESC")
 # The newest POST-driven encounter event of each machine: the extension writes encounter_id only on the consult start/close POST event (URL-driven ones carry null).
 # A consult start whose body did not parse carries no encounter_id but a reason 'body_<why>' (agent.js onCompleted, why from lib/body.js WHY: no_body, form_no_key,
-# raw_missing, raw_file_only, too_large, not_json, json_no_key, bad_uid), so that also counts as POST-driven. The underscore is escaped and the % doubled (psycopg).
+# raw_missing, raw_file_only, too_large, not_json, json_no_key, bad_uid), so that also counts as POST-driven. The match is token-wise, because reason can hold several
+# comma-separated tokens (e.g. 'absent_401,body_raw_missing'): the regex `(^|,)body_` matches a token that STARTS with body_, never 'nobody_x' or 'x_body_y'.
 POST_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.event, p.ts FROM pulse_presence_events p "
             "WHERE p.event IN ('encounter_open', 'encounter_close') AND ((p.payload->>'encounter_id' IS NOT NULL AND p.payload->>'encounter_id' <> '') "
-            "OR p.payload->>'reason' LIKE 'body\\_%%') "
+            "OR p.payload->>'reason' ~ '(^|,)body_') "
             "AND p.machine = ANY(%s::text[]) AND p.ts > %s ORDER BY p.machine, p.id DESC")
 SESSION_SQL = ("SELECT DISTINCT s.room_id FROM bench_session s "
                "WHERE s.room_id = ANY(%s::text[]) AND s.status IN ('recording', 'paused') AND s.started_at > %s")

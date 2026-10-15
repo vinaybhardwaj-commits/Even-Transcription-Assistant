@@ -777,9 +777,9 @@ class Round4(unittest.TestCase):
 class Round5(unittest.TestCase):
     def test_a_body_failed_consult_start_counts_as_post_driven(self):                                # S-1
         q = ch.POST_SQL
-        self.assertIn("AND ((p.payload->>'encounter_id' IS NOT NULL AND p.payload->>'encounter_id' <> '') OR p.payload->>'reason' LIKE 'body\\_%%') AND p.machine", q)
-        # (the clause is an OR alternative to a non-empty encounter_id, with the underscore escaped and the % doubled for psycopg)
-        self.assertEqual(q.replace("%s", "").replace("%%", "").count("%"), 0)                          # no stray % that psycopg would read as a placeholder
+        self.assertIn("AND ((p.payload->>'encounter_id' IS NOT NULL AND p.payload->>'encounter_id' <> '') OR p.payload->>'reason' ~ '(^|,)body_') AND p.machine", q)
+        # (the clause is an OR alternative to a non-empty encounter_id; a token-wise regex, so no LIKE escape and no % to double)
+        self.assertEqual(q.replace("%s", "").count("%"), 0)                                            # no stray % that psycopg would read as a placeholder
         self.assertEqual(q.count("%s"), 2)
         # the refuter's repro at the hold level: the SQL returns the body-failed POST open as a POST event (encounter_id null, reason body_not_json); a URL close came later
         pres = {"hb": [("M6", T - 5), ("M7", T - 5)], "enc": [("M6", "encounter_close", T - 480)], "post": [("M6", "encounter_open", T - 900)]}

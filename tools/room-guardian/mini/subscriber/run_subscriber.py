@@ -71,8 +71,11 @@ def main():
         except start_day_mod.ConfigError as e:       # no existing admin path is wired by this code: refuse rather than page start_day_failed forever
             log(f"REFUSING TO START: {e}")
             return 2
+    import usb_verify
+    verify = usb_verify.UsbVerify(sink, os.path.join(HOME, "data", "usb-verify-state.json"), time.time, os.path.join(HOME, "logs", "usb-verify-audit.jsonl"))
     s = Subscriber(os.path.join(HOME, "data"), os.path.join(HOME, "etc"), rooms, sink, quiet_after_s=cfg.get("quiet_after_s", 120), quiet_seed=sink.open_quiet_rooms(),
-                   consult=consult, start_day=start_day)
+                   consult=consult, start_day=start_day,
+                   usb_verify=verify, usb_missing_seed=sink.open_rooms("usb_device_missing"))
     q = queue.Queue()
     for r in rooms:
         for st in STREAMS:
@@ -90,6 +93,7 @@ def main():
             alert_router.ACKERS = set(ubus_bus.load_cfg()["ackers"])
             s.check_quiet()
             s.check_start_day()
+            s.check_usb_verify()
         except Exception as e:                                # a bus fault must not drop the quiet edge: Subscriber marked it raised, so log loudly
             log(f"check_quiet failed: {e.__class__.__name__}: {str(e)[:120]}")
         now = time.time()
