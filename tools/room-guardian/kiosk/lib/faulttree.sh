@@ -22,7 +22,7 @@ fault_tree() {
   if [ "$S_usb" = "false" ]; then
     case "${S_cc_age:-}" in
       ''|*[!0-9]*) echo "usb|usb_device_missing|usb_mic_present=false audio_engine_present=${S_engine:-null}" ;;
-      *) if [ "${S_usb_ticks:-0}" -ge "$USB_ABSENT_MIN_TICKS" ] 2>/dev/null; then
+      *) if [ "${S_usb_ticks:-0}" -ge "$USB_ABSENT_MIN_TICKS" ] 2>/dev/null && [ "${S_usb_span:-0}" -ge "$USB_ABSENT_MIN_SPAN_S" ] 2>/dev/null; then
            echo "usb|usb_power_off|usb_mic_present=false usb_absent_ticks=$S_usb_ticks cc_power_off_age_s=$S_cc_age port=${S_cc_port:-unknown}"
          else
            echo "usb|usb_device_missing|usb_mic_present=false audio_engine_present=${S_engine:-null}"

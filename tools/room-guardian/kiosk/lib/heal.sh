@@ -12,6 +12,7 @@
 #  G9 events carry ids, counts, levels and verdict names only.
 
 HEAL_CHANGED=0
+HEAL_EXTRA=""   # S2: never inherited from the environment
 ACTIONS_FILE="$STATE_DIR/actions"
 
 # Actions in the last hour. Fails closed (R12): an actions file that exists but is not a readable regular file counts as the cap REACHED,
@@ -254,36 +255,64 @@ usb_state_get() { # key -> value from the state file
   "$G_SED" -n "s/^$1=//p" "$USB_STATE" 2>/dev/null | "$G_HEAD" -n1
 }
 
-# none | today | bad. "bad" = the file exists but is not a readable regular file with an IST date: the budget cannot be shown to be unspent, so no reboot.
+# none | today | bad. "bad" = the file exists but is not a readable regular file with an IST date, or it is dated in the future (date after today, epoch more than 300 s ahead):
+# the budget cannot be shown to be unspent, so no reboot. usb_budget_state [today]: today defaults to ist_date.
 usb_budget_state() {
-  local d
+  local d ep today="${1:-}"
+  [ -n "$today" ] || today="$(ist_date)"
   { [ -e "$USB_STATE" ] || [ -L "$USB_STATE" ]; } || { echo none; return; }
   if [ ! -f "$USB_STATE" ] || [ -L "$USB_STATE" ] || [ ! -r "$USB_STATE" ]; then echo bad; return; fi
   d="$(usb_state_get date)"
   case "$d" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo bad; return ;; esac
-  if [ "$d" = "$(ist_date)" ]; then echo today; else echo none; fi
+  case "$today" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) if [ "$((10#$d))" -gt "$((10#$today))" ]; then echo bad; return; fi ;;
+  esac
+  ep="$(usb_state_get epoch)"
+  case "$ep" in
+    ''|*[!0-9]*) ;;
+    *) if [ "$ep" -gt "$(( $(now_epoch) + 300 ))" ]; then echo bad; return; fi
+       # B: spent when the epoch is later than now, or less than USB_BUDGET_S ago (stricter than "1 per IST day")
+       if [ "$ep" -gt "$(now_epoch)" ] || [ "$(( $(now_epoch) - ep ))" -lt "$USB_BUDGET_S" ]; then echo today; return; fi ;;
+  esac
+  if [ "$d" = "$today" ]; then echo today; else echo none; fi
 }
 
-# usb_state_write <date> <epoch> <recorder_pid> <coreaudiod_pid> <boot_age_s> <port>: write via a temp file, then read it back. 0 only when the read-back is identical.
+# A fresh temp file inside the state dir (S6): mktemp creates it O_EXCL, so a planted name or symlink is never followed. Prints the path. Refuses a symlinked state dir or state path,
+# and any leftover "$USB_STATE.tmp" (the old fixed name: something put it there).
+usb_state_tmp() {
+  local t
+  [ ! -L "$STATE_DIR" ] && [ ! -L "$USB_STATE" ] || return 1
+  [ ! -e "$USB_STATE.tmp" ] && [ ! -L "$USB_STATE.tmp" ] || return 1
+  t="$("$G_MKTEMP" "$STATE_DIR/usb-reboot.XXXXXX" 2>/dev/null)" || return 1
+  [ -f "$t" ] && [ ! -L "$t" ] || return 1
+  printf '%s' "$t"
+}
+
+# usb_state_write <date> <epoch> <recorder_pid> <coreaudiod_pid> <boot_age_s> <port>: write via a temp file, then read it back. 0 only when USB_STATE is a regular,
+# non-symlink file owned by the agent and the read-back is identical.
 usb_state_write() {
-  local tmp="$USB_STATE.tmp" want got
+  local tmp want got
   want="$(printf 'date=%s\nepoch=%s\nrecorder_pid=%s\ncoreaudiod_pid=%s\nboot_age_s=%s\nport=%s\nverify=pending' "$1" "$2" "$3" "$4" "$5" "$6")"
   mkdir -p "$STATE_DIR" 2>/dev/null
+  tmp="$(usb_state_tmp)" || return 1
   printf '%s\n' "$want" >"$tmp" 2>/dev/null || return 1
   "$G_MV" -f "$tmp" "$USB_STATE" 2>/dev/null || return 1
+  [ -f "$USB_STATE" ] && [ ! -L "$USB_STATE" ] && [ -O "$USB_STATE" ] || return 1
   got="$("$G_CAT" "$USB_STATE" 2>/dev/null)"
   [ "$got" = "$want" ]
 }
 
 # Put the previous state back after an abort between the write and the call (no delete: overwrite). Nothing before = a void marker with a date that is never today.
 usb_state_restore() { # previous content (may be empty)
-  local tmp="$USB_STATE.tmp"
+  local tmp
+  tmp="$(usb_state_tmp)" || return 1
   if [ -n "$1" ]; then printf '%s\n' "$1" >"$tmp"; else printf 'date=00000000\nverify=void\n' >"$tmp"; fi 2>/dev/null
   "$G_MV" -f "$tmp" "$USB_STATE" 2>/dev/null
 }
 
 usb_state_set_verify() { # value
-  local tmp="$USB_STATE.tmp"
+  local tmp
+  tmp="$(usb_state_tmp)" || return 1
   "$G_SED" "s/^verify=.*/verify=$1/" "$USB_STATE" >"$tmp" 2>/dev/null && "$G_MV" -f "$tmp" "$USB_STATE" 2>/dev/null
 }
 
@@ -308,8 +337,16 @@ usb_extra() {
     "$(jnum "$1")" "$(jnum "$2")" "$(jnum "$3")" "$(jstr "$4")" "$(jstr "$5")" "$(jnum "$6")" "$(jnum "$7")" "$(jnum "$8")" "$(jnum "$9")"
 }
 
+# A d' exit that does not reboot (M1): the C270 is off the bus and the power-off line is in the log, so the rung d page must not be lost.
+# usb_noreboot <why>: escalate usb_device_missing (the shared 600 s dedupe) and clear HEAL_EXTRA. The would_do / abort / failure event, if any, was already published.
+usb_noreboot() { # before why
+  escalate usb_device_missing usb "$1 $2"
+  HEAL_EXTRA=""
+}
+
 heal_usb_power_off() { # evidence (unused: the guards are re-read here)
-  local idle hold port ticks age before bstate prior now rc
+  local idle hold port ticks age before bstate prior now rc idate
+  HEAL_EXTRA=""
   now="$(now_epoch)"
   ticks="${S_usb_ticks:-0}"; age="${S_cc_age:-}"; port="${S_cc_port:-unknown}"
   idle="$(hid_idle_s)"; case "$idle" in ''|*[!0-9]*) idle="" ;; esac
@@ -319,32 +356,47 @@ heal_usb_power_off() { # evidence (unused: the guards are re-read here)
   # G3: this rung runs only while the capture device is off the bus
   if [ "$S_usb" != "false" ]; then HEAL_EXTRA=""; return 0; fi
   # HID idle unreadable or under 600 s: no action. A person may be at the screen; it stays rung d (escalate only).
-  if [ -z "$idle" ] || [ "$idle" -lt "$USB_HID_IDLE_MIN_S" ]; then
-    escalate usb_device_missing usb "$before hid_busy"; HEAL_EXTRA=""; return 0
-  fi
-  if usb_lock_active; then escalate usb_device_missing usb "$before rung_locked"; HEAL_EXTRA=""; return 0; fi
-  bstate="$(usb_budget_state)"
+  if [ -z "$idle" ] || [ "$idle" -lt "$USB_HID_IDLE_MIN_S" ]; then usb_noreboot "$before" hid_busy; return 0; fi
+  if usb_lock_active; then usb_noreboot "$before" rung_locked; return 0; fi
+  # S5: the IST date must be exactly 8 digits, read once; no reboot without it
+  idate="$(ist_date)"
+  case "$idate" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) usb_noreboot "$before" ist_date_failed; return 1 ;; esac
+  # C: while the post-boot verify is pending the reboot is still being proven: no d' at all (the verify path rules)
+  if [ -f "$USB_STATE" ] && [ "$(usb_state_get verify)" = "pending" ]; then usb_noreboot "$before" verify_pending; return 0; fi
+  bstate="$(usb_budget_state "$idate")"
   case "$bstate" in
     today) escalate usb_power_off_recurring usb "$before"; HEAL_EXTRA=""; return 0 ;;
-    bad) escalate usb_device_missing usb "$before state_unreadable"; HEAL_EXTRA=""; return 0 ;;
+    bad) usb_noreboot "$before" state_unreadable; return 0 ;;
   esac
   # the consult hold: set, missing, unreadable or true = no reboot (would_do only, and not counted against the G6 cap)
   if [ "$hold" != "clear" ]; then
     once_per "would:usb:usb_power_off:hold" 300 && heal_event would_do usb usb_power_off "$before" "" "WOULD-DO blocked=consult_hold" true
-    HEAL_EXTRA=""; return 1
+    usb_noreboot "$before" consult_hold; return 1
   fi
-  act_begin usb usb_power_off "$before" || { HEAL_EXTRA=""; return 1; }
+  # A: the shipped build keeps d' in SHADOW whatever the mode: would_do + the rung d page, no act_begin, no state, no reboot
+  if [ "$USB_DPRIME_HEAL" != 1 ]; then
+    once_per "would:usb:usb_power_off:dprime" 300 && heal_event would_do usb usb_power_off "$before" "" "WOULD-DO blocked=dprime_shadow" true
+    usb_noreboot "$before" dprime_shadow; return 1
+  fi
+  act_begin usb usb_power_off "$before" || { usb_noreboot "$before" not_acting; return 1; }
   prior="$("$G_CAT" "$USB_STATE" 2>/dev/null)"
-  if ! usb_state_write "$(ist_date)" "$now" "$S_rec_pid" "$S_ca_pid" "$S_boot_age" "$port"; then
+  if ! usb_state_write "$idate" "$now" "$S_rec_pid" "$S_ca_pid" "$S_boot_age" "$port"; then
     audit "usb-reboot state write failed: no reboot"
     heal_event heal usb usb_power_off "$before" "" "state_write_failed" false "$(target_for usb_reboot_failed)" page
-    HEAL_EXTRA=""; return 1
+    usb_noreboot "$before" state_write_failed; return 1
   fi
   # second kill-switch read, immediately before the root call (spec: < 2 s). Nothing slow sits between here and root_do.
   if ! act_step || ! consult_hold_clear; then
     usb_state_restore "$prior"
     heal_event abort usb usb_power_off "$before" "" "aborted_before_reboot" false
-    HEAL_EXTRA=""; return 1
+    usb_noreboot "$before" aborted; return 1
+  fi
+  # S3: the C270 may have been replugged since the collector read it (up to ~10 s ago). Present, or the read failing, = no reboot.
+  usb_present_now; rc=$?
+  if [ "$rc" -ne 1 ]; then
+    usb_state_restore "$prior"
+    heal_event abort usb usb_power_off "$before" "" "aborted_device_back" false
+    usb_noreboot "$before" device_back; return 1
   fi
   root_do reboot >/dev/null 2>&1; rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -352,7 +404,9 @@ heal_usb_power_off() { # evidence (unused: the guards are re-read here)
     audit "usb-reboot: reboot verb issued port=$port"
     heal_event kiosk_reboot usb usb_power_off "$before" "reboot_issued" "reboot_issued" false "$(target_for usb_power_off)" info
   else
+    # the budget stays spent and the state stays verify=pending: the verify path times it out (usb_reboot_failed + lock)
     heal_event kiosk_reboot usb usb_power_off "$before" "reboot_verb_rc=$rc" "reboot_failed" false "$(target_for usb_reboot_failed)" page
+    escalate usb_reboot_failed usb "$before reboot_verb_rc=$rc"
   fi
   HEAL_EXTRA=""
   return 0
@@ -385,6 +439,8 @@ usb_reboot_verify() {
 # Walk the tree; act on each fault in order; after a real fix re-collect and start over (faults stack).
 heal_cycle() {
   local pass=0 faults layer verdict evidence
+  # S1: once a reboot is issued the machine is going down; no rung acts again for the agent's lifetime
+  [ "${USB_REBOOT_ISSUED:-0}" = 1 ] && return 0
   usb_reboot_verify
   while [ "$pass" -lt 3 ]; do
     pass=$((pass + 1)); HEAL_CHANGED=0; HEAL_PASSES=$pass

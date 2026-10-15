@@ -4,7 +4,7 @@
 # Sourced, never executed. Every external effect goes through a PATH command or a GUARDIAN_* command
 # variable, so tests can substitute fakes.
 
-GUARDIAN_VERSION="c1-0.4.0-d1"   # bump per release: the audit "guardian start version=" line identifies the tree
+GUARDIAN_VERSION="c1-0.4.0-d2"   # bump per release: the audit "guardian start version=" line identifies the tree
 
 # R12. Run mode (guardian.sh run|check, G_RUNMODE=1) reads no test seam and no environment tunable: every name below is assigned its default
 # unconditionally and only guardian.conf (parsed as data by conf.sh, never sourced) can change the allow-listed keys. Library tests source this
@@ -45,6 +45,7 @@ g_const G_BASH /bin/bash
 g_const G_ID /usr/bin/id
 g_const G_STAT /usr/bin/stat
 g_const G_LS /bin/ls
+g_const G_MKTEMP /usr/bin/mktemp
 # 2.4 d': the unified-log reader is pinned too (a bare `log` is a zsh builtin). Library tests may point it at a fake through GUARDIAN_LOG_BIN; run mode never reads that name.
 if [ "${G_RUNMODE:-}" = 1 ]; then g_const G_LOG /usr/bin/log; else g_const G_LOG "${GUARDIAN_LOG_BIN:-/usr/bin/log}"; fi
 # The PATH every conf command (transport, sudo path) is started with in run mode (R13): a constant, never the caller's PATH.
@@ -80,14 +81,19 @@ g_def FLAG_MAX_AGE_S 30
 g_def CONFIRM_TIMEOUT_S 30
 g_const HEAL_MAX_PER_HOUR 3
 # 2.4 d' (USB-C power-off -> reboot): safety numbers, constants in code, not conf keys.
-g_const USB_ABSENT_MIN_TICKS 2      # the capture device absent for this many consecutive health ticks (>= 20 s)
+# A: d' stays SHADOW (would_do only) in this build whatever the mode says. Flipping it to 1 is its own one-line commit after the Fable gate. A code constant, not a conf key;
+# run mode assigns 0 unconditionally. Library tests may set GUARDIAN_TEST_DPRIME_HEAL (the same pattern as G_LOG): guardian.sh run|check never read it.
+if [ "${G_RUNMODE:-}" = 1 ]; then g_const USB_DPRIME_HEAL 0; else g_const USB_DPRIME_HEAL "${GUARDIAN_TEST_DPRIME_HEAL:-0}"; fi
+g_const USB_BUDGET_S 86400          # B: the reboot budget is spent for this long after the state epoch as well as for the IST day
+g_const USB_ABSENT_MIN_TICKS 2      # the capture device absent for this many consecutive health ticks
+g_const USB_ABSENT_MIN_SPAN_S 20    # AND the first absent tick at least this many seconds ago (tick spacing is only >= 5 s)
 g_const USB_HID_IDLE_MIN_S 600      # HID idle needed before a reboot
 g_const USB_CC_MAX_AGE_S 900        # the cable-detect line must be inside the last 15 min
 g_const USB_LOG_CAP_S 4             # cap on the log probe
 g_const USB_VERIFY_S 600            # the kiosk-side verify window after the reboot
 g_const USB_LOCK_S 86400            # lock after a failed verify
 # Fixed predicate (INFERRED from the OPD 5 log lines): kernel, subsystem com.apple.usb:all, message contains the cable-detect text.
-g_const USB_LOG_PREDICATE 'process == "kernel" AND subsystem == "com.apple.usb:all" AND eventMessage CONTAINS "AppleUSBHostPort::cableChangeOccurred: powering off"'
+g_const USB_LOG_PREDICATE 'process == "kernel" AND processID == 0 AND subsystem == "com.apple.usb:all" AND eventMessage CONTAINS "AppleUSBHostPort::cableChangeOccurred: powering off"'
 g_def IDLE_MIN_S 600
 g_def SPEECH_GATE_DBFS -50   # INFERRED: tape RMS at or above this is speech
 g_def SPEECH_QUIET_S 600

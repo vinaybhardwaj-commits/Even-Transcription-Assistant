@@ -46,7 +46,7 @@ usb_reset() {
 # usb_go <payload>: tick 1, 10 s later tick 2 (C270 absent both times), then the heal cycle.
 usb_go() {
   usb_ctl "$1"; collect_all
-  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 10)); export GUARDIAN_FAKE_NOW
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 20)); export GUARDIAN_FAKE_NOW
   usb_ctl "$1"; collect_all
   heal_cycle >/dev/null 2>&1
 }
@@ -67,12 +67,18 @@ test_usb_all_guards_true_heal_one_reboot_state_first() {
   assert_has "$(cat "$STATE_DIR/usb-reboot")" '^coreaudiod_pid=9999$' "state holds the coreaudiod pid"
   assert_has "$(cat "$STATE_DIR/usb-reboot")" '^port=usb-drd3-port-hs@03100000$' "state holds the port name only"
   assert_has "$(events)" '"action":"kiosk_reboot","layer":"usb","reason":"usb_power_off"' "heal event: kiosk_reboot, layer usb, kind usb_power_off"
-  assert_has "$(events)" '"guards":{"usb_absent_ticks":2,"cc_power_off_age_s":13[0-9],"hid_idle_s":1000,"consult_hold":"clear","port":"usb-drd3-port-hs@03100000"}' "guards in the event"
+  assert_has "$(events)" '"guards":{"usb_absent_ticks":2,"cc_power_off_age_s":14[0-9],"hid_idle_s":1000,"consult_hold":"clear","port":"usb-drd3-port-hs@03100000"}' "guards in the event"
   assert_has "$(events)" '"boot_age_s":{"before":100000,"after":null}' "boot_age_s before"
   assert_has "$(events)" '"recorder_pid":{"before":4242,"after":null}' "recorder_pid before"
   assert_has "$(events)" '"shadow":false' "a real action, not shadow"
   assert_not "$(cat "$CALLS")" "$SD_TOK\\|restart_engine\\|tapewriter record" "the kiosk sends no room command"
-  # a second qualifying event the same IST day: escalate, no second reboot
+  # S1: the agent that issued the reboot does nothing more, whatever the tick sees
+  : >"$CALLS"; : >"$T/pub.log"; rm -f "$STATE_DIR/usb_absent" "$STATE_DIR/cc_probe.neg" "$STATE_DIR/once"/*
+  usb_go "$U_CLEAR"
+  assert_eq "$(events | wc -l | tr -d ' ')" "0" "S1: after USB_REBOOT_ISSUED=1 heal_cycle emits nothing for the agent's lifetime"
+  assert_eq "$(n_reboot_calls)" "0" "S1: no second reboot call"
+  # a second qualifying event the same IST day (the first reboot proven healed): escalate, no second reboot
+  usb_state_set_verify healed_pending
   USB_REBOOT_ISSUED=0; : >"$CALLS"; : >"$T/pub.log"; rm -f "$STATE_DIR/usb_absent" "$STATE_DIR/cc_probe.neg"
   GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 300)); usb_logline 100
   usb_go "$U_CLEAR"
@@ -105,7 +111,7 @@ test_usb_each_guard_false_gives_no_reboot() {
       state_garbage) echo garbage >"$STATE_DIR/usb-reboot" ;;
     esac
     usb_ctl "$payload" "$age"; collect_all
-    GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 10)); export GUARDIAN_FAKE_NOW
+    GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 20)); export GUARDIAN_FAKE_NOW
     usb_ctl "$payload" "$age"; collect_all
     heal_cycle >/dev/null 2>&1
     assert_eq "$(n_reboot_calls)" "0" "$c: no root reboot call"
@@ -118,24 +124,25 @@ test_usb_each_guard_false_gives_no_reboot() {
 
 test_usb_absence_without_log_line_stays_rung_d() {
   load_libs; usb_reset; : >"$T/log.txt"
-  usb_ctl "$U_CLEAR"; collect_all; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 10)); export GUARDIAN_FAKE_NOW; usb_ctl "$U_CLEAR"; collect_all
+  usb_ctl "$U_CLEAR"; collect_all; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 20)); export GUARDIAN_FAKE_NOW; usb_ctl "$U_CLEAR"; collect_all
   assert_has "$(fault_tree)" '^usb|usb_device_missing|' "no log line: usb_device_missing"
   assert_not "$(fault_tree)" 'usb_power_off' "no log line: not d'"
-  usb_reset; usb_ctl "$U_CLEAR"; collect_all; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 10)); export GUARDIAN_FAKE_NOW; usb_ctl "$U_CLEAR"; collect_all
-  assert_has "$(fault_tree)" '^usb|usb_power_off|.*usb_absent_ticks=2 cc_power_off_age_s=13[0-9] port=usb-drd3-port-hs@03100000' "line + 2 ticks: d' with the port"
+  usb_reset; usb_ctl "$U_CLEAR"; collect_all; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 20)); export GUARDIAN_FAKE_NOW; usb_ctl "$U_CLEAR"; collect_all
+  assert_has "$(fault_tree)" '^usb|usb_power_off|.*usb_absent_ticks=2 cc_power_off_age_s=14[0-9] port=usb-drd3-port-hs@03100000' "line + 2 ticks: d' with the port"
   # a line older than 15 min does not count
-  usb_reset; usb_logline 1000; usb_ctl "$U_CLEAR"; collect_all; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 10)); export GUARDIAN_FAKE_NOW; usb_ctl "$U_CLEAR"; collect_all
+  usb_reset; usb_logline 1000; usb_ctl "$U_CLEAR"; collect_all; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 20)); export GUARDIAN_FAKE_NOW; usb_ctl "$U_CLEAR"; collect_all
   assert_has "$(fault_tree)" 'usb_device_missing' "a line older than 15 min: rung d"
   # the device back resets the count
-  usb_reset; usb_ctl "$U_CLEAR"; collect_all; printf 'USB Audio C270 HD\n' >"$T/usb.txt"; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 10)); export GUARDIAN_FAKE_NOW; collect_all
+  usb_reset; usb_ctl "$U_CLEAR"; collect_all; printf 'USB Audio C270 HD\n' >"$T/usb.txt"; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 20)); export GUARDIAN_FAKE_NOW; collect_all
   assert_eq "$S_usb_ticks" "0" "present resets the count"
 }
 
 test_usb_log_probe_command_is_pinned_and_fixed() {
   load_libs; usb_reset
-  usb_ctl "$U_CLEAR"; collect_all; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 10)); export GUARDIAN_FAKE_NOW; usb_ctl "$U_CLEAR"; collect_all
+  usb_ctl "$U_CLEAR"; collect_all; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 20)); export GUARDIAN_FAKE_NOW; usb_ctl "$U_CLEAR"; collect_all
   local l; l="$(grep '^LOG ' "$CALLS" | head -n1)"
-  assert_has "$l" '^LOG show --last 15m --style compact --predicate process == "kernel" AND subsystem == "com.apple.usb:all" AND eventMessage CONTAINS "AppleUSBHostPort::cableChangeOccurred: powering off"$' "fixed predicate, 15 m window"
+  assert_has "$l" '^LOG show --last 15m --style compact --predicate process == "kernel" AND processID == 0 AND subsystem == "com.apple.usb:all" AND eventMessage CONTAINS "AppleUSBHostPort::cableChangeOccurred: powering off"$' "fixed predicate, 15 m window"
+  assert_has "$l" 'process == "kernel" AND processID == 0 AND subsystem' "S8: processID == 0 in the probe"
   assert_eq "$(grep -c '^LOG ' "$CALLS")" "1" "one probe"
   # run mode pins the reader to /usr/bin/log whatever the environment says; library tests may re-point it
   assert_eq "$(env -i HOME="$HOME" G_RUNMODE=1 GUARDIAN_LOG_BIN=/tmp/evil /bin/bash -c '. "$0"; echo "$G_LOG"' "$KDIR/lib/common.sh" 2>/dev/null)" "/usr/bin/log" "run mode: G_LOG is /usr/bin/log whatever the environment says"
@@ -249,7 +256,7 @@ test_usb_root_helper_reboot_verb_is_exact() {
   done
   assert_eq "$(grep -c '^SHUTDOWN' "$CALLS")" "0" "no shutdown on a refused call"
   # the test seam is dead as root and outside test mode
-  assert_has "$(grep -n 'GUARDIAN_SHUTDOWN_BIN' "$h")" 'id -u.*!= "0".*GUARDIAN_ROOT_TESTMODE' "the shutdown seam needs non-root + test mode"
+  assert_has "$(grep -n 'GUARDIAN_SHUTDOWN_BIN' "$h")" '\$EUID. -ne 0.*GUARDIAN_ROOT_TESTMODE' "the shutdown seam needs non-root (EUID) + test mode"
   unset GUARDIAN_ROOT_TESTMODE
   : >"$CALLS"
   # without test mode the real path is used; prove it by pointing PATH nowhere and checking the fake is NOT run (the real /sbin/shutdown is never started here: sandboxed by refusing before)
@@ -326,7 +333,237 @@ test_usb_control_64_rooms_parse_and_exactly_one_false_is_clear() {
 
 test_usb_static_c3_and_version() {
   assert_eq "$(grep -rn -E "start_""recording|stop_""recording|scribe_""room_command|rec_""start|rec_""stop|$SD_TOK" "$KDIR"/bin "$KDIR"/lib "$KDIR"/install.sh "$KDIR"/uninstall.sh | wc -l | tr -d ' ')" "0" "C3 grep (with the day-start command) over the kiosk tree is 0"
-  assert_has "$(cat "$KDIR/lib/common.sh")" 'GUARDIAN_VERSION="c1-0.4.0-d1"' "version"
+  assert_has "$(cat "$KDIR/lib/common.sh")" 'GUARDIAN_VERSION="c1-0.4.0-d2"' "version"
+  assert_has "$(grep -n 'USB_LOG_PREDICATE' "$KDIR/lib/common.sh" | head -n1)" 'process == "kernel" AND processID == 0 AND subsystem' "S8: predicate pins processID == 0"
   assert_eq "$(cat "$KDIR/lib/heal.sh" "$KDIR/lib/collect.sh" "$KDIR/lib/faulttree.sh" "$KDIR/bin/guardian.sh" | grep -v '^[[:space:]]*#' | grep -c 'shutdown')" "0" "the agent code never names shutdown: only the root helper does"
   assert_eq "$(grep -n 'shutdown' "$KDIR/bin/guardian-root.sh" | grep -v '^[0-9]*:#' | wc -l | tr -d ' ')" "1" "the helper's only code line naming shutdown is the absolute default path"
+}
+
+# ---- d2 ----
+usb_esc() { # label: the rung d page (escalated, usb_device_missing, layer usb) is in the events
+  assert_has "$(events | grep '"reason":"usb_device_missing"')" '"layer":"usb".*"result":"escalated"' "$1: usb_device_missing escalated (M1)"
+}
+
+test_usb_m1_every_noreboot_exit_still_escalates_device_missing() {
+  load_libs
+  local c
+  for c in shadow old hold_true hold_missing kill g6cap; do
+    usb_reset
+    case "$c" in
+      shadow) usb_go "$U_SHADOW" ;;
+      old) usb_go "$U_OLD" ;;
+      hold_true) usb_go "$U_TRUE" ;;
+      hold_missing) usb_go "$U_OTHER" ;;
+      kill) usb_go "$U_KILL" ;;
+      g6cap) for _ in 1 2 3; do printf '%s x:y\n' "$GUARDIAN_FAKE_NOW" >>"$STATE_DIR/actions"; done; usb_go "$U_CLEAR" ;;
+    esac
+    assert_eq "$(n_reboot_calls)" "0" "$c: no reboot"
+    usb_esc "$c"
+    assert_not "$(events)" '"kind"' "$c: no kind key on any heal line"
+  done
+  # the would_do stays alongside the page
+  usb_reset; usb_go "$U_SHADOW"; assert_has "$(events)" 'WOULD-DO' "shadow: would_do kept"
+  # a state-write failure, the abort path, the device back, an ist_date failure
+  usb_reset; mkdir -p "$STATE_DIR/usb-reboot.tmp"; usb_go "$U_CLEAR"; usb_esc "state write failed"; rmdir "$STATE_DIR/usb-reboot.tmp"
+  usb_reset
+  eval "usb_state_write_real() $(declare -f usb_state_write | sed 1d)"
+  usb_state_write() { usb_state_write_real "$@" || return 1; usb_ctl "$U_KILL"; return 0; }
+  usb_go "$U_CLEAR"; usb_esc "abort path"; assert_eq "$(n_reboot_calls)" "0" "abort: no reboot"
+  eval "usb_state_write() $(declare -f usb_state_write_real | sed 1d)"
+  # R14 rung d, no log line: unchanged (one escalated page, no would_do, no hold read needed)
+  usb_reset; : >"$T/log.txt"; usb_go "$U_TRUE"
+  usb_esc "rung d"; assert_not "$(events)" 'WOULD-DO' "rung d: no would_do"; assert_eq "$(n_reboot_calls)" "0" "rung d: no reboot"
+}
+
+test_usb_s1_pending_verify_never_recurring_and_root_rc_fail() {
+  load_libs; usb_reset
+  # pending verify (a fresh agent after the boot, device still gone): no recurring page
+  printf 'date=%s\nepoch=%s\nrecorder_pid=1\ncoreaudiod_pid=1\nboot_age_s=1\nport=x\nverify=pending\n' "$(ist_date)" "$((GUARDIAN_FAKE_NOW + 5))" >"$STATE_DIR/usb-reboot"
+  usb_go "$U_CLEAR"
+  assert_not "$(events)" 'usb_power_off_recurring' "R2: no recurring while verify=pending"
+  usb_esc "C: verify_pending"; assert_has "$(events)" 'verify_pending' "C: reason verify_pending"
+  assert_eq "$(n_reboot_calls)" "0" "R2: no second reboot"
+  # the root verb fails (old helper): usb_reboot_failed, never recurring, budget spent, no retry
+  usb_reset; printf '#!/bin/bash\necho "ROOTFAIL $*" >>"$CALLS"\nexit 3\n' >"$T/bin/failhelper"; chmod +x "$T/bin/failhelper"
+  local keep="$GUARDIAN_ROOT_HELPER"; export GUARDIAN_ROOT_HELPER="$T/bin/failhelper"
+  usb_go "$U_CLEAR"
+  assert_has "$(events | grep '"reason":"usb_reboot_failed"')" '"result":"escalated"' "R4: usb_reboot_failed escalated"
+  assert_has "$(events)" '"result":"reboot_failed"' "R4: reboot_failed event"
+  assert_not "$(events)" 'usb_power_off_recurring' "R4: not recurring"
+  assert_eq "$(usb_budget_state)" "today" "R4: the budget stays spent"
+  assert_has "$(cat "$STATE_DIR/usb-reboot")" '^verify=pending$' "R4: verify stays pending"
+  : >"$CALLS"; : >"$T/pub.log"; rm -f "$STATE_DIR/usb_absent" "$STATE_DIR/cc_probe.neg"
+  usb_go "$U_CLEAR"
+  assert_eq "$(grep -c ROOTFAIL "$CALLS")" "0" "R4: no retry the next tick"
+  assert_not "$(events)" 'usb_power_off_recurring' "R4: still not recurring"
+  export GUARDIAN_ROOT_HELPER="$keep"
+}
+
+test_usb_s2_heal_extra_from_environment_never_reaches_an_event() {
+  export HEAL_EXTRA=',"evil":1'
+  load_libs
+  escalate probe_kind usb "x"; heal_event info usb x y "" noted false
+  assert_not "$(events)" 'evil' "S2: heal.sh load clears an inherited HEAL_EXTRA"
+  unset HEAL_EXTRA
+  assert_has "$(grep -n 'GUARDIAN_PIPE_SSH' "$KDIR/bin/guardian.sh")" 'HEAL_EXTRA' "S2: HEAL_EXTRA is in the run-mode unset list"
+}
+
+test_usb_s3_device_back_after_the_second_read_aborts() {
+  load_libs; usb_reset
+  eval "act_step_real() $(declare -f act_step | sed 1d)"
+  act_step() { act_step_real; local r=$?; printf 'USB Audio C270 HD\n' >"$T/usb.txt"; return $r; }
+  usb_go "$U_CLEAR"
+  assert_eq "$(n_reboot_calls)" "0" "R5: device replugged after the collector read: no reboot"
+  assert_has "$(events)" 'aborted_device_back' "R5: reported"
+  usb_esc "R5"
+  assert_eq "$(usb_budget_state)" "none" "R5: the budget is not spent"
+  # the re-read itself failing is an abort too
+  usb_reset
+  act_step() { act_step_real; local r=$?; printf '#!/bin/bash\nexit 1\n' >"$T/bin/ioreg"; return $r; }
+  usb_go "$U_CLEAR"
+  assert_eq "$(n_reboot_calls)" "0" "R5: a failed re-read: no reboot"
+  usb_esc "R5 failed re-read"
+  eval "act_step() $(declare -f act_step_real | sed 1d)"
+}
+
+test_usb_s4_future_dated_state_is_bad() {
+  load_libs
+  local c
+  for c in date epoch; do
+    usb_reset
+    if [ "$c" = date ]; then printf 'date=%s\nepoch=1\nverify=healed_pending\n' "$(TZ=Asia/Kolkata date -r "$((GUARDIAN_FAKE_NOW + 86400))" +%Y%m%d)" >"$STATE_DIR/usb-reboot"
+    else printf 'date=%s\nepoch=%s\nverify=healed_pending\n' "$(ist_date)" "$((GUARDIAN_FAKE_NOW + 400))" >"$STATE_DIR/usb-reboot"; fi
+    assert_eq "$(usb_budget_state)" "bad" "R7: future $c is bad"
+    usb_go "$U_CLEAR"
+    assert_eq "$(n_reboot_calls)" "0" "R7: future $c: no reboot"
+    usb_esc "R7 $c"
+  done
+  usb_reset; printf 'date=%s\nepoch=%s\nverify=healed_pending\n' "$(ist_date)" "$((GUARDIAN_FAKE_NOW + 200))" >"$STATE_DIR/usb-reboot"
+  assert_eq "$(usb_budget_state)" "today" "an epoch within 300 s ahead is tolerated"
+  usb_reset; printf 'date=00000000\nverify=void\n' >"$STATE_DIR/usb-reboot"
+  assert_eq "$(usb_budget_state)" "none" "the void marker is none"
+}
+
+test_usb_s5_ist_date_failure_means_no_reboot() {
+  load_libs; usb_reset
+  eval "ist_date_real() $(declare -f ist_date | sed 1d)"
+  ist_date() { echo ""; }
+  usb_go "$U_CLEAR"
+  assert_eq "$(n_reboot_calls)" "0" "R6: ist_date empty: no reboot"
+  usb_esc "R6"
+  usb_reset; ist_date() { echo "2026-10-14"; }
+  usb_go "$U_CLEAR"
+  assert_eq "$(n_reboot_calls)" "0" "R6: ist_date not 8 digits: no reboot"
+  eval "ist_date() $(declare -f ist_date_real | sed 1d)"
+}
+
+test_usb_s6_planted_symlinks_are_never_followed() {
+  load_libs; usb_reset
+  printf 'precious\n' >"$T/outside"; ln -s "$T/outside" "$STATE_DIR/usb-reboot.tmp"
+  usb_go "$U_CLEAR"
+  assert_eq "$(cat "$T/outside")" "precious" "R10: the planted tmp symlink target is untouched"
+  assert_eq "$(n_reboot_calls)" "0" "R10: no reboot"
+  usb_esc "R10"
+  rm -f "$STATE_DIR/usb-reboot.tmp"
+  # a symlinked state path
+  usb_reset; ln -s "$T/outside" "$STATE_DIR/usb-reboot"
+  usb_go "$U_CLEAR"
+  assert_eq "$(cat "$T/outside")" "precious" "R10: the symlinked state target is untouched"
+  assert_eq "$(n_reboot_calls)" "0" "R10: symlinked state: no reboot"
+  rm -f "$STATE_DIR/usb-reboot"
+  # the tmp file comes from mktemp in the state dir
+  assert_has "$(grep -n 'G_MKTEMP' "$KDIR/lib/heal.sh")" 'usb-reboot.XXXXXX' "S6: mktemp in the state dir"
+  # a good run leaves a regular file and the reboot goes
+  usb_reset; usb_go "$U_CLEAR"
+  assert_eq "$(n_reboot_calls)" "1" "a clean run still reboots"
+  [ -f "$STATE_DIR/usb-reboot" ] && [ ! -L "$STATE_DIR/usb-reboot" ] && ok || fail "state is a regular file"
+}
+
+test_usb_s7_root_helper_never_resolves_id_through_path() {
+  local h="$KDIR/bin/guardian-root.sh"
+  assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c 'id -u')" "0" "S7: no id -u in the helper"
+  assert_eq "$(grep -c 'EUID. -ne 0' "$h")" "2" "S7: both test seams test \$EUID"
+}
+
+test_usb_s8_ist_date_ignores_the_local_zone() {
+  load_libs
+  local e1 e2 z
+  e1="$(ist_epoch 00:30)"; e2="$(ist_epoch 23:50)"
+  for z in America/Los_Angeles UTC Asia/Kolkata Pacific/Kiritimati; do
+    assert_eq "$(TZ=$z ist_date "$e1")" "20261014" "S8: 00:30 IST under TZ=$z"
+    assert_eq "$(TZ=$z ist_date "$e2")" "20261014" "S8: 23:50 IST under TZ=$z"
+  done
+}
+
+test_usb_tick_span_needs_20s_as_well_as_two_ticks() {
+  load_libs; usb_reset
+  usb_ctl "$U_CLEAR"; collect_all
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 10)); export GUARDIAN_FAKE_NOW; usb_ctl "$U_CLEAR"; collect_all
+  assert_eq "$S_usb_ticks" "2" "two ticks 10 s apart"
+  assert_has "$(fault_tree)" 'usb_device_missing' "10 s span: still rung d"
+  assert_not "$(fault_tree)" 'usb_power_off' "10 s span: not d'"
+  heal_cycle >/dev/null 2>&1
+  assert_eq "$(n_reboot_calls)" "0" "10 s span: no reboot"
+  assert_not "$(cat "$CALLS")" '^LOG ' "10 s span: the log is not read"
+  GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 10)); export GUARDIAN_FAKE_NOW; usb_ctl "$U_CLEAR"; collect_all
+  assert_has "$(fault_tree)" 'usb_power_off' "20 s span: d'"
+}
+
+test_usb_no_kind_key_on_any_usb_heal_line() {
+  load_libs; usb_reset
+  usb_go "$U_CLEAR"
+  usb_state_set_verify healed_pending
+  assert_not "$(events)" '"kind"' "no kind key on the reboot lines"
+  assert_has "$(events)" '"action":"kiosk_reboot","layer":"usb"' "d1 names kept: action kiosk_reboot, layer usb"
+}
+
+test_usb_a_dprime_is_shadow_in_the_shipped_build() {
+  export GUARDIAN_TEST_DPRIME_HEAL=0
+  load_libs; usb_reset
+  assert_eq "$USB_DPRIME_HEAL" "0" "constant is 0"
+  usb_go "$U_CLEAR"   # mode heal, fresh new-form false, every guard true
+  assert_eq "$(n_reboot_calls)" "0" "A: HEAL + clear + all guards: 0 reboot calls"
+  assert_eq "$(n_shutdown)" "0" "A: no shutdown"
+  assert_has "$(events)" 'WOULD-DO blocked=dprime_shadow' "A: would_do blocked=dprime_shadow"
+  assert_has "$(events)" '"shadow":true' "A: report-only"
+  assert_has "$(events | grep 'dprime_shadow')" '"reason":"usb_device_missing"' "A: usb_device_missing escalated with the reason (M1)"
+  usb_esc "A"
+  [ ! -s "$STATE_DIR/actions" ] && [ ! -e "$STATE_DIR/usb-reboot" ] && ok || fail "A: no action counted, no budget spent"
+  # run mode: the flip is ignored and the constant is readonly
+  local c="$KDIR/lib/common.sh"
+  assert_eq "$(env -i HOME="$HOME" G_RUNMODE=1 GUARDIAN_TEST_DPRIME_HEAL=1 /bin/bash -c '. "$0"; echo "$USB_DPRIME_HEAL"' "$c" 2>/dev/null)" "0" "A: run mode ignores GUARDIAN_TEST_DPRIME_HEAL"
+  assert_has "$(env -i HOME="$HOME" G_RUNMODE=1 /bin/bash -c '. "$0"; declare -p USB_DPRIME_HEAL' "$c" 2>/dev/null)" 'declare -r' "A: readonly in run mode"
+  assert_has "$(sed -n '/unset GUARDIAN_TESTMODE/,/G_RUNMODE=1/p' "$KDIR/bin/guardian.sh")" 'GUARDIAN_TEST_DPRIME_HEAL' "A: guardian.sh unsets the seam in run mode"
+  assert_eq "$(grep -c 'USB_DPRIME_HEAL' "$KDIR/lib/conf.sh")" "0" "A: not a conf key"
+}
+
+test_usb_b_budget_is_spent_for_24h_and_for_future_epochs() {
+  load_libs; usb_reset
+  local yday; yday="$(TZ=Asia/Kolkata date -r "$((GUARDIAN_FAKE_NOW - 86400))" +%Y%m%d)"
+  printf 'date=%s\nepoch=%s\nverify=healed_pending\n' "$yday" "$((GUARDIAN_FAKE_NOW - 3600))" >"$STATE_DIR/usb-reboot"
+  assert_eq "$(usb_budget_state)" "today" "B: yesterday's date but 1 h ago: spent"
+  printf 'date=%s\nepoch=%s\nverify=healed_pending\n' "$yday" "$((GUARDIAN_FAKE_NOW - 86401))" >"$STATE_DIR/usb-reboot"
+  assert_eq "$(usb_budget_state)" "none" "B: 24 h and 1 s ago on an earlier date: free"
+  printf 'date=%s\nepoch=%s\nverify=healed_pending\n' "$yday" "$((GUARDIAN_FAKE_NOW + 100))" >"$STATE_DIR/usb-reboot"
+  assert_eq "$(usb_budget_state)" "today" "B: epoch later than now: spent"
+  printf 'date=%s\nepoch=%s\nverify=healed_pending\n' "$yday" "$((GUARDIAN_FAKE_NOW - 3600))" >"$STATE_DIR/usb-reboot"
+  usb_go "$U_CLEAR"
+  assert_eq "$(n_reboot_calls)" "0" "B: no reboot inside 24 h of the last one"
+  assert_has "$(events)" 'usb_power_off_recurring' "B: recurring page"
+}
+
+test_usb_d_log_line_must_be_from_the_kernel() {
+  load_libs
+  local c
+  for c in nonkernel_pid other_proc; do
+    usb_reset
+    local when; when="$(date -r "$((GUARDIAN_FAKE_NOW - 120))" '+%Y-%m-%d %H:%M:%S')"
+    case "$c" in
+      nonkernel_pid) printf 'hdr\n%s.104 Df  kernel[501:4242] [com.apple.usb:all] usb-drd3-port-hs@03100000: AppleUSBHostPort::cableChangeOccurred: powering off\n' "$when" >"$T/log.txt" ;;
+      other_proc) printf 'hdr\n%s.104 Df  evil[0:1] [com.apple.usb:all] usb-drd3-port-hs@03100000: AppleUSBHostPort::cableChangeOccurred: powering off\n' "$when" >"$T/log.txt" ;;
+    esac
+    usb_go "$U_CLEAR"
+    assert_not "$(fault_tree)" 'usb_power_off' "D $c: no trigger"
+    assert_eq "$(n_reboot_calls)" "0" "D $c: no reboot"
+  done
 }

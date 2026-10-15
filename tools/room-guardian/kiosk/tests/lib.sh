@@ -30,6 +30,7 @@ mk_sandbox() { # sets T and the whole environment; PATH gets the fake bin dir fi
   export GUARDIAN_PUBLISH_CMD='{ printf "%s\t" "$1"; cat; } >>"$T/pub.log"'
   export GUARDIAN_FLAG_CMD='cat "$T/flagout"; exit "$(cat "$T/flagrc")"'
   export GUARDIAN_SUDO="$T/bin/fakesudo"
+  export GUARDIAN_TEST_DPRIME_HEAL=1   # test seam for 2.4 d' HEAL (the constant is 0 in run mode and in the shipped build); the d2 shadow test sets it to 0
   export GUARDIAN_ROOT_HELPER="$KDIR/bin/guardian-root.sh"
   export GUARDIAN_ROOT_TESTMODE=1 GUARDIAN_ROOT_TEST_DB="$T/TCC.db"
   export GUARDIAN_LOG_BIN="$T/bin/fakelog" GUARDIAN_SHUTDOWN_BIN="$T/bin/fakeshutdown"   # /usr/bin/log and /sbin/shutdown are ALWAYS faked (2.4 d')

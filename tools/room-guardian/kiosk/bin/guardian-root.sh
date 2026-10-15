@@ -19,7 +19,7 @@ SQL_UPDATE="UPDATE access SET auth_value=2, auth_reason=2, last_modified=strftim
 
 db_for() { # user -> path, or fail
   local u="$1"
-  if [ "$(id -u)" != "0" ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_ROOT_TEST_DB:-}" ]; then
+  if [ "$EUID" -ne 0 ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_ROOT_TEST_DB:-}" ]; then
     printf '%s' "$GUARDIAN_ROOT_TEST_DB"; return 0
   fi
   case "$u" in ''|*[!A-Za-z0-9._-]*|root) return 1 ;; esac
@@ -78,7 +78,7 @@ case "$verb" in
     # exact argv: the verb alone. A test seam (GUARDIAN_SHUTDOWN_BIN) is honoured only when NOT root and GUARDIAN_ROOT_TESTMODE=1, like the TCC.db path above.
     if [ "$#" -ne 0 ]; then echo "bad_args" >&2; exit 2; fi
     sd=/sbin/shutdown
-    if [ "$(id -u)" != "0" ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_SHUTDOWN_BIN:-}" ]; then sd="$GUARDIAN_SHUTDOWN_BIN"; fi
+    if [ "$EUID" -ne 0 ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_SHUTDOWN_BIN:-}" ]; then sd="$GUARDIAN_SHUTDOWN_BIN"; fi
     exec "$sd" -r now
     ;;
   pmset-baseline) pmset -a sleep 0 autorestart 1 ;;
