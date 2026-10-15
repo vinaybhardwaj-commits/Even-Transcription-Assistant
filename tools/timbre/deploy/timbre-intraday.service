@@ -1,0 +1,15 @@
+# /etc/systemd/system/timbre-intraday.service — Timbre intraday scoring tick (CLEF-EVERY-CONSULT S2). Record-only; off unless the
+# config or TIMBRE_NIGHTLY_ENABLED=1 turns it on (TIMBRE_NIGHTLY_ENABLED=0 always wins). Secrets live in /etc/timbre-nightly.env.
+[Unit]
+Description=Timbre intraday patient-voice affect scoring (every consult, record-only)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=timbre
+WorkingDirectory=/opt/timbre/eta
+EnvironmentFile=/etc/timbre-nightly.env
+ExecStart=/opt/timbre/eta/tools/timbre/.venv/bin/python -m tools.timbre.nightly intraday --config /etc/timbre-nightly.json
+TimeoutStartSec=8h
+Nice=10
