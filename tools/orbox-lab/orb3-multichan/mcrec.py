@@ -17,7 +17,7 @@ idx fields (one row per 1 s of audio, written at the end of the second; overlap 
   infra_rms          rms below 20 Hz of the raw signal (before the high-pass)
   drift_ppm          least-squares frames-vs-monotonic drift since this device was (re)opened, null until 10 s
 """
-import sys, os, json, time, math, glob, re, argparse, subprocess, threading, signal, bisect, datetime as dt
+import sys, os, json, time, math, glob, re, argparse, subprocess, threading, signal, datetime as dt
 import numpy as np
 
 RATE = 48000
@@ -353,65 +353,78 @@ def _jl(path):
     if not os.path.exists(path): return []
     return [json.loads(l) for l in open(path) if l.strip()]
 
-class Timeline:
-    """wall_ns -> frame offset in the pcm, from idx rows (start and end anchor per row; gaps map to a flat offset)."""
-    def __init__(self, rows):
-        W, F = [], []
-        for r in rows:
-            fe = r["byte_offset"] // 2; fs = fe - r["frames"]; we = r["wall_ns"]; ws = we - int(r["frames"] * 1e9 / RATE)
-            for w, f in ((ws, fs), (we, fe)):
-                if W and w < W[-1]: w = W[-1]
-                if F and f < F[-1]: f = F[-1]
-                W.append(w); F.append(f)
-        self.W, self.F = W, F
-    def at(self, t_ns):
-        if not self.W: return 0
-        if t_ns <= self.W[0]: return self.F[0]
-        if t_ns >= self.W[-1]: return self.F[-1]
-        i = bisect.bisect_right(self.W, t_ns) - 1
-        w0, w1, f0, f1 = self.W[i], self.W[i + 1], self.F[i], self.F[i + 1]
-        return f0 if w1 == w0 else int(round(f0 + (t_ns - w0) / (w1 - w0) * (f1 - f0)))
+HOLE_NS = 100_000_000                  # a wall-time hole between idx rows bigger than this is a gap (zero-filled and listed)
+
+def layout(rows, lo, hi):
+    """Place idx rows on the window's wall timeline. Returns (target_frames, segs[(out, file_frame, n)], gaps[(out_a, out_b)]).
+    Rows are contiguous unless a wall hole > 100 ms separates them; the audio is then re-anchored by wall time (the hole is zeros)."""
+    target = int(round((hi - lo) * RATE / 1e9)); f_ = lambda ns: int(round(ns * RATE / 1e9))
+    segs, prev_end, pos = [], None, 0
+    for r in rows:
+        n = r["frames"]
+        if n <= 0: continue
+        fe = r["byte_offset"] // 2; we = r["wall_ns"]; sw = we - int(round(n * 1e9 / RATE))
+        if prev_end is None or sw - prev_end > HOLE_NS: pos = f_(sw - lo)
+        segs.append((pos, fe - n, n)); pos += n; prev_end = we
+    out, cur = [], 0
+    for o, fs, n in segs:
+        if o < cur: fs, n, o = fs + (cur - o), n - (cur - o), cur            # overlap / before window start
+        if o < 0: fs, n, o = fs - o, n + o, 0
+        if o + n > target: n = target - o
+        if n <= 0: continue
+        out.append((o, fs, n)); cur = o + n
+    gaps, cur = [], 0
+    for o, fs, n in out:
+        if o - cur > f_(HOLE_NS): gaps.append((cur, o))
+        cur = o + n
+    if target - cur > f_(HOLE_NS): gaps.append((cur, target))
+    return target, out, gaps
+
+def _cause(events, place, ws, we, tail):
+    """Label only (events never decide which gaps exist). Returns (cause, open_ended)."""
+    drops = [e for e in events if e["kind"] == "drop" and e.get("place") == place and e.get("gap_wall_ns", e["wall_ns"]) <= ws + 1_000_000_000]
+    if drops:
+        d = drops[-1]; w0 = d.get("gap_wall_ns", d["wall_ns"])
+        returned_before = any(g["kind"] == "gap" and g.get("place") == place and g["wall_start_ns"] >= w0 and g["wall_end_ns"] < ws - 1_000_000_000 for g in events)
+        if not returned_before:
+            restarted = any(r["kind"] == "start" and r["wall_ns"] > d["wall_ns"] for r in events)
+            return "drop", bool(tail and not restarted)
+    if any(r["kind"] == "start" and ws - 1_000_000_000 <= r["wall_ns"] <= we + 1_000_000_000 for r in events): return "restart", False
+    return "unknown", False
 
 def package(cfg, t0, t1, out):
     rec = cfg["out_dir"]; lo, hi = int(t0.timestamp() * 1e9), int(t1.timestamp() * 1e9)
     if hi <= lo: raise ConfigError("--to must be after --from")
     for d in ("media", "tracks"): os.makedirs(os.path.join(out, d), exist_ok=True)
     events = _jl(os.path.join(rec, "events.jsonl")); marks = _jl(os.path.join(rec, "marks.jsonl"))
-    env_rows, chans, sources = [], [], []
+    env_rows, chans, sources, gaps = [], [], [], []
     for m in cfg["mics"]:
-        p = m["place"]; rows = _jl(os.path.join(rec, p + ".idx.jsonl")); tl = Timeline(rows)
-        a, b = tl.at(lo), tl.at(hi); pcm = os.path.join(rec, p + ".pcm")
-        a = max(0, min(a, os.path.getsize(pcm) // 2)); b = max(a, min(b, os.path.getsize(pcm) // 2))
-        flac = os.path.join(out, "media", p + ".flac"); target = int(round((hi - lo) * RATE / 1e9))
-        ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "s16le", "-ar", str(RATE), "-ac", "1", "-i", "-", "-af", f"atrim=end_sample={target}", "-c:a", "flac", flac],
-                              stdin=subprocess.PIPE)
-        # zero-fill: gaps (and any uncovered head/tail) become digital silence so every mic's flac is exactly the window long
-        zeros = lambda n: b"\0" * (2 * n); filled = 0; wrote = 0
-        mygaps = sorted((e for e in events if e["kind"] == "gap" and e.get("place") == p and e["wall_end_ns"] >= lo and e["wall_start_ns"] <= hi),
-                        key=lambda e: e["byte_offset"])
-        def out_(buf):
-            nonlocal wrote
-            ff.stdin.write(buf); wrote += len(buf) // 2
+        p = m["place"]; rows = _jl(os.path.join(rec, p + ".idx.jsonl")); pcm = os.path.join(rec, p + ".pcm")
+        target, segs, mgaps = layout(rows, lo, hi)
+        flac = os.path.join(out, "media", p + ".flac")
+        ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "s16le", "-ar", str(RATE), "-ac", "1", "-i", "-", "-c:a", "flac", flac], stdin=subprocess.PIPE)
+        pos = 0; filled = 0
         with open(pcm, "rb") as f:
-            if tl.W and lo < tl.W[0]:
-                n = min(target, int(round((tl.W[0] - lo) * RATE / 1e9))); out_(zeros(n)); filled += n
-            pos = a
-            def copy(upto):
-                nonlocal pos
-                f.seek(pos * 2); left = (upto - pos) * 2
+            for o, fs, n in segs:
+                if o > pos: ff.stdin.write(b"\0" * (2 * (o - pos))); filled += o - pos
+                f.seek(fs * 2); left = n * 2; got = 0
                 while left > 0:
                     d = f.read(min(left, 1 << 20))
                     if not d: break
-                    out_(d); left -= len(d)
-                pos = max(pos, upto)
-            for g in mygaps:
-                at = max(a, min(b, g["byte_offset"] // 2)); copy(at)
-                n = int(round((min(g["wall_end_ns"], hi) - max(g["wall_start_ns"], lo)) * RATE / 1e9))
-                if n > 0: out_(zeros(n)); filled += n
-            copy(b)
-            if wrote < target: out_(zeros(target - wrote)); filled += target - wrote
+                    ff.stdin.write(d); left -= len(d); got += len(d)
+                short = left // 2                                           # pcm shorter than idx claims: pad, never shift
+                if short: ff.stdin.write(b"\0" * (2 * short)); filled += short
+                pos = o + n
+        if target > pos: ff.stdin.write(b"\0" * (2 * (target - pos))); filled += target - pos
         ff.stdin.close()
         if ff.wait() != 0: raise RuntimeError("ffmpeg failed for " + p)
+        wns = lambda fr: lo + int(round(fr * 1e9 / RATE))
+        for ga, gb in mgaps:
+            prev = [s_ for s_ in segs if s_[0] + s_[2] <= ga]; nxt = [s_ for s_ in segs if s_[0] >= gb]
+            boff = (prev[-1][1] + prev[-1][2]) * 2 if prev else (nxt[0][1] * 2 if nxt else 0)
+            cause, openend = _cause(events, p, wns(ga), wns(gb), gb >= target)
+            gaps.append(dict(place=p, wall_start_ns=wns(ga), wall_end_ns=wns(gb), byte_offset=boff, gap_s=round((gb - ga) / RATE, 3),
+                             zero_filled=True, cause=cause, open_ended=openend))
         win = [r for r in rows if lo <= r["wall_ns"] <= hi]
         for r in win:
             env_rows.append(dict(place=p, wall_ns=r["wall_ns"], mono_ns=r["mono_ns"], frames=r["frames"], rms=r["rms"], peak=r["peak"],
@@ -419,26 +432,16 @@ def package(cfg, t0, t1, out):
         drift = next((r["drift_ppm"] for r in reversed(win) if r.get("drift_ppm") is not None), None)
         gains = [e for e in events if e["kind"] == "gain" and e.get("place") == p and e["wall_ns"] <= hi]
         gain = gains[-1] if gains else None
-        chans.append(dict(place=p, port_path=m["port"], media=f"media/{p}.flac", sample_rate=RATE, channels=1, frames=b - a,
+        covered = sum(s_[2] for s_ in segs)
+        chans.append(dict(place=p, port_path=m["port"], media=f"media/{p}.flac", sample_rate=RATE, channels=1, frames=covered,
                           gain_set=gain and gain["set"], gain_read_back=gain and gain["read_back"], drift_ppm=drift, flac_frames=target, zero_filled_frames=filled, highpass_hz=cfg["hpf_hz"] if cfg["hpf"] else None))
-        sources.append(dict(id=p, path=f"media/{p}.flac", sample_rate=RATE, channels=1, byte_offset_start=a * 2, byte_offset_end=b * 2,
-                            clock="wall_ns from idx, NTP-synced"))
+        sources.append(dict(id=p, path=f"media/{p}.flac", sample_rate=RATE, channels=1, byte_offset_start=segs[0][1] * 2 if segs else 0,
+                            byte_offset_end=(segs[-1][1] + segs[-1][2]) * 2 if segs else 0, clock="wall_ns from idx, NTP-synced"))
     env_rows.sort(key=lambda r: (r["wall_ns"], r["place"]))
     with open(os.path.join(out, "tracks", "environment.jsonl"), "w") as f:
         for r in env_rows: f.write(json.dumps(r) + "\n")
     open(os.path.join(out, "tracks", "transcript.jsonl"), "w").close()
-    gaps = [dict(place=e["place"], wall_start_ns=e["wall_start_ns"], wall_end_ns=e["wall_end_ns"], byte_offset=e["byte_offset"], gap_s=e["gap_s"], zero_filled=True)
-            for e in events if e["kind"] == "gap" and e["wall_end_ns"] >= lo and e["wall_start_ns"] <= hi]
-    # a mic that dropped and had not returned by the window end: open-ended gap from the drop to the window end (its flac tail is zero-filled)
-    for e in events:
-        if e["kind"] != "drop" or e["wall_ns"] > hi: continue
-        w0 = e.get("gap_wall_ns", e["wall_ns"])
-        if any(g["kind"] == "gap" and g["place"] == e["place"] and g["wall_start_ns"] >= w0 for g in events): continue   # it came back: already listed above if it overlaps the window
-        w0 = max(w0, lo)
-        restart = next((r["wall_ns"] for r in events if r["kind"] == "start" and r["wall_ns"] > e["wall_ns"]), None)   # a recorder restart closes an open drop
-        w1 = hi if restart is None else min(restart, hi)
-        if w1 < w0: continue
-        gaps.append(dict(place=e["place"], wall_start_ns=w0, wall_end_ns=w1, byte_offset=e["byte_offset"], gap_s=round((w1 - w0) / 1e9, 3), zero_filled=True, open_ended=restart is None))
+    gaps.sort(key=lambda g: (g["wall_start_ns"], g["place"]))
     iso = lambda e, tz: dt.datetime.fromtimestamp(e / 1e9, tz).isoformat(timespec="seconds")
     man = dict(window_start_ist=iso(lo, IST), window_end_ist=iso(hi, IST), window_start_utc=iso(lo, dt.timezone.utc), window_end_utc=iso(hi, dt.timezone.utc),
                sample_rate=RATE, channels=chans, sources=sources, gaps=gaps,

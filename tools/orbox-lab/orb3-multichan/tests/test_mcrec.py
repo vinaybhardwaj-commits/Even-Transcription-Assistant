@@ -79,33 +79,6 @@ def test_T6_gain_refused_above_41_and_read_back(tmp_path):
     assert g["set"] == 41 and g["read_back"] == 41
 
 
-def test_T7_package_shape_and_flac_duration(tmp_path):
-    rec = tmp_path / "rec"; rec.mkdir(); n = 8 * RATE
-    sig = to_i16(0.1 * np.sin(2 * np.pi * 300 * t_arr(n)))
-    mics = [dict(place="corner", port="usb3/3-4/3-4:1.0", gain=41), dict(place="high", port="usb3/3-6/3-6:1.0", gain=41)]
-    s = Sim(rec, [FakeDevice(sig, mics[0]["port"], 0), FakeDevice(sig, mics[1]["port"], 1)], mics=mics); s.run(8)
-    import datetime as dt
-    ist0 = dt.datetime.fromtimestamp(BASE_WALL / 1e9, mcrec.IST)
-    out = tmp_path / "pkg"
-    f = (ist0 + dt.timedelta(seconds=2)).strftime("%Y-%m-%d %H:%M:%S"); t = (ist0 + dt.timedelta(seconds=6)).strftime("%Y-%m-%d %H:%M:%S")
-    cfgp = tmp_path / "c.json"; json.dump(s.cfg, open(cfgp, "w"))
-    mcrec.main(["package", "--config", str(cfgp), "--from", f, "--to", t, "--out", str(out)])
-    assert sorted(os.listdir(out)) == ["manifest.json", "media", "meta.json", "tracks"]
-    assert sorted(os.listdir(out / "media")) == ["corner.flac", "high.flac"]
-    assert sorted(os.listdir(out / "tracks")) == ["environment.jsonl", "transcript.jsonl"]
-    assert os.path.getsize(out / "tracks" / "transcript.jsonl") == 0
-    meta = json.load(open(out / "meta.json"))
-    assert meta["SIMULATED"] is False and set(meta) == {"window_start_ist", "window_end_ist", "window_start_utc", "window_end_utc", "SIMULATED"}
-    man = json.load(open(out / "manifest.json"))
-    assert man["sample_rate"] == 48000 and [c["place"] for c in man["channels"]] == ["corner", "high"]
-    assert man["channels"][0]["port_path"] == mics[0]["port"] and man["channels"][0]["gain_read_back"] == 41 and "gaps" in man
-    assert len(open(out / "tracks" / "environment.jsonl").read().splitlines()) >= 6
-    for p in ("corner", "high"):
-        raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(out / "media" / f"{p}.flac"), "-f", "s16le", "-ar", "48000", "-ac", "1", "-"],
-                             capture_output=True, check=True).stdout
-        assert abs(len(raw) // 2 - 4 * RATE) <= 1
-
-
 def test_resolve_port_by_usb_path(tmp_path):
     usb = tmp_path / "devices/pci/usb3/3-4/3-4:1.0"; usb2 = tmp_path / "devices/pci/usb3/3-6/3-6:1.0"
     cls = tmp_path / "class/sound"
@@ -124,60 +97,113 @@ def test_mark_cli_appends_offsets(tmp_path):
     assert m["label"] == "wheel in" and m["byte_offset"]["p0"] == 2 * RATE * 2 and m["wall_ns"] and m["mono_ns"]
 
 
-def test_O20_package_zero_fills_gaps(tmp_path):
+# ---- package tests: seeded white noise (a periodic sine cannot reveal a whole-second shift); hpf off so the flac equals the source
+
+def _pkg(tmp_path, s, a, b, name):
     import datetime as dt
-    rec = tmp_path / "rec"; rec.mkdir(); n = 30 * RATE
-    sig = to_i16(0.2 * np.sin(2 * np.pi * 300 * t_arr(n)))
-    mics = [dict(place="corner", port="usb3/3-4/3-4:1.0", gain=41), dict(place="high", port="usb3/3-6/3-6:1.0", gain=41)]
-    s = Sim(rec, [FakeDevice(sig, mics[0]["port"], 0), FakeDevice(sig, mics[1]["port"], 1, down=(5.0, 15.0))], mics=mics, hpf=False); s.run(28)
     ist0 = dt.datetime.fromtimestamp(BASE_WALL / 1e9, mcrec.IST); fmt = "%Y-%m-%d %H:%M:%S"
-    out = tmp_path / "pkg"; cfgp = tmp_path / "c.json"; json.dump(s.cfg, open(cfgp, "w"))
-    mcrec.main(["package", "--config", str(cfgp), "--from", (ist0 + dt.timedelta(seconds=2)).strftime(fmt), "--to", (ist0 + dt.timedelta(seconds=25)).strftime(fmt), "--out", str(out)])
-    def dec(p): return np.frombuffer(subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(out / "media" / f"{p}.flac"), "-f", "s16le", "-ar", "48000", "-ac", "1", "-"],
-                                                      capture_output=True, check=True).stdout, dtype="<i2")
-    c, h = dec("corner"), dec("high")
-    assert len(c) == len(h) == 23 * RATE                                # same length, window long
+    cfgp = tmp_path / "c.json"; json.dump(s.cfg, open(cfgp, "w")); out = tmp_path / name
+    mcrec.main(["package", "--config", str(cfgp), "--from", (ist0 + dt.timedelta(seconds=a)).strftime(fmt), "--to", (ist0 + dt.timedelta(seconds=b)).strftime(fmt), "--out", str(out)])
+    return out, json.load(open(out / "manifest.json"))
+
+def _dec(out, p):
+    return np.frombuffer(subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(out / "media" / f"{p}.flac"), "-f", "s16le", "-ar", "48000", "-ac", "1", "-"],
+                                        capture_output=True, check=True).stdout, dtype="<i2")
+
+def _lag0(x, ref):
+    """cross-correlate x against the source; assert the peak is at lag 0 (zero-filled regions contribute nothing)."""
+    n = 1 << int(np.ceil(np.log2(len(x) + len(ref))))
+    c = np.fft.irfft(np.fft.rfft(x.astype(float), n) * np.conj(np.fft.rfft(ref.astype(float), n)), n)
+    lag = int(np.argmax(c)); lag = lag - n if lag > n // 2 else lag
+    assert lag == 0, lag
+
+def _check_aligned(out, p, src, a_s, zero_spans):
+    """flac == source[a_s:] sample for sample, except digital zeros inside zero_spans (seconds, relative to the source)."""
+    x = _dec(out, p); ref = src[int(a_s * RATE):int(a_s * RATE) + len(x)].copy(); z = np.zeros(len(x), bool)
+    for u, v in zero_spans: z[int(round((u - a_s) * RATE)):int(round((v - a_s) * RATE))] = True
+    assert not x[z].any() and np.array_equal(x[~z], ref[~z]), p
+    _lag0(x, ref)
+    return x
+
+def _mics(): return [dict(place="corner", port="usb3/3-4/3-4:1.0", gain=41), dict(place="high", port="usb3/3-6/3-6:1.0", gain=41)]
+
+
+def test_T7_package_shape_and_flac_duration(tmp_path):
+    rec = tmp_path / "rec"; rec.mkdir(); src = to_i16(noise(8 * RATE)); mics = _mics()
+    s = Sim(rec, [FakeDevice(src, mics[0]["port"], 0), FakeDevice(src, mics[1]["port"], 1)], mics=mics); s.run(8)
+    out, man = _pkg(tmp_path, s, 2, 6, "pkg")
+    assert sorted(os.listdir(out)) == ["manifest.json", "media", "meta.json", "tracks"]
+    assert sorted(os.listdir(out / "media")) == ["corner.flac", "high.flac"]
+    assert sorted(os.listdir(out / "tracks")) == ["environment.jsonl", "transcript.jsonl"]
+    assert os.path.getsize(out / "tracks" / "transcript.jsonl") == 0
+    meta = json.load(open(out / "meta.json"))
+    assert meta["SIMULATED"] is False and set(meta) == {"window_start_ist", "window_end_ist", "window_start_utc", "window_end_utc", "SIMULATED"}
+    assert man["sample_rate"] == 48000 and [c["place"] for c in man["channels"]] == ["corner", "high"] and man["gaps"] == []
+    assert man["channels"][0]["port_path"] == mics[0]["port"] and man["channels"][0]["gain_read_back"] == 41
+    assert len(open(out / "tracks" / "environment.jsonl").read().splitlines()) >= 6
+    for p in ("corner", "high"): assert abs(len(_dec(out, p)) - 4 * RATE) <= 1
+
+
+def test_O20_package_zero_fills_gaps(tmp_path):
+    rec = tmp_path / "rec"; rec.mkdir(); src = to_i16(noise(30 * RATE)); mics = _mics()
+    s = Sim(rec, [FakeDevice(src, mics[0]["port"], 0), FakeDevice(src, mics[1]["port"], 1, down=(5.0, 15.0))], mics=mics, hpf=False); s.run(28)
+    out, man = _pkg(tmp_path, s, 2, 25, "pkg")
+    assert len(_dec(out, "corner")) == len(_dec(out, "high")) == 23 * RATE
     g = [e for e in s.jl("events.jsonl") if e["kind"] == "gap"][0]
-    i0 = int(round((g["wall_start_ns"] - BASE_WALL) / 1e9 * RATE)) - 2 * RATE; i1 = int(round((g["wall_end_ns"] - BASE_WALL) / 1e9 * RATE)) - 2 * RATE
-    assert not h[i0:i1].any() and np.abs(c[i0:i1]).max() > 1000         # gap region is digital zero, other mic untouched
-    assert np.array_equal(h[:i0 - 1], c[:i0 - 1]) and np.array_equal(h[i1 + 1:], c[i1 + 1:])   # aligned either side
+    za, zb = (g["wall_start_ns"] - BASE_WALL) / 1e9, (g["wall_end_ns"] - BASE_WALL) / 1e9
+    _check_aligned(out, "corner", src, 2, []); _check_aligned(out, "high", src, 2, [(za, zb)])
     assert len(s.pcm("high")) < 28 * RATE                               # raw pcm stays unpadded
-    man = json.load(open(out / "manifest.json"))
-    assert [x["zero_filled"] for x in man["gaps"]] == [True]
+    assert [(x["place"], x["zero_filled"], x["cause"]) for x in man["gaps"]] == [("high", True, "drop")]
+    assert abs(man["gaps"][0]["gap_s"] - (zb - za)) < 0.01
 
 
 def test_O22_dropped_and_never_returned_gets_open_ended_gap(tmp_path):
-    import datetime as dt
-    rec = tmp_path / "rec"; rec.mkdir(); n = 30 * RATE
-    sig = to_i16(0.2 * np.sin(2 * np.pi * 300 * t_arr(n)))
-    mics = [dict(place="corner", port="usb3/3-4/3-4:1.0", gain=41), dict(place="high", port="usb3/3-6/3-6:1.0", gain=41)]
-    s = Sim(rec, [FakeDevice(sig, mics[0]["port"], 0), FakeDevice(sig, mics[1]["port"], 1, down=(10.0, 999.0))], mics=mics, hpf=False); s.run(28)
-    ist0 = dt.datetime.fromtimestamp(BASE_WALL / 1e9, mcrec.IST); fmt = "%Y-%m-%d %H:%M:%S"
-    out = tmp_path / "pkg"; cfgp = tmp_path / "c.json"; json.dump(s.cfg, open(cfgp, "w"))
-    t1 = ist0 + dt.timedelta(seconds=25)
-    mcrec.main(["package", "--config", str(cfgp), "--from", (ist0 + dt.timedelta(seconds=2)).strftime(fmt), "--to", t1.strftime(fmt), "--out", str(out)])
-    man = json.load(open(out / "manifest.json"))
+    rec = tmp_path / "rec"; rec.mkdir(); src = to_i16(noise(30 * RATE)); mics = _mics()
+    s = Sim(rec, [FakeDevice(src, mics[0]["port"], 0), FakeDevice(src, mics[1]["port"], 1, down=(10.0, 999.0))], mics=mics, hpf=False); s.run(28)
+    out, man = _pkg(tmp_path, s, 2, 25, "pkg")
     assert len(man["gaps"]) == 1
     g = man["gaps"][0]
-    assert g["place"] == "high" and g["open_ended"] is True and g["zero_filled"] is True
-    assert g["wall_end_ns"] == BASE_WALL + 25 * 10**9 and 14.9 <= g["gap_s"] <= 15.2 and g["wall_start_ns"] < g["wall_end_ns"]
-    assert not any(e["kind"] == "gap" for e in s.jl("events.jsonl"))
-    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(out / "media" / "high.flac"), "-f", "s16le", "-ar", "48000", "-ac", "1", "-"], capture_output=True, check=True).stdout
-    assert len(raw) // 2 == 23 * RATE and not np.frombuffer(raw, dtype="<i2")[9 * RATE:].any()   # tail after the drop is digital zero
+    assert g["place"] == "high" and g["open_ended"] is True and g["zero_filled"] is True and g["cause"] == "drop"
+    assert g["wall_end_ns"] == BASE_WALL + 25 * 10**9 and 14.9 <= g["gap_s"] <= 15.2
+    _check_aligned(out, "high", src, 2, [(9.9, 25.0)]); _check_aligned(out, "corner", src, 2, [])
 
 
 def test_O22b_recorder_restart_closes_open_drop(tmp_path):
-    import datetime as dt
-    rec = tmp_path / "rec"; rec.mkdir(); n = 30 * RATE
-    sig = to_i16(0.2 * np.sin(2 * np.pi * 300 * t_arr(n)))
-    mics = [dict(place="corner", port="usb3/3-4/3-4:1.0", gain=41), dict(place="high", port="usb3/3-6/3-6:1.0", gain=41)]
-    s = Sim(rec, [FakeDevice(sig, mics[0]["port"], 0), FakeDevice(sig, mics[1]["port"], 1, down=(10.0, 999.0))], mics=mics, hpf=False); s.run(18)
-    s.clock.t = 20.0; mcrec.Recorder(s.cfg, s.rec.env)                 # recorder restarts at t=20 s: writes a new "start" event
-    ist0 = dt.datetime.fromtimestamp(BASE_WALL / 1e9, mcrec.IST); fmt = "%Y-%m-%d %H:%M:%S"; cfgp = tmp_path / "c.json"; json.dump(s.cfg, open(cfgp, "w"))
-    def pkg(a, b, name):
-        out = tmp_path / name
-        mcrec.main(["package", "--config", str(cfgp), "--from", (ist0 + dt.timedelta(seconds=a)).strftime(fmt), "--to", (ist0 + dt.timedelta(seconds=b)).strftime(fmt), "--out", str(out)])
-        return json.load(open(out / "manifest.json"))["gaps"]
-    assert pkg(22, 28, "later") == []                                   # window after the restart: no open gap
-    g = pkg(2, 28, "across")
-    assert len(g) == 1 and g[0]["open_ended"] is False and g[0]["wall_end_ns"] == BASE_WALL + 20 * 10**9
+    rec = tmp_path / "rec"; rec.mkdir(); src = to_i16(noise(40 * RATE)); mics = _mics()
+    s = Sim(rec, [FakeDevice(src, mics[0]["port"], 0), FakeDevice(src, mics[1]["port"], 1, down=(10.0, 20.05))], mics=mics, hpf=False)
+    s.run(20); s.restart(20.0); s.run(35, start=20.0)
+    out, man = _pkg(tmp_path, s, 22, 30, "later"); assert man["gaps"] == []          # window after the restart: no gap
+    out, man = _pkg(tmp_path, s, 2, 30, "across")
+    assert [(g["place"], g["cause"], g["open_ended"]) for g in man["gaps"]] == [("high", "drop", False)]
+    assert man["gaps"][0]["wall_end_ns"] == BASE_WALL + 20 * 10**9
+
+
+def test_G1_drop_restart_later_drop_both_listed(tmp_path):
+    rec = tmp_path / "rec"; rec.mkdir(); src = to_i16(noise(45 * RATE)); mics = _mics()
+    s = Sim(rec, [FakeDevice(src, mics[0]["port"], 0), FakeDevice(src, mics[1]["port"], 1, down=[(10.0, 20.05), (30.0, 34.0)])], mics=mics, hpf=False)
+    s.run(20); s.restart(20.0); s.run(40, start=20.0)
+    out, man = _pkg(tmp_path, s, 2, 38, "pkg")
+    gs = sorted((g["wall_start_ns"] - BASE_WALL) / 1e9 for g in man["gaps"])
+    assert len(gs) == 2 and abs(gs[0] - 9.9) < 0.01 and abs(gs[1] - 29.9) < 0.01 and {g["place"] for g in man["gaps"]} == {"high"}
+    _check_aligned(out, "high", src, 2, [(9.9, 20.0), (29.9, 33.9)]); _check_aligned(out, "corner", src, 2, [])
+
+
+def test_G2_whole_recorder_down_18_to_20(tmp_path):
+    rec = tmp_path / "rec"; rec.mkdir(); src = to_i16(noise(40 * RATE)); mics = _mics()
+    s = Sim(rec, [FakeDevice(src, mics[0]["port"], 0), FakeDevice(src, mics[1]["port"], 1)], mics=mics, hpf=False)
+    s.run(18); s.restart(20.0); s.run(35, start=20.0)
+    out, man = _pkg(tmp_path, s, 2, 30, "pkg")
+    for p in ("corner", "high"): _check_aligned(out, p, src, 2, [(18.0, 20.0)])
+    assert sorted((g["place"], g["cause"]) for g in man["gaps"]) == [("corner", "restart"), ("high", "restart")]
+    assert all(abs(g["gap_s"] - 2.0) < 0.01 and g["zero_filled"] for g in man["gaps"])
+
+
+def test_G3_one_mic_down_until_restart_stays_aligned(tmp_path):
+    rec = tmp_path / "rec"; rec.mkdir(); src = to_i16(noise(40 * RATE)); mics = _mics()
+    s = Sim(rec, [FakeDevice(src, mics[0]["port"], 0), FakeDevice(src, mics[1]["port"], 1, down=(10.0, 20.05))], mics=mics, hpf=False)
+    s.run(20); s.restart(20.0); s.run(35, start=20.0)
+    out, man = _pkg(tmp_path, s, 2, 30, "pkg")
+    # corner keeps recording only until the restart, then resumes at 20 s: its 20 s boundary is continuous (no gap)
+    _check_aligned(out, "high", src, 2, [(9.9, 20.0)]); _check_aligned(out, "corner", src, 2, [])
+    assert len(_dec(out, "corner")) == len(_dec(out, "high")) == 28 * RATE
+    assert [(g["place"], g["cause"]) for g in man["gaps"]] == [("high", "drop")]

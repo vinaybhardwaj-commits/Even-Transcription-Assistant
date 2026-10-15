@@ -11,6 +11,8 @@ BASE_MONO = 5_000_000_000_000
 
 def t_arr(n, rate=RATE): return np.arange(n) / rate
 
+def noise(n, seed=7, amp=0.2): return np.random.default_rng(seed).uniform(-amp, amp, n)
+
 def to_i16(x): return np.clip(np.rint(np.asarray(x) * 32768), -32768, 32767).astype("<i2")
 
 def clap(sig, at, amp=0.9, n=240):
@@ -26,9 +28,10 @@ class Clock:
 
 class FakeDevice:
     def __init__(self, signal_i16, port, card, ppm=0.0, down=None):
-        self.sig, self.port, self.card, self.ppm, self.down = signal_i16, port, card, ppm, down   # down=(t0,t1) seconds
+        self.sig, self.port, self.card, self.ppm = signal_i16, port, card, ppm
+        self.down = [down] if isinstance(down, tuple) else list(down or [])                    # (t0, t1) seconds, or a list of them
         self.k = 0; self.t = 0.0
-    def is_down(self): return self.down is not None and self.down[0] <= self.t < self.down[1]
+    def is_down(self): return any(a <= self.t < b for a, b in self.down)
 
 
 class FakeSource:
@@ -66,9 +69,13 @@ class Sim:
         self.rec = mcrec.Recorder(self.cfg, env)
         self.bf = self.cfg["block_frames"]
 
-    def run(self, seconds):
-        nb = int(seconds * RATE / self.bf)
-        for k in range(nb):
+    def restart(self, at_s):
+        """Whole-recorder restart: a new Recorder on the same files and env at time at_s (the next run(start=at_s) continues from there)."""
+        self.clock.t = at_s; self.rec = mcrec.Recorder(self.cfg, self.rec.env)
+
+    def run(self, seconds, start=0.0):
+        """Drive blocks from `start` to `seconds` (source time); workers are closed at the end of each call."""
+        for k in range(int(round(start * RATE / self.bf)), int(round(seconds * RATE / self.bf))):
             for w in self.rec.workers:
                 d = self.dev[w.mic["port"]]; d.k = k; d.t = (k + 1) * self.bf / (RATE * (1 + d.ppm * 1e-6))
                 self.clock.t = d.t; w.step()
