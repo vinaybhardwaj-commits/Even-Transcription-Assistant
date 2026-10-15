@@ -1,0 +1,10 @@
+[Unit]
+Description=ENC steward at 10:30 and 22:30 IST
+
+[Timer]
+OnCalendar=*-*-* 10:30:00 Asia/Kolkata
+OnCalendar=*-*-* 22:30:00 Asia/Kolkata
+Persistent=false
+
+[Install]
+WantedBy=timers.target
