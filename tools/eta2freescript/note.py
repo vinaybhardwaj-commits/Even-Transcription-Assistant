@@ -21,20 +21,49 @@ DOSE_ONLY = re.compile(r"^\s*\[dose not stated — doctor to verify\]\s*(\[\?\])
 BRACKET_SPAN = re.compile(r"\s*\[[^\]]*\]")
 
 
-def sanitize_note(note: str) -> str:
+ORDER_HEADINGS = frozenset({"Medication", "Further Investigation", "Refer to", "Follow up", "Surgery or Procedure"})
+
+
+def sanitize_note_ex(note: str) -> tuple[str, list[tuple[str | None, str]]]:
+    """sanitize_note plus what it removed: (text, [(heading, removed span), ...]). The heading is the one the line sits under
+    (a line without its own heading belongs to the last heading seen; None before the first)."""
     out = []
+    removed: list[tuple[str | None, str]] = []
+    cur: str | None = None
     for line in note.split("\n"):
+        spans = [m.group(0).strip() for m in BRACKET_SPAN.finditer(line)]
         line = BRACKET_SPAN.sub("", line)
+        head, sep, body = line.partition(":")
+        if sep and head in HEADINGS:
+            cur = head
+        removed += [(cur, sp) for sp in spans]
         if not line.strip():
             continue
-        head, sep, body = line.partition(":")
         if sep and head in HEADINGS:
             out.append(f"{head}:" if FILLER.match(body) or DOSE_ONLY.match(body) else line.rstrip())
         elif FILLER.match(line):
             continue
         else:
             out.append(line.rstrip())
-    return "\n".join(out)
+    return "\n".join(out), removed
+
+
+def sanitize_note(note: str) -> str:
+    return sanitize_note_ex(note)[0]
+
+
+def span_errors(removed: list[tuple[str | None, str]]) -> list[str]:
+    """FRX-L1: a removed span on an order line, or a removed span that is a dose / slot field word anywhere, rejects the consult.
+    Any other removed span (e.g. a speaker label) keeps the old behaviour and is only counted."""
+    from .validate import _D4_FIELDS  # lazy: validate does not import this module, but keep the import cycle-proof
+
+    heads: list[str] = []
+    for head, span in removed:
+        if head in ORDER_HEADINGS or span.strip("[] \t").lower() in _D4_FIELDS:
+            h = head or "note text"
+            if h not in heads:
+                heads.append(h)
+    return [f"FRX-L1 bracket span removed from {h}" for h in heads]
 
 
 def drop_clauses(text: str, drop) -> str:
