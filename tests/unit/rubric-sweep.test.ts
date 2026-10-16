@@ -12,6 +12,8 @@ const H = vi.hoisted(() => ({
   sql: [] as Array<{ text: string; values: unknown[] }>,
   fsRows: [] as string[],
   done: {} as Record<string, string[]>,
+  doneLab: {} as Record<string, string[]>,
+  ran: {} as Record<string, string[]>,
   today: {} as Record<string, number>,
   open: null as Record<string, unknown> | null,
   dbThrows: false,
@@ -26,7 +28,11 @@ vi.mock("@/lib/db", () => ({
     if (H.dbThrows) return Promise.reject(Object.assign(new Error("down"), { code: "08006" }));
     if (/FROM freescript_latest/.test(text)) return Promise.resolve((values[0] as string[]).filter((u) => H.fsRows.includes(u)).map((u) => ({ consult_uid: u })));
     if (/FROM rubric_result r JOIN rubric_run u/.test(text)) return Promise.resolve([{ n: H.today[String(values[0])] ?? 0 }]);
-    if (/FROM rubric_result WHERE rubric_id/.test(text)) return Promise.resolve((values[2] as string[]).filter((u) => (H.done[String(values[0])] ?? []).includes(u)).map((u) => ({ unit_key: u })));
+    if (/FROM scribe_job j/.test(text)) return Promise.resolve((values[3] as string[]).filter((u) => (H.ran[String(values[1])] ?? []).includes(u)).map((u) => ({ unit_key: u })));
+    if (/FROM rubric_result WHERE rubric_id/.test(text)) {
+      const have = [...(H.done[String(values[0])] ?? []), .../lab = false/.test(text) ? [] : H.doneLab[String(values[0])] ?? []];
+      return Promise.resolve((values[2] as string[]).filter((u) => have.includes(u)).map((u) => ({ unit_key: u })));
+    }
     return Promise.resolve([]);
   }, { transaction: async () => [] }),
 }));
@@ -56,6 +62,7 @@ vi.mock("@/lib/rubrics/blind-room-days", () => ({
 
 import { setLabStoreForTests, ENCOUNTER_CATALOG_KEY, type LabStore } from "@/lib/sarvam-lab";
 import { resetCatalogCacheForTests } from "@/lib/room-access/readers/catalog-consult";
+import { labWritable, labReadable } from "@/lib/sarvam-lab";
 import { runRubricSweep, sweepMode, inBackfillWindow, SWEEP_SUMMARY_KEY, SWEEP_ACTOR, SweepReadError, type SweepSummary } from "@/lib/rubrics/sweep";
 import { GET } from "@/app/api/cron/rubric-sweep/route";
 import { S7_TOOLS } from "@/lib/mcp/tools/s7";
@@ -82,7 +89,7 @@ const keysOf = (i = 0) => (H.submitted[i]!.args as { unit_keys: string[] }).unit
 let logs: string[];
 beforeEach(() => {
   H.rubrics.length = 0; H.rubrics.push({ ...RB });
-  H.sql = []; H.fsRows = []; H.done = {}; H.today = {}; H.open = null; H.dbThrows = false; H.submitted = []; H.submitThrow = {};
+  H.sql = []; H.fsRows = []; H.done = {}; H.doneLab = {}; H.ran = {}; H.today = {}; H.open = null; H.dbThrows = false; H.submitted = []; H.submitThrow = {};
   store.clear(); resetCatalogCacheForTests(); setLabStoreForTests(lab);
   logs = [];
   for (const m of ["log", "warn"] as const) vi.spyOn(console, m).mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
@@ -343,18 +350,67 @@ describe("dry mode and the summary", () => {
     const s: SweepSummary = out.summary;
     expect(Object.keys(s).sort()).toEqual(["at", "backfill_window", "mode", "rubrics"]);
     expect(s.at).toBe(new Date(NOW).toISOString());
-    expect(Object.keys(s.rubrics[0]!).sort()).toEqual(["done", "eligible", "id", "planned", "skipped_reason", "submitted_job_id", "today_units", "version"]);
+    expect(Object.keys(s.rubrics[0]!).sort()).toEqual(["deferred", "done", "eligible", "id", "planned", "skipped_reason", "submitted_job_id", "today_units", "version"]);
     expect(JSON.stringify(s)).not.toMatch(/CONS0001|k\/|room_/);
     expect(logs.join("\n")).not.toMatch(/CONS0001/);
   });
 
-  it("the summary goes to rubric/sweep/last.json; the lab allowlist (lib/sarvam-lab.ts) REFUSES that key today, so the tick succeeds with summary_written false (FLAG, see the report)", async () => {
+  it("F1: the summary key passes the REAL lab allowlist (read and write), the tick writes it, and sweep_status reads the same constant back", async () => {
+    expect(SWEEP_SUMMARY_KEY).toBe("rubric/sweep/1.0.0/last.json");
+    expect(labWritable(SWEEP_SUMMARY_KEY)).toBe(true);
+    expect(labReadable(SWEEP_SUMMARY_KEY)).toBe(true);
     setCatalog([crow("CONS000111", 30)]);
     const out = await runRubricSweep("dry", { now: NOW });
-    expect(SWEEP_SUMMARY_KEY).toBe("rubric/sweep/last.json");
-    expect("summary_written" in out && out.summary_written).toBe(false);
-    expect(store.has(SWEEP_SUMMARY_KEY)).toBe(false);
-    expect(logs.join("\n")).toContain("summary_write_failed");
+    expect("summary_written" in out && out.summary_written).toBe(true);
+    expect(JSON.parse(store.get(SWEEP_SUMMARY_KEY)!.body)).toEqual("summary" in out ? out.summary : null);
+    const tool = S7_TOOLS[0]!;
+    const got = (await tool.handler({ action: "sweep_status" }, { actor: "mcp:admin:tester", origin: "https://example.test", scopes: new Set<McpScope>(["read"]) })) as Row;
+    expect(got).toEqual({ ok: true, last: "summary" in out ? out.summary : null });
+    expect(logs.join("\n")).not.toContain("summary_write_failed");
+  });
+});
+
+describe("F2: done counts production rows only", () => {
+  it("the done statement filters lab = false; a lab row does not make a consult done, a production row does", async () => {
+    setCatalog([crow("CONS000131", 30), crow("CONS000132", 31)]);
+    H.doneLab = { rb_alpha: ["CONS000131"] };
+    H.done = { rb_alpha: ["CONS000132"] };
+    const s = await plan("live");
+    expect(keysOf()).toEqual(["CONS000131"]);
+    expect(s.rubrics[0]).toMatchObject({ eligible: 2, done: 1, planned: 1 });
+    expect(resultsQueries("rb_alpha")[0]!.text).toContain("AND lab = false");
+  });
+});
+
+describe("F3: no starvation, deferred 24 h", () => {
+  it("a key from a finished sweep job in the last 24 h that still has no row is deferred (not planned, counted); a key that has its row is done, not deferred; the next keys are reached", async () => {
+    setCatalog(Array.from({ length: 5 }, (_, i) => crow(`CONS00014${i}`, 30 + i)));
+    H.ran = { rb_alpha: ["CONS000140", "CONS000141", "CONS000142"] };
+    H.done = { rb_alpha: ["CONS000141"] };
+    const s = await plan("live");
+    expect(keysOf()).toEqual(["CONS000143", "CONS000144"]);
+    expect(s.rubrics[0]).toMatchObject({ eligible: 5, done: 1, deferred: 2, planned: 2 });
+  });
+
+  it("ONE bounded scribe_job statement per rubric per tick: kind rubric_run, actor cron:rubric-sweep, this rubric, done or failed, finished within 24 h, only the page's keys", async () => {
+    H.rubrics.push({ ...RB2 });
+    setCatalog([crow("CONS000151", 30), crow("CONS000152", 31)]);
+    await runRubricSweep("dry", { now: NOW });
+    const q = H.sql.filter((x) => /FROM scribe_job j/.test(x.text));
+    expect(q).toHaveLength(2);
+    expect(q[0]!.text).toContain("j.kind = 'rubric_run'");
+    expect(q[0]!.text).toContain("j.status IN ('done', 'failed')");
+    expect(q[0]!.text).toContain("j.finished_at > now() - make_interval(hours => ?::int)");
+    expect(q.map((x) => x.values.slice(0, 3))).toEqual([[SWEEP_ACTOR, "rb_alpha", 24], [SWEEP_ACTOR, "rb_beta", 24]]);
+    expect(q[0]!.values[3]).toEqual(["CONS000151", "CONS000152"]);
+  });
+
+  it("when every candidate is deferred nothing is planned and the reason is nothing_to_do", async () => {
+    setCatalog([crow("CONS000161", 30)]);
+    H.ran = { rb_alpha: ["CONS000161"] };
+    const s = await plan("live");
+    expect(s.rubrics[0]).toMatchObject({ eligible: 1, deferred: 1, planned: 0, skipped_reason: "nothing_to_do" });
+    expect(H.submitted).toEqual([]);
   });
 });
 
