@@ -9,6 +9,7 @@ vi.mock("@/lib/fleet/device-auth", async (orig) => ({ ...(await orig<Record<stri
 const isTwinLookup = (a: unknown[]): boolean => Array.isArray(a[0]) && (a[0] as string[]).join("?").match(/SELECT machine, kind, source, ts(, twin_source, twin_ts(, boot_id, seq)?)? FROM kiosk_health_(events|dedupe)/) !== null;
 vi.mock("@/lib/db", () => ({ sql: (...a: unknown[]) => (isTwinLookup(a) ? Promise.resolve([]) : M.sql(...a)) }));
 
+import { createHash } from "crypto";
 import { POST } from "@/app/api/kiosk-health/route";
 import { NextRequest } from "next/server";
 
@@ -202,5 +203,98 @@ describe("POST /api/kiosk-health — Authorization: Device <device JWS> (TS-H10 
     M.sql.mockResolvedValueOnce(idsFor(1));
     expect((await POST(post({ events: [ev(1, { machine: "anything-at-all" })] }))).status).toBe(200);
     expect(M.auth).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("POST /api/kiosk-health — Bearer poller token via KIOSK_HEALTH_POLLER_TOKEN_SHA256 (mic-guard poller, scoped)", () => {
+  const POLLER = ["t", "poller", "fixture"].join("-");
+  const SAVED_POLLER = process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256_SHA256;
+  const HASH = createHash("sha256").update(POLLER).digest("hex");
+  const pev = (seq: number, o: Record<string, unknown> = {}) => ev(seq, { source: "mini_micguard_poller", kind: "mic_guard", ...o });
+  const asPoller = (body: unknown) => post(body, `Bearer ${POLLER}`);
+  const reasons = (j: unknown) => ((j as { rejected_reasons: Array<{ reason: string }> }).rejected_reasons).map((r) => r.reason);
+  beforeEach(() => { process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256 = HASH; });
+  afterEach(() => { if (SAVED_POLLER === undefined) delete process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256; else process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256 = SAVED_POLLER; });
+
+  it("the daemon token still works with the poller token set", async () => {
+    M.sql.mockResolvedValueOnce(idsFor(1));
+    expect(await (await POST(post({ events: [ev(1)] }))).json()).toMatchObject({ ok: true, accepted: 1, rejected: 0 });
+  });
+
+  it("poller token + a mic_guard/mini_micguard_poller row is accepted", async () => {
+    M.sql.mockResolvedValueOnce(idsFor(1));
+    const res = await POST(asPoller({ events: [pev(1)] }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, accepted: 1, rejected: 0 });
+  });
+
+  it("another source is rejected wrong_source; the right source with another kind is wrong_kind; nothing is stored", async () => {
+    const a = await POST(asPoller({ events: [pev(1, { source: "daemon" })] }));
+    expect(a.status).toBe(200);
+    const ja = await a.json();
+    expect(ja).toMatchObject({ accepted: 0, rejected: 1 });
+    expect(reasons(ja)).toEqual(["wrong_source"]);
+    const jb = await (await POST(asPoller({ events: [pev(2, { kind: "heartbeat" })] }))).json();
+    expect(jb).toMatchObject({ accepted: 0, rejected: 1 });
+    expect(reasons(jb)).toEqual(["wrong_kind"]);
+    expect(M.sql).not.toHaveBeenCalled();
+  });
+
+  it("a mixed batch keeps only the allowed rows", async () => {
+    M.sql.mockImplementation(async (_t: string, p: unknown[]) => idsFor(p.length / 9));
+    const j = await (await POST(asPoller({ events: [pev(1), pev(2, { source: "helper" }), pev(3), pev(4, { kind: "power.sleep" })] }))).json();
+    expect(j).toMatchObject({ accepted: 2, rejected: 2 });
+    expect(reasons(j).sort()).toEqual(["wrong_kind", "wrong_source"]);
+    const params = (M.sql.mock.calls[0] as [string, unknown[]])[1];
+    expect(params.length / 9).toBe(2);
+  });
+
+  it("a steward.result row from the poller is rejected and never reaches applyStewardResults", async () => {
+    const j = await (await POST(asPoller({ events: [pev(1, { kind: "steward.result", payload: { ticket_id: "t1", nonce: "n1", outcome: "done" } })] }))).json();
+    expect(j).toMatchObject({ accepted: 0, rejected: 1 });
+    expect(reasons(j)).toEqual(["wrong_kind"]);
+    expect(M.sql).not.toHaveBeenCalled(); // applyStewardResults would have queried; the row was never stored
+  });
+
+  it("a wrong token is 401 with the poller token set and with it unset", async () => {
+    expect((await POST(post({ events: [pev(1)] }, "Bearer nope"))).status).toBe(401);
+    delete process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256;
+    expect((await POST(post({ events: [pev(1)] }, "Bearer nope"))).status).toBe(401);
+    expect(M.sql).not.toHaveBeenCalled();
+  });
+
+  it("an unset or blank poller env makes the poller value a 401", async () => {
+    delete process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256;
+    expect((await POST(asPoller({ events: [pev(1)] }))).status).toBe(401);
+    process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256 = "  \n";
+    expect((await POST(asPoller({ events: [pev(1)] }))).status).toBe(401);
+    expect(M.sql).not.toHaveBeenCalled();
+  });
+
+  it("a non-hex or wrong-length hash env turns the poller path off (401)", async () => {
+    for (const bad of [POLLER, "zz".repeat(32), HASH.slice(0, 63), HASH + "0"]) {
+      process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256 = bad;
+      expect((await POST(asPoller({ events: [pev(1)] }))).status).toBe(401);
+    }
+    expect(M.sql).not.toHaveBeenCalled();
+  });
+
+  it("the hash itself is not a bearer credential, and a prefix other than Bearer is refused", async () => {
+    expect((await POST(post({ events: [pev(1)] }, `Bearer ${HASH}`))).status).toBe(401);
+    expect((await POST(post({ events: [pev(1)] }, `bearer ${POLLER}`))).status).toBe(401);
+    expect(M.sql).not.toHaveBeenCalled();
+  });
+
+  it("the daemon token unset with the poller set is still 500 not_configured", async () => {
+    delete process.env.KIOSK_HEALTH_INGEST_TOKEN;
+    const res = await POST(asPoller({ events: [pev(1)] }));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ ok: false, error: "not_configured" });
+  });
+
+  it("a poller token saved with a trailing newline still matches", async () => {
+    process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256 = `${HASH}\n`;
+    M.sql.mockResolvedValueOnce(idsFor(1));
+    expect((await POST(asPoller({ events: [pev(1)] }))).status).toBe(200);
   });
 });
