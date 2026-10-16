@@ -11,8 +11,20 @@ from test_subscriber import CAEnv
 NIGHT_T = datetime(2026, 10, 16, 23, 0, tzinfo=ar.IST).timestamp()          # a night run, outside the clinic and the V window
 
 
+def night_ts(night, hour=23):
+    """A ts inside the given IST night (default 23:00 IST on that date)."""
+    return int(datetime.strptime(night, "%Y%m%d").replace(hour=hour, tzinfo=ar.IST).timestamp())
+
+
+def safe_ts(night):
+    try:
+        return night_ts(night)
+    except ValueError:                       # an impossible date: the test passes its own ts
+        return 1760000000
+
+
 def line(result, night="20261016", room="r1", **kw):
-    d = {"room_id": room, "install_id": "inst-1", "ts": 1760000000, "action": "canary", "night": night, "result": result, "mode": "heal",
+    d = {"room_id": room, "install_id": "inst-1", "ts": safe_ts(night), "action": "canary", "night": night, "result": result, "mode": "heal",
          "pre_db": -60.0, "burst_db": -40.5, "rise_db": 19.5, "volume": 0.3, "output": "Built-in Output"}
     d.update(kw); return d
 
@@ -77,6 +89,12 @@ class Routing(unittest.TestCase):
     def test_would_do_is_stored_and_never_a_case(self):
         e = Env(); self.assertTrue(e.canary(line("would_do", mode="shadow"))); self.assertEqual(e.kinds(), []); self.assertEqual(len(e.stored()), 1)
         self.assertEqual(e.router.tick(e.bus)["paged"], 0); self.assertEqual(e.invalid(), [])
+
+    def test_would_do_writes_one_audit_line_each(self):
+        e = Env(); e.canary(line("would_do", mode="shadow")); e.canary(line("would_do", mode="shadow", night="20261017"))
+        a = [json.loads(l) for dp, _d, fs in os.walk(e.sub.data) for f in fs if f == "r1.canary-audit.jsonl" for l in open(os.path.join(dp, f))]
+        self.assertEqual([(x["event"], x["night"]) for x in a], [("would_do", "20261016"), ("would_do", "20261017")]); self.assertEqual(set(a[0]), {"ts", "room", "event", "night"})
+        self.assertEqual(len(e.stored()), 2); self.assertEqual(e.kinds(), [])
 
     def test_pass_closes_every_open_canary_case_of_that_room_only(self):
         e = Env()
@@ -192,6 +210,79 @@ class Validation(unittest.TestCase):
         e = Env(); e.canary(dict(line("no_local_rise"), install_id="SECRET-ID", extra=1)); self.assertNotIn("SECRET-ID", json.dumps(e.invalid())); self.assertEqual(set(e.invalid()[0]), {"ts", "room", "why"})
 
 
+class NightRules(unittest.TestCase):
+    """MUST-1 (calendar), SHOULD-2 (night bound to ts), SHOULD-1 (overflow), the stale pass."""
+    def refused(self, e, obj, why="night", room="r1"):
+        e.canary(obj, room=room); self.assertEqual(e.kinds(room), [], obj["night"])
+        inv = e.invalid(room); self.assertEqual(inv[-1]["why"], why, obj["night"]); return inv
+
+    def test_impossible_calendar_dates_are_refused_with_an_audit_line_and_no_case(self):
+        for n in ("20260231", "20260230", "20260431", "20250229", "20261301", "20260100", "20260001"):
+            for res in ("no_local_rise", "inconclusive:output_absent", "inconclusive:tape_short", "pass"):
+                with self.subTest(f'{n} {res}'):
+                    e = Env(); self.refused(e, line(res, night=n, ts=night_ts("20261016")))
+                    self.assertEqual(len(e.invalid()), 1)
+        e = Env(); e.canary(line("no_local_rise", night="20260231", ts=night_ts("20261016"))); e.canary(line("inconclusive:output_absent", night="20260231", ts=night_ts("20261016")))
+        self.assertFalse(os.path.exists(os.path.join(e.sub.data, "canary-state.json")))                    # nothing was recorded for a refused line
+
+    def test_a_real_leap_day_is_accepted(self):
+        e = Env(); e.canary(line("no_local_rise", night="20240229", ts=night_ts("20240229"))); self.assertEqual(e.kinds(), ["canary_failed"])
+
+    def test_a_poisoned_state_file_is_cleaned_on_load_and_real_nights_still_escalate(self):
+        e = Env()
+        json.dump({"r1": {"absent_night": "20260231", "opened": {"canary_inconclusive": "20260231", "canary_failed": "20261015", "bogus_kind": "20261015"}}, "r2": "junk", "r3": {"opened": 5}},
+                  open(os.path.join(e.sub.data, "canary-state.json"), "w"))
+        sub2 = sb.Subscriber(e.sub.data, e.tmp.name, ["r1", "r2"], sb.RouterSink(e.router), e.clock)          # never raises
+        self.assertEqual(sub2.canary.state["r1"], {"opened": {"canary_failed": "20261015"}, "absent_night": None})
+        audit = [json.loads(l) for l in open(os.path.join(e.sub.data, "canary-state-audit.jsonl"))]
+        self.assertEqual({(a["field"], a["room"]) for a in audit}, {("opened", "r1"), ("absent_night", "r1")}); self.assertGreaterEqual(len(audit), 3)
+        for n in ("20261016", "20261017"): sub2.on_line("kiosk/r1/canary", json.dumps(line("inconclusive:output_absent", night=n)))
+        self.assertEqual(e.kinds(), ["canary_inconclusive", "canary_output_absent"])
+
+    def test_an_unreadable_state_file_never_raises(self):
+        e = Env(); open(os.path.join(e.sub.data, "canary-state.json"), "w").write("{not json")
+        sub2 = sb.Subscriber(e.sub.data, e.tmp.name, ["r1"], sb.RouterSink(e.router), e.clock); self.assertEqual(sub2.canary.state, {})
+
+    def test_night_is_the_ist_night_of_ts_give_or_take_a_day(self):
+        self.assertEqual(cr.ist_night_of(night_ts("20261016", 23)), "20261016"); self.assertEqual(cr.ist_night_of(night_ts("20261017", 2)), "20261016")
+        self.assertEqual(cr.ist_night_of(night_ts("20261017", 11)), "20261016"); self.assertEqual(cr.ist_night_of(night_ts("20261017", 12)), "20261017")
+        e = Env(); self.refused(e, line("no_local_rise", night="20991231", ts=night_ts("20261016")), "night_ts"); self.refused(e, line("no_local_rise", night="20200101", ts=night_ts("20261016")), "night_ts")
+        self.refused(e, line("no_local_rise", night="20261018", ts=night_ts("20261016")), "night_ts"); self.refused(e, line("no_local_rise", night="20261013", ts=night_ts("20261016")), "night_ts")
+
+    def test_cross_midnight_runs_are_right(self):
+        for hour_date, night, ok in (("20261016", "20261016", True),            # 23:00 on the 16th is the night of the 16th
+                                      ("20261017", "20261016", True),            # 02:00 on the 17th is still the night of the 16th
+                                      ("20261017", "20261017", True),            # 02:00 on the 17th with the next night: +1 day is allowed
+                                      ("20261016", "20261015", True),            # -1 day is allowed
+                                      ("20261017", "20261014", False), ("20261016", "20261018", False)):
+            with self.subTest(f'{hour_date} {night}'):
+                e = Env(); hour = 23 if hour_date == "20261016" else 2
+                e.canary(line("no_local_rise", night=night, ts=night_ts(hour_date, hour))); self.assertEqual(e.kinds(), ["canary_failed"] if ok else [])
+
+    def test_a_far_future_night_cannot_freeze_the_streak(self):
+        e = Env(); e.canary(line("inconclusive:output_absent", night="20991231", ts=night_ts("20261016")))
+        for n in ("20261016", "20261017", "20261018"): e.canary(line("inconclusive:output_absent", night=n))
+        self.assertIn("canary_output_absent", e.kinds())
+
+    def test_huge_numbers_are_refused_with_an_audit_line_and_no_raise(self):
+        for field in ("ts", "pre_db", "burst_db", "rise_db", "volume"):
+            raw = json.dumps(line("no_local_rise")).replace(f'"{field}": {json.dumps(line("no_local_rise")[field])}', f'"{field}": 1' + "0" * 400)
+            self.assertIn("0" * 400, raw)
+            e = Env(); self.assertTrue(e.canary(None, raw=raw)); self.assertEqual(e.kinds(), [])
+            self.assertEqual(e.invalid()[-1]["why"], "ts" if field == "ts" else "number_field", field)
+        self.assertFalse(cr._num(10 ** 400)); self.assertFalse(cr._num(-(10 ** 400))); self.assertFalse(cr._num(2 ** 63)); self.assertTrue(cr._num(2 ** 63 - 1)); self.assertFalse(cr._num(float("inf")))
+
+    def test_a_pass_closes_a_case_only_if_its_night_is_not_older(self):
+        e = Env(); e.canary(line("no_local_rise", night="20261016")); e.canary(line("inconclusive:tape_short", night="20261016"))
+        e.canary(line("pass", night="20261015")); self.assertEqual(e.kinds(), ["canary_failed", "canary_inconclusive"])       # a stale pass closes nothing
+        e.canary(line("pass", night="20261016")); self.assertEqual(e.kinds(), [])                                           # the same night closes
+        e.canary(line("no_local_rise", night="20261017")); e.canary(line("pass", night="20261018")); self.assertEqual(e.kinds(), [])   # a later night closes
+
+    def test_a_stale_pass_does_not_break_the_streak(self):
+        e = Env(); e.canary(line("inconclusive:output_absent", night="20261016")); e.canary(line("pass", night="20261015"))
+        e.canary(line("inconclusive:output_absent", night="20261017")); self.assertIn("canary_output_absent", e.kinds())
+
+
 class Shadow(unittest.TestCase):
     def test_a_canary_line_only_opens_or_closes_cases_never_acts(self):
         class Spy:
@@ -199,8 +290,7 @@ class Shadow(unittest.TestCase):
             def __getattr__(self, n): return lambda *a, **k: self.calls.append(n)
         spy = Spy(); s = sb.Subscriber(os.path.join(Env().tmp.name, "d"), "/tmp", ["r1"], spy, lambda: NIGHT_T)
         for r in ("pass", "would_do", "no_local_rise", "inconclusive:output_absent"): s.on_line("kiosk/r1/canary", json.dumps(line(r)))
-        self.assertEqual(set(spy.calls) - {"canary_case", "canary_pass"}, set())
-        self.assertEqual(sorted(set(spy.calls)), ["canary_case", "canary_pass"])
+        self.assertEqual(sorted(set(spy.calls)), ["canary_case", "canary_close"])
 
 
 def rec_line(reason, severity="page", shadow=False, **kw):

@@ -272,10 +272,9 @@ class RouterSink:
     def canary_case(self, room, kind, now):
         self._open(room, kind, now)
 
-    def canary_pass(self, room, now):
-        """A canary pass closes the room's open canary cases (failed, inconclusive, output_absent)."""
-        for k in ("canary_failed", "canary_inconclusive", "canary_output_absent"):
-            self.router.close_room(None, room, "canary pass", kind=k)
+    def canary_close(self, room, kind, now):
+        """A canary pass closes this canary case of the room (CanaryRoute decides which kinds, by night)."""
+        self.router.close_room(None, room, "canary pass", kind=kind)
 
     def capture_recovered(self, room, now):
         """Health zero_ratio back under 0.05: close the audio cases of this room. recorder_changed is NOT closed here (audio back says nothing about the recorder)."""
@@ -291,7 +290,7 @@ class Subscriber:
         self.usb_verify = usb_verify                          # the F2 Mini verify (always on once a healed_pending line arrives)
         self.usb_missing = set(usb_missing_seed) & set(self.rooms)   # rooms with an open usb_device_missing case: closed by a health line with usb_mic_present true
         self.last_health = {}                                 # room -> (receive time, obj) of the newest health line
-        self.canary = CanaryRoute(sink, os.path.join(data_dir, "canary-state.json"))     # FR1-C5: SHADOW, alerts only (see canary_route.py)
+        self.canary = CanaryRoute(sink, os.path.join(data_dir, "canary-state.json"), data_dir)     # FR1-C5: SHADOW, alerts only (see canary_route.py)
         os.makedirs(data_dir, exist_ok=True)
         t0 = clock()
         self.last_seen = {r: t0 for r in self.rooms}
