@@ -250,7 +250,7 @@ suite("JEV-EVERY-CONSULT S1 — every transcribed consult, record-only", () => {
     expect(c.ist_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(Object.keys(c).sort()).toEqual(["clef_done", "cut", "ist_date", "jev_done", "no_state", "transcribed"]);
     const h = await jevHealth();
-    expect(h.coverage).toEqual(c);
+    expect(h.coverage).toEqual({ ...c, backfill_since: "off" });
   });
 
   const setRef = async () => {
@@ -292,7 +292,7 @@ suite("JEV-EVERY-CONSULT S1 — every transcribed consult, record-only", () => {
     pg.exec(`ALTER TABLE encounter_catalog RENAME TO encounter_catalog_x`);
     try {
       const h = await jevHealth();
-      expect(h.coverage).toEqual({ unavailable: true });
+      expect(h.coverage).toEqual({ unavailable: true, backfill_since: "off" });
       expect(h.uses.length).toBeGreaterThan(0);
       expect(h.budget).toBeDefined();
     } finally { pg.exec(`ALTER TABLE encounter_catalog_x RENAME TO encounter_catalog`); }

@@ -34,6 +34,13 @@ export function parseBackfillSince(raw: string | undefined, nowMs: number = Date
   return v > todayIst ? null : v;
 }
 
+export type BackfillSinceState = "off" | "on" | "bad";
+/** off = unset or empty after trim; on = parses; bad = set to something the parser rejects. Never returns or logs the value. */
+export function backfillSinceState(raw: string | undefined, nowMs: number = Date.now()): BackfillSinceState {
+  if ((raw ?? "").trim() === "") return "off";
+  return parseBackfillSince(raw, nowMs) === null ? "bad" : "on";
+}
+
 /** JEV_CONSULT_BACKFILL_SINCE: the Jev sweeper's second pass lower bound (IST date), or null = OFF. */
 export function jevBackfillSince(nowMs: number = Date.now()): string | null {
   return parseBackfillSince(process.env.JEV_CONSULT_BACKFILL_SINCE, nowMs);
@@ -57,6 +64,7 @@ export async function allTranscribedConsults(limit: number, ctx?: { sha: string;
   const sha = ctx?.sha ?? null, mode = ctx?.mode ?? "shadow";
   const live = await selectTranscribedConsults(n, days, sha, mode, CONSULT_SUBJECT_TYPE);
   const since = jevBackfillSince(nowMs);
+  if (since === null && backfillSinceState(process.env.JEV_CONSULT_BACKFILL_SINCE, nowMs) === "bad") console.info("jev consult backfill_since=bad");
   if (since === null || live.length >= n) return live;
   // pass 2: only capacity the live window leaves unused, from the half-open range [since 00:00 IST, start of the pass-1 window)
   const b = backfillBounds(nowMs, days, since);

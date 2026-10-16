@@ -17,7 +17,7 @@ import { QUESTION_SET_FILES } from "@/jev/question-sets";
 import { selectC4Candidates, selectC4CandidatesBefore, selectClefPicks, selectCurrentSets, selectJevPicks, type Candidate, type ClefPick, type CurrentSet, type Cursor, type JevPick } from "@/lib/room-access/catalog-c4-select";
 import { canonicalJson } from "./canonical";
 import { classifyDbError } from "./errors";
-import { backfillBounds, parseBackfillSince } from "./consult-eligible";
+import { backfillBounds, backfillSinceState, parseBackfillSince, type BackfillSinceState } from "./consult-eligible";
 import { catalogC4SyncEnabled } from "./flags";
 import { validateSetFile, type QuestionSetFile } from "./sets";
 
@@ -34,7 +34,7 @@ export const CATALOG_SYNC_HARD_MS = 35_000;
 export const CATALOG_SYNC_STATEMENT_TIMEOUT_MS = 15_000;
 /** FIX1 F1: the second scan starts at slot (floor(now/5 min) mod K) of K equal slices of [lo, hi), so successive ticks sweep the whole backfill range instead of re-reading its oldest end. */
 export const BACKFILL_ROTATE_SLOTS = 8;
-const ROTATE_TICK_MS = 5 * 60_000;
+export const ROTATE_TICK_MS = 5 * 60_000;
 const PAGE = 500;
 const MAX_PAGES = 10;
 /** Same shape as store.ts TOKEN (INFERRED: store.ts does not export it, and this slice may not edit it). The final gate is validateBatch either way. */
@@ -45,9 +45,10 @@ export type CatalogCounts = {
   posted: number; updated: number; inserted: number; stale: number; unchanged: number;
   skipped_off_enum: number; skipped_bad_token: number; budget_hit: boolean; capped: number;
   missing: number; retried: number; retired: number; invariant_dropped: number; error_class: string | null;
+  since_state: BackfillSinceState;   // CATALOG_C4_BACKFILL_SINCE: "off" (unset/empty) | "on" | "bad" (set but rejected by the parser; value never logged)
   backfill_rows: number;      // rows from the CATALOG_C4_BACKFILL_SINCE second scan that were actually posted (0 when OFF, or when the step ended before the ingest)
 };
-export const zeroCounts = (): CatalogCounts => ({ posted: 0, updated: 0, inserted: 0, stale: 0, unchanged: 0, skipped_off_enum: 0, skipped_bad_token: 0, budget_hit: false, capped: 0, missing: 0, retried: 0, retired: 0, invariant_dropped: 0, error_class: null, backfill_rows: 0 });
+export const zeroCounts = (): CatalogCounts => ({ posted: 0, updated: 0, inserted: 0, stale: 0, unchanged: 0, skipped_off_enum: 0, skipped_bad_token: 0, budget_hit: false, capped: 0, missing: 0, retried: 0, retired: 0, invariant_dropped: 0, error_class: null, since_state: "off", backfill_rows: 0 });
 
 type Kind = "choice" | "noul" | "score";
 type QDef = { kind: Kind; options: Set<string> | null; levels: number };
@@ -217,11 +218,14 @@ export async function runCatalogC4Sync(now: () => number = Date.now, stmtTimeout
   const limit = (): number => { const left = hardDeadline - now(); if (left <= 0) throw new HardDeadlineError(); return Math.min(stmtTimeoutMs, left); };
   const scan = { pages: 0, candidates_scanned: 0 };
   try {
-    const wallMs = Date.now();      // the IST boundaries are real time (they meet the database's clock); `now` may be a test's virtual clock and only drives the rotation slot
+    const wallMs = Date.now();
+      // the IST boundaries are real time (they meet the database's clock); `now` may be a test's virtual clock and only drives the rotation slot
+    c.since_state = backfillSinceState(process.env.CATALOG_C4_BACKFILL_SINCE, wallMs);
     await runStep(c, scan, overBudget, limit, catalogC4BackfillSince(wallMs), wallMs, Math.floor(t0 / ROTATE_TICK_MS));
   } catch (e) {
     c.error_class = e instanceof StatementTimeoutError ? "statement_timeout" : e instanceof ConcurrentIngestError ? "concurrent_insert" : classifyDbError(e);
   }
+  if (c.since_state === "bad" && c.error_class === null) c.error_class = "bad_since";
   console.info(`catalog_c4 tick ${JSON.stringify({ ...c, ms: Math.max(0, now() - t0) })}`);
   console.info(`catalog_c4 ceiling ${JSON.stringify({ pages: scan.pages, candidates_scanned: scan.candidates_scanned, max_pages: MAX_PAGES, page_size: PAGE })}`);
   return c;
