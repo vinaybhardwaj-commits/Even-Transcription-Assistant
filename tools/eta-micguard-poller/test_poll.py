@@ -287,6 +287,14 @@ class RunOnce(unittest.TestCase):
         self.assertNotIn("EVILVALUE", out)
         self.assertNotIn("EVILROOM", out)
 
+    def test_target_regex_rejects_leading_dash_and_metachars(self):
+        for bad in ("-oProxyCommand=x@h", "u@-h", "u@h;rm", "u@h $(x)", "@h", "u@"):
+            self.assertIsNone(poll._TARGET_RE.match(bad), bad)
+        self.assertIsNotNone(poll._TARGET_RE.match("user_1.a@kiosk-a.example"))
+
+    def test_default_url_is_www(self):
+        self.assertTrue(poll.DEFAULT_URL.startswith("https://www."))
+
     def test_load_config_validation_rules(self):
         with open(self.cfg, "w") as fh:
             json.dump([{"room_id": "r1", "machine": "bad machine!", "ssh": TARGET}, {"room_id": "r1", "machine": "m", "ssh": "user@host;rm", "installed": True},

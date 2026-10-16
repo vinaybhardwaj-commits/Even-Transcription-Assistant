@@ -10,8 +10,8 @@ import type { ExtHealthRow } from "@/lib/encounter-windows/ext-health";
 const NOW = Date.parse("2026-10-06T05:30:00.000Z"); // 11:00 IST, clinic hours
 const AS_OF = new Date(NOW).toISOString();
 const ago = (s: number) => new Date(NOW - s * 1000).toISOString();
-const OPD_INSTALLED = "EHRC-OPD6s-Mac-mini";
-const OPD_NOT_INSTALLED = "EHRC-OPD5s-Mac-mini";
+const OPD_INSTALLED = "kiosk-fixture-a";
+const OPD_NOT_INSTALLED = "kiosk-fixture-b";
 const POLLER = "mini_micguard_poller";
 
 function pollerRows(machine: string, state: string) {

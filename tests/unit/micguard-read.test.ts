@@ -43,7 +43,7 @@ import { readRoomsLive } from "@/lib/admin/rooms-live";
 const NOW = Date.parse("2026-10-16T06:00:00.000Z"); // 11:30 IST
 const ago = (s: number, base = NOW) => new Date(base - s * 1000).toISOString();
 const rowAt = (payload: Row, tsIso: string, rn = 1) => ({ room_id: "room_a", ts: tsIso, received_at: tsIso, payload, rn });
-const row = (payload: Row, receivedAgoS = 30, base = NOW): { room_id: string; ts: string; received_at: string; payload: Row } => ({
+const row = (payload: Row, receivedAgoS = 30, base = NOW): { room_id: string; ts: string; received_at: string; payload: Row; rn: number } => ({
   room_id: "room_a", ts: ago(receivedAgoS, base), received_at: ago(receivedAgoS, base), payload, rn: 1,
 });
 const pl = (state: string, over: Row = {}): Row => ({ state, reason: null, last_line_at: ago(20), age_s: 20, restored_today: 0, last_restored_at: null, ...over });

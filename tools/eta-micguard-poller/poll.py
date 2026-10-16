@@ -35,7 +35,7 @@ IST_OFFSET = "+05:30"   # the guard writes local (IST) wall-clock stamps
 
 DEFAULT_CONFIG = "~/.config/eta-micguard/kiosks.json"
 DEFAULT_STATE = "~/.local/state/eta-micguard/state.json"
-DEFAULT_URL = "https://evenscribe.app/api/kiosk-health"
+DEFAULT_URL = "https://www.evenscribe.app/api/kiosk-health"   # the apex 307-redirects, and urllib does not follow a POST redirect
 DEFAULT_CRED_PATH = "~/.claude/secrets/kiosk_health_ingest_token"
 
 # Fixed, read-only. Prints: LAST <line> | NOFILE, MTIME <epoch>, NOW <epoch>, RESTORED <stamp>*.
@@ -48,7 +48,7 @@ REMOTE_COMMAND = (
 
 # The rooms the board knows (lib/rooms-live/rooms.ts). A config room_id outside this list is skipped. MICGUARD_ROOMS (comma list) replaces it.
 KNOWN_ROOMS = ("room_yh3etjpf", "room_87frpus9", "room_ux92qpws", "room_4ggnkg5x", "room_pnyc9u49", "room_qyzghzaf", "room_ymch4bxu", "room_bh6jtq4t")
-_TARGET_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.:-]+$")
+_TARGET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.:-]*$")   # no leading "-" (ssh option injection)
 _MACHINE_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 STATES = ("ok", "restored", "read_error", "missing", "write_failed", "db_missing", "stale", "not_installed")

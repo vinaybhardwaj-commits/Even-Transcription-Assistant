@@ -19,7 +19,7 @@ A room posts when its state, reason or restored_today changed, or its last post 
 ## Setup
 1. Copy `kiosks.example.json` to `~/.config/eta-micguard/kiosks.json` (or set `MICGUARD_KIOSKS`) and fill in your own rooms. Keep it out of git.
 2. Put the ingest token in a 0600 file at `~/.claude/secrets/kiosk_health_ingest_token` (or set `MICGUARD_TOKEN_FILE`). If the file is missing the poller logs and exits 0 without posting.
-3. Optional: `MICGUARD_INGEST_URL` (default `https://evenscribe.app/api/kiosk-health`), `MICGUARD_STATE` (default `~/.local/state/eta-micguard/state.json`).
+3. Optional: `MICGUARD_INGEST_URL` (default `https://www.evenscribe.app/api/kiosk-health`), `MICGUARD_STATE` (default `~/.local/state/eta-micguard/state.json`).
 4. Copy `com.eta.micguard-poller.plist.example` to `~/Library/LaunchAgents/`, fix the paths, `launchctl load` it. It runs `poll.py --once` every 60 s.
 
 ## Test
