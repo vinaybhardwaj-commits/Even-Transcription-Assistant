@@ -290,7 +290,7 @@ class Subscriber:
         self.usb_verify = usb_verify                          # the F2 Mini verify (always on once a healed_pending line arrives)
         self.usb_missing = set(usb_missing_seed) & set(self.rooms)   # rooms with an open usb_device_missing case: closed by a health line with usb_mic_present true
         self.last_health = {}                                 # room -> (receive time, obj) of the newest health line
-        self.canary = CanaryRoute(sink, os.path.join(data_dir, "canary-state.json"), data_dir)     # FR1-C5: SHADOW, alerts only (see canary_route.py)
+        self.canary = CanaryRoute(sink, os.path.join(data_dir, "canary-state.json"), data_dir, clock)     # FR1-C5: SHADOW, alerts only (see canary_route.py)
         os.makedirs(data_dir, exist_ok=True)
         t0 = clock()
         self.last_seen = {r: t0 for r in self.rooms}

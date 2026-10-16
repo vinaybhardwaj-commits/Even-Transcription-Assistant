@@ -33,7 +33,10 @@ class Env(CAEnv):
     def __init__(self, t0=NIGHT_T, **kw):
         super().__init__(t0, **kw)
 
-    def canary(self, obj, room="r1", raw=None):
+    def canary(self, obj, room="r1", raw=None, sync=True):
+        """sync: the Mini clock is set to the line's own ts first, as with a kiosk whose clock agrees with the Mini's. sync=False leaves the clock alone (a skewed kiosk)."""
+        if sync and isinstance(obj, dict) and isinstance(obj.get("ts"), int) and 0 < obj["ts"] < 4e9:
+            self.clock.t = obj["ts"]
         return self.sub.on_line(f"kiosk/{room}/canary", raw if raw is not None else json.dumps(obj))
 
     def kinds(self, room="r1"):
@@ -318,12 +321,6 @@ class ReplayAndAudit(unittest.TestCase):
         for n in ("20261014", "20261015", "20261016", "20261015", "20261014"): e.canary(line("no_local_rise", night=n))
         self.assertEqual(e.sub.canary.state["r1"]["opened"]["canary_failed"], "20261016")
 
-    def test_a_ts_more_than_36_h_from_the_mini_clock_is_audited_and_handled_as_before(self):
-        e = Env()                                                                            # the Mini clock is 16 Oct 23:00 IST
-        e.canary(line("no_local_rise", night="20261020")); self.assertEqual(e.kinds(), ["canary_failed"])     # acted on as before ...
-        far = [a for a in self.audit(e) if a["event"] == "ts_far"]; self.assertEqual(len(far), 1); self.assertEqual(far[0]["night"], "20261020")      # ... and audited
-        e2 = Env(); e2.canary(line("no_local_rise", night="20261017")); self.assertEqual([a for a in self.audit(e2) if a["event"] == "ts_far"], [])     # 24 h: not far
-
     def test_na_the_loader_audits_each_dropped_entry_and_a_non_dict_file(self):
         for body, want in (('{"r1": "garbage", "r2": 5, "r3": ["x"]}', {("entry", "r1"), ("entry", "r2"), ("entry", "r3")}), ('["list"]', {("file", "-")}), ('"str"', {("file", "-")}),
                            ("null", {("file", "-")}), ('{"r1": {"opened": 5, "absent_night": "20261016"}}', {("opened", "r1")})):
@@ -350,6 +347,77 @@ class ReplayAndAudit(unittest.TestCase):
             with self.subTest(ts):
                 e = Env(); e.canary(line("no_local_rise", ts=ts)); self.assertEqual(e.kinds(), []); self.assertEqual(e.invalid()[-1]["why"], "ts")
         self.assertIsNone(cr.ist_night_of(10 ** 15))
+
+
+H36 = 36 * 3600
+
+
+def skew_line(result, ts, **kw):
+    """A kiosk line whose ts and night agree with each other (a real producer with a skewed clock), whatever the Mini clock says."""
+    return line(result, night=cr.ist_night_of(ts), ts=ts, **kw)
+
+
+class ClockSkew(unittest.TestCase):
+    """R4 MUST-1: a ts more than 36 h from the Mini clock (either direction) is stored and audited ONLY; it moves no state. Exactly 36 h acts, 36 h + 1 s does not."""
+    def far_audits(self, e):
+        return [a for dp, _d, fs in os.walk(e.sub.data) for f in fs if f == "r1.canary-audit.jsonl" for l in open(os.path.join(dp, f)) for a in [json.loads(l)] if a["event"] == "ts_far"]
+
+    def genuine_week(self, e):
+        """7 genuine nights from the Mini's own clock: every fail opens canary_failed, every pass closes it."""
+        for i in range(7):
+            night = (datetime.strptime("20261016", "%Y%m%d") + __import__("datetime").timedelta(days=i)).strftime("%Y%m%d")
+            e.canary(line("no_local_rise", night=night)); self.assertEqual(e.kinds(), ["canary_failed"], night)
+            e.canary(line("pass", night=night)); self.assertEqual(e.kinds(), [], night)
+
+    def test_forward_dated_lines_open_nothing_move_nothing_and_do_not_mute_genuine_nights(self):
+        for label, skew in (("+400 d", 400 * 86400), ("+72 h", 72 * 3600), ("+40 h", 40 * 3600)):
+            for res in ("no_local_rise", "inconclusive:output_absent", "inconclusive:tape_short", "pass", "would_do"):
+                with self.subTest(f"{label} {res}"):
+                    e = Env(); e.clock.t = NIGHT_T
+                    e.canary(skew_line(res, int(NIGHT_T) + skew), sync=False)
+                    self.assertEqual(e.kinds(), []); self.assertEqual(e.sub.canary.state, {}); self.assertEqual(len(self.far_audits(e)), 1)
+                    self.assertFalse(os.path.exists(os.path.join(e.sub.data, "canary-state.json")))
+                    self.assertEqual(e.invalid(), []); self.assertEqual(len(e.stored()), 1)                       # stored
+                    self.genuine_week(e)
+                    self.assertEqual(e.sub.canary.state["r1"]["opened"]["canary_failed"], "20261022")
+
+    def test_a_backward_dated_line_behaves_the_same(self):
+        for res in ("no_local_rise", "inconclusive:output_absent", "pass"):
+            with self.subTest(res):
+                e = Env(); e.clock.t = NIGHT_T; e.canary(skew_line(res, int(NIGHT_T) - 40 * 3600), sync=False)
+                self.assertEqual(e.kinds(), []); self.assertEqual(e.sub.canary.state, {}); self.assertEqual(len(self.far_audits(e)), 1); self.genuine_week(e)
+
+    def test_a_far_line_cannot_touch_existing_state_or_the_streak(self):
+        e = Env(); e.canary(line("inconclusive:output_absent", night="20261016")); before = json.dumps(e.sub.canary.state, sort_keys=True)
+        for ts in (int(NIGHT_T) + 72 * 3600, int(NIGHT_T) - 72 * 3600):
+            for res in ("pass", "no_local_rise", "inconclusive:tape_short", "inconclusive:output_absent"):
+                e.clock.t = NIGHT_T; e.canary(skew_line(res, ts), sync=False)
+        self.assertEqual(json.dumps(e.sub.canary.state, sort_keys=True), before); self.assertEqual(e.kinds(), ["canary_inconclusive"])
+        e.canary(line("inconclusive:output_absent", night="20261017")); self.assertIn("canary_output_absent", e.kinds())      # the genuine streak still escalates
+
+    def test_the_far_check_runs_before_the_stale_night_check(self):
+        e = Env(); e.canary(line("no_local_rise", night="20261016")); e.clock.t = NIGHT_T
+        e.canary(skew_line("no_local_rise", int(NIGHT_T) - 72 * 3600), sync=False)
+        ev = [a["event"] for dp, _d, fs in os.walk(e.sub.data) for f in fs if f == "r1.canary-audit.jsonl" for l in open(os.path.join(dp, f)) for a in [json.loads(l)]]
+        self.assertEqual(ev, ["ts_far"])                                                                          # not stale_night
+
+    def test_the_36_h_boundary_exactly_36_h_acts_36_h_plus_1_s_is_audit_only_in_both_directions(self):
+        for sign in (1, -1):
+            for delta, acts in ((H36 - 1, True), (H36, True), (H36 + 1, False)):
+                with self.subTest(f"{'+' if sign > 0 else '-'}{delta}"):
+                    e = Env(); e.clock.t = NIGHT_T; e.canary(skew_line("no_local_rise", int(NIGHT_T) + sign * delta), sync=False)
+                    self.assertEqual(e.kinds(), ["canary_failed"] if acts else []); self.assertEqual(len(self.far_audits(e)), 0 if acts else 1)
+
+    def test_poisoned_state_a_stored_night_more_than_36_h_ahead_is_dropped_on_load(self):
+        e = Env()                                                                                               # the Mini clock is 16 Oct 23:00 IST
+        json.dump({"r1": {"absent_night": "20271120", "opened": {"canary_failed": "20271120", "canary_inconclusive": "20261016", "canary_output_absent": "20261019"}},
+                   "r2": {"absent_night": "20261018", "opened": {"canary_failed": "20261018"}}}, open(os.path.join(e.sub.data, "canary-state.json"), "w"))
+        sub2 = sb.Subscriber(e.sub.data, e.tmp.name, ["r1", "r2"], sb.RouterSink(e.router), e.clock)
+        self.assertEqual(sub2.canary.state["r1"], {"opened": {"canary_inconclusive": "20261016"}, "absent_night": None})
+        self.assertEqual(sub2.canary.state["r2"], {"opened": {"canary_failed": "20261018"}, "absent_night": "20261018"})     # 18 Oct is the newest night a genuine line can carry: kept
+        got = sorted((a["field"], a["room"]) for a in (json.loads(l) for l in open(os.path.join(e.sub.data, "canary-state-audit.jsonl"))))
+        self.assertEqual(got, [("absent_night_future", "r1"), ("opened_future", "r1"), ("opened_future", "r1")])
+        sub2.on_line("kiosk/r1/canary", json.dumps(line("no_local_rise", night="20261016"))); self.assertEqual(e.kinds(), ["canary_failed"])          # the room is not silenced
 
 
 class Shadow(unittest.TestCase):

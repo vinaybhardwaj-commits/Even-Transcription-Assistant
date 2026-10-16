@@ -5,7 +5,7 @@ Validation is strict: exactly these keys (no more, no fewer), the types below, t
 ONE audit line (<data>/<day>/<room>.canary-invalid.jsonl, the reason only). A `night` must be a real calendar date and the IST night of `ts` (12:00 to 12:00 IST) give or take one day and never a case.
 Results: pass (with a night not older than the night that opened the case) closes the room's open canary cases and breaks the output_absent streak. no_local_rise opens canary_failed (URGENT, a V kind with the coreaudio window: the router
 treats it like capture_dead). inconclusive:<why> opens canary_inconclusive (NORMAL tier, not V); inconclusive:output_absent on two consecutive nights also opens canary_output_absent
-(URGENT, not V). would_do is stored and gets one audit line (<room>.canary-audit.jsonl), never a case. Each case kind opens at most once per room per night (the `night` key of the line), even after an ACK.
+(URGENT, not V). would_do is stored and gets one audit line (<room>.canary-audit.jsonl), never a case. A line whose ts is more than 36 h from the Mini clock (either direction; exactly 36 h acts) is stored and audited only, and moves no state. Each case kind opens at most once per room per night (the `night` key of the line), even after an ACK.
 State (the nights already alerted and the last output_absent night) is kept in <data>/canary-state.json, so a restart neither re-opens a night nor forgets a streak."""
 import json, math, os, re
 from datetime import datetime, timedelta, timezone
@@ -100,7 +100,7 @@ def _next_night(night):
 
 class CanaryRoute:
     def __init__(self, sink, state_path=None, audit_dir=None, clock=None):
-        self.sink, self.state_path, self.audit_dir = sink, state_path, audit_dir
+        self.sink, self.state_path, self.audit_dir, self.clock = sink, state_path, audit_dir, clock
         self.state = {}                  # room -> {"opened": {kind: night}, "absent_night": night|None}
         if state_path and os.path.exists(state_path):
             try:
@@ -109,6 +109,10 @@ class CanaryRoute:
                 if not isinstance(d, dict):
                     self._audit_state("file", "-")          # a state file that is not an object: dropped whole
                     d = {}
+                limit = None                   # the newest night a genuine line can carry: the night of (clock + 36 h), plus the one day the night/ts rule allows
+                if callable(clock):
+                    n = ist_night_of(clock() + TS_FAR_S)
+                    limit = _next_night(n) if n else None
                 for k, v in d.items():
                     if not isinstance(v, dict):
                         self._audit_state("entry", k); continue
@@ -117,13 +121,13 @@ class CanaryRoute:
                         v = dict(v, opened={})
                     opened = {}
                     for a, b in v["opened"].items():
-                        if a in CASE_KINDS and valid_night(b):
+                        if a in CASE_KINDS and valid_night(b) and (limit is None or b <= limit):
                             opened[a] = b
                         else:
-                            self._audit_state("opened", k)
+                            self._audit_state("opened" if not (valid_night(b) and limit is not None and b > limit) else "opened_future", k)     # a stored night from a skewed clock must not silence the room
                     absent = v.get("absent_night")
-                    if absent is not None and not valid_night(absent):
-                        self._audit_state("absent_night", k); absent = None
+                    if absent is not None and not (valid_night(absent) and (limit is None or absent <= limit)):
+                        self._audit_state("absent_night" if not (valid_night(absent) and limit is not None and absent > limit) else "absent_night_future", k); absent = None
                     self.state[str(k)] = {"opened": opened, "absent_night": absent}
             except Exception:            # noqa: BLE001 -- a corrupt or poisoned state file never stops the subscriber: what cannot be read is dropped
                 self._audit_state("file", "-")
@@ -193,9 +197,12 @@ class CanaryRoute:
             self.audit_invalid(room, why, now, day_dir)
             return "invalid"
         res, night = raw_obj["result"], raw_obj["night"]
-        st = self.state.setdefault(room, {"opened": {}, "absent_night": None})
         if abs(raw_obj["ts"] - now) > TS_FAR_S:
-            self._audit_event(room, "ts_far", night, now, day_dir, line_ts=int(raw_obj["ts"]))      # audited only: the line is handled as before
+            # A ts more than 36 h from the Mini clock, in EITHER direction (exactly 36 h still acts; 36 h + 1 s does not): stored (by the caller) and audited ONLY. It never opens, folds,
+            # closes or moves any state (opened, absent_night, the streak), so a kiosk with a skewed clock cannot freeze or mute the room. Runs before the stale-night check.
+            self._audit_event(room, "ts_far", night, now, day_dir, line_ts=int(raw_obj["ts"]))
+            return "stored"
+        st = self.state.setdefault(room, {"opened": {}, "absent_night": None})
         if res == "would_do":
             self.audit_would_do(room, night, now, day_dir)
             return "stored"              # stored in the stream file by the caller; audited above; no case
