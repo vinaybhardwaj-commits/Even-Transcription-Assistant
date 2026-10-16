@@ -6,8 +6,9 @@ import { evaluateEhrc } from "@/lib/rubrics/engines/ehrc";
 import { listSurgicalStays, parseStayKey } from "@/lib/rubrics/readers/stay-record";
 import { sql } from "@/lib/db";
 import type { Rubric, RubricUnit } from "@/lib/rubrics/types";
-import { listAudioHours, listConsultKeys, parseRoomHourKey, readAudioHour, readConsultSpan, readWindowTurns, windowPair, consultPair, isRefusal, blindRefusal, refuse, isIstDate, isRoomId, type ReadRefusal } from "@/lib/rubrics/readers";
-import type { Turn } from "@/lib/room-access/readers/turns";
+import { listAudioHours, listConsultKeys, parseRoomHourKey, readAudioHour, readConsultSpan, windowPair, consultPair, isRefusal, blindRefusal, refuse, isIstDate, isRoomId, type ReadRefusal } from "@/lib/rubrics/readers";
+import { readRebTalkTurns } from "@/lib/room-access/readers/reb-consult";
+import type { ConsultSpan } from "@/lib/room-access/readers/consult-span";
 import { evaluateRoomMicQuality } from "@/lib/rubrics/engines/room-mic-quality";
 import { evaluateTalkTime } from "@/lib/rubrics/engines/talk-time";
 import { evaluateConsultAffect, evaluateSurgicalPitch } from "@/lib/rubrics/engines/consult-llm";
@@ -57,24 +58,15 @@ export async function evaluateUnit(r: Rubric, unitKind: RubricUnit, unitKey: str
     if (!got.ok) return skip(got.reason === "no_data" ? "no_audio_state" : got.reason, pair);
     return engine(() => evaluateRoomMicQuality(got.data), pair);
   }
-  if (r.id === "talk_time" && unitKind === "window") {
-    const got = await readWindowTurns(unitKey);
-    if (!got.ok) return skip(got.reason, pair);
-    const out = engine(() => evaluateTalkTime(got.data.turns, { start_ms: got.data.start_ms, end_ms: got.data.end_ms }), pair);
-    return { ...out, evidence: { window_id: unitKey, turns: got.data.turns.length, attributed: got.data.attributed, diarize_state: got.data.diarize_state } };
-  }
+  if (r.id === "talk_time" && unitKind === "window") return skip("role_layer_consult_only", pair); // the role layer exists per consult only; readWindowTurns (voiceprint roles) is not a source for doctor/other
   if (r.id === "talk_time" && unitKind === "consult") {
+    // VP-ACC-01: doctor = the role layer's doctor, never a voiceprint match. No role layer = skip; room_turn_speaker is never read here.
     const span = await readConsultSpan(unitKey);
     if (!span.ok) return skip(span.reason, pair);
-    const turns: Turn[] = [];
-    let refused = 0;
-    for (const w of span.data.windows) {
-      const got = await readWindowTurns(w.window_id);
-      if (!got.ok) { refused += 1; continue; }
-      turns.push(...got.data.turns); // window bounds AND turn times are absolute epoch ms, the clock of t_open / t_close (G56): no offset
-    }
-    const out = engine(() => evaluateTalkTime(turns, { start_ms: span.data.t_open_ms, end_ms: span.data.t_close_ms }), pair);
-    return { ...out, evidence: { consult_key: unitKey, windows: span.data.windows.length, windows_refused: refused, turns: turns.length, quality: span.data.quality } };
+    const got = await readRebTalkTurns(span.data as ConsultSpan);
+    if (!got.ok) return { ...skip(got.reason, pair), evidence: { consult_key: unitKey, n_integrity_skipped: got.n_integrity_skipped } };
+    const out = engine(() => evaluateTalkTime(got.turns, { start_ms: span.data.t_open_ms, end_ms: span.data.t_close_ms }), pair);
+    return { ...out, evidence: { consult_key: unitKey, turns: got.turns.length, quality: span.data.quality, role_source: "reb:llm-roles", n_unknown_role: got.n_unknown_role, role_config_hash: got.role_config_hash, text_source: got.text_source, n_integrity_skipped: got.n_integrity_skipped } };
   }
   return skip("unit_not_supported", pair);
 }

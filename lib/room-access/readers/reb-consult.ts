@@ -224,8 +224,8 @@ async function loadRoleDoc(uid: string, rooms: ReadonlySet<string>, store: LabSt
  * Flag off: the text track's lines and turns, untouched, and no index read. Flag on: join the role track when one passes the checks.
  * A sha or key failure is counted and the text track is still returned without roles (lines stay as speakerOf left them).
  */
-async function joinRoleTrack(uid: string, roomId: string, store: LabStore, layer: "translate" | "stt", textDoc: unknown, open: number, close: number, got: { lines: ConsultLine[]; turns: Turn[] }): Promise<{ lines: ConsultLine[]; turns: Turn[]; skipped: number; provenance: { role_source: "reb_llm_roles"; role_config_hash: string } | Record<string, never> }> {
-  if (!rebRoleLlmEnabled()) return { lines: got.lines, turns: got.turns, skipped: 0, provenance: {} };
+async function joinRoleTrack(uid: string, roomId: string, store: LabStore, layer: "translate" | "stt", textDoc: unknown, open: number, close: number, got: { lines: ConsultLine[]; turns: Turn[] }, force = false): Promise<{ lines: ConsultLine[]; turns: Turn[]; skipped: number; provenance: { role_source: "reb_llm_roles"; role_config_hash: string } | Record<string, never> }> {
+  if (!force && !rebRoleLlmEnabled()) return { lines: got.lines, turns: got.turns, skipped: 0, provenance: {} };
   const loaded = await loadRoleDoc(uid, new Set([roomId]), store);
   if (!loaded.doc || !("config_hash" in loaded)) return { lines: got.lines, turns: got.turns, skipped: loaded.skipped, provenance: {} };
   const lookup = roleLookupFromDoc(loaded.doc, layer);
@@ -249,7 +249,8 @@ export async function readRebRoleFlags(uid: string, roomId: string, roomSlug = "
   return roleFlagsFromExtras((loaded.doc as { extras?: unknown }).extras);
 }
 
-export async function readRebConsult(span: ConsultSpan): Promise<RebOutcome> {
+/** `opts.forceRoles` joins the role track whatever ETA_REB_ROLE_LLM says (talk_time only; the flag keeps its meaning for the transcript readers). */
+export async function readRebConsult(span: ConsultSpan, opts: { forceRoles?: boolean } = {}): Promise<RebOutcome> {
   const none: RebOutcome = { found: null, n_integrity_skipped: 0 };
   const uid = span.consult_uid;
   if (!uid || !UID_RE.test(uid)) return none;
@@ -281,7 +282,7 @@ export async function readRebConsult(span: ConsultSpan): Promise<RebOutcome> {
       const got = linesFromTrack(doc, span.t_open_ms, span.t_close_ms, layer);
       if (!got || got.lines.length === 0) continue;
       if (layer === "stt" && !got.allEnglish) break; // the preferred engine's latest row is not wholly English: the stt layer yields nothing, the caller falls through to window_english
-      const joined = await joinRoleTrack(uid, span.room_id, store, layer, doc, span.t_open_ms, span.t_close_ms, got);
+      const joined = await joinRoleTrack(uid, span.room_id, store, layer, doc, span.t_open_ms, span.t_close_ms, got, opts.forceRoles === true);
       skipped += joined.skipped;
       return {
         found: {
@@ -293,6 +294,32 @@ export async function readRebConsult(span: ConsultSpan): Promise<RebOutcome> {
     }
   }
   return { found: null, n_integrity_skipped: skipped };
+}
+
+// ---- talk_time: speaker roles from the role layer, never from voiceprint attribution (VP-ACC-01) ---------------------------------------------------------------------------
+export type RebTalkTurns =
+  | { ok: true; turns: Turn[]; n_unknown_role: number; role_config_hash: string; text_source: RebConsult["source"]; n_integrity_skipped: number }
+  | { ok: false; reason: "no_role_layer"; n_integrity_skipped: number };
+
+/** doctor -> clinician, idx 0; patient 1; attender 2; staff 3; other 4 (role null); unknown -> idx null (unattributed). */
+const TALK_IDX: Record<RebSpeakerRole, number | null> = { doctor: 0, patient: 1, attender: 2, staff: 3, other: 4, unknown: null };
+
+/**
+ * Turns for talk_time from the consult's REB text track joined to its role track, ALWAYS (independent of ETA_REB_ROLE_LLM). Times are absolute epoch ms clamped to the consult span.
+ * No role track, or one that fails its sha check, is { ok: false, reason: "no_role_layer" }; there is no fallback.
+ * Ruling (newcat-lead, 16 Oct): when the NEWEST role row fails its sha, the next older VERIFIED ok role row is used (loadRoleDoc's existing behaviour). Accepted: it is sha-checked and traceable through role_config_hash; n_integrity_skipped counts the rows passed over. Segment times and roles only: the lines (text) are dropped here.
+ */
+export async function readRebTalkTurns(span: ConsultSpan): Promise<RebTalkTurns> {
+  const out = await readRebConsult(span, { forceRoles: true });
+  const f = out.found;
+  if (!f || f.role_source !== "reb_llm_roles" || !f.role_config_hash) return { ok: false, reason: "no_role_layer", n_integrity_skipped: out.n_integrity_skipped };
+  let nUnknown = 0;
+  const turns: Turn[] = f.turns.map((t) => {
+    const role: RebSpeakerRole = t.reb_role ?? "unknown";
+    if (role === "unknown") nUnknown += 1;
+    return { source_ref: t.source_ref, start_ms: span.t_open_ms + t.start_ms, end_ms: span.t_open_ms + t.end_ms, speaker_idx: TALK_IDX[role], role: role === "doctor" ? "clinician" : null, overlap_ms: null, reb_role: role };
+  });
+  return { ok: true, turns, n_unknown_role: nUnknown, role_config_hash: f.role_config_hash, text_source: f.source, n_integrity_skipped: out.n_integrity_skipped };
 }
 
 // ---- S8C: a palimpsest track of a consult, as a reference (scribe_sarvam status / result / transcribe) --------------------------------------------------------------------------
