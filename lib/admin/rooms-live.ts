@@ -22,6 +22,7 @@
  */
 
 import { sql } from "@/lib/db";
+import { readMicGuard, type MicGuardView } from "@/lib/micguard-read";
 import { query as brainQuery } from "@/lib/brain/db";
 import { WAREHOUSE_CUE_TYPES } from "@/lib/mcp/tools/fuse-report";
 import { LISTENER_FRESH_MS, listListeners, type ListenerRow } from "@/lib/bench-commands";
@@ -146,6 +147,8 @@ export type LiveSession = {
 
 export type RoomLive = {
   room: { id: string; slug: string; name: string };
+  /** mic-permission guard state (lib/micguard-read.ts); this screen is admin-gated, so it is always present from readRoomsLive. null = no guard row in 24 h. */
+  mic_guard?: MicGuardView | null;
   recording: boolean;
   paused_session: boolean;
   session_id: string | null;
@@ -760,6 +763,10 @@ export async function readRoomsLive(now: Date = new Date()): Promise<RoomsLiveRe
     };
     return buildRoomLive(room, mine, counts, brain, marksNotSent, nowMs, [...brainDegraded]);
   });
+
+  // Mic-permission guard per room (admin-gated screen: always added). Never throws; a failed read leaves null.
+  const micGuard = await readMicGuard(sql as never, roomIds, nowMs);
+  for (const r of out) r.mic_guard = micGuard.byRoom[r.room.id] ?? null;
 
   const day: DaySummary = {
     audio_recorded_ms: [...audioMsByRoom.values()].reduce((a, b) => a + b, 0),

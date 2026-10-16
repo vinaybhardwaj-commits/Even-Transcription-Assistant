@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import { COLORS, ICON, NO_DOCTOR_PROBLEM_NOTE, WORD, showNoDoctorNote, BAR_TICK_FRACTION, barFraction, forMinutes, headline, isProblem, stepsFor } from "@/lib/rooms-live/present";
 import { cardStyle, L4_FILL as L4_TEXT, type EscalationLevel } from "@/lib/rooms-live/escalation";
 import type { RoomRow } from "@/lib/rooms-live/snapshot";
+import { micGuardBadge } from "@/lib/micguard-read";
 
 const box: CSSProperties = { background: "#fff", borderRadius: 14, padding: 14, border: "1px solid #E4E2DC", display: "flex", flexDirection: "column", gap: 8 };
 
@@ -14,6 +15,22 @@ export function SoundBar({ row, onDark }: { row: RoomRow; onDark?: boolean }) {
     <div role="meter" aria-label="Sound level" aria-valuemin={0} aria-valuemax={100} aria-valuenow={grey ? 0 : pct} style={{ height: 8, borderRadius: 4, background: onDark ? "rgba(255,255,255,.28)" : "#ECEBE6", overflow: "hidden", position: "relative" }}>
       <div style={{ width: `${grey ? 0 : pct}%`, height: "100%", background: onDark ? "#FFFFFF" : c.fg, transition: "width .6s ease" }} />
       <div aria-hidden="true" data-testid="speech-tick" style={{ position: "absolute", left: `${BAR_TICK_FRACTION * 100}%`, top: 0, bottom: 0, width: 2, background: onDark ? "rgba(255,255,255,.75)" : "#4F535A" }} />
+    </div>
+  );
+}
+
+/** Admin only: /api/rooms-live/now sends mic_guard to admin callers alone, so for everyone else this never renders. */
+function MicPermBadge({ view }: { view: NonNullable<RoomRow["mic_guard"]> }) {
+  const b = micGuardBadge(view);
+  const style: CSSProperties =
+    b.tone === "alert"
+      ? { background: "#FBE9E7", color: "#B3261E", border: "1px solid #E8B4AE" }
+      : { background: "#ECEBE6", color: "#4F535A", border: "1px solid #E4E2DC" };
+  return (
+    <div>
+      <span data-testid="mic-perm-badge" data-tone={b.tone} title={b.title} style={{ ...style, display: "inline-block", borderRadius: 999, padding: "2px 10px", fontSize: 12, fontWeight: 700 }}>
+        {b.text}
+      </span>
     </div>
   );
 }
@@ -53,6 +70,7 @@ export function RoomTile({ row, nowMs, eng, calm, level, durMs, canClaim, onClai
       <SoundBar row={row} onDark={!!st && (level === 3 || level === 4)} />
       <div style={{ fontSize: 16, fontWeight: 600, color: st ? fg : c.fg }}>{headline(row)}</div>
       {(problem || row.state === "unknown") && first ? <div style={{ fontSize: 15 }}>{first}</div> : null}
+      {row.mic_guard ? <MicPermBadge view={row.mic_guard} /> : null}
       {row.steward_line ? <div data-testid="steward-line" style={{ fontSize: 13, color: sub }}>{row.steward_line.text}</div> : null}
       {showNoDoctorNote(row) ? <div style={{ fontSize: 14, color: sub }}>{NO_DOCTOR_PROBLEM_NOTE}</div> : null}
       {since && (esc || row.state_since !== null) ? <div style={{ fontSize: 13, color: sub, fontWeight: st?.boldFor ? 800 : 400 }}>{since}</div> : null}

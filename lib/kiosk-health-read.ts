@@ -246,6 +246,7 @@ export async function readKioskHealth(sql: WindowsDb, machineKeys: string[], asO
       return s;
     };
 
+    // MIC-GUARD POLLER ROWS (source 'mini_micguard_poller', kind mic_guard) are NOT kiosk-daemon rows: queries 1 and 4 exclude that source so the poller never enrols a Mac or stands in for a heartbeat (R12).
     // 1 — newest row per (machine, kind). Ordered by event time; the heartbeat's ts and received_at agree. For audio.devices only the system_profiler
     // shape (boolean default_input_present) is wanted, so the ioreg rows never compete for "newest" and their large payloads never travel.
     const newest = (await sql`
@@ -254,6 +255,7 @@ export async function readKioskHealth(sql: WindowsDb, machineKeys: string[], asO
        WHERE k.machine = ANY(${keys}::text[])
          AND k.received_at >= ${hi}::timestamptz - interval '24 hours'
          AND k.received_at <= ${hi}::timestamptz
+         AND k.source <> 'mini_micguard_poller'
          AND (k.kind <> 'audio.devices' OR jsonb_typeof(k.payload->'default_input_present') = 'boolean')
        ORDER BY k.machine, k.kind, k.ts DESC, k.received_at DESC
     `) as unknown as NewestRow[];
@@ -466,6 +468,7 @@ export async function readKioskHealth(sql: WindowsDb, machineKeys: string[], asO
         FROM kiosk_health_events k
        WHERE k.machine = ANY(${keys}::text[])
          AND k.received_at BETWEEN ${hi}::timestamptz - interval '7 days' AND ${hi}::timestamptz
+         AND k.source <> 'mini_micguard_poller'
        ORDER BY k.machine, k.received_at DESC
     `) as unknown as SeenRow[];
     for (const r of seen) {
