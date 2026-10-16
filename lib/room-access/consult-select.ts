@@ -41,12 +41,15 @@ export async function selectTranscribedConsultsBefore(n: number, lo: string, hi:
   const rows = (await sql`
     WITH b AS (
       SELECT ${hi}::timestamptz AS hi, ${lo}::timestamptz AS lo
+    ), lu AS (
+      SELECT DISTINCT z.consult_uid FROM eta_encounter_windows z
+       WHERE z.consult_key IN (SELECT jsonb_array_elements_text(${JSON.stringify(liveKeys)}::jsonb)) AND z.consult_uid IS NOT NULL
     ), q AS (
       SELECT w.consult_key, w.consult_uid, w.t_close FROM eta_encounter_windows w, b
        WHERE w.t_close IS NOT NULL AND w.consult_uid IS NOT NULL AND w.room_id IS NOT NULL
          AND w.t_open >= b.lo AND w.t_open < b.hi
          AND NOT EXISTS (SELECT 1 FROM eta_encounter_windows z WHERE z.consult_uid = w.consult_uid AND z.t_open >= b.hi AND z.t_open <= now())
-         AND NOT EXISTS (SELECT 1 FROM eta_encounter_windows z WHERE z.consult_uid = w.consult_uid AND z.consult_key IN (SELECT jsonb_array_elements_text(${JSON.stringify(liveKeys)}::jsonb)))
+         AND w.consult_uid NOT IN (SELECT consult_uid FROM lu)
          AND EXISTS (SELECT 1 FROM encounter_catalog ec WHERE ec.consult_uid = w.consult_uid
                        AND ec.stages->'sealed'->>'state' = 'ok' AND ec.stages->'stt'->>'state' = 'ok'
                        AND (ec.stages->'translate'->>'state' = 'ok' OR (ec.stages->'translate'->>'state' = 'n/a' AND ec.stages->'translate'->>'reason' = 'english')))
