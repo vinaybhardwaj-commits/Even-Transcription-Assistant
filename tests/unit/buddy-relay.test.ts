@@ -11,7 +11,7 @@ let commands: Array<{ roomId: string; kind: string; args: string | null; source:
 let installs: Array<{ room_id: string; hostname: string; app_version: string | null }> = [];
 let throwOn: RegExp | null = null;
 let hang = false;
-let fetchImpl: (url: string, init: RequestInit) => Promise<Response> = async () => new Response(JSON.stringify({ window: true, live: true, reason_code: "ok" }), { status: 200 });
+let fetchImpl: (url: string, init: RequestInit) => Promise<Response> = async () => new Response(JSON.stringify({ window: true, live: true, reason_code: null }), { status: 200 });
 const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
 let releaseHang: (() => void) | null = null;
 const writes: string[] = [];
@@ -84,7 +84,7 @@ beforeEach(() => {
   process.env.NEWCAT_BASE_URL = "https://newcat.example.test";
   process.env.NEWCAT_RELAY_KEY = "test-relay-key-value";
   fetchCalls.length = 0;
-  fetchImpl = async () => new Response(JSON.stringify({ window: true, live: true, reason_code: "ok" }), { status: 200 });
+  fetchImpl = async () => new Response(JSON.stringify({ window: true, live: true, reason_code: null }), { status: 200 });
   vi.stubGlobal("fetch", (url: string, init: RequestInit) => { fetchCalls.push({ url, init }); return fetchImpl(url, init); });
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "info").mockImplementation(() => {});
@@ -277,7 +277,7 @@ describe("Encounter Buddy L1 relay", () => {
       async () => new Response(JSON.stringify({ window: "yes" }), { status: 200 }),
       async () => new Response(JSON.stringify({}), { status: 200 }),
       async () => new Response(JSON.stringify({ window: true }), { status: 200 }),
-      async () => new Response(JSON.stringify({ window: true, live: "yes", reason_code: "ok" }), { status: 200 }),
+      async () => new Response(JSON.stringify({ window: true, live: "yes", reason_code: null }), { status: 200 }),
       async () => new Response(JSON.stringify({ window: true, live: true }), { status: 200 }),
       async () => new Response(JSON.stringify({ reason_code: "conflict" }), { status: 409 }),
       async () => { throw new Error("network down secret-value"); },
@@ -326,7 +326,7 @@ describe("Encounter Buddy L1 relay", () => {
   it("decide resolving after the budget writes nothing", async () => {
     vi.useFakeTimers();
     let release!: () => void;
-    fetchImpl = () => new Promise<Response>((res) => { release = () => res(new Response(JSON.stringify({ window: true, live: true, reason_code: "ok" }), { status: 200 })); });
+    fetchImpl = () => new Promise<Response>((res) => { release = () => res(new Response(JSON.stringify({ window: true, live: true, reason_code: null }), { status: 200 })); });
     const p = relayInserted([rowOf()]);
     await vi.advanceTimersByTimeAsync(RELAY_TIMEOUT_MS + 1);
     await expect(p).resolves.toBeUndefined();
@@ -380,7 +380,7 @@ describe("Encounter Buddy: server-side doctor resolve", () => {
         mbCalls.push({ body: JSON.parse(init.body as string), key: (init.headers as Record<string, string>)["x-api-key"]! });
         return mbImpl();
       }
-      return new Response(JSON.stringify({ window: true, live: true, reason_code: "ok" }), { status: 200 });
+      return new Response(JSON.stringify({ window: true, live: true, reason_code: null }), { status: 200 });
     };
   });
   afterEach(() => { delete process.env.METABASE_URL; delete process.env.METABASE_API_KEY; });
@@ -443,7 +443,7 @@ describe("Encounter Buddy: server-side doctor resolve", () => {
         sig.addEventListener("abort", () => { abortedAt = Date.now(); });
         return new Promise<Response>(() => {});
       }
-      return new Response(JSON.stringify({ window: true, live: true, reason_code: "ok" }), { status: 200 });
+      return new Response(JSON.stringify({ window: true, live: true, reason_code: null }), { status: 200 });
     };
     const t0 = Date.now();
     await post([openCU()]);
@@ -515,7 +515,7 @@ describe("Encounter Buddy: server-side doctor resolve", () => {
 describe("Encounter Buddy: newcat consult-started route", () => {
   it("posts to /v1/buddy/consult-started; a 409 conflict is a fault and writes nothing", async () => {
     expect(DECIDE_PATH).toBe("/v1/buddy/consult-started");
-    fetchImpl = async () => new Response(JSON.stringify({ window: true, live: true, reason_code: "dup" }), { status: 409 });
+    fetchImpl = async () => new Response(JSON.stringify({ window: true, live: true, reason_code: null }), { status: 409 });
     await post([open()]);
     expect(refs).toHaveLength(0);
     expect(commands).toHaveLength(0);
@@ -523,7 +523,7 @@ describe("Encounter Buddy: newcat consult-started route", () => {
   });
 
   it("window true with live false still writes; live is only counted", async () => {
-    fetchImpl = async () => new Response(JSON.stringify({ window: true, live: false, reason_code: "shadow" }), { status: 200 });
+    fetchImpl = async () => new Response(JSON.stringify({ window: true, live: false, reason_code: null }), { status: 200 });
     await post([open()]);
     expect(refs).toHaveLength(1);
     expect(logs()).toContain("decide_live=0");
@@ -533,6 +533,64 @@ describe("Encounter Buddy: newcat consult-started route", () => {
     await post([open()]);
     expect(refs).toHaveLength(1);
     expect(logs()).toContain("decide_live=1");
+  });
+});
+
+describe("Encounter Buddy: reason_code contract (RELAY-NR)", () => {
+  const reply = (body: unknown) => async () => new Response(JSON.stringify(body), { status: 200 });
+
+  it("after a fleet lift, {window:true, live:true, reason_code:null} writes the ref row and command (decide_true)", async () => {
+    fetchImpl = reply({ window: true, live: true, reason_code: null });
+    await post([open()]);
+    expect(refs).toHaveLength(1);
+    expect(commands).toHaveLength(1);
+    expect(logs()).toContain("decide_true=1");
+  });
+
+  it("while fleet_off, {window:false, live:false, reason_code:'fleet_off'} writes nothing (decide_false)", async () => {
+    fetchImpl = reply({ window: false, live: false, reason_code: "fleet_off" });
+    await post([open()]);
+    expect(writes).toEqual([]);
+    expect(logs()).toContain("decide_false=1");
+  });
+
+  it("a window opens after the lift and stays shut while fleet_off is set", async () => {
+    fetchImpl = reply({ window: false, live: false, reason_code: "fleet_off" });
+    await post([open("lift-1")]);
+    expect(refs).toHaveLength(0);
+    fetchImpl = reply({ window: true, live: true, reason_code: null });
+    await post([open("lift-1")]);
+    expect(refs).toHaveLength(1);
+    const before = writes.length;
+    fetchImpl = reply({ window: false, live: false, reason_code: "fleet_off" });
+    await post([open("lift-2")]);
+    expect(writes).toHaveLength(before);
+    expect(refs).toHaveLength(1);
+  });
+
+  it("a shadow decision {window:false, live:true, reason_code:'fleet_off'} writes nothing (decide_false)", async () => {
+    fetchImpl = reply({ window: false, live: true, reason_code: "fleet_off" });
+    await post([open()]);
+    expect(writes).toEqual([]);
+    expect(logs()).toContain("decide_false=1");
+  });
+
+  it.each([
+    ["window:true with a string reason", { window: true, live: true, reason_code: "fleet_off" }],
+    ["window:false with null", { window: false, live: false, reason_code: null }],
+    ["reason_code missing, window:true", { window: true, live: true }],
+    ["reason_code missing, window:false", { window: false, live: false }],
+    ["reason_code a number", { window: false, live: false, reason_code: 7 }],
+    ["reason_code a number, window:true", { window: true, live: true, reason_code: 0 }],
+    ["reason_code an empty string", { window: false, live: false, reason_code: "" }],
+    ["reason_code not snake_case", { window: false, live: false, reason_code: "Fleet Off" }],
+  ])("unparseable, writes nothing: %s", async (_n, body) => {
+    fetchImpl = reply(body);
+    await post([open()]);
+    expect(writes).toEqual([]);
+    expect(refs).toHaveLength(0);
+    expect(commands).toHaveLength(0);
+    expect(logs()).toContain("decide_fault=1");
   });
 });
 

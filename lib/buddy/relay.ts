@@ -42,6 +42,12 @@ export type DecideReply = { window: boolean; live: boolean };
 /** Resolves window true/false (a bare boolean, or {window, live}); throws on anything else (a 409, non-2xx, bad shape: the caller counts decide_fault). */
 export type DecideClient = (req: DecideRequest) => Promise<boolean | DecideReply>;
 
+/** The B1R contract: an open window carries reason_code null; a closed one carries a lowercase snake_case reason. Anything else fails closed. */
+const REASON_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+function reasonCodeMatchesWindow(window: boolean, reason: unknown): boolean {
+  return window ? reason === null : typeof reason === "string" && REASON_CODE.test(reason);
+}
+
 /** The real client. Values come from env only (NEWCAT_BASE_URL, NEWCAT_RELAY_KEY); unset = throws = fail closed. */
 export const defaultDecide: DecideClient = async (req) => {
   const base = (process.env.NEWCAT_BASE_URL ?? "").trim().replace(/\/+$/, "");
@@ -58,7 +64,7 @@ export const defaultDecide: DecideClient = async (req) => {
     });
     if (!res.ok) throw new Error("decide_non_2xx");
     const j = (await res.json()) as { window?: unknown; live?: unknown; reason_code?: unknown };
-    if (typeof j?.window !== "boolean" || typeof j?.live !== "boolean" || typeof j?.reason_code !== "string") throw new Error("decide_unparseable");
+    if (typeof j?.window !== "boolean" || typeof j?.live !== "boolean" || !("reason_code" in j) || !reasonCodeMatchesWindow(j.window, j.reason_code)) throw new Error("decide_unparseable");
     return { window: j.window, live: j.live };
   } finally {
     clearTimeout(timer);
