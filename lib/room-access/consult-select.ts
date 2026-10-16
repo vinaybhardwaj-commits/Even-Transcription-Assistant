@@ -10,7 +10,13 @@
 import { sql } from "@/lib/db";
 import { newDecisionId, type WorkerDecision } from "@/lib/jev/worker/persist";
 
-export async function selectTranscribedConsults(n: number, days: number, sha: string | null, mode: string, subjectType: string): Promise<string[]> {
+/** JEV-NODATA-RETRY R1: a consult whose rows for (sha, mode) are ALL no_state = 'no_data' markers is re-offered once the newest is older than this many minutes. Every other marker reason stays terminal. */
+export const NODATA_RETRY_MIN = 30;
+
+/** Count-only out-param: how many of the returned consults were re-offered under R1 (they already hold no_data markers for this sha/mode). */
+export type NodataRetryStats = { nodataRetry: number };
+
+export async function selectTranscribedConsults(n: number, days: number, sha: string | null, mode: string, subjectType: string, stats?: NodataRetryStats): Promise<string[]> {
   const rows = (await sql`
     WITH q AS (
       SELECT w.consult_key, w.consult_uid, w.t_close FROM eta_encounter_windows w
@@ -22,13 +28,20 @@ export async function selectTranscribedConsults(n: number, days: number, sha: st
     ), pick AS (
       SELECT DISTINCT ON (consult_uid) consult_key, consult_uid, t_close FROM q ORDER BY consult_uid, consult_key
     )
-    SELECT p.consult_key FROM pick p
+    SELECT p.consult_key,
+           (${sha}::text IS NOT NULL AND EXISTS (
+              SELECT 1 FROM jev_decision r JOIN eta_encounter_windows rx ON rx.consult_key = r.subject_id
+               WHERE rx.consult_uid = p.consult_uid AND r.subject_type = ${subjectType} AND r.question_set_sha256 = ${sha}::text AND r.mode = ${mode}::text AND r.order_variant = 'derived')) AS retried
+      FROM pick p
      WHERE ${sha}::text IS NULL OR NOT EXISTS (
+       -- decided = any derived row that is NOT a no_data marker (answered, abstained, refused, read_refused, ...), or a no_data marker still inside the cooldown
        SELECT 1 FROM jev_decision d JOIN eta_encounter_windows x ON x.consult_key = d.subject_id
-        WHERE x.consult_uid = p.consult_uid AND d.subject_type = ${subjectType} AND d.question_set_sha256 = ${sha}::text AND d.mode = ${mode}::text AND d.order_variant = 'derived')
+        WHERE x.consult_uid = p.consult_uid AND d.subject_type = ${subjectType} AND d.question_set_sha256 = ${sha}::text AND d.mode = ${mode}::text AND d.order_variant = 'derived'
+          AND (d.evidence->>'no_state' IS DISTINCT FROM 'no_data' OR d.created_at > now() - make_interval(mins => ${NODATA_RETRY_MIN}::int)))
      ORDER BY p.t_close ASC, p.consult_key ASC
      LIMIT ${n}::int
-  `) as Array<{ consult_key: string }>;
+  `) as Array<{ consult_key: string; retried: boolean }>;
+  if (stats) stats.nodataRetry += rows.filter((r) => r.retried).length;
   return rows.map((r) => r.consult_key);
 }
 
@@ -37,7 +50,7 @@ export async function selectTranscribedConsults(n: number, days: number, sha: st
  * half-open range [`lo`, `hi`) (FIX1 F2: both bound as timestamptz, computed once per call by the caller: `lo` = SINCE 00:00 IST, `hi` = start of the pass-1 window). A uid with any window at or after that start is pass 1's, so it is excluded here: the two passes never share a uid.
  * `liveKeys` are the keys pass 1 returned: a uid owning any of them is skipped, so a boundary that moved between the two statements (IST midnight) still gives one key per uid.
  */
-export async function selectTranscribedConsultsBefore(n: number, lo: string, hi: string, liveKeys: string[], sha: string | null, mode: string, subjectType: string): Promise<string[]> {
+export async function selectTranscribedConsultsBefore(n: number, lo: string, hi: string, liveKeys: string[], sha: string | null, mode: string, subjectType: string, stats?: NodataRetryStats): Promise<string[]> {
   const rows = (await sql`
     WITH b AS (
       SELECT ${hi}::timestamptz AS hi, ${lo}::timestamptz AS lo
@@ -56,13 +69,20 @@ export async function selectTranscribedConsultsBefore(n: number, lo: string, hi:
     ), pick AS (
       SELECT DISTINCT ON (consult_uid) consult_key, consult_uid, t_close FROM q ORDER BY consult_uid, consult_key
     )
-    SELECT p.consult_key FROM pick p
+    SELECT p.consult_key,
+           (${sha}::text IS NOT NULL AND EXISTS (
+              SELECT 1 FROM jev_decision r JOIN eta_encounter_windows rx ON rx.consult_key = r.subject_id
+               WHERE rx.consult_uid = p.consult_uid AND r.subject_type = ${subjectType} AND r.question_set_sha256 = ${sha}::text AND r.mode = ${mode}::text AND r.order_variant = 'derived')) AS retried
+      FROM pick p
      WHERE ${sha}::text IS NULL OR NOT EXISTS (
+       -- decided = any derived row that is NOT a no_data marker (answered, abstained, refused, read_refused, ...), or a no_data marker still inside the cooldown
        SELECT 1 FROM jev_decision d JOIN eta_encounter_windows x ON x.consult_key = d.subject_id
-        WHERE x.consult_uid = p.consult_uid AND d.subject_type = ${subjectType} AND d.question_set_sha256 = ${sha}::text AND d.mode = ${mode}::text AND d.order_variant = 'derived')
+        WHERE x.consult_uid = p.consult_uid AND d.subject_type = ${subjectType} AND d.question_set_sha256 = ${sha}::text AND d.mode = ${mode}::text AND d.order_variant = 'derived'
+          AND (d.evidence->>'no_state' IS DISTINCT FROM 'no_data' OR d.created_at > now() - make_interval(mins => ${NODATA_RETRY_MIN}::int)))
      ORDER BY p.t_close ASC, p.consult_key ASC
      LIMIT ${n}::int
-  `) as Array<{ consult_key: string }>;
+  `) as Array<{ consult_key: string; retried: boolean }>;
+  if (stats) stats.nodataRetry += rows.filter((r) => r.retried).length;
   return rows.map((r) => r.consult_key);
 }
 
@@ -103,8 +123,11 @@ export async function coverageJevDone(sha: string, subjectType: string, istDate:
 }
 
 /**
- * M1: write no_state MARKER rows (outcome no_answer, evidence.no_state) without ever changing an existing row. Skipped entirely when ANY jev_decision row already
- * exists for (subject_type, subject_id, question_set_sha256, mode); ON CONFLICT DO NOTHING besides. One statement, so the check and the insert cannot interleave.
+ * M1: write no_state MARKER rows (outcome no_answer, evidence.no_state) without ever changing a real row. Skipped entirely when ANY jev_decision row for
+ * (subject_type, subject_id, question_set_sha256, mode) is something other than a no_data marker (a real answer, an abstain, a terminal marker such as read_refused).
+ * JEV-NODATA-RETRY R2: over rows that are ALL no_data markers the insert goes through and ON CONFLICT refreshes the marker (reason, created_at = now(), so the 30-minute
+ * cooldown restarts); the DO UPDATE is guarded by `WHERE jev_decision.evidence->>'no_state' = 'no_data'`, so a row that is not a no_data marker is never touched.
+ * One statement, so the check and the insert cannot interleave. A later real answer replaces the marker rows through upsertDecisions (same worker key).
  */
 export async function insertNoStateMarkers(rows: WorkerDecision[]): Promise<number> {
   if (rows.length === 0) return 0;
@@ -126,8 +149,11 @@ export async function insertNoStateMarkers(rows: WorkerDecision[]): Promise<numb
         question_set_sha256 text, order_variant text, option_order_sha256 text, lane text, answer jsonb, probabilities jsonb, confidence real, band text,
         outcome text, call_id text, job_id text, mode text, latency_ms int, input_tokens int, output_tokens int, cost_usd numeric, evidence jsonb,
         state_sha256 text, mock boolean)
-     WHERE NOT EXISTS (SELECT 1 FROM jev_decision e WHERE e.subject_type = x.subject_type AND e.subject_id = x.subject_id AND e.question_set_sha256 = x.question_set_sha256 AND e.mode = x.mode)
-    ON CONFLICT DO NOTHING
+     WHERE NOT EXISTS (SELECT 1 FROM jev_decision e WHERE e.subject_type = x.subject_type AND e.subject_id = x.subject_id AND e.question_set_sha256 = x.question_set_sha256 AND e.mode = x.mode
+                         AND e.evidence->>'no_state' IS DISTINCT FROM 'no_data')
+    ON CONFLICT (subject_type, subject_id, question_id, question_set_sha256, order_variant, mode) WHERE question_set_sha256 IS NOT NULL DO UPDATE SET
+      evidence = EXCLUDED.evidence, call_id = EXCLUDED.call_id, job_id = EXCLUDED.job_id, created_at = now()
+      WHERE jev_decision.evidence->>'no_state' = 'no_data'
     RETURNING 1`) as unknown[];
   return out.length;
 }
