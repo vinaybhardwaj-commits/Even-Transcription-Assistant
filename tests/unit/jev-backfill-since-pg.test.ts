@@ -10,7 +10,7 @@ import { dockerAvailable, pgContainer } from "../support/s1-pg";
 const H = vi.hoisted(() => ({ tag: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>), sqlCalls: 0 }));
 vi.mock("@/lib/db", () => ({ sql: (a: TemplateStringsArray, ...v: unknown[]) => { H.sqlCalls += 1; return H.tag!(a, ...v); } }));
 
-import { allTranscribedConsults, parseBackfillSince, jevBackfillSince, BACKFILL_SINCE_FLOOR } from "@/lib/jev/worker/consult-eligible";
+import { allTranscribedConsults, backfillBounds, parseBackfillSince, jevBackfillSince, BACKFILL_SINCE_FLOOR } from "@/lib/jev/worker/consult-eligible";
 import { selectTranscribedConsults } from "@/lib/room-access/consult-select";
 
 const HAVE = dockerAvailable();
@@ -112,7 +112,8 @@ suite("JEV consult backfill since — second pass", () => {
     // pass 1 alone holds the edge row; pass 2 alone holds the earlier one
     expect(await selectTranscribedConsults(50, 7, SHA, "shadow", "consult")).toEqual(["cx_edge@ma"]);
     const { selectTranscribedConsultsBefore } = await import("@/lib/room-access/consult-select");
-    expect(await selectTranscribedConsultsBefore(50, 7, istDay(12), SHA, "shadow", "consult")).toEqual(["cx_just_before@ma"]);
+    const bb = backfillBounds(Date.now(), 7, istDay(12));
+    expect(await selectTranscribedConsultsBefore(50, bb.lo, bb.hi, [], SHA, "shadow", "consult")).toEqual(["cx_just_before@ma"]);
   });
   it("a uid with a window in each range is returned once, by its pass-1 key (never twice)", async () => {
     win("cx_a_old@ma", "u_split", { daysAgo: 9 });
@@ -149,5 +150,19 @@ suite("JEV consult backfill since — second pass", () => {
       expect(await allTranscribedConsults(50, ctx), String(v)).toEqual(base);
       expect(H.sqlCalls).toBe(1);
     }
+  });
+  it("RF-J3 (F2): the JS boundary moved past IST midnight between the two passes still gives one key per uid", async () => {
+    win("cx_a@ma", "u_xover", { daysAgo: 7, sec: -3600 });      // 1 h before the pass-1 window start
+    win("cx_b@ma", "u_xover", { daysAgo: 7, sec: 3600 });       // 1 h after it
+    since(12);
+    const base = await allTranscribedConsults(50, ctx);
+    expect(base).toEqual(["cx_b@ma"]);
+    const out = await allTranscribedConsults(50, ctx, Date.now() + 86_400_000);      // pass 2's bounds are a day later than pass 1's statement saw
+    expect(out.filter((k) => k.startsWith("cx_a") || k.startsWith("cx_b"))).toEqual(["cx_b@ma"]);
+  });
+  it("backfillBounds: IST midnight `days` back and SINCE 00:00 IST, as ISO UTC", () => {
+    const b = backfillBounds(Date.UTC(2026, 9, 16, 12, 0, 0), 7, "2026-09-09");
+    expect(b.hi).toBe("2026-10-08T18:30:00.000Z");      // 9 Oct 00:00 IST
+    expect(b.lo).toBe("2026-09-08T18:30:00.000Z");
   });
 });

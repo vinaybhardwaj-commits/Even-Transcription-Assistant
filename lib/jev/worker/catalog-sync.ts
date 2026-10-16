@@ -17,7 +17,7 @@ import { QUESTION_SET_FILES } from "@/jev/question-sets";
 import { selectC4Candidates, selectC4CandidatesBefore, selectClefPicks, selectCurrentSets, selectJevPicks, type Candidate, type ClefPick, type CurrentSet, type Cursor, type JevPick } from "@/lib/room-access/catalog-c4-select";
 import { canonicalJson } from "./canonical";
 import { classifyDbError } from "./errors";
-import { parseBackfillSince } from "./consult-eligible";
+import { backfillBounds, parseBackfillSince } from "./consult-eligible";
 import { catalogC4SyncEnabled } from "./flags";
 import { validateSetFile, type QuestionSetFile } from "./sets";
 
@@ -32,6 +32,9 @@ export const CATALOG_SYNC_BUDGET_MS = 20_000;
 export const CATALOG_SYNC_HARD_MS = 35_000;
 /** FU2 G3 (FU1-3): wall-clock limit on each of the four selects and the ingest. A Promise race, not SET LOCAL: see withTimeout. */
 export const CATALOG_SYNC_STATEMENT_TIMEOUT_MS = 15_000;
+/** FIX1 F1: the second scan starts at slot (floor(now/5 min) mod K) of K equal slices of [lo, hi), so successive ticks sweep the whole backfill range instead of re-reading its oldest end. */
+export const BACKFILL_ROTATE_SLOTS = 8;
+const ROTATE_TICK_MS = 5 * 60_000;
 const PAGE = 500;
 const MAX_PAGES = 10;
 /** Same shape as store.ts TOKEN (INFERRED: store.ts does not export it, and this slice may not edit it). The final gate is validateBatch either way. */
@@ -42,7 +45,7 @@ export type CatalogCounts = {
   posted: number; updated: number; inserted: number; stale: number; unchanged: number;
   skipped_off_enum: number; skipped_bad_token: number; budget_hit: boolean; capped: number;
   missing: number; retried: number; retired: number; invariant_dropped: number; error_class: string | null;
-  backfill_rows: number;      // rows collected by the CATALOG_C4_BACKFILL_SINCE second scan (0 when OFF)
+  backfill_rows: number;      // rows from the CATALOG_C4_BACKFILL_SINCE second scan that were actually posted (0 when OFF, or when the step ended before the ingest)
 };
 export const zeroCounts = (): CatalogCounts => ({ posted: 0, updated: 0, inserted: 0, stale: 0, unchanged: 0, skipped_off_enum: 0, skipped_bad_token: 0, budget_hit: false, capped: 0, missing: 0, retried: 0, retired: 0, invariant_dropped: 0, error_class: null, backfill_rows: 0 });
 
@@ -214,7 +217,8 @@ export async function runCatalogC4Sync(now: () => number = Date.now, stmtTimeout
   const limit = (): number => { const left = hardDeadline - now(); if (left <= 0) throw new HardDeadlineError(); return Math.min(stmtTimeoutMs, left); };
   const scan = { pages: 0, candidates_scanned: 0 };
   try {
-    await runStep(c, scan, overBudget, limit, catalogC4BackfillSince());
+    const wallMs = Date.now();      // the IST boundaries are real time (they meet the database's clock); `now` may be a test's virtual clock and only drives the rotation slot
+    await runStep(c, scan, overBudget, limit, catalogC4BackfillSince(wallMs), wallMs, Math.floor(t0 / ROTATE_TICK_MS));
   } catch (e) {
     c.error_class = e instanceof StatementTimeoutError ? "statement_timeout" : e instanceof ConcurrentIngestError ? "concurrent_insert" : classifyDbError(e);
   }
@@ -223,8 +227,9 @@ export async function runCatalogC4Sync(now: () => number = Date.now, stmtTimeout
   return c;
 }
 
-async function runStep(c: CatalogCounts, scan: { pages: number; candidates_scanned: number }, overBudget: () => boolean, limit: () => number, since: string | null): Promise<void> {
+async function runStep(c: CatalogCounts, scan: { pages: number; candidates_scanned: number }, overBudget: () => boolean, limit: () => number, since: string | null, wallMs: number, tickNo: number): Promise<void> {
   const rows: CatalogRow[] = [];
+  let backfillCollected = 0;
   let cur: CurrentSet[] | null = null;
   // One paged scan over `fetchPage`. True = it ended exhausted (a short page or no candidates); false = stopped by budget, BATCH_ROWS or MAX_PAGES.
   const scanRange = async (fetchPage: (cursor: Cursor) => Promise<Candidate[]>): Promise<boolean> => {
@@ -267,11 +272,20 @@ async function runStep(c: CatalogCounts, scan: { pages: number; candidates_scann
   };
   try {
     const exhausted = await scanRange((cursor) => withTimeout(selectC4Candidates(WINDOW_DAYS, cursor, PAGE), limit()));
-    // BACKFILL-SINCE: a second scan over the older range, only once the live-window scan ended exhausted and nothing capped it; same rows array, page total, budget and deadline
-    if (since !== null && exhausted && !c.budget_hit && rows.length < BATCH_ROWS && scan.pages < MAX_PAGES) {
-      const before = rows.length;
-      try { await scanRange((cursor) => withTimeout(selectC4CandidatesBefore(WINDOW_DAYS, since, cursor, PAGE), limit())); }
-      finally { c.backfill_rows = rows.length - before; }
+    // BACKFILL-SINCE: a second scan over the older range, only once the live-window scan ended exhausted and nothing capped it; same rows array, page total, budget and deadline.
+    // FIX1 F1: it starts at a rotating slot of [lo, hi) and wraps once to [lo, start), so every tick covers a different slice first.
+    const room = (): boolean => !c.budget_hit && rows.length < BATCH_ROWS && scan.pages < MAX_PAGES;
+    if (since !== null && exhausted && room()) {
+      const bb = backfillBounds(wallMs, WINDOW_DAYS, since);
+      if (bb.loMs < bb.hiMs) {
+        const before = rows.length;
+        const startMs = bb.loMs + Math.floor(((((tickNo % BACKFILL_ROTATE_SLOTS) + BACKFILL_ROTATE_SLOTS) % BACKFILL_ROTATE_SLOTS) * (bb.hiMs - bb.loMs)) / BACKFILL_ROTATE_SLOTS);
+        const start = new Date(startMs).toISOString();
+        try {
+          const ended = await scanRange((cursor) => withTimeout(selectC4CandidatesBefore(bb.lo, bb.hi, start, bb.hi, cursor, PAGE), limit()));
+          if (ended && startMs > bb.loMs && room()) await scanRange((cursor) => withTimeout(selectC4CandidatesBefore(bb.lo, bb.hi, bb.lo, start, cursor, PAGE), limit()));
+        } finally { backfillCollected = rows.length - before; }
+      }
     }
   } catch (e) {
     if (!(e instanceof HardDeadlineError)) throw e;
@@ -284,6 +298,6 @@ async function runStep(c: CatalogCounts, scan: { pages: number; candidates_scann
   let lm: number;
   try { lm = limit(); } catch (e) { if (e instanceof HardDeadlineError) { c.budget_hit = true; return; } throw e; }      // no time to start the ingest: post nothing
   const res = await withTimeout(ingestCatalogRows(v.rows, { updateOnly: true }), lm);
-  c.posted = v.rows.length; c.updated = res.updated; c.inserted = res.inserted; c.stale = res.stale;
+  c.posted = v.rows.length; c.backfill_rows = backfillCollected; c.updated = res.updated; c.inserted = res.inserted; c.stale = res.stale;
   c.missing = res.missing ?? 0; c.retried = res.retried ? 1 : 0;      // retried is not an error
 }

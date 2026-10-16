@@ -44,15 +44,15 @@ export async function selectC4Candidates(days: number, cursor: Cursor, limit: nu
 }
 
 /**
- * BACKFILL-SINCE second scan: the same candidate rules, keyset and columns as selectC4Candidates, over consults whose FIRST t_open lies in [`since` 00:00 IST, start of the `days` window).
- * A uid with any window at or after that start belongs to the first scan (it is excluded here, so no uid is scanned twice); a uid with a window before `since` has an earlier first t_open (excluded).
- * `since` is an IST date YYYY-MM-DD already validated by parseBackfillSince.
+ * BACKFILL-SINCE second scan: the same candidate rules, keyset and columns as selectC4Candidates, over consults whose first t_open AT OR AFTER `lo` (SINCE 00:00 IST) lies in [`from`, `to`),
+ * with lo <= from <= to <= hi (`hi` = start of the `days` window). FIX1 F1/F2: all four are timestamptz parameters (ISO UTC) computed once per tick in JS, so the caller can rotate its start.
+ * A uid with any window at or after `hi` belongs to the first scan (excluded here, so no uid is scanned twice). FIX1 F3: a uid with a window before `lo` is NOT excluded; its t0 is its
+ * first window at or after `lo`, so a consult straddling the SINCE midnight is synced (matching Jev pass 2).
  */
-export async function selectC4CandidatesBefore(days: number, since: string, cursor: Cursor, limit: number): Promise<Candidate[]> {
+export async function selectC4CandidatesBefore(lo: string, hi: string, from: string, to: string, cursor: Cursor, limit: number): Promise<Candidate[]> {
   const rows = (await sql`
     WITH cur AS (SELECT DISTINCT ON (s.id) s.id, s.version, s.content_sha256 FROM jev_question_set s WHERE s.status IN ('shadow', 'live') ORDER BY s.id, s.created_at DESC, s.version DESC),
-    b AS (SELECT ((date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') - make_interval(days => ${days}::int)) AT TIME ZONE 'Asia/Kolkata') AS hi,
-                 ((${since}::date)::timestamp AT TIME ZONE 'Asia/Kolkata') AS lo)
+    b AS (SELECT ${hi}::timestamptz AS hi, ${lo}::timestamptz AS lo, ${from}::timestamptz AS lft, ${to}::timestamptz AS rgt)
     SELECT g.consult_uid, to_char(g.t0 AT TIME ZONE 'UTC', ${ISO_US}::text) AS t0, ec.jev AS stored_jev, ec.clef_affect AS stored_clef
       FROM (SELECT w.consult_uid, min(w.t_open) AS t0 FROM eta_encounter_windows w, b
              WHERE w.consult_uid IS NOT NULL
@@ -60,8 +60,8 @@ export async function selectC4CandidatesBefore(days: number, since: string, curs
              GROUP BY w.consult_uid) g
       CROSS JOIN b
       JOIN encounter_catalog ec ON ec.consult_uid = g.consult_uid
-     WHERE g.t0 < b.hi
-       AND NOT EXISTS (SELECT 1 FROM eta_encounter_windows y WHERE y.consult_uid = g.consult_uid AND (y.t_open < b.lo OR (y.t_open >= b.hi AND y.t_open <= now())))
+     WHERE g.t0 >= b.lft AND g.t0 < b.rgt
+       AND NOT EXISTS (SELECT 1 FROM eta_encounter_windows y WHERE y.consult_uid = g.consult_uid AND y.t_open >= b.hi AND y.t_open <= now())
        AND (${cursor?.t0 ?? null}::timestamptz IS NULL OR (g.t0, g.consult_uid) > (${cursor?.t0 ?? null}::timestamptz, ${cursor?.uid ?? null}::text))
        AND (EXISTS (SELECT 1 FROM eta_encounter_windows x JOIN jev_decision d ON d.subject_id = x.consult_key
                      JOIN cur ON cur.id = d.question_set_id AND cur.content_sha256 = d.question_set_sha256

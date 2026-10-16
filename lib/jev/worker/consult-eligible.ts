@@ -39,16 +39,28 @@ export function jevBackfillSince(nowMs: number = Date.now()): string | null {
   return parseBackfillSince(process.env.JEV_CONSULT_BACKFILL_SINCE, nowMs);
 }
 
+const IST_MS = 5.5 * 3_600_000, DAY_MS = 86_400_000;
+/**
+ * FIX1 F2: the two instants of a backfill range, computed ONCE per call in JS so both statements of a pass pair see the same boundary even across IST midnight.
+ * hi = start of the `days`-IST-day window (IST midnight, `days` days before today's), lo = `since` 00:00 IST. ISO UTC strings, bound as timestamptz.
+ */
+export function backfillBounds(nowMs: number, days: number, since: string): { hi: string; lo: string; hiMs: number; loMs: number } {
+  const hiMs = Math.floor((nowMs + IST_MS) / DAY_MS) * DAY_MS - days * DAY_MS - IST_MS;
+  const loMs = Date.parse(`${since}T00:00:00Z`) - IST_MS;
+  return { hi: new Date(hiMs).toISOString(), lo: new Date(loMs).toISOString(), hiMs, loMs };
+}
+
 /** `ctx` (sha, mode) excludes subjects with a derived decision for that set sha in that mode — for ANY consult_key sharing the uid. Absent = no exclusion. */
-export async function allTranscribedConsults(limit: number, ctx?: { sha: string; mode: string }): Promise<string[]> {
+export async function allTranscribedConsults(limit: number, ctx?: { sha: string; mode: string }, nowMs: number = Date.now()): Promise<string[]> {
   const n = Math.max(1, Math.min(2000, Math.trunc(limit) || 1));
   const days = backfillDays();
   const sha = ctx?.sha ?? null, mode = ctx?.mode ?? "shadow";
   const live = await selectTranscribedConsults(n, days, sha, mode, CONSULT_SUBJECT_TYPE);
-  const since = jevBackfillSince();
+  const since = jevBackfillSince(nowMs);
   if (since === null || live.length >= n) return live;
   // pass 2: only capacity the live window leaves unused, from the half-open range [since 00:00 IST, start of the pass-1 window)
-  const older = await selectTranscribedConsultsBefore(n - live.length, days, since, sha, mode, CONSULT_SUBJECT_TYPE);
+  const b = backfillBounds(nowMs, days, since);
+  const older = await selectTranscribedConsultsBefore(n - live.length, b.lo, b.hi, live, sha, mode, CONSULT_SUBJECT_TYPE);
   console.info(`jev consult backfill_picked=${older.length}`);
   return [...new Set([...live, ...older])];
 }

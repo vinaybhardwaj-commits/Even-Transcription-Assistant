@@ -98,6 +98,9 @@ const on = () => { process.env.CATALOG_C4_SYNC_ENABLED = "1"; };
 const istDay = (daysAgo: number): string => new Date(Date.now() + 5.5 * 3_600_000 - daysAgo * 86_400_000).toISOString().slice(0, 10);
 const infoLines = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.map((c) => String(c[0]));
 const tickOf = (spy: { mock: { calls: unknown[][] } }) => JSON.parse(infoLines(spy).find((l) => l.startsWith("catalog_c4 tick "))!.slice("catalog_c4 tick ".length));
+/** a constant clock: tick 0, rotation slot 0 (the second scan starts at the oldest end, as before FIX1) and never over budget */
+const SLOT0 = () => 0;
+const wipeCatalogJev = () => pg.exec("UPDATE encounter_catalog SET jev = NULL, clef_affect = NULL;");
 const vclock = () => { const k = { t: 0 }; return { k, now: () => k.t }; };
 /** `count` consults `daysAgo` days back, each with an answered current-sha decision and a catalog block that is NOT the shape the sync writes: they are candidates, yield no row (invariant_dropped). */
 const bulkSilent = (prefix: string, count: number, daysAgo: number) => pg.exec(
@@ -143,7 +146,7 @@ suite("CATALOG-C4 backfill since — second scan", () => {
     cd("cx_live@ma", "u_live", 3); cd("cx_old@ma", "u_old", 10);
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
-      const r = await runCatalogC4Sync();
+      const r = await runCatalogC4Sync(SLOT0);
       expect(r).toMatchObject({ posted: 1, updated: 1, backfill_rows: 0, error_class: null });
       expect({ ...r, backfill_rows: undefined }).toEqual({ ...zeroCounts(), posted: 1, updated: 1, backfill_rows: undefined });
       expect(tickOf(spy)).toEqual({ ...r, ms: expect.any(Number) });
@@ -157,7 +160,7 @@ suite("CATALOG-C4 backfill since — second scan", () => {
     cd("cx_live@ma", "u_live", 3); cd("cx_old@ma", "u_old", 10); cd("cx_older@ma", "u_older", 12);
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
-      const r = await runCatalogC4Sync();
+      const r = await runCatalogC4Sync(SLOT0);
       expect(r).toMatchObject({ posted: 3, updated: 3, inserted: 0, backfill_rows: 2, error_class: null, budget_hit: false });
       expect(tickOf(spy).backfill_rows).toBe(2);
       expect(JSON.parse(infoLines(spy)[1]!.slice("catalog_c4 ceiling ".length))).toMatchObject({ pages: 2, candidates_scanned: 3 });
@@ -168,22 +171,22 @@ suite("CATALOG-C4 backfill since — second scan", () => {
   it("the SINCE bound is inclusive at 00:00 IST for the consult's first t_open; a consult first opened before it is out", async () => {
     on(); sinceOn(10);
     cd("cx_in@ma", "u_in", 10); win("cx_out@ma", "u_out", { daysAgo: 10, min: -1 }); decide("cx_out@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
-    await runCatalogC4Sync();
+    await runCatalogC4Sync(SLOT0);
     expect(posted()).toEqual(["u_in"]);
   });
-  it("a uid whose windows straddle the 8-day boundary is scanned once (first scan only); one whose first window is before SINCE is out", async () => {
+  it("a uid whose windows straddle the 8-day boundary is scanned once (first scan only); one straddling SINCE is synced by the second (F3)", async () => {
     on(); sinceOn(14);
     win("cx_s1@ma", "u_0801", { daysAgo: 9 }); win("cx_s2@ma", "u_0801", { daysAgo: 2 }); decide("cx_s1@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
     win("cx_t1@ma", "u_0802", { daysAgo: 20 }); win("cx_t2@ma", "u_0802", { daysAgo: 11 }); decide("cx_t2@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
-    const r = await runCatalogC4Sync();
-    expect(r).toMatchObject({ posted: 1, backfill_rows: 0 });
-    expect(posted()).toEqual(["u_0801"]);
+    const r = await runCatalogC4Sync(SLOT0);
+    expect(r).toMatchObject({ posted: 2, backfill_rows: 1 });
+    expect(posted()).toEqual(["u_0801", "u_0802"]);
   });
   it("the second scan does not run after BATCH_ROWS is reached (520 live candidates, 500 rows)", async () => {
     on(); sinceOn();
     bulkWins("p", 520, 3); bulkDecisions("p", 520, SHA["chair-affect"]!, "v0", "{}");
     cd("cx_old@ma", "u_old", 10);
-    const r = await runCatalogC4Sync();
+    const r = await runCatalogC4Sync(SLOT0);
     expect(r).toMatchObject({ posted: 500, backfill_rows: 0 });
     expect(posted()).not.toContain("u_old");
   });
@@ -223,7 +226,7 @@ suite("CATALOG-C4 backfill since — second scan", () => {
     cd("cx_old@ma", "u_old", 10);
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
-      const r = await runCatalogC4Sync();
+      const r = await runCatalogC4Sync(SLOT0);
       expect(r).toMatchObject({ posted: 0, backfill_rows: 0, error_class: null });
       expect(JSON.parse(infoLines(spy)[1]!.slice("catalog_c4 ceiling ".length))).toMatchObject({ pages: 10, candidates_scanned: 5000 });
     } finally { spy.mockRestore(); }
@@ -235,7 +238,7 @@ suite("CATALOG-C4 backfill since — second scan", () => {
     cd("cx_old@ma", "u_old", 10);
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
-      const r = await runCatalogC4Sync();
+      const r = await runCatalogC4Sync(SLOT0);
       expect(r).toMatchObject({ posted: 1, backfill_rows: 1, error_class: null });
       expect(JSON.parse(infoLines(spy)[1]!.slice("catalog_c4 ceiling ".length))).toMatchObject({ pages: 10, candidates_scanned: 4401 });
     } finally { spy.mockRestore(); }
@@ -244,12 +247,12 @@ suite("CATALOG-C4 backfill since — second scan", () => {
     on(); sinceOn();
     cd("cx_old@ma", "u_old", 10);
     win("cx_nocat@ma", "u_nocat", { daysAgo: 11, catalog: false }); decide("cx_nocat@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
-    const r1 = await runCatalogC4Sync();
+    const r1 = await runCatalogC4Sync(SLOT0);
     expect(r1).toMatchObject({ posted: 1, updated: 1, inserted: 0, missing: 0, backfill_rows: 1 });
     expect((await rows`SELECT count(*)::int AS c FROM encounter_catalog WHERE consult_uid = 'u_nocat'`)[0]!.c).toBe(0);
     const before = await catalogOf("u_old");
     H.posted.length = 0;
-    const r2 = await runCatalogC4Sync();
+    const r2 = await runCatalogC4Sync(SLOT0);
     expect(r2).toMatchObject({ posted: 0, updated: 0, unchanged: 1, backfill_rows: 0 });
     expect(H.posted).toHaveLength(0);
     expect((await catalogOf("u_old"))!.jev).toEqual(before!.jev);
@@ -259,7 +262,7 @@ suite("CATALOG-C4 backfill since — second scan", () => {
     cd("cx_old@ma", "u_old", 10);
     const gone = { set_id: "gone-set:q", set_sha: "c".repeat(64), band: "review", label: "low", model: "jev-1.13.0", at: "2026-09-10T00:00:00.000Z", state: "current" };
     pg.exec(`UPDATE encounter_catalog SET jev = '${JSON.stringify({ sets: [gone] })}'::jsonb WHERE consult_uid = 'u_old'`);
-    const r = await runCatalogC4Sync();
+    const r = await runCatalogC4Sync(SLOT0);
     expect(r).toMatchObject({ posted: 1, retired: 1, backfill_rows: 1 });
     const sets = (await catalogOf("u_old"))!.jev.sets as Array<Record<string, unknown>>;
     expect(sets.find((s) => s.set_id === "gone-set:q")).toMatchObject({ state: "retired", set_sha: gone.set_sha });
@@ -268,7 +271,69 @@ suite("CATALOG-C4 backfill since — second scan", () => {
   it("flag off reads nothing even with SINCE set", async () => {
     sinceOn();
     cd("cx_old@ma", "u_old", 10);
-    expect(await runCatalogC4Sync()).toEqual(zeroCounts());
+    expect(await runCatalogC4Sync(SLOT0)).toEqual(zeroCounts());
     expect(H.sqlCalls).toBe(0);
+  });
+  it("RF-C1 (F3): a consult straddling the SINCE midnight is synced; the 8-day straddler stays the first scan's", async () => {
+    on(); process.env.CATALOG_C4_BACKFILL_SINCE = istDay(12);
+    cd("cx_s1@ma", "u_sinceedge", 12); pg.exec(`UPDATE eta_encounter_windows SET t_open = t_open - interval '1 hour', t_close = t_close - interval '1 hour' WHERE consult_key = 'cx_s1@ma'`);
+    win("cx_s2@ma", "u_sinceedge", { daysAgo: 12, min: 60 }); decide("cx_s2@ma", "chair-affect", "distress", { type: "choice", choice: "low" });
+    cd("cx_e1@ma", "u_edge8", 9); win("cx_e2@ma", "u_edge8", { daysAgo: 7, min: 60 });
+    const r = await runCatalogC4Sync(SLOT0);
+    expect(posted()).toEqual(["u_edge8", "u_sinceedge"]);
+    expect(r).toMatchObject({ posted: 2, backfill_rows: 1 });
+  });
+  it("F4: backfill_rows counts only rows actually posted (0 when the step aborts before the ingest)", async () => {
+    on(); sinceOn();
+    cd("cx_old@ma", "u_old", 10);
+    const { k, now } = vclock();
+    H.onSql = (n) => { if (n === 5) k.t = CATALOG_SYNC_HARD_MS + 1; };      // the ingest finds no time left
+    const r = await runCatalogC4Sync(now);
+    expect(r.backfill_rows).toBe(0);
+    expect(H.posted).toHaveLength(0);
+  });
+  describe("F1 rotation", () => {
+    const tick = (i: number) => () => i * 5 * 60_000;      // tick i: rotation slot i mod 8; budget never binds
+    it("wrap with empty halves: whichever slot it starts in, a lone consult is found, and slot 0 does not wrap", async () => {
+      on(); sinceOn(12);
+      cd("cx_old@ma", "u_old", 10);
+      for (const i of [0, 3, 7, 8]) {
+        wipeCatalogJev(); H.posted.length = 0;
+        const r = await runCatalogC4Sync(tick(i));
+        expect(r, `tick ${i}`).toMatchObject({ posted: 1, backfill_rows: 1, error_class: null });
+      }
+    });
+    it("slot 0 equals today's order: oldest first from SINCE", async () => {
+      on(); sinceOn(12);
+      for (let i = 0; i < 3; i++) cd(`cx_o${i}@ma`, `u_o${i}`, 11 - i);
+      await runCatalogC4Sync(SLOT0);
+      expect(H.posted.flat().map((r) => (r as { consult_uid: string }).consult_uid)).toEqual(["u_o0", "u_o1", "u_o2"]);
+    });
+    it("budget_hit mid-wrap: rows collected so far are posted and counted, no further select", async () => {
+      on(); sinceOn(12);
+      cd("cx_a@ma", "u_ten", 10); cd("cx_b@ma", "u_eleven", 11);      // slot 3 starts 10.5 days back: u_ten is in [start, hi), u_eleven only in the wrap [lo, start)
+      const { k, now } = vclock(); k.t = 3 * 5 * 60_000;
+      H.onSql = (n) => { if (n === 5) k.t += CATALOG_SYNC_BUDGET_MS + 1; };      // 1 live select, then the first backfill page (select, sets, jev picks, clef picks)
+      const r = await runCatalogC4Sync(now);
+      expect(r).toMatchObject({ budget_hit: true, posted: 1, backfill_rows: 1, error_class: null });
+      expect(posted()).toEqual(["u_ten"]);
+      expect(H.sqlCalls).toBe(6);      // no select in the wrap, then the ingest
+    });
+    it("5,200 backfill consults with current decisions: 16 ticks (5 min apart) post every consult at least once", async () => {
+      on(); sinceOn(40);
+      pg.exec(`INSERT INTO eta_encounter_windows (consult_key, consult_uid, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version)
+               SELECT 'rb_' || g || '@ma', 'rbu_' || lpad(g::text, 5, '0'), 'mc_1', 'rm_a', 'none', ${TODAY0} - interval '39 days' + g * interval '10 minutes', ${TODAY0} - interval '39 days' + g * interval '10 minutes' + interval '1 second', 'endConsult', 'clean', 'v_t'
+                 FROM generate_series(1, 5200) g;
+               INSERT INTO encounter_catalog (consult_uid) SELECT 'rbu_' || lpad(g::text, 5, '0') FROM generate_series(1, 5200) g;
+               INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, question_set_id, question_set_version, question_set_sha256, order_variant, mode, answer, band, outcome, evidence)
+               SELECT 'jdrb_' || g, 'consult', 'rb_' || g || '@ma', 'distress', 'pv', 'jev-1.13.0', 'chair-affect', '${fileOf("chair-affect").version}', '${SHA["chair-affect"]}', 'derived', 'shadow', '{"type":"choice","choice":"low"}', 'review', 'answered', '{}'::jsonb FROM generate_series(1, 5200) g;`);
+      const seen = new Set<string>();
+      for (let i = 0; i < 16; i++) {
+        H.posted.length = 0;
+        await runCatalogC4Sync(tick(i));
+        for (const r of H.posted.flat()) seen.add((r as { consult_uid: string }).consult_uid);
+      }
+      expect(seen.size).toBe(5200);
+    });
   });
 });

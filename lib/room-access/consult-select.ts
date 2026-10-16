@@ -34,19 +34,19 @@ export async function selectTranscribedConsults(n: number, days: number, sha: st
 
 /**
  * BACKFILL-SINCE pass 2: the SAME predicates as selectTranscribedConsults (transcribed rule, the uid's lexically smallest key, decided-for-sha/mode exclusion, oldest first) over the
- * half-open range [`since` 00:00 IST, start of the `days` window). A uid with any window at or after that start is pass 1's, so it is excluded here: the two passes never share a uid.
- * `since` is an IST date YYYY-MM-DD already validated by parseBackfillSince.
+ * half-open range [`lo`, `hi`) (FIX1 F2: both bound as timestamptz, computed once per call by the caller: `lo` = SINCE 00:00 IST, `hi` = start of the pass-1 window). A uid with any window at or after that start is pass 1's, so it is excluded here: the two passes never share a uid.
+ * `liveKeys` are the keys pass 1 returned: a uid owning any of them is skipped, so a boundary that moved between the two statements (IST midnight) still gives one key per uid.
  */
-export async function selectTranscribedConsultsBefore(n: number, days: number, since: string, sha: string | null, mode: string, subjectType: string): Promise<string[]> {
+export async function selectTranscribedConsultsBefore(n: number, lo: string, hi: string, liveKeys: string[], sha: string | null, mode: string, subjectType: string): Promise<string[]> {
   const rows = (await sql`
     WITH b AS (
-      SELECT ((date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') - make_interval(days => ${days}::int)) AT TIME ZONE 'Asia/Kolkata') AS hi,
-             ((${since}::date)::timestamp AT TIME ZONE 'Asia/Kolkata') AS lo
+      SELECT ${hi}::timestamptz AS hi, ${lo}::timestamptz AS lo
     ), q AS (
       SELECT w.consult_key, w.consult_uid, w.t_close FROM eta_encounter_windows w, b
        WHERE w.t_close IS NOT NULL AND w.consult_uid IS NOT NULL AND w.room_id IS NOT NULL
          AND w.t_open >= b.lo AND w.t_open < b.hi
          AND NOT EXISTS (SELECT 1 FROM eta_encounter_windows z WHERE z.consult_uid = w.consult_uid AND z.t_open >= b.hi AND z.t_open <= now())
+         AND NOT EXISTS (SELECT 1 FROM eta_encounter_windows z WHERE z.consult_uid = w.consult_uid AND z.consult_key IN (SELECT jsonb_array_elements_text(${JSON.stringify(liveKeys)}::jsonb)))
          AND EXISTS (SELECT 1 FROM encounter_catalog ec WHERE ec.consult_uid = w.consult_uid
                        AND ec.stages->'sealed'->>'state' = 'ok' AND ec.stages->'stt'->>'state' = 'ok'
                        AND (ec.stages->'translate'->>'state' = 'ok' OR (ec.stages->'translate'->>'state' = 'n/a' AND ec.stages->'translate'->>'reason' = 'english')))
