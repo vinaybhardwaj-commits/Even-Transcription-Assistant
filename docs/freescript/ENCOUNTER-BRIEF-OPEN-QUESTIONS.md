@@ -1,0 +1,26 @@
+# ENCOUNTER-BRIEF open questions (for the lead)
+
+Companion to `docs/freescript/ENCOUNTER-BRIEF-SPEC-v1.md`. Each question names the spec section it blocks, the default the spec assumes if no answer comes, and what changes if the answer differs. The settled decisions in the brief are not reopened here.
+
+| id | question | blocks | default assumed in the spec |
+|---|---|---|---|
+| OQ-1 | **Where is the 16 Oct role-vote and arm (c) code?** No code in this repo fuses the LLM role layer, Jev cues and Clef-omni, and no Jev question set ranks speaker labels as doctor-like (spec §3, F1). Who owns landing it as the `role_votes.v1` layer, and which Jev question produced the "Jev doctor cue"? | phase 0a and 0b; all attribution | Phase 0a lands it on the box as a stored layer before 1a can ship |
+| OQ-2 | When the role track is `text-judge` or `caa-labels` (not `llm-roles`), may it count as voter 1 for 3/3? | §5.2 | Yes, marked `role_track_not_llm` in `degraded` |
+| OQ-3 | Are the app-side Nemotron identity labels (`spkN`, table `diarize_nemotron_speaker`) from the same diarization run as the bundle's `diar_nemotron` (`speaker_N`)? If not, which one is the backbone? | §5.3, §5.6 | Bundle `diar_nemotron` is the backbone; votes must be in its label space |
+| OQ-4 | The arm (c) margin of 0.05 is measured against what? `identity.ts` compares the best and runner-up **centroid** for one speaker; `tools/timbre/slots.py` compares the best and next **slot** for one centroid. | §5.6, §6.3 | The `slots.py` meaning (the next label in this consult), because arm (c) asks "which label is the logged-in doctor" |
+| OQ-5 | 3/3 says non-doctor while arm (c) says doctor for the same label. Is "unknown, no order" correct, or does one rule win? | §6.3 | Unknown, no order (both are settled; the conservative result) |
+| OQ-6 | The merged-turn detector thresholds (25 s, two Nemotron speakers each at least 20%) need a bench on the sarvam-mayura merged consults. Who supplies the labelled set? | §5.1 | Ship with the defaults in shadow; tune before 1a goes live |
+| OQ-7 | Should the artifact schema move to v0.4 to add `speaker_source: encounter_brief`, a `confirm_speaker` completion kind and an `unattributed_speaker` flag? Pulse-facing fields stay the same. | §8.2 | No schema change in phase 1: reuse `diarisation` and `inferred_confirm` |
+| OQ-8 | C4 Jev and Clef data are admin-only on the search route. May the box runner hold `ADMIN_TOKEN` for a read-only fetch, or should the palimpsest bundle gain a C4 slot? | §5.5 | A bundle slot (keeps the runner without an admin secret) |
+| OQ-9 | Which Jev C4 `set_id`s should feed consult context (stt-quality, u10 walk-in or end-signal)? | §4.7, §5.5 | stt-quality plus u10 walk-in and end-signal, config only |
+| OQ-10 | The brief-mode advice budget: 10 items and 700 characters (today 5 and 300). Is a longer `general_advice` acceptable to Pulse and to doctors? | §8.4, phase 1b | 10 and 700; must-carry warnings always kept |
+| OQ-11 | The emphasis and priority weights (repeat 0.5, explicit 0.3, translator 0.2; must-carry +0.3; firm +0.1). Accept as a starting point, or bench first? | §7.3, §7.5 | Accept; report the rank changes in shadow |
+| OQ-12 | Adding modules changes `code_sha256` for every run, which re-queues `rejected` uids under `--skip-existing`. Accept the re-run cost when the runner moves? | §8.1 | Accept; announce before the move |
+| OQ-13 | **About 25% of consults (15/60 on 16 Oct) have no order-capable span.** In brief mode every order there becomes a doctor-confirm prompt; there is no fallback to today's looser rule. Confirm. | §9.2 | Confirmed: no fallback for that case |
+| OQ-14 | The PDQI-9 harness arms are `A`, `B0` and `Bn` (`eval/pdqi9/run.py:21`). Extend them to `B0`, `Bb`, `Bw` and `Ba`, or map the brief arms onto `Bn` runs? | §11.2 | Extend the arm list |
+| OQ-15 | The adoption rule: A1 over A0 if no floor regresses and PDQI-9 is not worse; A2 over A1 if counselling recall rises by at least 10 points. Which n and which consult set (it must have `role_votes`)? | §11.2 | n=60, stratified like the blind 30, frozen before the run |
+| OQ-16 | More doctor speech in Advice and Plan will meet the FRX-N1 phrase rules (49 "addressed to doctor" rejects on 16 Oct, policy open since 15 Oct). Settle FRX-N1 before 1b, or run 1b with today's rule? | §14, phase 1b | Run with today's rule and measure the reject delta in shadow |
+| OQ-17 | Translators: the REB role vocabulary has no `translator`. Should the role layer learn one, or is brief-side detection (adjacent, restates the doctor) enough? | §6.5 | Brief-side detection only |
+| OQ-18 | A second 3/3 doctor in one consult (for example a senior and a junior doctor): may both order? | §6.3 | Yes, flagged `second_doctor` |
+| OQ-19 | Is the logged-in doctor of a consult reliably available on the box (the bundle `cutter_row.doctor_uid`), and do all Even doctors have an enrolled print? Without one, arm (c) is off for that consult. | §5.6 | Arm (c) off when there is no enrolment; counted in `degraded` |
+| OQ-20 | Is the `parts` lane (provisional, Clef plus Jev 30 s bins) allowed as a section prior, given that its owner may retune it? | §5.8 | Optional and off until its coverage is known |
