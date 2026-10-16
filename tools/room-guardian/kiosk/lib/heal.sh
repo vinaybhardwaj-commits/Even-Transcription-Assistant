@@ -39,7 +39,7 @@ heal_event() {
 
 target_for() {
   case "$1" in
-    usb_device_missing|usb_power_off|usb_reboot_failed|usb_power_off_recurring|helper_xpc_down|disk_low|mic_restricted|recorder_crash_loop|recorder_capture_stalled|recorder_needs_enrol|coreaudio_rms_dead|autologin_changed) echo "fleet" ;;
+    usb_device_missing|usb_power_off|usb_reboot_failed|usb_power_off_recurring|helper_xpc_down|disk_low|mic_restricted|recorder_crash_loop|recorder_capture_stalled|recorder_needs_enrol|recorder_failed|coreaudio_rms_dead|autologin_changed) echo "fleet" ;;
     server_retired|server_disabled|mic_row_missing|mic_flip_regranted|heal_rate_limited) echo "gating-lead,fleet" ;;
     presence_stale) echo "consult-lead" ;;
     *) echo "fleet" ;;
@@ -208,7 +208,10 @@ heal_chrome() {
   local before idle
   idle="$(hid_idle_s)"; before="presence_heartbeat_age_s=${S_presence_age:-null} hid_idle_s=${idle:-null}"
   if ! chrome_restart_allowed; then
-    once_per "chrome:deferred" 600 && heal_event deferred presence chrome_restart_deferred "$before" "" "not_idle_not_night" "$([ "$(current_mode)" = heal ] && echo false || echo true)"
+    local why=not_idle_not_night
+    # R16d NIT-2: outside the night window a consult hold that is not clear is its own reason
+    in_night_window || consult_hold_clear || why=consult_hold
+    once_per "chrome:deferred" 600 && heal_event deferred presence chrome_restart_deferred "$before" "" "$why" "$([ "$(current_mode)" = heal ] && echo false || echo true)"
     return 0
   fi
   act_begin presence presence_stale "$before" || return 1
@@ -482,7 +485,7 @@ heal_cycle() {
         recorder_not_running|recorder_hung|recorder_needs_enrol) heal_recorder "$verdict" ;;
         presence_stale) heal_chrome ;;
         pmset_drift|launchagent_missing|autologin_changed) heal_drift "$verdict" ;;
-        usb_device_missing|mic_restricted|mic_row_missing|recorder_crash_loop|recorder_capture_stalled|helper_xpc_down|disk_low|server_retired|server_disabled|coreaudio_rms_dead)
+        usb_device_missing|mic_restricted|mic_row_missing|recorder_failed|recorder_crash_loop|recorder_capture_stalled|helper_xpc_down|disk_low|server_retired|server_disabled|coreaudio_rms_dead)
           escalate "$verdict" "$layer" "$evidence" ;;
         power_rebooted) once_per "info:power_rebooted" 3600 && heal_event info "$layer" "$verdict" "$evidence" "" noted "$([ "$(current_mode)" = heal ] && echo false || echo true)" ;;
         *) : ;; # network_offline, upload_pending: the recorder retries itself

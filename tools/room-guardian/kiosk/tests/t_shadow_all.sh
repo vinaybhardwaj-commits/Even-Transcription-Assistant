@@ -46,7 +46,7 @@ sa_prep() {
     chrome) GUARDIAN_FAKE_NOW="$(ist_epoch 23:00)"; write_status capture_open=false; SA_CALL="heal_chrome"; SA_POS="pkill -x Google Chrome" ;;
     pmset) printf 'sleep 10\nautorestart 0\n' >"$T/pmset"; SA_CALL="heal_drift pmset_drift"; SA_POS="pmset-baseline" ;;
     la_missing) rm -f "$RR_PLIST"; SA_CALL="heal_drift launchagent_missing"; SA_POS="install-launch-agent" ;;
-    canary) GUARDIAN_FAKE_NOW="$(ist_epoch 23:00)"; write_status capture_open=false; mk_pcm 100 10; rm -f "$STATE_DIR/canary_night"; SA_CALL="canary_cycle"; SA_POS="afplay" ;;
+    canary) GUARDIAN_FAKE_NOW="$(ist_epoch 22:00)"; write_status capture_open=false; mk_pcm_tone 100 10; rm -f "$STATE_DIR/canary_slot"; SA_CALL="canary_cycle"; SA_POS="afplay" ;;
     usb) SA_CLEAR=1; : >"$T/usb.txt"; : >"$T/engine.txt"; echo 1000000000000 >"$T/hid"
          { printf 'header\n'; printf '%s.104 Df  kernel[0:694] [com.apple.usb:all] usb-drd3-port-hs@03100000: AppleUSBHostPort::cableChangeOccurred: powering off\n' "$(date -r "$((GUARDIAN_FAKE_NOW - 60))" '+%Y-%m-%d %H:%M:%S')"; } >"$T/log.txt"
          printf '2 %s %s\n' "$((GUARDIAN_FAKE_NOW - 10))" "$((GUARDIAN_FAKE_NOW - 30))" >"$STATE_DIR/usb_absent"; SA_CALL="heal_usb_power_off x"; SA_POS="guardian-root.sh reboot" ;;

@@ -34,7 +34,7 @@ mk_sandbox() { # sets T and the whole environment; PATH gets the fake bin dir fi
   export GUARDIAN_ROOT_HELPER="$KDIR/bin/guardian-root.sh"
   export GUARDIAN_ROOT_TESTMODE=1 GUARDIAN_ROOT_TEST_DB="$T/TCC.db" GUARDIAN_ROOT_LOG_BIN="$T/bin/log"   # R16: the helper pins /usr/bin/log; its own test seam (non-root + test mode only)
   export GUARDIAN_LOG_BIN="$T/bin/fakelog" GUARDIAN_SHUTDOWN_BIN="$T/bin/fakeshutdown"   # /usr/bin/log and /sbin/shutdown are ALWAYS faked (2.4 d')
-  export CANARY_AFPLAY="$T/bin/afplay" CANARY_SAMPLE_S=0   # afplay is always faked; no real sound
+  export CANARY_AFPLAY="$T/bin/afplay" CANARY_SAMPLE_S=0 CANARY_PLAY_GAP_S=0   # afplay is always faked; no real sound
   export CALLS="$T/calls.log"; : >"$CALLS"
   : >"$T/pub.log"; printf 'fleet=off\n' >"$T/flagout"; echo 0 >"$T/flagrc"
   echo 4242 >"$T/rec_pid"; echo 9999 >"$T/ca_pid"; : >"$T/tapewriters"
@@ -118,8 +118,11 @@ F
   cat >"$b/afplay" <<'F'
 #!/bin/bash
 echo "afplay $*" >>"$CALLS"
-if [ -s "$T/afplay_lag" ]; then perl -e 'my($lag,$a)=@ARGV; my @s=((100) x ($lag*16000)); for my $b (1..3){ push @s,(($a) x 8000); push @s,((100) x 8000) if $b<3 } push @s,((100) x 8000); print pack("s<*",@s)' "$(cat "$T/afplay_lag")" "$(cat "$T/afplay_amp")" >>"$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"
-elif [ -s "$T/afplay_amp" ]; then perl -e 'print pack("s<*", ($ARGV[0]) x 40000)' "$(cat "$T/afplay_amp")" >>"$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"; fi
+# the tone is a 1 kHz sine whose RMS is the amp (peak amp*sqrt2), then 6 s of quiet at 100 RMS (the 10 s between plays); the quiet bed is the same 1 kHz sine at RMS 100
+TAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"
+PERL_S='sub sn { my($r,$i)=@_; return int($r*1.41421356*sin(6.28318530718*$i/16)+($r>=0?0.5:-0.5)); }'
+if [ -s "$T/afplay_lag" ]; then perl -e "$PERL_S"'my($lag,$a)=@ARGV; my $i=0; my @s; push @s,sn(100,$i++) for 1..($lag*16000); for my $b (1..3){ push @s,sn($a,$i++) for 1..8000; if ($b<3) { push @s,sn(100,$i++) for 1..8000 } } push @s,sn(100,$i++) for 1..8000; push @s,sn(100,$i++) for 1..96000; print pack("s<*",@s)' "$(cat "$T/afplay_lag")" "$(cat "$T/afplay_amp")" >>"$TAPE"
+elif [ -s "$T/afplay_amp" ]; then perl -e "$PERL_S"'my $i=0; my @s; push @s,sn($ARGV[0],$i++) for 1..40000; push @s,sn(100,$i++) for 1..96000; print pack("s<*",@s)' "$(cat "$T/afplay_amp")" >>"$TAPE"; fi
 exit "$(cat "$T/afplay_rc" 2>/dev/null || echo 0)"
 F
   printf '#!/bin/bash\necho "room-recorder $*" >>"$CALLS"; exit 0\n' >"$T/app/Contents/MacOS/room-recorder"
@@ -171,6 +174,14 @@ mk_pcm() { # amplitude seconds
   local d="$RR_ROOT/captures/c1/seg_001"
   mkdir -p "$d"
   perl -e 'my($a,$s)=@ARGV; print pack("s<*", ($a) x ($s*16000))' "$1" "$2" >"$d/tape.pcm"
+  touch -t "$(date -j -f %s "$GUARDIAN_FAKE_NOW" +%Y%m%d%H%M.%S)" "$d/tape.pcm"
+}
+
+# canary tape bed: a 1 kHz sine of RMS amplitude $1 (the same level as mk_pcm DC $1) for $2 s, so the band statistic has something to read
+mk_pcm_tone() { # rms seconds
+  local d="$RR_ROOT/captures/c1/seg_001"
+  mkdir -p "$d"
+  perl -e 'my($a,$s)=@ARGV; print pack("s<*", map { int($a*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..($s*16000-1))' "$1" "$2" >"$d/tape.pcm"
   touch -t "$(date -j -f %s "$GUARDIAN_FAKE_NOW" +%Y%m%d%H%M.%S)" "$d/tape.pcm"
 }
 

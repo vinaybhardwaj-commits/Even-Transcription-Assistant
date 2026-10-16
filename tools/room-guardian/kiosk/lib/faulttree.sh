@@ -6,8 +6,15 @@
 # CoreAudio (layer 4) is evaluated in its place but its verdict is held back until layers 5-9 are
 # clear (A3 cross-cutting note, spec 2.4b): killing coreaudiod never fixed a permission or 409 fault.
 
+# <=80 chars of printable ASCII (control bytes and non-ASCII dropped, runs of blanks collapsed); "null" when nothing is left
+fault_err80() {
+  local e
+  e="$(printf '%s' "$1" | LC_ALL=C "$G_TR" '\n\t\r' '   ' | LC_ALL=C "$G_TR" -cd ' -~' | "$G_TR" -s ' ' | "$G_HEAD" -c 80)"
+  [ -n "$e" ] && printf '%s' "$e" || printf 'null'
+}
+
 fault_tree() {
-  local ca_held="" l59=0
+  local ca_held="" l59=0 k
 
   # 1 power / sleep
   if [ -n "$S_boot_age" ] && [ "$S_boot_age" -lt 900 ] 2>/dev/null; then
@@ -48,7 +55,9 @@ fault_tree() {
         echo "tcc|mic_denied|tcc_row=$S_tcc_row mic_state=${S_mic_state:-null}"; l59=1
       else
         # R15c + R16: error, error:read, error:<why> and ANY other non-numeric text = the row is UNKNOWN (the helper could not read TCC.db): no verdict, no l59, no page. Only a number other than 2 is a denial.
-        once_per "tcc_row_unreadable:$S_tcc_row" 86400 && audit "tcc row unreadable: $S_tcc_row"
+        # R16d NIT-1: the stamp key is bounded: the first 32 chars of the row, reduced to [A-Za-z0-9:_-]
+        k="$(printf '%.32s' "$S_tcc_row" | LC_ALL=C "$G_TR" -c 'A-Za-z0-9:_-' '_')"
+        once_per "tcc_row_unreadable:$k" 86400 && audit "tcc row unreadable: $S_tcc_row"
       fi ;;
   esac
   # 6 recorder process
@@ -62,6 +71,8 @@ fault_tree() {
   case "$S_state" in
     needs_enrol) echo "recorder|recorder_needs_enrol|state=needs_enrol"; l59=1 ;;
     capture_stalled) echo "recorder|recorder_capture_stalled|state=capture_stalled"; l59=1 ;;
+    # R16d: state=failed is its own fault (escalate only in heal.sh). last_error is printable ASCII only, whitespace collapsed, at most 80 chars; the JSON escape happens in heal_event.
+    failed) echo "recorder|recorder_failed|state=failed last_error=$(fault_err80 "$S_last_error")"; l59=1 ;;
   esac
   # 7 helper (XPC)
   if [ "$S_helper_ok" = "false" ]; then echo "helper|helper_xpc_down|helper_xpc_ok=false"; l59=1; fi

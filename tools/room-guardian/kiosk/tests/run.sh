@@ -9,7 +9,7 @@ SBROOT="$(mktemp -d "${TMPDIR:-/tmp}/guardian-tests.XXXXXX")"
 SBROOT="$(cd -P "$SBROOT" && pwd -P)"; export SBROOT
 trap 'rm -rf "$SBROOT"' EXIT
 total_fail=0; total_pass=0; ntests=0; leaks=0
-for f in t_*.sh; do
+for f in ${TFILES:-t_*.sh}; do
   echo "== $f"
   # shellcheck disable=SC1090
   . "./$f"
