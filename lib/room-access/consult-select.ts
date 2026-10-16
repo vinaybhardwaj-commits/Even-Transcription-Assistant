@@ -47,11 +47,11 @@ export async function selectTranscribedConsults(n: number, days: number, sha: st
                WHERE rx.consult_uid = p.consult_uid AND r.subject_type = ${subjectType} AND r.question_set_sha256 = ${sha}::text AND r.mode = ${mode}::text AND r.order_variant = 'derived')) AS retried
       FROM pick p
      WHERE ${sha}::text IS NULL OR NOT EXISTS (
-       -- decided = any derived row that is NOT a no_data marker (answered, abstained, refused, read_refused, ...), or a no_data marker still inside the cooldown, or a no_data marker on a consult past the retry window
+       -- decided = any derived row that is NOT a no_data marker (answered, abstained, refused, read_refused, ...), or a no_data marker still inside the cooldown, or a no_data marker on a consult whose NEWEST window (max t_close over the uid, FIX2) is past the retry window
        SELECT 1 FROM jev_decision d JOIN eta_encounter_windows x ON x.consult_key = d.subject_id
         WHERE x.consult_uid = p.consult_uid AND d.subject_type = ${subjectType} AND d.question_set_sha256 = ${sha}::text AND d.mode = ${mode}::text AND d.order_variant = 'derived'
           AND (d.evidence->>'no_state' IS DISTINCT FROM 'no_data' OR d.created_at > now() - make_interval(mins => ${NODATA_RETRY_MIN}::int)
-               OR p.t_close < now() - make_interval(hours => ${NODATA_RETRY_MAX_AGE_H}::int)))
+               OR (SELECT max(mw.t_close) FROM eta_encounter_windows mw WHERE mw.consult_uid = p.consult_uid) < now() - make_interval(hours => ${NODATA_RETRY_MAX_AGE_H}::int)))
      -- FIX1 F2: fresh consults (no derived rows) first, then the no_data re-offers; each group oldest t_close first
      ORDER BY retried ASC, p.t_close ASC, p.consult_key ASC
      LIMIT ${n}::int
@@ -89,11 +89,11 @@ export async function selectTranscribedConsultsBefore(n: number, lo: string, hi:
                WHERE rx.consult_uid = p.consult_uid AND r.subject_type = ${subjectType} AND r.question_set_sha256 = ${sha}::text AND r.mode = ${mode}::text AND r.order_variant = 'derived')) AS retried
       FROM pick p
      WHERE ${sha}::text IS NULL OR NOT EXISTS (
-       -- decided = any derived row that is NOT a no_data marker (answered, abstained, refused, read_refused, ...), or a no_data marker still inside the cooldown, or a no_data marker on a consult past the retry window
+       -- decided = any derived row that is NOT a no_data marker (answered, abstained, refused, read_refused, ...), or a no_data marker still inside the cooldown, or a no_data marker on a consult whose NEWEST window (max t_close over the uid, FIX2) is past the retry window
        SELECT 1 FROM jev_decision d JOIN eta_encounter_windows x ON x.consult_key = d.subject_id
         WHERE x.consult_uid = p.consult_uid AND d.subject_type = ${subjectType} AND d.question_set_sha256 = ${sha}::text AND d.mode = ${mode}::text AND d.order_variant = 'derived'
           AND (d.evidence->>'no_state' IS DISTINCT FROM 'no_data' OR d.created_at > now() - make_interval(mins => ${NODATA_RETRY_MIN}::int)
-               OR p.t_close < now() - make_interval(hours => ${NODATA_RETRY_MAX_AGE_H}::int)))
+               OR (SELECT max(mw.t_close) FROM eta_encounter_windows mw WHERE mw.consult_uid = p.consult_uid) < now() - make_interval(hours => ${NODATA_RETRY_MAX_AGE_H}::int)))
      -- FIX1 F2: fresh consults (no derived rows) first, then the no_data re-offers; each group oldest t_close first
      ORDER BY retried ASC, p.t_close ASC, p.consult_key ASC
      LIMIT ${n}::int

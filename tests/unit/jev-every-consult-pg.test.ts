@@ -82,6 +82,8 @@ import { consultCoverage } from "@/lib/jev/worker/coverage";
 import { jevHealth } from "@/lib/jev/worker/health";
 import { pendingSubjects, sweepUse } from "@/lib/jev/worker/sweeper";
 import { askSubject } from "@/lib/jev/worker/call";
+import { jevAskKind } from "@/lib/jobs/kinds/jev-ask";
+import type { StepContext } from "@/lib/jobs/types";
 
 const HAVE = dockerAvailable();
 const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
@@ -254,6 +256,46 @@ suite("JEV-EVERY-CONSULT S1 — every transcribed consult, record-only", () => {
     expect((await rows`SELECT min(created_at) AS t FROM jev_decision`)[0]!.t).not.toEqual(before);
     expect(await pendingSubjects(def, SHA_PITCH, "shadow", 10)).toEqual([]);
     expect(Number((await rows`SELECT count(*)::int AS c FROM jev_decision WHERE subject_id = 'cx_0001@ma'`)[0]!.c)).toBeGreaterThan(0);
+  });
+  it("JEV-NODATA-RETRY FIX2 MUST-4: one full sweep cycle (sweepUse, the job plan, askSubject) logs exactly ONE nodata_retry line, equal to the retries the job builds (200 stale + 1 fresh = 199)", async () => {
+    Object.assign(process.env, { JEV_WORKER_ENABLED: "1", ETA_JEV_TEXT_LANE: "1", JEV_USE_CONSULT_RUBRIC: "1" });
+    pg.exec(`INSERT INTO eta_encounter_windows (consult_key, consult_uid, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version)
+             SELECT 'st' || lpad(g::text, 4, '0') || '@ma', 'ust' || lpad(g::text, 4, '0'), 'mc_1', 'rm_a', 'none', now() - interval '3 hours' + g * interval '1 second', now() - interval '3 hours' + g * interval '1 second' + interval '1 second', 'endConsult', 'clean', 'v_t' FROM generate_series(1, 200) g`);
+    pg.exec(`INSERT INTO encounter_catalog (consult_uid, stages) SELECT 'ust' || lpad(g::text, 4, '0'), '{"sealed":{"state":"ok"},"stt":{"state":"ok"},"translate":{"state":"ok"}}'::jsonb FROM generate_series(1, 200) g`);
+    pg.exec(`INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, question_set_sha256, order_variant, mode, answer, outcome, evidence, created_at)
+             SELECT 'jd_st' || g, 'consult', 'st' || lpad(g::text, 4, '0') || '@ma', 'q_1', 'pv', 'm', '${SHA_PITCH}', 'derived', 'shadow', '{"type":"none"}', 'no_answer', '{"no_state":"no_data"}', now() - interval '600 minutes' FROM generate_series(1, 200) g`);
+    win("cx_fresh@ma", "u_fresh");
+    const def = getUse("consult_rubric", "pitch-detect")!;
+    const set = (await rows`SELECT id, version, content_sha256 AS sha, model_pin FROM jev_question_set WHERE id = 'pitch-detect' AND status = 'shadow'`)[0]!;
+    const q = (await rows`SELECT question_id FROM jev_question WHERE question_set_id = 'pitch-detect' AND version = ${set.version}`);
+    const ref = { id: set.id, version: set.version, sha: set.sha, modelPin: set.model_pin, use: "consult_rubric", subjectType: "consult" };
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const lines = () => info.mock.calls.map((a) => String(a[0])).filter((l) => l.startsWith("jev consult nodata_retry="));
+    try {
+      expect(await sweepUse(def)).toMatchObject({ enqueued: true, pending: 50 });
+      expect(lines()).toEqual([]);                                                       // the sweep's pick builds nothing: no line
+      const args = { use: "consult_rubric", mode: "shadow", set_id: set.id, version: set.version, subjects_key: "sweep" };
+      const out = await jevAskKind.run({ job: { id: "job_fix2", kind: "jev_ask", args, status: "running", step: "plan", progress: {}, result: null, error: null, actor: "test", created_at: "", started_at: "", updated_at: "", finished_at: null, lease_until: null, lease_owner: null, attempts: 1, failures: 0 }, step: "plan", args, progress: {} } as StepContext);
+      expect(out.kind).toBe("next");
+      const subjects = (out as unknown as { progress: { subjects: string[] } }).progress.subjects;
+      const built = subjects.filter((k) => k !== "cx_fresh@ma").length;                  // every plan subject except the fresh one is a retry
+      expect(subjects).toHaveLength(200);
+      expect(subjects[0]).toBe("cx_fresh@ma");
+      expect(built).toBe(199);
+      for (const id of subjects.slice(0, 3)) await askSubject({ jobId: null, set: ref, defs: q.map((r) => ({ question_id: r.question_id })) as never, mode: "shadow", subjectId: id, build: { unbuildable: "no_data" } });
+      expect(lines()).toEqual([`jev consult nodata_retry=${built}`]);                   // ONE line, from the plan pick
+    } finally { info.mockRestore(); }
+  });
+  it("JEV-NODATA-RETRY FIX2 F3: the 48 h window uses max(t_close) over the uid's windows, not the picked key's (@ma 50 h ago, @mb 1 h ago: still re-offered; both old: terminal)", async () => {
+    win("cx_0001@ma", "u_0001", { daysAgo: 1 }); win("cx_0001@mb", "u_0001", { daysAgo: 1 });
+    pg.exec(`UPDATE eta_encounter_windows SET t_open = now() - interval '50 hours', t_close = now() - interval '50 hours' + interval '1 second' WHERE consult_key = 'cx_0001@ma'`);
+    pg.exec(`UPDATE eta_encounter_windows SET t_open = now() - interval '1 hour', t_close = now() - interval '1 hour' + interval '1 second' WHERE consult_key = 'cx_0001@mb'`);
+    const def = getUse("consult_rubric", "pitch-detect")!;
+    pg.exec(`INSERT INTO jev_decision (id, subject_type, subject_id, question_id, prompt_version, model, question_set_sha256, order_variant, mode, answer, outcome, evidence, created_at)
+             VALUES ('jd_f3', 'consult', 'cx_0001@ma', 'q_1', 'pv', 'm', '${SHA_PITCH}', 'derived', 'shadow', '{"type":"none"}', 'no_answer', '{"no_state":"no_data"}', now() - interval '600 minutes')`);
+    expect(await pendingSubjects(def, SHA_PITCH, "shadow", 10)).toEqual(["cx_0001@ma"]);
+    pg.exec(`UPDATE eta_encounter_windows SET t_open = now() - interval '49 hours', t_close = now() - interval '49 hours' + interval '1 second' WHERE consult_key = 'cx_0001@mb'`);
+    expect(await pendingSubjects(def, SHA_PITCH, "shadow", 10)).toEqual([]);
   });
   it("coverage counts on a seeded fixture (counts only) and jevHealth carries them as `coverage`", async () => {
     win("cx_0001@ma", "u_0001", { today: true }); win("cx_0001@mb", "u_0001", { today: true }); win("cx_0002@ma", "u_0002", { today: true, min: 1 }); win("cx_0003@ma", "u_0003", { today: true, min: 2 });
