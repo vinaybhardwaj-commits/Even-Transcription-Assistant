@@ -7,6 +7,7 @@ import { neon } from '@neondatabase/serverless';
 import { resolveMachines } from './occupancy.mjs';
 import { cachedFacts } from './snapshot.mjs';
 import { trackerOf } from './tracker.mjs';
+import { classify as micGuardOf, applyToMic, fetchMicGuard } from './micguard.mjs';
 
 const HOME = os.homedir();
 const REFRESH = Number(process.env.PW_REFRESH || 5) * 1000; // ms
@@ -127,7 +128,10 @@ async function fetchBench(force) {
     const TALK = new Map(); for (const [id, a] of recent) TALK.set(id, a.filter((v) => v.t >= cut30).map((v) => v.p));
     const P25 = new Map();
     for (const [id, a] of per) { if (a.length < 30) continue; a.sort((x, y) => x - y); P25.set(id, a[Math.floor(0.25 * (a.length - 1))]); }
-    benchCache = { at: Date.now(), data: { L, I, S, K, P25, SIL, TALK }, err: null };
+    // mic-permission guard: its own fail-soft read; an error or no rows leaves the board as it was
+    const MG = await fetchMicGuard(() => sql`select distinct on (room_id) room_id, ts, payload from kiosk_health_events
+          where kind = 'mic_guard' and ts > now() - interval '24 hours' order by room_id, ts desc`);
+    benchCache = { at: Date.now(), data: { L, I, S, K, P25, SIL, TALK, MG }, err: null };
   } catch (e) { benchCache = { ...benchCache, err: e.message }; }   // keep the last good data; retry on the next tick
   return benchCache;
 }
@@ -245,7 +249,7 @@ function evalRoom(room, st) {
       mic = talk ? { text: 'speech ' + lvl, color: 'green' } : { text: 'live ' + lvl, color: 'green' };
     }
   }
-  out.mic = mic;
+  out.mic = applyToMic(mic, out.problems, micGuardOf(b && b.MG && b.MG.get(room.id)));
 
   // TRACKER problem: red only while the warehouse says a doctor is consulting
   if (out.trk.down && out.doc.consulting) { out.trk.color = 'red'; out.problems.push(`Pulse tracker silent${Number.isFinite(out.trk.secs) ? ' ' + minsText(out.trk.secs) : ''} while ${out.doc.who} is consulting — ETA cannot see who is in the room.`); }
