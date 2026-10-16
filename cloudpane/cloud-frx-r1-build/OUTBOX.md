@@ -1,1 +1,3 @@
 - 2026-10-16T16:21:46Z code commit 2e4a51e5 on cloudpane/cloud-frx-r1-build/r1 (base 3cdb7c0b); 9 files; new tests 300 pass; mutants 8/8 killed; oracle OFF 200/200 byte-identical; recorder 200 (80 same, 120 changed, 96 drugs moved)
+- 2026-10-16T16:32:54Z full suite: 1 failed (B1 test_m4, R1-caused, not edited), 3895 passed, 2 skipped; schema checks clean; py_compile 3.10 OK; gitleaks 0 on changed files
+- 2026-10-16T16:32:54Z report cloudpane-reports/FRX-R1-BUILD-REPORT.md committed; verdict built, one gate line red (B1), label blocked (B2/B3)
