@@ -545,6 +545,48 @@ describe("FIX3: the unit keys are eta_encounter_windows.consult_key", () => {
     expect(q.map((x) => (x.values[0] as string[]).length)).toEqual([10, 10, 5]);
   });
 
+  it("FIX4 (refuter R3-1): scored under @mac_a, then a LONGER window @mac_b lands and becomes the pick: the consult is done (counted), not planned again; the statement asks about both keys", async () => {
+    setCatalog([crow("CONS000281", 30), crow("CONS000282", 31)]);
+    H.windows = [win("CONS000281", "mac_a", 0, 5), win("CONS000281", "mac_b", 0, 20), win("CONS000282", "mac_a", 0, 9)];
+    H.done = { rb_alpha: ["CONS000281@mac_a"] }; // scored earlier under the then-picked key
+    const s = await plan("live");
+    expect(keysOf()).toEqual(["CONS000282@mac_a"]); // 281 is NOT planned again under @mac_b
+    expect(s.rubrics[0]).toMatchObject({ done: 1, deferred: 0, planned: 1, multi_window: 1 });
+    const done = resultsQueries("rb_alpha");
+    expect(done).toHaveLength(1); // still ONE done statement per page per rubric
+    expect([...(done[0]!.values[2] as string[])].sort()).toEqual(["CONS000281@mac_a", "CONS000281@mac_b", "CONS000282@mac_a"]);
+  });
+
+  it("FIX4: deferred the same way: a finished sweep job that carried the OTHER key defers the consult under the picked key", async () => {
+    setCatalog([crow("CONS000291", 30), crow("CONS000292", 31)]);
+    H.windows = [win("CONS000291", "mac_a", 0, 5), win("CONS000291", "mac_b", 0, 20), win("CONS000292", "mac_a", 0, 9)];
+    H.ran = { rb_alpha: ["CONS000291@mac_a"] };
+    const s = await plan("live");
+    expect(keysOf()).toEqual(["CONS000292@mac_a"]);
+    expect(s.rubrics[0]).toMatchObject({ done: 0, deferred: 1, planned: 1 });
+    expect(H.sql.filter((x) => /FROM scribe_job j/.test(x.text))).toHaveLength(1);
+  });
+
+  it("FIX4: done wins over deferred across keys, and an undone, undeferred uid is planned under the PICKED key only", async () => {
+    setCatalog([crow("CONS000301", 30), crow("CONS000302", 31)]);
+    H.windows = [win("CONS000301", "mac_a", 0, 5), win("CONS000301", "mac_b", 0, 20), win("CONS000302", "mac_a", 0, 5), win("CONS000302", "mac_b", 0, 20)];
+    H.done = { rb_alpha: ["CONS000301@mac_a"] };
+    H.ran = { rb_alpha: ["CONS000301@mac_b"] };
+    const s = await plan("live");
+    expect(keysOf()).toEqual(["CONS000302@mac_b"]);
+    expect(s.rubrics[0]).toMatchObject({ done: 1, deferred: 0, planned: 1, multi_window: 2 });
+  });
+
+  it("FIX4: single-key consults are unchanged (done, deferred and planned as before)", async () => {
+    setCatalog([crow("CONS000311", 30), crow("CONS000312", 31), crow("CONS000313", 32)]);
+    H.windows = ["CONS000311", "CONS000312", "CONS000313"].map((u) => win(u, "mac_a", 0, 10));
+    H.done = { rb_alpha: ["CONS000311@mac_a"] };
+    H.ran = { rb_alpha: ["CONS000312@mac_a"] };
+    const s = await plan("live");
+    expect(keysOf()).toEqual(["CONS000313@mac_a"]);
+    expect(s.rubrics[0]).toMatchObject({ done: 1, deferred: 1, planned: 1, multi_window: 0 });
+  });
+
   it("dry stays SELECT-only with the mapping statement, and submits nothing", async () => {
     setCatalog([crow("CONS000251", 30)]);
     H.windows = [win("CONS000251", "mac_a", 0, 10)];
