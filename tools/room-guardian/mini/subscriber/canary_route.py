@@ -1,23 +1,31 @@
 """canary_route.py -- FR1-C5 (Mini side): the nightly Guardian canary events from the kiosk (topic kiosk/<room>/canary, one JSON line per run) become cases.
 SHADOW: the Mini only ALERTS on a canary event. It takes no action of any kind (no play, no command, no reboot, no write to a kiosk); a canary line only ever opens or closes a case.
+R16d (kiosk 257b23c1): the line also carries "slot" ("pm" 21:40 or "am" 07:20, or null), "pass_db", "plays" (0 to 2 measured plays, 7 numeric/bool-or-null members each) and "pass_db_band", appended after
+"output". Both shapes are accepted. The Mini stores the line as sent (the plays array is in the stream file) and never recomputes the kiosk's verdict. The raw `night` field is the IST DATE of
+the slot, so the 21:40 slot of date D and the 07:20 slot of D+1 are the same clinical night: every dedupe, streak, stale-night and pass rule here uses the IST 12:00-12:00 night of `ts`
+(ist_night_of), and the `night` field is only checked to be within a day of it.
 Line shape (kiosk lib/canary.sh canary_event): {"room_id", "install_id", "ts", "action": "canary", "night": "YYYYMMDD", "result", "mode", "pre_db", "burst_db", "rise_db", "volume", "output"}.
 Validation is strict: exactly these keys (no more, no fewer), the types below, the result vocabulary, the room_id equals the topic room, no duplicate JSON keys. A line that fails gets
 ONE audit line (<data>/<day>/<room>.canary-invalid.jsonl, the reason only). A `night` must be a real calendar date and the IST night of `ts` (12:00 to 12:00 IST) give or take one day and never a case.
-Results: pass (with a night not older than the night that opened the case) closes the room's open canary cases and breaks the output_absent streak. no_local_rise opens canary_failed (URGENT, a V kind with the coreaudio window: the router
+Results: aborted:<why> (R16d-3, a play gate failed before play 1 or 2; eight fixed reasons) is a NORMAL-tier canary_inconclusive: never canary_failed, and neutral for the output_absent streak. pass (with a night not older than the night that opened the case) closes the room's open canary cases and breaks the output_absent streak. no_local_rise opens canary_failed (URGENT, a V kind with the coreaudio window: the router
 treats it like capture_dead). inconclusive:<why> opens canary_inconclusive (NORMAL tier, not V); inconclusive:output_absent on two consecutive nights also opens canary_output_absent
 (URGENT, not V). would_do is stored and gets one audit line (<room>.canary-audit.jsonl), never a case. A line whose ts is more than 36 h from the Mini clock (either direction; exactly 36 h acts) is stored and audited only, and moves no state. Each case kind opens at most once per room per night (the `night` key of the line), even after an ACK.
 State (the nights already alerted and the last output_absent night) is kept in <data>/canary-state.json, so a restart neither re-opens a night nor forgets a streak."""
 import json, math, os, re
 from datetime import datetime, timedelta, timezone
 
-KEYS = ("room_id", "install_id", "ts", "action", "night", "result", "mode", "pre_db", "burst_db", "rise_db", "volume", "output")
+KEYS = ("room_id", "install_id", "ts", "action", "night", "result", "mode", "pre_db", "burst_db", "rise_db", "volume", "output")             # the R15c / R16b line
+KEYS_R16D = KEYS + ("slot", "pass_db", "plays", "pass_db_band")                                                                                # the R16d line: four fields appended after "output"
+PLAY_KEYS = ("pre_db", "burst_db", "rise_db", "pre_db_band", "burst_db_band", "rise_db_band", "pass_broadband")
+ABORT_WHY = ("outside_window", "consult_not_clear", "hid_unreadable", "hid_active", "recorder_failed", "recorder_busy", "not_recording", "tape_not_advancing")    # R16d-3, fixed by guardian-lead
+SLOTS = ("pm", "am")                                                    # kiosk canary_slot_name; null outside both slots (a state_* refusal line)
 RESULTS = ("pass", "would_do", "no_local_rise")
 WHY_RE = re.compile(r"^[a-z0-9_]{1,40}$")
 NIGHT_RE = re.compile(r"^[0-9]{8}$")          # the shape only; a real calendar date is checked with strptime (valid_night)
 IST = timezone(timedelta(hours=5, minutes=30))
 MODES = ("shadow", "heal")
 STR_CAP = 200
-TS_FAR_S = 36 * 3600                         # a line whose ts is further than this from the Mini clock is audited (never acted on differently)
+TS_FAR_S = 36 * 3600                         # a line whose ts is further than this from the Mini clock is stored and audited only (never acted on)
 CASE_KINDS = ("canary_failed", "canary_inconclusive", "canary_output_absent")
 OUTPUT_ABSENT = "inconclusive:output_absent"
 
@@ -65,8 +73,9 @@ def validate(obj, room):
     """-> (True, "") or (False, why). `why` is a fixed word, never the line's content."""
     if not isinstance(obj, dict):
         return False, "not_an_object"
-    if set(obj) != set(KEYS):
-        return False, "keys"
+    r16d = set(obj) == set(KEYS_R16D)
+    if set(obj) != set(KEYS) and not r16d:
+        return False, "keys"                      # exactly the R15c line or exactly the R16d line: no more, no fewer
     if obj["room_id"] != room:
         return False, "room_mismatch"
     if obj["action"] != "canary":
@@ -83,7 +92,11 @@ def validate(obj, room):
     r = obj["result"]
     if not isinstance(r, str):
         return False, "result_type"
-    if r not in RESULTS and not (r.startswith("inconclusive:") and WHY_RE.fullmatch(r[len("inconclusive:"):])):
+    aborted = r.startswith("aborted:")
+    if aborted:
+        if r[len("aborted:"):] not in ABORT_WHY:
+            return False, "result"                # exactly the eight reasons guardian-lead fixed; anything else is invalid
+    elif r not in RESULTS and not (r.startswith("inconclusive:") and WHY_RE.fullmatch(r[len("inconclusive:"):])):
         return False, "result"
     if obj["mode"] not in MODES:
         return False, "mode"
@@ -91,6 +104,21 @@ def validate(obj, room):
         return False, "string_field"
     if not all(_numnull(obj[k]) for k in ("pre_db", "burst_db", "rise_db", "volume")):
         return False, "number_field"
+    if aborted and (not r16d or obj["slot"] not in SLOTS):
+        return False, "slot"                      # an aborted line comes from the R16d kiosk and always names its committed slot, never null
+    if r16d:
+        if obj["slot"] is not None and obj["slot"] not in SLOTS:
+            return False, "slot"
+        if not _numnull(obj["pass_db"]) or not _numnull(obj["pass_db_band"]):
+            return False, "number_field"
+        plays = obj["plays"]
+        if not isinstance(plays, list) or len(plays) > 2:
+            return False, "plays"
+        for pl in plays:
+            if not isinstance(pl, dict) or set(pl) != set(PLAY_KEYS):
+                return False, "plays"
+            if not all(_numnull(pl[k]) for k in PLAY_KEYS[:6]) or not (pl["pass_broadband"] is None or isinstance(pl["pass_broadband"], bool)):
+                return False, "plays"
     return True, ""
 
 
@@ -196,7 +224,10 @@ class CanaryRoute:
         if not ok:
             self.audit_invalid(room, why, now, day_dir)
             return "invalid"
-        res, night = raw_obj["result"], raw_obj["night"]
+        res = raw_obj["result"]
+        # The clinical night: the IST 12:00-12:00 night of the line's ts, NOT the raw `night` field (R16d: `night` is the IST date of the slot, and the 21:40 slot of date D and
+        # the 07:20 slot of date D+1 are the SAME night). Validation has already checked the field is within a day of it.
+        night = ist_night_of(raw_obj["ts"])
         if abs(raw_obj["ts"] - now) > TS_FAR_S:
             # A ts more than 36 h from the Mini clock, in EITHER direction (exactly 36 h still acts; 36 h + 1 s does not): stored (by the caller) and audited ONLY. It never opens, folds,
             # closes or moves any state (opened, absent_night, the streak), so a kiosk with a skewed clock cannot freeze or mute the room. Runs before the stale-night check.
@@ -224,7 +255,9 @@ class CanaryRoute:
             opened = r == "opened"
             if r == "stale":
                 return "stored"          # a replayed older line moves nothing, not even the output_absent streak
-            if res == OUTPUT_ABSENT:
+            if res.startswith("aborted:"):
+                pass                     # an aborted slot is neutral for the output_absent streak: it neither counts toward it nor breaks it
+            elif res == OUTPUT_ABSENT:
                 prev = st.get("absent_night")
                 if prev is not None and _next_night(prev) == night:
                     opened = (self._open_once(room, "canary_output_absent", night, now, day_dir) == "opened") or opened

@@ -868,6 +868,7 @@ class ConfigFlags(unittest.TestCase):
         self.assertEqual(len(self.live_config_problems(dict(ok, consult_open_publish=True, consult_room_map={self.OPD6: {}, "opd-7": {}}))), 1)    # two rooms
         self.assertEqual(len(self.live_config_problems(dict(ok, consult_open_publish=True, consult_room_map={"opd-7": {}}))), 1)                  # the wrong room
         self.assertEqual(len(self.live_config_problems(dict(ok, consult_open_publish=True, consult_room_map=[self.OPD6]))), 1)
+        self.assertEqual(len(self.live_config_problems(dict(ok, consult_open_publish=False, consult_room_map={"opd-7": {}}))), 1)           # "if present": a literal false with a bad map still fails
         for k, v in (("consult_windows_enabled", True), ("consult_windows_enabled", False), ("start_day_after_boot", True), ("start_day_after_boot", False), ("start_day_cmd", ["x"]), ("start_day_cmd", [])):
             self.assertEqual(len(self.live_config_problems(dict(ok, **{k: v}))), 1, k)
 

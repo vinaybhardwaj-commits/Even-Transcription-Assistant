@@ -420,6 +420,155 @@ class ClockSkew(unittest.TestCase):
         sub2.on_line("kiosk/r1/canary", json.dumps(line("no_local_rise", night="20261016"))); self.assertEqual(e.kinds(), ["canary_failed"])          # the room is not silenced
 
 
+def r16d(result, day, slot, hhmm, plays=2, over=None):
+    """A kiosk R16d line: ts inside the slot (pm 21:40 or am 07:20 IST on `day`), `night` = the IST date of the slot (as the kiosk's ist_date()), the four new fields appended."""
+    from datetime import timedelta
+    t = datetime.strptime(day, "%Y%m%d").replace(hour=int(hhmm[:2]), minute=int(hhmm[2:]), tzinfo=ar.IST)
+    play = {"pre_db": -60.0, "burst_db": -40.5, "rise_db": 19.5, "pre_db_band": -70.2, "burst_db_band": -45.1, "rise_db_band": 25.1, "pass_broadband": True}
+    d = line(result, night=day, ts=int(t.timestamp()), slot=slot, pass_db=6.0, plays=[dict(play) for _ in range(plays)], pass_db_band=10.0)
+    d.update(over or {}); return d
+
+
+def nxt(day, n=1):
+    from datetime import timedelta
+    return (datetime.strptime(day, "%Y%m%d") + timedelta(days=n)).strftime("%Y%m%d")
+
+
+class R16dLine(unittest.TestCase):
+    """R5: the R16d line (slot, pass_db, plays, pass_db_band) is accepted beside the R15c one; one clinical night per 21:40 + 07:20 pair."""
+    def test_both_shapes_are_accepted_and_the_plays_are_stored_as_sent(self):
+        e = Env(); old = line("no_local_rise", night="20261016"); new = r16d("no_local_rise", "20261017", "am", "0720")
+        self.assertTrue(e.canary(old)); self.assertTrue(e.canary(new)); self.assertEqual(e.invalid(), [])
+        stored = [json.loads(l) for l in e.stored()]; self.assertEqual(len(stored), 2); self.assertEqual(stored[1]["plays"], new["plays"]); self.assertEqual(len(stored[1]["plays"]), 2)
+        self.assertEqual(stored[1]["slot"], "am"); self.assertEqual(stored[1]["pass_db_band"], 10.0)
+
+    def test_every_result_and_the_field_variants_are_accepted(self):
+        for res in ("pass", "no_local_rise", "would_do", "inconclusive:output_absent", "inconclusive:tape_unreadable", "inconclusive:play_timeout", "inconclusive:state_corrupt"):
+            for n_plays in (0, 1, 2):
+                for kw in ({}, {"slot": None}, {"pass_db": None}, {"pass_db_band": None}, {"install_id": None, "volume": None, "pre_db": None, "burst_db": None, "rise_db": None}):
+                    with self.subTest(f"{res} {n_plays} {sorted(kw)}"):
+                        e = Env(); e.canary(r16d(res, "20261016", "pm", "2140", plays=n_plays, over=kw)); self.assertEqual(e.invalid(), [])
+        e = Env(); d = r16d("pass", "20261016", "pm", "2140"); d["plays"][0].update(pre_db=None, burst_db=None, rise_db=None, pre_db_band=None, burst_db_band=None, rise_db_band=None, pass_broadband=None)
+        e.canary(d); self.assertEqual(e.invalid(), [])
+
+    def test_a_malformed_r16d_line_gets_an_audit_line_and_no_case(self):
+        base = r16d("no_local_rise", "20261016", "pm", "2140")
+        def without(k):
+            d = dict(base); d.pop(k); return d
+        def play(**kw):
+            d = dict(base); p = dict(base["plays"][0]); p.update(kw); d["plays"] = [p]; return d
+        cases = [("keys", dict(base, extra=1)), ("keys", without("slot")), ("keys", without("plays")), ("keys", without("pass_db")), ("keys", without("pass_db_band")),
+                 ("slot", dict(base, slot="noon")), ("slot", dict(base, slot="PM")), ("slot", dict(base, slot=5)), ("slot", dict(base, slot="")),
+                 ("number_field", dict(base, pass_db="x")), ("number_field", dict(base, pass_db=True)), ("number_field", dict(base, pass_db_band=[1])),
+                 ("plays", dict(base, plays="x")), ("plays", dict(base, plays=None)), ("plays", dict(base, plays=base["plays"] * 2 + base["plays"])), ("plays", dict(base, plays=[1])),
+                 ("plays", dict(base, plays=[{"pre_db": 1}])), ("plays", play(extra=1)), ("plays", play(pre_db="1")), ("plays", play(rise_db_band=True)),
+                 ("plays", play(pass_broadband="true")), ("plays", play(pass_broadband=1)), ("plays", play(burst_db=10 ** 400))]
+        for why, obj in cases:
+            with self.subTest(f"{why} {str(obj)[-40:]}"):
+                e = Env()
+                e.canary(obj); self.assertEqual(e.kinds(), [], why); self.assertEqual(e.invalid()[-1]["why"], why)
+        raw = json.dumps(base); e = Env(); e.canary(None, raw=raw.replace('"pre_db": -60.0', '"pre_db": NaN', 1)); self.assertEqual(e.kinds(), []); self.assertEqual(e.invalid()[-1]["why"], "number_field")
+        i = raw.index('"pre_db": -60.0', raw.index('"plays"')); e = Env(); e.canary(None, raw=raw[:i] + '"pre_db": NaN' + raw[i + len('"pre_db": -60.0'):]); self.assertEqual(e.kinds(), []); self.assertEqual(e.invalid()[-1]["why"], "plays")
+
+    def test_the_two_slots_of_one_night_are_one_night_for_the_output_absent_streak(self):
+        e = Env()
+        e.canary(r16d("inconclusive:output_absent", "20261016", "pm", "2140")); e.canary(r16d("inconclusive:output_absent", "20261017", "am", "0720"))
+        self.assertEqual(e.kinds(), ["canary_inconclusive"])                                    # 21:40 on the 16th and 07:20 on the 17th: the SAME night, no escalation
+        self.assertEqual(e.sub.canary.state["r1"]["absent_night"], "20261016"); self.assertEqual(e.sub.canary.state["r1"]["opened"], {"canary_inconclusive": "20261016"})
+
+    def test_two_consecutive_real_nights_escalate(self):
+        for seq in ((("20261016", "pm", "2140"), ("20261017", "pm", "2140")),                    # pm then pm
+                    (("20261016", "pm", "2140"), ("20261017", "am", "0720"), ("20261017", "pm", "2140")),     # the second night's first slot is its pm
+                    (("20261016", "am", "0720"), ("20261016", "pm", "2140"))):                  # am of the 16th is the night of the 15th, pm of the 16th is the night of the 16th
+            with self.subTest(str(seq)):
+                e = Env()
+                for day, slot, hhmm in seq: e.canary(r16d("inconclusive:output_absent", day, slot, hhmm))
+                self.assertEqual(e.kinds(), ["canary_inconclusive", "canary_output_absent"])
+
+    def test_a_skipped_night_does_not_escalate(self):
+        e = Env(); e.canary(r16d("inconclusive:output_absent", "20261016", "pm", "2140")); e.canary(r16d("inconclusive:output_absent", "20261018", "pm", "2140"))
+        self.assertEqual(e.kinds(), ["canary_inconclusive"])
+
+    def test_a_pass_in_the_am_slot_closes_a_pm_fail_of_the_same_night(self):
+        e = Env(); e.canary(r16d("no_local_rise", "20261016", "pm", "2140")); self.assertEqual(e.kinds(), ["canary_failed"])
+        e.canary(r16d("pass", "20261017", "am", "0720")); self.assertEqual(e.kinds(), [])
+        e = Env(); e.canary(r16d("no_local_rise", "20261016", "pm", "2140")); e.canary(r16d("pass", "20261016", "am", "0720"))     # the am slot of the 16th is the PREVIOUS night: a stale pass
+        self.assertEqual(e.kinds(), ["canary_failed"])
+
+    def test_one_case_per_night_across_both_slots_even_after_an_ack(self):
+        e = Env(); e.canary(r16d("no_local_rise", "20261016", "pm", "2140")); first = e.open()["canary_failed"]["first_id"]
+        e.canary(r16d("no_local_rise", "20261017", "am", "0720")); self.assertEqual(e.open()["canary_failed"]["first_id"], first); self.assertEqual(e.open()["canary_failed"]["suppressed_count"], 0)
+        e.router.close_room(None, "r1", "ACK", kind="canary_failed"); e.canary(r16d("no_local_rise", "20261017", "am", "0720")); self.assertEqual(e.kinds(), [])      # not re-opened this night
+        e.canary(r16d("no_local_rise", "20261017", "pm", "2140")); self.assertEqual(e.kinds(), ["canary_failed"])                                                  # the next night opens
+
+    def test_the_replay_and_clock_skew_guards_hold_with_slot_lines(self):
+        e = Env(); e.canary(r16d("no_local_rise", "20261016", "pm", "2140"))
+        e.canary(r16d("no_local_rise", "20261014", "pm", "2140"), sync=False)                    # a replayed older slot line (far from the clock: audit only)
+        e.canary(r16d("pass", "20261015", "pm", "2140"), sync=False); self.assertEqual(e.kinds(), ["canary_failed"])
+        e2 = Env(); e2.clock.t = r16d("pass", "20261016", "pm", "2140")["ts"]
+        e2.canary(r16d("no_local_rise", "20261018", "pm", "2140"), sync=False)                   # forward-dated by more than 36 h: audit only
+        self.assertEqual(e2.kinds(), []); self.assertEqual(e2.sub.canary.state, {})
+        e2.canary(r16d("no_local_rise", "20261016", "pm", "2140")); self.assertEqual(e2.kinds(), ["canary_failed"])
+        e3 = Env(); e3.canary(r16d("no_local_rise", "20261016", "pm", "2140")); e3.canary(r16d("no_local_rise", "20261016", "pm", "2140"))    # the same slot line twice: one case
+        self.assertEqual(e3.open()["canary_failed"]["suppressed_count"], 0)
+
+    def test_the_verdict_is_the_kiosks_the_mini_does_not_recompute_it(self):
+        e = Env(); d = r16d("pass", "20261016", "pm", "2140"); d["plays"][0]["pass_broadband"] = False; d["plays"][0]["rise_db_band"] = -5.0
+        e.canary(d); self.assertEqual(e.kinds(), [])                                             # result pass stays a pass whatever the plays say
+        e = Env(); d = r16d("no_local_rise", "20261016", "pm", "2140"); e.canary(d); self.assertEqual(e.kinds(), ["canary_failed"])
+
+
+class Aborted(unittest.TestCase):
+    """R5 addendum (R16d-3): result aborted:<why>, eight fixed reasons; NORMAL-tier canary_inconclusive, never canary_failed, neutral for the output_absent streak."""
+    WHY = ("outside_window", "consult_not_clear", "hid_unreadable", "hid_active", "recorder_failed", "recorder_busy", "not_recording", "tape_not_advancing")
+
+    def test_each_of_the_eight_reasons_opens_a_normal_tier_canary_inconclusive_and_never_canary_failed(self):
+        self.assertEqual(cr.ABORT_WHY, self.WHY)
+        for why in self.WHY:
+            for plays in (0, 1):
+                with self.subTest(f"{why} {plays}"):
+                    e = Env(); e.canary(r16d(f"aborted:{why}", "20261016", "pm", "2140", plays=plays)); self.assertEqual(e.invalid(), [])
+                    self.assertEqual(e.kinds(), ["canary_inconclusive"]); self.assertNotIn("canary_failed", e.kinds())
+                    e.router.tick(e.bus)
+                    for m in e.bus.real: self.assertNotEqual(m["priority"], "urgent")
+                    e.clock.adv(5 * 3600); e.router.tick(e.bus); self.assertEqual(e.v_texts(), [])
+
+    def test_anything_else_is_invalid(self):
+        for res in ("aborted:", "aborted", "aborted:window", "aborted:consult", "aborted:hid", "aborted:speech", "aborted:tape", "aborted:recorder", "aborted:Outside_Window",
+                    "aborted:outside_window2", "aborted: outside_window", "aborted:outside_window ", "ABORTED:outside_window", "aborted:outside_window:x", "aborted:heal_rate", "aborted:already_tonight"):
+            with self.subTest(res):
+                e = Env(); e.canary(r16d(res, "20261016", "pm", "2140")); self.assertEqual(e.kinds(), []); self.assertEqual(e.invalid()[-1]["why"], "result")
+
+    def test_an_aborted_line_must_be_r16d_and_name_its_slot(self):
+        e = Env(); e.canary(r16d("aborted:hid_active", "20261016", "pm", "2140", over={"slot": None})); self.assertEqual(e.kinds(), []); self.assertEqual(e.invalid()[-1]["why"], "slot")
+        e = Env(); e.canary(line("aborted:hid_active", night="20261016")); self.assertEqual(e.kinds(), []); self.assertEqual(e.invalid()[-1]["why"], "slot")        # the R15c shape has no slot
+        for slot in ("noon", "AM"):
+            e = Env(); e.canary(r16d("aborted:hid_active", "20261016", "pm", "2140", over={"slot": slot})); self.assertEqual(e.kinds(), [])
+        e = Env(); e.canary(r16d("aborted:hid_active", "20261016", "am", "0720")); self.assertEqual(e.kinds(), ["canary_inconclusive"])
+
+    def test_an_aborted_slot_does_not_count_toward_the_output_absent_streak(self):
+        e = Env(); e.canary(r16d("aborted:hid_active", "20261016", "pm", "2140")); e.canary(r16d("aborted:recorder_busy", "20261017", "pm", "2140"))
+        self.assertEqual(e.kinds(), ["canary_inconclusive"]); self.assertIsNone(e.sub.canary.state["r1"]["absent_night"])                                       # two aborted nights: no streak, no escalation
+        e = Env(); e.canary(r16d("inconclusive:output_absent", "20261016", "pm", "2140")); e.canary(r16d("aborted:hid_active", "20261017", "pm", "2140"))
+        self.assertNotIn("canary_output_absent", e.kinds()); e.canary(r16d("inconclusive:output_absent", "20261018", "pm", "2140"))
+        self.assertNotIn("canary_output_absent", e.kinds())                                    # absent on the 16th, absent on the 18th: not consecutive nights
+
+    def test_an_aborted_slot_does_not_break_a_streak_either(self):
+        e = Env(); e.canary(r16d("inconclusive:output_absent", "20261016", "pm", "2140")); e.canary(r16d("aborted:hid_active", "20261017", "am", "0720"))     # the same night as the pm slot
+        self.assertEqual(e.sub.canary.state["r1"]["absent_night"], "20261016")
+        e.canary(r16d("inconclusive:output_absent", "20261017", "pm", "2140")); self.assertIn("canary_output_absent", e.kinds())
+
+    def test_aborted_then_a_pass_closes_the_case_and_the_guards_hold(self):
+        e = Env(); e.canary(r16d("aborted:tape_not_advancing", "20261016", "pm", "2140")); e.canary(r16d("pass", "20261017", "am", "0720")); self.assertEqual(e.kinds(), [])
+        e = Env(); e.canary(r16d("aborted:tape_not_advancing", "20261016", "pm", "2140")); e.canary(r16d("aborted:tape_not_advancing", "20261014", "pm", "2140"), sync=False)
+        e.canary(r16d("pass", "20261015", "pm", "2140"), sync=False); self.assertEqual(e.kinds(), ["canary_inconclusive"])                                      # replayed older lines move nothing
+        e = Env(); e.clock.t = r16d("pass", "20261016", "pm", "2140")["ts"]; e.canary(r16d("aborted:hid_active", "20261019", "pm", "2140"), sync=False)    # far forward: audit only
+        self.assertEqual(e.kinds(), []); self.assertEqual(e.sub.canary.state, {})
+
+    def test_a_kill_or_mode_change_between_plays_still_gives_would_do(self):
+        e = Env(); e.canary(r16d("would_do", "20261016", "pm", "2140", plays=1, over={"mode": "shadow"})); self.assertEqual(e.kinds(), []); self.assertEqual(e.invalid(), [])
+
+
 class Shadow(unittest.TestCase):
     def test_a_canary_line_only_opens_or_closes_cases_never_acts(self):
         class Spy:
@@ -430,10 +579,13 @@ class Shadow(unittest.TestCase):
         self.assertEqual(sorted(set(spy.calls)), ["canary_case", "canary_close"])
 
 
+LAST_ERROR_80 = ("exec failed: code 78 (bad config) at /x/y; retry in 30s" + " " * 40)[:80]            # R16d: sanitised, up to 80 printable characters
+
+
 def rec_line(reason, severity="page", shadow=False, **kw):
     """The kiosk escalate() shape (heal.sh escalate -> heal_event), as R16d emits recorder_failed: no `kind`, layer recorder, action escalate, result escalated."""
     d = {"room_id": "r1", "ts": 1760000000, "action": "escalate", "layer": "recorder", "reason": reason,
-         "before": "state=failed last_error=boom" if reason == "recorder_failed" else "pid=none state=null", "after": "", "result": "escalated", "shadow": shadow,
+         "before": "state=failed last_error=" + LAST_ERROR_80 if reason == "recorder_failed" else "pid=none state=null", "after": "", "result": "escalated", "shadow": shadow,
          "target": "fleet", "severity": severity}
     d.update(kw); return d
 
