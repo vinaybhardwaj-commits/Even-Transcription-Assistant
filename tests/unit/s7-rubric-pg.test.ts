@@ -270,7 +270,7 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
 
   it("rubric_run on talk_time consults: with no role layer in the lab store every consult is skipped no_role_layer (never the voiceprint turns); a formerly blind consult is not refused", async () => {
     const { job } = await runJob("rubric_run", { rubric_id: "talk_time", lab: true, unit: "consult", unit_keys: ["enc1@m1", "enc3@m2", "enc2@m1"] });
-    expect(job).toMatchObject({ status: "done", result: { ok: 0, failed: 0, blind_room_days: 0 } });
+    expect(job).toMatchObject({ status: "done", result: { ok: 0, failed: 0, skipped: 3, blind_room_days: 0 } });
     const r = (await pg.sql`SELECT unit_key, status, score FROM rubric_result WHERE unit_key = 'enc1@m1'`)[0] as Record<string, any>;
     expect(r).toMatchObject({ status: "skipped", score: { reason: "no_role_layer" } });
     expect((await pg.sql`SELECT 1 FROM rubric_result WHERE unit_key = 'enc3@m2'`).length).toBe(1);

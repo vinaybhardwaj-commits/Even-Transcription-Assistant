@@ -306,7 +306,8 @@ const TALK_IDX: Record<RebSpeakerRole, number | null> = { doctor: 0, patient: 1,
 
 /**
  * Turns for talk_time from the consult's REB text track joined to its role track, ALWAYS (independent of ETA_REB_ROLE_LLM). Times are absolute epoch ms clamped to the consult span.
- * No role track, or one that fails its sha check, is { ok: false, reason: "no_role_layer" }; there is no fallback. Segment times and roles only: the lines (text) are dropped here.
+ * No role track, or one that fails its sha check, is { ok: false, reason: "no_role_layer" }; there is no fallback.
+ * Ruling (newcat-lead, 16 Oct): when the NEWEST role row fails its sha, the next older VERIFIED ok role row is used (loadRoleDoc's existing behaviour). Accepted: it is sha-checked and traceable through role_config_hash; n_integrity_skipped counts the rows passed over. Segment times and roles only: the lines (text) are dropped here.
  */
 export async function readRebTalkTurns(span: ConsultSpan): Promise<RebTalkTurns> {
   const out = await readRebConsult(span, { forceRoles: true });

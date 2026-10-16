@@ -1,6 +1,6 @@
 /**
  * Engine talk_time — S7-0. PURE: one unit's turns -> doctor vs other talk share, turns, interruptions, overlap, longest monologue, silence share.
- * Definitions: rubrics/talk_time/rubric.json. A turn's class: doctor = role clinician; other = attributed to any other diarized speaker; unattributed = no room_turn_speaker row.
+ * Definitions: rubrics/talk_time/rubric.json. A turn's class: doctor = role clinician; other = attributed to any other diarized speaker; unattributed = role unknown (idx null) in the role layer; the caller supplies roles from the REB role track, never from room_turn_speaker.
  */
 import type { Turn } from "../readers/turns";
 import type { EngineResult } from "./types";

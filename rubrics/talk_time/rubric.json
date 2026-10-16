@@ -2,10 +2,10 @@
   "id": "talk_time",
   "version": "0.2.0",
   "title": "Talk time, interruptions and silence of a window or a consult",
-  "unit": "window",
+  "unit": "consult",
   "units": [
-    "window",
-    "consult"
+    "consult",
+    "window"
   ],
   "inputs": [
     "turns",
@@ -21,8 +21,8 @@
     "overlap_ms": "length of time covered by two or more speakers at once",
     "longest_monologue_ms": "the longest run of one speaker's turns whose gaps are under 2 000 ms",
     "silence_share": "1 - union of all turn intervals / window length (consult: the consult span)",
-    "skipped": "no_diarization when the window has no room_turn_speaker rows; no_turns when it has no stt_turn cues",
-    "consult_unit": "the turns of every bench window overlapping the consult span (eta_encounter_windows t_open..t_close), clipped to the span"
+    "skipped": "no_role_layer when the consult has no role track, or the role track or the English text track fails its sha-256 check, or the text is not English, or there is no consult_uid (no fallback to room_turn_speaker); no_diarization when the joined role track gives no attributed turns; role_layer_consult_only for a window unit (the role layer exists per consult only). The window unit is kept in `units` only so that a window run is recorded as skipped and the 0.1.0 window rows (voiceprint era) stay readable by version in rubric_result; it scores nothing.",
+    "consult_unit": "the consult's REB English text track joined to its role track (llm-roles) by segment time, clamped to the consult span (eta_encounter_windows t_open..t_close). Role-track choice: when the newest role row fails its sha-256 check, the next older VERIFIED ok role row is used (sha-checked, traceable through evidence.role_config_hash); a role track with no verified row is no_role_layer"
   },
   "output": {
     "type": "object",

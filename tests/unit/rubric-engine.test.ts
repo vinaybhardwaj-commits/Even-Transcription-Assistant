@@ -34,7 +34,7 @@ describe("the rubric files and the registry", () => {
   });
   it("the two code rubrics and the four definition-only drafts", () => {
     expect(RUBRICS.filter((r) => r.engine === "code").map((r) => r.id)).toEqual(["room_mic_quality", "talk_time"]);
-    expect(unitsOf(getRubric("talk_time")!)).toEqual(["window", "consult"]);
+    expect(unitsOf(getRubric("talk_time")!)).toEqual(["consult", "window"]);
     expect(unitsOf(getRubric("room_mic_quality")!)).toEqual(["room_hour"]);
     const defs = ["consult_chair_affect", "consult_surgical_pitch", "ehrc_surgical_outcome", "care_sentiment"].map((i) => getRubric(i)!);
     for (const d of defs) { expect(d.engine).toBe("llm_zdr"); expect(d.source).toMatch(/@/); }
