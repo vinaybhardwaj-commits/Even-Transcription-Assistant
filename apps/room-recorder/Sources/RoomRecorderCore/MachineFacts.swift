@@ -1,5 +1,6 @@
 import AVFoundation
 import Darwin
+import CoreGraphics
 import Foundation
 import TapeCapture
 
@@ -49,6 +50,9 @@ public struct MachineFacts: Equatable, Sendable {
   /// the same breath. Nil when either half was not measured (no configured device, or CoreAudio
   /// would not list). Additive; an older server ignores the key.
   public var deviceState: String?
+  /// 0.1.41. The number of attached, active displays (mirrored displays count once). Nil when CoreGraphics would not
+  /// answer. A count only: no names, serials or resolutions.
+  public var displaysCount: Int?
 
   public init(
     micState: String,
@@ -63,8 +67,10 @@ public struct MachineFacts: Equatable, Sendable {
     inputVolume: Double? = nil,
     inputVolumeSettable: Bool? = nil,
     inputDeviceUID: String? = nil,
-    deviceState: String? = nil
+    deviceState: String? = nil,
+    displaysCount: Int? = nil
   ) {
+    self.displaysCount = displaysCount
     self.inputDeviceUID = inputDeviceUID
     self.micState = micState
     self.neverSleep = neverSleep
@@ -118,8 +124,17 @@ public enum MachineFactsReader {
       inputVolume: volume?.value,
       inputVolumeSettable: volume?.settable,
       inputDeviceUID: inputDeviceUID,
-      deviceState: MachineFacts.deviceState(configuredUID: inputDeviceUID, devices: devices)
+      deviceState: MachineFacts.deviceState(configuredUID: inputDeviceUID, devices: devices),
+      displaysCount: displaysCount()
     )
+  }
+
+  /// 0.1.41. Active displays, from CoreGraphics' list (no window server round trip, no permission prompt, and the
+  /// count only). Nil when the call fails.
+  public static func displaysCount() -> Int? {
+    var count: UInt32 = 0
+    guard CGGetActiveDisplayList(0, nil, &count) == .success else { return nil }
+    return Int(count)
   }
 
   /// Release R4 (D4) — the configured device's input volume and whether it can be set, read now

@@ -67,6 +67,9 @@ public struct InstallPollFields: Equatable, Sendable {
   /// 0.1.25. "ok" or "lost", whether the configured device is attached. Additive: the server
   /// ignores an unknown key until the release that reads it.
   public var deviceState: String?
+  /// 0.1.41 (Encounter Buddy L1, Fable A1-C7). How many attached displays can show the Buddy transcript. An integer and
+  /// nothing about them: no names, serials or resolutions. Nil when the count could not be read.
+  public var displaysCount: Int?
 
   // ─── RELEASE R4 (D4) ──────────────────────────────────────────────────────────────────────
   /// The input volume, 0–1, of the device this app records from (`deviceUID`). Nil when that
@@ -143,8 +146,10 @@ public struct InstallPollFields: Equatable, Sendable {
     selectedInputUID: String? = nil,
     levelSeq: Int64? = nil,
     levelAt: String? = nil,
-    deviceState: String? = nil
+    deviceState: String? = nil,
+    displaysCount: Int? = nil
   ) {
+    self.displaysCount = displaysCount
     self.selectedInputUID = selectedInputUID
     self.levelSeq = levelSeq
     self.levelAt = levelAt
@@ -230,7 +235,8 @@ public struct InstallPollFields: Equatable, Sendable {
       selectedInputUID: facts.inputDeviceUID,
       levelSeq: levelSeq,
       levelAt: levelAt,
-      deviceState: facts.deviceState
+      deviceState: facts.deviceState,
+      displaysCount: facts.displaysCount
     )
   }
 
@@ -315,6 +321,10 @@ public struct InstallPollFields: Equatable, Sendable {
     // Beside `input_device_name`, about the same device. The volume in four decimals, dropped
     // when outside 0–1 like `peak`; settable as `"true"`/`"false"`, absent when not measured.
     add("input_volume", Self.unitString(inputVolume))
+    // 0.1.41. A whole number of displays, dropped when negative; absent when not measured.
+    if let displaysCount, displaysCount >= 0 {
+      items.append(URLQueryItem(name: "displays_count", value: String(displaysCount)))
+    }
     if let inputVolumeSettable {
       items.append(
         URLQueryItem(name: "input_volume_settable", value: inputVolumeSettable ? "true" : "false"))

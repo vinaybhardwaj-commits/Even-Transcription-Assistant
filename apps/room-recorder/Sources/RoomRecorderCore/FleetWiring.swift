@@ -171,7 +171,7 @@ public final class FileFleetKeyStore: FleetKeyStore, @unchecked Sendable {
   public init(
     root: URL, keychainReader: @escaping @Sendable () throws -> Data = { try KeychainFleetKeyStore.readSeedNonInteractive() },
     deadline: TimeInterval = RoomSessionStore.keychainDeadline, uid: UInt32 = getuid(),
-    currentDeviceID: @escaping @Sendable () -> String? = { nil }, log: @escaping @Sendable (String) -> Void
+    currentDeviceID: @escaping @Sendable () -> String?, log: @escaping @Sendable (String) -> Void
   ) {
     self.currentDeviceID = currentDeviceID
     self.root = root
