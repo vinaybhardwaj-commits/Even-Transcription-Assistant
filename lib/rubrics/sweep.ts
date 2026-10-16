@@ -8,7 +8,7 @@
  */
 import { sql } from "@/lib/db";
 import { loadCatalog, type Row } from "@/lib/room-access/readers/catalog-consult";
-import { RUBRICS } from "./registry";
+import { RUBRICS, unitsOf } from "./registry";
 import { isBlindRoomDay } from "./blind-room-days";
 import { RUBRIC_RUN_KIND } from "@/lib/jobs/kinds/rubric-run";
 import { findOpenJob } from "@/lib/jobs/store";
@@ -21,8 +21,9 @@ export const SWEEP_DEFER_HOURS = 24;
 export const SWEEP_MIN_DATE = "2026-09-09";
 export const SWEEP_JOB_UNITS = 200;
 export const SWEEP_DAILY_UNITS_DEFAULT = 1500;
-/** The most candidates one tick looks at (newest first), so the "done" statement stays bounded. Beyond it the oldest wait for newer ones to finish. */
-export const SWEEP_CANDIDATE_CAP = 5000;
+/** The candidate list is walked in pages of this size (every statement stays bounded to one page), at most SWEEP_MAX_PAGES pages per tick. */
+export const SWEEP_PAGE_SIZE = 5000;
+export const SWEEP_MAX_PAGES = 4;
 const H48_MS = 48 * 3_600_000;
 const H24_MS = 24 * 3_600_000;
 const IST_MS = 19_800_000;
@@ -62,7 +63,7 @@ export function hasTextSource(row: Row): boolean {
 
 export type Candidate = { uid: string; ended: number | null; recent: boolean; settledByAge: boolean };
 
-/** PURE. The consults that pass every rule except FreeScript-by-row and "done": date, not held out, text source. Ordered recent (last 48 h) newest first, then older newest first. */
+/** PURE. ALL the consults that pass every rule except FreeScript-by-row and "done": date, not held out, text source. Ordered recent (last 48 h) newest first, then older newest first. */
 export function candidatesOf(rows: Iterable<Row>, nowMs: number, backfill: boolean): Candidate[] {
   const out: Candidate[] = [];
   for (const row of rows) {
@@ -77,11 +78,11 @@ export function candidatesOf(rows: Iterable<Row>, nowMs: number, backfill: boole
     out.push({ uid, ended, recent, settledByAge: closed !== null && nowMs - closed > H24_MS });
   }
   out.sort((a, b) => (a.recent === b.recent ? 0 : a.recent ? -1 : 1) || (b.ended ?? Number.NEGATIVE_INFINITY) - (a.ended ?? Number.NEGATIVE_INFINITY) || (a.uid < b.uid ? -1 : 1));
-  return out.slice(0, SWEEP_CANDIDATE_CAP);
+  return out;
 }
 
 export type RubricSummary = { id: string; version: string; eligible: number; done: number; deferred: number; planned: number; submitted_job_id: string | null; skipped_reason: string | null; today_units: number };
-export type SweepSummary = { at: string; mode: "dry" | "live"; rubrics: RubricSummary[]; backfill_window: boolean };
+export type SweepSummary = { at: string; mode: "dry" | "live"; rubrics: RubricSummary[]; backfill_window: boolean; pages: number; page_capped: boolean };
 export type SweepOutcome = { skipped: "no_production_rubric" } | { summary: SweepSummary; summary_written: boolean };
 
 export const dailyUnitsCap = (env: Record<string, string | undefined> = process.env): number => {
@@ -143,9 +144,9 @@ type Plan = { summary: RubricSummary; keys: string[] };
 /** The first closed word of a refusal reason (never the reason's numbers or values). */
 const reasonCode = (e: JobArgsError): string => /^([a-z_]+)/.exec(e.reason)?.[1] ?? "refused";
 
-export async function runRubricSweep(mode: "dry" | "live", opts: { now?: number; origin?: string; env?: Record<string, string | undefined> } = {}): Promise<SweepOutcome> {
+export async function runRubricSweep(mode: "dry" | "live", opts: { now?: number; origin?: string; env?: Record<string, string | undefined>; pageSize?: number } = {}): Promise<SweepOutcome> {
   const nowMs = opts.now ?? Date.now();
-  const rubrics = RUBRICS.filter((r) => r.status === "production" && r.unit === "consult");
+  const rubrics = RUBRICS.filter((r) => r.status === "production" && unitsOf(r).includes("consult"));
   if (rubrics.length === 0) return { skipped: "no_production_rubric" };
   const backfill = inBackfillWindow(nowMs);
   const cap = dailyUnitsCap(opts.env ?? process.env);
@@ -154,24 +155,44 @@ export async function runRubricSweep(mode: "dry" | "live", opts: { now?: number;
   const catalog = await loadCatalog(nowMs);
   if (!catalog) throw new SweepReadError("catalog_unavailable");
   const cands = candidatesOf(catalog.rows.values(), nowMs, backfill);
-  const needFs = cands.filter((c) => !c.settledByAge).map((c) => c.uid);
-  const hasFs = await freescriptSettled(needFs);
-  const eligible = cands.filter((c) => c.settledByAge || hasFs.has(c.uid));
-  const uids = eligible.map((c) => c.uid);
+  const pageSize = opts.pageSize ?? SWEEP_PAGE_SIZE;
 
-  const plans: Plan[] = [];
+  // per rubric: what is needed this tick (nothing when a job is open or the day's units are used) and what has been counted so far
+  type Walk = { r: (typeof rubrics)[number]; need: number; keys: string[]; done: number; deferred: number; todo: number; today: number; reason: string | null };
+  const walks: Walk[] = [];
   for (const r of rubrics) {
-    const done = await doneKeys(r.id, r.version, uids);
-    const ran = await recentlyRun(r.id, uids);
     const today = await todayUnits(r.id, r.version);
     const open = await dbRead(() => findOpenJob(RUBRIC_RUN_KIND, [["rubric_id", r.id]]));
     const remaining = Math.max(0, cap - today);
-    const deferred = uids.filter((u) => !done.has(u) && ran.has(u)).length;
-    const todo = uids.filter((u) => !done.has(u) && !ran.has(u));
-    const keys = open || remaining === 0 ? [] : todo.slice(0, Math.min(SWEEP_JOB_UNITS, remaining));
-    const reason = open ? "job_open" : remaining === 0 ? "daily_units_cap" : todo.length === 0 ? "nothing_to_do" : null;
-    plans.push({ keys, summary: { id: r.id, version: r.version, eligible: uids.length, done: uids.filter((u) => done.has(u)).length, deferred, planned: keys.length, submitted_job_id: null, skipped_reason: reason, today_units: today } });
+    walks.push({ r, need: open || remaining === 0 ? 0 : Math.min(SWEEP_JOB_UNITS, remaining), keys: [], done: 0, deferred: 0, todo: 0, today, reason: open ? "job_open" : remaining === 0 ? "daily_units_cap" : null });
   }
+
+  // walk the sorted candidates in pages; every statement is bounded to one page; stop when every rubric that needs keys has its job's worth, the list ends, or SWEEP_MAX_PAGES pages are done
+  let pages = 0;
+  let walked = 0;
+  while (walked < cands.length && pages < SWEEP_MAX_PAGES && walks.some((w) => w.need > 0 && w.keys.length < w.need)) {
+    const page = cands.slice(walked, walked + pageSize);
+    walked += page.length;
+    pages += 1;
+    const hasFs = await freescriptSettled(page.filter((c) => !c.settledByAge).map((c) => c.uid));
+    const uids = page.filter((c) => c.settledByAge || hasFs.has(c.uid)).map((c) => c.uid);
+    for (const w of walks) {
+      if (w.need === 0 || w.keys.length >= w.need) continue;
+      const done = await doneKeys(w.r.id, w.r.version, uids);
+      const ran = await recentlyRun(w.r.id, uids);
+      for (const u of uids) {
+        if (done.has(u)) w.done += 1;
+        else if (ran.has(u)) w.deferred += 1;
+        else { w.todo += 1; if (w.keys.length < w.need) w.keys.push(u); }
+      }
+    }
+  }
+  const pageCapped = pages >= SWEEP_MAX_PAGES && walked < cands.length && walks.some((w) => w.need > 0 && w.keys.length < w.need);
+
+  const plans: Plan[] = walks.map((w) => ({
+    keys: w.keys,
+    summary: { id: w.r.id, version: w.r.version, eligible: cands.length, done: w.done, deferred: w.deferred, planned: w.keys.length, submitted_job_id: null, skipped_reason: w.reason ?? (w.todo === 0 ? "nothing_to_do" : null), today_units: w.today },
+  }));
 
   // ---- submit phase (live only); one rubric failing never stops the others ----
   for (const p of plans) {
@@ -186,7 +207,7 @@ export async function runRubricSweep(mode: "dry" | "live", opts: { now?: number;
     }
   }
 
-  const summary: SweepSummary = { at: new Date(nowMs).toISOString(), mode, rubrics: plans.map((p) => p.summary), backfill_window: backfill };
+  const summary: SweepSummary = { at: new Date(nowMs).toISOString(), mode, rubrics: plans.map((p) => p.summary), backfill_window: backfill, pages, page_capped: pageCapped };
   return { summary, summary_written: await writeSummary(summary) };
 }
 
