@@ -24,10 +24,22 @@ export const CLIP_URL_TTL_S = 900;
 export const CATALOG_MIN_DATE = "2026-09-09";
 
 export type Catalog = { rows: Map<string, Row>; n_bad_lines: number; generated_at: string | number | null };
+type StaleReason = "read_failed" | "missing" | "empty";
+/** CATALOG-14: `cache` is the last GOOD catalog (>= 1 row) and `at` is when it was last read successfully (a re-read with an unchanged etag counts). */
 type Cached = { at: number; etag: string | null; modified: string | null; catalog: Catalog };
 let cache: Cached | null = null;
+/** CATALOG-14: while a good catalog is cached, a failed read is retried after this backoff (not after the full cache window); stale service is allowed for CATALOG_STALE_MAX_MS after `at`. */
+export const CATALOG_RETRY_MS = 15_000;
+export const CATALOG_STALE_MAX_MS = 6 * 3_600_000;
+const STALE_LOG_EVERY_MS = 60_000;
+let retryAt = 0;
+let retryReason: StaleReason = "read_failed";
+let lastStaleLogAt: number | null = null;
 export function resetCatalogCacheForTests(): void {
   cache = null;
+  retryAt = 0;
+  retryReason = "read_failed";
+  lastStaleLogAt = null;
 }
 
 const genKey = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && !Number.isNaN(Date.parse(v)) ? Date.parse(v) : Number.NEGATIVE_INFINITY);
@@ -58,26 +70,57 @@ export function parseCatalog(body: string): Catalog {
   return { rows, n_bad_lines: bad, generated_at: generated };
 }
 
-/** The catalog, or null when it cannot be read (the caller answers catalog_unavailable). */
+/**
+ * CATALOG-14: a read failed (throw, missing object, or a body with no rows) while a good catalog may be cached. Serve it, stale, for up to CATALOG_STALE_MAX_MS after it was last read
+ * successfully, and leave the cache as it is; start the short retry backoff. Older than that, or nothing cached: null (a long outage stays visible). One log line per minute at most,
+ * codes and counts only. With nothing cached the old read-failure line is kept and there is no backoff (every call tries again, as before).
+ */
+function failedRead(reason: StaleReason, now: number): Catalog | null {
+  if (!cache) {
+    if (reason === "read_failed") console.warn("[catalog]", JSON.stringify({ code: "catalog_read_failed" }));
+    return null;
+  }
+  retryAt = now + CATALOG_RETRY_MS;
+  retryReason = reason;
+  return serveStale(reason, now);
+}
+
+function serveStale(reason: StaleReason, now: number): Catalog | null {
+  if (!cache || now - cache.at > CATALOG_STALE_MAX_MS) return null;
+  if (lastStaleLogAt === null || now - lastStaleLogAt >= STALE_LOG_EVERY_MS) {
+    lastStaleLogAt = now;
+    console.warn("[catalog]", JSON.stringify({ code: "catalog_stale_served", reason, age_s: Math.max(0, Math.round((now - cache.at) / 1000)) }));
+  }
+  return cache.catalog;
+}
+
+/** The catalog, or null when it cannot be read and no good one is cached within the stale limit (the caller answers catalog_unavailable). */
 export async function loadCatalog(now: number = Date.now()): Promise<Catalog | null> {
   if (cache && now - cache.at < CATALOG_CACHE_MS) return cache.catalog;
+  if (cache && now < retryAt) return serveStale(retryReason, now); // inside the backoff after a failed read: keep serving the cached catalog, read nothing
   const reader = labReader();
   if (!reader) return null;
   let got: Awaited<ReturnType<typeof reader.get>>;
   try {
     got = await reader.get(ENCOUNTER_CATALOG_KEY);
   } catch {
-    console.warn("[catalog]", JSON.stringify({ code: "catalog_read_failed" }));
-    return null;
+    return failedRead("read_failed", now);
   }
-  if (!got) return null;
+  if (!got) return failedRead("missing", now);
   const modified = got.last_modified ?? null;
   if (cache && ((got.etag !== null && got.etag === cache.etag) || (got.etag === null && modified !== null && modified === cache.modified))) {
     cache = { ...cache, at: now };
+    retryAt = 0;
     return cache.catalog;
   }
-  cache = { at: now, etag: got.etag, modified, catalog: parseCatalog(got.body) };
-  return cache.catalog;
+  const catalog = parseCatalog(got.body);
+  if (catalog.rows.size === 0) {
+    // an empty body never replaces a good catalog; with nothing good cached the (empty) result is returned as before but not kept as the good one
+    return cache ? failedRead("empty", now) : catalog;
+  }
+  cache = { at: now, etag: got.etag, modified, catalog };
+  retryAt = 0;
+  return catalog;
 }
 
 // --- search helpers (pure) ------------------------------------------------------------------------------------------------------------------
