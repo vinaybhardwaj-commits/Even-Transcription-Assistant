@@ -81,7 +81,7 @@ export function candidatesOf(rows: Iterable<Row>, nowMs: number, backfill: boole
   return out;
 }
 
-export type RubricSummary = { id: string; version: string; eligible: number; done: number; deferred: number; planned: number; submitted_job_id: string | null; skipped_reason: string | null; today_units: number };
+export type RubricSummary = { id: string; version: string; eligible: number; done: number; deferred: number; no_window: number; multi_window: number; planned: number; submitted_job_id: string | null; skipped_reason: string | null; today_units: number };
 export type SweepSummary = { at: string; mode: "dry" | "live"; rubrics: RubricSummary[]; backfill_window: boolean; pages: number; page_capped: boolean };
 export type SweepOutcome = { skipped: "no_production_rubric" } | { summary: SweepSummary; summary_written: boolean };
 
@@ -103,7 +103,41 @@ async function freescriptSettled(uids: string[]): Promise<Set<string>> {
   return new Set(rows.map((r) => r.consult_uid));
 }
 
-/** One statement per rubric: which of the keys already have a PRODUCTION result (lab = false) for this rubric AND version, any status. */
+export type WindowRow = { consult_uid: string; consult_key: string; t_open: string | Date; t_close: string | Date };
+
+/**
+ * One statement per page: the window rows (eta_encounter_windows) of the page's catalog consult_uids. The rubric_run consult unit is resolved by consult_key
+ * ('<encounter_id>@<machine>', readConsultSpan), not by the bare consult_uid, so every later statement and the job's unit_keys use consult_key. A still-open window (no t_close) is not a unit yet.
+ */
+async function windowsFor(uids: string[]): Promise<WindowRow[]> {
+  if (uids.length === 0) return [];
+  return dbRead(async () => (await sql`
+    SELECT consult_uid, consult_key, t_open, t_close FROM eta_encounter_windows
+     WHERE consult_uid = ANY(${uids}::text[]) AND t_close IS NOT NULL
+  `) as WindowRow[]);
+}
+
+/**
+ * PURE. consult_uid -> ONE consult_key. A consult_uid with several rows (one per machine) takes the row with the longest (t_close - t_open); ties go to the lexically smallest
+ * consult_key. A uid with no row is absent from the map. Counts: no_window = uids without a row, multi_window = uids with more than one.
+ */
+export function pickWindowKeys(uids: readonly string[], rows: readonly WindowRow[]): { keys: Map<string, string>; no_window: number; multi_window: number } {
+  const by = new Map<string, WindowRow[]>();
+  for (const r of rows) { const l = by.get(r.consult_uid); if (l) l.push(r); else by.set(r.consult_uid, [r]); }
+  const span = (r: WindowRow): number => Date.parse(String(r.t_close)) - Date.parse(String(r.t_open));
+  const keys = new Map<string, string>();
+  let noWindow = 0, multi = 0;
+  for (const u of uids) {
+    const l = by.get(u);
+    if (!l || l.length === 0) { noWindow += 1; continue; }
+    if (l.length > 1) multi += 1;
+    const best = l.reduce((a, b) => { const d = (Number.isFinite(span(b)) ? span(b) : -Infinity) - (Number.isFinite(span(a)) ? span(a) : -Infinity); return d > 0 || (d === 0 && b.consult_key < a.consult_key) ? b : a; });
+    keys.set(u, best.consult_key);
+  }
+  return { keys, no_window: noWindow, multi_window: multi };
+}
+
+/** One statement per rubric: which of the CONSULT KEYS already have a PRODUCTION result (lab = false) for this rubric AND version, any status. */
 async function doneKeys(rubricId: string, version: string, uids: string[]): Promise<Set<string>> {
   if (uids.length === 0) return new Set();
   const rows = await dbRead(async () => (await sql`
@@ -158,13 +192,13 @@ export async function runRubricSweep(mode: "dry" | "live", opts: { now?: number;
   const pageSize = opts.pageSize ?? SWEEP_PAGE_SIZE;
 
   // per rubric: what is needed this tick (nothing when a job is open or the day's units are used) and what has been counted so far
-  type Walk = { r: (typeof rubrics)[number]; need: number; keys: string[]; done: number; deferred: number; todo: number; today: number; reason: string | null };
+  type Walk = { r: (typeof rubrics)[number]; need: number; keys: string[]; done: number; deferred: number; noWindow: number; multi: number; todo: number; today: number; reason: string | null };
   const walks: Walk[] = [];
   for (const r of rubrics) {
     const today = await todayUnits(r.id, r.version);
     const open = await dbRead(() => findOpenJob(RUBRIC_RUN_KIND, [["rubric_id", r.id]]));
     const remaining = Math.max(0, cap - today);
-    walks.push({ r, need: open || remaining === 0 ? 0 : Math.min(SWEEP_JOB_UNITS, remaining), keys: [], done: 0, deferred: 0, todo: 0, today, reason: open ? "job_open" : remaining === 0 ? "daily_units_cap" : null });
+    walks.push({ r, need: open || remaining === 0 ? 0 : Math.min(SWEEP_JOB_UNITS, remaining), keys: [], done: 0, deferred: 0, noWindow: 0, multi: 0, todo: 0, today, reason: open ? "job_open" : remaining === 0 ? "daily_units_cap" : null });
   }
 
   // walk the sorted candidates in pages; every statement is bounded to one page; stop when every rubric that needs keys has its job's worth, the list ends, or SWEEP_MAX_PAGES pages are done
@@ -176,11 +210,16 @@ export async function runRubricSweep(mode: "dry" | "live", opts: { now?: number;
     pages += 1;
     const hasFs = await freescriptSettled(page.filter((c) => !c.settledByAge).map((c) => c.uid));
     const uids = page.filter((c) => c.settledByAge || hasFs.has(c.uid)).map((c) => c.uid);
+    // catalog consult_uid -> window consult_key, once per page; from here on every key is the consult_key
+    const mapped = pickWindowKeys(uids, await windowsFor(uids));
+    const unitKeys = uids.map((u) => mapped.keys.get(u)).filter((k): k is string => typeof k === "string");
     for (const w of walks) {
       if (w.need === 0 || w.keys.length >= w.need) continue;
-      const done = await doneKeys(w.r.id, w.r.version, uids);
-      const ran = await recentlyRun(w.r.id, uids);
-      for (const u of uids) {
+      w.noWindow += mapped.no_window;
+      w.multi += mapped.multi_window;
+      const done = await doneKeys(w.r.id, w.r.version, unitKeys);
+      const ran = await recentlyRun(w.r.id, unitKeys);
+      for (const u of unitKeys) {
         if (done.has(u)) w.done += 1;
         else if (ran.has(u)) w.deferred += 1;
         else { w.todo += 1; if (w.keys.length < w.need) w.keys.push(u); }
@@ -191,7 +230,7 @@ export async function runRubricSweep(mode: "dry" | "live", opts: { now?: number;
 
   const plans: Plan[] = walks.map((w) => ({
     keys: w.keys,
-    summary: { id: w.r.id, version: w.r.version, eligible: cands.length, done: w.done, deferred: w.deferred, planned: w.keys.length, submitted_job_id: null, skipped_reason: w.reason ?? (w.todo === 0 ? "nothing_to_do" : null), today_units: w.today },
+    summary: { id: w.r.id, version: w.r.version, eligible: cands.length, done: w.done, deferred: w.deferred, no_window: w.noWindow, multi_window: w.multi, planned: w.keys.length, submitted_job_id: null, skipped_reason: w.reason ?? (w.todo === 0 ? "nothing_to_do" : null), today_units: w.today },
   }));
 
   // ---- submit phase (live only); one rubric failing never stops the others ----
