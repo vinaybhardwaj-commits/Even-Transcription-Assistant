@@ -899,7 +899,7 @@ test_kiosk_code_has_no_perl_python_osascript_or_jq() {
 test_guardian_version_is_bumped_and_identifies_the_tree() {
   load_libs
   [ "$GUARDIAN_VERSION" != "c1-0.1.0" ] && ok || fail "GUARDIAN_VERSION is still c1-0.1.0"
-  assert_eq "$GUARDIAN_VERSION" "c1-0.4.3-r15c" "version string"
+  assert_eq "$GUARDIAN_VERSION" "c1-0.4.4-r16" "version string"
 }
 
 # a fake tr, wc, sed, ps, tail, head or cat first on PATH must not be used on the control path
@@ -1013,7 +1013,8 @@ test_endless_line_without_lf_keeps_memory_bounded_and_stores_nothing() {
     sleep 0.1; i=$((i + 1))
   done
   kill "$pp" 2>/dev/null; wait "$pp" 2>/dev/null
-  [ "$((max - base))" -lt 1500 ] && ok || fail "reader RSS grew by $((max - base)) KB over a 3 MB line"
+  # R16 N2: limit = max observed growth (1392 KB over 5 runs on the base under mini-test: 1344 1392 1216 1360 1328) + 50% = 2088, floor 2500 KB. A 3 MB line read without the cap grows far past it.
+  [ "$((max - base))" -lt 2500 ] && ok || fail "reader RSS grew by $((max - base)) KB over a 3 MB line"
   assert_eq "$(sed -n '2p' "$STATE_DIR/control.last")" "overlong" "nothing but the marker stored"
   flag_fetch; killswitch_engaged; assert_rc $? 0 "killed"
 }

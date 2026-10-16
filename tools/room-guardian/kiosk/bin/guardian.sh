@@ -35,7 +35,7 @@ shopt -u expand_aliases 2>/dev/null
 trap - DEBUG ERR RETURN 2>/dev/null
 set +T +E 2>/dev/null
 
-HERE="$(cd "$G_SRCDIR/.." && pwd)"   # builtins only (R15b): no dirname, no PATH lookup before the pre-source check
+HERE="$(CDPATH='' cd -P -- "$G_SRCDIR/.." && pwd -P)"   # builtins only (R15b): no dirname, no PATH lookup before the pre-source check; CDPATH cleared, symlinks resolved (R16 N1)
 G_MODE_ARG="${1:-run}"
 # R13 S5. The test entry is honoured only for once|handle, with GUARDIAN_TEST_ENTRY=1, and only when the test harness file sits next to this
 # script tree. install.sh never copies tests/, so an installed tree has no such file and ignores the variable.

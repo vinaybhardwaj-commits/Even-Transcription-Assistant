@@ -26,7 +26,20 @@ case "$ROOM" in ''|*[!a-z0-9-]*) echo "--room <slug> required (lowercase letters
 [ -z "$CONFIG" ] || [ -r "$CONFIG" ] || { echo "cannot read --config" >&2; exit 2; }
 # R12: guardian.conf is data, parsed by lib/conf.sh. Refuse a config the agent would reject (it would run killed), before anything is installed.
 if [ -n "$CONFIG" ]; then
-  if ! ( G_TR=/usr/bin/tr; G_WC=/usr/bin/wc; G_HEAD=/usr/bin/head; audit() { echo "  conf: $*" >&2; }; . "$SRC/lib/conf.sh"; conf_load "$CONFIG" noperm ); then
+  # R16: GUARDIAN_PIPE_SSH goes through `eval`, which strips one level of quotes, and OpenSSH splits UserKnownHostsFile / IdentityFile values on
+  # whitespace. A value with a space that is not inner-quoted makes every ssh call fail (rc 255, OPD 6). Pattern check on the text only: no eval, no source.
+  # Flagged: KEY="a b" / KEY='a b' (bare), "KEY=a b" (outer-quoted, no inner quote). Not flagged: -o "KEY=\"a b\"". An unquoted KEY=a b cannot be told from KEY=a followed by the next option, so it is not checked.
+  pipe_ssh_lint() {
+    local v="${GUARDIAN_PIPE_SSH:-}" re_bare re_wrapped
+    re_bare='(^|[[:space:]])(UserKnownHostsFile|IdentityFile)=("[^"]* [^"]*"|'"'"'[^'"'"']* [^'"'"']*'"'"')'
+    re_wrapped='"(UserKnownHostsFile|IdentityFile)=[^"\\]* [^"]*"'
+    if [[ $v =~ $re_bare ]] || [[ $v =~ $re_wrapped ]]; then
+      audit "GUARDIAN_PIPE_SSH: a UserKnownHostsFile or IdentityFile value has a space and is not inner-quoted; write -o \"UserKnownHostsFile=\\\"<path>\\\"\" (see guardian.conf.example)"
+      return 1
+    fi
+    return 0
+  }
+  if ! ( G_TR=/usr/bin/tr; G_WC=/usr/bin/wc; G_HEAD=/usr/bin/head; audit() { echo "  conf: $*" >&2; }; . "$SRC/lib/conf.sh"; conf_load "$CONFIG" noperm && pipe_ssh_lint ); then
     echo "refusing: --config is not valid guardian.conf (data lines only, allow-listed keys)" >&2; exit 2
   fi
 fi

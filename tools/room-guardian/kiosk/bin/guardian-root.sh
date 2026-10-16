@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # Kiosk Guardian: the ONE root helper. Installed root:wheel 0755, run only as `<kiosk-sudo path> eta-guardian-root <verb> ...`.
 # Fixed verbs, no free-form commands. Every SQL string the Guardian runs is in this file.
 #   tcc-row <user>                 print "auth_value|auth_reason|last_modified", "none", or "error:<why>"
