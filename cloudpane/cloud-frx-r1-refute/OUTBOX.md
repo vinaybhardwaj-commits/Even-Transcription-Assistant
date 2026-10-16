@@ -1,0 +1,5 @@
+- target cloudpane/cloud-frx-r1-build/r1 code 2e4a51e5 base 3cdb7c0b
+- gate: suite 1 failed 3895 passed 2 skipped; schema check 2/2; vendored examples 3/3 OK; py3.10 7/7; gitleaks 0
+- probes: R1-1 2000 cases 0 survivors 0 stripped; R1-2 3000 cases; OFF 500 consults written diff 88; moved-drug visible 152/600
+- mutants: 8 of own, 8 killed
+- verdict FAIL, cloudpane-reports/FRX-R1-VERDICT.md
