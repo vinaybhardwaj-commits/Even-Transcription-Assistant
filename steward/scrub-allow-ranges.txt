@@ -1,0 +1,32 @@
+# steward/scrub-allow-ranges.txt: path-scoped allowance for network-range literals (Fable ruling 16 Oct 2026, RULING-FABLE-SCRUB-SSRF-RANGES-16OCT).
+# Format: <path><whitespace><exact literal>. Only the two files below, only these literals. A concrete host address (any 100.x.y.z tailnet IP, any real LAN IP)
+# still fails in these files. RFC 5737/3849 documentation addresses (192.0.2.x, 198.51.100.x, 203.0.113.x, 2001:db8::) are allowed in these paths by code.
+# Any new file or literal needs a new ruling. Needs merge-owner review.
+lib/mcp/oauth/ssrf.ts 10.0.0.0/8
+lib/mcp/oauth/ssrf.ts 172.16.0.0/12
+lib/mcp/oauth/ssrf.ts 192.168.0.0/16
+lib/mcp/oauth/ssrf.ts 100.64.0.0/10
+lib/mcp/oauth/ssrf.ts 127.0.0.0/8
+lib/mcp/oauth/ssrf.ts 169.254.0.0/16
+lib/mcp/oauth/ssrf.ts ::1
+lib/mcp/oauth/ssrf.ts fc00::/7
+lib/mcp/oauth/ssrf.ts fe80::/10
+tests/unit/mcp-oauth-o2.test.ts 10.0.0.0/8
+tests/unit/mcp-oauth-o2.test.ts 172.16.0.0/12
+tests/unit/mcp-oauth-o2.test.ts 192.168.0.0/16
+tests/unit/mcp-oauth-o2.test.ts 100.64.0.0/10
+tests/unit/mcp-oauth-o2.test.ts 127.0.0.0/8
+tests/unit/mcp-oauth-o2.test.ts 169.254.0.0/16
+tests/unit/mcp-oauth-o2.test.ts ::1
+tests/unit/mcp-oauth-o2.test.ts fc00::/7
+tests/unit/mcp-oauth-o2.test.ts fe80::/10
+# The allow file itself lists the same literals (it is scrubbed in the same PR); the same literals only.
+steward/scrub-allow-ranges.txt 10.0.0.0/8
+steward/scrub-allow-ranges.txt 172.16.0.0/12
+steward/scrub-allow-ranges.txt 192.168.0.0/16
+steward/scrub-allow-ranges.txt 100.64.0.0/10
+steward/scrub-allow-ranges.txt 127.0.0.0/8
+steward/scrub-allow-ranges.txt 169.254.0.0/16
+steward/scrub-allow-ranges.txt ::1
+steward/scrub-allow-ranges.txt fc00::/7
+steward/scrub-allow-ranges.txt fe80::/10
