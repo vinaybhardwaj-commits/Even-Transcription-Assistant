@@ -251,8 +251,8 @@
       "a chart keyword alone is not a pitch",
       "a pitch is scored even when the operation is never booked; a local referral for surgery is still a pitch",
       "only the speaking doctor's OWN recommendation counts: an outside doctor's surgery advice that is merely reported is not a pitch unless this doctor endorses it",
-      "a scope or endoscopic procedure (short, no admission) counts as surgery for this rubric",
-      "an optional offer (\"not a must, your call\"), with or without a date, is a surgery recommendation (a soft pitch); a stated decision or plan to operate also counts as a recommendation"
+      "a scope or endoscopic procedure (short, no admission) counts as surgery for this rubric (recommendation_kind surgery)",
+      "an optional offer (\"not a must, your call\"), with or without a date, is a surgery recommendation (a soft pitch); a stated decision or plan to operate also counts as a recommendation. This is not advising against an operation; V3 takes precedence over the no_surgery rule."
     ]
   },
   "prompt": "prompt.json",
