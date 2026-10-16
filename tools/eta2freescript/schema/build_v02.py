@@ -27,7 +27,7 @@ V01 = HERE.parent / "vendor" / "freescript-w38" / "eta-freescript-artifact.schem
 V02 = HERE / "eta-freescript-artifact.v0.2.schema.json"
 
 SPEAKERS_V02 = ["doctor", "patient", "attendant", "staff", "other", "unknown"]
-NEW_FLAGS = ["boundary_quarantined", "doctor_dose_precedence"]
+NEW_FLAGS = ["boundary_quarantined", "doctor_dose_precedence", "field_withheld"]
 COMPLETION_KINDS = ["regimen_slot", "drug_history", "exam_missing", "dose_unstated", "follow_up_unstated", "boundary_review"]
 
 

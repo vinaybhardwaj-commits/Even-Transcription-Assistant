@@ -36,6 +36,9 @@ class Options:
     stage_b: str = f"stageB-{STAGE_B_VERSION}"
     stage_b_enabled: bool = True
     write_v01: bool = True
+    # FreeScript R1 (r1_floors): floors on gp_extraction before Stage B and a deterministic Medication section. False is the
+    # base behaviour, note byte-identical. The nightly reads ETA_FREESCRIPT_NOTES_ONLY (nightly.notes_only_enabled).
+    notes_only: bool = True
 
 
 def _fallback_note(art: dict, flags: dict, banned: list[str]) -> str:
@@ -114,9 +117,26 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
 
     prompts = [prompt_path(opts.stage_a)] + ([prompt_path(opts.stage_b)] if opts.stage_b_enabled else [])
     art = build(c, enc, bnd, model_id, sha(*prompts), sha(*code_paths()), specialty)
+    r1 = None
+    if opts.notes_only:  # before Stage B sees gp_extraction: the model never sees withheld content
+        from .r1_floors import apply_r1
+        art, r1 = apply_r1(art, c.turns)
     flags = flags_by_pointer(art)
     banned = [n for p in art["provenance"] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
     det, det_rem = _fallback_note_ex(art, flags, banned)
+
+    def med_floor(note: str) -> str:
+        """notes_only: the Medication section is always the deterministic one (R1-4). Off: the note as it is."""
+        if not opts.notes_only:
+            return note
+        from .r1_floors import notes_only_note
+        return notes_only_note(art, note)[0]
+
+    def note_errs(errs: list[str]) -> list[str]:
+        """Off: FRX-G1 does not choose the note, so the note stays byte-identical to the base. It still gates the write."""
+        return errs if opts.notes_only else [e for e in errs if not e.startswith("FRX-G1")]
+
+    det = med_floor(det)
     log = {"uid": c.uid, "speaker_source": c.speaker_source, "english_source": c.english_source,
            "boundary": art["clip_boundary"], "completion_required": len(art["completion_required"]),
            "guard_issues": enc["_guard"]["issues"]}
@@ -132,10 +152,10 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
             log["raw_llm_note_has_filler"] = any(FILLER.match(l.partition(":")[2]) for l in txt.split("\n")
                                                  if l.partition(":")[0] in HEADINGS and l.partition(":")[2].strip())
             art["note_text"], llm_rem = sanitize_note_ex(txt)
-            llm_errs = check(art) + span_errors(llm_rem)
+            llm_errs = note_errs(check(art)) + span_errors(llm_rem)
             if llm_errs and not span_errors(llm_rem):  # a note that lost a span on an order line is not repaired: it goes to the fallback
                 art["note_text"], llm_rem = sanitize_note_ex(repair_note(txt, art["gp_extraction"], flags, banned, combination_groups(art)))
-                repaired = check(art) + span_errors(llm_rem)
+                repaired = note_errs(check(art)) + span_errors(llm_rem)
                 log["note_repaired"] = not repaired
                 if not repaired:
                     llm_errs = []
@@ -143,6 +163,9 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
                     llm_errs = repaired
         except Exception as e:  # a failed Stage B call falls back like an invalid note
             llm_errs = [f"stageB call failed: {type(e).__name__}"]
+    if opts.notes_only and llm_errs == []:  # a kept model note: its Medication section is replaced by the deterministic one, then checked again
+        art["note_text"] = med_floor(art["note_text"])
+        llm_errs = check(art) + span_errors(llm_rem)
     if llm_errs is None or llm_errs:
         art["note_text"] = det
         llm_rem = det_rem
@@ -157,7 +180,21 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         flags = flags_by_pointer(art)
         banned = [n for p in art["provenance"] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
         art["note_text"], llm_rem = _fallback_note_ex(art, flags, banned)
+        art["note_text"] = med_floor(art["note_text"])
         log["field_recovery"] = recovered
+    if opts.notes_only:
+        from .r1_floors import pick_drug_in_note
+        if pick_drug_in_note(art, art["note_text"]):  # a drug R1 moved to pick_drug is never in note_text: the fallback, if that clears it
+            alt, alt_rem = _fallback_note_ex(art, flags_by_pointer(art), banned)
+            alt = med_floor(alt)
+            if not pick_drug_in_note(art, alt):
+                art["note_text"], llm_rem = alt, alt_rem
+                log["note_source"] = "deterministic_fallback"
+            r1["r1_4_pick_drug_in_note"] = int(pick_drug_in_note(art, art["note_text"]))
+        from .note import MEDICATION_LABEL
+        r1["r1_4_label_kept"] = int(f"Medication: {MEDICATION_LABEL}" in art["note_text"].split("\n"))
+        if any(v for k, v in r1.items() if k not in ("notes_only", "r1_5_no_turns")):  # only when R1 acted, as sanitize_removed
+            log["r1"] = r1
     final = check(art) + span_errors(llm_rem)
     if llm_rem:  # only when a span was removed, so a consult with none keeps a byte-identical log
         log["sanitize_removed"] = len(llm_rem)

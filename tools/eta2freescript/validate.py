@@ -412,6 +412,12 @@ def frx(art: dict) -> list[str]:
                 e.append("FRX-E3 identity pattern in gp_extraction, note_text, provenance text, or slots")
                 break
 
+    # FRX-G1: no posted gp_extraction string matches the R1-1 withhold set. An invariant: r1_floors withholds such a field first.
+    from .r1_floors import posted_hits, withhold_reason
+    for hit in posted_hits(gx):
+        why = withhold_reason(_at(gx, "/" + "/".join(map(str, hit))), str(hit[0]))
+        e.append(f"FRX-G1 /{'/'.join(map(str, hit))} posted string matches the withhold set ({why})")
+
     for path, kind in LISTS.items():
         try:
             items = _at(gx, path)

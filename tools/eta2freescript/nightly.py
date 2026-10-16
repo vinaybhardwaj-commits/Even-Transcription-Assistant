@@ -115,6 +115,18 @@ def flag_enabled(env: dict, config_enabled: bool = True) -> bool:
     raise NightlyError("ETA_FREESCRIPT has an unrecognised value")
 
 
+def notes_only_enabled(env: dict | None = None) -> bool:
+    """ETA_FREESCRIPT_NOTES_ONLY, default "1": FreeScript R1 notes-only mode (pipeline.Options.notes_only). 0/false/no/off
+    turns it off; any other value is an error, as for ETA_FREESCRIPT."""
+    env = os.environ if env is None else env
+    v = (env.get("ETA_FREESCRIPT_NOTES_ONLY") or "").strip().lower() or "1"  # unset or empty: on
+    if v in _TRUTHY:
+        return True
+    if v in _FALSY:
+        return False
+    raise NightlyError("ETA_FREESCRIPT_NOTES_ONLY has an unrecognised value")
+
+
 def load_config(path: str | None, env: dict | None = None) -> dict:
     env = os.environ if env is None else env
     cfg = dict(DEFAULTS)
@@ -125,6 +137,7 @@ def load_config(path: str | None, env: dict | None = None) -> dict:
     if env.get("FREESCRIPT_DATA", "").strip():
         cfg["data"] = env["FREESCRIPT_DATA"].strip()
     cfg["enabled"] = flag_enabled(env, bool(cfg.get("enabled")))
+    notes_only_enabled(env)  # a bad value fails at start, not per consult
     b = parse_bundle_config(env)
     if b:
         cfg["bundle_cmd"], cfg["bundle_cwd"] = b
@@ -552,7 +565,7 @@ def _default_run(data: Path, out: Path, uid: str) -> dict:
     client = make_client("bedrock", UsageLedger(out / "usage.jsonl"), None)
     assert_phi_safe(*client.resolve("sonnet"))
     c = load_consult(data, uid)
-    return run_consult(c, client, out, Options())
+    return run_consult(c, client, out, Options(notes_only=notes_only_enabled()))
 
 
 def execute(rows: list[dict], cfg: dict, *, dry_run: bool, run_one, post, on_result=None, on_start=None) -> dict:
@@ -1172,7 +1185,7 @@ def _bundle_runner(consults: dict, out: Path, keep_root: str | None = None):
             state["client"] = make_client("bedrock", UsageLedger(out / "usage.jsonl"), None)
             assert_phi_safe(*state["client"].resolve("sonnet"))
         try:
-            log = run_consult(consults[uid], state["client"], out, Options())
+            log = run_consult(consults[uid], state["client"], out, Options(notes_only=notes_only_enabled()))
         except Exception as e:
             # a consult that raised still keeps what it spent, and reports it to execute() so the summary's cost_usd includes it
             e.cost_usd = _usd_between(out / "usage.jsonl", state["offset"])

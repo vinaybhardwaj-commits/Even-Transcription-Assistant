@@ -407,3 +407,27 @@ def combination_groups(art: dict) -> list[tuple[str, list[int]]]:
                 continue
         i = j if len(idx) >= 2 else i + 1
     return groups
+
+
+# --- notes_only (FreeScript R1-4) -----------------------------------------------------------------------------
+MEDICATION_LABEL = "Unconfirmed list, not a prescription; the treating doctor confirms each drug."
+"""The first line under Medication in notes_only mode (V, 16 Oct). pipeline keeps it only while the artifact still validates with it."""
+
+
+def medication_floor(note: str, gx: dict, flags: dict | None = None, banned_names: list[str] | None = None, groups: list | None = None,
+                     label: bool = True) -> str:
+    """notes_only: the Medication section is always the deterministic one, rendered from gp_extraction (the R1-filtered medicines),
+    with MEDICATION_LABEL as its first line when `label`. Any model-written Medication line is replaced. No medicine: the section
+    stays empty. Sections are read as _split_sections reads them, and only the Medication block is replaced: every other line
+    stays byte-identical. A note with no Medication heading is rebuilt through _split_sections / _assemble."""
+    body = ([MEDICATION_LABEL] if label else []) + _split_sections(render_note(gx, flags, banned_names, groups))["Medication"]
+    body = body if len(body) > int(label) else []
+    block = [f"Medication: {body[0]}" if body else "Medication:"] + body[1:]
+    lines = (note or "").split("\n")
+    start = next((i for i, l in enumerate(lines) if l.partition(":")[1] and l.partition(":")[0] == "Medication"), None)
+    if start is None:
+        sections = _split_sections(note)
+        sections["Medication"] = body
+        return _assemble(sections)
+    end = next((j for j in range(start + 1, len(lines)) if lines[j].partition(":")[1] and lines[j].partition(":")[0] in HEADINGS), len(lines))
+    return "\n".join(lines[:start] + block + lines[end:])
