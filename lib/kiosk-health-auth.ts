@@ -11,6 +11,7 @@ export function kioskIngestToken(): string | undefined {
 }
 
 let warnedBadHash = false;
+const EMPTY_SHA256 = createHash("sha256").update("").digest();
 
 /** The poller token's SHA-256 digest from env (64 hex chars, trimmed), or undefined when unset, blank or malformed (the poller path is then off). */
 export function kioskPollerTokenHash(): Buffer | undefined {
@@ -23,14 +24,24 @@ export function kioskPollerTokenHash(): Buffer | undefined {
     }
     return undefined;
   }
-  return Buffer.from(raw, "hex");
+  const digest = Buffer.from(raw, "hex");
+  if (digest.equals(EMPTY_SHA256)) {
+    if (!warnedBadHash) {
+      warnedBadHash = true;
+      console.error("[kiosk-health] poller token hash is malformed; poller path disabled");
+    }
+    return undefined; // the hash of an empty token: no secret behind it
+  }
+  return digest;
 }
 
 /** True when the header is exactly "Bearer <token>" and sha256(token) equals the configured digest (constant-time compare of the 32-byte digests). */
 export function pollerTokenOk(header: string): boolean {
   const want = kioskPollerTokenHash();
   if (!want || !header.startsWith("Bearer ")) return false;
-  const got = createHash("sha256").update(header.slice("Bearer ".length).trim()).digest();
+  const token = header.slice("Bearer ".length).trim();
+  if (!token) return false;
+  const got = createHash("sha256").update(token).digest();
   return got.length === want.length && timingSafeEqual(got, want);
 }
 

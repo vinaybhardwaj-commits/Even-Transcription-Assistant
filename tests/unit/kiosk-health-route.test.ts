@@ -208,7 +208,7 @@ describe("POST /api/kiosk-health — Authorization: Device <device JWS> (TS-H10 
 
 describe("POST /api/kiosk-health — Bearer poller token via KIOSK_HEALTH_POLLER_TOKEN_SHA256 (mic-guard poller, scoped)", () => {
   const POLLER = ["t", "poller", "fixture"].join("-");
-  const SAVED_POLLER = process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256_SHA256;
+  const SAVED_POLLER = process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256;
   const HASH = createHash("sha256").update(POLLER).digest("hex");
   const pev = (seq: number, o: Record<string, unknown> = {}) => ev(seq, { source: "mini_micguard_poller", kind: "mic_guard", ...o });
   const asPoller = (body: unknown) => post(body, `Bearer ${POLLER}`);
@@ -282,6 +282,14 @@ describe("POST /api/kiosk-health — Bearer poller token via KIOSK_HEALTH_POLLER
   it("the hash itself is not a bearer credential, and a prefix other than Bearer is refused", async () => {
     expect((await POST(post({ events: [pev(1)] }, `Bearer ${HASH}`))).status).toBe(401);
     expect((await POST(post({ events: [pev(1)] }, `bearer ${POLLER}`))).status).toBe(401);
+    expect(M.sql).not.toHaveBeenCalled();
+  });
+
+  it("an empty token never authenticates, even when the env holds the hash of an empty string", async () => {
+    process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256 = createHash("sha256").update("").digest("hex");
+    for (const h of ["Bearer ", "Bearer  ", "Bearer   "]) {
+      expect((await POST(post({ events: [pev(1)] }, h))).status).toBe(401);
+    }
     expect(M.sql).not.toHaveBeenCalled();
   });
 
