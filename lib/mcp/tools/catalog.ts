@@ -35,8 +35,8 @@ const HELP = [
   "action=get {consult_uid, include_text?, include_identity?}: the full row and layers {transcript, parts, audio_features (timbre/talktime/clef rows), freescript, rubric, jev, identity, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call. Admin callers also get layers.catalog_c4 (the same {jev, clef_affect, presence}). For admin callers, layers.jev falls back to catalog_c4.jev (source encounter_catalog.jev (C4)) when jev_decision has no rows.",
   "action=clip_audio_url {consult_uid}: presigned GET of the clip, 900 s, {url, expires_at, bytes, minutes, audio_sha256, cut_signature_sha256}; audio_sha256 is the hash of the FLAC bytes (null when absent), cut_signature_sha256 hashes the cut metadata, not the audio. The URL is never audited or logged.",
   "action=clip_audio_chunk {consult_uid, offset?, length? <= 1 MiB}: the stored FLAC bytes as base64, {offset, length, total_bytes, content_type, base64, done, audio_sha256 (FLAC bytes hash, null when absent), cut_signature_sha256 (cut metadata, not the audio)}; bad_range past the end.",
-  "A consult with no clip key answers no_clip {sealed: the stored clip status token, or null} on clip_audio_url and clip_audio_chunk; bad_clip_key is a key that fails the allowlist or the row binding.",
-  "action=explorer_link {consult_uid} | {doctor_uid, date (IST, clamped to 2026-09-09)} | {individual_uid (admin)}: {url, kind} deep link into the Encounter Explorer (SCRIBE_EXPLORER_URL); reads nothing and does not check the id exists.",
+  "A consult with no clip key answers no_clip {sealed: the row's stored seal reason token, or null} on clip_audio_url and clip_audio_chunk; bad_clip_key is a key that fails the allowlist or the row binding.",
+  "action=explorer_link {consult_uid} | {doctor_uid, date (IST, clamped to 2026-09-09)} | {individual_uid}: admin only (admin_required otherwise); {url, kind} deep link into the Encounter Explorer (SCRIBE_EXPLORER_URL); reads nothing and does not check the id exists.",
   "Held-out room-days are refused blind_room_day on get, clip_audio_url and clip_audio_chunk and left out of search.",
 ].join(" ");
 
@@ -389,7 +389,7 @@ async function clipAudioUrl(args: ToolArgs): Promise<Row> {
 const EXPLORER_BASE = /^https:\/\/claude\.ai\/[A-Za-z0-9/_-]{1,200}$/;
 const EXPLORER_ARGS = new Set(["action", "consult_uid", "doctor_uid", "date", "individual_uid"]);
 
-/** CATALOG-13: a deep link into the Explorer. No database, no R2, no catalog read: the ids are validated for shape only (the Explorer checks they exist). */
+/** CATALOG-13: a deep link into the Explorer, ADMIN ONLY for every form. No database, no R2, no catalog read: the ids are validated for shape only (the Explorer checks they exist). */
 function explorerLink(args: ToolArgs, isAdmin: boolean): Row {
   const given = Object.keys(args).filter((k) => args[k] !== undefined && args[k] !== null);
   const stray = given.filter((k) => !EXPLORER_ARGS.has(k));
@@ -411,9 +411,9 @@ function explorerLink(args: ToolArgs, isAdmin: boolean): Row {
   } else {
     const ind = argStr(args, "individual_uid", 64);
     if (!ind || !UID.test(ind)) return badArgs("individual_uid must match [A-Za-z0-9_-]{6,64}");
-    if (!isAdmin) return { ok: false, error: "admin_required" };
     fragment = `patient=${ind}`; kind = "patient";
   }
+  if (!isAdmin) return { ok: false, error: "admin_required" }; // the whole action is admin-only (FIX2), checked right after the arguments
   const base = process.env.SCRIBE_EXPLORER_URL ?? "";
   if (!EXPLORER_BASE.test(base)) return { ok: false, error: "explorer_url_not_configured" };
   return { ok: true, url: `${base}#${fragment}`, kind };
@@ -454,7 +454,7 @@ export const catalogTool: McpTool = {
     // C2: names, ids and the Pulse link need the admin scope AND an "admin:" actor (as scribe_admin's writes do), checked before anything is read. has_prescription stays read scope.
     const present = (k: string) => args[k] !== undefined && args[k] !== null && args[k] !== "" && args[k] !== false;
     if (action === "explorer_link") {
-      // no scope throw here: a patient link for a non-admin is a plain admin_required answer; nothing below (catalog, sql, R2) is touched
+      // no scope throw here: a non-admin gets a plain admin_required answer (after bad_args); nothing below (catalog, sql, R2) is touched
       return failSafe({ ok: false, error: "catalog_unavailable" }, async () => explorerLink(args, ctx.scopes.has("admin") && ctx.actor.replace(/^mcp:/, "").startsWith(ADMIN_ACTOR_PREFIX)));
     }
     if ((action === "get" || action === "search") && (argBool(args, "include_identity") || present("prescription_uid") || present("individual_uid"))) {

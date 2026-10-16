@@ -58,16 +58,16 @@ afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); setLabStoreForTests(nu
 
 describe("Part A: no_clip", () => {
   const cases: Array<[string, unknown]> = [
-    ["null key", { r2_key: null, r2_status: "skipped:final_no_session" }],
-    ["absent key", { r2_status: "skipped:final_no_session", bytes: null }],
-    ["empty key", { r2_key: "", r2_status: "skipped:final_no_session" }],
+    ["null key", { r2_key: null, sealed: "skipped:final_no_session" }],
+    ["absent key", { sealed: "skipped:final_no_session", bytes: null }],
+    ["empty key", { r2_key: "", sealed: "skipped:final_no_session" }],
     ["no clip object", undefined],
     ["clip null", null],
   ];
 
   it.each(cases)("%s: both clip actions answer no_clip with the stored seal token; nothing is signed or read from R2", async (_n, clip) => {
     setRows([crow(UID, clip)]);
-    const want = clip && typeof clip === "object" && "r2_status" in clip ? "skipped:final_no_session" : null;
+    const want = clip && typeof clip === "object" && "sealed" in clip ? "skipped:final_no_session" : null;
     expect(await call({ action: "clip_audio_url", consult_uid: UID })).toEqual({ ok: false, error: "no_clip", sealed: want });
     expect(await call({ action: "clip_audio_chunk", consult_uid: UID })).toEqual({ ok: false, error: "no_clip", sealed: want });
     expect(H.signed).toBe(0);
@@ -77,35 +77,43 @@ describe("Part A: no_clip", () => {
   it("the seal token is passed only when it matches /^[a-z_:]{1,64}$/; anything else (case, digits, spaces, long, non-string) is null", async () => {
     const out: Array<unknown> = [];
     for (const st of ["skipped:final_no_session", "no_session", "Upper", "has space", "with-dash", "x1", "a".repeat(65), 42, null, ""]) {
-      setRows([crow(UID, { r2_key: null, r2_status: st })]);
+      setRows([crow(UID, { r2_key: null, sealed: st })]);
       resetCatalogCacheForTests();
       out.push((await call({ action: "clip_audio_url", consult_uid: UID })).sealed);
     }
     expect(out).toEqual(["skipped:final_no_session", "no_session", null, null, null, null, null, null, null, null]);
-    expect(sealReasonOf(crow(UID, { r2_status: "a".repeat(64) }))).toBe("a".repeat(64));
+    expect(sealReasonOf(crow(UID, { sealed: "a".repeat(64) }))).toBe("a".repeat(64));
   });
 
-  it("FIX1: the seal reason is read from row.sealed, then row.clip.sealed, then clip.r2_status; each source alone works", async () => {
+  it("FIX2: the seal reason is read from row.sealed, then row.clip.sealed; each source alone works", async () => {
     const seal = async (row: Row) => { setRows([row]); resetCatalogCacheForTests(); return (await call({ action: "clip_audio_url", consult_uid: UID })).sealed; };
     expect(await seal({ ...crow(UID, { r2_key: null }), sealed: "skipped:final_no_session" })).toBe("skipped:final_no_session");
     expect(await seal(crow(UID, { r2_key: null, sealed: "no_session" }))).toBe("no_session");
-    expect(await seal(crow(UID, { r2_key: null, r2_status: "silent_audio" }))).toBe("silent_audio");
     expect(await seal(crow(UID, { r2_key: null }))).toBeNull();
   });
 
-  it("FIX1: the order is row.sealed > clip.sealed > clip.r2_status, and a source that does not match the filter (or is not a string) does not block a later one", async () => {
+  it("FIX2: clip.r2_status is a storage status, not a seal reason: it is never read", async () => {
+    const seal = async (row: Row) => { setRows([row]); resetCatalogCacheForTests(); return (await call({ action: "clip_audio_chunk", consult_uid: UID })).sealed; };
+    expect(await seal(crow(UID, { r2_key: null, r2_status: "skipped:final_no_session" }))).toBeNull();
+    expect(await seal(crow(UID, { r2_key: null, r2_status: "mirrored" }))).toBeNull();
+    expect(await seal(crow(UID, { r2_key: null, r2_status: "from_status", sealed: "from_clip" }))).toBe("from_clip");
+    expect(sealReasonOf({ clip: { r2_status: "skipped:final_no_session" } })).toBeNull();
+  });
+
+  it("FIX2: the order is row.sealed > clip.sealed, and a source that does not match the filter (or is not a string) does not block the next", async () => {
     const seal = (row: Row) => { setRows([row]); resetCatalogCacheForTests(); return call({ action: "clip_audio_chunk", consult_uid: UID }).then((o) => o.sealed); };
-    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "from_clip", r2_status: "from_status" }), sealed: "from_row" })).toBe("from_row");
-    expect(await seal(crow(UID, { r2_key: null, sealed: "from_clip", r2_status: "from_status" }))).toBe("from_clip");
-    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "from_clip", r2_status: "from_status" }), sealed: "Bad Value" })).toBe("from_clip");
-    expect(await seal({ ...crow(UID, { r2_key: null, sealed: 7, r2_status: "from_status" }), sealed: true })).toBe("from_status");
-    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "x".repeat(65), r2_status: "from_status" }), sealed: "no-dash" })).toBe("from_status");
-    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "Bad", r2_status: "also bad" }), sealed: false })).toBeNull();
-    expect(sealReasonOf({ sealed: "a", clip: { sealed: "b", r2_status: "c" } })).toBe("a");
+    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "from_clip" }), sealed: "from_row" })).toBe("from_row");
+    expect(await seal(crow(UID, { r2_key: null, sealed: "from_clip" }))).toBe("from_clip");
+    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "from_clip" }), sealed: "Bad Value" })).toBe("from_clip");
+    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "from_clip" }), sealed: true })).toBe("from_clip");
+    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "from_clip" }), sealed: "x".repeat(65) })).toBe("from_clip");
+    expect(await seal({ ...crow(UID, { r2_key: null, sealed: 7 }), sealed: "no-dash" })).toBeNull();
+    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "Bad" }), sealed: false })).toBeNull();
+    expect(sealReasonOf({ sealed: "a", clip: { sealed: "b" } })).toBe("a");
   });
 
   it("the answer carries no key and no text: only ok, error and sealed", async () => {
-    setRows([crow(UID, { r2_key: null, r2_status: "skipped:final_no_session", signature_sha256: "c".repeat(64) })]);
+    setRows([crow(UID, { r2_key: null, sealed: "skipped:final_no_session", signature_sha256: "c".repeat(64) })]);
     const o = await call({ action: "clip_audio_url", consult_uid: UID });
     expect(Object.keys(o).sort()).toEqual(["error", "ok", "sealed"]);
   });
@@ -133,12 +141,12 @@ describe("Part A: no_clip", () => {
 
 describe("Part B: explorer_link", () => {
   const BASE = "https://claude.ai/artifact/explorer_01";
-  const link = (args: Row, ctx?: ToolContext) => call({ action: "explorer_link", ...args }, ctx);
+  const link = (args: Row, ctx: ToolContext = ADMIN_CTX) => call({ action: "explorer_link", ...args }, ctx);
 
   it("each form returns {ok, url, kind} on the configured base", async () => {
     expect(await link({ consult_uid: UID })).toEqual({ ok: true, url: `${BASE}#consult=${UID}`, kind: "consult" });
     expect(await link({ doctor_uid: "doc00001", date: "2026-10-12" })).toEqual({ ok: true, url: `${BASE}#doctor=doc00001&date=2026-10-12`, kind: "doctor_day" });
-    expect(await link({ individual_uid: "IND000001" }, ADMIN_CTX)).toEqual({ ok: true, url: `${BASE}#patient=IND000001`, kind: "patient" });
+    expect(await link({ individual_uid: "IND000001" })).toEqual({ ok: true, url: `${BASE}#patient=IND000001`, kind: "patient" });
   });
 
   it("the date is clamped to 2026-09-09 and must be a real date", async () => {
@@ -153,13 +161,35 @@ describe("Part B: explorer_link", () => {
       { doctor_uid: "doc00001", date: "2026-10-12", individual_uid: "IND000001" }, { consult_uid: "short" }, { consult_uid: "has space1" }, { consult_uid: "a/b/c/d/e" },
       { doctor_uid: "doc 1", date: "2026-10-12" }, { doctor_uid: "d#oc&1", date: "2026-10-12" }, { consult_uid: UID, limit: 5 }, { consult_uid: UID, include_text: true }, { consult_uid: UID, from: "2026-10-01" },
     ];
-    for (const a of bad) expect(await link(a, ADMIN_CTX), JSON.stringify(a)).toMatchObject({ ok: false, error: "bad_args" });
+    for (const a of bad) expect(await link(a), JSON.stringify(a)).toMatchObject({ ok: false, error: "bad_args" });
   });
 
-  it("the patient link needs admin: a read caller, or an admin scope without an admin: actor, gets admin_required", async () => {
-    expect(await link({ individual_uid: "IND000001" })).toEqual({ ok: false, error: "admin_required" });
-    expect(await link({ individual_uid: "IND000001" }, { actor: "mcp:someone", origin: "https://example.test", scopes: new Set<McpScope>(["read", "admin"]) })).toEqual({ ok: false, error: "admin_required" });
-    expect(await link({ consult_uid: UID })).toMatchObject({ ok: true }); // the other forms stay read scope
+  it("FIX2: the WHOLE action is admin-only: every form answers admin_required to a read caller, to admin scope without an admin: actor, and to an admin: actor without the scope", async () => {
+    const callers: ToolContext[] = [
+      READ_CTX,
+      { actor: "mcp:someone", origin: "https://example.test", scopes: new Set<McpScope>(["read", "admin"]) },
+      { actor: "mcp:admin:tester", origin: "https://example.test", scopes: new Set<McpScope>(["read"]) },
+    ];
+    const forms: Row[] = [{ consult_uid: UID }, { doctor_uid: "doc00001", date: "2026-10-12" }, { individual_uid: "IND000001" }];
+    for (const ctx of callers) for (const f of forms) expect(await link(f, ctx), `${ctx.actor} ${JSON.stringify(f)}`).toEqual({ ok: false, error: "admin_required" });
+    for (const f of forms) expect(await link(f, ADMIN_CTX)).toMatchObject({ ok: true });
+  });
+
+  it("FIX2: bad_args is answered before admin_required, and admin_required before the base is looked at (a non-admin learns nothing about the config)", async () => {
+    expect(await link({}, READ_CTX)).toMatchObject({ ok: false, error: "bad_args" });
+    expect(await link({ consult_uid: "short" }, READ_CTX)).toMatchObject({ error: "bad_args" });
+    expect(await link({ consult_uid: UID, limit: 5 }, READ_CTX)).toMatchObject({ error: "bad_args" });
+    vi.stubEnv("SCRIBE_EXPLORER_URL", "");
+    expect(await link({ consult_uid: UID }, READ_CTX)).toEqual({ ok: false, error: "admin_required" });
+    expect(await link({ consult_uid: UID })).toEqual({ ok: false, error: "explorer_url_not_configured" });
+  });
+
+  it("the doctor id is percent-encoded in the link (: and @ become %3A and %40), consult and patient ids are not", async () => {
+    const o = await link({ doctor_uid: "doc:1@x.y", date: "2026-10-05" });
+    expect(String(o.url)).toContain("doctor=doc%3A1%40x.y&date=2026-10-05");
+    expect(String(o.url).split("#")[1]).toBe("doctor=doc%3A1%40x.y&date=2026-10-05");
+    expect(String((await link({ consult_uid: UID })).url)).not.toContain("%");
+    expect(String((await link({ individual_uid: "IND-00_01" })).url)).toContain("patient=IND-00_01");
   });
 
   it("the base must be https://claude.ai/...: missing, other hosts, http, fragments, queries, a bare host and an over-long path are explorer_url_not_configured", async () => {
@@ -179,8 +209,8 @@ describe("Part B: explorer_link", () => {
     setRows([crow(UID, { r2_key: GOOD_KEY() })]);
     await link({ consult_uid: UID });
     await link({ doctor_uid: "doc00001", date: "2026-10-12" });
-    await link({ individual_uid: "IND000001" }, ADMIN_CTX);
     await link({ individual_uid: "IND000001" });
+    await link({ individual_uid: "IND000001" }, READ_CTX);
     await link({});
     vi.stubEnv("SCRIBE_EXPLORER_URL", "");
     await link({ consult_uid: UID });
@@ -194,7 +224,7 @@ describe("Part B: explorer_link", () => {
     expect(await link({ consult_uid: "NOSUCHUID1" })).toMatchObject({ ok: true, kind: "consult" });
   });
 
-  it("the action and the date argument are in the schema and the help text; the tool stays read scope", () => {
+  it("the action and the date argument are in the schema and the help text; the tool stays read scope (the explorer_link action checks admin itself)", () => {
     const props = (catalogTool.inputSchema as { properties: Record<string, { enum?: string[] }> }).properties;
     expect(props.action!.enum).toContain("explorer_link");
     expect(props.date).toBeDefined();
