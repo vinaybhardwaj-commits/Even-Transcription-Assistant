@@ -40,8 +40,9 @@ public struct BuddyRunnerContext: Sendable {
   public let log: @Sendable (String) -> Void
 }
 
-/// Decided BEFORE the tap starts: nil means no runner on this Mac (no `buddy-runner.json`), and the consult behaves
-/// exactly as in 0.1.41 (window at once, 0.1.41 page). Otherwise it returns the builder for this consult's runner.
+/// Decided BEFORE the tap starts: nil means no usable `buddy-runner.json` on this Mac, so no runner. (0.1.43: that no
+/// longer means "window at once"; the window follows the payload's `window` alone.) Otherwise it returns the builder
+/// for this consult's runner.
 public typealias BuddyRunnerPlan = @Sendable () -> (@Sendable (BuddyRunnerContext) -> BuddyRunner)?
 
 public enum BuddyConsultOutcome: Equatable, Sendable {
@@ -51,6 +52,8 @@ public enum BuddyConsultOutcome: Equatable, Sendable {
   case alreadyOpen
   /// The kill switch is on for this consult: no window, no tap.
   case off
+  /// 0.1.43. The payload did not say `window === true` and there is no runner to start: no window, no tap, no page.
+  case noWindow
   /// The opaque id is not the shape newcat mints.
   case badID
   /// The tap could not be started. The recording is untouched.
@@ -75,6 +78,10 @@ public final class BuddyConsultController: @unchecked Sendable {
   private var runner: BuddyRunner?
   private var runnerTask: Task<Void, Never>?
   private var windowOpen = false
+  /// 0.1.43. The payload's `window === true` for the live consult. A runner may ask for the window only while this is set.
+  private var windowPermitted = false
+  /// 0.1.43. How many consults wanted a runner (`live === true`) and found no usable config. Counts only.
+  private var noConfigCount = 0
 
   /// `buddy-tap.json`: the port and the token for the local Buddy process. Mode 0600, written when a consult opens,
   /// deleted when it ends. The token is never logged.
@@ -108,7 +115,10 @@ public final class BuddyConsultController: @unchecked Sendable {
   public var isLive: Bool { lock.withLock { liveID != nil } }
   public var liveOpaqueID: String? { lock.withLock { liveID } }
 
-  public func consultStarted(opaqueID: String, buddyOff: Bool) -> BuddyConsultOutcome {
+  /// 0.1.43 (fail closed). `window` and `live` are the payload's, each true ONLY for a JSON `true`: absent, null, a
+  /// string or false arrive here as false. A window opens only when `window` is true. A runner starts only when `live`
+  /// is true and `buddy-runner.json` is usable. There is no default for either argument, on purpose.
+  public func consultStarted(opaqueID: String, buddyOff: Bool, window: Bool, live: Bool) -> BuddyConsultOutcome {
     guard BuddyTapServer.isValidOpaqueID(opaqueID) else { return .badID }
     if buddyOff {
       // The kill switch on a consult that is already live closes it; on a fresh one it opens nothing.
@@ -120,14 +130,23 @@ public final class BuddyConsultController: @unchecked Sendable {
     return lock.withLock {
       if liveID == opaqueID { return .alreadyOpen }
       if liveID != nil { _ = tearDownLocked(reason: "replaced") }
+      // The runner plan is asked only for a live session. No usable config is one counted line per consult.
+      let build = live ? runnerPlan?() : nil
+      if live && build == nil {
+        noConfigCount += 1
+        log("buddy runner: no config count \(noConfigCount) (opaque_id \(opaqueID))")
+      }
+      guard window || build != nil else {
+        log("encounter buddy: no window and no runner for this consult (opaque_id \(opaqueID))")
+        return .noWindow
+      }
       guard let minted = token ?? makeToken() else {
         log("encounter buddy: no random source, tap not started (opaque_id \(opaqueID))")
         return .tapUnavailable
       }
       token = minted
       let server = BuddyTapServer(token: minted, opaqueID: opaqueID, state: state)
-      // With a runner the page does not exist until newcat says `window` is true (ADDENDUM 1).
-      let build = runnerPlan?()
+      // With a runner the page does not exist until the payload and newcat both say `window` is true (ADDENDUM 1).
       if build != nil { server.setPageEnabled(false) }
       let port: UInt16
       do {
@@ -143,8 +162,9 @@ public final class BuddyConsultController: @unchecked Sendable {
       }
       self.server = server
       liveID = opaqueID
+      windowPermitted = window
       guard let build else {
-        // No runner on this Mac: the 0.1.41 behaviour, unchanged.
+        // No runner, and the payload said `window === true` (the guard above): the 0.1.41 window, no POSTs.
         openWindowLocked(opaqueID: opaqueID)
         return .opened(port: port)
       }
@@ -193,6 +213,7 @@ public final class BuddyConsultController: @unchecked Sendable {
     server?.stop()
     server = nil
     liveID = nil
+    windowPermitted = false
     try? FileManager.default.removeItem(at: root.appendingPathComponent(Self.tapFileName))
     if windowOpen {
       presenter.close(opaqueID: live)
@@ -218,6 +239,11 @@ public final class BuddyConsultController: @unchecked Sendable {
     lock.withLock {
       guard liveID == opaqueID else { return }
       if open {
+        // The payload is the first gate: a flags answer cannot open a window the relay did not allow.
+        guard windowPermitted else {
+          log("encounter buddy: window request refused, the payload did not allow a window (opaque_id \(opaqueID))")
+          return
+        }
         openWindowLocked(opaqueID: opaqueID)
       } else if windowOpen {
         server?.setPageEnabled(false)
@@ -256,8 +282,8 @@ private final class ConsultWindow: BuddyRunnerWindowControlling, @unchecked Send
 }
 
 extension BuddyConsultController {
-  /// The plan a resident app uses: a runner exists only where `buddy-runner.json` is present and usable in the room root,
-  /// read afresh at each consult so a Mac can be switched on or off without a restart.
+  /// The plan a resident app uses: a runner exists only where `buddy-runner.json` is present and usable in the room root
+  /// (and the payload said `live`), read afresh at each consult so a Mac can be switched on or off without a restart.
   public static func filePlan(root: URL, log: @escaping @Sendable (String) -> Void) -> BuddyRunnerPlan {
     {
       guard let config = BuddyRunnerConfig.load(root: root, log: log) else { return nil }

@@ -660,14 +660,25 @@ public struct BuddyRunnerConfig: Equatable, Sendable {
   public var base: URL
   public var key: String
 
+  /// 0.1.43. What the health field reports: counts of rooms by these three words, never the path or the contents.
+  public enum Status: String, Sendable { case ok, absent, unusable }
+
   public static func load(root: URL, log: @Sendable (String) -> Void = { _ in }) -> BuddyRunnerConfig? {
+    inspect(root: root, log: log).config
+  }
+
+  /// The file's state, read afresh. `absent` is no file at all; `unusable` is a file that is loose, unparseable or
+  /// missing a field; `ok` carries the config.
+  public static func status(root: URL) -> Status { inspect(root: root).status }
+
+  static func inspect(root: URL, log: @Sendable (String) -> Void = { _ in }) -> (status: Status, config: BuddyRunnerConfig?) {
     let url = root.appendingPathComponent(fileName)
     var info = stat()
-    guard stat(url.path, &info) == 0 else { return nil }
+    guard stat(url.path, &info) == 0 else { return (.absent, nil) }
     // The key is a credential: a file other users can read is refused, not used.
     guard info.st_mode & 0o077 == 0 else {
       log("buddy runner: \(fileName) is readable by others, runner off")
-      return nil
+      return (.unusable, nil)
     }
     guard let data = try? Data(contentsOf: url),
       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -676,9 +687,9 @@ public struct BuddyRunnerConfig: Equatable, Sendable {
       let key = object["key"] as? String, !key.isEmpty
     else {
       log("buddy runner: \(fileName) is not usable, runner off")
-      return nil
+      return (.unusable, nil)
     }
-    return BuddyRunnerConfig(base: base, key: key)
+    return (.ok, BuddyRunnerConfig(base: base, key: key))
   }
 }
 

@@ -193,7 +193,7 @@ public enum BenchCommandKind: RawRepresentable, Codable, Hashable, Sendable {
   /// mic into a separate segment. Refused while a session is open.
   case selfTest
   /// 0.1.41 (Encounter Buddy L1). A consult began: open the recorder's own window and serve the tap. Never starts or
-  /// stops recording. `args`: `opaque_id` (required) and `buddy_off` (the kill switch, optional bool).
+  /// stops recording. `args`: `opaque_id` (required), `buddy_off` (the kill switch, optional bool), and (0.1.43) `window` and `live`, each true only for a JSON `true`.
   case consultStarted
   /// 0.1.41. The consult ended: close the window and stop the tap.
   case consultEnded

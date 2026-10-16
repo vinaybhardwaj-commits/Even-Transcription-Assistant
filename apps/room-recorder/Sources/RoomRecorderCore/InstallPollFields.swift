@@ -115,6 +115,9 @@ public struct InstallPollFields: Equatable, Sendable {
   public var helperUpdateStep: String?
   public var helperUpdateVersion: String?
   public var helperUpdateResult: String?
+  /// 0.1.43. `ok`, `absent` or `unusable`: the state of `buddy-runner.json` in the room root, so fleet can count rooms
+  /// after a key is placed. A word and nothing else (never the path, the base or the key). Nil when not measured.
+  public var buddyRunnerConfig: String?
 
   public init(
     installID: String,
@@ -321,6 +324,10 @@ public struct InstallPollFields: Equatable, Sendable {
     // Beside `input_device_name`, about the same device. The volume in four decimals, dropped
     // when outside 0–1 like `peak`; settable as `"true"`/`"false"`, absent when not measured.
     add("input_volume", Self.unitString(inputVolume))
+    // 0.1.43. Only the three words the server will learn to count; anything else is not sent.
+    if let buddyRunnerConfig, BuddyRunnerConfig.Status(rawValue: buddyRunnerConfig) != nil {
+      items.append(URLQueryItem(name: "buddy_runner_config", value: buddyRunnerConfig))
+    }
     // 0.1.41. A whole number of displays, dropped when negative; absent when not measured.
     if let displaysCount, displaysCount >= 0 {
       items.append(URLQueryItem(name: "displays_count", value: String(displaysCount)))

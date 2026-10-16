@@ -864,7 +864,7 @@ import Testing
       await rig.remote.push(BuddyL1Tests.command("c1", "start_day"))
       try await R4Fixture.waitUntil { rig.launcher.launchCount == 1 }
       if runnerOn {
-        await rig.remote.push(BuddyL1Tests.command("c2", "consult_started", #"{"opaque_id":"opq_same"}"#))
+        await rig.remote.push(BuddyL1Tests.command("c2", "consult_started", #"{"opaque_id":"opq_same","window":false,"live":true}"#))
         try await R4Fixture.waitUntil { transport.posted.count == 1 }
         try await Task.sleep(nanoseconds: 500_000_000)
         #expect(transport.posted.count == 1, "the stalled chunk holds the only slot")
@@ -905,7 +905,7 @@ import Testing
     await rig.remote.push(BuddyL1Tests.command("c1", "start_day"))
     try await R4Fixture.waitUntil { rig.launcher.launchCount == 1 }
     let before = BuddyL1Tests.tree(rig.root).filter { !$0.contains("status.json") && !$0.contains("tape.") }
-    await rig.remote.push(BuddyL1Tests.command("c2", "consult_started", #"{"opaque_id":"opq_files"}"#))
+    await rig.remote.push(BuddyL1Tests.command("c2", "consult_started", #"{"opaque_id":"opq_files","window":true,"live":true}"#))
     try await R4Fixture.waitUntil { BuddyL1Tests.tapFile(rig.root) != nil }
     try await R4Fixture.waitUntil { rig.presenter.all == ["open:opq_files"] }
     try await R4Fixture.waitUntil { tape.offsetsAsked.count >= 1 }  // the consult has started on the tape
@@ -928,9 +928,9 @@ import Testing
     let rig = try await Self.engineRig(plan: { nil })
     defer { try? FileManager.default.removeItem(at: rig.root) }
     let task = Task { try await rig.engine.run() }
-    await rig.remote.push(BuddyL1Tests.command("c1", "consult_started", #"{"opaque_id":"opq_win"}"#))
+    await rig.remote.push(BuddyL1Tests.command("c1", "consult_started", #"{"opaque_id":"opq_win","window":true}"#))
     try await R4Fixture.waitUntil { rig.presenter.all == ["open:opq_win"] }
-    await rig.remote.push(BuddyL1Tests.command("c2", "consult_started", #"{"opaque_id":"opq_win"}"#))
+    await rig.remote.push(BuddyL1Tests.command("c2", "consult_started", #"{"opaque_id":"opq_win","window":true}"#))
     try await R4Fixture.waitUntil { await rig.remote.acks.count == 2 }
     #expect(rig.presenter.all == ["open:opq_win"], "no re-open while the consult is live (A2-C3)")
     await rig.remote.push(BuddyL1Tests.command("c3", "consult_ended", #"{"opaque_id":"opq_win"}"#))

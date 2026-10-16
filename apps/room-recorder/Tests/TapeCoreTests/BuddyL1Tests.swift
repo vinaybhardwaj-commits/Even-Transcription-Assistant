@@ -277,7 +277,7 @@ import Testing
     let task = Task { try await rig.engine.run() }
     await rig.remote.push(Self.command("c1", "start_day"))
     try await R4Fixture.waitUntil { rig.launcher.launchCount == 1 }
-    await rig.remote.push(Self.command("c2", "consult_started", #"{"opaque_id":"opq_abc123"}"#))
+    await rig.remote.push(Self.command("c2", "consult_started", #"{"opaque_id":"opq_abc123","window":true}"#))
     try await R4Fixture.waitUntil { Self.tapFile(rig.root) != nil }
     let tap = try #require(Self.tapFile(rig.root))
     // The state box is refreshed on the engine's loop; wait until the capture is visible to the tap.
@@ -309,7 +309,7 @@ import Testing
     let rig = try await Self.rig()
     defer { try? FileManager.default.removeItem(at: rig.root) }
     let task = Task { try await rig.engine.run() }
-    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_tok"}"#))
+    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_tok","window":true}"#))
     try await R4Fixture.waitUntil { Self.tapFile(rig.root) != nil }
     let tap = try #require(Self.tapFile(rig.root))
     #expect(tap.token.count == 64)
@@ -337,7 +337,7 @@ import Testing
     let rig = try await Self.rig()
     defer { try? FileManager.default.removeItem(at: rig.root) }
     let task = Task { try await rig.engine.run() }
-    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_lo"}"#))
+    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_lo","window":true}"#))
     try await R4Fixture.waitUntil { Self.tapFile(rig.root) != nil }
     let tap = try #require(Self.tapFile(rig.root))
     #expect(Self.get(port: tap.port, path: "/encounter/opq_lo/state")?.status == 200, "the loopback answers")
@@ -374,7 +374,7 @@ import Testing
     await rig.remote.push(Self.command("c1", "start_day"))
     try await R4Fixture.waitUntil { rig.launcher.launchCount == 1 }
     let before = Self.tree(rig.root).filter { !$0.contains("status.json") && !$0.contains("tape.") }
-    await rig.remote.push(Self.command("c2", "consult_started", #"{"opaque_id":"opq_files"}"#))
+    await rig.remote.push(Self.command("c2", "consult_started", #"{"opaque_id":"opq_files","window":true}"#))
     try await R4Fixture.waitUntil { Self.tapFile(rig.root) != nil }
     let tap = try #require(Self.tapFile(rig.root))
     try await R4Fixture.waitUntil { Self.get(port: tap.port, path: "/tap/pcm?from=0&max=4096", token: tap.token)?.status == 200 }
@@ -404,7 +404,7 @@ import Testing
       try await R4Fixture.waitUntil { rig.launcher.launchCount == 1 }
       var reader: Task<Void, Never>?
       if tapOn {
-        await rig.remote.push(Self.command("c2", "consult_started", #"{"opaque_id":"opq_same"}"#))
+        await rig.remote.push(Self.command("c2", "consult_started", #"{"opaque_id":"opq_same","window":true}"#))
         try await R4Fixture.waitUntil { Self.tapFile(rig.root) != nil }
         let tap = try #require(Self.tapFile(rig.root))
         // A client that reads the tape the whole time the recorder is cutting pieces.
@@ -436,12 +436,12 @@ import Testing
     let rig = try await Self.rig()
     defer { try? FileManager.default.removeItem(at: rig.root) }
     let task = Task { try await rig.engine.run() }
-    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_win"}"#))
+    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_win","window":true}"#))
     try await R4Fixture.waitUntil { rig.presenter.all == ["open:opq_win"] }
     let url = try #require(rig.presenter.openedURLs.first)
     #expect(url.host == "127.0.0.1" && url.path == "/encounter/opq_win" && url.scheme == "http")
     // The same consult again does not reopen it (A2-C3).
-    await rig.remote.push(Self.command("c2", "consult_started", #"{"opaque_id":"opq_win"}"#))
+    await rig.remote.push(Self.command("c2", "consult_started", #"{"opaque_id":"opq_win","window":true}"#))
     try await R4Fixture.waitUntil { await rig.remote.acks.count == 2 }
     #expect(rig.presenter.all == ["open:opq_win"])
     await rig.remote.push(Self.command("c3", "consult_ended", #"{"opaque_id":"opq_win"}"#))
@@ -476,7 +476,7 @@ import Testing
     let rig = try await Self.rig(attachBuddy: false)
     defer { try? FileManager.default.removeItem(at: rig.root) }
     let task = Task { try await rig.engine.run() }
-    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_none"}"#))
+    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_none","window":true}"#))
     try await R4Fixture.waitUntil { await rig.remote.acks.count == 1 }
     #expect(await rig.remote.acks.first?.error == "buddy_unavailable")
     #expect(rig.presenter.all.isEmpty)
@@ -492,16 +492,16 @@ import Testing
     let task = Task { try await rig.engine.run() }
     await rig.remote.push(Self.command("c1", "start_day"))
     try await R4Fixture.waitUntil { rig.launcher.launchCount == 1 }
-    await rig.remote.push(Self.command("c2", "consult_started", #"{"opaque_id":"opq_off","buddy_off":true}"#))
+    await rig.remote.push(Self.command("c2", "consult_started", #"{"opaque_id":"opq_off","buddy_off":true,"window":true}"#))
     try await R4Fixture.waitUntil { await rig.remote.acks.count == 2 }
     #expect(await rig.remote.acks.last?.ok == true, "refused quietly: the consult itself is fine")
     #expect(rig.presenter.all.isEmpty, "no window")
     #expect(Self.tapFile(rig.root) == nil, "no token file, so nothing to read the tap with")
     // A live consult that is then switched off is closed, and its tap is gone.
-    await rig.remote.push(Self.command("c3", "consult_started", #"{"opaque_id":"opq_on"}"#))
+    await rig.remote.push(Self.command("c3", "consult_started", #"{"opaque_id":"opq_on","window":true}"#))
     try await R4Fixture.waitUntil { Self.tapFile(rig.root) != nil }
     let tap = try #require(Self.tapFile(rig.root))
-    await rig.remote.push(Self.command("c4", "consult_started", #"{"opaque_id":"opq_on","buddy_off":true}"#))
+    await rig.remote.push(Self.command("c4", "consult_started", #"{"opaque_id":"opq_on","buddy_off":true,"window":true}"#))
     try await R4Fixture.waitUntil { rig.presenter.all.contains("close:opq_on") }
     #expect(Self.get(port: tap.port, path: "/tap/pcm?from=0&max=8", token: tap.token) == nil, "nothing is listening")
     #expect(Self.tapFile(rig.root) == nil)
@@ -533,7 +533,7 @@ import Testing
     let rig = try await Self.rig(mic: "denied")
     defer { try? FileManager.default.removeItem(at: rig.root) }
     let task = Task { try await rig.engine.run() }
-    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_page"}"#))
+    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_page","window":true}"#))
     try await R4Fixture.waitUntil { Self.tapFile(rig.root) != nil }
     let tap = try #require(Self.tapFile(rig.root))
     let page = try #require(Self.get(port: tap.port, path: "/encounter/opq_page"))
@@ -574,7 +574,7 @@ import Testing
     let rig = try await Self.rig(configuration: missing)
     defer { try? FileManager.default.removeItem(at: rig.root) }
     let task = Task { try await rig.engine.run() }
-    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_dev"}"#))
+    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_dev","window":true}"#))
     try await R4Fixture.waitUntil { Self.tapFile(rig.root) != nil }
     let tap = try #require(Self.tapFile(rig.root))
     try await R4Fixture.waitUntil {
@@ -601,7 +601,7 @@ import Testing
     }
     let configBefore = try Data(contentsOf: rig.root.appendingPathComponent("config.json"))
     let statusBefore = try statusFacts()
-    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_room"}"#))
+    await rig.remote.push(Self.command("c1", "consult_started", #"{"opaque_id":"opq_room","window":true}"#))
     await rig.remote.push(Self.command("c2", "consult_ended", #"{"opaque_id":"opq_room"}"#))
     try await R4Fixture.waitUntil { await rig.remote.acks.count == 2 }
     // One more status write after the commands.
@@ -623,7 +623,7 @@ import Testing
     let task = Task { try await rig.engine.run() }
     await rig.remote.push(Self.command("c1", "start_day"))
     try await R4Fixture.waitUntil { rig.launcher.launchCount == 1 }
-    await rig.remote.push(Self.command("c2", "consult_started", #"{"opaque_id":"opq_rec"}"#))
+    await rig.remote.push(Self.command("c2", "consult_started", #"{"opaque_id":"opq_rec","window":true}"#))
     await rig.remote.push(Self.command("c3", "consult_ended", #"{"opaque_id":"opq_rec"}"#))
     try await R4Fixture.waitUntil { await rig.remote.acks.count == 3 }
     #expect(rig.launcher.launchCount == 1, "the capture was not restarted")

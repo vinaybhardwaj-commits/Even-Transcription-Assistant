@@ -1530,6 +1530,8 @@ public actor RoomEngine {
           fields.helperUpdateStep = helper?.updateStep
           fields.helperUpdateVersion = helper?.updateVersion
           fields.helperUpdateResult = helper?.updateResult
+          // 0.1.43. One word about buddy-runner.json (ok, absent or unusable), read now; never the path or contents.
+          fields.buddyRunnerConfig = BuddyRunnerConfig.status(root: persistence.root).rawValue
           return fields
         }
         let response = try await remote.pollCommands(
@@ -4538,8 +4540,13 @@ public actor RoomEngine {
     guard let buddy else { return CommandResult(ok: false, sessionID: nil, error: "buddy_unavailable") }
     var opaqueID: String?
     var off = false
+    // 0.1.43. Strict booleans: only a JSON `true` counts. Absent, null, a string "true" or false mean no window / not live.
+    var window = false
+    var live = false
     if case .object(let arguments) = command.args {
       if case .some(.string(let value)) = arguments["opaque_id"] { opaqueID = value }
+      if case .some(.bool(true)) = arguments["window"] { window = true }
+      if case .some(.bool(true)) = arguments["live"] { live = true }
       // INFERRED field name (newcat has not named it): `buddy_off: true` is the per-room / per-doctor kill switch.
       if case .some(.bool(true)) = arguments["buddy_off"] { off = true }
     }
@@ -4547,8 +4554,8 @@ public actor RoomEngine {
     case .consultStarted:
       guard let opaqueID else { return CommandResult(ok: false, sessionID: nil, error: "bad_args") }
       publishBuddyState(force: true)
-      switch buddy.consultStarted(opaqueID: opaqueID, buddyOff: off) {
-      case .opened, .alreadyOpen, .off:
+      switch buddy.consultStarted(opaqueID: opaqueID, buddyOff: off, window: window, live: live) {
+      case .opened, .alreadyOpen, .off, .noWindow:
         return CommandResult(ok: true, sessionID: nil, error: nil)
       case .badID:
         return CommandResult(ok: false, sessionID: nil, error: "bad_args")
