@@ -510,6 +510,23 @@ export function clipKeyOf(row: Row): string | null {
   return k;
 }
 
+/** CATALOG-13: true when the row names NO clip key at all (no clip object, or r2_key null / absent / ""), as against a key that is present but fails the shape or the row binding (clipKeyOf). */
+export function clipAbsent(row: Row): boolean {
+  const k = asRec(row.clip)?.r2_key;
+  return k === undefined || k === null || k === "";
+}
+
+const SEAL_REASON = /^[a-z_:]{1,64}$/;
+/**
+ * CATALOG-13 (FIX2): the seal reason a row stores for its clip, as a short lower-case token. Sources in order: row.sealed (string), then row.clip.sealed (string); the first that is a
+ * string matching /^[a-z_:]{1,64}$/ wins, else null (a non-matching earlier source does not block a later one). clip.r2_status is a storage status, not a seal reason, and is NOT read.
+ */
+export function sealReasonOf(row: Row): string | null {
+  const clip = asRec(row.clip);
+  for (const v of [row.sealed, clip?.sealed]) if (typeof v === "string" && SEAL_REASON.test(v)) return v;
+  return null;
+}
+
 export async function presignClip(key: string, now: number = Date.now()): Promise<{ url: string; expires_at: string }> {
   const url = await signGetUrl({ key, expiresInSeconds: CLIP_URL_TTL_S });
   return { url, expires_at: new Date(now + CLIP_URL_TTL_S * 1000).toISOString() };

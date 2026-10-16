@@ -617,15 +617,20 @@ describe("clip_audio_url", () => {
     expect(ttl).toBeGreaterThan(890_000);
     expect(ttl).toBeLessThanOrEqual(900_000);
   });
-  it("a key that is not under consult-clips/, holds .., is missing or is not a string is bad_clip_key and is never signed", async () => {
-    for (const k of ["bench/room/2026-10-05/s1/chunk_00001.webm", "clips/s1/a.webm", "consult-clips/../bench/x.flac", "consult-clips/2026-10-05/../../x", "/consult-clips/x", "Consult-clips/x", "", 7, null, undefined]) {
+  it("a key that is not under consult-clips/, holds .. or is not a string is bad_clip_key; a missing, null or empty key is no_clip (CATALOG-13); neither is ever signed", async () => {
+    for (const k of ["bench/room/2026-10-05/s1/chunk_00001.webm", "clips/s1/a.webm", "consult-clips/../bench/x.flac", "consult-clips/2026-10-05/../../x", "/consult-clips/x", "Consult-clips/x", 7]) {
       resetCatalogCacheForTests();
       setCatalog([crow(UID, { clip: { r2_key: k, bytes: 1, minutes: 1 } })]);
       expect(await run({ action: "clip_audio_url", consult_uid: UID }), String(k)).toEqual({ ok: false, error: "bad_clip_key" });
     }
+    for (const k of ["", null, undefined]) {
+      resetCatalogCacheForTests();
+      setCatalog([crow(UID, { clip: { r2_key: k, bytes: 1, minutes: 1 } })]);
+      expect(await run({ action: "clip_audio_url", consult_uid: UID }), String(k)).toEqual({ ok: false, error: "no_clip", sealed: null });
+    }
     resetCatalogCacheForTests();
     setCatalog([crow(UID, { clip: undefined })]);
-    expect(await run({ action: "clip_audio_url", consult_uid: UID })).toEqual({ ok: false, error: "bad_clip_key" });
+    expect(await run({ action: "clip_audio_url", consult_uid: UID })).toEqual({ ok: false, error: "no_clip", sealed: null });
     expect(H.signCalls).toEqual([]);
   });
   it("bad uid, unknown uid and a blind room-day are refused before signing", async () => {
