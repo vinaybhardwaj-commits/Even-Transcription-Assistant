@@ -50,6 +50,31 @@ manifest has `scope_json.job = "timbre-intraday"`. Nothing reads it for any deci
 - **Off switch:** `TIMBRE_NIGHTLY_ENABLED=0` (also disables `run`) or `systemctl disable --now timbre-intraday.timer`. Exit codes as `run`.
 - The nightly `run` does not read the ledger, so it still re-scores the previous day in full (a new run row; readers use `affect_consult_latest`).
 
+## R4: Clef-omni roles for no-voiceprint consults (CLEF-D2-R4, dark, suggest-only)
+
+    python -m tools.timbre.nightly r4 --date YYYY-MM-DD --consults FILE [--dry-run]
+
+`FILE` is one `consult_uid` per line (blank lines and `#` lines skipped). It lists the consults whose latest `scribe_timbre` row is
+unscorable with reason `no_voiceprint`; newcat-lead writes it. Only those consults go through plan, prepare, role_clef, the pipeline
+(with `--clef-roles`) and store. It is a NEW run, so `affect_consult_latest` moves to it only for those consults. No ledger, no
+timers. Same exit codes and `ALERT` lines as `run` (0 ok, 2 partial, 1 failed); `--dry-run` fetches and plans, makes no Clef call.
+
+For each prepared consult PART, `tools/timbre/role_clef.py` takes each Nemotron slot with at least 6 s of dominant speech, cuts up to
+3 snippets of 4-10 s from it, and makes ONE Clef-omni call per slot (`role`: doctor / patient / attender or family / other staff;
+audio only, no transcript text). `doctor_slot` is the slot with the highest p(doctor) if that is >= 0.6 and leads the next slot by
+>= 0.2; `patient_slot` is the best p(patient) among the others if >= 0.6. Otherwise there is no decision and the part keeps its
+`no_voiceprint` row. The decisions are written to `<workdir>/.../prep/clef-roles.json` and passed to the pipeline as
+`--clef-roles`; the override applies ONLY to a clip that would otherwise be `no_voiceprint` (no centroid, or a `map_slots`
+rejection that maps to it). A clip with a working centroid is never touched. Without `--clef-roles` the pipeline is unchanged.
+
+**`role_source=clef_omni`** means the doctor and patient slots came from Clef-omni's audio role labels, not from a doctor voiceprint.
+It is on every pipeline window built that way (`windows.parquet` column `role_source`) and on the run row as
+`scope_json.role_source` (with `scope_json.job = "timbre-r4-clefomni"`). The ingest payload carries no per-window `role_source`
+(there is no column for it and no migration); `scope_json` is the stored marker, and every window of an r4 run is a candidate for
+re-scoring. A later centroid re-score (once the doctor's centroid exists) supersedes these rows: it is a newer run, so
+`affect_consult_latest` follows it. Cost: `cost_usd_est` includes the role calls (input tokens at US$0.15/M); the run is capped at
+US$3.00 per date for the Clef valence estimate plus the role calls (shared with D2 Fix A; the US$40 total is tracked outside this job).
+
 ## Retention (36 months, every Timbre table)
 App cron `/api/cron/timbre-retention`, daily 21:50 UTC (03:20 IST, `vercel.json`): windows and consults whose consult date
 is older than 36 months, runs started more than 36 months ago (cascade), then calibration maps older than 36 months that
