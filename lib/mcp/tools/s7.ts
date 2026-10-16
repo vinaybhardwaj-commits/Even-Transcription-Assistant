@@ -17,10 +17,11 @@ import { listResults, listRuns, readEvidence } from "@/lib/rubrics/store";
 import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
 import { buildBoard } from "@/lib/rubrics/board";
 import { RUBRIC_UNITS } from "@/lib/rubrics/types";
+import { readSweepSummary } from "@/lib/rubrics/sweep";
 import { argBool, argInt, argStr, ToolScopeError, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 
 type Row = Record<string, unknown>;
-export const RUBRIC_ACTIONS = ["list", "describe", "results", "runs", "board", "run", "bench"] as const;
+export const RUBRIC_ACTIONS = ["list", "describe", "results", "runs", "board", "sweep_status", "run", "bench"] as const;
 type Action = (typeof RUBRIC_ACTIONS)[number];
 export const RESULTS_LIMIT_DEFAULT = 50;
 export const RESULTS_LIMIT_MAX = 200;
@@ -48,7 +49,7 @@ const rubric: McpTool = {
   name: "scribe_rubric",
   description:
     "Rubric engine (S7-0): versioned repo rubrics that score STORED data and write results to the database and R2. Admin only; never writes to Pulse; room audio never goes to Sarvam. Times UTC. " +
-    "action=list|describe|results|runs|board (read) and run|bench (invoke; queue a job). board {rubric_id, from, to, by? doctor|room, lab?, min_n? >= 3}: counts per opaque doctor id or room; no ranking, no verdict; a draft rubric needs lab:true. list {status?}: id, version, units, engine, inputs, status, bench. describe {rubric_id}: the full rubric file (definition, output schema, bench) plus recent runs. " +
+    "action=list|describe|results|runs|board|sweep_status (read) and run|bench (invoke; queue a job). sweep_status: the per-consult sweep's last tick summary (counts and ids only), or last:null. board {rubric_id, from, to, by? doctor|room, lab?, min_n? >= 3}: counts per opaque doctor id or room; no ranking, no verdict; a draft rubric needs lab:true. list {status?}: id, version, units, engine, inputs, status, bench. describe {rubric_id}: the full rubric file (definition, output schema, bench) plus recent runs. " +
     "results {rubric_id?, unit?, rooms? (the first), from?, to?, run_id?, lab?, status?, limit <= 200}: stored results (score, findings, evidence_key, a pointer to the R2 evidence); include_text:true also fetches the evidence JSON of at most 20 rows. runs {rubric_id?, limit}: run history (runs and benches). " +
     `run {rubric_id, unit?, unit_keys?, rooms?, from?, to?, limit <= ${RUBRIC_RUN_MAX_UNITS}, lab?}: only a PRODUCTION rubric runs on a room/date range; a draft or benched rubric needs lab:true AND unit_keys (lab_required / explicit_units_required otherwise). ` +
     "Only engine=code rubrics run in this slice (engine_not_available otherwise). bench {rubric_id, set?}: run the rubric over its labelled bench set and score it (rubric_run kind bench; result passed true/false, report in R2). Rubric status changes only by repository commit. " +
@@ -129,6 +130,13 @@ const rubric: McpTool = {
           lab: argBool(args, "lab"), ...(typeof args.min_n === "number" ? { min_n: args.min_n } : {}),
           room: Array.isArray(args.rooms) && typeof args.rooms[0] === "string" ? String(args.rooms[0]) : null,
         });
+      }
+      case "sweep_status": {
+        try {
+          return { ok: true, last: await readSweepSummary() };
+        } catch {
+          return { ok: false, error: "sweep_status_unavailable" };
+        }
       }
       case "run": {
         if (!rid) return { ok: false, error: "rubric_id_required" };
