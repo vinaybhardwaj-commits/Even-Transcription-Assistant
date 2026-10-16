@@ -119,13 +119,14 @@ async function windowsFor(uids: string[]): Promise<WindowRow[]> {
 
 /**
  * PURE. consult_uid -> ONE consult_key. A consult_uid with several rows (one per machine) takes the row with the longest (t_close - t_open); ties go to the lexically smallest
- * consult_key. A uid with no row is absent from the map. Counts: no_window = uids without a row, multi_window = uids with more than one.
+ * consult_key (FIX4: `all` keeps EVERY key of the uid, so a result under any of them settles the uid even if a later, longer window changes the pick). A uid with no row is absent from the maps. Counts: no_window = uids without a row, multi_window = uids with more than one.
  */
-export function pickWindowKeys(uids: readonly string[], rows: readonly WindowRow[]): { keys: Map<string, string>; no_window: number; multi_window: number } {
+export function pickWindowKeys(uids: readonly string[], rows: readonly WindowRow[]): { keys: Map<string, string>; all: Map<string, string[]>; no_window: number; multi_window: number } {
   const by = new Map<string, WindowRow[]>();
   for (const r of rows) { const l = by.get(r.consult_uid); if (l) l.push(r); else by.set(r.consult_uid, [r]); }
   const span = (r: WindowRow): number => Date.parse(String(r.t_close)) - Date.parse(String(r.t_open));
   const keys = new Map<string, string>();
+  const all = new Map<string, string[]>();
   let noWindow = 0, multi = 0;
   for (const u of uids) {
     const l = by.get(u);
@@ -133,8 +134,9 @@ export function pickWindowKeys(uids: readonly string[], rows: readonly WindowRow
     if (l.length > 1) multi += 1;
     const best = l.reduce((a, b) => { const d = (Number.isFinite(span(b)) ? span(b) : -Infinity) - (Number.isFinite(span(a)) ? span(a) : -Infinity); return d > 0 || (d === 0 && b.consult_key < a.consult_key) ? b : a; });
     keys.set(u, best.consult_key);
+    all.set(u, [...new Set(l.map((x) => x.consult_key))]);
   }
-  return { keys, no_window: noWindow, multi_window: multi };
+  return { keys, all, no_window: noWindow, multi_window: multi };
 }
 
 /** One statement per rubric: which of the CONSULT KEYS already have a PRODUCTION result (lab = false) for this rubric AND version, any status. */
@@ -212,17 +214,20 @@ export async function runRubricSweep(mode: "dry" | "live", opts: { now?: number;
     const uids = page.filter((c) => c.settledByAge || hasFs.has(c.uid)).map((c) => c.uid);
     // catalog consult_uid -> window consult_key, once per page; from here on every key is the consult_key
     const mapped = pickWindowKeys(uids, await windowsFor(uids));
-    const unitKeys = uids.map((u) => mapped.keys.get(u)).filter((k): k is string => typeof k === "string");
+    const mappedUids = uids.filter((u) => mapped.keys.has(u));
+    const allKeys = [...new Set(mappedUids.flatMap((u) => mapped.all.get(u) ?? []))]; // EVERY closed window key of the page: the done and deferred statements ask about all of them
     for (const w of walks) {
       if (w.need === 0 || w.keys.length >= w.need) continue;
       w.noWindow += mapped.no_window;
       w.multi += mapped.multi_window;
-      const done = await doneKeys(w.r.id, w.r.version, unitKeys);
-      const ran = await recentlyRun(w.r.id, unitKeys);
-      for (const u of unitKeys) {
-        if (done.has(u)) w.done += 1;
-        else if (ran.has(u)) w.deferred += 1;
-        else { w.todo += 1; if (w.keys.length < w.need) w.keys.push(u); }
+      const done = await doneKeys(w.r.id, w.r.version, allKeys);
+      const ran = await recentlyRun(w.r.id, allKeys);
+      // a consult_uid is done (or deferred) if ANY of its keys has a production row (or sits in a finished sweep job); only an undone, undeferred uid is planned, under its picked key
+      for (const u of mappedUids) {
+        const ks = mapped.all.get(u) ?? [];
+        if (ks.some((k) => done.has(k))) w.done += 1;
+        else if (ks.some((k) => ran.has(k))) w.deferred += 1;
+        else { w.todo += 1; if (w.keys.length < w.need) w.keys.push(mapped.keys.get(u)!); }
       }
     }
   }
