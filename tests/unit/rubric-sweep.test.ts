@@ -14,6 +14,7 @@ const H = vi.hoisted(() => ({
   done: {} as Record<string, string[]>,
   doneLab: {} as Record<string, string[]>,
   ran: {} as Record<string, string[]>,
+  windows: null as Array<Record<string, unknown>> | null,
   today: {} as Record<string, number>,
   open: null as Record<string, unknown> | null,
   dbThrows: false,
@@ -26,6 +27,11 @@ vi.mock("@/lib/db", () => ({
     const text = strings.join("?").replace(/\s+/g, " ").trim();
     H.sql.push({ text, values });
     if (H.dbThrows) return Promise.reject(Object.assign(new Error("down"), { code: "08006" }));
+    if (/FROM eta_encounter_windows/.test(text)) {
+      const want = new Set(values[0] as string[]);
+      const rows = H.windows ?? [...want].map((u) => ({ consult_uid: u, consult_key: u, t_open: "2026-10-14T01:00:00Z", t_close: "2026-10-14T01:10:00Z" })); // default: the key is the uid (older tests)
+      return Promise.resolve(rows.filter((r) => want.has(String(r.consult_uid))));
+    }
     if (/FROM freescript_latest/.test(text)) return Promise.resolve((values[0] as string[]).filter((u) => H.fsRows.includes(u)).map((u) => ({ consult_uid: u })));
     if (/FROM rubric_result r JOIN rubric_run u/.test(text)) return Promise.resolve([{ n: H.today[String(values[0])] ?? 0 }]);
     if (/FROM scribe_job j/.test(text)) return Promise.resolve((values[3] as string[]).filter((u) => (H.ran[String(values[1])] ?? []).includes(u)).map((u) => ({ unit_key: u })));
@@ -64,7 +70,7 @@ vi.mock("@/lib/rubrics/blind-room-days", () => ({
 import { setLabStoreForTests, ENCOUNTER_CATALOG_KEY, type LabStore } from "@/lib/sarvam-lab";
 import { resetCatalogCacheForTests } from "@/lib/room-access/readers/catalog-consult";
 import { labWritable, labReadable } from "@/lib/sarvam-lab";
-import { runRubricSweep, sweepMode, inBackfillWindow, SWEEP_SUMMARY_KEY, SWEEP_ACTOR, SweepReadError, type SweepSummary } from "@/lib/rubrics/sweep";
+import { runRubricSweep, pickWindowKeys, sweepMode, inBackfillWindow, SWEEP_SUMMARY_KEY, SWEEP_ACTOR, SweepReadError, type SweepSummary } from "@/lib/rubrics/sweep";
 import { GET } from "@/app/api/cron/rubric-sweep/route";
 import { S7_TOOLS } from "@/lib/mcp/tools/s7";
 import type { ToolContext } from "@/lib/mcp/registry";
@@ -90,7 +96,7 @@ const keysOf = (i = 0) => (H.submitted[i]!.args as { unit_keys: string[] }).unit
 let logs: string[];
 beforeEach(() => {
   H.rubrics.length = 0; H.rubrics.push({ ...RB });
-  H.sql = []; H.fsRows = []; H.done = {}; H.doneLab = {}; H.ran = {}; H.today = {}; H.open = null; H.dbThrows = false; H.submitted = []; H.submitThrow = {};
+  H.sql = []; H.fsRows = []; H.done = {}; H.doneLab = {}; H.ran = {}; H.windows = null; H.today = {}; H.open = null; H.dbThrows = false; H.submitted = []; H.submitThrow = {};
   store.clear(); resetCatalogCacheForTests(); setLabStoreForTests(lab);
   logs = [];
   for (const m of ["log", "warn"] as const) vi.spyOn(console, m).mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
@@ -351,8 +357,8 @@ describe("dry mode and the summary", () => {
     const s: SweepSummary = out.summary;
     expect(Object.keys(s).sort()).toEqual(["at", "backfill_window", "mode", "page_capped", "pages", "rubrics"]);
     expect(s.at).toBe(new Date(NOW).toISOString());
-    expect(Object.keys(s.rubrics[0]!).sort()).toEqual(["deferred", "done", "eligible", "id", "planned", "skipped_reason", "submitted_job_id", "today_units", "version"]);
-    expect(JSON.stringify(s)).not.toMatch(/CONS0001|k\/|room_/);
+    expect(Object.keys(s.rubrics[0]!).sort()).toEqual(["deferred", "done", "eligible", "id", "multi_window", "no_window", "planned", "skipped_reason", "submitted_job_id", "today_units", "version"]);
+    expect(JSON.stringify(s)).not.toMatch(/CONS0001|k\/|room_|@/);
     expect(logs.join("\n")).not.toMatch(/CONS0001/);
   });
 
@@ -476,6 +482,99 @@ describe("A1: a production rubric whose units include consult is swept as unit c
     expect(s.rubrics.map((r) => r.id)).toEqual(["rb_tt"]);
     expect(H.submitted).toHaveLength(1);
     expect(H.submitted[0]!.args).toMatchObject({ rubric_id: "rb_tt", unit: "consult", lab: false, unit_keys: ["CONS000171"] });
+  });
+});
+
+describe("FIX3: the unit keys are eta_encounter_windows.consult_key", () => {
+  const win = (uid: string, machine: string, openMin: number, closeMin: number): Row => ({ consult_uid: uid, consult_key: `${uid}@${machine}`, t_open: new Date(NOW + openMin * 60_000).toISOString(), t_close: new Date(NOW + closeMin * 60_000).toISOString() });
+
+  it("the mapping statement is verbatim, bounded to the page, and the submitted unit_keys are the consult_keys, not the catalog uids", async () => {
+    setCatalog([crow("CONS000201", 30), crow("CONS000202", 31)]);
+    H.windows = [win("CONS000201", "mac_a", 0, 10), win("CONS000202", "mac_a", 0, 12)];
+    await runRubricSweep("live", { now: NOW });
+    expect(keysOf()).toEqual(["CONS000201@mac_a", "CONS000202@mac_a"]);
+    const q = H.sql.filter((x) => /FROM eta_encounter_windows/.test(x.text));
+    expect(q).toHaveLength(1);
+    expect(q[0]!.text).toBe("SELECT consult_uid, consult_key, t_open, t_close FROM eta_encounter_windows WHERE consult_uid = ANY(?::text[]) AND t_close IS NOT NULL");
+    expect(q[0]!.values[0]).toEqual(["CONS000201", "CONS000202"]);
+  });
+
+  it("done and deferred are matched on consult_key: a result row or a recent job under the key counts; the bare uid under those tables does not", async () => {
+    setCatalog([crow("CONS000211", 30), crow("CONS000212", 31), crow("CONS000213", 32), crow("CONS000214", 33)]);
+    H.windows = ["CONS000211", "CONS000212", "CONS000213", "CONS000214"].map((u) => win(u, "mac_a", 0, 10));
+    H.done = { rb_alpha: ["CONS000211@mac_a", "CONS000214"] }; // the bare uid is NOT a result key
+    H.ran = { rb_alpha: ["CONS000212@mac_a", "CONS000213"] }; // nor a job unit key
+    const s = await plan("live");
+    expect(keysOf()).toEqual(["CONS000213@mac_a", "CONS000214@mac_a"]);
+    expect(s.rubrics[0]).toMatchObject({ done: 1, deferred: 1, planned: 2 });
+    const done = resultsQueries("rb_alpha")[0]!;
+    expect(done.values[2]).toEqual(["CONS000211@mac_a", "CONS000212@mac_a", "CONS000213@mac_a", "CONS000214@mac_a"]);
+    const jobq = H.sql.find((x) => /FROM scribe_job j/.test(x.text))!;
+    expect(jobq.values[3]).toEqual(["CONS000211@mac_a", "CONS000212@mac_a", "CONS000213@mac_a", "CONS000214@mac_a"]);
+  });
+
+  it("a consult_uid with no window row is skipped and counted as no_window (per rubric); a still-open window is not a row", async () => {
+    H.rubrics.push({ ...RB2 });
+    setCatalog([crow("CONS000221", 30), crow("CONS000222", 31), crow("CONS000223", 32)]);
+    H.windows = [win("CONS000221", "mac_a", 0, 10)]; // 222 has none; 223's open window is excluded by the SQL (t_close IS NOT NULL), so also none
+    const s = await plan("live");
+    expect(keysOf(0)).toEqual(["CONS000221@mac_a"]);
+    expect(s.rubrics.map((r) => [r.id, r.no_window, r.multi_window, r.planned])).toEqual([["rb_alpha", 2, 0, 1], ["rb_beta", 2, 0, 1]]);
+  });
+
+  it("two rows for one consult_uid (two machines): the longest (t_close - t_open) wins; a tie goes to the lexically smallest consult_key; counted as multi_window", async () => {
+    setCatalog([crow("CONS000231", 30), crow("CONS000232", 31), crow("CONS000233", 32), crow("CONS000234", 33)]);
+    H.windows = [
+      win("CONS000231", "mac_a", 0, 5), win("CONS000231", "mac_b", 0, 20), // longest = mac_b
+      win("CONS000232", "mac_c", 0, 10), win("CONS000232", "mac_a", 5, 15), win("CONS000232", "mac_b", 0, 10), // three-way tie of 10 min -> mac_a
+      win("CONS000233", "mac_a", 0, 9), // single
+      win("CONS000234", "mac_z", 0, 3), win("CONS000234", "mac_y", 1, 4), // tie of 3 min -> mac_y
+    ];
+    const s = await plan("live");
+    expect(keysOf()).toEqual(["CONS000231@mac_b", "CONS000232@mac_a", "CONS000233@mac_a", "CONS000234@mac_y"]);
+    expect(s.rubrics[0]).toMatchObject({ no_window: 0, multi_window: 3, planned: 4 });
+    expect(pickWindowKeys(["U1"], [{ consult_uid: "U1", consult_key: "U1@b", t_open: "2026-10-14T00:00:00Z", t_close: "2026-10-14T00:01:00Z" }, { consult_uid: "U1", consult_key: "U1@a", t_open: "2026-10-14T00:00:00Z", t_close: "2026-10-14T00:01:00Z" }]).keys.get("U1")).toBe("U1@a");
+  });
+
+  it("ONE mapping statement per page (not per rubric, not per consult), each bounded to that page's uids", async () => {
+    H.rubrics.push({ ...RB2 });
+    setCatalog(Array.from({ length: 25 }, (_, i) => crow(`CONS0002${String(40 + i)}`, 30 + i / 10)));
+    await runRubricSweep("dry", { now: NOW, pageSize: 10 });
+    const q = H.sql.filter((x) => /FROM eta_encounter_windows/.test(x.text));
+    expect(q).toHaveLength(3);
+    expect(q.map((x) => (x.values[0] as string[]).length)).toEqual([10, 10, 5]);
+  });
+
+  it("dry stays SELECT-only with the mapping statement, and submits nothing", async () => {
+    setCatalog([crow("CONS000251", 30)]);
+    H.windows = [win("CONS000251", "mac_a", 0, 10)];
+    const s = await plan("dry");
+    for (const q of H.sql) expect(q.text).toMatch(/^SELECT/);
+    expect(H.sql.some((x) => /FROM eta_encounter_windows/.test(x.text))).toBe(true);
+    expect(H.submitted).toEqual([]);
+    expect(s.rubrics[0]).toMatchObject({ planned: 1, skipped_reason: "dry_run" });
+  });
+
+  it("the summary and the logs hold no consult_uid and no consult_key (no @machine either)", async () => {
+    setCatalog([crow("CONS000261", 30), crow("CONS000262", 31)]);
+    H.windows = [win("CONS000261", "mac_a", 0, 10), win("CONS000261", "mac_b", 0, 5)];
+    const s = await plan("live");
+    expect(JSON.stringify(s)).not.toMatch(/CONS0002|@|mac_/);
+    expect(logs.join("\n")).not.toMatch(/CONS0002|mac_/);
+  });
+
+  it("the submitted args pass the REAL parseRubricRunArgs (a production consult rubric from the real registry, consult_keys as unit_keys)", async () => {
+    const actual = await vi.importActual<typeof import("@/lib/rubrics/registry")>("@/lib/rubrics/registry");
+    const prod = actual.RUBRICS.find((r) => r.status === "production" && actual.unitsOf(r).includes("consult"));
+    expect(prod, "a production consult rubric exists on main").toBeDefined();
+    H.rubrics.length = 0; H.rubrics.push(prod as never);
+    setCatalog([crow("CONS000271", 30), crow("CONS000272", 31)]);
+    H.windows = [win("CONS000271", "mac_a", 0, 10), win("CONS000272", "mac_b", 0, 10)];
+    await runRubricSweep("live", { now: NOW });
+    expect(H.submitted).toHaveLength(1);
+    const { parseRubricRunArgs } = await import("@/lib/jobs/kinds/rubric-run");
+    const parsed = parseRubricRunArgs(H.submitted[0]!.args);
+    expect(parsed).toMatchObject({ rubric_id: prod!.id, unit: "consult", lab: false, unit_keys: ["CONS000271@mac_a", "CONS000272@mac_b"] });
   });
 });
 
