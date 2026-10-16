@@ -61,6 +61,8 @@ describe("the rubric files and the registry", () => {
       return null;
     };
     const benchReportText = (raw: string): string => {
+      // JSON.parse keeps the LAST of two equal keys, so a duplicate "gold" could hide rows behind a valid summary: the raw text may hold at most one "gold" key
+      if ((raw.match(/"gold"\s*:/g) ?? []).length > 1) throw new Error("more than one gold key");
       const j = JSON.parse(raw) as Record<string, unknown>;
       if ("gold" in j) {
         const bad = goldShape(j.gold);
@@ -96,7 +98,12 @@ describe("the rubric files and the registry", () => {
     expect(() => benchReportText(JSON.stringify({ ...good, gold: { ...good.gold, unscored: "6" } }))).toThrow(/integer/);
     expect(() => benchReportText(JSON.stringify({ ...good, gold: { ...good.gold, reason: "x".repeat(121) } }))).toThrow(/reason/);
     expect(() => benchReportText(JSON.stringify({ ...good, gold: { ...good.gold, reason: 'say "hi"' } }))).toThrow(/reason/);
-    expect(contentProblems(benchReportText(JSON.stringify({ ...good, nested: { gold: { run_id: "rub_1" } } })), true)).toContain("quote, example, gold or placeholder id"); // a nested gold key
+    const goldOk = JSON.stringify(good.gold);
+    expect(() => benchReportText(`{"gold": [{"unit_key": "u1"}], "gold": ${goldOk}}`)).toThrow(/more than one gold/); // rows, then a valid summary
+    expect(() => benchReportText(`{"gold": {"text": "a free text line"}, "gold": ${goldOk}}`)).toThrow(/more than one gold/); // a text field, then a valid summary
+    expect(() => benchReportText(`{"gold": ${goldOk}, "gold": ${goldOk}}`)).toThrow(/more than one gold/);
+    expect(() => benchReportText(JSON.stringify({ ...good, nested: { gold: { run_id: "rub_1" } } }))).toThrow(/more than one gold/); // a nested gold key beside the real one
+    expect(contentProblems(benchReportText(JSON.stringify({ rubric_id: "x", nested: { gold: { run_id: "rub_1" } } })), true)).toContain("quote, example, gold or placeholder id"); // a nested gold key alone
     expect(contentProblems(benchReportText(JSON.stringify({ ...good, gold_rows: 1 })), true)).toContain("quote, example, gold or placeholder id");
     expect(contentProblems(benchReportText(JSON.stringify({ ...good, ids: ["hv-0123456789abcdef"] })), true)).toContain("bench unit key");
     expect(contentProblems(benchReportText(JSON.stringify({ ...good, ids: ["bg-ab-123"] })), true)).toContain("bench unit key");
