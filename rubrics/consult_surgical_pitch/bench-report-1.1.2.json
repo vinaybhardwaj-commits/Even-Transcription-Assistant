@@ -1,0 +1,19 @@
+{
+  "rubric_id": "consult_surgical_pitch",
+  "version": "1.1.2",
+  "set": "human_v",
+  "run_id": "rub_6j6kanlaef5h",
+  "metric": "accuracy_vs_V_on_excerpts",
+  "value": 0.931,
+  "fields": 29,
+  "units": 18,
+  "units_correct_surgery_recommended": 17,
+  "threshold": 0.8,
+  "gold": {
+    "run_id": "rub_0ojqz81hb0f5",
+    "unscored": 6,
+    "reason": "no bench text for Meet units"
+  },
+  "decided_by": "scribe-mcp-lead 16 Oct, fable gate pending",
+  "date": "2026-10-16"
+}

@@ -64,7 +64,7 @@ describe("read actions", () => {
     const all = await run({ action: "list" }, ["read"]);
     expect((all.rubrics as Row[]).map((r) => r.id)).toEqual(["room_mic_quality", "talk_time", "consult_chair_affect", "consult_surgical_pitch", "ehrc_surgical_outcome", "care_sentiment", "encounter_vs_record"]);
     expect((all.rubrics as Row[])[1]).toMatchObject({ id: "talk_time", units: ["window", "consult"], engine: "code", status: "draft", inputs: ["turns", "consult_span"] });
-    expect((await run({ action: "list", status: "production" }, ["read"])).rubrics).toEqual([]);
+    expect(((await run({ action: "list", status: "production" }, ["read"])).rubrics as Row[]).map((x) => x.id)).toEqual(["consult_surgical_pitch"]); // promoted 16 Oct (human_v bench report)
     answer = (t) => (/FROM rubric_run/.test(t) ? [{ run_id: "rub_1", kind: "bench" }] : []);
     const d = await run({ action: "describe", rubric_id: "room_mic_quality" }, ["read"]);
     expect(d).toMatchObject({ ok: true, rubric: { id: "room_mic_quality", version: "0.1.0" }, recent_runs: [{ run_id: "rub_1" }] });

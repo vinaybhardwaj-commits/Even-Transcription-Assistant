@@ -161,7 +161,7 @@
     "metric": "field_accuracy",
     "threshold": 0.8
   },
-  "status": "draft",
+  "status": "production",
   "definition": {
     "object": "the surgery recommendation in a doctor-patient consultation: how it is pitched, how doubt is handled, how the patient takes it up",
     "extends": "consult_chair_affect: keeps its four axes, uptake codes and teach-back, and adds the three blocks below",

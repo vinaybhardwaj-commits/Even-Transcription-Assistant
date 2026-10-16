@@ -104,7 +104,7 @@ describe("the prompts", () => {
     expect(blob).not.toMatch(/\bP\d{2}\b|UHID|MEET-|CONSULT-\d|\b\d{10}\b/);
   });
   it("the Jev typed questions are in the rubric files while the engine stays llm_zdr", () => {
-    for (const r of [affect, pitch]) { expect(r.engine).toBe("llm_zdr"); expect(r.questions!.length).toBeGreaterThan(5); expect(r.status).toBe("draft"); }
+    for (const r of [affect, pitch]) { expect(r.engine).toBe("llm_zdr"); expect(r.questions!.length).toBeGreaterThan(5); expect(r.status).toBe(r.id === "consult_surgical_pitch" ? "production" : "draft"); }
     expect(affect.questions!.map((q) => q.id)).toEqual(expect.arrayContaining(["distress", "uptake", "resolution_type", "engagement_process"]));
   });
 });

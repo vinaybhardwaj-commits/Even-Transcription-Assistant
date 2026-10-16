@@ -25,12 +25,18 @@ describe("the rubric files and the registry", () => {
     for (const f of folders) expect(JSON.parse(readFileSync(join(ROOT, f, "rubric.json"), "utf8")).id).toBe(f);
     expect(RUBRICS.map((r) => r.id)).toEqual([...REGISTERED_IDS]);
   });
-  it("every file passes the schema and the cross-field rules; nothing is production or benched yet; status changes only by commit", () => {
+  it("every file passes the schema and the cross-field rules; only consult_surgical_pitch is production, every other rubric is draft; status changes only by commit", () => {
     for (const r of RUBRICS) {
       expect(T.RubricFile.safeParse(r).success, r.id).toBe(true);
       expect(T.rubricProblems(r, r.id, (f: string) => f.endsWith("/prompt.json") && !!r.prompt), r.id).toEqual([]);
-      expect(r.status, r.id).toBe("draft");
+      expect(r.status, r.id).toBe(r.id === "consult_surgical_pitch" ? "production" : "draft");
     }
+    // promotion = status change + a committed bench report (S7 spec): the report exists, parses and clears the rubric's own threshold
+    const pitch = getRubric("consult_surgical_pitch")!;
+    const rep = JSON.parse(readFileSync(join(ROOT, "consult_surgical_pitch", `bench-report-${pitch.version}.json`), "utf8"));
+    expect(rep).toMatchObject({ rubric_id: "consult_surgical_pitch", version: pitch.version, set: "human_v", metric: "accuracy_vs_V_on_excerpts" });
+    expect(rep.value).toBeGreaterThanOrEqual(pitch.bench.threshold);
+    expect(rep.threshold).toBe(pitch.bench.threshold);
   });
   it("the two code rubrics and the four definition-only drafts", () => {
     expect(RUBRICS.filter((r) => r.engine === "code").map((r) => r.id)).toEqual(["room_mic_quality", "talk_time"]);
@@ -55,7 +61,7 @@ describe("the rubric files and the registry", () => {
       expect(/"examples?"\s*:|"gold|"quotes?"\s*:\s*[\["]|_PRIVATE|Poornima|Srikanth|Nayar|Veda\b/i.test(text), f).toBe(false); // (the placeholder-id tokens are caught by identifierTokens above)
     }
     expect(readdirSync(join(ROOT)).filter((n) => !statSync(join(ROOT, n)).isDirectory())).toEqual([]); // no stray files
-    for (const f of folders) expect(readdirSync(join(ROOT, f)), f).toEqual(f === "consult_chair_affect" || f === "consult_surgical_pitch" || f === "encounter_vs_record" || f === "ehrc_surgical_outcome" ? ["prompt.json", "rubric.json"] : ["rubric.json"]); // a prompt file (S7-1) but no gold set, no bench with text, no linkage
+    for (const f of folders) expect(readdirSync(join(ROOT, f)), f).toEqual(f === "consult_surgical_pitch" ? ["bench-report-1.1.2.json", "prompt.json", "rubric.json"] : f === "consult_chair_affect" || f === "encounter_vs_record" || f === "ehrc_surgical_outcome" ? ["prompt.json", "rubric.json"] : ["rubric.json"]); // a prompt file (S7-1) but no gold set, no bench with text, no linkage
   });
   it("a bad file fails: unknown key, bad semver, id not the folder, a draft-only gap on a benched rubric, a code rubric with a prompt, a consult rubric with no consult input", () => {
     const ok = JSON.parse(JSON.stringify(getRubric("talk_time")));
