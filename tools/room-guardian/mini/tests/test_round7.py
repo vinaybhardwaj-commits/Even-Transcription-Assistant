@@ -85,8 +85,8 @@ class BackgroundRefresher(unittest.TestCase):                                   
         h, clock = self.bg(Src()); h._stop.set()                                              # manual rounds: no thread, so the test controls the snapshot
         self.assertEqual(h.hold(clock()), {"opd-6": True, "opd-7": True})                     # none yet
         h._snap = (h.compute(clock()), clock()); self.assertEqual(h.hold(clock()), {"opd-6": False, "opd-7": False})
-        self.assertEqual(h.hold(clock() + 60), {"opd-6": False, "opd-7": False})              # exactly 60 s old: still usable (I2: was 120 s)
-        self.assertEqual(h.hold(clock() + 61), {"opd-6": True, "opd-7": True})                # older than 60 s: every room held
+        self.assertEqual(h.hold(clock() + 90), {"opd-6": False, "opd-7": False})              # exactly 90 s old: still usable (DPM-6: was 60 s, I2: was 120 s)
+        self.assertEqual(h.hold(clock() + 91), {"opd-6": True, "opd-7": True})                # older than 90 s: every room held
         h._snap = ({"opd-6": False, "opd-7": False}, float("nan")); self.assertEqual(h.hold(clock()), {"opd-6": True, "opd-7": True})
         h._snap = ("garbage", clock()); self.assertEqual(h.hold(clock()), {"opd-6": True, "opd-7": True})                # a bad snapshot never raises
 

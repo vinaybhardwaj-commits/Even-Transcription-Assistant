@@ -29,7 +29,7 @@ SILENCE_ZERO_RATIO = 0.98                                    # INFERRED: a healt
 ENC_LOOKBACK_S = 4 * 3600                                    # the windows' bound: the newest encounter_open/close is looked for within this long
 LEVEL_FRESH_S = 120
 FALLBACK_BUDGET_S = 8                                        # the per-room retry after a failed batched read stops after this long
-SNAPSHOT_MAX_AGE_S = 60                                      # the publish thread serves a snapshot at most this old (older or none = every room true); normally <= ~50 s (20 s refresh + 30 s wait)
+SNAPSHOT_MAX_AGE_S = 90                                      # the publish thread serves a snapshot at most this old (older or none = every room true); normally <= ~50 s (20 s refresh + 30 s wait). 90 per fable DPM-6; the health/heartbeat age rule (MAX_AGE_S) stays 120
 REFRESH_BUDGET_S = 20                                        # one WHOLE refresh (every source plus every retry) is bounded to this, well under the 30 s publish period
 PRESENCE_KEYS = ("hb", "enc", "post")                        # the batched Presence value always has all three; a value missing one is a source error
 DEFAULT_URL_FILE = "~/.config/eta-audio/db.url"
@@ -86,7 +86,10 @@ def _connect(path, timeout):
     import psycopg
     with open(os.path.expanduser(path)) as f:
         url = f.read().strip()
-    c = psycopg.connect(url, connect_timeout=timeout, options=f"-c default_transaction_read_only=on -c statement_timeout={int(timeout * 1000)}")
+    # NO `options=` startup parameter: against the live Neon endpoint a connect carrying it hangs (probe 16 Oct 2026: 121 s, then a timeout; the same URL without it connects in
+    # 0.3 s). Read-only is enforced per transaction instead (c.read_only = True makes psycopg open each transaction READ ONLY) and the statement timeout is a SET LOCAL
+    # inside that same transaction (see pg_sources.run), which also holds through a pooler.
+    c = psycopg.connect(url, connect_timeout=timeout)
     c.read_only = True
     return c
 
@@ -101,7 +104,9 @@ def pg_sources(url_file=None, timeout=QUERY_TIMEOUT_S):
     def run(*queries):
         c = _connect(path, timeout)
         try:
-            return [c.execute(sql, params).fetchall() for sql, params in queries]
+            with c.transaction():
+                c.execute(f"SET LOCAL statement_timeout = {int(timeout * 1000)}")
+                return [c.execute(sql, params).fetchall() for sql, params in queries]
         finally:
             c.close()
 
@@ -462,3 +467,88 @@ def build(flags, rooms, sink, home, clock=time.time, sources=None, background=Fa
                        open_session_requires_levels=flags.get("open_session_requires_levels") is not False,
                        consult_windows_enabled=flags.get("consult_windows_enabled") is True,
                        post_open_overrides_url_close=flags.get("post_open_overrides_url_close") is not False, background=background)
+
+
+# ---- one-shot probe: `python3 consult_hold.py --probe <router.json-like file>`
+def _redactor(url_file):
+    """-> f(text) that removes the DB URL, its user, password and host from any error text before it is printed. A URL file that cannot be read redacts nothing (nothing is known)."""
+    secrets = set()
+    try:
+        from urllib.parse import urlparse, unquote
+        with open(os.path.expanduser(url_file or DEFAULT_URL_FILE)) as f:
+            url = f.read().strip()
+        u = urlparse(url)
+        for s in (url, u.password, unquote(u.password or ""), u.username, u.hostname, u.netloc):
+            if s and len(s) >= 3:
+                secrets.add(s)
+    except Exception:                      # noqa: BLE001
+        pass
+
+    def red(text):
+        text = str(text)
+        for s in sorted(secrets, key=len, reverse=True):
+            text = text.replace(s, "<redacted>")
+        return text
+    return red
+
+
+def probe(cfg_path, sources=None, clock=time.time):
+    """ONE compute with background off, through build(). -> a JSON-able dict. Never publishes, never writes the audit file (audit_path and sink are cleared after build), never prints the
+    DB URL or a credential (error text is redacted). Prints machine keys, room ids, slugs, counts, event names and booleans only: no names, no ages, no timestamps.
+    The rooms are the keys of consult_room_map. The kiosk health line comes from the live subscriber and the probe has none, so `health_stale` is always among the reasons;
+    `db_hold` is the hold with that one reason left out (what the DB sources alone say)."""
+    with open(cfg_path) as f:
+        flags = json.load(f)
+    if not isinstance(flags, dict) or not isinstance(flags.get("consult_room_map"), dict):
+        raise ValueError("the config needs a consult_room_map object")
+    rooms = sorted(flags["consult_room_map"])
+    red = _redactor(flags.get("consult_db_url_file"))
+    errors = []
+    real = sources if sources is not None else pg_sources(flags.get("consult_db_url_file"))
+
+    def wrap(name):
+        def f(now, arg):
+            try:
+                return real[name](now, arg)
+            except BaseException as e:     # noqa: BLE001 -- recorded verbatim (redacted), then re-raised so ConsultHold treats it as a source error
+                errors.append({"source": name, "arg_count": len(arg) if arg is not None else 0, "error": f"{type(e).__name__}: {red(e)}"})
+                raise
+        return f
+    h = build(flags, rooms, None, "/nonexistent-probe-home", clock, sources={n: wrap(n) for n in ("presence", "session", "levels", "windows")}, background=False)
+    h.audit_path, h.sink = None, None
+    now = clock()
+    out = h.compute(now)
+    rooms_out = {}
+    for r in rooms:
+        keys, rid, slug = _entry(h.map.get(r))
+        _hold, why = h._room(r, now)
+        rec = {"hold": out[r], "reasons": why, "db_hold": bool([x for x in why if x != "health_stale"]) if why != ["clear"] else False,
+               "machine": keys, "room_id": rid, "slug": slug, "rows": {}}
+        pd = (h.data.get("presence") or ({}, 0))[0]
+        if keys and pd:
+            rec["rows"]["presence"] = {"hb": sum(1 for x in pd["hb"] if x[0] in keys), "enc": sum(1 for x in pd["enc"] if x[0] in keys), "post": sum(1 for x in pd["post"] if x[0] in keys),
+                                       "enc_newest": {x[0]: x[1] for x in pd["enc"] if x[0] in keys}, "post_newest": {x[0]: x[1] for x in pd["post"] if x[0] in keys}}
+        sd_ = h.data.get("session")
+        if rid and sd_:
+            rec["rows"]["session"] = {"open": 1 if rid in sd_[0] else 0}
+        ld = h.data.get("levels")
+        if rid and ld:
+            rec["rows"]["levels"] = {"rows": sum(1 for x in ld[0] if x[0] == rid), "active_recent": any(x[0] == rid and x[1] is not None and (not _finite(x[1]) or now - x[1] <= LEVEL_FRESH_S) for x in ld[0])}
+        wd = h.data.get("windows")
+        if h.windows_on and slug and wd:
+            rec["rows"]["windows"] = {"rows": sum(1 for x in wd[0] if x[0] == slug)}
+        rooms_out[r] = rec
+    return {"rooms": rooms_out, "source_errors": {n: bool(h.err.get(n)) for n in ("presence", "session", "levels", "windows") if n in h.err},
+            "item_bad": {n: sorted(v) for n, v in h.item_bad.items() if v}, "errors": errors,
+            "switches": {"capture_closed_counts_quiet": h.closed_quiet, "open_session_requires_levels": h.need_levels, "consult_windows_enabled": h.windows_on, "post_open_overrides_url_close": h.post_override}}
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) == 3 and sys.argv[1] == "--probe":
+        try:
+            print(json.dumps(probe(sys.argv[2]), sort_keys=True, indent=1))
+        except Exception as e:             # noqa: BLE001
+            print(f"probe failed: {type(e).__name__}: {e}", file=sys.stderr); sys.exit(2)
+    else:
+        print("usage: consult_hold.py --probe <router.json-like file>", file=sys.stderr); sys.exit(64)

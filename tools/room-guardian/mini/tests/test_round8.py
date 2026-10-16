@@ -1,5 +1,5 @@
 """FR1 2.4 d' Round 8 (R7 delta refute, 1 MUST): the stuck-source case is opened and closed on the LOOP thread (the case store is a sqlite3 connection that raises from any other
-thread); no store or sink call runs off the loop thread; S1 pins; the start_day worker idle-exit race; the 60 s snapshot limit; usb_device_missing closes on an ACK."""
+thread); no store or sink call runs off the loop thread; S1 pins; the start_day worker idle-exit race; the 90 s snapshot limit; usb_device_missing closes on an ACK."""
 import json, os, sys, tempfile, threading, time, unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "subscriber")); sys.path.insert(0, os.path.join(HERE, "..", "router"))
@@ -106,12 +106,12 @@ class SnapshotAndRefresherPins(unittest.TestCase):                              
         h.stop(); self.assertIsNotNone(h._snap)
         self.assertEqual(h._snap[1], clock())                                                  # not the start of the round and not a future time
         self.assertGreater(h._snap[1], T)
-        self.assertEqual(h.hold(clock() + 60), {"opd-6": h._snap[0]["opd-6"], "opd-7": h._snap[0]["opd-7"]}); self.assertEqual(h.hold(clock() + 61), {"opd-6": True, "opd-7": True})
+        self.assertEqual(h.hold(clock() + 90), {"opd-6": h._snap[0]["opd-6"], "opd-7": h._snap[0]["opd-7"]}); self.assertEqual(h.hold(clock() + 91), {"opd-6": True, "opd-7": True})
 
-    def test_a_dead_refreshers_snapshot_goes_stale_at_60_s(self):                              # I2
+    def test_a_dead_refreshers_snapshot_goes_stale_at_90_s(self):                              # I2, DPM-6
         h, clock, _ = mk(Src(), background=True); h._stop.set()
         h._snap = (h.compute(clock()), clock())
-        for age, want in ((0, False), (50, False), (60, False), (60.5, True), (61, True), (119, True)):
+        for age, want in ((0, False), (50, False), (60, False), (90, False), (90.5, True), (91, True), (119, True), (1e9, True)):
             self.assertEqual(h.hold(clock() + age)["opd-6"], want, age)
 
     def test_the_whole_refresh_with_per_item_retries_stays_inside_the_budget(self):           # mutants 6, 7
@@ -187,6 +187,25 @@ class StartDayWorkerIdleExit(unittest.TestCase):                                
         finally:
             s._wlock.release()
         t.join(2); self.assertFalse(t.is_alive()); self.assertIsNotNone(s._worker)
+
+    def test_a_worker_whose_idle_exit_finds_an_item_keeps_running_and_sends_it(self):        # DPM-4 (mutant 12: `continue` -> `return` in _work)
+        done = []; s = sd.StartDayAfterBoot(lambda r: done.append(r), None, Sink(), Clock(T), background=True, idle_s=0.05)
+        s._enqueue("r1", 1, T)
+        for _ in range(200):
+            if done: break
+            time.sleep(0.01)
+        self.assertEqual(done, ["r1"]); w = s._worker; self.assertIsNotNone(w)
+        s._wlock.acquire()
+        try:
+            time.sleep(0.3)                                  # the worker's get() has timed out and it now waits on _wlock inside _try_exit
+            self.assertTrue(w.is_alive())
+            s._q.put(("r2", 2, T))                           # the item arrives in that window (what a blocked _enqueue puts the moment the lock frees)
+        finally:
+            s._wlock.release()
+        for _ in range(200):
+            if len(done) == 2: break
+            time.sleep(0.01)                                 # NO further _enqueue: only the same worker can send it
+        self.assertEqual(done, ["r1", "r2"]); self.assertEqual(s._q.qsize(), 0); self.assertIs(s._worker, w)
 
     def test_a_burst_of_sends_against_a_worker_that_keeps_going_idle_loses_nothing(self):      # I1 (stress)
         done = []; lock = threading.Lock()
