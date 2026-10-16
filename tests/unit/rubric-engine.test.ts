@@ -48,12 +48,21 @@ describe("the rubric files and the registry", () => {
     expect(getRubric("ehrc_surgical_outcome")!.source).toBe("ehrc-surgical-outcome@md");
   });
   it("NO identifier, quote, example, gold row or placeholder id in any rubric file (the repo is public)", () => {
+    // PP-4: the same content scan also covers every rubrics/*/prompt.json and rubrics/*/bench-report-*.json. A bench report may carry the literal KEY "gold" (the gold-set summary: run id, count, reason);
+    // the exemption removes ONLY the exact token `"gold":` from bench-report-*.json text before the regex, so a gold row, a "gold_..." key or any other quoted text there still trips it.
     for (const f of folders) {
-      const text = readFileSync(join(ROOT, f, "rubric.json"), "utf8");
-      expect(T.identifierTokens(text), f).toEqual([]);
-      expect(/[^\x00-\x7f]/.test(text), `${f} has a non-ASCII character (a quoted phrase in another script?)`).toBe(false);
-      expect(/"examples?"\s*:|"gold|"quotes?"\s*:\s*[\["]|_PRIVATE|Poornima|Srikanth|Nayar|Veda\b/i.test(text), f).toBe(false); // (the placeholder-id tokens are caught by identifierTokens above)
+      const files = readdirSync(join(ROOT, f)).filter((n) => n === "rubric.json" || n === "prompt.json" || /^bench-report-.+\.json$/.test(n));
+      for (const n of files) {
+        const raw = readFileSync(join(ROOT, f, n), "utf8");
+        const text = n.startsWith("bench-report-") ? raw.replace(/"gold"\s*:/g, '"_"  :') : raw;
+        expect(T.identifierTokens(text), `${f}/${n}`).toEqual([]);
+        expect(/[^\x00-\x7f]/.test(text), `${f}/${n} has a non-ASCII character (a quoted phrase in another script?)`).toBe(false);
+        expect(/"examples?"\s*:|"gold|"quotes?"\s*:\s*[\["]|_PRIVATE|Poornima|Srikanth|Nayar|Veda\b/i.test(text), `${f}/${n}`).toBe(false); // (the placeholder-id tokens are caught by identifierTokens above)
+      }
     }
+    // the exemption is exact: a bench-report with a gold ROW still trips the scan
+    expect(/"gold/i.test(`{"gold_rows": 1}`.replace(/"gold"\s*:/g, '"_"  :'))).toBe(true);
+    expect(/"gold/i.test(`{"gold": {"run_id": "x"}}`.replace(/"gold"\s*:/g, '"_"  :'))).toBe(false);
     expect(readdirSync(join(ROOT)).filter((n) => !statSync(join(ROOT, n)).isDirectory())).toEqual([]); // no stray files
     for (const f of folders) expect(readdirSync(join(ROOT, f)), f).toEqual(f === "consult_chair_affect" || f === "consult_surgical_pitch" || f === "encounter_vs_record" || f === "ehrc_surgical_outcome" ? ["prompt.json", "rubric.json"] : ["rubric.json"]); // a prompt file (S7-1) but no gold set, no bench with text, no linkage
   });

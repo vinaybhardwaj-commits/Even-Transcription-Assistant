@@ -139,6 +139,28 @@ describe("the board", () => {
     resultRows = Array.from({ length: 5001 }, (_, i) => mk(i));
     expect(await buildBoard({ ...ARGS, by: "room" })).toMatchObject({ ok: false, error: "board_too_large" });
   });
+  it("PP-1: a production consult_surgical_pitch board (by=room and by=doctor) carries the exact standing note; a draft pitch board keeps the draft note; a production rubric not in the map carries none", async () => {
+    const NOTE = "report only; never a verdict on a doctor; benched on 18 excerpts";
+    const pitch = JSON.parse(readFileSync("rubrics/consult_surgical_pitch/rubric.json", "utf8")) as object;
+    resultRows = [1, 2, 3].map((n) => mk(n, { score: { surgery_recommended: true } }));
+    windowRows = [1, 2, 3].map(win);
+    for (const by of ["room", "doctor"] as const) {
+      override = { ...pitch, status: "production" };
+      const out = await buildBoard({ rubric_id: "consult_surgical_pitch", from: "2026-10-01", to: "2026-10-08", lab: false, by });
+      if (!out.ok) throw new Error(JSON.stringify(out));
+      expect(out.board_meta.note, by).toBe(NOTE);
+      expect(out.board_meta.status, by).toBeUndefined(); // the draft status field is not added
+      override = { ...pitch, status: "draft" };
+      const draft = await buildBoard({ rubric_id: "consult_surgical_pitch", from: "2026-10-01", to: "2026-10-08", lab: true, by });
+      if (!draft.ok) throw new Error(JSON.stringify(draft));
+      expect(draft.board_meta, by).toMatchObject({ status: "draft", note: "not for decisions" });
+    }
+    override = { ...(JSON.parse(readFileSync("rubrics/talk_time/rubric.json", "utf8")) as object), status: "production" };
+    resultRows = [mk(1, { unit_kind: "window" })];
+    const tt = await buildBoard({ rubric_id: "talk_time", from: "2026-10-01", to: "2026-10-08", lab: false });
+    if (!tt.ok) throw new Error(JSON.stringify(tt));
+    expect(tt.board_meta.note).toBeUndefined();
+  });
   it("V1 — more than 1500 signed records is board_too_large with ZERO warehouse calls; exactly 1500 still makes the one SELECT", async () => {
     const MAX = REC.BOARD_MAX_UIDS;
     expect(MAX).toBe(1500);
