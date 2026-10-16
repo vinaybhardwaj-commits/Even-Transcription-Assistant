@@ -49,3 +49,17 @@ test_r16_root_helper_shebang_is_bash_p() {
   assert_eq "$(head -n1 "$KDIR/bin/guardian-root.sh")" "#!/bin/bash -p" "guardian-root.sh shebang"
   assert_eq "$(head -n1 "$KDIR/bin/guardian.sh")" "#!/bin/bash -p" "guardian.sh shebang (the match)"
 }
+
+# R16b ruling on N1: the pre-source check looks at the UNRESOLVED $HERE (the path as started) and compares it with the -P result. An install dir reached through a symlink exits 3 `symlink:`.
+test_r16b_install_dir_reached_through_a_symlink_exits_3() {
+  local g out
+  r15_ready; g="$GUARDIAN_HOME"
+  ln -s "$g" "$T/linkinst"
+  out="$(cd "$T" && "${R14_CAP[@]}" /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" /bin/bash -p "$T/linkinst/bin/guardian.sh" check 2>&1; echo "rc=$?")"
+  assert_has "$out" "rc=3" "symlinked install dir: exit 3"
+  assert_has "$out" "code tree unsafe (symlink: $T/linkinst)" "reason symlink, names the unresolved path"
+  assert_not "$out" "killswitch=" "nothing ran past the pre-source check"
+  rm -f "$T/linkinst"
+  out="$(cd "$g" && "${R14_CAP[@]}" /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$GUARDIAN_HOME" PATH="$PROD_PATH" /bin/bash -p bin/guardian.sh check 2>&1)"
+  assert_has "$out" "killswitch=clear mode=heal" "the real path still starts"
+}

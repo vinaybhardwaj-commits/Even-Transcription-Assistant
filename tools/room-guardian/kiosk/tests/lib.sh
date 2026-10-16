@@ -32,7 +32,7 @@ mk_sandbox() { # sets T and the whole environment; PATH gets the fake bin dir fi
   export GUARDIAN_SUDO="$T/bin/fakesudo"
   export GUARDIAN_TEST_DPRIME_HEAL=1   # test seam for 2.4 d' HEAL (the constant is 0 in run mode and in the shipped build); the d2 shadow test sets it to 0
   export GUARDIAN_ROOT_HELPER="$KDIR/bin/guardian-root.sh"
-  export GUARDIAN_ROOT_TESTMODE=1 GUARDIAN_ROOT_TEST_DB="$T/TCC.db"
+  export GUARDIAN_ROOT_TESTMODE=1 GUARDIAN_ROOT_TEST_DB="$T/TCC.db" GUARDIAN_ROOT_LOG_BIN="$T/bin/log"   # R16: the helper pins /usr/bin/log; its own test seam (non-root + test mode only)
   export GUARDIAN_LOG_BIN="$T/bin/fakelog" GUARDIAN_SHUTDOWN_BIN="$T/bin/fakeshutdown"   # /usr/bin/log and /sbin/shutdown are ALWAYS faked (2.4 d')
   export CANARY_AFPLAY="$T/bin/afplay" CANARY_SAMPLE_S=0   # afplay is always faked; no real sound
   export CALLS="$T/calls.log"; : >"$CALLS"
@@ -174,6 +174,14 @@ mk_pcm() { # amplitude seconds
   touch -t "$(date -j -f %s "$GUARDIAN_FAKE_NOW" +%Y%m%d%H%M.%S)" "$d/tape.pcm"
 }
 
+# R16 (GR15-10): the Chrome day rule needs the consult hold CLEAR. consult_clear [age_s]: store a fresh new-form control payload with consult_open false for this room, as the control subscriber would.
+consult_clear() {
+  local age="${1:-1}"
+  mkdir -p "$STATE_DIR"
+  { printf '%s\n' "$((GUARDIAN_FAKE_NOW - age))"; printf '{"consult_open": {"%s": false}, "kill": false, "modes": {"%s": "heal"}, "ts": %s}\n' "$GUARDIAN_ROOM" "$GUARDIAN_ROOM" "$GUARDIAN_FAKE_NOW"; } >"$STATE_DIR/control.last"
+  rm -f "$STATE_DIR/control_latch" "$STATE_DIR/control_state"
+  export GUARDIAN_CONTROL_SUB_CMD='true'
+}
 events() { grep "^kiosk/$GUARDIAN_ROOM/heal$(printf '\t')" "$T/pub.log" 2>/dev/null; }
 
 # reap_tracked <sandbox>: kill only the pids a test recorded in <sandbox>/*.pid, and only while they still look like what the test started

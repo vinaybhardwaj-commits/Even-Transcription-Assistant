@@ -4,7 +4,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")" || exit 2
 # shellcheck source=lib.sh
 . ./lib.sh
 # Every sandbox lives under one parent so a leftover is countable (R11): none may survive a test function.
-SBROOT="$(mktemp -d "${TMPDIR:-/tmp}/guardian-tests.XXXXXX")"; export SBROOT
+SBROOT="$(mktemp -d "${TMPDIR:-/tmp}/guardian-tests.XXXXXX")"
+# R16b: the pre-source check refuses any symlink on the path the agent was started by, and macOS TMPDIR sits under /var -> /private/var: sandboxes use the resolved path.
+SBROOT="$(cd -P "$SBROOT" && pwd -P)"; export SBROOT
 trap 'rm -rf "$SBROOT"' EXIT
 total_fail=0; total_pass=0; ntests=0; leaks=0
 for f in t_*.sh; do

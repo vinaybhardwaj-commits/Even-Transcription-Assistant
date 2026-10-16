@@ -482,7 +482,7 @@ test_usb_s6_planted_symlinks_are_never_followed() {
 test_usb_s7_root_helper_never_resolves_id_through_path() {
   local h="$KDIR/bin/guardian-root.sh"
   assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c 'id -u')" "0" "S7: no id -u in the helper"
-  assert_eq "$(grep -c 'EUID. -ne 0' "$h")" "2" "S7: both test seams test \$EUID"
+  assert_eq "$(grep -c 'EUID. -ne 0' "$h")" "3" "S7: all three test seams (db, shutdown, log) test \$EUID"
 }
 
 test_usb_s8_ist_date_ignores_the_local_zone() {

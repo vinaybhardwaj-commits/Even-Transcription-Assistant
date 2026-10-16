@@ -68,7 +68,8 @@ test_r15_every_bad_ancestor_shape_kills_the_agent_and_install_repairs_or_refuses
   assert_eq "$(r15_mode_of "$HOME/Library/Application Support")" "755" "ww: world write removed, the rest kept"
   # a symlinked ancestor owned by the agent user: the agent is killed, the installer refuses and writes nothing
   r15_ready; r15_shape_on symlink
-  assert_has "$(r15_agent check)" "killswitch=engaged mode=shadow why=tree" "symlink: the agent is killed"
+  # R16b: a symlink on the path the agent was started by is now refused by the pre-source check (exit 3, nothing loaded), before tree_check can name it: the agent does not start
+  assert_not "$(r15_agent check)" "killswitch=clear" "symlink: the agent does not start"
   before="$(find "$par.real" -type f -exec cksum {} + | LC_ALL=C sort)"
   out="$(r15_inst 2>&1)"; assert_rc $? 2 "symlink: install refuses"
   assert_has "$out" "refusing: ancestor" "symlink: says so"

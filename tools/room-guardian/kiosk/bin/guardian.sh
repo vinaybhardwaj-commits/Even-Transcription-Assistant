@@ -35,7 +35,8 @@ shopt -u expand_aliases 2>/dev/null
 trap - DEBUG ERR RETURN 2>/dev/null
 set +T +E 2>/dev/null
 
-HERE="$(CDPATH='' cd -P -- "$G_SRCDIR/.." && pwd -P)"   # builtins only (R15b): no dirname, no PATH lookup before the pre-source check; CDPATH cleared, symlinks resolved (R16 N1)
+HERE_U="$(CDPATH='' cd -- "$G_SRCDIR/.." && pwd)"   # builtins only (R15b): no dirname, no PATH lookup before the pre-source check; CDPATH cleared. R16b: the path AS STARTED, symlinks unresolved
+HERE="$(CDPATH='' cd -P -- "$G_SRCDIR/.." && pwd -P)"   # the resolved tree (R16 N1). Any difference from HERE_U means a symlink on the way in: the pre-source check refuses it
 G_MODE_ARG="${1:-run}"
 # R13 S5. The test entry is honoured only for once|handle, with GUARDIAN_TEST_ENTRY=1, and only when the test harness file sits next to this
 # script tree. install.sh never copies tests/, so an installed tree has no such file and ignores the variable.
@@ -56,6 +57,11 @@ fi
 # after 120 s, and that is the page. (The per-tick tree_check keeps health flowing when the tree is loosened while the agent runs.) The test entry skips it.
 if [ "${G_RUNMODE:-}" = 1 ]; then
   G_PRE_ME="$(/usr/bin/id -u 2>/dev/null)"
+  # R16b: the unresolved $HERE must equal the resolved one. A symlinked install dir (or any symlink component) is a finding: exit 3, nothing sourced.
+  if [ "$HERE_U" != "$HERE" ]; then
+    echo "guardian: code tree unsafe (symlink: $HERE_U): refusing to start, nothing was loaded" >&2
+    exit 3
+  fi
   for G_PRE_P in "$HERE" "$HERE/bin" "$HERE/lib" "$HERE/bin/guardian.sh" "$HERE/lib/common.sh" "$HERE/lib/conf.sh" "$HERE/lib/collect.sh" "$HERE/lib/killswitch.sh" \
       "$HERE/lib/faulttree.sh" "$HERE/lib/heal.sh" "$HERE/lib/probe.sh" "$HERE/lib/canary.sh"; do
     G_PRE_WHY=""
@@ -190,16 +196,16 @@ loop_watch() {
 }
 
 subscriber_loop() {
-  local topic payload backoff=2
+  local topic payload backoff=2 rc
   [ -n "$GUARDIAN_SUBSCRIBE_CMD" ] || return 0
   loop_init
   while :; do
     loop_parent_ok || loop_orphaned
     { g_conf_cmd "$GUARDIAN_SUBSCRIBE_CMD" "$GUARDIAN_ROOM" </dev/null 2>/dev/null | while IFS="$(printf '\t')" read -r topic payload; do
       handle_message "$topic" "$payload"
-    done; } </dev/null &
-    loop_watch $!
-    audit "subscriber exited; retry in ${backoff}s"
+    done; exit "${PIPESTATUS[0]}"; } </dev/null &   # R16 (GR15-2): the exit code of the subscribe command (ssh), not of the while loop
+    loop_watch $!; rc=$?
+    audit "subscriber exited rc=$rc; retry in ${backoff}s"
     loop_nap "$backoff"
     [ "$backoff" -lt 60 ] && backoff=$((backoff * 2))
   done
@@ -241,15 +247,15 @@ control_pump() {
 
 # Kiosk's own subscription to guardian/control. Same backoff pattern as subscriber_loop.
 control_loop() {
-  local backoff=2
+  local backoff=2 rc
   [ -n "$GUARDIAN_CONTROL_SUB_CMD" ] || return 0
   loop_init
   while :; do
     # bash drops NUL on read, which would turn "fa<NUL>lse" into a clean "false": map NUL to 0x01 first so the raw-byte check on control.last kills it.
     loop_parent_ok || loop_orphaned
-    { g_conf_cmd "$GUARDIAN_CONTROL_SUB_CMD" "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | nul_to_soh | control_pump; } </dev/null &
-    loop_watch $!
-    audit "control subscriber exited; retry in ${backoff}s"
+    { g_conf_cmd "$GUARDIAN_CONTROL_SUB_CMD" "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | nul_to_soh | control_pump; exit "${PIPESTATUS[0]}"; } </dev/null &   # R16: first stage = the subscribe command's own exit code
+    loop_watch $!; rc=$?
+    audit "control subscriber exited rc=$rc; retry in ${backoff}s"
     loop_nap "$backoff"
     [ "$backoff" -lt 60 ] && backoff=$((backoff * 2))
   done

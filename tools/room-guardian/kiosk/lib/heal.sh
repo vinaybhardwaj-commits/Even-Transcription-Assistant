@@ -196,6 +196,9 @@ heal_recorder() { # verdict
 chrome_restart_allowed() {
   local idle; idle="$(hid_idle_s)"
   in_night_window && return 0
+  # R16 (GR15-10): by day a third, independent guard. The consult hold must be CLEAR: a fresh control payload that says consult_open=false for this room, explicitly. A missing,
+  # stale, old-form, true or malformed signal = defer (consult_hold_clear fails closed). HID idle and speech are never the only day guard once the recorder is dead.
+  consult_hold_clear || return 1
   [ -n "$idle" ] && [ "$idle" -ge "$IDLE_MIN_S" ] 2>/dev/null || return 1
   speech_recent && return 1
   return 0
@@ -471,7 +474,9 @@ heal_cycle() {
     while IFS='|' read -r layer verdict evidence; do
       [ -n "$verdict" ] || continue
       case "$verdict" in
-        mic_denied) heal_tcc ;;
+        mic_denied)
+          # R16 (RC-4): while the TCC row is unreadable (error*) the agent can never write TCC.db either (no Full Disk Access): escalate only, no root call, no action spent.
+          case "${S_tcc_row:-}" in error*) escalate "$verdict" "$layer" "$evidence" ;; *) heal_tcc ;; esac ;;
         coreaudio_no_device) heal_coreaudiod ;;
         usb_power_off) heal_usb_power_off "$evidence" ;;
         recorder_not_running|recorder_hung|recorder_needs_enrol) heal_recorder "$verdict" ;;
