@@ -260,24 +260,19 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     expect(JSON.stringify(await pg.sql`SELECT * FROM rubric_result`)).not.toMatch(/alpha|bravo|charlie/);
   });
 
-  it("rubric_run on talk_time windows: the numbers from the fixture, formerly blind room-day scored, missing diarization skipped with their reasons, never failed", async () => {
+  it("rubric_run on talk_time windows: every window is skipped role_layer_consult_only (the role layer is per consult), never failed; an unknown window is unresolved", async () => {
     const { job } = await runJob("rubric_run", { rubric_id: "talk_time", lab: true, unit: "window", unit_keys: ["w1", "w2", "w3", "w4", "nope"] });
-    expect(job).toMatchObject({ status: "done", result: { ok: 3, failed: 0, skipped: 2, blind_room_days: 0 } });
-    const rows = (await pg.sql`SELECT unit_key, status, score, room_id FROM rubric_result ORDER BY unit_key`) as Array<Record<string, any>>;
-    const by = Object.fromEntries(rows.map((r) => [r.unit_key, r]));
-    expect(by.w1).toMatchObject({ status: "ok", room_id: "r1", score: { doctor_talk_ms: 20000, other_talk_ms: 12000, doctor_share: 0.625, interruptions: 1, overlap_ms: 2000, longest_monologue_ms: 12000, speakers: 2 } });
-    expect(by.w2.score.reason).toBe("no_diarization"); // w2 has a turn cue but no room_turn_speaker row: nobody attributed
-    expect(by.w3).toMatchObject({ status: "ok" }); // formerly held-out: scored and written
-    expect(by.w4).toMatchObject({ status: "ok", room_id: "room_qyzghzaf", score: { doctor_talk_ms: 5000, other_talk_ms: 3000 } });
-    expect(by.nope).toBeUndefined(); // no such window: its room and date are unknown, so NO row is written (counted as unresolved)
+    expect(job).toMatchObject({ status: "done", result: { ok: 0, failed: 0, skipped: 5, blind_room_days: 0 } });
+    const rows = (await pg.sql`SELECT unit_key, status, score FROM rubric_result ORDER BY unit_key`) as Array<Record<string, any>>;
+    expect(rows.map((r) => [r.unit_key, r.status, r.score.reason])).toEqual([["w1", "skipped", "role_layer_consult_only"], ["w2", "skipped", "role_layer_consult_only"], ["w3", "skipped", "role_layer_consult_only"], ["w4", "skipped", "role_layer_consult_only"]]);
     expect(job.result.unresolved).toBe(1);
   });
 
-  it("rubric_run on talk_time consults: the turns of the overlapping windows clipped to the span; a formerly blind consult is scored", async () => {
+  it("rubric_run on talk_time consults: with no role layer in the lab store every consult is skipped no_role_layer (never the voiceprint turns); a formerly blind consult is not refused", async () => {
     const { job } = await runJob("rubric_run", { rubric_id: "talk_time", lab: true, unit: "consult", unit_keys: ["enc1@m1", "enc3@m2", "enc2@m1"] });
-    expect(job).toMatchObject({ status: "done", result: { ok: 2, skipped: 1, blind_room_days: 0 } });
+    expect(job).toMatchObject({ status: "done", result: { ok: 0, failed: 0, blind_room_days: 0 } });
     const r = (await pg.sql`SELECT unit_key, status, score FROM rubric_result WHERE unit_key = 'enc1@m1'`)[0] as Record<string, any>;
-    expect(r).toMatchObject({ status: "ok", score: { span_ms: 30000, doctor_talk_ms: 15000, other_talk_ms: 12000, interruptions: 1 } });
+    expect(r).toMatchObject({ status: "skipped", score: { reason: "no_role_layer" } });
     expect((await pg.sql`SELECT 1 FROM rubric_result WHERE unit_key = 'enc3@m2'`).length).toBe(1);
   });
 
@@ -302,10 +297,7 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     // what the WRONG frame (session started_at + window ms) would have computed for the same row: a window 55 years in the future, overlapping nothing
     const wrong = (await pg.sql`SELECT extract(epoch FROM s.started_at)::float8 * 1000 + w.start_ms AS rel FROM bench_window w JOIN bench_session s ON s.id = w.session_id WHERE w.id = 'w1'`)[0] as { rel: number };
     expect(wrong.rel).toBeGreaterThan(W1 + 1e12);
-    // the engine uses the cue times as they are (absolute): doctor talk of the consult comes out right with no offset
-    const { job } = await runJob("rubric_run", { rubric_id: "talk_time", lab: true, unit: "consult", unit_keys: ["enc1@m1"] });
-    expect(job.result.ok).toBe(1);
-    expect(((await pg.sql`SELECT score FROM rubric_result WHERE unit_key = 'enc1@m1'`)[0] as { score: Row }).score).toMatchObject({ doctor_talk_ms: 15000, other_talk_ms: 12000 });
+    // talk_time no longer reads these windows' voiceprint turns (the consult unit takes roles from the role layer, see talk-time-role-layer.test.ts); the frame check above is the point of this test
   });
 
   it("G53 — a failing guard query for a window THROWS: the job is retried and ends failed, ZERO rubric_result rows, no evidence; a transient failure is retried and the unit is then written once", async () => {
@@ -324,17 +316,18 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
     const ok = await runJob("rubric_run", { rubric_id: "talk_time", lab: true, unit: "window", unit_keys: ["w1"] });
     H.sql = real;
     expect(blipped).toBe(true);
-    expect(ok.job).toMatchObject({ status: "done", result: { ok: 1, failed: 0 } });
+    expect(ok.job).toMatchObject({ status: "done", result: { ok: 0, failed: 0, skipped: 1 } }); // the guard still runs; the unit is then skipped role_layer_consult_only
     expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result WHERE unit_key = 'w1'`)[0] as { n: number }).n).toBe(1);
   });
 
-  it("G53 — a failing READ (the turns query) is a thrown error too, never a stored failed / engine_error row", async () => {
+  it("G53 — talk_time never issues the voiceprint turns query for a window (it is skipped role_layer_consult_only), so a failing turns read cannot fail or be stored", async () => {
     const real = H.sql!;
-    H.sql = (async (strs: TemplateStringsArray, ...v: unknown[]) => { if (/FROM cue c LEFT JOIN room_turn_speaker/.test(strs.join("?"))) throw new Error("db down"); return real(strs, ...v); }) as never;
-    const dead = await runJob("rubric_run", { rubric_id: "talk_time", lab: true, unit: "window", unit_keys: ["w1"] });
+    let turnsQueries = 0;
+    H.sql = (async (strs: TemplateStringsArray, ...v: unknown[]) => { if (/FROM cue c LEFT JOIN room_turn_speaker/.test(strs.join("?"))) { turnsQueries += 1; throw new Error("db down"); } return real(strs, ...v); }) as never;
+    const out = await runJob("rubric_run", { rubric_id: "talk_time", lab: true, unit: "window", unit_keys: ["w1"] });
     H.sql = real;
-    expect(dead.job.status).toBe("failed");
-    expect(await pg.sql`SELECT 1 FROM rubric_result`).toEqual([]);
+    expect(turnsQueries).toBe(0);
+    expect(out.job).toMatchObject({ status: "done", result: { failed: 0, skipped: 1 } });
   });
 
   it("G52 — the talk_time window listing lists the formerly held-out windows too, blind_excluded 0", async () => {

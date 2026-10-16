@@ -13,7 +13,7 @@
   ],
   "engine": "code",
   "definition": {
-    "doctor": "a turn whose room_turn_speaker row has role = clinician (an enrolled voiceprint matched); every other attributed turn is 'other'; a turn with no row is 'unattributed'",
+    "doctor": "doctor = role-layer doctor (REB role track llm-roles, joined to the consult's text track); patient / attender / staff / other are 'other'; role unknown is 'unattributed'. Never a voiceprint match (room_turn_speaker)",
     "talk_ms": "per class, the length of the union of that class's turn intervals (a turn's start_ms/end_ms are the cue's own)",
     "doctor_share": "doctor_talk_ms / (doctor_talk_ms + other_talk_ms); null when there is no doctor or no other talk",
     "turns": "count of attributed turns per class",

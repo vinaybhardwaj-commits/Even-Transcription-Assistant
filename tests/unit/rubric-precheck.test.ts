@@ -28,10 +28,11 @@ describe("a formerly held-out pair is read and scored like any day (rule lifted 
     expect(out).not.toMatchObject({ reason: "blind_room_day" });
     expect(calls.audio).toBe(1);
   });
-  it("a window whose room-day is the pair: the turns reader is called", async () => {
+  it("a window whose room-day is the pair: not refused as held-out; talk_time reads no voiceprint turns (role_layer_consult_only)", async () => {
     const out = await evaluateUnit(getRubric("talk_time")!, "window", "w_any");
     expect(out).not.toMatchObject({ reason: "blind_room_day" });
-    expect(calls.turns).toBeGreaterThan(0);
+    expect(out).toMatchObject({ status: "skipped", reason: "role_layer_consult_only" });
+    expect(calls.turns).toBe(0);
   });
   it("a consult on the pair: the span reader is called", async () => {
     const out = await evaluateUnit(getRubric("talk_time")!, "consult", "enc@m");
