@@ -236,6 +236,25 @@ suite("JEV-EVERY-CONSULT S1 — every transcribed consult, record-only", () => {
     expect(m.map((r) => [r.subject_id, r.outcome, r.why, r.band])).toEqual(expect.arrayContaining([["cx_0001@ma", "no_answer", "no_data", "abstain"], ["cx_0002@ma", "no_answer", "null_build", "abstain"]]));
     expect(await pendingSubjects(def, SHA_PITCH, "shadow", 10)).toEqual(["cx_0003@ma"]);
   });
+  it("JEV-NODATA-RETRY FIX1 F5: a stale no_data consult is re-offered END TO END (sweepUse enqueues a job, askSubject runs again), and a fresh marker is not", async () => {
+    Object.assign(process.env, { JEV_WORKER_ENABLED: "1", ETA_JEV_TEXT_LANE: "1", JEV_USE_CONSULT_RUBRIC: "1" });
+    win("cx_0001@ma", "u_0001");
+    const def = getUse("consult_rubric", "pitch-detect")!;
+    const set = (await rows`SELECT id, version, content_sha256 AS sha, model_pin FROM jev_question_set WHERE id = 'pitch-detect' AND status = 'shadow'`)[0]!;
+    const q = (await rows`SELECT question_id FROM jev_question WHERE question_set_id = 'pitch-detect' AND version = ${set.version}`);
+    const defs = q.map((r) => ({ question_id: r.question_id })) as never;
+    const ref = { id: set.id, version: set.version, sha: set.sha, modelPin: set.model_pin, use: "consult_rubric", subjectType: "consult" };
+    await askSubject({ jobId: null, set: ref, defs, mode: "shadow", subjectId: "cx_0001@ma", build: { unbuildable: "no_data" } });
+    expect(await sweepUse(def)).toMatchObject({ enqueued: false, skipped: "nothing_pending" });      // inside the cooldown
+    pg.exec(`UPDATE jev_decision SET created_at = now() - interval '40 minutes'`);
+    expect(await sweepUse(def)).toMatchObject({ enqueued: true, pending: 1 });                        // re-offered and queued
+    expect(await pendingSubjects(def, SHA_PITCH, "shadow", 10)).toEqual(["cx_0001@ma"]);
+    const before = (await rows`SELECT min(created_at) AS t FROM jev_decision`)[0]!.t;
+    await askSubject({ jobId: null, set: ref, defs, mode: "shadow", subjectId: "cx_0001@ma", build: { unbuildable: "no_data" } });   // the job's askSubject: re-mark
+    expect((await rows`SELECT min(created_at) AS t FROM jev_decision`)[0]!.t).not.toEqual(before);
+    expect(await pendingSubjects(def, SHA_PITCH, "shadow", 10)).toEqual([]);
+    expect(Number((await rows`SELECT count(*)::int AS c FROM jev_decision WHERE subject_id = 'cx_0001@ma'`)[0]!.c)).toBeGreaterThan(0);
+  });
   it("coverage counts on a seeded fixture (counts only) and jevHealth carries them as `coverage`", async () => {
     win("cx_0001@ma", "u_0001", { today: true }); win("cx_0001@mb", "u_0001", { today: true }); win("cx_0002@ma", "u_0002", { today: true, min: 1 }); win("cx_0003@ma", "u_0003", { today: true, min: 2 });
     win("cx_0004@ma", "u_0004", { today: true, min: 3, text: false }); win("cx_0006@ma", "u_0006", { today: true, min: 5, sealed: null }); win("cx_0005@ma", "u_0005", { today: true, min: 4, closed: false });

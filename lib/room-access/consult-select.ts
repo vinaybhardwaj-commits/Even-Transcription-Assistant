@@ -13,10 +13,23 @@ import { newDecisionId, type WorkerDecision } from "@/lib/jev/worker/persist";
 /** JEV-NODATA-RETRY R1: a consult whose rows for (sha, mode) are ALL no_state = 'no_data' markers is re-offered once the newest is older than this many minutes. Every other marker reason stays terminal. */
 export const NODATA_RETRY_MIN = 30;
 
-/** Count-only out-param: how many of the returned consults were re-offered under R1 (they already hold no_data markers for this sha/mode). */
-export type NodataRetryStats = { nodataRetry: number };
+/** JEV-NODATA-RETRY FIX1 F3: a no_data consult is re-offered only while its t_close is within this many hours; older no_data markers stay terminal (bounds the rebuild cost). */
+export const NODATA_RETRY_MAX_AGE_H = 48;
 
-export async function selectTranscribedConsults(n: number, days: number, sha: string | null, mode: string, subjectType: string, stats?: NodataRetryStats): Promise<string[]> {
+/**
+ * FIX1 F4: of `keys` (consult_keys a sweep is about to build), the ones that are R1 re-offers: they already hold derived rows (all no_data markers, or the select would not have returned them) for (sha, mode).
+ * Count-only use: the sweeper logs `jev consult nodata_retry=<n>` from the consults that survive pendingSubjects.
+ */
+export async function nodataRetryKeys(keys: string[], sha: string, mode: string, subjectType: string): Promise<string[]> {
+  if (keys.length === 0) return [];
+  const rows = (await sql`
+    SELECT DISTINCT d.subject_id FROM jev_decision d
+     WHERE d.subject_type = ${subjectType} AND d.question_set_sha256 = ${sha}::text AND d.mode = ${mode}::text AND d.order_variant = 'derived'
+       AND d.subject_id = ANY(${keys}::text[])`) as Array<{ subject_id: string }>;
+  return rows.map((r) => r.subject_id);
+}
+
+export async function selectTranscribedConsults(n: number, days: number, sha: string | null, mode: string, subjectType: string): Promise<string[]> {
   const rows = (await sql`
     WITH q AS (
       SELECT w.consult_key, w.consult_uid, w.t_close FROM eta_encounter_windows w
@@ -34,14 +47,15 @@ export async function selectTranscribedConsults(n: number, days: number, sha: st
                WHERE rx.consult_uid = p.consult_uid AND r.subject_type = ${subjectType} AND r.question_set_sha256 = ${sha}::text AND r.mode = ${mode}::text AND r.order_variant = 'derived')) AS retried
       FROM pick p
      WHERE ${sha}::text IS NULL OR NOT EXISTS (
-       -- decided = any derived row that is NOT a no_data marker (answered, abstained, refused, read_refused, ...), or a no_data marker still inside the cooldown
+       -- decided = any derived row that is NOT a no_data marker (answered, abstained, refused, read_refused, ...), or a no_data marker still inside the cooldown, or a no_data marker on a consult past the retry window
        SELECT 1 FROM jev_decision d JOIN eta_encounter_windows x ON x.consult_key = d.subject_id
         WHERE x.consult_uid = p.consult_uid AND d.subject_type = ${subjectType} AND d.question_set_sha256 = ${sha}::text AND d.mode = ${mode}::text AND d.order_variant = 'derived'
-          AND (d.evidence->>'no_state' IS DISTINCT FROM 'no_data' OR d.created_at > now() - make_interval(mins => ${NODATA_RETRY_MIN}::int)))
-     ORDER BY p.t_close ASC, p.consult_key ASC
+          AND (d.evidence->>'no_state' IS DISTINCT FROM 'no_data' OR d.created_at > now() - make_interval(mins => ${NODATA_RETRY_MIN}::int)
+               OR p.t_close < now() - make_interval(hours => ${NODATA_RETRY_MAX_AGE_H}::int)))
+     -- FIX1 F2: fresh consults (no derived rows) first, then the no_data re-offers; each group oldest t_close first
+     ORDER BY retried ASC, p.t_close ASC, p.consult_key ASC
      LIMIT ${n}::int
   `) as Array<{ consult_key: string; retried: boolean }>;
-  if (stats) stats.nodataRetry += rows.filter((r) => r.retried).length;
   return rows.map((r) => r.consult_key);
 }
 
@@ -50,7 +64,7 @@ export async function selectTranscribedConsults(n: number, days: number, sha: st
  * half-open range [`lo`, `hi`) (FIX1 F2: both bound as timestamptz, computed once per call by the caller: `lo` = SINCE 00:00 IST, `hi` = start of the pass-1 window). A uid with any window at or after that start is pass 1's, so it is excluded here: the two passes never share a uid.
  * `liveKeys` are the keys pass 1 returned: a uid owning any of them is skipped, so a boundary that moved between the two statements (IST midnight) still gives one key per uid.
  */
-export async function selectTranscribedConsultsBefore(n: number, lo: string, hi: string, liveKeys: string[], sha: string | null, mode: string, subjectType: string, stats?: NodataRetryStats): Promise<string[]> {
+export async function selectTranscribedConsultsBefore(n: number, lo: string, hi: string, liveKeys: string[], sha: string | null, mode: string, subjectType: string): Promise<string[]> {
   const rows = (await sql`
     WITH b AS (
       SELECT ${hi}::timestamptz AS hi, ${lo}::timestamptz AS lo
@@ -75,14 +89,15 @@ export async function selectTranscribedConsultsBefore(n: number, lo: string, hi:
                WHERE rx.consult_uid = p.consult_uid AND r.subject_type = ${subjectType} AND r.question_set_sha256 = ${sha}::text AND r.mode = ${mode}::text AND r.order_variant = 'derived')) AS retried
       FROM pick p
      WHERE ${sha}::text IS NULL OR NOT EXISTS (
-       -- decided = any derived row that is NOT a no_data marker (answered, abstained, refused, read_refused, ...), or a no_data marker still inside the cooldown
+       -- decided = any derived row that is NOT a no_data marker (answered, abstained, refused, read_refused, ...), or a no_data marker still inside the cooldown, or a no_data marker on a consult past the retry window
        SELECT 1 FROM jev_decision d JOIN eta_encounter_windows x ON x.consult_key = d.subject_id
         WHERE x.consult_uid = p.consult_uid AND d.subject_type = ${subjectType} AND d.question_set_sha256 = ${sha}::text AND d.mode = ${mode}::text AND d.order_variant = 'derived'
-          AND (d.evidence->>'no_state' IS DISTINCT FROM 'no_data' OR d.created_at > now() - make_interval(mins => ${NODATA_RETRY_MIN}::int)))
-     ORDER BY p.t_close ASC, p.consult_key ASC
+          AND (d.evidence->>'no_state' IS DISTINCT FROM 'no_data' OR d.created_at > now() - make_interval(mins => ${NODATA_RETRY_MIN}::int)
+               OR p.t_close < now() - make_interval(hours => ${NODATA_RETRY_MAX_AGE_H}::int)))
+     -- FIX1 F2: fresh consults (no derived rows) first, then the no_data re-offers; each group oldest t_close first
+     ORDER BY retried ASC, p.t_close ASC, p.consult_key ASC
      LIMIT ${n}::int
   `) as Array<{ consult_key: string; retried: boolean }>;
-  if (stats) stats.nodataRetry += rows.filter((r) => r.retried).length;
   return rows.map((r) => r.consult_key);
 }
 

@@ -12,6 +12,8 @@ import { breakerIsOpen } from "./breaker";
 import { dailyCapUsd, askBatch, liveFlagOn, modeGate, REAL_USES, type JevMode, type RealUse } from "./flags";
 import { reservationUsd, spentTodayUsd, submitJevAskCapped } from "./budget";
 import "./register";   // any entry into the sweeper (the cron route, a nudge) sees every registered use
+import { CONSULT_SUBJECT_TYPE } from "./consult-eligible";
+import { nodataRetryKeys } from "@/lib/room-access/consult-select";
 import { listUses, usesOf, type JevUseDef } from "./uses";
 
 export type SweepSkip = "worker_disabled" | "use_flag_off" | "text_lane_off" | "live_flag_off" | "circuit_open" | "budget_paused" | "no_set" | "open_job" | "nothing_pending" | "cap_would_overshoot";
@@ -21,6 +23,14 @@ export type SweepUse = { use: string; enqueued: boolean; skipped?: SweepSkip; jo
 export async function pendingSubjects(def: JevUseDef, sha: string, mode: JevMode, limit: number): Promise<string[]> {
   const ids = await def.eligible(limit * 4, { sha, mode });
   if (ids.length === 0) return [];
+  if (def.subjectType === CONSULT_SUBJECT_TYPE) {
+    // FIX1 F1: the consult selects already exclude decided consults IN SQL, with the one R1/F3 predicate (no_data markers past the cooldown and inside the 48 h window are NOT decided). Filtering again by
+    // "any derived row" would drop every re-offer, so there is deliberately no second predicate here: it cannot drift. Fresh consults come first (F2).
+    const picked = ids.slice(0, limit);
+    const retried = (await nodataRetryKeys(picked, sha, mode, def.subjectType)).length;   // F4: only consults that survive and are built
+    console.info(`jev consult nodata_retry=${retried}`);
+    return picked;
+  }
   const done = (await sql`
     SELECT subject_id FROM jev_decision
      WHERE question_set_sha256 = ${sha} AND mode = ${mode} AND order_variant = 'derived' AND subject_type = ${def.subjectType}
