@@ -630,14 +630,14 @@ describe("scribe_rubric sweep_status", () => {
   });
 
   it("returns the stored summary as written", async () => {
-    const s: SweepSummary = { at: "2026-10-15T08:00:00.000Z", mode: "live", backfill_window: false, rubrics: [{ id: "rb_alpha", version: "1.0.0", eligible: 3, done: 1, planned: 2, submitted_job_id: "job_x", skipped_reason: null, today_units: 5 }] };
+    const s: SweepSummary = { at: "2026-10-15T08:00:00.000Z", mode: "live", backfill_window: false, pages: 1, page_capped: false, rubrics: [{ id: "rb_alpha", version: "1.0.0", eligible: 3, done: 1, deferred: 0, no_window: 0, multi_window: 0, planned: 2, submitted_job_id: "job_x", skipped_reason: null, today_units: 5 }] };
     store.set(SWEEP_SUMMARY_KEY, { body: JSON.stringify(s), etag: null });
     expect(await status()).toEqual({ ok: true, last: s });
   });
 
   it("is read scope, listed in the enum and the description; a corrupt object is last:null", async () => {
     expect(tool.scope).toBe("read");
-    expect((tool.inputSchema as { properties: { action: { enum: string[] } } }).properties.action.enum).toContain("sweep_status");
+    expect((tool.inputSchema as unknown as { properties: { action: { enum: string[] } } }).properties.action.enum).toContain("sweep_status");
     expect(tool.description).toContain("sweep_status");
     store.set(SWEEP_SUMMARY_KEY, { body: "{nope", etag: null });
     expect(await status()).toEqual({ ok: true, last: null });

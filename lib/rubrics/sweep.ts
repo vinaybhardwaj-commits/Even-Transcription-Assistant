@@ -12,6 +12,7 @@ import { RUBRICS, unitsOf } from "./registry";
 import { isBlindRoomDay } from "./blind-room-days";
 import { RUBRIC_RUN_KIND } from "@/lib/jobs/kinds/rubric-run";
 import { findOpenJob } from "@/lib/jobs/store";
+import { readConsultWindows, type WindowRow } from "@/lib/room-access/readers/consult-windows";
 import { JobArgsError, submitJob } from "@/lib/jobs/submit";
 import { labStore } from "@/lib/sarvam-lab";
 
@@ -103,18 +104,11 @@ async function freescriptSettled(uids: string[]): Promise<Set<string>> {
   return new Set(rows.map((r) => r.consult_uid));
 }
 
-export type WindowRow = { consult_uid: string; consult_key: string; t_open: string | Date; t_close: string | Date };
+export type { WindowRow };
 
-/**
- * One statement per page: the window rows (eta_encounter_windows) of the page's catalog consult_uids. The rubric_run consult unit is resolved by consult_key
- * ('<encounter_id>@<machine>', readConsultSpan), not by the bare consult_uid, so every later statement and the job's unit_keys use consult_key. A still-open window (no t_close) is not a unit yet.
- */
+/** One statement per page, through the room-access reader (the SQL lives in lib/room-access/readers/consult-windows.ts; the room-data guard allows no other path). */
 async function windowsFor(uids: string[]): Promise<WindowRow[]> {
-  if (uids.length === 0) return [];
-  return dbRead(async () => (await sql`
-    SELECT consult_uid, consult_key, t_open, t_close FROM eta_encounter_windows
-     WHERE consult_uid = ANY(${uids}::text[]) AND t_close IS NOT NULL
-  `) as WindowRow[]);
+  return dbRead(() => readConsultWindows(uids));
 }
 
 /**
