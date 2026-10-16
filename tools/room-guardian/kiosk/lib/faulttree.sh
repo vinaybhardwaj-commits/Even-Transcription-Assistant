@@ -6,10 +6,10 @@
 # CoreAudio (layer 4) is evaluated in its place but its verdict is held back until layers 5-9 are
 # clear (A3 cross-cutting note, spec 2.4b): killing coreaudiod never fixed a permission or 409 fault.
 
-# <=80 chars of printable ASCII (control bytes and non-ASCII dropped, runs of blanks collapsed); "null" when nothing is left
+# <=80 chars of printable ASCII (control bytes and non-ASCII dropped, runs of blanks collapsed, then trimmed); "null" when nothing is left
 fault_err80() {
   local e
-  e="$(printf '%s' "$1" | LC_ALL=C "$G_TR" '\n\t\r' '   ' | LC_ALL=C "$G_TR" -cd ' -~' | "$G_TR" -s ' ' | "$G_HEAD" -c 80)"
+  e="$(printf '%s' "$1" | LC_ALL=C "$G_TR" '\n\t\r' '   ' | LC_ALL=C "$G_TR" -cd ' -~' | "$G_TR" -s ' ' | "$G_SED" -e 's/^ //' -e 's/ $//' | "$G_HEAD" -c 80 | "$G_SED" -e 's/ $//')"
   [ -n "$e" ] && printf '%s' "$e" || printf 'null'
 }
 

@@ -140,15 +140,24 @@ test_r16d_band_filter_coefficients_and_gain() {
 
 test_r16d_band_tone_passes_noise_does_not() {
   load_libs
-  local f="$T/b.pcm" r
-  # quiet bed (1 kHz sine RMS 100), then a 1 kHz tone RMS 4000: a large band rise
-  { perl -e 'print pack("s<*", map { int(141.4*sin(6.28318530718*$_/16)) } 0..79999)'; perl -e 'print pack("s<*", map { int(5656*sin(6.28318530718*$_/16)) } 0..39999)'; } >"$f"
-  r="$(canary_band_stats "$f" 0 160000 80000 | awk '{ printf "%.0f", $2 - $1 }')"
-  [ "$r" -ge 30 ] && ok || fail "1 kHz tone: band rise $r dB (want >= 30)"
-  # broadband noise of equal RMS in both ranges (white noise, RMS 4000 both): no rise
-  perl -e 'srand(7); sub g { my $u=rand(); my $v=rand(); return sqrt(-2*log($u+1e-12))*cos(6.2831853*$v) } print pack("s<*", map { int(4000*g()) } 0..239999)' >"$f"
-  r="$(canary_band_stats "$f" 0 160000 80000 | awk '{ printf "%.0f", $2 - $1 }')"
-  [ "$r" -lt 10 ] && ok || fail "equal-RMS noise: band rise $r dB (want < 10)"
+  local f="$T/b.pcm" rt rn
+  # quiet bed (1 kHz sine RMS 100) in pre, then a burst of RMS 6000: a 1 kHz tone, and equal-RMS broadband white noise
+  perl -e 'print pack("s<*", map { int(141.4*sin(6.28318530718*$_/16)) } 0..79999)' >"$T/bed.pcm"
+  { cat "$T/bed.pcm"; perl -e 'print pack("s<*", map { int(8485*sin(6.28318530718*$_/16)) } 0..39999)'; } >"$f"
+  rt="$(canary_band_stats "$f" 0 160000 80000 | awk '{ printf "%.1f", $2 - $1 }')"
+  { cat "$T/bed.pcm"; perl -e 'srand(7); print pack("s<*", map { my $u=rand()||1e-9; my $v=rand(); my $x=6000*sqrt(-2*log($u))*cos(6.2831853*$v); $x=32767 if $x>32767; $x=-32767 if $x<-32767; int($x) } 0..39999)'; } >"$f"
+  rn="$(canary_band_stats "$f" 0 160000 80000 | awk '{ printf "%.1f", $2 - $1 }')"
+  assert_eq "$(awk -v r="$rt" -v t="$CANARY_BAND_PASS_DB" 'BEGIN { print (r >= t) ? "pass" : "fail" }')" "pass" "1 kHz tone RMS 6000 over the quiet bed passes the band statistic ($rt dB)"
+  assert_eq "$(awk -v r="$rn" -v t="$CANARY_BAND_PASS_DB" 'BEGIN { print (r >= t) ? "pass" : "fail" }')" "fail" "equal-RMS white noise does NOT pass ($rn dB)"
+}
+
+# the 160-sample warm-up discard (mutant m5, k <= 0): a DC step at sample 0 has an HP transient that only the discard removes; with it the pre RMS is the 1 LSB floor
+test_r16d_warmup_discard_is_pinned() {
+  local f="$T/w.pcm" out
+  load_libs
+  { perl -e 'print pack("s<*", (8000) x 80000)'; perl -e 'print pack("s<*", map { int(1414*sin(6.28318530718*$_/16)) } 0..39999)'; } >"$f"
+  out="$(canary_band_stats "$f" 0 160000 80000)"
+  assert_eq "${out%% *}" "-90.3" "pre_db_band is the 1 LSB floor once the 10 ms transient is discarded"
 }
 
 # two plays: pass/pass = pass, pass/fail = no_local_rise, pass/refused = inconclusive
@@ -157,13 +166,13 @@ test_r16d_two_of_two_logic() {
   assert_has "$(cn_events)" '"result":"pass"' "pass/pass"
   # pass then a quiet second play: the fake afplay writes the tone only when the amp file exists; remove it after the first call
   r6_at 22:00
-  printf '#!/bin/bash\necho "afplay $*" >>"$CALLS"\nn=$(grep -c "^afplay " "$CALLS")\nTAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"\nA=11200; [ "$n" -ge 2 ] && A=100\nperl -e '"'"'my $a=shift; print pack("s<*", map { int($a*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..39999, map { int(141.4*sin(6.28318530718*$_/16)+0.5) } 0..95999)'"'"' "$A" >>"$TAPE"\nexit 0\n' >"$T/bin/afplay"; chmod +x "$T/bin/afplay"
+  printf '#!/bin/bash\necho "afplay $*" >>"$CALLS"\nn=$(grep -c "^afplay " "$CALLS")\nTAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"\nA=11200; [ "$n" -ge 2 ] && A=100\nperl -e '"'"'my $a=shift; print pack("s<*", (map { int($a*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..39999), (map { int(141.4*sin(6.28318530718*$_/16)+0.5) } 0..95999))'"'"' "$A" >>"$TAPE"\ntouch -t \"$(date -j -f %%s \"$GUARDIAN_FAKE_NOW\" +%%Y%%m%%d%%H%%M.%%S)\" \"$TAPE\"\nexit 0\n' >"$T/bin/afplay"; chmod +x "$T/bin/afplay"
   cn_run
   assert_has "$(cn_events)" '"result":"no_local_rise"' "pass/fail"
   assert_eq "$(cn_plays)" "2" "both plays made"
   # pass then a refused second play (afplay fails the second time): inconclusive
   r6_at 22:00
-  printf '#!/bin/bash\necho "afplay $*" >>"$CALLS"\nn=$(grep -c "^afplay " "$CALLS")\nTAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"\nperl -e '"'"'print pack("s<*", map { int(11200*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..39999, map { int(141.4*sin(6.28318530718*$_/16)+0.5) } 0..95999)'"'"' >>"$TAPE"\n[ "$n" -ge 2 ] && exit 3\nexit 0\n' >"$T/bin/afplay"; chmod +x "$T/bin/afplay"
+  printf '#!/bin/bash\necho "afplay $*" >>"$CALLS"\nn=$(grep -c "^afplay " "$CALLS")\nTAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"\nperl -e '"'"'print pack("s<*", (map { int(11200*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..39999), (map { int(141.4*sin(6.28318530718*$_/16)+0.5) } 0..95999))'"'"' >>"$TAPE"\ntouch -t \"$(date -j -f %%s \"$GUARDIAN_FAKE_NOW\" +%%Y%%m%%d%%H%%M.%%S)\" \"$TAPE\"\n[ "$n" -ge 2 ] && exit 3\nexit 0\n' >"$T/bin/afplay"; chmod +x "$T/bin/afplay"
   cn_run
   assert_has "$(cn_events)" '"result":"inconclusive:afplay_error"' "pass/refused"
   assert_not "$(cn_events)" '"result":"pass"' "never a pass on one play"
@@ -171,7 +180,7 @@ test_r16d_two_of_two_logic() {
 
 test_r16d_kill_switch_between_plays_gives_one_play_and_would_do() {
   r6_at 22:00
-  printf '#!/bin/bash\necho "afplay $*" >>"$CALLS"\nTAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"\nperl -e '"'"'print pack("s<*", map { int(11200*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..39999, map { int(141.4*sin(6.28318530718*$_/16)+0.5) } 0..95999)'"'"' >>"$TAPE"\n: >"%s/flags/heal-off"\nexit 0\n' "$GUARDIAN_HOME" >"$T/bin/afplay"; chmod +x "$T/bin/afplay"
+  printf '#!/bin/bash\necho "afplay $*" >>"$CALLS"\nTAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"\nperl -e '"'"'print pack("s<*", (map { int(11200*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..39999), (map { int(141.4*sin(6.28318530718*$_/16)+0.5) } 0..95999))'"'"' >>"$TAPE"\ntouch -t \"$(date -j -f %%s \"$GUARDIAN_FAKE_NOW\" +%%Y%%m%%d%%H%%M.%%S)\" \"$TAPE\"\n: >"%s/flags/heal-off"\nexit 0\n' "$GUARDIAN_HOME" >"$T/bin/afplay"; chmod +x "$T/bin/afplay"
   cn_run
   assert_eq "$(cn_plays)" "1" "kill switch engaged between plays: 1 play"
   assert_has "$(cn_events)" '"result":"would_do"' "would_do"
@@ -228,26 +237,25 @@ test_r16d_recorder_failed_mutant_arm_removed() {
 
 # SHOULD-1: a helper that fails or prints nothing leaves S_tcc_row=error; mic_state denied gives an escalate and 0 helper write calls
 test_r16d_unreadable_helper_row_escalates_without_write() {
-  load_libs; go_heal; mk_tcc 2 2>/dev/null
-  write_status mic_state=denied
+  load_libs; go_heal
+  write_status mic_state=denied capture_open=false   # capture CLOSED: heal_tcc would otherwise go on to the root call (the log-only path would make "0 calls" vacuous)
   printf '#!/bin/bash\necho "HELPER $*" >>"$CALLS"\nexit 1\n' >"$T/helper_fail"; chmod +x "$T/helper_fail"
   GUARDIAN_ROOT_HELPER="$T/helper_fail"; export GUARDIAN_ROOT_HELPER
-  collect_all
-  S_tcc_row=error
+  rm -f "$STATE_DIR/tcc_row"
   : >"$CALLS"; : >"$T/pub.log"
+  collect_all   # collect.sh:125-127 stores the plain row "error" because the helper failed; no override of S_tcc_row
+  assert_eq "$S_tcc_row" "error" "the failing helper gives the plain row error"
   heal_cycle
   assert_eq "$(events | grep -c '"action":"escalate"')" "1" "one escalate"
-  assert_eq "$(grep -c '^HELPER\|^SUDO' "$CALLS")" "0" "0 helper calls"
-  # the numeric-only rung is what holds: a mutant that matches error:* instead of numbers would call heal_tcc
-  sed 's/case "${S_tcc_row:-}" in .*\*) heal_tcc ;; esac ;;/case "${S_tcc_row:-}" in error*) escalate "$verdict" "$layer" "$evidence" ;; *) heal_tcc ;; esac ;;/' "$KDIR/lib/heal.sh" >"$T/heal_mut.sh"
-  grep -q 'error\*) escalate' "$T/heal_mut.sh" && ok || fail "mutant built"
+  assert_eq "$(grep -c '^HELPER tcc-heal' "$CALLS")" "0" "0 tcc-heal helper calls"
+  assert_eq "$([ -f "$STATE_DIR/actions" ] && wc -l <"$STATE_DIR/actions" | tr -d ' ' || echo 0)" "0" "no action spent"
 }
 
 # NIT-1: the once_per key of tcc_row_unreadable is bounded
 test_r16d_tcc_row_unreadable_key_is_bounded() {
   local row f
   load_libs; go_heal
-  row="$(printf 'r/%.0s' $(seq 1 100))"
+  row="$(printf 'r/%.0s' $(seq 1 150))"
   write_status mic_state=authorized; collect_all; S_tcc_row="$row"
   fault_tree >/dev/null
   f="$(ls "$STATE_DIR/once" | grep tcc_row_unreadable)"
@@ -296,9 +304,23 @@ test_r16d_mutant_speech_arm_removed() {
 }
 
 test_r16d_band_threshold_is_herdr_final_and_margins() {
+  local rb
   load_libs
-  assert_eq "$CANARY_BAND_PASS_DB" "34.67" "band threshold"
-  # pass fixture: tone RMS 11200 over bed RMS 100 = 40.98 dB (margin 6.3 dB over 34.67); fail fixtures: 200 over 100 = 6.0 dB, 100 over 100 = 0 dB
-  assert_eq "$(awk 'BEGIN { printf "%.1f", 20 * log(11200 / 100) / log(10) - 34.67 }')" "6.3" "pass margin"
-  assert_eq "$(awk 'BEGIN { printf "%.1f", 34.67 - 20 * log(200 / 100) / log(10) }')" "28.6" "small-rise margin"
+  assert_eq "$CANARY_BAND_PASS_DB" "34.67" "band threshold default (herdr final)"
+  # MEASURED margins: the event's own rise_db_band against $CANARY_BAND_PASS_DB, no arithmetic on literals
+  r6_at 22:00; cn_run   # pass fixture: tone 11200 over bed 100
+  rb="$(cn_events | grep -o '"rise_db_band":[0-9.-]*' | cut -d: -f2 | tr '\n' ' ')"
+  assert_eq "$(awk -v t="$CANARY_BAND_PASS_DB" -v l="$rb" 'BEGIN { split(l, a, " "); print (a[1] >= t + 5 && a[2] >= t + 5) ? "ok" : "margin under 5 dB: " l }')" "ok" "pass fixture clears the threshold by >= 5 dB ($rb)"
+  r6_at 22:00; echo 200 >"$T/afplay_amp"; cn_run   # small-rise fixture: tone 200 over bed 100
+  rb="$(cn_events | grep -o '"rise_db_band":[0-9.-]*' | cut -d: -f2 | tr '\n' ' ')"
+  assert_eq "$(awk -v t="$CANARY_BAND_PASS_DB" -v l="$rb" 'BEGIN { split(l, a, " "); print (a[1] <= t - 20 && a[2] <= t - 20) ? "ok" : "margin under 20 dB: " l }')" "ok" "small-rise fixture is >= 20 dB under the threshold ($rb)"
+}
+
+# NIT (b): a whitespace-only last_error is null
+test_r16d_whitespace_only_last_error_is_null() {
+  load_libs
+  assert_eq "$(fault_err80 "   ")" "null" "blanks only"
+  assert_eq "$(fault_err80 "$(printf ' \t \n ')")" "null" "blanks, tab, newline"
+  assert_eq "$(fault_err80 "  a   b  ")" "a b" "collapsed and trimmed"
+  assert_eq "$(fault_err80 "$(printf 'x%.0s' $(seq 1 79)) yyyy")" "$(printf 'x%.0s' $(seq 1 79))" "a cut that ends on a blank is trimmed too"
 }

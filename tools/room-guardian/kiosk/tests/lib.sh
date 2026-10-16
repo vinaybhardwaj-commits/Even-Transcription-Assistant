@@ -120,9 +120,13 @@ F
 echo "afplay $*" >>"$CALLS"
 # the tone is a 1 kHz sine whose RMS is the amp (peak amp*sqrt2), then 6 s of quiet at 100 RMS (the 10 s between plays); the quiet bed is the same 1 kHz sine at RMS 100
 TAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"
-PERL_S='sub sn { my($r,$i)=@_; return int($r*1.41421356*sin(6.28318530718*$i/16)+($r>=0?0.5:-0.5)); }'
-if [ -s "$T/afplay_lag" ]; then perl -e "$PERL_S"'my($lag,$a)=@ARGV; my $i=0; my @s; push @s,sn(100,$i++) for 1..($lag*16000); for my $b (1..3){ push @s,sn($a,$i++) for 1..8000; if ($b<3) { push @s,sn(100,$i++) for 1..8000 } } push @s,sn(100,$i++) for 1..8000; push @s,sn(100,$i++) for 1..96000; print pack("s<*",@s)' "$(cat "$T/afplay_lag")" "$(cat "$T/afplay_amp")" >>"$TAPE"
-elif [ -s "$T/afplay_amp" ]; then perl -e "$PERL_S"'my $i=0; my @s; push @s,sn($ARGV[0],$i++) for 1..40000; push @s,sn(100,$i++) for 1..96000; print pack("s<*",@s)' "$(cat "$T/afplay_amp")" >>"$TAPE"; fi
+PERL_S='srand(7); sub tn { my($r,$i,$f)=@_; if ($ENV{NOISE}) { my $u=rand()||1e-9; my $v=rand(); my $x=$r*sqrt(-2*log($u))*cos(6.28318530718*$v); $x=32767 if $x>32767; $x=-32767 if $x<-32767; return int($x); } return sn($r,$i,$f); } sub sn { my($r,$i,$f)=@_; $f ||= 1000; return int($r*1.41421356*sin(6.28318530718*$f*$i/16000)+($r>=0?0.5:-0.5)); }'
+# optional: afplay_hz = the tone frequency (default 1000), afplay_bedhz = the frequency of the quiet bed written after the tone (default 1000)
+export NOISE="$([ -e "$T/afplay_noise" ] && echo 1)" HZ="$(cat "$T/afplay_hz" 2>/dev/null || echo 1000)" BEDHZ="$(cat "$T/afplay_bedhz" 2>/dev/null || echo 1000)"
+if [ -s "$T/afplay_lag" ]; then perl -e "$PERL_S"'my($lag,$a)=@ARGV; my $i=0; my @s; push @s,sn(100,$i++,$ENV{BEDHZ}) for 1..($lag*16000); for my $b (1..3){ push @s,tn($a,$i++,$ENV{HZ}) for 1..8000; if ($b<3) { push @s,sn(100,$i++,$ENV{BEDHZ}) for 1..8000 } } push @s,sn(100,$i++,$ENV{BEDHZ}) for 1..8000; push @s,sn(100,$i++,$ENV{BEDHZ}) for 1..96000; print pack("s<*",@s)' "$(cat "$T/afplay_lag")" "$(cat "$T/afplay_amp")" >>"$TAPE"
+elif [ -s "$T/afplay_amp" ]; then perl -e "$PERL_S"'my $i=0; my @s; push @s,tn($ARGV[0],$i++,$ENV{HZ}) for 1..40000; push @s,sn(100,$i++,$ENV{BEDHZ}) for 1..96000; print pack("s<*",@s)' "$(cat "$T/afplay_amp")" >>"$TAPE"; fi
+# the append moves the mtime to the real clock; the library reads the fake clock, so put it back (R16d-3: canary_play_gate re-reads the tape)
+[ -n "$TAPE" ] && touch -t "$(date -j -f %s "$GUARDIAN_FAKE_NOW" +%Y%m%d%H%M.%S)" "$TAPE"
 exit "$(cat "$T/afplay_rc" 2>/dev/null || echo 0)"
 F
   printf '#!/bin/bash\necho "room-recorder $*" >>"$CALLS"; exit 0\n' >"$T/app/Contents/MacOS/room-recorder"
@@ -178,10 +182,10 @@ mk_pcm() { # amplitude seconds
 }
 
 # canary tape bed: a 1 kHz sine of RMS amplitude $1 (the same level as mk_pcm DC $1) for $2 s, so the band statistic has something to read
-mk_pcm_tone() { # rms seconds
+mk_pcm_tone() { # rms seconds [hz, default 1000]
   local d="$RR_ROOT/captures/c1/seg_001"
   mkdir -p "$d"
-  perl -e 'my($a,$s)=@ARGV; print pack("s<*", map { int($a*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..($s*16000-1))' "$1" "$2" >"$d/tape.pcm"
+  perl -e 'my($a,$s,$f)=@ARGV; print pack("s<*", map { int($a*1.41421356*sin(6.28318530718*$f*$_/16000)+0.5) } 0..($s*16000-1))' "$1" "$2" "${3:-1000}" >"$d/tape.pcm"
   touch -t "$(date -j -f %s "$GUARDIAN_FAKE_NOW" +%Y%m%d%H%M.%S)" "$d/tape.pcm"
 }
 

@@ -98,12 +98,17 @@ canary_eligible() {
   return 0
 }
 
+# R16d-3: after canary_commit_state the events carry the COMMITTED slot's name and IST date (CANARY_COMMIT_KEY), never the clock's at event time.
+# Before a commit (refused, skipped or would_do events) they carry the slot and date computed at event time, as before.
+canary_event_slot() { if [ -n "${CANARY_COMMIT_KEY:-}" ]; then printf '%s' "${CANARY_COMMIT_KEY##*-}"; else canary_slot_name; fi; }
+canary_event_night() { if [ -n "${CANARY_COMMIT_KEY:-}" ]; then printf '%s' "${CANARY_COMMIT_KEY%%-*}"; else ist_date; fi; }
+
 # canary_event <result> [pre_db burst_db rise_db]: one JSON line on kiosk/<room>/canary and in the audit log. Ids, levels and verdict only.
 canary_event() {
   local line
   line="$(printf '{"room_id":%s,"install_id":%s,"ts":%s,"action":"canary","night":%s,"result":%s,"mode":%s,"pre_db":%s,"burst_db":%s,"rise_db":%s,"volume":%s,"output":%s,"slot":%s,"pass_db":%s,"plays":[%s],"pass_db_band":%s}' \
-    "$(jstr "$GUARDIAN_ROOM")" "$(jstr "$S_install_id")" "$(now_epoch)" "$(jstr "$(ist_date)")" "$(jstr "$1")" "$(jstr "$(current_mode)")" \
-    "$(jnum "${2:-}")" "$(jnum "${3:-}")" "$(jnum "${4:-}")" "$(jnum "$CANARY_VOLUME")" "$(jstr "${CANARY_OUTPUT:-unknown}")" "$(jstr "$(canary_slot_name)")" "$(jnum "$CANARY_PASS_DB")" "${CANARY_PLAYS:-}" "$(jnum "$CANARY_BAND_PASS_DB")")"
+    "$(jstr "$GUARDIAN_ROOM")" "$(jstr "$S_install_id")" "$(now_epoch)" "$(jstr "$(canary_event_night)")" "$(jstr "$1")" "$(jstr "$(current_mode)")" \
+    "$(jnum "${2:-}")" "$(jnum "${3:-}")" "$(jnum "${4:-}")" "$(jnum "$CANARY_VOLUME")" "$(jstr "${CANARY_OUTPUT:-unknown}")" "$(jstr "$(canary_event_slot)")" "$(jnum "$CANARY_PASS_DB")" "${CANARY_PLAYS:-}" "$(jnum "$CANARY_BAND_PASS_DB")")"
   printf '%s\n' "$line" >>"$AUDIT_LOG" 2>/dev/null
   publish "kiosk/$GUARDIAN_ROOM/canary" "$line"
 }
@@ -118,6 +123,7 @@ canary_commit_state() {
   [ "$("$G_CAT" "$CANARY_SLOT_FILE" 2>/dev/null)" = "$key" ] || return 1
   printf '%s\n' "$now" >"$CANARY_LAST_FILE" 2>/dev/null
   [ "$("$G_CAT" "$CANARY_LAST_FILE" 2>/dev/null)" = "$now" ] || return 1
+  CANARY_COMMIT_KEY="$key"
   return 0
 }
 
@@ -249,9 +255,32 @@ canary_play_json() {
     "$(jnum "$P_PRE")" "$(jnum "$P_BURST")" "$(jnum "$P_RISE")" "$(jnum "$P_PRB")" "$(jnum "$P_BB")" "$(jnum "$P_RB")" "$P_PBB"
 }
 
-# R16d item 8: exactly two plays per slot, the second starting CANARY_PLAY_GAP_S (10 s) after the first started. Pass = both plays' band rise >= CANARY_BAND_PASS_DB.
+# R16d-3 (fable G2): the gate set, re-checked on FRESHLY READ inputs directly before EACH play. canary_eligible runs once per tick on values collected at the start of the tick;
+# play 2 starts CANARY_PLAY_GAP_S later, so every input is read again here (status.json, the tape, HID, the control payload, the clock).
+# Same gates, same order and same CANARY_WHY as canary_eligible. NOT re-run: canary_state_ok and the heal rate (the slot is committed and its action spent). The kill switch
+# and the mode stay with act_step (would_do). $1 = the committed slot key. 0 = may play; 1 = abort, CANARY_WHY set.
+canary_play_gate() {
+  local key="$1" idle
+  CANARY_WHY=""
+  { [ -n "$key" ] && [ "$(canary_slot_key)" = "$key" ]; } || { CANARY_WHY=outside_window; return 1; }
+  if ! in_night_window && ! consult_hold_clear; then CANARY_WHY=consult_not_clear; return 1; fi
+  idle="$(hid_idle_s)"
+  case "$idle" in ''|*[!0-9]*) CANARY_WHY=hid_unreadable; return 1 ;; esac
+  [ "$idle" -ge "$CANARY_IDLE_MIN_S" ] || { CANARY_WHY=hid_active; return 1; }
+  S_state="$(json_get "$STATUS_JSON" state)"; S_capture_open="$(json_get "$STATUS_JSON" capture_open)"; S_pending="$(json_get "$STATUS_JSON" pending_piece_count)"
+  [ "$S_state" != "failed" ] || { CANARY_WHY=recorder_failed; return 1; }
+  if [ -n "$S_state" ] && [ "$S_state" != "recording" ]; then CANARY_WHY=recorder_busy; return 1; fi
+  [ "$S_state" = "recording" ] || { CANARY_WHY=not_recording; return 1; }
+  S_rms="$(rms_dbfs_2s)"
+  [ -n "$S_rms" ] || { CANARY_WHY=tape_not_advancing; return 1; }
+  if speech_recent; then CANARY_WHY=recorder_busy; return 1; fi
+  return 0
+}
+
+# R16d item 8: exactly two plays per slot, the second starting CANARY_PLAY_GAP_S (15 s, R16d-3 G1) after the first started; tape lag can only cause a false FAIL and 15 s removes it.
+# Pass = both plays' band rise >= CANARY_BAND_PASS_DB. R16d-3: canary_play_gate runs directly before EACH play; a failed gate aborts the slot (aborted:<why>, no retry).
 canary_play_and_confirm() {
-  local ap="$G_AFPLAY" n wait_ms r1_pre r1_burst r1_rise ok=0 first_start
+  local ap="$G_AFPLAY" n wait_ms r1_pre r1_burst r1_rise ok=0 first_start ckey="${CANARY_COMMIT_KEY:-$(canary_slot_key)}"
   [ "${G_RUNMODE:-}" != 1 ] && [ "${GUARDIAN_TESTMODE:-}" = 1 ] && ap="${CANARY_AFPLAY:-/usr/bin/false}"   # test mode never reaches the real afplay
   CANARY_PLAYS=""
   if ! canary_volume_ok; then audit "canary not played: CANARY_VOLUME is not in (0,0.5]"; canary_event "inconclusive:bad_volume"; return 0; fi
@@ -262,6 +291,7 @@ canary_play_and_confirm() {
       wait_ms=$(( first_start + CANARY_PLAY_GAP_S * 1000 - $(mono_ms) ))
       if [ "$wait_ms" -gt 0 ]; then gsleep "$(printf '%d.%03d' $((wait_ms / 1000)) $((wait_ms % 1000)))"; fi
     fi
+    canary_play_gate "$ckey" || { audit "canary aborted: $CANARY_WHY play=$n slot=$ckey"; canary_event "aborted:$CANARY_WHY" "${r1_pre:-}" "${r1_burst:-}" "${r1_rise:-}"; return 0; }
     if ! canary_play_once "$ap"; then
       canary_event "$CANARY_PLAY_RES" "${r1_pre:-}" "${r1_burst:-}" "${r1_rise:-}"
       return 0
@@ -284,7 +314,7 @@ canary_skip_audit() {
 
 # Called once per tick, after heal_cycle. Cheap when not eligible.
 canary_cycle() {
-  CANARY_OUTPUT=unknown; CANARY_PLAYS=""
+  CANARY_OUTPUT=unknown; CANARY_PLAYS=""; CANARY_COMMIT_KEY=""
   [ "$CANARY_ENABLED" = 1 ] || return 0
   if ! canary_eligible; then
     # a slot state that cannot be trusted is reported (at most hourly), never played on

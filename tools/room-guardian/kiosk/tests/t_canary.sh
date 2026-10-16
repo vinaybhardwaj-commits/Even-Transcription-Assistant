@@ -237,7 +237,7 @@ test_run_mode_never_uses_the_afplay_seam() {
   printf '#!/bin/bash\necho "PINNED-CALL $*" >>"%s/pinned_calls"\n' "$T" >"$T/pinned_afplay"; chmod +x "$T/pinned_afplay"
   G_AFPLAY="$T/pinned_afplay"
   # every seam set, run mode on: the tone must go to the pinned path and never to the CANARY_AFPLAY fake
-  ( G_RUNMODE=1; GUARDIAN_TESTMODE=1; CANARY_AFPLAY="$T/bin/afplay"; act_step() { return 0; }; canary_play_and_confirm ) >/dev/null 2>&1
+  ( G_RUNMODE=1; GUARDIAN_TESTMODE=1; CANARY_AFPLAY="$T/bin/afplay"; act_step() { return 0; }; canary_play_gate() { return 0; }; canary_play_and_confirm )   # run mode reads the real clock, so the slot gate is stubbed here (R16d-3) >/dev/null 2>&1
   assert_eq "$(cn_plays)" "0" "the seam fake (CANARY_AFPLAY) was not called in run mode"
   assert_eq "$(grep -c PINNED-CALL "$T/pinned_calls" 2>/dev/null || echo 0)" "1" "only the pinned afplay path was used"
   # and outside run mode (the test harness) the seam is the fake, so a test can never reach the real afplay

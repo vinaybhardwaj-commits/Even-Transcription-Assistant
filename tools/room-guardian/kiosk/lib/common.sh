@@ -4,7 +4,7 @@
 # Sourced, never executed. Every external effect goes through a PATH command or a GUARDIAN_* command
 # variable, so tests can substitute fakes.
 
-GUARDIAN_VERSION="c1-0.4.6-r16d"   # bump per release: the audit "guardian start version=" line identifies the tree
+GUARDIAN_VERSION="c1-0.4.7-r16d3"   # bump per release: the audit "guardian start version=" line identifies the tree
 
 # R12. Run mode (guardian.sh run|check, G_RUNMODE=1) reads no test seam and no environment tunable: every name below is assigned its default
 # unconditionally and only guardian.conf (parsed as data by conf.sh, never sourced) can change the allow-listed keys. Library tests source this
@@ -109,7 +109,7 @@ g_const CANARY_IDLE_MIN_S 600
 g_def CANARY_PASS_DB 32.65
 # R16d item 8: the decision statistic is the 1-3 kHz band rise, 2 of 2 plays. Machine-set from herdr-lead's FINAL band null (Opus refute 0 MUST): ~/oc/herdr-lead/mic-cal/CANARY-BAND-REFUTE-16OCT.md. Still g_def, as item 8 says.
 g_def CANARY_BAND_PASS_DB 34.67
-g_def CANARY_PLAY_GAP_S 10   # the second play starts this long after the first started
+g_def CANARY_PLAY_GAP_S 15   # the second play starts this long after the first started (R16d-3 G1: 15 s removes tape-lag false FAILs)
 # RBJ biquad coefficients "b0 b1 b2 a1 a2" (fs 16000, Q 0.70710678), 10 decimals: HP 1000 Hz then LP 3000 Hz. Same filter as herdr-lead's band null (rise_db_null_band.py).
 g_const CANARY_HP_COEF "0.7570763753 -1.5141527507 0.7570763753 -1.4542435863 0.5740619151"
 g_const CANARY_LP_COEF "0.1866943331 0.3733886662 0.1866943331 -0.4629380253 0.2097153578"
