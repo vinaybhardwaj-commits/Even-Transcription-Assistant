@@ -39,9 +39,10 @@ vi.mock("@/lib/db", () => ({
       // one statement: the ref row and its command, atomically
       writes.push("ref_and_command");
       const [opaque, uid, room, , , cmd] = v as string[];
+      const [win, liv] = [v[6], v[7]] as boolean[];
       if (refs.some((r) => r.consult_uid === uid)) return [];
       refs.push({ opaque_id: opaque!, consult_uid: uid!, room_id: room!, closed_at: null });
-      commands.push({ roomId: room!, kind: "consult_started", args: JSON.stringify({ opaque_id: opaque }), source: "buddy" });
+      commands.push({ roomId: room!, kind: "consult_started", args: JSON.stringify({ opaque_id: opaque, window: win, live: liv }), source: "buddy" });
       return [{ id: cmd }];
     }
     if (/WITH closed AS/.test(q)) {
@@ -136,13 +137,12 @@ describe("Encounter Buddy L1 relay", () => {
     expect(refs).toHaveLength(0);
   });
 
-  it("command args contain only opaque_id", async () => {
+  it("consult_started args are exactly opaque_id, window, live; consult_ended args are opaque_id only", async () => {
     await post([open(), close()]);
     expect(commands).toHaveLength(2);
-    for (const c of commands) {
-      expect(Object.keys(JSON.parse(c.args!))).toEqual(["opaque_id"]);
-      expect(c.args).not.toContain(UID);
-    }
+    expect(Object.keys(JSON.parse(commands[0]!.args!))).toEqual(["opaque_id", "window", "live"]);
+    expect(Object.keys(JSON.parse(commands[1]!.args!))).toEqual(["opaque_id"]);
+    for (const c of commands) expect(c.args).not.toContain(UID);
     expect(JSON.parse(commands[0]!.args!).opaque_id).toBe(refs[0]!.opaque_id);
   });
 
@@ -613,5 +613,118 @@ describe("F8: the operator route refuses the relay-only kinds", () => {
     expect(commands).toHaveLength(0);
     vi.doUnmock("@/lib/bench");
     vi.doUnmock("@/lib/bench-commands");
+  });
+});
+
+describe("Encounter Buddy shadow reach (Part X)", () => {
+  const logs = () => [console.warn, console.info].flatMap((f) => (f as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]))).join("\n");
+  const reply = (window: boolean, live: boolean) => { fetchImpl = async () => new Response(JSON.stringify({ window, live, reason_code: window ? null : "shadow" }), { status: 200 }); };
+  const setVersion = (v: string | null) => { installs[0]!.app_version = v; };
+  const args = (i: number) => JSON.parse(commands[i]!.args!) as Record<string, unknown>;
+
+  it("shadow + room on 0.1.42: no ref row, no command, skipped_version counted", async () => {
+    reply(false, true); setVersion("0.1.42");
+    await post([open()]);
+    expect(refs).toHaveLength(0);
+    expect(commands).toHaveLength(0);
+    expect(logs()).toContain("decide_shadow_skipped_version=1");
+    expect(logs()).toContain("decide_shadow_enqueued=0");
+  });
+
+  it("shadow + 0.1.43: one ref row and one command with args exactly {opaque_id, window:false, live:true}", async () => {
+    reply(false, true); setVersion("0.1.43");
+    await post([open()]);
+    expect(refs).toHaveLength(1);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({ kind: "consult_started", roomId: "room_fix_1" });
+    expect(args(0)).toEqual({ opaque_id: refs[0]!.opaque_id, window: false, live: true });
+    expect(writes).toEqual(["ref_and_command"]);
+    expect(logs()).toContain("decide_shadow_enqueued=1");
+    expect(logs()).toContain("decide_shadow_skipped_version=0");
+  });
+
+  it("shadow + 0.1.44 and 0.2.0: enqueue", async () => {
+    reply(false, true);
+    for (const [i, v] of ["0.1.44", "0.2.0"].entries()) {
+      setVersion(v);
+      await post([open(`consult-fixture-v${i}`)]);
+    }
+    expect(commands).toHaveLength(2);
+  });
+
+  it("window-true payload is {opaque_id, window:true, live:<bool>}", async () => {
+    reply(true, true);
+    await post([open("consult-fixture-a")]);
+    reply(true, false);
+    await post([open("consult-fixture-b")]);
+    expect(args(0)).toEqual({ opaque_id: refs[0]!.opaque_id, window: true, live: true });
+    expect(args(1)).toEqual({ opaque_id: refs[1]!.opaque_id, window: true, live: false });
+  });
+
+  it("window-true on an old room (0.1.30) still sends", async () => {
+    reply(true, true); setVersion("0.1.30");
+    await post([open()]);
+    expect(commands).toHaveLength(1);
+  });
+
+  it("null, unknown and garbage version: no shadow enqueue", async () => {
+    reply(false, true);
+    for (const [i, v] of [null, "", "unknown", "0.1.43-beta", "v0.1.43", "0.1.x", "9;DROP"].entries()) {
+      setVersion(v as string | null);
+      await post([open(`consult-fixture-g${i}`)]);
+    }
+    expect(refs).toHaveLength(0);
+    expect(commands).toHaveLength(0);
+  });
+
+  it("a missing install row: nothing at all, not even a decide call", async () => {
+    reply(false, true); installs = [];
+    await post([open()]);
+    expect(refs).toHaveLength(0);
+    expect(commands).toHaveLength(0);
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it("a room not in BUDDY_RELAY_ROOMS: nothing for shadow either", async () => {
+    reply(false, true); setVersion("0.1.43");
+    process.env.BUDDY_RELAY_ROOMS = "room_other";
+    await post([open()]);
+    expect(refs).toHaveLength(0);
+    expect(commands).toHaveLength(0);
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it("window:false + live:false: nothing, even on 0.1.43", async () => {
+    reply(false, false); setVersion("0.1.43");
+    await post([open()]);
+    expect(refs).toHaveLength(0);
+    expect(commands).toHaveLength(0);
+    expect(logs()).toContain("decide_false=1");
+  });
+
+  it("consult_ended after a shadow enqueue is sent", async () => {
+    reply(false, true); setVersion("0.1.43");
+    await post([open()]);
+    await post([close()]);
+    expect(commands.map((c) => c.kind)).toEqual(["consult_started", "consult_ended"]);
+    expect(args(1)).toEqual({ opaque_id: refs[0]!.opaque_id });
+  });
+
+  it("no consult_uid, doctor_uid, text or token in the args or in any log line", async () => {
+    reply(false, true); setVersion("0.1.43");
+    await post([ext({ event: "encounter_open", encounter_id: UID, doctor_uid: "doc-fixture-1" })]);
+    reply(false, true); setVersion("0.1.42");
+    await post([ext({ event: "encounter_open", encounter_id: "u-2", doctor_uid: "doc-fixture-1" })]);
+    const all = logs();
+    expect(all).toContain("[buddy-relay]");
+    for (const c of commands) for (const bad of [UID, "u-2", "doc-fixture-1", "test-relay-key-value", TOKEN]) expect(c.args).not.toContain(bad);
+    for (const bad of [UID, "u-2", "doc-fixture-1", refs[0]!.opaque_id, "room_fix_1", "test-relay-key-value", "newcat.example.test", "0.1.4"]) expect(all).not.toContain(bad);
+  });
+
+  it("reason_code null + window true is accepted (relay.ts reasonCodeMatchesWindow, RELAY-NR a68423fb)", async () => {
+    reply(true, true);
+    await post([open()]);
+    expect(refs).toHaveLength(1);
+    expect(logs()).not.toContain("decide_fault=1");
   });
 });
