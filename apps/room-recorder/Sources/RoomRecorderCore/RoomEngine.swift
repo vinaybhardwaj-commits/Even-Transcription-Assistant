@@ -4520,10 +4520,15 @@ public actor RoomEngine {
   /// The resident app turns Encounter Buddy on once, after `load`. Without it (a test, an unbundled build) the two
   /// consult commands are acknowledged `buddy_unavailable` and nothing else happens.
   public func attachBuddy(presenter: any BuddyWindowPresenting) {
+    attachBuddy(presenter: presenter, runnerPlan: BuddyConsultController.filePlan(root: persistence.root, log: log))
+  }
+
+  /// 0.1.42. `runnerPlan` decides per consult whether a runner exists (the app: `buddy-runner.json`; a test: a fake).
+  func attachBuddy(presenter: any BuddyWindowPresenting, runnerPlan: @escaping BuddyRunnerPlan) {
     // A token file left by a process that died mid-consult names a port nobody listens on any more.
     try? FileManager.default.removeItem(at: persistence.root.appendingPathComponent(BuddyConsultController.tapFileName))
     buddy = BuddyConsultController(
-      root: persistence.root, state: buddyState, presenter: presenter, log: log)
+      root: persistence.root, state: buddyState, presenter: presenter, log: log, runnerPlan: runnerPlan)
   }
 
   /// Test seam: a controller built by the test, so it can see the presenter and the token file.

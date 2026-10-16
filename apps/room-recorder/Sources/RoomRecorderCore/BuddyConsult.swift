@@ -30,6 +30,20 @@ public enum BuddyWindowPolicy {
   public static let hasCloseControl = true
 }
 
+/// 0.1.42. What a runner is built from. The runner itself lives in `BuddyRunner.swift`.
+public struct BuddyRunnerContext: Sendable {
+  public let opaqueID: String
+  public let tapPort: UInt16
+  public let tapToken: String
+  public let transcript: BuddyLiveTranscript
+  public let window: any BuddyRunnerWindowControlling
+  public let log: @Sendable (String) -> Void
+}
+
+/// Decided BEFORE the tap starts: nil means no runner on this Mac (no `buddy-runner.json`), and the consult behaves
+/// exactly as in 0.1.41 (window at once, 0.1.41 page). Otherwise it returns the builder for this consult's runner.
+public typealias BuddyRunnerPlan = @Sendable () -> (@Sendable (BuddyRunnerContext) -> BuddyRunner)?
+
 public enum BuddyConsultOutcome: Equatable, Sendable {
   /// The window is open and the tap is serving.
   case opened(port: UInt16)
@@ -57,6 +71,10 @@ public final class BuddyConsultController: @unchecked Sendable {
   private var token: String?
   private var server: BuddyTapServer?
   private var liveID: String?
+  private let runnerPlan: BuddyRunnerPlan?
+  private var runner: BuddyRunner?
+  private var runnerTask: Task<Void, Never>?
+  private var windowOpen = false
 
   /// `buddy-tap.json`: the port and the token for the local Buddy process. Mode 0600, written when a consult opens,
   /// deleted when it ends. The token is never logged.
@@ -64,24 +82,27 @@ public final class BuddyConsultController: @unchecked Sendable {
 
   public init(
     root: URL, state: BuddyStateBox, presenter: any BuddyWindowPresenting,
-    log: @escaping @Sendable (String) -> Void
+    log: @escaping @Sendable (String) -> Void, runnerPlan: BuddyRunnerPlan? = nil
   ) {
     self.root = root
     self.state = state
     self.presenter = presenter
     self.log = log
     self.makeToken = { BuddyToken.make() }
+    self.runnerPlan = runnerPlan
   }
 
   init(
     root: URL, state: BuddyStateBox, presenter: any BuddyWindowPresenting,
-    log: @escaping @Sendable (String) -> Void, makeToken: @escaping @Sendable () -> String?
+    log: @escaping @Sendable (String) -> Void, makeToken: @escaping @Sendable () -> String?,
+    runnerPlan: BuddyRunnerPlan? = nil
   ) {
     self.root = root
     self.state = state
     self.presenter = presenter
     self.log = log
     self.makeToken = makeToken
+    self.runnerPlan = runnerPlan
   }
 
   public var isLive: Bool { lock.withLock { liveID != nil } }
@@ -105,6 +126,9 @@ public final class BuddyConsultController: @unchecked Sendable {
       }
       token = minted
       let server = BuddyTapServer(token: minted, opaqueID: opaqueID, state: state)
+      // With a runner the page does not exist until newcat says `window` is true (ADDENDUM 1).
+      let build = runnerPlan?()
+      if build != nil { server.setPageEnabled(false) }
       let port: UInt16
       do {
         port = try server.start()
@@ -119,9 +143,20 @@ public final class BuddyConsultController: @unchecked Sendable {
       }
       self.server = server
       liveID = opaqueID
-      let url = URL(string: "http://127.0.0.1:\(port)/encounter/\(opaqueID)")!
-      presenter.open(url: url, opaqueID: opaqueID)
-      log("encounter buddy: window open (opaque_id \(opaqueID))")
+      guard let build else {
+        // No runner on this Mac: the 0.1.41 behaviour, unchanged.
+        openWindowLocked(opaqueID: opaqueID)
+        return .opened(port: port)
+      }
+      let transcript = BuddyLiveTranscript(opaqueID: opaqueID)
+      server.attach(transcript: transcript)
+      let context = BuddyRunnerContext(
+        opaqueID: opaqueID, tapPort: port, tapToken: minted, transcript: transcript,
+        window: ConsultWindow(opaqueID: opaqueID, controller: self), log: log)
+      let runner = build(context)
+      self.runner = runner
+      runnerTask = Task { await runner.run() }
+      log("encounter buddy: runner started, no window until the flags say so (opaque_id \(opaqueID))")
       return .opened(port: port)
     }
   }
@@ -146,14 +181,51 @@ public final class BuddyConsultController: @unchecked Sendable {
 
   private func tearDownLocked(reason: String) -> BuddyConsultOutcome {
     guard let live = liveID else { return .nothingOpen }
+    // Stop sending first, and drop the ring: nothing is sent after a consult ends, a kill or a cap stop.
+    if let runner {
+      runner.haltNow()  // at once: no chunk is cut or sent after this line, whatever the actor is in the middle of
+      let task = runnerTask
+      Task { task?.cancel(); await runner.stop() }
+    }
+    runner = nil
+    runnerTask = nil
     server?.stopServing()
     server?.stop()
     server = nil
     liveID = nil
     try? FileManager.default.removeItem(at: root.appendingPathComponent(Self.tapFileName))
-    presenter.close(opaqueID: live)
-    log("encounter buddy: window closed (opaque_id \(live)) (\(reason))")
+    if windowOpen {
+      presenter.close(opaqueID: live)
+      windowOpen = false
+      log("encounter buddy: window closed (opaque_id \(live)) (\(reason))")
+    } else {
+      log("encounter buddy: consult closed, no window was open (opaque_id \(live)) (\(reason))")
+    }
     return .closed
+  }
+
+  private func openWindowLocked(opaqueID: String) {
+    guard !windowOpen, let server else { return }
+    server.setPageEnabled(true)
+    let url = URL(string: "http://127.0.0.1:\(server.port)/encounter/\(opaqueID)")!
+    presenter.open(url: url, opaqueID: opaqueID)
+    windowOpen = true
+    log("encounter buddy: window open (opaque_id \(opaqueID))")
+  }
+
+  /// The runner's request, for ITS consult only. A runner that outlives its consult cannot open or close anything.
+  fileprivate func setWindow(opaqueID: String, open: Bool, reason: String) {
+    lock.withLock {
+      guard liveID == opaqueID else { return }
+      if open {
+        openWindowLocked(opaqueID: opaqueID)
+      } else if windowOpen {
+        server?.setPageEnabled(false)
+        presenter.close(opaqueID: opaqueID)
+        windowOpen = false
+        log("encounter buddy: window closed (opaque_id \(opaqueID)) (\(reason))")
+      }
+    }
   }
 
   private func writeTapFile(port: UInt16, token: String) -> Bool {
@@ -169,5 +241,32 @@ public final class BuddyConsultController: @unchecked Sendable {
       return false
     }
     return true
+  }
+}
+
+/// The runner's handle on one consult's window.
+private final class ConsultWindow: BuddyRunnerWindowControlling, @unchecked Sendable {
+  let opaqueID: String
+  private weak var controller: BuddyConsultController?
+  init(opaqueID: String, controller: BuddyConsultController) {
+    self.opaqueID = opaqueID
+    self.controller = controller
+  }
+  func setWindow(open: Bool, reason: String) { controller?.setWindow(opaqueID: opaqueID, open: open, reason: reason) }
+}
+
+extension BuddyConsultController {
+  /// The plan a resident app uses: a runner exists only where `buddy-runner.json` is present and usable in the room root,
+  /// read afresh at each consult so a Mac can be switched on or off without a restart.
+  public static func filePlan(root: URL, log: @escaping @Sendable (String) -> Void) -> BuddyRunnerPlan {
+    {
+      guard let config = BuddyRunnerConfig.load(root: root, log: log) else { return nil }
+      return { context in
+        BuddyRunner(
+          opaqueID: context.opaqueID, transport: BuddyHTTPTransport(config: config),
+          pcm: BuddyTapReader(port: context.tapPort, token: context.tapToken), window: context.window,
+          transcript: context.transcript, log: context.log)
+      }
+    }
   }
 }

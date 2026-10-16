@@ -82,6 +82,8 @@ public final class BuddyTapServer: @unchecked Sendable {
   private var listenFD: Int32 = -1
   private var stopped = false
   private var serving = true
+  private var pageEnabled = true
+  private var transcript: BuddyLiveTranscript?
   private let work = DispatchQueue(label: "buddy.tap.connections", attributes: .concurrent)
 
   public private(set) var port: UInt16 = 0
@@ -141,6 +143,14 @@ public final class BuddyTapServer: @unchecked Sendable {
 
   /// The kill switch and the consult end both land here: from now on every tap request is refused.
   func stopServing() { lock.withLock { serving = false } }
+
+  /// 0.1.42. The page and its state exist only while the window does (ADDENDUM 1): with this off both routes answer 404,
+  /// as if there were no page. The tap route is not affected.
+  func setPageEnabled(_ enabled: Bool) { lock.withLock { pageEnabled = enabled } }
+  /// 0.1.42. With a transcript attached the page is the L2 page (live transcript, stale indicator, notice); without one
+  /// it is the 0.1.41 page, byte for byte.
+  func attach(transcript: BuddyLiveTranscript) { lock.withLock { self.transcript = transcript } }
+  private var pageState: (enabled: Bool, transcript: BuddyLiveTranscript?) { lock.withLock { (pageEnabled, transcript) } }
   var isServing: Bool { lock.withLock { serving && !stopped } }
 
   private func acceptLoop(_ fd: Int32) {
@@ -184,10 +194,12 @@ public final class BuddyTapServer: @unchecked Sendable {
       respond(client, status: 405, body: Data("{\"error\":\"method\"}".utf8), type: "application/json")
       return
     }
-    if request.path == "/encounter/\(opaqueID)" {
-      respondPage(client)
-    } else if request.path == "/encounter/\(opaqueID)/state" {
-      respondState(client)
+    if request.path == "/encounter/\(opaqueID)" || request.path == "/encounter/\(opaqueID)/state" {
+      guard pageState.enabled else {
+        respond(client, status: 404, body: Data("{\"error\":\"not_found\"}".utf8), type: "application/json")
+        return
+      }
+      if request.path == "/encounter/\(opaqueID)" { respondPage(client) } else { respondState(client) }
     } else if request.path == "/tap/pcm" {
       respondTap(client, request)
     } else {
@@ -251,14 +263,21 @@ public final class BuddyTapServer: @unchecked Sendable {
   private func respondState(_ client: Int32) {
     let snapshot = state.snapshot
     let live = isServing
+    if let transcript = pageState.transcript {
+      respond(
+        client, status: 200, body: BuddyPage.stateJSON(opaqueID: opaqueID, recording: live && snapshot.recording, micState: snapshot.micState, transcript: transcript.snapshot()),
+        type: "application/json")
+      return
+    }
     let body =
       "{\"opaque_id\":\"\(opaqueID)\",\"recording\":\(live && snapshot.recording ? "true" : "false"),\"mic_state\":\"\(snapshot.micState)\"}"
     respond(client, status: 200, body: Data(body.utf8), type: "application/json")
   }
 
   private func respondPage(_ client: Int32) {
+    let html = pageState.transcript == nil ? BuddyPage.html(opaqueID: opaqueID) : BuddyPage.liveHTML(opaqueID: opaqueID)
     respond(
-      client, status: 200, body: Data(BuddyPage.html(opaqueID: opaqueID).utf8), type: "text/html; charset=utf-8",
+      client, status: 200, body: Data(html.utf8), type: "text/html; charset=utf-8",
       extra: ["Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'"])
   }
 
@@ -345,6 +364,81 @@ enum BuddyPage {
         rec.className=s.recording?"on":"off";
         document.getElementById("mic").textContent=s.mic_state;
       }catch(e){}
+    }
+    tick();setInterval(tick,2000);
+    </script></body></html>
+    """
+  }
+}
+
+// MARK: - 0.1.42: the live-transcript page (Fable A2-C2, A2-C4, A2-C5, A2-C18; D5)
+
+extension BuddyPage {
+  /// The A2-C2 notice. THE WORDING IS V's; this line is a stand-in so the notice exists and is tested. It names Encounter
+  /// Buddy, says the transcript is shown and stored in newcat, and says how to opt out.
+  static let notice =
+    "Encounter Buddy is on for this consult. The live transcript is shown here and stored in newcat. To opt out, ask your clinic lead."
+
+  /// What the page may know before L5, and nothing else: the notice, recording and mic_state (separate), the opaque id,
+  /// the live transcript, the stale indicator and which of live / off / unavailable it is. No question, suggestion, flag
+  /// or engine field exists in this object (A2-C4); the test pins the key set.
+  static func stateJSON(opaqueID: String, recording: Bool, micState: String, transcript: BuddyLiveTranscript.Snapshot) -> Data {
+    let body: [String: Any] = [
+      "opaque_id": opaqueID,
+      "recording": recording,
+      "mic_state": micState,
+      "live_state": transcript.state.rawValue,
+      "stale": transcript.stale,
+      "notice": notice,
+      "transcript": transcript.segments.map { ["text": $0.text, "gap": $0.gap] as [String: Any] },
+    ]
+    return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data("{}".utf8)
+  }
+
+  static func liveHTML(opaqueID: String) -> String {
+    // `opaqueID` is validated by `BuddyTapServer.isValidOpaqueID` before a server exists, so it carries no markup.
+    // Text is only ever set with textContent, never as markup. A state whose opaque_id is not this page's is not shown.
+    """
+    <!doctype html><html lang="en"><head><meta charset="utf-8"><title>Encounter Buddy</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+    body{font:14px -apple-system,system-ui,sans-serif;margin:0;padding:12px;color:#1d1d1f;background:#f5f5f7}
+    h1{font-size:14px;margin:0 0 6px}
+    .notice{font-size:12px;color:#6e6e73;margin-bottom:6px}
+    .row{display:flex;justify-content:space-between;padding:4px 0;border-top:1px solid #d2d2d7}
+    .k{color:#6e6e73}.on{color:#1a7f37;font-weight:600}.off{color:#b3261e;font-weight:600}
+    .banner{margin:6px 0;font-weight:600}.stale{color:#b35c00;font-weight:600}
+    details{margin-top:6px;border-top:1px solid #d2d2d7;padding-top:4px}
+    summary{cursor:pointer;color:#6e6e73}
+    #tx div{padding:2px 0;white-space:pre-wrap}.gap{color:#6e6e73;font-style:italic}
+    .id{font:11px ui-monospace,Menlo,monospace;color:#6e6e73;margin-top:8px;word-break:break-all}
+    @media (prefers-color-scheme: dark){body{background:#1c1c1e;color:#f5f5f7}.row,details{border-color:#3a3a3c}.k,.id,.notice,summary,.gap{color:#98989d}}
+    </style></head><body>
+    <h1>Encounter Buddy</h1>
+    <div class="notice" id="notice"></div>
+    <div class="row"><span class="k">Recording</span><span id="rec" class="off">not recording</span></div>
+    <div class="row"><span class="k">Microphone</span><span id="mic">&hellip;</span></div>
+    <div class="banner" id="banner"></div>
+    <div class="stale" id="stale" hidden>stale</div>
+    <details open><summary>Live transcript</summary><div id="tx"></div></details>
+    <div class="id">\(opaqueID)</div>
+    <script>
+    const ME="\(opaqueID)";
+    function show(id,t){document.getElementById(id).textContent=t}
+    async function tick(){
+      try{
+        const r=await fetch("/encounter/"+ME+"/state",{cache:"no-store"});
+        const s=await r.json();
+        if(s.opaque_id!==ME){show("banner","live transcript unavailable");document.getElementById("tx").replaceChildren();return}
+        const rec=document.getElementById("rec");
+        rec.textContent=s.recording?"recording":"not recording";rec.className=s.recording?"on":"off";
+        show("mic",s.mic_state);show("notice",s.notice);
+        show("banner",s.live_state==="off"?"live transcript off":s.live_state==="unavailable"?"live transcript unavailable":"");
+        document.getElementById("stale").hidden=!s.stale;
+        const tx=document.getElementById("tx");
+        tx.replaceChildren(...s.transcript.map(p=>{const d=document.createElement("div");
+          if(p.gap){d.className="gap";d.textContent="\\u2014 gap \\u2014"}else{d.textContent=p.text}return d}));
+      }catch(e){show("banner","live transcript unavailable");document.getElementById("stale").hidden=false;document.getElementById("tx").replaceChildren()}
     }
     tick();setInterval(tick,2000);
     </script></body></html>
