@@ -1,0 +1,4 @@
+- 2026-10-17 refute e4c1406f started; base ba51564b
+- gate: tsc 0, typecheck:tests 0, build 0, vitest 8222 pass / 53 fail (52 docker-guard, 1 timing untouched), oauth pg 22/22 pass, check:silent 13 vs 9 (FAIL)
+- probes: tests/unit/mcp-oauth-refute-probes.test.ts 10/10 reproduce
+- verdict PASS-WITH-FIXES; findings F1-F6, adjacent A1-A2; report cloudpane/cloud-scribe-oauth/REFUTE-e4c1406f.md
