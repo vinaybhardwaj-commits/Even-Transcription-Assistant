@@ -262,6 +262,36 @@ def load_hosts():
     return out
 
 
+RANGES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "steward", "scrub-allow-ranges.txt")
+DOC_ADDR = re.compile(r"\b(?:192\.0\.2|198\.51\.100|203\.0\.113)\.\d{1,3}\b|2001:db8::?[0-9a-f:]*", re.I)
+
+
+def load_range_allow():
+    """path -> exact network-range literals (steward/scrub-allow-ranges.txt, Fable ruling 16 Oct 2026). Path-scoped; never a host address."""
+    out = {}
+    try:
+        for l in open(RANGES_FILE):
+            l = l.split("#", 1)[0].strip()
+            parts = l.split()
+            if len(parts) == 2:
+                out.setdefault(parts[0], []).append(parts[1])
+    except OSError:
+        pass
+    return out
+
+
+RANGE_ALLOW = load_range_allow()
+
+
+def strip_range_literals(path, text):
+    lits = RANGE_ALLOW.get(path.replace("\\", "/"))
+    if not lits:
+        return text
+    for lit in sorted(lits, key=len, reverse=True):
+        text = text.replace(lit, " ")
+    return DOC_ADDR.sub(" ", text)
+
+
 def host_hits(text, hosts):
     if not hosts:
         return []
@@ -365,7 +395,7 @@ def check(path, data, commit, hosts, report):
     if phi_applies(low) and not is_synthetic(low):
         for n in phi_hits(low, text):
             report("phi-field", path, n, commit)
-    for n in host_hits(text, hosts):
+    for n in host_hits(strip_range_literals(low, text), hosts):
         report("host-deny", path, n, commit)
     if "/mirrors/" in "/" + low or os.environ.get("STEWARD_PUBLIC_IPV4") == "1":
         for n in public_ipv4_hits(text):
