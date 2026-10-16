@@ -109,6 +109,8 @@ class PipelineConfig:
     device: str = "cpu"
     doctor_slot: int | None = None
     patient_slot: int | None = None
+    clef_roles: dict | None = None  # clip_id -> {doctor_slot, patient_slot}; CLEF-D2-R4, used only for would-be no_voiceprint clips
+    clef_roles_path: str | None = None
     min_n: int = DEFAULT_MIN_N
     records: list[dict] | None = None
     audio_by_clip: dict | None = None
@@ -476,6 +478,7 @@ def _add_score_args(score: argparse.ArgumentParser) -> None:
     score.add_argument("--device", default="cpu")
     score.add_argument("--doctor-slot", type=int, default=None)
     score.add_argument("--patient-slot", type=int, default=None)
+    score.add_argument("--clef-roles", default=None, help="JSON of clip_id to Clef-omni role slots; only for clips that would be no_voiceprint")
     score.add_argument("--min-n", type=int, default=DEFAULT_MIN_N)
     score.add_argument("--gold-labels", nargs="+", default=None)
     score.add_argument("--batch-col", default="batch")
@@ -502,6 +505,7 @@ def _config_from_args(args) -> PipelineConfig:
         device=args.device,
         doctor_slot=args.doctor_slot,
         patient_slot=args.patient_slot,
+        clef_roles_path=args.clef_roles,
         min_n=args.min_n,
         gold_labels=args.gold_labels,
         batch_col=args.batch_col,
@@ -511,6 +515,8 @@ def _config_from_args(args) -> PipelineConfig:
 
 def _score_one(rec, cfg, rule, *, clef_on, odyssey, audeering, clef, calls):
     base = _blank(rec)
+    if rec.get("role_source"):
+        base["role_source"] = rec["role_source"]
     duration = float(rec["end_s"]) - float(rec["start_s"])
     if duration + 1e-6 < rule.min_pure_s:
         base["reason"] = "too_short"
@@ -785,7 +791,8 @@ def _nemotron_windows(clip, cfg, common, centroid) -> list[dict]:
     from tools.timbre.nemotron_windows import build_from_nlp
     from tools.timbre.slots import map_slots
 
-    if centroid is None and cfg.doctor_slot is None and cfg.patient_slot is None:
+    role_slots = _clef_role_slots(cfg, clip)
+    if centroid is None and cfg.doctor_slot is None and cfg.patient_slot is None and role_slots is None:
         return [_unscored(common, clip, "no_voiceprint")]
     loaded = _nlp_for(clip, cfg)
     if loaded is None:
@@ -804,7 +811,18 @@ def _nemotron_windows(clip, cfg, common, centroid) -> list[dict]:
             slot_kwargs["slot_embeddings"] = slot_emb
         else:
             slot_kwargs["frame_embeddings"] = embeddings
-    decision = map_slots(probs, frame_ms=frame_ms, **slot_kwargs)
+    role_source = None
+    if centroid is None and not slot_kwargs:  # no centroid and no cfg override: no_voiceprint unless the Clef roles name the slots
+        decision = _decide_or_none(probs, frame_ms, role_slots)
+        if decision is None:
+            return [_unscored(common, clip, "no_voiceprint")]
+        role_source = _ROLE_SOURCE
+    else:
+        decision = map_slots(probs, frame_ms=frame_ms, **slot_kwargs)
+        if not decision.accepted and role_slots is not None and slot_reason(decision.reason) == "no_voiceprint":
+            forced = _decide_or_none(probs, frame_ms, role_slots)  # a rejection that maps to no_voiceprint
+            if forced is not None:
+                decision, role_source = forced, _ROLE_SOURCE
     if not decision.accepted:
         return [_unscored(common, clip, slot_reason(decision.reason))]
     built = build_from_nlp(
@@ -822,6 +840,8 @@ def _nemotron_windows(clip, cfg, common, centroid) -> list[dict]:
     out = []
     for row in built.rows:
         rec = {**common, **row, "voiceprint_ok": True}
+        if role_source:
+            rec["role_source"] = role_source
         i0, i1 = frame_bounds(probs.shape[0], frame_ms, float(row["start_s"]), float(row["end_s"]))
         window_probs = probs[i0:i1]
         rec["probs_score"] = probs_purity(
@@ -838,6 +858,30 @@ def _nemotron_windows(clip, cfg, common, centroid) -> list[dict]:
             rec["embedding_optional"] = False
         out.append(rec)
     return out
+
+
+_ROLE_SOURCE = "clef_omni"
+
+
+def _clef_role_slots(cfg: PipelineConfig, clip: dict) -> dict | None:
+    """Per-clip slot override from ``--clef-roles`` (CLEF-D2-R4), or None. Loaded once per config."""
+    if cfg.clef_roles is None and cfg.clef_roles_path:
+        from tools.timbre.role_clef import load_roles
+
+        cfg.clef_roles = load_roles(cfg.clef_roles_path)
+    hit = (cfg.clef_roles or {}).get(clip["clip_id"])
+    if not hit:
+        return None
+    return {"doctor_slot": int(hit["doctor_slot"]), "patient_slot": int(hit["patient_slot"])}
+
+
+def _decide_or_none(probs, frame_ms: float, slot_kwargs: dict):
+    from tools.timbre.slots import SlotError, map_slots
+
+    try:
+        return map_slots(probs, frame_ms=frame_ms, **slot_kwargs)
+    except SlotError:  # a stale or out-of-range override is no decision: the clip stays no_voiceprint
+        return None
 
 
 def _segment_windows(clip, cfg, common, centroid) -> list[dict]:
