@@ -17,6 +17,10 @@ export const BOARD_MAX_ROWS = 5000;
 export const MIN_N_DEFAULT = 5;
 export const MIN_N_FLOOR = 3;
 export const BOARD_NOTE_DRAFT = "not for decisions";
+/** A production rubric's STANDING board note, by rubric id (Fable PP-1, 16 Oct 2026). A production rubric not listed here carries no note; draft and benched rubrics keep BOARD_NOTE_DRAFT. */
+export const BOARD_STANDING_NOTES: Readonly<Record<string, string>> = {
+  consult_surgical_pitch: "report only; never a verdict on a doctor; benched on 18 excerpts",
+};
 export const UNATTRIBUTED = "unattributed";
 
 type Row = { unit_key: string; unit_kind: string; version: string; room_id: string; ist_date: string; score: Record<string, unknown> | null; findings: string[] };
@@ -131,6 +135,7 @@ export async function buildBoard(a: BoardArgs): Promise<BoardResult> {
       rubric_id: r.id, versions: [...new Set(rows.map((x) => x.version))].sort(), lab, by, from: a.from, to: a.to, min_n: minN, n_rows: rows.length, n_unattributed: nUnattributed,
       n_blind_excluded: Number(blindCount[0]?.n ?? 0), generated_at: new Date().toISOString(),
       ...(r.status !== "production" ? { status: r.status === "benched" ? "benched" : "draft", note: BOARD_NOTE_DRAFT } : {}),
+      ...(r.status === "production" && BOARD_STANDING_NOTES[r.id] ? { note: BOARD_STANDING_NOTES[r.id] } : {}),
       ...(isEvr ? { label: "discrepancy report", severities: ["none", "minor", "material", "obvious"] } : {}),
     },
     groups: out,
