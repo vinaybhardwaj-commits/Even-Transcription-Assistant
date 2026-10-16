@@ -1,6 +1,6 @@
 {
   "id": "talk_time",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "title": "Talk time, interruptions and silence of a window or a consult",
   "unit": "window",
   "units": [
