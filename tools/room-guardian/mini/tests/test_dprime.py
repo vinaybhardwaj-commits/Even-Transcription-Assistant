@@ -847,11 +847,37 @@ class ConfigFlags(unittest.TestCase):
             c = self.cfg({"consult_open_publish": v, "start_day_after_boot": v}); self.assertEqual((c["consult_open_publish"], c["start_day_after_boot"]), (False, False))
         c = self.cfg({"consult_open_publish": True, "start_day_after_boot": True}); self.assertEqual((c["consult_open_publish"], c["start_day_after_boot"]), (True, True))
 
-    def test_the_live_router_config_has_neither_flag(self):
+    OPD6 = "opd-6-webcam-only-am8n"
+
+    @staticmethod
+    def live_config_problems(raw):
+        """-> what is wrong with a router.json (as parsed JSON) under the 16 Oct ruling (fable FABLE51-FR1-CONSULT-OPEN-ON-16OCT): consult_open_publish may be on, and the
+        consult_room_map must then hold exactly one key, opd-6-webcam-only-am8n (CO-1); consult_windows_enabled, start_day_after_boot and start_day_cmd must be ABSENT (a literal
+        false is not absent)."""
+        out = [f"{k} is present" for k in ("consult_windows_enabled", "start_day_after_boot", "start_day_cmd") if k in raw]
+        if "consult_open_publish" in raw and (not isinstance(raw.get("consult_room_map"), dict) or sorted(raw["consult_room_map"]) != [ConfigFlags.OPD6]):
+            out.append("consult_open_publish is present but consult_room_map is not exactly the one OPD 6 key")
+        return out
+
+    def test_the_live_router_config_check_itself(self):
+        ok = {"to": ["a"], "ackers": ["a"]}
+        self.assertEqual(self.live_config_problems(ok), [])
+        self.assertEqual(self.live_config_problems(dict(ok, consult_open_publish=True, consult_room_map={self.OPD6: {"machine": "m"}})), [])
+        self.assertEqual(len(self.live_config_problems(dict(ok, consult_open_publish=True))), 1)                                                   # on without a map
+        self.assertEqual(len(self.live_config_problems(dict(ok, consult_open_publish=True, consult_room_map={}))), 1)
+        self.assertEqual(len(self.live_config_problems(dict(ok, consult_open_publish=True, consult_room_map={self.OPD6: {}, "opd-7": {}}))), 1)    # two rooms
+        self.assertEqual(len(self.live_config_problems(dict(ok, consult_open_publish=True, consult_room_map={"opd-7": {}}))), 1)                  # the wrong room
+        self.assertEqual(len(self.live_config_problems(dict(ok, consult_open_publish=True, consult_room_map=[self.OPD6]))), 1)
+        for k, v in (("consult_windows_enabled", True), ("consult_windows_enabled", False), ("start_day_after_boot", True), ("start_day_after_boot", False), ("start_day_cmd", ["x"]), ("start_day_cmd", [])):
+            self.assertEqual(len(self.live_config_problems(dict(ok, **{k: v}))), 1, k)
+
+    def test_the_live_router_config_has_no_windows_or_start_day_keys_and_at_most_the_one_opd6_consult_room(self):
         p = os.path.expanduser("~/oc/fleet-access/guardian/etc/router.json")
         if not os.path.exists(p):
             self.skipTest("no live config on this machine")
-        c = ubus_bus.load_cfg(p); self.assertEqual((c["consult_open_publish"], c["start_day_after_boot"]), (False, False))
+        ubus_bus.load_cfg(p)                                                                                          # it must also load
+        with open(p) as f:
+            self.assertEqual(self.live_config_problems(json.load(f)), [])
 
 
 if __name__ == "__main__":
