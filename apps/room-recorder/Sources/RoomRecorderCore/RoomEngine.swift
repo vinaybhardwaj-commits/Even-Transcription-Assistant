@@ -4481,6 +4481,11 @@ public actor RoomEngine {
       return
     }
     let target = RoomInputVolumeStore(root: persistence.root).value(forUID: uid)
+    // FIX1: set only when the value differs. CoreAudio reports a Float32, so equal means within a hair, not bit-equal.
+    if let current = before.value, abs(current - target) < Self.volumeEpsilon {
+      log("input volume on open: no change, before \(Self.volumeText(before.value)), stored \(Self.volumeText(target))")
+      return
+    }
     do {
       try audioInputs.setInputVolume(uid: uid, value: target)
       let after = audioInputs.inputVolume(uid: uid)?.value
@@ -4489,6 +4494,8 @@ public actor RoomEngine {
       log("input volume on open: before \(Self.volumeText(before.value)), set failed (\(bounded(error, limit: 80)))")
     }
   }
+
+  static let volumeEpsilon = 0.0005
 
   static func volumeText(_ value: Double?) -> String {
     value.map { String(format: "%.3f", $0) } ?? "unreadable"

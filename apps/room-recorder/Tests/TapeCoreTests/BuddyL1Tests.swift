@@ -688,6 +688,29 @@ import Testing
     try await task.value
   }
 
+  @Test func aVolumeAlreadyAtTheStoredValueIsNotSetAgain() async throws {
+    let audio = R4AudioInputs.standard(deviceA: .init(volume: 1.0, settable: true))
+    let rig = try await Self.rig(audio: audio)
+    defer { try? FileManager.default.removeItem(at: rig.root) }
+    let task = Task { try await rig.engine.run() }
+    await rig.remote.push(Self.command("c1", "start_day"))
+    try await R4Fixture.waitUntil { rig.launcher.launchCount == 1 }
+    #expect(audio.volumeSets.isEmpty, "current == stored (default 1.0): no set call")
+    #expect(rig.logs.all.contains("input volume on open: no change, before 1.000, stored 1.000"))
+    // A stored 0.7 with the device already at 0.7 (Float32 noise included) is also left alone on the next open.
+    audio.setVolume(0.70001, uid: "device-a")
+    RoomInputVolumeStore(root: rig.root).remember(0.7, forUID: "device-a")
+    await rig.remote.push(Self.command("c2", "pause_day"))
+    try await R4Fixture.waitUntil { await rig.remote.acks.count == 2 }
+    await rig.remote.push(Self.command("c3", "resume_day"))
+    try await R4Fixture.waitUntil { rig.launcher.launchCount == 2 }
+    #expect(audio.volumeSets.isEmpty)
+    await rig.remote.push(Self.command("c4", "end_day"))
+    try await R4Fixture.waitUntil { await rig.remote.acks.count == 4 }
+    task.cancel()
+    try await task.value
+  }
+
   @Test func aVolumeTheDeviceWillNotTakeIsLeftAsFound() async throws {
     let audio = R4AudioInputs.standard(deviceA: .init(volume: 0.3, settable: false))
     let rig = try await Self.rig(audio: audio)
