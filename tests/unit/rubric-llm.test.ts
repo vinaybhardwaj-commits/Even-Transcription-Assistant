@@ -96,7 +96,7 @@ describe("the prompts", () => {
     expect(a).toContain("consult_chair_affect v1.1.0, prompt v1.1.0");
     expect(a).toContain(JSON.stringify(affect.output));
     expect(a).toMatch(/anti/i);
-    expect(E.systemPrompt(pitch)).toContain("consult_surgical_pitch v1.1.1");
+    expect(E.systemPrompt(pitch)).toContain("consult_surgical_pitch v1.1.2");
     expect(a).not.toContain("engine_note"); // the repo-side notes are not sent to the model
   });
   it("carry no example transcripts, quotes or identifiers", () => {
@@ -159,7 +159,7 @@ describe("consult_surgical_pitch", () => {
     expect((r.evidence as { quotes: unknown[] }).quotes).toHaveLength(2);
   });
   it("1.1.1 recommendation_kind is decided in CODE: surgery_recommended false is always no_surgery (never null, never another kind); true keeps the model's kind, or null when it gave none", async () => {
-    expect(pitch.version).toBe("1.1.1");
+    expect(pitch.version).toBe("1.1.2");
     expect(E.pitchKind({ surgery_recommended: false })).toBe("no_surgery");
     expect(E.pitchKind({ surgery_recommended: false, recommendation_kind: null })).toBe("no_surgery");
     expect(E.pitchKind({ surgery_recommended: false, recommendation_kind: "conservative" })).toBe("no_surgery");
@@ -221,7 +221,7 @@ describe("gates: lab only, blind room-days (lifted), bench wiring", () => {
     expect(affect.bench).toMatchObject({ location: "rubric/bench/consult_chair_affect/gold.jsonl", metric: "field_accuracy" });
     expect(pitch.bench.location).toBe("rubric/bench/consult_surgical_pitch/gold.jsonl");
     expect((affect.definition as { bench_population: string }).bench_population).toMatch(/Meet teleconsult.*no room tape/);
-    expect((pitch.definition as { bench_population: string }).bench_population).toMatch(/Meet.*no room tape/);
+    expect((pitch.definition as { bench_population: string }).bench_population).toMatch(/human_v is room tape.*Meet scouts are the gold and grokbot sets/);
     const set = parseBenchSet({ unit: "consult", items: [{ unit_key: "m001", expected: { surgery_recommended: false } }, { unit_key: "m002", expected: { uptake_codes: ["hedge", "accept"], distress: "low" } }] })!;
     expect(compareItem(set.items[0]!, { surgery_recommended: false }).every((c) => c.equal)).toBe(true);
     expect(compareItem(set.items[1]!, { uptake_codes: ["accept", "hedge"], distress: "low" }).every((c) => c.equal)).toBe(true);
