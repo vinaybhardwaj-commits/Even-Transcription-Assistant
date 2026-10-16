@@ -6,7 +6,9 @@
  *   2. a fault on the command insert rolls the ref row back: neither lands, and a retry lands both;
  *   3. concurrent opens for one consult give exactly one ref row and one command;
  *   4. window:false and a decide fault write nothing;
- *   5. consult_ended updates the ref and enqueues one command, and a second close enqueues none.
+ *   5. consult_ended updates the ref and enqueues one command, and a second close enqueues none;
+ *   6. shadow (window:false, live:true): on an ACTIVE install at 0.1.43 one ref row and one command with args exactly {opaque_id, window:false, live:true} (JSON booleans);
+ *      on 0.1.42 nothing lands; consult_ended after a shadow open lands its command.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
@@ -30,6 +32,11 @@ const UID = "bpg-consult-1";
 const row = (event: "encounter_open" | "encounter_close", uid = UID) =>
   ({ source: "ext" as const, machine: "MAC-BPG-1", room: null, event, ts: new Date().toISOString(), email: null, payload: { encounter_id: uid } });
 const yes = async () => true;
+const shadow = async () => ({ window: false, live: true });
+const ROOM43 = "room_bpg43";
+const ROOM42 = "room_bpg42";
+const row2 = (event: "encounter_open" | "encounter_close", machine: string, uid: string) =>
+  ({ source: "ext" as const, machine, room: null, event, ts: new Date().toISOString(), email: null, payload: { encounter_id: uid } });
 
 beforeAll(() => {
   if (!HAVE) return;
@@ -39,8 +46,12 @@ beforeAll(() => {
   pg.exec(`
     INSERT INTO room (id, slug, name, pin_hash, transcript_enabled) VALUES ('${ROOM}', 'bpg-1', 'BPG Room', 'x', TRUE);
     INSERT INTO room_install (install_id, room_id, enrolled_at, enrolled_by, hostname, app_version) VALUES ('inst_bpg1', '${ROOM}', now(), 'test', 'MAC-BPG-1', '0.1.30');
+    INSERT INTO room (id, slug, name, pin_hash, transcript_enabled) VALUES ('${ROOM43}', 'bpg-43', 'BPG Room 43', 'x', TRUE), ('${ROOM42}', 'bpg-42', 'BPG Room 42', 'x', TRUE);
+    INSERT INTO room_install (install_id, room_id, enrolled_at, enrolled_by, hostname, app_version) VALUES
+      ('inst_bpg43', '${ROOM43}', now(), 'test', 'MAC-BPG-43', '0.1.43'),
+      ('inst_bpg42', '${ROOM42}', now(), 'test', 'MAC-BPG-42', '0.1.42');
   `);
-  process.env.BUDDY_RELAY_ROOMS = ROOM;
+  process.env.BUDDY_RELAY_ROOMS = [ROOM, ROOM43, ROOM42].join(",");
 }, 300_000);
 afterAll(() => { if (HAVE) pg.stop(); delete process.env.BUDDY_RELAY_ROOMS; });
 beforeEach(() => {
@@ -96,5 +107,32 @@ describe.skipIf(!HAVE)("relay CTE on real postgres", () => {
     expect(await R.relayConsultEvent(row("encounter_close") as never, Date.now() + 5000, yes)).toBe("duplicate");
     expect(await counts()).toEqual({ refs: 1, started: 1, ended: 1 });
     expect((await q<{ closed: boolean }>`SELECT closed_at IS NOT NULL AS closed FROM buddy_consult_ref`)[0]!.closed).toBe(true);
+  });
+
+  it("shadow (window:false, live:true) on an ACTIVE 0.1.43 install lands one ref row and one command, args exactly {opaque_id, window:false, live:true} as JSON booleans", async () => {
+    expect(await R.relayConsultEvent(row2("encounter_open", "MAC-BPG-43", "bpg-shadow-43") as never, Date.now() + 5000, shadow)).toBe("sent");
+    expect(await counts()).toEqual({ refs: 1, started: 1, ended: 0 });
+    const c = (await q<{ args: Record<string, unknown>; room_id: string; w: string; l: string; keys: string[] }>`
+      SELECT args, room_id, jsonb_typeof(args->'window') AS w, jsonb_typeof(args->'live') AS l, ARRAY(SELECT jsonb_object_keys(args) ORDER BY 1) AS keys
+        FROM bench_command WHERE kind = 'consult_started'`)[0]!;
+    const r = (await q<{ opaque_id: string }>`SELECT opaque_id FROM buddy_consult_ref`)[0]!;
+    expect(c.args).toEqual({ opaque_id: r.opaque_id, window: false, live: true });
+    expect(c.keys).toEqual(["live", "opaque_id", "window"]);
+    expect([c.w, c.l]).toEqual(["boolean", "boolean"]);
+    expect(c.room_id).toBe(ROOM43);
+  });
+
+  it("shadow on a 0.1.42 install lands no ref row and no command", async () => {
+    expect(await R.relayConsultEvent(row2("encounter_open", "MAC-BPG-42", "bpg-shadow-42") as never, Date.now() + 5000, shadow)).toBe("decide_false");
+    expect(await counts()).toEqual({ refs: 0, started: 0, ended: 0 });
+  });
+
+  it("consult_ended after a shadow open lands its command", async () => {
+    await R.relayConsultEvent(row2("encounter_open", "MAC-BPG-43", "bpg-shadow-43") as never, Date.now() + 5000, shadow);
+    expect(await R.relayConsultEvent(row2("encounter_close", "MAC-BPG-43", "bpg-shadow-43") as never, Date.now() + 5000, shadow)).toBe("sent");
+    expect(await counts()).toEqual({ refs: 1, started: 1, ended: 1 });
+    const e = (await q<{ args: Record<string, unknown> }>`SELECT args FROM bench_command WHERE kind = 'consult_ended'`)[0]!;
+    const r = (await q<{ opaque_id: string }>`SELECT opaque_id FROM buddy_consult_ref`)[0]!;
+    expect(e.args).toEqual({ opaque_id: r.opaque_id });
   });
 });
