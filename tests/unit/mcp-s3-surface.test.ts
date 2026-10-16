@@ -447,7 +447,7 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(46_805); // measured 46,790: 46,593 + CATALOG-7 197
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(46_805); // 46,805 incl. the scribe_rubric sweep_status action (RUBRIC-SWEEP: measured 46,805; was 46,790 = 46,593 + CATALOG-7 197)
   });
 
   it("S6-DIET: tools/list with every description field removed is IDENTICAL to the REL2-R2 capture (CATALOG-1: the scribe_catalog tool; ADMIN-1: the scribe_admin tool; consult-reuse: scribe_sarvam force; S4: scribe_steward ticket views; main 7a66f27: the engine property of scribe_diarize_segments; epic #23 c: the nemotron_identity job kind; 0142: the pulse_doctor_voice job kind; TS-H13: the helper and commands views of scribe_kiosks; 0143: the nemotron_lab_run job kind; TS-H13: the helper and commands views of scribe_kiosks) (names, schemas, enums, defaults, bounds, required, annotations)", async () => {

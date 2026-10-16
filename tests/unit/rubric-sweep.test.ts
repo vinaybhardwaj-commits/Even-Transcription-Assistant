@@ -31,7 +31,8 @@ vi.mock("@/lib/db", () => ({
     if (/FROM scribe_job j/.test(text)) return Promise.resolve((values[3] as string[]).filter((u) => (H.ran[String(values[1])] ?? []).includes(u)).map((u) => ({ unit_key: u })));
     if (/FROM rubric_result WHERE rubric_id/.test(text)) {
       const have = [...(H.done[String(values[0])] ?? []), .../lab = false/.test(text) ? [] : H.doneLab[String(values[0])] ?? []];
-      return Promise.resolve((values[2] as string[]).filter((u) => have.includes(u)).map((u) => ({ unit_key: u })));
+      const haveSet = new Set(have);
+      return Promise.resolve((values[2] as string[]).filter((u) => haveSet.has(u)).map((u) => ({ unit_key: u })));
     }
     return Promise.resolve([]);
   }, { transaction: async () => [] }),
@@ -348,7 +349,7 @@ describe("dry mode and the summary", () => {
     const out = await runRubricSweep("live", { now: NOW });
     if (!("summary" in out)) throw new Error("no summary");
     const s: SweepSummary = out.summary;
-    expect(Object.keys(s).sort()).toEqual(["at", "backfill_window", "mode", "rubrics"]);
+    expect(Object.keys(s).sort()).toEqual(["at", "backfill_window", "mode", "page_capped", "pages", "rubrics"]);
     expect(s.at).toBe(new Date(NOW).toISOString());
     expect(Object.keys(s.rubrics[0]!).sort()).toEqual(["deferred", "done", "eligible", "id", "planned", "skipped_reason", "submitted_job_id", "today_units", "version"]);
     expect(JSON.stringify(s)).not.toMatch(/CONS0001|k\/|room_/);
@@ -411,6 +412,70 @@ describe("F3: no starvation, deferred 24 h", () => {
     const s = await plan("live");
     expect(s.rubrics[0]).toMatchObject({ eligible: 1, deferred: 1, planned: 0, skipped_reason: "nothing_to_do" });
     expect(H.submitted).toEqual([]);
+  });
+});
+
+describe("R1: paged walk, no starvation of the backfill", () => {
+  const night = Date.parse("2026-10-15T18:00:00Z"); // 23:30 IST, backfill window open
+  const uidAt = (i: number) => `CONS${String(i).padStart(7, "0")}`;
+
+  it("5,001 consults, the newest 5,000 done, in the backfill window: the oldest is planned, in page 2; every statement stays within one page", async () => {
+    setCatalog(Array.from({ length: 5001 }, (_, i) => crow(uidAt(i), 25 + i * 0.01, {}, night)));
+    H.done = { rb_alpha: Array.from({ length: 5000 }, (_, i) => uidAt(i)) };
+    const out = await runRubricSweep("live", { now: night });
+    if (!("summary" in out)) throw new Error("no summary");
+    expect(keysOf()).toEqual([uidAt(5000)]);
+    expect(out.summary).toMatchObject({ pages: 2, page_capped: false, backfill_window: true });
+    expect(out.summary.rubrics[0]).toMatchObject({ eligible: 5001, done: 5000, planned: 1 });
+    for (const q of resultsQueries("rb_alpha")) expect((q.values[2] as string[]).length).toBeLessThanOrEqual(5000);
+    expect(resultsQueries("rb_alpha")).toHaveLength(2);
+  });
+
+  it("a job's worth (200) found on page 1 stops the walk: one page, one statement set, not capped", async () => {
+    setCatalog(Array.from({ length: 300 }, (_, i) => crow(uidAt(i), 25 + i * 0.01, {}, night)));
+    const out = await runRubricSweep("dry", { now: night, pageSize: 250 });
+    if (!("summary" in out)) throw new Error("no summary");
+    expect(out.summary).toMatchObject({ pages: 1, page_capped: false });
+    expect(out.summary.rubrics[0]).toMatchObject({ planned: 200, eligible: 300 });
+  });
+
+  it("page_capped is true when the 4-page limit stops the walk with candidates left and a rubric still short", async () => {
+    setCatalog(Array.from({ length: 41 }, (_, i) => crow(uidAt(i), 25 + i * 0.01, {}, night)));
+    H.done = { rb_alpha: Array.from({ length: 41 }, (_, i) => uidAt(i)) };
+    const out = await runRubricSweep("dry", { now: night, pageSize: 10 });
+    if (!("summary" in out)) throw new Error("no summary");
+    expect(out.summary).toMatchObject({ pages: 4, page_capped: true });
+    expect(out.summary.rubrics[0]).toMatchObject({ eligible: 41, done: 40, planned: 0 });
+    expect(resultsQueries("rb_alpha")).toHaveLength(4);
+  });
+
+  it("page_capped is false when the list ends inside the limit (exactly 40 candidates, 4 pages of 10)", async () => {
+    setCatalog(Array.from({ length: 40 }, (_, i) => crow(uidAt(i), 25 + i * 0.01, {}, night)));
+    H.done = { rb_alpha: Array.from({ length: 40 }, (_, i) => uidAt(i)) };
+    const out = await runRubricSweep("dry", { now: night, pageSize: 10 });
+    if (!("summary" in out)) throw new Error("no summary");
+    expect(out.summary).toMatchObject({ pages: 4, page_capped: false });
+  });
+
+  it("an open job or a spent day means no walk at all for that rubric (no statements beyond today / open-job)", async () => {
+    setCatalog([crow("CONS000999", 30)]);
+    H.today = { rb_alpha: 1500 };
+    const out = await runRubricSweep("dry", { now: NOW });
+    if (!("summary" in out)) throw new Error("no summary");
+    expect(out.summary.pages).toBe(0);
+    expect(resultsQueries("rb_alpha")).toHaveLength(0);
+  });
+});
+
+describe("A1: a production rubric whose units include consult is swept as unit consult", () => {
+  it("a talk_time-shaped rubric (primary unit window, units [consult]) is swept; a rubric without consult in units is not", async () => {
+    H.rubrics.length = 0;
+    H.rubrics.push({ id: "rb_tt", version: "1.0.0", unit: "window", units: ["consult"], status: "production" }, { ...WINDOW });
+    setCatalog([crow("CONS000171", 30)]);
+    const s = await plan("live");
+    expect(s.rubrics.map((r) => r.id)).toEqual(["rb_tt"]);
+    expect(H.submitted).toHaveLength(1);
+    expect(H.submitted[0]!.args).toMatchObject({ rubric_id: "rb_tt", unit: "consult", lab: false, unit_keys: ["CONS000171"] });
   });
 });
 
