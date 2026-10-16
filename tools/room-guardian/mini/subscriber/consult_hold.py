@@ -19,7 +19,7 @@ activity, zero_ratio < 0.98, in the last 2 min). The hourly windows signal is OF
 The DB sources are Neon reads with the read-only credential file the consult cutter uses (read by path, never printed), one thread and one 5 s timeout per source.
 Every SQL string, table, field and event name below is INFERRED (copied from lib/rooms-live/read.ts, tools/pulse-watch and extensions/pulse-presence/src/agent.js and
 lib/events.js; not run on the Mini)."""
-import json, math, os, threading, time
+import json, math, os, re, threading, time
 from datetime import datetime, timedelta, timezone
 
 CACHE_S, MAX_AGE_S, QUERY_TIMEOUT_S, STUCK_S, SINK_RETRY_S = 30, 120, 5, 1800, 300
@@ -478,7 +478,8 @@ def _redactor(url_file):
         with open(os.path.expanduser(url_file or DEFAULT_URL_FILE)) as f:
             url = f.read().strip()
         u = urlparse(url)
-        for s in (url, u.password, unquote(u.password or ""), u.username, u.hostname, u.netloc):
+        host_as_written = u.netloc.rsplit("@", 1)[-1].split(":")[0]      # urlparse().hostname is lower-cased; libpq prints the host as written
+        for s in (url, u.password, unquote(u.password or ""), u.username, u.hostname, host_as_written, host_as_written.split(".")[0], re.sub(r"-pooler$", "", host_as_written.split(".")[0], flags=re.I), u.netloc):
             if s and len(s) >= 3:
                 secrets.add(s)
     except Exception:                      # noqa: BLE001
@@ -487,12 +488,15 @@ def _redactor(url_file):
     def red(text):
         text = str(text)
         for s in sorted(secrets, key=len, reverse=True):
-            text = text.replace(s, "<redacted>")
+            text = re.sub(re.escape(s), "<redacted>", text, flags=re.I)           # any case
         return text
     return red
 
 
-def probe(cfg_path, sources=None, clock=time.time):
+PROBE_ROOM_RE = re.compile(r"^[a-z0-9_-]{1,64}$")          # the room slug rule of the control line (subscriber SLUG_RE)
+
+
+def probe(cfg_path, sources=None, clock=time.time, timeout_s=None):
     """ONE compute with background off, through build(). -> a JSON-able dict. Never publishes, never writes the audit file (audit_path and sink are cleared after build), never prints the
     DB URL or a credential (error text is redacted). Prints machine keys, room ids, slugs, counts, event names and booleans only: no names, no ages, no timestamps.
     The rooms are the keys of consult_room_map. The kiosk health line comes from the live subscriber and the probe has none, so `health_stale` is always among the reasons;
@@ -502,22 +506,31 @@ def probe(cfg_path, sources=None, clock=time.time):
     if not isinstance(flags, dict) or not isinstance(flags.get("consult_room_map"), dict):
         raise ValueError("the config needs a consult_room_map object")
     rooms = sorted(flags["consult_room_map"])
+    if not all(isinstance(r, str) and PROBE_ROOM_RE.fullmatch(r) for r in rooms):
+        raise ValueError("consult_room_map has a key that is not a room slug [a-z0-9_-]{1,64}")     # the key is not echoed: the live subscriber could never publish that room
     red = _redactor(flags.get("consult_db_url_file"))
-    errors = []
+    errors, returned = [], set()
     real = sources if sources is not None else pg_sources(flags.get("consult_db_url_file"))
 
     def wrap(name):
         def f(now, arg):
             try:
-                return real[name](now, arg)
+                v = real[name](now, arg)
+                returned.add(name)
+                return v
             except BaseException as e:     # noqa: BLE001 -- recorded verbatim (redacted), then re-raised so ConsultHold treats it as a source error
                 errors.append({"source": name, "arg_count": len(arg) if arg is not None else 0, "error": f"{type(e).__name__}: {red(e)}"})
                 raise
         return f
     h = build(flags, rooms, None, "/nonexistent-probe-home", clock, sources={n: wrap(n) for n in ("presence", "session", "levels", "windows")}, background=False)
     h.audit_path, h.sink = None, None
+    if timeout_s is not None:
+        h.timeout_s = timeout_s            # test seam; the CLI always uses the live default
     now = clock()
     out = h.compute(now)
+    for n in ("presence", "session", "levels", "windows"):
+        if h.err.get(n) and not any(e["source"] == n for e in errors):       # a failed source with no exception: it timed out (no answer) or answered with a wrong shape
+            errors.append({"source": n, "arg_count": 0, "error": "wrong_shape: the source answered with a value of the wrong shape" if n in returned else "timeout: no answer within the source timeout"})
     rooms_out = {}
     for r in rooms:
         keys, rid, slug = _entry(h.map.get(r))
@@ -549,6 +562,11 @@ if __name__ == "__main__":
         try:
             print(json.dumps(probe(sys.argv[2]), sort_keys=True, indent=1))
         except Exception as e:             # noqa: BLE001
-            print(f"probe failed: {type(e).__name__}: {e}", file=sys.stderr); sys.exit(2)
+            try:
+                with open(sys.argv[2]) as f:
+                    url_file = json.load(f).get("consult_db_url_file")
+            except Exception:              # noqa: BLE001
+                url_file = None
+            print(f"probe failed: {type(e).__name__}: {_redactor(url_file if isinstance(url_file, str) else None)(e)}", file=sys.stderr); sys.exit(2)
     else:
         print("usage: consult_hold.py --probe <router.json-like file>", file=sys.stderr); sys.exit(64)

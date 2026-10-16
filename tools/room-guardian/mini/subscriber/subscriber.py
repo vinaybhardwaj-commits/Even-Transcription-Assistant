@@ -1,6 +1,6 @@
 """subscriber.py -- Mini subscriber for the Room Guardian pipe (FR-1 C4). Clock, source, sinks and the data dir are injected.
 
-* Streams kiosk/<room>/health, heal, probe-reply -> JSONL under <data>/<YYYY-MM-DD>/<room>.<stream>.jsonl; days older than KEEP_DAYS are pruned.
+* Streams kiosk/<room>/health, heal, probe-reply, canary (FR1-C5, alerts only: see canary_route.py) -> JSONL under <data>/<YYYY-MM-DD>/<room>.<stream>.jsonl; days older than KEEP_DAYS are pruned.
 * Quiet detection is HERE, not pipe `monitor` (R4): a room with no health line for QUIET_AFTER_S raises guardian_quiet once (edge), and a
   line after that closes it. A room is counted from process start, so a room that never speaks is quiet too.
 * Strict validation (validate_heal) applies ONLY to heal messages that carry `kind` (coreaudio_scope). Any other heal message (today's R9 shape, including its
@@ -23,9 +23,10 @@ Health/heal/probe lines are stored as received. Nothing here prints line content
 """
 import json, os, re, shutil, time
 from datetime import datetime, timedelta, timezone
+from canary_route import CanaryRoute
 
 IST = timezone(timedelta(hours=5, minutes=30))
-STREAMS = ("health", "heal", "probe-reply")
+STREAMS = ("health", "heal", "probe-reply", "canary")
 QUIET_AFTER_S, KEEP_DAYS = 120, 30
 HEAL_KINDS = ("capture_dead", "capture_muted", "coreaudio_heal_failed", "recorder_disturbed")
 KIND_ALIASES = {"recorder_changed": "recorder_disturbed"}        # accepted for now; the canonical name is the gate's (CA-C5)
@@ -268,6 +269,13 @@ class RouterSink:
     def start_day_failed(self, room, now):
         self._open(room, "start_day_failed", now)
 
+    def canary_case(self, room, kind, now):
+        self._open(room, kind, now)
+
+    def canary_close(self, room, kind, now):
+        """A canary pass closes this canary case of the room (CanaryRoute decides which kinds, by night)."""
+        self.router.close_room(None, room, "canary pass", kind=kind)
+
     def capture_recovered(self, room, now):
         """Health zero_ratio back under 0.05: close the audio cases of this room. recorder_changed is NOT closed here (audio back says nothing about the recorder)."""
         kinds = {"capture_dead", "capture_muted", "coreaudio_heal_failed"}
@@ -282,6 +290,7 @@ class Subscriber:
         self.usb_verify = usb_verify                          # the F2 Mini verify (always on once a healed_pending line arrives)
         self.usb_missing = set(usb_missing_seed) & set(self.rooms)   # rooms with an open usb_device_missing case: closed by a health line with usb_mic_present true
         self.last_health = {}                                 # room -> (receive time, obj) of the newest health line
+        self.canary = CanaryRoute(sink, os.path.join(data_dir, "canary-state.json"), data_dir, clock)     # FR1-C5: SHADOW, alerts only (see canary_route.py)
         os.makedirs(data_dir, exist_ok=True)
         t0 = clock()
         self.last_seen = {r: t0 for r in self.rooms}
@@ -299,6 +308,9 @@ class Subscriber:
         except (TypeError, ValueError):
             if stream == "heal":              # a non-JSON heal line is logged only (own file, capped, JSON-quoted): no case
                 self._log_invalid_heal(room, raw)
+            elif stream == "canary":          # a non-JSON canary line is not stored; it gets one audit line (also a 5000-digit integer, which Python refuses)
+                t = self.clock()
+                self.canary.audit_invalid(room, "not_json", t, os.path.join(self.data, datetime.fromtimestamp(t, IST).strftime("%Y-%m-%d")))
             return False                      # not JSON: never stored in the stream file
         now = self.clock()
         day = datetime.fromtimestamp(now, IST).strftime("%Y-%m-%d")
@@ -308,6 +320,8 @@ class Subscriber:
             f.write(raw.rstrip("\n") + "\n")
         if stream == "heal":
             self._on_heal(room, obj, now, dup)
+        if stream == "canary":
+            self.canary.handle(room, obj, dup, now, d)      # the line is already stored above; this only validates it and opens or closes cases
         if stream == "health":
             if isinstance(obj, dict):
                 self.last_health[room] = (now, obj)
