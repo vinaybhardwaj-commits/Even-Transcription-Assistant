@@ -80,7 +80,7 @@ describe("catalog_c4 since_state / bad_since", () => {
 
 describe("Jev sweeper backfill_since=bad", () => {
   const lines = (spy: ReturnType<typeof vi.spyOn>) => spy.mock.calls.map((a) => String(a[0]));
-  it("bad: exactly one count-only line per call, no pass 2, value not logged", async () => {
+  it("bad: exactly one backfill_since line per call, no pass 2, value not logged", async () => {
     process.env.JEV_CONSULT_BACKFILL_SINCE = "2026-99-99";
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
     await allTranscribedConsults(10, undefined, NOW);
