@@ -5,6 +5,10 @@ const ALERT_STATES = new Set(['restored', 'read_error', 'missing', 'write_failed
 const IST_MS = 5.5 * 3600e3;
 const istDay = (ms) => Math.floor((ms + IST_MS) / 86400e3);
 const istClock = (ms) => { const d = new Date(ms + IST_MS); return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0'); };
+// Cell labels fit the 12-13 wide narrow layout; the full words are in the problem line.
+export const LABEL = { read_error: 'PERM rd err', missing: 'PERM missing', write_failed: 'PERM wr fail', db_missing: 'PERM no db', stale: 'PERM stale' };
+// A kiosk that is switched off reads as stale/ssh_unreachable; that is only an alert in clinic hours (08:00-21:00 IST).
+const inClinicHours = (ms) => { const h = new Date(ms + IST_MS).getUTCHours(); return h >= 8 && h < 21; };
 const parseMs = (v) => { const t = v == null ? NaN : new Date(v).getTime(); return Number.isFinite(t) ? t : NaN; };
 
 // row: { ts, payload } or undefined. now: epoch ms.
@@ -26,10 +30,11 @@ export function classify(row, now = Date.now()) {
   const restoredToday = restoredN > 0 && istDay(Number.isFinite(lastMs) ? lastMs : rowMs) === istDay(now);
   if (state === 'restored' || (restoredToday && !ALERT_STATES.has(state))) {
     const at = Number.isFinite(lastMs) ? istClock(lastMs) : (state === 'restored' ? istClock(rowMs) : null);
-    return { alert: true, state: 'restored', reason: p.reason || null, text: at ? `PERM restored ${at}` : 'PERM restored',
+    return { alert: true, state: 'restored', reason: p.reason || null, text: at ? `PERM r ${at}` : 'PERM restored',
       problem: `mic permission was switched off and restored${at ? ' at ' + at : ''} — check the recorder is capturing.` };
   }
   if (ALERT_STATES.has(state)) {
+    if (state === 'stale' && p.reason === 'ssh_unreachable' && !inClinicHours(now)) return null;
     const reason = p.reason ? ` — ${p.reason}` : '';
     const words = {
       read_error: 'mic permission check cannot read (read_error)',
@@ -38,7 +43,7 @@ export function classify(row, now = Date.now()) {
       db_missing: 'mic permission database not found (db_missing)',
       stale: 'mic permission check is out of date (stale)',
     }[state];
-    return { alert: true, state, reason: p.reason || null, text: `PERM ${state}`, problem: words + reason + '.' };
+    return { alert: true, state, reason: p.reason || null, text: LABEL[state], problem: words + reason + '.' };
   }
   return null;   // ok, or an unknown state: leave the cell alone
 }
