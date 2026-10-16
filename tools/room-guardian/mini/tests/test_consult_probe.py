@@ -100,6 +100,15 @@ class Redaction(unittest.TestCase):
                     self.assertNotIn(bad, blob)
                 self.assertIn("<redacted>", blob)
 
+    def test_nc_the_endpoint_id_without_the_pooler_suffix_is_redacted(self):
+        host = "ep-cold-fog-123456-pooler.us-east-2.aws.example.invalid"
+        for text in ("The endpoint ID ep-cold-fog-123456 has been disabled", "endpoint EP-COLD-FOG-123456 disabled", f"host {host} unreachable"):
+            with self.subTest(text):
+                out = ch.probe(self.cfg(host), sources=Src(**dict(GOOD, session=RuntimeError(text))), clock=lambda: NOW)
+                blob = json.dumps(out).lower()
+                for bad in ("ep-cold-fog-123456", host): self.assertNotIn(bad, blob)
+                self.assertIn("<redacted>", blob)
+
     def test_n2_the_top_level_handler_redacts_what_it_prints(self):
         home = tempfile.TemporaryDirectory(); self.addCleanup(home.cleanup)
         os.makedirs(os.path.join(home.name, ".config", "eta-audio"))

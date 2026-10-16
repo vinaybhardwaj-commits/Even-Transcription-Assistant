@@ -308,6 +308,9 @@ class Subscriber:
         except (TypeError, ValueError):
             if stream == "heal":              # a non-JSON heal line is logged only (own file, capped, JSON-quoted): no case
                 self._log_invalid_heal(room, raw)
+            elif stream == "canary":          # a non-JSON canary line is not stored; it gets one audit line (also a 5000-digit integer, which Python refuses)
+                t = self.clock()
+                self.canary.audit_invalid(room, "not_json", t, os.path.join(self.data, datetime.fromtimestamp(t, IST).strftime("%Y-%m-%d")))
             return False                      # not JSON: never stored in the stream file
         now = self.clock()
         day = datetime.fromtimestamp(now, IST).strftime("%Y-%m-%d")

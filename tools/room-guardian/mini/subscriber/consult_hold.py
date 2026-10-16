@@ -479,7 +479,7 @@ def _redactor(url_file):
             url = f.read().strip()
         u = urlparse(url)
         host_as_written = u.netloc.rsplit("@", 1)[-1].split(":")[0]      # urlparse().hostname is lower-cased; libpq prints the host as written
-        for s in (url, u.password, unquote(u.password or ""), u.username, u.hostname, host_as_written, host_as_written.split(".")[0], u.netloc):
+        for s in (url, u.password, unquote(u.password or ""), u.username, u.hostname, host_as_written, host_as_written.split(".")[0], re.sub(r"-pooler$", "", host_as_written.split(".")[0], flags=re.I), u.netloc):
             if s and len(s) >= 3:
                 secrets.add(s)
     except Exception:                      # noqa: BLE001

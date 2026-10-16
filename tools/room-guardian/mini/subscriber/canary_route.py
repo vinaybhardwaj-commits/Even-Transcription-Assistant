@@ -17,6 +17,7 @@ NIGHT_RE = re.compile(r"^[0-9]{8}$")          # the shape only; a real calendar 
 IST = timezone(timedelta(hours=5, minutes=30))
 MODES = ("shadow", "heal")
 STR_CAP = 200
+TS_FAR_S = 36 * 3600                         # a line whose ts is further than this from the Mini clock is audited (never acted on differently)
 CASE_KINDS = ("canary_failed", "canary_inconclusive", "canary_output_absent")
 OUTPUT_ABSENT = "inconclusive:output_absent"
 
@@ -105,20 +106,25 @@ class CanaryRoute:
             try:
                 with open(state_path) as f:
                     d = json.load(f)
-                if isinstance(d, dict):
-                    for k, v in d.items():
-                        if not (isinstance(v, dict) and isinstance(v.get("opened"), dict)):
-                            continue
-                        opened = {}
-                        for a, b in v["opened"].items():
-                            if a in CASE_KINDS and valid_night(b):
-                                opened[a] = b
-                            else:
-                                self._audit_state("opened", k)
-                        absent = v.get("absent_night")
-                        if absent is not None and not valid_night(absent):
-                            self._audit_state("absent_night", k); absent = None
-                        self.state[str(k)] = {"opened": opened, "absent_night": absent}
+                if not isinstance(d, dict):
+                    self._audit_state("file", "-")          # a state file that is not an object: dropped whole
+                    d = {}
+                for k, v in d.items():
+                    if not isinstance(v, dict):
+                        self._audit_state("entry", k); continue
+                    if not isinstance(v.get("opened"), dict):
+                        self._audit_state("opened", k)      # the room's entry is kept without its opened nights (a valid absent_night survives)
+                        v = dict(v, opened={})
+                    opened = {}
+                    for a, b in v["opened"].items():
+                        if a in CASE_KINDS and valid_night(b):
+                            opened[a] = b
+                        else:
+                            self._audit_state("opened", k)
+                    absent = v.get("absent_night")
+                    if absent is not None and not valid_night(absent):
+                        self._audit_state("absent_night", k); absent = None
+                    self.state[str(k)] = {"opened": opened, "absent_night": absent}
             except Exception:            # noqa: BLE001 -- a corrupt or poisoned state file never stops the subscriber: what cannot be read is dropped
                 self._audit_state("file", "-")
 
@@ -153,20 +159,30 @@ class CanaryRoute:
 
     def audit_would_do(self, room, night, now, day_dir):
         """One audit line per would_do (the line itself is stored in the stream file by the caller)."""
+        self._audit_event(room, "would_do", night, now, day_dir)
+
+    def _audit_event(self, room, event, night, now, day_dir, **kw):
         try:
             os.makedirs(day_dir, exist_ok=True)
             with open(os.path.join(day_dir, f"{room}.canary-audit.jsonl"), "a") as f:
-                f.write(json.dumps({"ts": int(now), "room": room, "event": "would_do", "night": night}, sort_keys=True) + "\n")
+                f.write(json.dumps(dict(kw, ts=int(now), room=room, event=event, night=night), sort_keys=True) + "\n")
         except OSError:
             pass
 
-    def _open_once(self, room, kind, night, now):
+    def _open_once(self, room, kind, night, now, day_dir=None):
+        """-> "opened", "same" (this kind already opened for this room tonight; also after an ACK closed it) or "stale". A night OLDER than the stored one is stored and audited only:
+        it never opens, never folds into the open case and never moves the state, and the stored night never goes backwards."""
         st = self.state.setdefault(room, {"opened": {}, "absent_night": None})
-        if st["opened"].get(kind) == night:
-            return False                 # this kind already opened for this room tonight (also after an ACK closed it)
+        stored = st["opened"].get(kind)
+        if stored is not None and night < stored:
+            if day_dir:
+                self._audit_event(room, "stale_night", night, now, day_dir, kind=kind, stored=stored)
+            return "stale"
+        if stored == night:
+            return "same"
         self.sink.canary_case(room, kind, now)
-        st["opened"][kind] = night       # recorded only after the sink took it: a store fault is retried by the next line of the night
-        return True
+        st["opened"][kind] = night if stored is None else max(stored, night)      # recorded only after the sink took it: a store fault is retried by the next line of the night
+        return "opened"
 
     def handle(self, room, raw_obj, dup, now, day_dir):
         """-> "invalid" | "stored" | "case" | "closed". Never raises on a bad line; a sink fault propagates to the caller (which logs it and keeps reading)."""
@@ -178,6 +194,8 @@ class CanaryRoute:
             return "invalid"
         res, night = raw_obj["result"], raw_obj["night"]
         st = self.state.setdefault(room, {"opened": {}, "absent_night": None})
+        if abs(raw_obj["ts"] - now) > TS_FAR_S:
+            self._audit_event(room, "ts_far", night, now, day_dir, line_ts=int(raw_obj["ts"]))      # audited only: the line is handled as before
         if res == "would_do":
             self.audit_would_do(room, night, now, day_dir)
             return "stored"              # stored in the stream file by the caller; audited above; no case
@@ -193,13 +211,16 @@ class CanaryRoute:
             self._save()
             return "closed" if closed else "stored"
         if res == "no_local_rise":
-            opened = self._open_once(room, "canary_failed", night, now)
+            opened = self._open_once(room, "canary_failed", night, now, day_dir) == "opened"
         else:
-            opened = self._open_once(room, "canary_inconclusive", night, now)
+            r = self._open_once(room, "canary_inconclusive", night, now, day_dir)
+            opened = r == "opened"
+            if r == "stale":
+                return "stored"          # a replayed older line moves nothing, not even the output_absent streak
             if res == OUTPUT_ABSENT:
                 prev = st.get("absent_night")
                 if prev is not None and _next_night(prev) == night:
-                    opened = self._open_once(room, "canary_output_absent", night, now) or opened
+                    opened = (self._open_once(room, "canary_output_absent", night, now, day_dir) == "opened") or opened
                 if prev is None or night >= prev:
                     st["absent_night"] = night
             else:
