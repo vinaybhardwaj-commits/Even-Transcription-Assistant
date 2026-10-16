@@ -93,12 +93,14 @@ const suite = HAVE || !ALLOW_SKIP ? describe : describe.skip;
 const TODAY0 = "(date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')";
 let SHA_PITCH = "", SHA_CHAIR = "";
 let n = 0;
-/** One eta_encounter_windows row: opened `daysAgo` IST days before today's midnight (+ `min` minutes), closed 1 s after. Synthetic ids only. */
-function win(key: string, uid: string | null, o: { daysAgo?: number; min?: number; closed?: boolean; room?: string | null; rx?: string | null; text?: boolean; sealed?: string | null; stt?: string | null; translate?: string | null; reason?: string | null } = {}): void {
-  const { daysAgo = 0, min = 0, closed = true, room = "rm_a", rx = null, text = true, sealed = "ok", reason = null } = o;
+/** One eta_encounter_windows row: opened `daysAgo` IST days before today's midnight (+ `min` minutes), closed 1 s after. Synthetic ids only.
+ *  FU2 G5: daysAgo defaults to 1 (always in the past: TODAY0 + 30 min is in the future between 00:00 and 00:30 IST). `today: true` is for the coverage cases, which need an IST-today window:
+ *  it opens at TODAY0 + `min` minutes but never later than 1 s ago, so it is today and in the past at any clock time after 00:00:01 IST. */
+function win(key: string, uid: string | null, o: { today?: boolean; daysAgo?: number; min?: number; closed?: boolean; room?: string | null; rx?: string | null; text?: boolean; sealed?: string | null; stt?: string | null; translate?: string | null; reason?: string | null } = {}): void {
+  const { daysAgo = 1, min = 0, closed = true, room = "rm_a", rx = null, text = true, sealed = "ok", reason = null } = o;
   // catalog stages (INFERRED keys): text:false = stt and translate never ran; stt/translate default to ok
   const stt = o.stt !== undefined ? o.stt : text ? "ok" : null, translate = o.translate !== undefined ? o.translate : text ? "ok" : null;
-  const open = `${TODAY0} - interval '${daysAgo} days' + interval '${min} minutes'`;
+  const open = o.today ? `LEAST(${TODAY0} + interval '${min} minutes', now() - interval '1 second')` : `${TODAY0} - interval '${daysAgo} days' + interval '${min} minutes'`;
   pg.exec(`INSERT INTO eta_encounter_windows (consult_key, consult_uid, prescription_ref, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version)
            VALUES ('${key}', ${uidSql(uid)}, ${rx ? `'${rx}'` : "NULL"}, 'mc_1', ${room ? `'${room}'` : "NULL"}, 'none', ${open}, ${closed ? `${open} + interval '1 second'` : "NULL"}, '${closed ? "endConsult" : "open"}', 'clean', 'v_t')`);
   if (!uid) return;
@@ -235,8 +237,8 @@ suite("JEV-EVERY-CONSULT S1 — every transcribed consult, record-only", () => {
     expect(await pendingSubjects(def, SHA_PITCH, "shadow", 10)).toEqual(["cx_0003@ma"]);
   });
   it("coverage counts on a seeded fixture (counts only) and jevHealth carries them as `coverage`", async () => {
-    win("cx_0001@ma", "u_0001"); win("cx_0001@mb", "u_0001"); win("cx_0002@ma", "u_0002", { min: 1 }); win("cx_0003@ma", "u_0003", { min: 2 });
-    win("cx_0004@ma", "u_0004", { min: 3, text: false }); win("cx_0006@ma", "u_0006", { min: 5, sealed: null }); win("cx_0005@ma", "u_0005", { min: 4, closed: false });
+    win("cx_0001@ma", "u_0001", { today: true }); win("cx_0001@mb", "u_0001", { today: true }); win("cx_0002@ma", "u_0002", { today: true, min: 1 }); win("cx_0003@ma", "u_0003", { today: true, min: 2 });
+    win("cx_0004@ma", "u_0004", { today: true, min: 3, text: false }); win("cx_0006@ma", "u_0006", { today: true, min: 5, sealed: null }); win("cx_0005@ma", "u_0005", { today: true, min: 4, closed: false });
     win("cx_old1@ma", "u_old1", { daysAgo: 2 });   // not today
     decide("cx_0001@ma", SHA_PITCH); decide("cx_0002@ma", SHA_PITCH); decide("cx_0003@ma", SHA_CHAIR); decide("cx_old1@ma", SHA_PITCH); decide("cx_0001@ma", SHA_CHAIR, "live");
     pg.exec(`INSERT INTO affect_calibration_map (id, target, score_col, calib_version, min_n, fit_on, git_sha, sha256, payload) VALUES (1, 'arousal', 'a', 'v', 1, 'f', '${"a".repeat(40)}', '${"b".repeat(64)}', '{}'), (2, 'valence', 'v', 'v', 1, 'f', '${"a".repeat(40)}', '${"c".repeat(64)}', '{}')`);
@@ -276,14 +278,14 @@ suite("JEV-EVERY-CONSULT S1 — every transcribed consult, record-only", () => {
     expect((await rows`SELECT count(*)::int AS c FROM jev_decision WHERE subject_id = 'cx_0001@ma' AND mode = 'live'`)[0]!.c).toBe(nq);
   });
   it("M2 (RF-A5): markers are not jev_done (they are no_state), and an untranscribed consult's decision is not counted", async () => {
-    win("cx_0001@ma", "u_0001"); win("cx_0002@ma", "u_0002", { min: 1, text: false });
+    win("cx_0001@ma", "u_0001", { today: true }); win("cx_0002@ma", "u_0002", { today: true, min: 1, text: false });
     const { defs, ref } = await setRef();
     await askSubject({ jobId: null, set: ref, defs, mode: "shadow", subjectId: "cx_0001@ma", build: null });
     decide("cx_0002@ma", SHA_PITCH);
     const c = await consultCoverage();
     expect(c).toMatchObject({ cut: 2, transcribed: 1, jev_done: { "pitch-detect": 0, "chair-affect": 0 }, no_state: { "pitch-detect": 1, "chair-affect": 0 } });
     decide("cx_0001@mb", SHA_PITCH); // a real row on the sibling key: the consult now counts as done, not no_state
-    win("cx_0001@mb", "u_0001");
+    win("cx_0001@mb", "u_0001", { today: true });
     expect(await consultCoverage()).toMatchObject({ jev_done: { "pitch-detect": 1 }, no_state: { "pitch-detect": 0 } });
   });
   it("L2: coverage throwing gives coverage { unavailable: true } and the rest of jevHealth is unchanged", async () => {
