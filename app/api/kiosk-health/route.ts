@@ -7,6 +7,8 @@
  *       token it signs for /api/fleet/* (lib/fleet/device-auth.ts: aud evenscribe-fleet, htm POST, htu /api/kiosk-health, bsha = hash of THIS body, single-use jti). A Device post may
  *       carry only source "helper", only for the device's OWN Mac and room; steward.result is allowed (the app reports ticket results here) and only touches that Mac's tickets.
  *       Any other event is rejected by name (wrong_source · machine_not_in_room · room_mismatch). An invalid Device token → 401.
+ *       OR Authorization: Bearer <poller token>, checked as sha256(token) against KIOSK_HEALTH_POLLER_TOKEN_SHA256 (after the daemon token; path off when unset, blank or not 64 hex chars): the Mini mic-guard poller. It may post only kind "mic_guard" with source
+ *       "mini_micguard_poller"; any other row is rejected by name (wrong_source · wrong_kind), never stored, and never reaches applyStewardResults. The poller token cannot read steward tickets.
  * Cross-source de-duplication (lib/kiosk-health-dedupe.ts): an event whose twin (same Mac, same kind, the OTHER source of the daemon/helper pair, ts within 2 s) is already stored AND not yet used by another event is not stored again (pairing is one-to-one, nearest first); it is counted in
  * `deduped` and recorded in kiosk_health_dedupe (migration 0154).
  * Idempotent on (machine, boot_id, seq): replays of a spooled batch insert nothing new and still answer 200.
@@ -23,7 +25,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { validateKioskHealthBatch, type KioskHealthRow } from "@/lib/kiosk-health-ingest";
-import { tokenOk } from "@/lib/kiosk-health-auth";
+import { tokenOk, pollerTokenOk, POLLER_KIND, POLLER_SOURCE } from "@/lib/kiosk-health-auth";
 import { authenticateDevice, type DeviceRow } from "@/lib/fleet/device-auth";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
 import { loadLedgerNear, loadStoredNear, recordDropped, splitTwins } from "@/lib/kiosk-health-dedupe";
@@ -71,6 +73,7 @@ export async function POST(req: NextRequest) {
   // TS-H10/H8: the room app's per-device credential (an Ed25519 JWS bound to this method, path and body); the daemon's bearer path below is unchanged.
   let device: DeviceRow | null = null;
   let preRead: string | null = null;
+  let pollerMode = false;
   if (authz.startsWith("Device ")) {
     const declaredDevice = Number(req.headers.get("content-length"));
     if (Number.isFinite(declaredDevice) && declaredDevice > MAX_BODY_CHARS) return reply(413, { ok: false, error: "body_too_large" });
@@ -97,7 +100,10 @@ export async function POST(req: NextRequest) {
       }
       return reply(500, { ok: false, error: "not_configured" });
     }
-    if (!tokenOk(authz, expected)) return reply(401, { ok: false, error: "unauthorized" });
+    if (!tokenOk(authz, expected)) {
+      if (pollerTokenOk(authz)) pollerMode = true;
+      else return reply(401, { ok: false, error: "unauthorized" });
+    }
   }
 
   const declared = Number(req.headers.get("content-length"));
@@ -134,6 +140,16 @@ export async function POST(req: NextRequest) {
         : null;
       if (why) rejected.push({ index: -1, reason: why });
       else kept.push(r);
+    }
+    rows = kept;
+  }
+
+  // A poller-token post is confined to the poller's own kind and source; anything else is rejected by name and never stored.
+  if (pollerMode) {
+    const kept: KioskHealthRow[] = [];
+    for (const r of rows) {
+      if (r.kind === POLLER_KIND && r.source === POLLER_SOURCE) kept.push(r);
+      else rejected.push({ index: -1, reason: r.source !== POLLER_SOURCE ? "wrong_source" : "wrong_kind" });
     }
     rows = kept;
   }

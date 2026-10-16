@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const M = vi.hoisted(() => ({ sql: vi.fn() }));
 vi.mock("@/lib/db", () => ({ sql: M.sql }));
 
+import { createHash } from "crypto";
 import { GET } from "@/app/api/steward/tickets/route";
 import { NextRequest } from "next/server";
 import { STEWARD_TICKET_KEY_ID } from "@/lib/steward/ticket-public-key";
@@ -88,5 +89,17 @@ describe("GET /api/steward/tickets", () => {
     const res = await GET(get());
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ ok: false, error: "db" });
+  });
+
+  it("the poller token cannot read tickets: 401, database never touched", async () => {
+    const POLLER = ["t", "poller", "fixture"].join("-");
+    const SAVED_POLLER = process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256;
+    process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256 = createHash("sha256").update(POLLER).digest("hex");
+    try {
+      expect((await GET(get("machine=m1", `Bearer ${POLLER}`))).status).toBe(401);
+      expect(M.sql).not.toHaveBeenCalled();
+    } finally {
+      if (SAVED_POLLER === undefined) delete process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256; else process.env.KIOSK_HEALTH_POLLER_TOKEN_SHA256 = SAVED_POLLER;
+    }
   });
 });
