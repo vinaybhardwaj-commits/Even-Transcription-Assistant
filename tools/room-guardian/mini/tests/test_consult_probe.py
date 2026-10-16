@@ -78,5 +78,58 @@ class Probe(unittest.TestCase):
         self.assertEqual(r.returncode, 2); self.assertNotIn(PW_, r.stdout + r.stderr)
 
 
+class Redaction(unittest.TestCase):
+    """CO-8 N1 (host as written, first label, any case), N2 (top-level handler redacts), N3 (room keys), N4 (timeouts in errors)."""
+    MIXED = "EP-Cold-Fog-123456." + "Example.invalid"                       # a host written in mixed case, built at run time
+
+    def cfg(self, url_host, mapkeys=("opd-6",), **extra):
+        d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup); self.dir = d.name
+        url = "postgres" + "://" + USER_ + ":" + PW_ + "@" + url_host + "/neondb"
+        c = dict({"consult_room_map": {k: {"machine": "MK1", "room_id": "rid6", "slug": "slug6"} for k in mapkeys}, "consult_db_url_file": os.path.join(d.name, "db.url")}, **extra)
+        open(c["consult_db_url_file"], "w").write(url + "\n")
+        p = os.path.join(d.name, "probe.json"); open(p, "w").write(json.dumps(c)); return p
+
+    def test_n1_the_host_as_written_and_its_first_label_are_redacted_in_any_case(self):
+        label = self.MIXED.split(".")[0]
+        for text in (f'could not translate host name "{self.MIXED}" to address', f'host {self.MIXED.lower()} refused', f'host {self.MIXED.upper()} refused', f"endpoint {label} not found",
+                     f"endpoint {label.lower()} not found", f"endpoint {label.upper()} not found"):
+            with self.subTest(text):
+                out = ch.probe(self.cfg(self.MIXED), sources=Src(**dict(GOOD, session=RuntimeError(text))), clock=lambda: NOW)
+                blob = json.dumps(out)
+                for bad in (self.MIXED, self.MIXED.lower(), self.MIXED.upper(), label, label.lower(), label.upper(), PW_, USER_):
+                    self.assertNotIn(bad, blob)
+                self.assertIn("<redacted>", blob)
+
+    def test_n2_the_top_level_handler_redacts_what_it_prints(self):
+        home = tempfile.TemporaryDirectory(); self.addCleanup(home.cleanup)
+        os.makedirs(os.path.join(home.name, ".config", "eta-audio"))
+        open(os.path.join(home.name, ".config", "eta-audio", "db.url"), "w").write("postgres" + "://" + USER_ + ":" + PW_ + "@" + HOST_ + "/neondb\n")
+        script = os.path.join(HERE, "..", "subscriber", "consult_hold.py")
+        r = subprocess.run([sys.executable, "-I", script, "--probe", os.path.join(home.name, HOST_ + ".json")], capture_output=True, text=True, timeout=30, env={"HOME": home.name, "PATH": os.environ.get("PATH", "")})
+        self.assertEqual(r.returncode, 2); self.assertIn("probe failed: FileNotFoundError", r.stderr); self.assertIn("<redacted>", r.stderr)
+        for bad in (HOST_, PW_, USER_): self.assertNotIn(bad, r.stdout + r.stderr)
+
+    def test_n3_room_keys_must_be_slugs(self):
+        for key in ("OPD-6", "opd 6", "opd.6", "", "x" * 65, "opd-6/../x"):
+            with self.subTest(repr(key)):
+                with self.assertRaises(ValueError) as cm: ch.probe(self.cfg(HOST_, mapkeys=(key,)), sources=Src(**GOOD), clock=lambda: NOW)
+                if key: self.assertNotIn(key, str(cm.exception))
+        out = ch.probe(self.cfg(HOST_, mapkeys=("a-b_c9", "x" * 64)), sources=Src(**GOOD), clock=lambda: NOW); self.assertEqual(sorted(out["rooms"]), sorted(["a-b_c9", "x" * 64]))
+
+    def test_n4_a_source_timeout_is_listed_in_errors(self):
+        import time as _t
+        class Slow(Src):
+            def __getitem__(self, name):
+                if name != "session": return super().__getitem__(name)
+                def f(now, arg): _t.sleep(1.0); return set()
+                return f
+        out = ch.probe(self.cfg(HOST_), sources=Slow(**GOOD), clock=lambda: NOW, timeout_s=0.1)
+        self.assertEqual([e["source"] for e in out["errors"]], ["session"]); self.assertTrue(out["errors"][0]["error"].startswith("timeout")); self.assertTrue(out["source_errors"]["session"])
+
+    def test_n4_a_wrong_shape_answer_is_listed_too(self):
+        out = ch.probe(self.cfg(HOST_), sources=Src(**dict(GOOD, session=["not", "a", "set"])), clock=lambda: NOW)
+        self.assertEqual([(e["source"], e["error"].split(":")[0]) for e in out["errors"]], [("session", "wrong_shape")])
+
+
 if __name__ == "__main__":
     unittest.main()
