@@ -119,7 +119,12 @@
  *   layerStatus?:Object<string,{status:"ok"|"absent"|"not_available"|"error", source:string|null, code:string|null}>,
  *   transcriptMeta?:{span:{t0:number,t1:number}|null, degraded:string[], nClamped:number|null, manifestT0Ms:number|null, durationS:number|null}|null,
  *   partsClamped?:number|null,
- *   identityDegraded?:boolean
+ *   identityDegraded?:boolean,
+ *   c4?:{state:"absent"|"error"|"null"|"ok", code:string|null, data:Object|null},   catalog C4 (admin only, all optional): absent = no key, error = failed read, null = nothing stored
+ *   jevSets?:Object[]|null,    C4 jev set rows {set_id, set_sha, band, label, model, at, state}; jev above stays the jev_decision rows
+ *   jevBad?:boolean,           layers.jev (or the C4 jev column) came back in a shape the page does not read
+ *   tracks_present?:string[],  raw layers_present names (stt, translate, diar_sarvam, role, parts...)
+ *   narrative?:{turns:Object, voice_id:Object, topics:Object}   MOCKUP ONLY (draft shape v0): the live adapter never sets it
  * }} ConsultDetail
  */
 

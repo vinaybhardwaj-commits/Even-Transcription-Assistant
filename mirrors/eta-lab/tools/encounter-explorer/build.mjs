@@ -12,7 +12,7 @@ import { CATALOG_ACTIONS, CATALOG_TOOLS } from "./src/adapter-catalog.js";
 const root = dirname(fileURLToPath(import.meta.url));
 ensureMockup();
 const rd = p => readFileSync(join(root, p), "utf8");
-const ORDER = ["types", "util", "pulse", "days", "adapter", "mcp-call", "adapter-current", "adapter-catalog", "audio-synth", "adapter-fixture", "ui", "main"];
+const ORDER = ["types", "util", "links", "c4", "pulse", "days", "adapter", "mcp-call", "adapter-current", "adapter-catalog", "audio-synth", "adapter-fixture", "dom", "layers", "ui", "main"];
 
 function strip(src) {
   return src

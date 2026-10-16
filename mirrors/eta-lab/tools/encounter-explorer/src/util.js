@@ -83,3 +83,6 @@ export function uidOfUnitKey(k) { return typeof k === "string" ? k.split("@")[0]
 
 /** Three states: "yes", "no", or "unknown" (the catalog has not joined prescription data for this consult: has_prescription null and no id). Never "no" for unknown. */
 export const rxState = c => (hasRx(c) ? "yes" : c.has_prescription === null ? "unknown" : "no");
+
+/** The reason token of the sealed stage (e.g. final_no_session), or null: why a consult has no clip. */
+export const sealedReason = c => { const r = c && c.stages && c.stages.sealed && c.stages.sealed.reason; return typeof r === "string" && /^[A-Za-z0-9_.:-]{1,60}$/.test(r) ? r : null; };
