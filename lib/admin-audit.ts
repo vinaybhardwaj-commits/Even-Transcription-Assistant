@@ -15,13 +15,13 @@
  */
 import { sql } from "@/lib/db";
 
-export type AdminActor = { type: "admin" | "system"; id: string };
+export type AdminActor = { type: "admin" | "system" | "person"; id: string };
 
 export type AdminAuditInput = {
   actor: AdminActor;
   /** `admin.<action>` or `admin.<action>.refused`. */
   action: string;
-  targetType: "room" | "room_install";
+  targetType: "room" | "room_install" | "mcp_person";
   targetId: string;
   meta: Record<string, unknown>;
   /** ADMIN-1b: true = a failed insert THROWS (the MCP tool writes its audit row before the write and fails closed). Default false = best-effort. */

@@ -80,7 +80,7 @@ describe("registration", () => {
     expect(t.find((x) => x.name === "scribe_lanes")!.annotations.readOnlyHint).toBe(true);
     const aspect = ((t.find((x) => x.name === "scribe_health")!.inputSchema as { properties: Row }).properties.aspect as { enum: string[] }).enum;
     expect(aspect).toContain("routes");
-    expect(JSON.stringify(body.result).length).toBeLessThanOrEqual(46_892); // MEASURED 46,892 = CATALOG-13's 46,877 + 15 for the scribe_rubric sweep_status action (RUBRIC-SWEEP); CATALOG-13: 46,877 (+87 over 46,790: the explorer_link action, its date argument and the no_clip help; measured 46,790: 46,593 + CATALOG-7 197)
+    expect(JSON.stringify(body.result).length).toBeLessThanOrEqual(47_207); // OAUTH-PERSON: 47,207 (MEASURED; +315 over 46,892: the scribe_admin people actions and their schema, the scribe_audit_recent actor filter); before it: MEASURED 46,892 = CATALOG-13's 46,877 + 15 for the scribe_rubric sweep_status action (RUBRIC-SWEEP); CATALOG-13: 46,877 (+87 over 46,790: the explorer_link action, its date argument and the no_clip help; measured 46,790: 46,593 + CATALOG-7 197)
   });
 
   it("the write needs write scope at the door; a room-restricted token is refused", async () => {

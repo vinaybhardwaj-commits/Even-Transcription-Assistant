@@ -10,5 +10,7 @@ export const MCP_AUDIT_ACTOR = "mcp:operator-v1";
 export function mcpActorId(actor: string | null | undefined): string {
   const t = typeof actor === "string" ? actor.trim() : "";
   if (!t) return MCP_AUDIT_ACTOR;
+  // OAUTH-O3: a person principal records as `person:<email>` exactly (no `mcp:` prefix, no 64-char cut that could truncate an address and break an exact-match actor filter).
+  if (t.startsWith("person:")) return t.slice(0, 261);
   return t.startsWith("mcp:") ? t.slice(0, 64) : `mcp:${t}`.slice(0, 64);
 }
