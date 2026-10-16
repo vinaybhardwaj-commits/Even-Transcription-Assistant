@@ -322,13 +322,19 @@ class NeverBreaksControl(unittest.TestCase):
 
 
 class PgSources(unittest.TestCase):
-    """S3: pg_sources against a fake psycopg: read-only at connect, the 5 s statement timeout, parameters bound, credential read from the file."""
+    """S3: pg_sources against a fake psycopg: a READ ONLY transaction, the 5 s statement timeout (SET LOCAL), parameters bound, credential read from the file."""
     def setUp(self):
         self.calls = []
         outer = self
         class Conn:
             read_only = False
-            def execute(self, sql, params): outer.calls.append(("execute", sql, params)); self.sql = sql; return self
+            def execute(self, sql, params=None): outer.calls.append(("execute", sql, params)); self.sql = sql; return self
+            def transaction(self):
+                conn = self
+                class Tx:
+                    def __enter__(s): outer.calls.append(("begin", conn.read_only)); return conn
+                    def __exit__(s, *a): outer.calls.append(("commit",)); return False
+                return Tx()
             def fetchall(self): return outer.rows[self.sql] if isinstance(outer.rows, dict) else outer.rows
             def close(self): outer.calls.append(("close",))
         self.conn = Conn(); self.rows = []
@@ -343,15 +349,18 @@ class PgSources(unittest.TestCase):
         ch.pg_sources(self.f)["session"](T, ["b6"])
         kind, url, kw = self.calls[0]
         self.assertEqual((kind, url), ("connect", "postgres://u:p@h/db"))
-        self.assertIn("default_transaction_read_only=on", kw["options"]); self.assertIn("statement_timeout=5000", kw["options"]); self.assertEqual(kw["connect_timeout"], 5)
+        self.assertNotIn("options", kw)                                                              # a startup `options=` parameter hangs against the live endpoint (16 Oct probe)
+        self.assertEqual(kw, {"connect_timeout": 5})
         self.assertTrue(self.conn.read_only); self.assertEqual(self.calls[-1], ("close",))
+        self.assertEqual(self.calls[1], ("begin", True))                                              # the transaction is READ ONLY (psycopg read_only) ...
+        self.assertEqual(self.calls[2], ("execute", "SET LOCAL statement_timeout = 5000", None))     # ... and the 5 s statement timeout is its first statement
 
     def test_sql_is_constant_with_bound_parameters(self):
         at = datetime.fromtimestamp(T - 3, timezone.utc)
         self.rows = {ch.HB_SQL: [("M6", at)], ch.ENC_SQL: [("M6", "encounter_open", at)], ch.POST_SQL: [("M6", "encounter_open", at)]}
         out = ch.pg_sources(self.f)["presence"](T, ["M6"])
         self.assertEqual(out, {"hb": [("M6", T - 3)], "enc": [("M6", "encounter_open", T - 3)], "post": [("M6", "encounter_open", T - 3)]})
-        ex = [c for c in self.calls if c[0] == "execute"]; self.assertEqual([x[1] for x in ex], [ch.HB_SQL, ch.ENC_SQL, ch.POST_SQL]); self.assertEqual(ex[0][2][0], ["M6"])
+        ex = [c for c in self.calls if c[0] == "execute" and not c[1].startswith("SET LOCAL")]; self.assertEqual([x[1] for x in ex], [ch.HB_SQL, ch.ENC_SQL, ch.POST_SQL]); self.assertEqual(ex[0][2][0], ["M6"])
         utc = timezone.utc                                                                           # I-1: the lookbacks are pinned (heartbeat 2 min, encounter events 4 h)
         self.assertEqual(ex[0][2][1], datetime.fromtimestamp(T - 120, utc)); self.assertEqual(ex[1][2][1], datetime.fromtimestamp(T - 4 * 3600, utc))
         self.assertEqual(ex[2][2][1], datetime.fromtimestamp(T - 4 * 3600, utc)); self.assertEqual(ch.ENC_LOOKBACK_S, 4 * 3600)
