@@ -33,7 +33,7 @@ from .boundary import Boundary
 from .combinations import components_of
 from .followup import add_interval, map_follow_up
 from .guard import (
-    CONTINUE_QUOTE, NON_DOCTOR, NUM_WORDS, NUM_WORDS_HI, bind_regimen_to_clause, numerals, recover_regimen, rx_turns,
+    CONTINUE_QUOTE, DOSE_FIELDS, NON_DOCTOR, NUM_WORDS, NUM_WORDS_HI, bind_regimen_to_clause, numerals, recover_regimen, rx_turns,
 )
 from .ingest import Consult, Turn
 from .note import FILLER, drop_clauses, scrub_identity
@@ -554,7 +554,8 @@ class Builder:
         out = dict(it)
         lost = False
         for k in bad:
-            out[k] = as_text(it[k])
+            # FRX-N1 C1: a list in a dose field joins to "500, 250", no unit and no component. It is absent, never a join.
+            out[k] = None if k in DOSE_FIELDS and isinstance(it[k], list) else as_text(it[k])
             lost = lost or out[k] is None
         if lost and record:
             self.P(kind, f"{kind} (value not representable)", "discussed_only", self.unquarantined(self.turns(it)), 0.5, None)
@@ -1344,6 +1345,11 @@ class Builder:
         if self.quarantined(turns):
             self.quarantine("medicine", "unnamed drug in a quarantined turn", turns, names=[], lead=lead)
             return
+        bad = [k for k in DOSE_FIELDS if s.get(k) is not None and not (isinstance(s[k], (str, int, float)) and not isinstance(s[k], bool))]
+        for k in bad:  # FRX-N1 C1: a list or other structure in a slot dose field takes the absent branch
+            s[k] = None
+        if bad:
+            self.P("medicine", "medicine (value not representable)", "discussed_only", self.unquarantined(turns), 0.5, None)
         self._fill_slot_regimen(s, turns)
         if not any(s.get(k) for k in ("dosage_form", "frequency", "duration", "timing", "strength", "drug_class_said", "indication_said")) and not s.get("_flags"):
             return

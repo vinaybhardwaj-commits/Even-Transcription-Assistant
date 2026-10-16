@@ -24,7 +24,7 @@ from tools.eta2freescript import pipeline
 from tools.eta2freescript.boundary import Boundary
 from tools.eta2freescript.mapper import as_text, build, duration_words
 from tools.eta2freescript.models import FakeClient
-from tools.eta2freescript.note import flags_by_pointer
+from tools.eta2freescript.note import flags_by_pointer, render_note
 from tools.eta2freescript.pipeline import _fallback_note_ex, run_consult
 from tools.eta2freescript.validate import printable_errors
 
@@ -244,7 +244,8 @@ def test_site_prescription_text_fields():
     a = build_direct(enc)
     assert not has_brace(a["gp_extraction"]) and not has_brace(a["slots"])
     full = dict(base, strength="500 mg", frequency="twice a day", duration="three days")
-    a = art_of(prescription=[dict(full, instructions=["after food", "with water"], route=["oral"])])
+    # C1: route is a dose field, so a list there is no longer joined ("oral"); only instructions joins
+    a = art_of(prescription=[dict(full, instructions=["after food", "with water"], route="oral")])
     b = art_of(prescription=[dict(full, instructions="after food, with water", route="oral")])
     assert a["gp_extraction"] == b["gp_extraction"] and a["gp_extraction"]["medicines"]
 
@@ -508,3 +509,169 @@ def test_recorder_over_run_consult_changes_only_where_a_structure_was_present(ba
         assert not has_brace(new["artifact"]["gp_extraction"]), i
     assert injected > 100 and changed > 50
     print(f"recorder: {n} consults, {injected} with a structure in a text field, {changed} changed ({crashed} of them crash on base)")
+
+
+# ---- C1 (16 Oct 2026): a list in a dose field is absent plus one "(value not representable)" item, never a join -----------------
+C1_BASE_SHA = "7130c5a7"
+DOSE_LISTS = {"strength": [500, 250], "frequency": ["twice a day", "once a day"], "duration": [3, 5], "route": ["oral", "topical"]}
+RX_BASE = {"action": "start", "decision_turn": 4, "generic": "paracetamol", "basis": "said", "confidence": 0.85, "source_turns": [4],
+           "strength": "500 mg", "frequency": "twice a day", "duration": "three days", "route": "oral"}
+SLOT_BASE = {"dosage_form": "gel", "frequency": "twice a day", "duration": "for two weeks", "strength": "500 mg", "quote_turn": 4,
+             "source_turns": [4]}
+JOINS = ("500, 250", "twice a day, once a day", "3, 5", "oral, topical")
+
+
+def direct(**enc):
+    """The mapper alone (guard() would recover a dose from the quote and hide the list); note_text as the pipeline renders it."""
+    enc.setdefault("examination", EXAM)
+    art = build_direct(empty_encounter(**enc))
+    art["note_text"] = render_note(art["gp_extraction"], flags_by_pointer(art))
+    return art
+
+
+def not_representable(art):
+    return [p for p in art["provenance"] if p["text"] == "medicine (value not representable)"]
+
+
+def whole(art):
+    return json.dumps({k: art[k] for k in ("gp_extraction", "slots", "provenance", "note_text") if k in art}) + fallback(art)
+
+
+@pytest.mark.parametrize("field", sorted(DOSE_LISTS))
+def test_c1_prescription_dose_list_is_absent_with_one_item(field):
+    a = direct(prescription=[dict(RX_BASE, **{field: DOSE_LISTS[field]})])
+    assert len(not_representable(a)) == 1
+    med = a["gp_extraction"]["medicines"][0]
+    if field != "route":
+        assert field not in med or med[field] in (None, "")
+    for j in JOINS:
+        assert j not in whole(a), (field, j)
+    assert any(f"{field}_unstated" in (p.get("flags") or []) for p in a["provenance"]) or field == "route"
+
+
+@pytest.mark.parametrize("field", sorted(DOSE_LISTS))
+def test_c1_regimen_slot_dose_list_is_absent_with_one_item(field):
+    a = direct(regimen_slots=[dict(SLOT_BASE, **{field: DOSE_LISTS[field]})])
+    assert len(not_representable(a)) == 1
+    assert a["slots"], a
+    # the absent branch: the same slot as when the field is None (frequency and duration may still be read from the doctor's clause)
+    none = direct(regimen_slots=[dict(SLOT_BASE, **{field: None})])
+    nid = lambda slots: json.dumps([{k: v for k, v in x.items() if k != "slot_id"} for x in slots], sort_keys=True)
+    assert nid(a["slots"]) == nid(none["slots"])
+    for j in JOINS:
+        assert j not in whole(a), (field, j)
+    assert not any(stray(x) for slot in a["slots"] for part in (slot[k] for k in ("form", "frequency", "duration", "strength"))
+                   for x in strings(part)), a["slots"]
+
+
+def test_c1_regimen_slot_every_structure_in_a_dose_field_is_absent():
+    for field in DOSE_FIELDS_UNDER_TEST:
+        for bad in ([1, 2], ["a"], [], {"value": 3, "unit": "DAYS"}, {"a": 1}, [["a"]], True):
+            a = direct(regimen_slots=[dict(SLOT_BASE, **{field: bad})])
+            assert len(not_representable(a)) == 1, (field, bad)
+            assert not has_brace(a["slots"]) and "True" not in json.dumps(a["slots"]), (field, bad)
+
+
+DOSE_FIELDS_UNDER_TEST = ("strength", "frequency", "duration", "route")
+
+
+def test_c1_dose_fields_are_the_guard_constant():
+    from tools.eta2freescript.guard import DOSE_FIELDS
+    assert tuple(DOSE_FIELDS) == DOSE_FIELDS_UNDER_TEST and M.DOSE_FIELDS is DOSE_FIELDS
+
+
+def test_c1_all_four_lists_at_once_on_both_sites_leave_no_join_anywhere():
+    a = direct(prescription=[dict(RX_BASE, **DOSE_LISTS)], regimen_slots=[dict(SLOT_BASE, **DOSE_LISTS)])
+    assert len(not_representable(a)) == 2
+    for j in JOINS:
+        assert j not in whole(a), j
+
+
+def test_c1_control_instructions_list_still_joins():
+    a = direct(prescription=[dict(RX_BASE, instructions=["after food", "with water"])])
+    assert not not_representable(a)
+    assert "after food, with water" in whole(a)
+    b = direct(prescription=[dict(RX_BASE, instructions="after food, with water")])
+    assert a["gp_extraction"] == b["gp_extraction"]
+
+
+@pytest.mark.parametrize("key", ["instructions", "dosage_form", "drug_class_said", "name_interpretation"])
+def test_c1_control_non_dose_rx_lists_still_join(key):
+    a = direct(prescription=[dict(RX_BASE, **{key: ["x", "y"]})])
+    assert not not_representable(a)
+    assert a["gp_extraction"] == direct(prescription=[dict(RX_BASE, **{key: "x, y"})])["gp_extraction"]
+
+
+def test_c1_control_other_text_fields_still_join():
+    a = art_of(advice=[{"text": ["drink water", "rest"], "basis": "said", "source_turns": [5]}])
+    assert "drink water, rest" in whole(a)
+    inv = _inv(["before food", "morning"])
+    assert inv["gp_extraction"]["further_investigations"][0]["instruction"] == "before food, morning"
+    assert not not_representable(a) and not not_representable(inv)
+
+
+def _base_c1():
+    global BASE_SHA
+    saved = BASE_SHA
+    BASE_SHA = C1_BASE_SHA
+    try:
+        return _base_mapper()
+    finally:
+        BASE_SHA = saved
+
+
+@pytest.fixture(scope="module")
+def base_c1():
+    return _base_c1()
+
+
+def test_c1_oracle_plain_string_input_is_byte_identical_to_7130c5a7(base_c1):
+    assert base_c1.MAPPER_VERSION == M.MAPPER_VERSION and hasattr(base_c1, "as_text")
+    n = 2500
+    for seed in range(n):
+        g = Gen(40_000 + seed, "str")
+        enc = g.enc()
+        if seed % 2:  # plain-string regimen slots too
+            enc["regimen_slots"] = [dict(SLOT_BASE, frequency=g.rng.choice(["twice a day", "once a day"]),
+                                         duration=g.rng.choice([None, "for two weeks"]), strength=g.rng.choice([None, "500 mg"]))]
+        old, new = build_direct(enc, base_c1), build_direct(enc)
+        assert json.dumps(stable(old), sort_keys=True) == json.dumps(stable(new), sort_keys=True), seed
+        assert fallback(old) == fallback(new), seed
+    assert n >= 2000
+
+
+def _inject(enc, rng):
+    """List values in dose fields of prescription and regimen_slots. Returns True when one went in."""
+    hit = False
+    for rx in enc["prescription"]:
+        for k in rng.sample(sorted(DOSE_LISTS), rng.randint(1, 2)) if rng.random() < 0.7 else []:
+            rx[k] = list(DOSE_LISTS[k])
+            hit = True
+    if rng.random() < 0.7:
+        slot = dict(SLOT_BASE)
+        if rng.random() < 0.7:
+            slot[rng.choice(["strength", "frequency", "duration", "route"])] = [500, 250]
+            hit = True
+        enc["regimen_slots"] = [slot]
+    return hit
+
+
+def test_c1_recorder_changes_only_where_a_list_dose_field_was_injected(base_c1, tmp_path):
+    n, injected, changed = 240, 0, 0
+    for i in range(n):
+        g = Gen(50_000 + i, "str")
+        enc = g.enc()
+        enc["prescription"] = enc["prescription"] or [dict(RX_BASE)]
+        hit = _inject(enc, random.Random(i))
+        injected += hit
+        new_calls, new = _record(M, enc, tmp_path / f"n{i}")
+        old_calls, old = _record(base_c1, enc, tmp_path / f"o{i}")
+        same = (old_calls == new_calls and json.dumps(stable(old["artifact"]), sort_keys=True) == json.dumps(stable(new["artifact"]), sort_keys=True)
+                and old["final_valid"] == new["final_valid"])
+        if not same:
+            changed += 1
+            assert hit, i
+        for j in JOINS:
+            assert j not in json.dumps(new["artifact"]), (i, j)
+    assert injected > 100 and changed > 20
+    print(f"c1 recorder: {n} consults, {injected} with a list dose field, {changed} changed")
