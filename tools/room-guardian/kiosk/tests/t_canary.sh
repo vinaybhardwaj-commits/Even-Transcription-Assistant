@@ -35,7 +35,7 @@ test_kill_switch_on_never_plays_even_in_heal_mode() {
 }
 
 test_heal_plays_once_per_night_at_volume_0_3() {
-  cn_prep; go_heal; echo 5623 >"$T/afplay_amp"; cn_run
+  cn_prep; go_heal; echo 11200 >"$T/afplay_amp"; cn_run
   assert_eq "$(cn_plays)" "2" "afplay called twice (two plays per slot)"
   assert_has "$(grep '^afplay ' "$CALLS")" "-v 0.3 " "volume 0.3"
   assert_has "$(grep '^afplay ' "$CALLS")" "canary.wav" "the canary WAV"
@@ -46,7 +46,7 @@ test_heal_plays_once_per_night_at_volume_0_3() {
 }
 
 test_slot_pm_then_am_next_morning_both_play() {
-  cn_prep 22:00; go_heal; echo 5623 >"$T/afplay_amp"; cn_run
+  cn_prep 22:00; go_heal; echo 11200 >"$T/afplay_amp"; cn_run
   assert_eq "$(cn_plays)" "2" "played at 22:00 (pm)"
   GUARDIAN_FAKE_NOW="$(( $(ist_epoch 07:30) + 86400 ))"; write_status; mk_pcm_tone 100 10; consult_clear; go_heal; cn_run
   assert_eq "$(cn_plays)" "4" "the next morning am slot plays (9 h 40 after pm)"
@@ -108,10 +108,10 @@ test_wav_is_a_48k_mono_tone_of_three_bursts() {
   assert_eq "$(od -An -v -t d2 -j$((44 + 48)) -N2 "$w" | tr -d ' ')" "0" "sample 24 crosses zero"
 }
 
-test_confirm_plus_35_db_is_pass() {
-  cn_prep; go_heal; echo 5623 >"$T/afplay_amp"; cn_run
+test_confirm_plus_41_db_is_pass() {
+  cn_prep; go_heal; echo 11200 >"$T/afplay_amp"; cn_run
   assert_has "$(cn_events)" '"result":"pass"' "pass"
-  assert_has "$(cn_events)" '"rise_db":3[45]\.' "rise about 35 dB"
+  assert_has "$(cn_events)" '"rise_db":4[01]\.' "rise about 41 dB"
   assert_not "$(cn_events)" 'RIFF' "G9 no audio in the event"
 }
 
@@ -127,7 +127,7 @@ test_confirm_no_rise_is_no_local_rise() {
 }
 
 test_confirm_output_absent_is_inconclusive() {
-  cn_prep; go_heal; touch "$T/sp_no_out"; echo 5623 >"$T/afplay_amp"; cn_run
+  cn_prep; go_heal; touch "$T/sp_no_out"; echo 11200 >"$T/afplay_amp"; cn_run
   assert_has "$(cn_events)" '"result":"inconclusive:output_absent"' "no output device"
   assert_has "$(cn_events)" '"output":"absent"' "output field"
   assert_eq "$(cn_plays)" "0" "nothing played to a missing device"
@@ -145,14 +145,14 @@ test_confirm_tape_stalled_is_inconclusive() {
 cn_fake_sp_sets_heal_off() { printf '#!/bin/bash\n: >"%s/flags/heal-off"\necho "{\\"SPAudioDataType\\":[{\\"coreaudio_default_audio_output_device\\":\\"yes\\"}]}"\n' "$GUARDIAN_HOME" >"$T/bin/system_profiler"; chmod +x "$T/bin/system_profiler"; }
 
 test_direct_call_in_shadow_makes_no_afplay_call() {
-  cn_prep; go_shadow; echo 5623 >"$T/afplay_amp"
+  cn_prep; go_shadow; echo 11200 >"$T/afplay_amp"
   ACT_LAYER=canary; canary_play_and_confirm
   assert_eq "$(cn_plays)" "0" "canary_play_and_confirm in SHADOW: 0 plays"
   assert_has "$(cn_events)" '"result":"would_do"' "reported as would_do"
 }
 
 test_kill_engaged_during_the_output_check_makes_no_play() {
-  cn_prep; go_heal; echo 5623 >"$T/afplay_amp"; cn_fake_sp_sets_heal_off
+  cn_prep; go_heal; echo 11200 >"$T/afplay_amp"; cn_fake_sp_sets_heal_off
   cn_run
   [ -e "$FLAG_DIR/heal-off" ] && ok || fail "the fake output check set heal-off"
   assert_eq "$(cn_plays)" "0" "kill engaged after act_step, before afplay: 0 plays"
@@ -161,7 +161,7 @@ test_kill_engaged_during_the_output_check_makes_no_play() {
 test_burst_found_at_any_tape_lag() {
   local lag
   for lag in 0 1 2 3; do
-    cn_prep; go_heal; echo 5623 >"$T/afplay_amp"; echo "$lag" >"$T/afplay_lag"; cn_run
+    cn_prep; go_heal; echo 11200 >"$T/afplay_amp"; echo "$lag" >"$T/afplay_lag"; cn_run
     assert_has "$(cn_events)" '"result":"pass"' "lag ${lag}s passes"
   done
 }
@@ -169,12 +169,12 @@ test_burst_found_at_any_tape_lag() {
 test_volume_must_be_a_decimal_in_0_to_0_5() {
   local v
   for v in 0 0.0 0.00 0.51 0.6 1 1.0 abc "0.3 -x" "" -0.2 .3 0.123; do
-    cn_prep; go_heal; echo 5623 >"$T/afplay_amp"; CANARY_VOLUME="$v"; cn_run
+    cn_prep; go_heal; echo 11200 >"$T/afplay_amp"; CANARY_VOLUME="$v"; cn_run
     assert_eq "$(cn_plays)" "0" "volume [$v]: no play"
     assert_has "$(cn_events)" 'inconclusive:bad_volume' "volume [$v]: reported"
   done
   for v in 0.3 0.5 0.05 0.1; do
-    cn_prep; go_heal; echo 5623 >"$T/afplay_amp"; CANARY_VOLUME="$v"; cn_run
+    cn_prep; go_heal; echo 11200 >"$T/afplay_amp"; CANARY_VOLUME="$v"; cn_run
     assert_eq "$(cn_plays)" "2" "volume [$v]: plays"
   done
 }
@@ -182,7 +182,7 @@ test_volume_must_be_a_decimal_in_0_to_0_5() {
 test_night_state_fails_closed() {
   local c
   for c in garbage empty dir unreadable future short; do
-    cn_prep; go_heal; echo 5623 >"$T/afplay_amp"; rm -rf "$CANARY_SLOT_FILE"
+    cn_prep; go_heal; echo 11200 >"$T/afplay_amp"; rm -rf "$CANARY_SLOT_FILE"
     case "$c" in
       garbage) echo "garbage" >"$CANARY_SLOT_FILE" ;;
       empty) : >"$CANARY_SLOT_FILE" ;;
@@ -197,27 +197,27 @@ test_night_state_fails_closed() {
     chmod 600 "$CANARY_SLOT_FILE" 2>/dev/null; rm -rf "$CANARY_SLOT_FILE"
   done
   # an older night is fine
-  cn_prep; go_heal; echo 5623 >"$T/afplay_amp"; echo 20200101-pm >"$CANARY_SLOT_FILE"; cn_run
+  cn_prep; go_heal; echo 11200 >"$T/afplay_amp"; echo 20200101-pm >"$CANARY_SLOT_FILE"; cn_run
   assert_eq "$(cn_plays)" "2" "an older night plays"
   assert_eq "$(cat "$CANARY_SLOT_FILE")" "$(canary_slot_key)" "night written"
   assert_eq "$(cat "$CANARY_LAST_FILE")" "$GUARDIAN_FAKE_NOW" "last-play epoch written"
 }
 
 test_no_second_play_within_6_h_of_the_last() {
-  cn_prep; go_heal; echo 5623 >"$T/afplay_amp"
+  cn_prep; go_heal; echo 11200 >"$T/afplay_amp"
   echo "$((GUARDIAN_FAKE_NOW - 3600))" >"$CANARY_LAST_FILE"; cn_run
   assert_eq "$(cn_plays)" "0" "1 h after a play: refused"
   assert_has "$(cn_events)" 'inconclusive:state_recent_play' "reported"
-  cn_prep; go_heal; echo 5623 >"$T/afplay_amp"; echo "$((GUARDIAN_FAKE_NOW + 3600))" >"$CANARY_LAST_FILE"; cn_run
+  cn_prep; go_heal; echo 11200 >"$T/afplay_amp"; echo "$((GUARDIAN_FAKE_NOW + 3600))" >"$CANARY_LAST_FILE"; cn_run
   assert_eq "$(cn_plays)" "0" "a last play in the future (clock went back): refused"
-  cn_prep; go_heal; echo 5623 >"$T/afplay_amp"; echo "junk" >"$CANARY_LAST_FILE"; cn_run
+  cn_prep; go_heal; echo 11200 >"$T/afplay_amp"; echo "junk" >"$CANARY_LAST_FILE"; cn_run
   assert_eq "$(cn_plays)" "0" "garbage last-play: refused"
-  cn_prep; go_heal; echo 5623 >"$T/afplay_amp"; echo "$((GUARDIAN_FAKE_NOW - 22000))" >"$CANARY_LAST_FILE"; cn_run
+  cn_prep; go_heal; echo 11200 >"$T/afplay_amp"; echo "$((GUARDIAN_FAKE_NOW - 22000))" >"$CANARY_LAST_FILE"; cn_run
   assert_eq "$(cn_plays)" "2" "over 6 h: plays"
 }
 
 test_state_that_cannot_be_written_means_no_play() {
-  cn_prep; go_heal; echo 5623 >"$T/afplay_amp"; mkdir "$CANARY_LAST_FILE"
+  cn_prep; go_heal; echo 11200 >"$T/afplay_amp"; mkdir "$CANARY_LAST_FILE"
   cn_run
   assert_eq "$(cn_plays)" "0" "last-play path is a directory: no play"
 }
@@ -233,7 +233,7 @@ test_canary_constants_are_not_settable_from_the_environment() {
 # run and once never honour CANARY_AFPLAY / TESTMODE: the tone goes to the pinned afplay path only. A fake /usr/bin is impossible here, so the check
 # is on the code path: the variable that reaches run_capped, with G_RUNMODE=1 and with every seam set.
 test_run_mode_never_uses_the_afplay_seam() {
-  cn_prep; go_heal; echo 5623 >"$T/afplay_amp"
+  cn_prep; go_heal; echo 11200 >"$T/afplay_amp"
   printf '#!/bin/bash\necho "PINNED-CALL $*" >>"%s/pinned_calls"\n' "$T" >"$T/pinned_afplay"; chmod +x "$T/pinned_afplay"
   G_AFPLAY="$T/pinned_afplay"
   # every seam set, run mode on: the tone must go to the pinned path and never to the CANARY_AFPLAY fake
@@ -287,28 +287,28 @@ cn_ctl() {
 }
 
 test_control_path_fresh_heal_plays_once() {
-  cn_prep; echo 5623 >"$T/afplay_amp"; cn_ctl 5 heal; cn_run
+  cn_prep; echo 11200 >"$T/afplay_amp"; cn_ctl 5 heal; cn_run
   assert_eq "$(cn_plays)" "2" "control.last fresh heal: 2 plays"
   assert_has "$(cn_events)" '"result":"pass"' "pass"
 }
 
 test_control_path_age_90_plays_age_91_does_not() {
-  cn_prep; echo 5623 >"$T/afplay_amp"; cn_ctl 90 heal; cn_run
+  cn_prep; echo 11200 >"$T/afplay_amp"; cn_ctl 90 heal; cn_run
   assert_eq "$(cn_plays)" "2" "age 90 s: 2 plays"
-  cn_prep; echo 5623 >"$T/afplay_amp"; cn_ctl 91 heal; cn_run
+  cn_prep; echo 11200 >"$T/afplay_amp"; cn_ctl 91 heal; cn_run
   assert_eq "$(cn_plays)" "0" "age 91 s: 0 plays"
   assert_has "$(cn_events)" '"result":"would_do"' "age 91 s: reported as would_do"
 }
 
 test_control_path_shadow_kill_and_heal_off_never_play() {
-  cn_prep; echo 5623 >"$T/afplay_amp"; cn_ctl 5 shadow; cn_run
+  cn_prep; echo 11200 >"$T/afplay_amp"; cn_ctl 5 shadow; cn_run
   assert_eq "$(cn_plays)" "0" "mode shadow: 0 plays"
   assert_has "$(cn_events)" '"result":"would_do"' "shadow: would_do"
-  cn_prep; echo 5623 >"$T/afplay_amp"; cn_ctl 5 heal true; cn_run
+  cn_prep; echo 11200 >"$T/afplay_amp"; cn_ctl 5 heal true; cn_run
   assert_eq "$(cn_plays)" "0" "kill true: 0 plays"
-  cn_prep; echo 5623 >"$T/afplay_amp"; cn_ctl 5 heal; touch "$FLAG_DIR/heal-off"; cn_run
+  cn_prep; echo 11200 >"$T/afplay_amp"; cn_ctl 5 heal; touch "$FLAG_DIR/heal-off"; cn_run
   assert_eq "$(cn_plays)" "0" "heal-off flag: 0 plays"
-  cn_prep; echo 5623 >"$T/afplay_amp"; rm -f "$STATE_DIR/control.last"; GUARDIAN_CONTROL_SUB_CMD=true; flag_fetch; cn_run
+  cn_prep; echo 11200 >"$T/afplay_amp"; rm -f "$STATE_DIR/control.last"; GUARDIAN_CONTROL_SUB_CMD=true; flag_fetch; cn_run
   assert_eq "$(cn_plays)" "0" "no control message at all: 0 plays"
 }
 
@@ -316,7 +316,7 @@ test_control_path_flip_during_the_output_check_makes_no_play() {
   local flip
   # the fake output check rewrites control.last (a kill, then a message that is already 91 s old) after act_step and before afplay
   for flip in kill stale shadow; do
-    cn_prep; echo 5623 >"$T/afplay_amp"; cn_ctl 5 heal
+    cn_prep; echo 11200 >"$T/afplay_amp"; cn_ctl 5 heal
     case "$flip" in
       kill) body="printf '%s\\n{\"kill\": true, \"modes\": {\"opd9\": \"heal\"}, \"ts\": %s}\\n' $((GUARDIAN_FAKE_NOW)) $((GUARDIAN_FAKE_NOW))" ;;
       stale) body="printf '%s\\n{\"kill\": false, \"modes\": {\"opd9\": \"heal\"}, \"ts\": %s}\\n' $((GUARDIAN_FAKE_NOW - 91)) $((GUARDIAN_FAKE_NOW - 91))" ;;

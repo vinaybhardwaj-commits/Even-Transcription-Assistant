@@ -5,7 +5,7 @@
 r6_audit() { cat "$GUARDIAN_HOME/audit.log" 2>/dev/null; }
 # r6_at <HH:MM> [days]: an eligible slot at that IST time, heal mode, a loud 1 kHz tone ready, the consult hold CLEAR
 r6_at() {
-  cn_prep "$1"; GUARDIAN_FAKE_NOW=$(( $(ist_epoch "$1") + ${2:-0} * 86400 )); write_status; mk_pcm_tone 100 10; consult_clear; go_heal; echo 7954 >"$T/afplay_amp"
+  cn_prep "$1"; GUARDIAN_FAKE_NOW=$(( $(ist_epoch "$1") + ${2:-0} * 86400 )); write_status; mk_pcm_tone 100 10; consult_clear; go_heal; echo 11200 >"$T/afplay_amp"
 }
 
 test_r16d_slot_boundaries() {
@@ -32,7 +32,7 @@ test_r16d_once_per_slot_and_pm_then_am() {
 test_r16d_pm_then_am_state_kept() {
   r6_at 22:00; cn_run
   # keep canary_slot and canary_last_play; only the per-tick scratch is reset for the next morning
-  GUARDIAN_FAKE_NOW=$(( $(ist_epoch 07:30) + 86400 )); write_status; mk_pcm_tone 100 10; consult_clear; go_heal; echo 7954 >"$T/afplay_amp"; rm -rf "$STATE_DIR/actions"; : >"$CALLS"
+  GUARDIAN_FAKE_NOW=$(( $(ist_epoch 07:30) + 86400 )); write_status; mk_pcm_tone 100 10; consult_clear; go_heal; echo 11200 >"$T/afplay_amp"; rm -rf "$STATE_DIR/actions"; : >"$CALLS"
   cn_run
   assert_eq "$(cn_plays)" "2" "am after pm with the real pm state on disk"
 }
@@ -106,7 +106,7 @@ test_r16d_event_fields_and_threshold() {
   r6_at 22:00; cn_run
   assert_has "$(cn_events)" '"slot":"pm"' "slot"
   assert_has "$(cn_events)" '"pass_db":32.65' "pass_db"
-  assert_has "$(cn_events)" '"pass_db_band":10' "pass_db_band"
+  assert_has "$(cn_events)" '"pass_db_band":34.67' "pass_db_band"
   assert_has "$(cn_events)" '"plays":\[{"pre_db":' "plays array"
   assert_has "$(cn_events)" '"rise_db_band":' "band rise"
   assert_has "$(cn_events)" '"pass_broadband":' "pass_broadband"
@@ -131,6 +131,9 @@ test_r16d_band_filter_coefficients_and_gain() {
         re2 = 1 + c[o+4] * cos(w) + c[o+5] * cos(2*w); im2 = -c[o+4] * sin(w) - c[o+5] * sin(2*w)
         g *= sqrt((re1*re1 + im1*im1) / (re2*re2 + im2*im2)) }
       printf "%.2f", 20 * log(4000 * g / 32768) / log(10) }')"
+    if [ "$hz" = 2000 ]; then
+      assert_eq "$(awk -v g="$g" 'BEGIN { d = (g - 20 * log(4000 / 32768) / log(10)) - (-0.82); if (d < 0) d = -d; print (d <= 0.1) ? "ok" : "off " d }')" "ok" "2 kHz cascade gain -0.82 dB +-0.1 (herdr figure)"
+    fi
     assert_eq "$(awk -v a="$g" -v b="$exp" 'BEGIN { d = a - b; if (d < 0) d = -d; print (d <= 0.5) ? "ok" : "off " a " vs " b }')" "ok" "gain at $hz Hz within 0.5 dB of analytic"
   done
 }
@@ -154,13 +157,13 @@ test_r16d_two_of_two_logic() {
   assert_has "$(cn_events)" '"result":"pass"' "pass/pass"
   # pass then a quiet second play: the fake afplay writes the tone only when the amp file exists; remove it after the first call
   r6_at 22:00
-  printf '#!/bin/bash\necho "afplay $*" >>"$CALLS"\nn=$(grep -c "^afplay " "$CALLS")\nTAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"\nA=7954; [ "$n" -ge 2 ] && A=100\nperl -e '"'"'my $a=shift; print pack("s<*", map { int($a*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..39999, map { int(141.4*sin(6.28318530718*$_/16)+0.5) } 0..95999)'"'"' "$A" >>"$TAPE"\nexit 0\n' >"$T/bin/afplay"; chmod +x "$T/bin/afplay"
+  printf '#!/bin/bash\necho "afplay $*" >>"$CALLS"\nn=$(grep -c "^afplay " "$CALLS")\nTAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"\nA=11200; [ "$n" -ge 2 ] && A=100\nperl -e '"'"'my $a=shift; print pack("s<*", map { int($a*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..39999, map { int(141.4*sin(6.28318530718*$_/16)+0.5) } 0..95999)'"'"' "$A" >>"$TAPE"\nexit 0\n' >"$T/bin/afplay"; chmod +x "$T/bin/afplay"
   cn_run
   assert_has "$(cn_events)" '"result":"no_local_rise"' "pass/fail"
   assert_eq "$(cn_plays)" "2" "both plays made"
   # pass then a refused second play (afplay fails the second time): inconclusive
   r6_at 22:00
-  printf '#!/bin/bash\necho "afplay $*" >>"$CALLS"\nn=$(grep -c "^afplay " "$CALLS")\nTAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"\nperl -e '"'"'print pack("s<*", map { int(7954*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..39999, map { int(141.4*sin(6.28318530718*$_/16)+0.5) } 0..95999)'"'"' >>"$TAPE"\n[ "$n" -ge 2 ] && exit 3\nexit 0\n' >"$T/bin/afplay"; chmod +x "$T/bin/afplay"
+  printf '#!/bin/bash\necho "afplay $*" >>"$CALLS"\nn=$(grep -c "^afplay " "$CALLS")\nTAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"\nperl -e '"'"'print pack("s<*", map { int(11200*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..39999, map { int(141.4*sin(6.28318530718*$_/16)+0.5) } 0..95999)'"'"' >>"$TAPE"\n[ "$n" -ge 2 ] && exit 3\nexit 0\n' >"$T/bin/afplay"; chmod +x "$T/bin/afplay"
   cn_run
   assert_has "$(cn_events)" '"result":"inconclusive:afplay_error"' "pass/refused"
   assert_not "$(cn_events)" '"result":"pass"' "never a pass on one play"
@@ -168,7 +171,7 @@ test_r16d_two_of_two_logic() {
 
 test_r16d_kill_switch_between_plays_gives_one_play_and_would_do() {
   r6_at 22:00
-  printf '#!/bin/bash\necho "afplay $*" >>"$CALLS"\nTAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"\nperl -e '"'"'print pack("s<*", map { int(7954*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..39999, map { int(141.4*sin(6.28318530718*$_/16)+0.5) } 0..95999)'"'"' >>"$TAPE"\n: >"%s/flags/heal-off"\nexit 0\n' "$GUARDIAN_HOME" >"$T/bin/afplay"; chmod +x "$T/bin/afplay"
+  printf '#!/bin/bash\necho "afplay $*" >>"$CALLS"\nTAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"\nperl -e '"'"'print pack("s<*", map { int(11200*1.41421356*sin(6.28318530718*$_/16)+0.5) } 0..39999, map { int(141.4*sin(6.28318530718*$_/16)+0.5) } 0..95999)'"'"' >>"$TAPE"\n: >"%s/flags/heal-off"\nexit 0\n' "$GUARDIAN_HOME" >"$T/bin/afplay"; chmod +x "$T/bin/afplay"
   cn_run
   assert_eq "$(cn_plays)" "1" "kill switch engaged between plays: 1 play"
   assert_has "$(cn_events)" '"result":"would_do"' "would_do"
@@ -290,4 +293,12 @@ test_r16d_mutant_speech_arm_removed() {
   r6_at 22:00; mk_pcm_tone 2000 10
   r6_mut '/if speech_recent; then CANARY_WHY=recorder_busy/d'; cn_run
   assert_eq "$(cn_plays)" "2" "mutant (speech arm removed) plays"
+}
+
+test_r16d_band_threshold_is_herdr_final_and_margins() {
+  load_libs
+  assert_eq "$CANARY_BAND_PASS_DB" "34.67" "band threshold"
+  # pass fixture: tone RMS 11200 over bed RMS 100 = 40.98 dB (margin 6.3 dB over 34.67); fail fixtures: 200 over 100 = 6.0 dB, 100 over 100 = 0 dB
+  assert_eq "$(awk 'BEGIN { printf "%.1f", 20 * log(11200 / 100) / log(10) - 34.67 }')" "6.3" "pass margin"
+  assert_eq "$(awk 'BEGIN { printf "%.1f", 34.67 - 20 * log(200 / 100) / log(10) }')" "28.6" "small-rise margin"
 }

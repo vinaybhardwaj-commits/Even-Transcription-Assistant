@@ -107,8 +107,8 @@ g_const CANARY_IDLE_MIN_S 600
 # tone window must rise this far above the 5 s before it. Machine-set (R16d, no per-room hand tuning): the pooled night null of ~/oc/herdr-lead/mic-cal/CANARY-RISE-NULL-16-OCT-2026.md
 # (n=4855, p99.9 29.65, max 32.64) under the rule max(p99.9 + 3, 10) = 32.65.
 g_def CANARY_PASS_DB 32.65
-# R16d item 8: the decision statistic is the 1-3 kHz band rise, 2 of 2 plays. PLACEHOLDER 10 until herdr-lead's band null lands (then one number here).
-g_def CANARY_BAND_PASS_DB 10
+# R16d item 8: the decision statistic is the 1-3 kHz band rise, 2 of 2 plays. Machine-set from herdr-lead's FINAL band null (Opus refute 0 MUST): ~/oc/herdr-lead/mic-cal/CANARY-BAND-REFUTE-16OCT.md. Still g_def, as item 8 says.
+g_def CANARY_BAND_PASS_DB 34.67
 g_def CANARY_PLAY_GAP_S 10   # the second play starts this long after the first started
 # RBJ biquad coefficients "b0 b1 b2 a1 a2" (fs 16000, Q 0.70710678), 10 decimals: HP 1000 Hz then LP 3000 Hz. Same filter as herdr-lead's band null (rise_db_null_band.py).
 g_const CANARY_HP_COEF "0.7570763753 -1.5141527507 0.7570763753 -1.4542435863 0.5740619151"
