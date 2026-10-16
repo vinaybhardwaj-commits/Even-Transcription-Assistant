@@ -5,6 +5,7 @@
  */
 import { sql } from "@/lib/db";
 import { dailyCapUsd, dailySoftUsd, liveFlagOn, REAL_USES, useFlagOn, workerEnabled, textLaneOn, USE_SENDS_TEXT, type RealUse } from "./flags";
+import { backfillSinceState, type BackfillSinceState } from "./consult-eligible";
 import { consultCoverage, type Coverage } from "./coverage";
 import { getBreaker, isDue, type BreakerRow } from "./breaker";
 
@@ -26,7 +27,7 @@ export type UseHealth = {
   error_classes_24h: Record<string, number>;
   drift_alerts: string[];
 };
-export type JevHealth = { ist_date: string; budget: { spent_usd: number; cap_usd: number; soft_usd: number; left_usd: number }; sweeper_last_job_at: string | null; coverage: Coverage | { unavailable: true }; uses: UseHealth[] };
+export type JevHealth = { ist_date: string; budget: { spent_usd: number; cap_usd: number; soft_usd: number; left_usd: number }; sweeper_last_job_at: string | null; coverage: (Coverage | { unavailable: true }) & { backfill_since: BackfillSinceState }; uses: UseHealth[] };
 
 export async function jevHealth(): Promise<JevHealth> {
   const [spentRows, sets, calls, lastErr, queue, lastOk, bands, classes, drift, sweeper] = await Promise.all([
@@ -47,10 +48,13 @@ export async function jevHealth(): Promise<JevHealth> {
     sql`SELECT max(created_at) AS at FROM scribe_job WHERE kind = 'jev_ask' AND actor LIKE 'cron:jev_sweep%'`,
   ]) as unknown as Array<Array<Record<string, unknown>>>;
   // L2: coverage is a bonus read; a throw or a 5 s stall must not take the rest of the health result down with it.
-  const coverage: Coverage | { unavailable: true } = await Promise.race([
+  const cov: Coverage | { unavailable: true } = await Promise.race([
     consultCoverage().catch(() => ({ unavailable: true as const })),
     new Promise<{ unavailable: true }>((res) => { const t = setTimeout(() => res({ unavailable: true }), 5000); t.unref?.(); }),
   ]);
+
+  // BF-4 (a): "off" | "on" | "bad" for JEV_CONSULT_BACKFILL_SINCE; present even when the coverage read is unavailable. The value is never returned.
+  const coverage = { ...cov, backfill_since: backfillSinceState(process.env.JEV_CONSULT_BACKFILL_SINCE) };
 
   const spent = n(spentRows[0]?.usd);
   const cap = dailyCapUsd();
