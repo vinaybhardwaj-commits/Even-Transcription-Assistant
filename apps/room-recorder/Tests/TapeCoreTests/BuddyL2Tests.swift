@@ -718,6 +718,7 @@ import Testing
 
   @Test func aShadowConsultHasNoWindowNoPageNoStateAndNoActivation() async throws {
     let c = try Self.consult(flags: Self.shadow)
+    defer { c.controller.shutdown() }  // ends any consult left open, which halts and stops its runner
     defer { try? FileManager.default.removeItem(at: c.root) }
     guard case .opened(let port) = c.controller.consultStarted(opaqueID: "opq_l2", buddyOff: false) else { Issue.record("not opened"); return }
     try await R4Fixture.waitUntil { c.h.transport.flagPollCount >= 1 }
@@ -734,6 +735,7 @@ import Testing
 
   @Test func aLiveConsultOpensItsWindowOnlyWhenWindowIsTrueAndTheEndClosesItAndDropsTheRunner() async throws {
     let c = try Self.consult(flags: Self.live)
+    defer { c.controller.shutdown() }  // ends any consult left open, which halts and stops its runner
     defer { try? FileManager.default.removeItem(at: c.root) }
     guard case .opened(let port) = c.controller.consultStarted(opaqueID: "opq_l2", buddyOff: false) else { Issue.record("not opened"); return }
     #expect(c.presenter.all.isEmpty, "not at consult_started: only once the flags say window")
@@ -750,6 +752,7 @@ import Testing
 
   @Test func theKillSwitchOnALiveConsultStopsTheRunnerAndClosesTheWindow() async throws {
     let c = try Self.consult(flags: Self.live)
+    defer { c.controller.shutdown() }  // ends any consult left open, which halts and stops its runner
     defer { try? FileManager.default.removeItem(at: c.root) }
     _ = c.controller.consultStarted(opaqueID: "opq_l2", buddyOff: false)
     try await R4Fixture.waitUntil { c.presenter.all == ["open:opq_l2"] }
@@ -759,6 +762,7 @@ import Testing
 
   @Test func theD5PageShowsExactlyTheD5FieldsAndNoQuestionOrSuggestionExists() async throws {
     let c = try Self.consult(flags: Self.live)
+    defer { c.controller.shutdown() }  // ends any consult left open, which halts and stops its runner
     defer { try? FileManager.default.removeItem(at: c.root) }
     guard case .opened(let port) = c.controller.consultStarted(opaqueID: "opq_l2", buddyOff: false) else { Issue.record("not opened"); return }
     try await R4Fixture.waitUntil { c.presenter.all == ["open:opq_l2"] }
@@ -781,6 +785,7 @@ import Testing
 
   @Test func theTranscriptOfOneConsultNeverAppearsInTheNext() async throws {
     let c = try Self.consult(flags: Self.live)
+    defer { c.controller.shutdown() }  // ends any consult left open, which halts and stops its runner
     defer { try? FileManager.default.removeItem(at: c.root) }
     guard case .opened(let firstPort) = c.controller.consultStarted(opaqueID: "opq_one", buddyOff: false) else { Issue.record("not opened"); return }
     try await R4Fixture.waitUntil { c.presenter.all == ["open:opq_one"] }
@@ -800,6 +805,7 @@ import Testing
 
   @Test func withNoRunnerOnThisMacTheWindowBehavesExactlyAsIn0141() async throws {
     let c = try Self.consult(flags: Self.live, runner: false)
+    defer { c.controller.shutdown() }  // ends any consult left open, which halts and stops its runner
     defer { try? FileManager.default.removeItem(at: c.root) }
     guard case .opened(let port) = c.controller.consultStarted(opaqueID: "opq_l2", buddyOff: false) else { Issue.record("not opened"); return }
     #expect(c.presenter.all == ["open:opq_l2"], "opened at once, as in 0.1.41")
@@ -862,6 +868,11 @@ import Testing
         try await R4Fixture.waitUntil { transport.posted.count == 1 }
         try await Task.sleep(nanoseconds: 500_000_000)
         #expect(transport.posted.count == 1, "the stalled chunk holds the only slot")
+      }
+      if runnerOn {
+        // End the consult: this halts the runner and cancels the chunk the stalled transport is parked in.
+        await rig.remote.push(BuddyL1Tests.command("c8", "consult_ended", #"{"opaque_id":"opq_same"}"#))
+        try await R4Fixture.waitUntil { await rig.remote.acks.contains { $0.id == "c8" } }
       }
       await rig.remote.push(BuddyL1Tests.command("c9", "end_day"))
       try await R4Fixture.waitUntil { await rig.remote.acks.contains { $0.id == "c9" } }
