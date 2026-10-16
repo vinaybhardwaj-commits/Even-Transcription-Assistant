@@ -55,12 +55,12 @@ const counts = async () => ({
 });
 
 describe.skipIf(!HAVE)("relay CTE on real postgres", () => {
-  it("window:true lands the ref row and the command, and the args are {opaque_id} only", async () => {
+  it("window:true lands the ref row and the command, and the args are {opaque_id, window, live}", async () => {
     expect(await R.relayConsultEvent(row("encounter_open") as never, Date.now() + 5000, yes)).toBe("sent");
     expect(await counts()).toEqual({ refs: 1, started: 1, ended: 0 });
     const c = (await q<{ args: Record<string, unknown>; source: string; room_id: string }>`SELECT args, source, room_id FROM bench_command WHERE kind = 'consult_started'`)[0]!;
     const r = (await q<{ opaque_id: string }>`SELECT opaque_id FROM buddy_consult_ref`)[0]!;
-    expect(c.args).toEqual({ opaque_id: r.opaque_id });
+    expect(c.args).toEqual({ opaque_id: r.opaque_id, window: true, live: false });
     expect(c).toMatchObject({ source: "buddy", room_id: ROOM });
   });
 

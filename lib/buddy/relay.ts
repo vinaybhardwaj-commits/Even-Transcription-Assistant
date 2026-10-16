@@ -6,10 +6,13 @@
  *   - open:  INSERT a buddy_consult_ref row (opaque_id = 32 hex); only if THIS call created it, enqueue `consult_started`.
  *   - close: UPDATE closed_at on the open row; only if a row was updated, enqueue `consult_ended`.
  * DECIDE (A2-C5, fail closed). On open, after every gate below passes, the relay mints the opaque_id and asks newcat (POST NEWCAT_BASE_URL + DECIDE_PATH = /v1/buddy/consult-started, scope buddy.relay, Bearer NEWCAT_RELAY_KEY,
- * body {opaque_id, consult_uid, room, doctor_uid|null}, reply {window, live, reason_code}) whether a window may open. Only window:true writes the ref row and the command.
- * window:false, a timeout (DECIDE_TIMEOUT_MS), a non-2xx, an unparseable reply, or an unset NEWCAT_BASE_URL / NEWCAT_RELAY_KEY writes nothing. Logs carry
- * the counts decide_true / decide_false / decide_fault only. consult_ended is unchanged: a close with no ref row writes nothing.
- * The ref row and its command land in ONE statement. The command args are `{ opaque_id }` and nothing else. Only source 'ext' rows, only events
+ * body {opaque_id, consult_uid, room, doctor_uid|null}, reply {window, live, reason_code}) whether a window may open. The ref row and the command are written when
+ * window:true, OR when live:true with window:false (a shadow session) AND the room's ACTIVE room_install.app_version is >= SHADOW_MIN_APP_VERSION (0.1.43).
+ * A null, unknown or unparseable version, or a missing install row, means no shadow write (fail closed). Window:false + live:false, a timeout (DECIDE_TIMEOUT_MS),
+ * a non-2xx, an unparseable reply, or an unset NEWCAT_BASE_URL / NEWCAT_RELAY_KEY writes nothing. Logs carry
+ * the counts decide_true / decide_false / decide_fault / decide_shadow_enqueued / decide_shadow_skipped_version only. consult_ended is unchanged: it is sent for
+ * any open ref row, and a close with no ref row writes nothing.
+ * The ref row and its command land in ONE statement. The command args are `{ opaque_id, window, live }` (the stored decision; two booleans) and nothing else. Only source 'ext' rows, only events
  * within MAX_AGE_MS / MAX_FUTURE_MS of server time, and only a non-blank encounter_id. consult_uid, doctor_uid and prescription ids never go to the recorder.
  *
  * DOCTOR. A missing or blank payload doctor_uid is resolved from the warehouse by consult_uid (exact; one distinct doctor_uid or null), capped at
@@ -35,6 +38,8 @@ export const RELAY_TIMEOUT_MS = 2000;
 /** newcat's mint route. One constant, so the final route name is a one-line change. */
 export const DECIDE_PATH = "/v1/buddy/consult-started";
 export const DECIDE_TIMEOUT_MS = 1200;
+/** First recorder build that fails closed on the payload (opens a window only on window === true) and can run a shadow session. */
+export const SHADOW_MIN_APP_VERSION = "0.1.43";
 
 /** Wire body to newcat (scope buddy.relay): the room goes under the key `room`. */
 export type DecideRequest = { opaque_id: string; consult_uid: string; room: string; doctor_uid: string | null };
@@ -118,7 +123,7 @@ export type DoctorCounts = {
 };
 
 /** Counts for the log line. */
-export type DecideCounts = { decide_true: number; decide_false: number; decide_fault: number; decide_live?: number };
+export type DecideCounts = { decide_true: number; decide_false: number; decide_fault: number; decide_live?: number; decide_shadow_enqueued?: number; decide_shadow_skipped_version?: number };
 
 export type RelayOutcome = "sent" | "duplicate" | "skipped" | "decide_false" | "decide_fault";
 
@@ -128,8 +133,8 @@ export function relayRooms(env: NodeJS.ProcessEnv = process.env): string[] {
 }
 
 
-/** Gated room for this machine (and whether its app can take the kind), or null. */
-async function resolveRoom(machine: string | null, gate: string[]): Promise<string | null> {
+/** Gated room for this machine (and its reported app version; its app can take the kind), or null. */
+async function resolveRoom(machine: string | null, gate: string[]): Promise<{ roomId: string; appVersion: string | null } | null> {
   if (!machine) return null;
   const rows = (await sql`
     SELECT room_id, hostname, app_version
@@ -139,7 +144,7 @@ async function resolveRoom(machine: string | null, gate: string[]): Promise<stri
   const want = normalizeHostname(machine);
   const hit = rows.find((r) => r.hostname && normalizeHostname(r.hostname) === want);
   if (!hit || !appVersionAtLeast(hit.app_version, VERBS_MIN_APP_VERSION)) return null;
-  return hit.room_id;
+  return { roomId: hit.room_id, appVersion: hit.app_version };
 }
 
 /** Producers' clocks: an event older than this, or further ahead than the skew allowance, is not a live consult edge. */
@@ -193,8 +198,9 @@ export async function relayConsultEvent(
   const gate = relayRooms();
   if (gate.length === 0) return "skipped";
   if (Date.now() >= deadline) return "skipped";
-  const roomId = await resolveRoom(row.machine, gate);
-  if (!roomId) return "skipped";
+  const room = await resolveRoom(row.machine, gate);
+  if (!room) return "skipped";
+  const roomId = room.roomId;
   if (Date.now() >= deadline) return "skipped";
 
   const cmdId = newCommandId();
@@ -231,19 +237,31 @@ export async function relayConsultEvent(
       if (Date.now() >= deadline) return "skipped";
     }
     let window: boolean;
+    let live = false;
     try {
       const reply = await decide({ opaque_id: opaqueId, consult_uid: consultUid, room: roomId, doctor_uid: doctorUid });
       window = typeof reply === "boolean" ? reply : reply.window === true;
+      live = typeof reply !== "boolean" && reply.live === true;
       if (typeof reply !== "boolean" && reply.window === true && reply.live === true && tally) tally.decide_live = (tally.decide_live ?? 0) + 1;
     } catch {
       if (tally) tally.decide_fault++;
       return "decide_fault";
     }
     if (!window) {
-      if (tally) tally.decide_false++;
-      return "decide_false";
-    }
-    if (tally) tally.decide_true++;
+      // Shadow session (live, no window): only a recorder that fails closed on the payload (>= SHADOW_MIN_APP_VERSION) may receive it.
+      if (!live) {
+        if (tally) tally.decide_false++;
+        return "decide_false";
+      }
+      if (!appVersionAtLeast(room.appVersion, SHADOW_MIN_APP_VERSION)) {
+        if (tally) {
+          tally.decide_false++;
+          tally.decide_shadow_skipped_version = (tally.decide_shadow_skipped_version ?? 0) + 1;
+        }
+        return "decide_false";
+      }
+      if (tally) tally.decide_shadow_enqueued = (tally.decide_shadow_enqueued ?? 0) + 1;
+    } else if (tally) tally.decide_true++;
     if (Date.now() >= deadline) return "skipped";
     const made = (await sql`
       WITH made AS (
@@ -253,7 +271,7 @@ export async function relayConsultEvent(
         RETURNING opaque_id, room_id
       )
       INSERT INTO bench_command (id, room_id, kind, args, status, source)
-      SELECT ${cmdId}::text, room_id, 'consult_started', jsonb_build_object('opaque_id', opaque_id), 'pending', 'buddy' FROM made
+      SELECT ${cmdId}::text, room_id, 'consult_started', jsonb_build_object('opaque_id', opaque_id, 'window', ${window}::boolean, 'live', ${live}::boolean), 'pending', 'buddy' FROM made
       RETURNING id
     `) as Array<{ id: string }>;
     return made.length === 0 ? "duplicate" : "sent";
@@ -285,7 +303,7 @@ export async function relayInserted(rows: PresenceRow[], decide: DecideClient = 
     if (todo.length === 0) return;
     const deadline = Date.now() + RELAY_TIMEOUT_MS;
     const counts = { sent: 0, duplicate: 0, skipped: 0, failed: 0, decide_false: 0, decide_fault: 0 };
-    const tally: DecideCounts = { decide_true: 0, decide_false: 0, decide_fault: 0, decide_live: 0 };
+    const tally: DecideCounts = { decide_true: 0, decide_false: 0, decide_fault: 0, decide_live: 0, decide_shadow_enqueued: 0, decide_shadow_skipped_version: 0 };
     const dtally: DoctorCounts = { doctor_resolve_off: 0, doctor_resolve_fault: 0, doctor_hint_would_help: 0, doctor_resolve_unsafe_uid: 0, doctor_resolve_null: 0 };
     let timer: ReturnType<typeof setTimeout> | undefined;
     const work = (async () => {
@@ -304,8 +322,8 @@ export async function relayInserted(rows: PresenceRow[], decide: DecideClient = 
       }),
     ]);
     if (timer) clearTimeout(timer);
-    if (tally.decide_true + tally.decide_false + tally.decide_fault > 0) {
-      console.info(`[buddy-relay] decide: decide_true=${tally.decide_true} decide_false=${tally.decide_false} decide_fault=${tally.decide_fault} decide_live=${tally.decide_live}`);
+    if (tally.decide_true + tally.decide_false + tally.decide_fault + (tally.decide_shadow_enqueued ?? 0) > 0) {
+      console.info(`[buddy-relay] decide: decide_true=${tally.decide_true} decide_false=${tally.decide_false} decide_fault=${tally.decide_fault} decide_live=${tally.decide_live} decide_shadow_enqueued=${tally.decide_shadow_enqueued} decide_shadow_skipped_version=${tally.decide_shadow_skipped_version}`);
     }
     if (dtally.doctor_resolve_off + dtally.doctor_resolve_fault + dtally.doctor_hint_would_help + dtally.doctor_resolve_unsafe_uid + dtally.doctor_resolve_null > 0) {
       console.info(`[buddy-relay] doctor: doctor_resolve_off=${dtally.doctor_resolve_off} doctor_resolve_fault=${dtally.doctor_resolve_fault} doctor_hint_would_help=${dtally.doctor_hint_would_help} doctor_resolve_unsafe_uid=${dtally.doctor_resolve_unsafe_uid} doctor_resolve_null=${dtally.doctor_resolve_null}`);
