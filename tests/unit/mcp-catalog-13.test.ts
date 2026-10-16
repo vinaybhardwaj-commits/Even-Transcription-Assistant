@@ -85,6 +85,25 @@ describe("Part A: no_clip", () => {
     expect(sealReasonOf(crow(UID, { r2_status: "a".repeat(64) }))).toBe("a".repeat(64));
   });
 
+  it("FIX1: the seal reason is read from row.sealed, then row.clip.sealed, then clip.r2_status; each source alone works", async () => {
+    const seal = async (row: Row) => { setRows([row]); resetCatalogCacheForTests(); return (await call({ action: "clip_audio_url", consult_uid: UID })).sealed; };
+    expect(await seal({ ...crow(UID, { r2_key: null }), sealed: "skipped:final_no_session" })).toBe("skipped:final_no_session");
+    expect(await seal(crow(UID, { r2_key: null, sealed: "no_session" }))).toBe("no_session");
+    expect(await seal(crow(UID, { r2_key: null, r2_status: "silent_audio" }))).toBe("silent_audio");
+    expect(await seal(crow(UID, { r2_key: null }))).toBeNull();
+  });
+
+  it("FIX1: the order is row.sealed > clip.sealed > clip.r2_status, and a source that does not match the filter (or is not a string) does not block a later one", async () => {
+    const seal = (row: Row) => { setRows([row]); resetCatalogCacheForTests(); return call({ action: "clip_audio_chunk", consult_uid: UID }).then((o) => o.sealed); };
+    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "from_clip", r2_status: "from_status" }), sealed: "from_row" })).toBe("from_row");
+    expect(await seal(crow(UID, { r2_key: null, sealed: "from_clip", r2_status: "from_status" }))).toBe("from_clip");
+    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "from_clip", r2_status: "from_status" }), sealed: "Bad Value" })).toBe("from_clip");
+    expect(await seal({ ...crow(UID, { r2_key: null, sealed: 7, r2_status: "from_status" }), sealed: true })).toBe("from_status");
+    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "x".repeat(65), r2_status: "from_status" }), sealed: "no-dash" })).toBe("from_status");
+    expect(await seal({ ...crow(UID, { r2_key: null, sealed: "Bad", r2_status: "also bad" }), sealed: false })).toBeNull();
+    expect(sealReasonOf({ sealed: "a", clip: { sealed: "b", r2_status: "c" } })).toBe("a");
+  });
+
   it("the answer carries no key and no text: only ok, error and sealed", async () => {
     setRows([crow(UID, { r2_key: null, r2_status: "skipped:final_no_session", signature_sha256: "c".repeat(64) })]);
     const o = await call({ action: "clip_audio_url", consult_uid: UID });
