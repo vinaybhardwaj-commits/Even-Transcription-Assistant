@@ -54,21 +54,59 @@ describe("the rubric files and the registry", () => {
     expect(getRubric("ehrc_surgical_outcome")!.source).toBe("ehrc-surgical-outcome@md");
   });
   it("NO identifier, quote, example, gold row or placeholder id in any rubric file (the repo is public)", () => {
-    // PP-4: the same content scan also covers every rubrics/*/prompt.json and rubrics/*/bench-report-*.json. A bench report may carry the literal KEY "gold" (the gold-set summary: run id, count, reason);
-    // the exemption removes ONLY the exact token `"gold":` from bench-report-*.json text before the regex, so a gold row, a "gold_..." key or any other quoted text there still trips it.
+    // PP-4: the same content scan also covers every rubrics/*/prompt.json and rubrics/*/bench-report-*.json. A bench report may carry ONE top-level key "gold": the gold-set summary
+    // {run_id, unscored, reason}. benchReportText parses the file, checks that exact shape, deletes exactly that top-level key and returns the re-serialised rest, which then goes through the
+    // same regexes as every other file. Any other gold shape throws; a "gold" key anywhere else survives into the text and trips /"gold/.
+    const goldShape = (g: unknown): string | null => {
+      if (!g || typeof g !== "object" || Array.isArray(g)) return "gold is not an object";
+      const o = g as Record<string, unknown>;
+      if (!Object.keys(o).every((k) => k === "run_id" || k === "unscored" || k === "reason")) return "gold has a key outside run_id, unscored, reason";
+      if ("run_id" in o && !(typeof o.run_id === "string" && /^rub_[a-z0-9]+$/.test(o.run_id))) return "gold.run_id is not rub_<id>";
+      if ("unscored" in o && !Number.isInteger(o.unscored)) return "gold.unscored is not an integer";
+      if ("reason" in o && !(typeof o.reason === "string" && o.reason.length <= 120 && /^[\x20-\x7e]*$/.test(o.reason) && !/["\\]/.test(o.reason))) return "gold.reason is not a short plain ASCII string";
+      return null;
+    };
+    const benchReportText = (raw: string): string => {
+      const j = JSON.parse(raw) as Record<string, unknown>;
+      if ("gold" in j) {
+        const bad = goldShape(j.gold);
+        if (bad) throw new Error(bad);
+        delete j.gold;
+      }
+      return JSON.stringify(j);
+    };
+    // bench unit keys must never appear in a bench report (counts and ids only): hv-<16 hex>, bg-<2 letters><3 digits>
+    const BENCH_UNIT_KEY = /\bhv-[0-9a-f]{16}\b|\bbg-[a-z]{2}-?\d{3}\b/i;
+    const contentProblems = (text: string, bench: boolean): string[] => {
+      const p: string[] = [];
+      if (T.identifierTokens(text).length > 0) p.push("identifier token");
+      if (/[^\x00-\x7f]/.test(text)) p.push("non-ASCII character");
+      if (/"examples?"\s*:|"gold|"quotes?"\s*:\s*[\["]|_PRIVATE|Poornima|Srikanth|Nayar|Veda\b/i.test(text)) p.push("quote, example, gold or placeholder id");
+      if (bench && BENCH_UNIT_KEY.test(text)) p.push("bench unit key");
+      return p;
+    };
     for (const f of folders) {
       const files = readdirSync(join(ROOT, f)).filter((n) => n === "rubric.json" || n === "prompt.json" || /^bench-report-.+\.json$/.test(n));
       for (const n of files) {
+        const bench = n.startsWith("bench-report-");
         const raw = readFileSync(join(ROOT, f, n), "utf8");
-        const text = n.startsWith("bench-report-") ? raw.replace(/"gold"\s*:/g, '"_"  :') : raw;
-        expect(T.identifierTokens(text), `${f}/${n}`).toEqual([]);
-        expect(/[^\x00-\x7f]/.test(text), `${f}/${n} has a non-ASCII character (a quoted phrase in another script?)`).toBe(false);
-        expect(/"examples?"\s*:|"gold|"quotes?"\s*:\s*[\["]|_PRIVATE|Poornima|Srikanth|Nayar|Veda\b/i.test(text), `${f}/${n}`).toBe(false); // (the placeholder-id tokens are caught by identifierTokens above)
+        expect(contentProblems(bench ? benchReportText(raw) : raw, bench), `${f}/${n}`).toEqual([]);
       }
     }
-    // the exemption is exact: a bench-report with a gold ROW still trips the scan
-    expect(/"gold/i.test(`{"gold_rows": 1}`.replace(/"gold"\s*:/g, '"_"  :'))).toBe(true);
-    expect(/"gold/i.test(`{"gold": {"run_id": "x"}}`.replace(/"gold"\s*:/g, '"_"  :'))).toBe(false);
+    // the exemption is exact
+    const good = { rubric_id: "x", gold: { run_id: "rub_0abc1", unscored: 6, reason: "no bench text for Meet units" } };
+    expect(contentProblems(benchReportText(JSON.stringify(good)), true)).toEqual([]);
+    expect(() => benchReportText(JSON.stringify({ ...good, gold: [{ unit_key: "u1", expected: { a: 1 } }] }))).toThrow(/not an object/); // gold rows
+    expect(() => benchReportText(JSON.stringify({ ...good, gold: { ...good.gold, text: "a free text line" } }))).toThrow(/outside/); // a text field
+    expect(() => benchReportText(JSON.stringify({ ...good, gold: { ...good.gold, run_id: "run_1" } }))).toThrow(/run_id/);
+    expect(() => benchReportText(JSON.stringify({ ...good, gold: { ...good.gold, unscored: "6" } }))).toThrow(/integer/);
+    expect(() => benchReportText(JSON.stringify({ ...good, gold: { ...good.gold, reason: "x".repeat(121) } }))).toThrow(/reason/);
+    expect(() => benchReportText(JSON.stringify({ ...good, gold: { ...good.gold, reason: 'say "hi"' } }))).toThrow(/reason/);
+    expect(contentProblems(benchReportText(JSON.stringify({ ...good, nested: { gold: { run_id: "rub_1" } } })), true)).toContain("quote, example, gold or placeholder id"); // a nested gold key
+    expect(contentProblems(benchReportText(JSON.stringify({ ...good, gold_rows: 1 })), true)).toContain("quote, example, gold or placeholder id");
+    expect(contentProblems(benchReportText(JSON.stringify({ ...good, ids: ["hv-0123456789abcdef"] })), true)).toContain("bench unit key");
+    expect(contentProblems(benchReportText(JSON.stringify({ ...good, ids: ["bg-ab-123"] })), true)).toContain("bench unit key");
+    expect(contentProblems(JSON.stringify({ gold: 1 }), false)).toContain("quote, example, gold or placeholder id"); // outside a bench report no gold key is exempt
     expect(readdirSync(join(ROOT)).filter((n) => !statSync(join(ROOT, n)).isDirectory())).toEqual([]); // no stray files
     for (const f of folders) expect(readdirSync(join(ROOT, f)), f).toEqual(f === "consult_surgical_pitch" ? ["bench-report-1.1.2.json", "prompt.json", "rubric.json"] : f === "consult_chair_affect" || f === "encounter_vs_record" || f === "ehrc_surgical_outcome" ? ["prompt.json", "rubric.json"] : ["rubric.json"]); // a prompt file (S7-1) but no gold set, no bench with text, no linkage
   });
