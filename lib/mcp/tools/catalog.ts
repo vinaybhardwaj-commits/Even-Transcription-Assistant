@@ -32,7 +32,7 @@ const DAY_MS = 86_400_000;
 const HELP = [
   "Read-only; touches no room. Times UTC; from/to are IST dates. Encounter Explorer catalog (palimpsest C1) of consults since 2026-09-09. Internal admins only; NO PHI removal: include_text=true returns transcript text; include_identity=true and the prescription_uid / individual_uid filters need the admin scope; they return names, ids and the Pulse link (rx.prescription only with include_text too).",
   "action=search {doctor_uid?, room?, from?, to? (span <= 92 days, clamped to 2026-09-09), source? cutter|caa, limit<=200 (default 50), cursor?}: newest first, layers without keys plus layers_present, next_cursor, total_matched, n_bad_lines, n_blind_excluded. Filters has_prescription (alias has_rx), prescription_uid, individual_uid join encounter_catalog (identity_rows says how many consults had a row; an empty table returns no rows, never a false has_prescription=false). include_identity=true adds identity per row. Admin callers also get catalog_c4 per row: {jev, clef_affect, presence} (ids, tokens, scores and UTC ms from migration 0169; null when unset).",
-  "action=get {consult_uid, include_text?, include_identity?}: the full row and layers {transcript, parts, audio_features (timbre/talktime/clef rows), freescript, rubric, jev, identity, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call. Admin callers also get layers.catalog_c4 (the same {jev, clef_affect, presence}).",
+  "action=get {consult_uid, include_text?, include_identity?}: the full row and layers {transcript, parts, audio_features (timbre/talktime/clef rows), freescript, rubric, jev, identity, cdmss, rx}; each is {status: ok|absent|not_available|error, source: [track paths with cfg8 | table], data}. One layer failing never fails the call. Admin callers also get layers.catalog_c4 (the same {jev, clef_affect, presence}). For admin callers, layers.jev falls back to catalog_c4.jev (source encounter_catalog.jev (C4)) when jev_decision has no rows.",
   "action=clip_audio_url {consult_uid}: presigned GET of the clip, 900 s, {url, expires_at, bytes, minutes, audio_sha256, cut_signature_sha256}; audio_sha256 is the hash of the FLAC bytes (null when absent), cut_signature_sha256 hashes the cut metadata, not the audio. The URL is never audited or logged.",
   "action=clip_audio_chunk {consult_uid, offset?, length? <= 1 MiB}: the stored FLAC bytes as base64, {offset, length, total_bytes, content_type, base64, done, audio_sha256 (FLAC bytes hash, null when absent), cut_signature_sha256 (cut metadata, not the audio)}; bad_range past the end.",
   "Held-out room-days are refused blind_room_day on get, clip_audio_url and clip_audio_chunk and left out of search.",
@@ -289,6 +289,17 @@ async function c4Layer(uid: string): Promise<Layer> {
   return layerOk(source, c4View(r));
 }
 
+/**
+ * CATALOG-12: for admin callers, layers.jev falls back to the C4 jev column (encounter_catalog.jev, as stored) when jev_decision has NO rows. jev_decision rows win (no merge);
+ * a jev_decision read error stays an error; a C4 layer that is absent or an error leaves jev as it was. Non-admin callers never get it (the C4 columns are admin-only).
+ */
+function jevWithC4Fallback(jev: Layer, c4layer: Layer | null, isAdmin: boolean): Layer {
+  if (!isAdmin || jev.status !== "absent" || !c4layer || c4layer.status !== "ok") return jev;
+  const sets = (c4layer.data as { jev?: unknown } | null)?.jev ?? null;
+  if (sets === null) return jev;
+  return layerOk(["encounter_catalog.jev (C4)"], { origin: "catalog_c4", sets });
+}
+
 async function get(args: ToolArgs, isAdmin = false): Promise<Row> {
   const uid = argStr(args, "consult_uid", 64);
   if (!uid || !UID.test(uid)) return badArgs("consult_uid must match [A-Za-z0-9_-]{6,64}");
@@ -313,7 +324,7 @@ async function get(args: ToolArgs, isAdmin = false): Promise<Row> {
   return {
     ok: true,
     row,
-    layers: { transcript, parts, audio_features: audioFeatures, freescript, rubric, jev, identity: idl.identity, cdmss: layerNotAvailable(["consult-audit S5 (pending)"]), rx: idl.rx, ...(c4layer ? { catalog_c4: c4layer } : {}) },
+    layers: { transcript, parts, audio_features: audioFeatures, freescript, rubric, jev: jevWithC4Fallback(jev, c4layer, isAdmin), identity: idl.identity, cdmss: layerNotAvailable(["consult-audit S5 (pending)"]), rx: idl.rx, ...(c4layer ? { catalog_c4: c4layer } : {}) },
   };
 }
 
