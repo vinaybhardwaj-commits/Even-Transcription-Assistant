@@ -81,3 +81,30 @@ export async function auditToolCall(input: {
     console.warn("[mcp-audit] audit_log insert failed (console fallback)", JSON.stringify({ tool: input.tool, ...meta, err: String((e as Error)?.message ?? e).slice(0, 160) }));
   }
 }
+
+const deniedLast = new Map<string, number>();
+const DENIED_AUDIT_EVERY_MS = 60_000;
+
+/**
+ * KEY DENYLIST: one audit row for a denied call, actor `denied:<first 8 hex of the token hash>` (never the token, never the full hash). At most one row per hash prefix per minute
+ * (in memory per instance), so a looping client cannot flood the table. Best-effort like every audit write; returns whether a row was attempted.
+ */
+export async function auditDeniedCall(prefix: string, now: number = Date.now()): Promise<boolean> {
+  if (!/^[0-9a-f]{8}$/.test(prefix)) return false;
+  const last = deniedLast.get(prefix);
+  if (last !== undefined && now - last < DENIED_AUDIT_EVERY_MS) return false;
+  deniedLast.set(prefix, now);
+  if (deniedLast.size > 1000) for (const [k, t] of deniedLast) if (now - t >= DENIED_AUDIT_EVERY_MS) deniedLast.delete(k);
+  try {
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+      VALUES ('system', ${`denied:${prefix}`}, 'mcp.denied', 'mcp_auth', 'bearer', ${JSON.stringify({ ok: false, err_kind: "denied" })}::jsonb)
+    `;
+  } catch (e) {
+    console.warn("[mcp-audit] denied-call audit insert failed", String((e as Error)?.message ?? e).slice(0, 120));
+  }
+  return true;
+}
+
+/** test seam */
+export function resetDeniedAuditForTests(): void { deniedLast.clear(); }

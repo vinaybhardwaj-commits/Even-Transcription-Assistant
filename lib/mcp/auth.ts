@@ -49,6 +49,12 @@ export const MCP_TOKENS_ADMIN_ENV = "SCRIBE_MCP_TOKENS_ADMIN";
  * entry wins whole) and then through the same primary/EXTRA collision rules as ADMIN. Absent or blank = nothing changes.
  */
 export const MCP_TOKENS_ADMIN_2_ENV = "SCRIBE_MCP_TOKENS_ADMIN_2";
+/**
+ * KEY DENYLIST (16 Oct 2026, V). SCRIBE_MCP_TOKENS_DENY is a JSON array of sha256 hex. checkMcpBearer hashes the presented token and checks it FIRST, before every map and the
+ * single-token fallback; a denied hash gets the same 401 unauthorized as an unknown token even if a map still lists it. It can only REMOVE access. Unset or blank = no denylist.
+ * Malformed (not JSON, not an array) never disables auth: every 64-hex run in the raw text is denied. A valid array with some bad items denies the good ones.
+ */
+export const MCP_TOKENS_DENY_ENV = "SCRIBE_MCP_TOKENS_DENY";
 export const ADMIN_ACTOR_PREFIX = "admin:";
 export const MCP_TOKEN_ID = "operator-v1";
 
@@ -98,7 +104,8 @@ export type McpPrincipal = {
   tools?: ReadonlySet<string>;
 };
 
-export type McpAuthFailure = { status: 401 | 503; code: "unauthorized" | "mcp_token_not_configured" };
+/** `denied` (key denylist only) is the first 8 hex of the denied token's hash, for the audit row; the response body never carries it. */
+export type McpAuthFailure = { status: 401 | 503; code: "unauthorized" | "mcp_token_not_configured"; denied?: string };
 
 const sha256Hex = (v: string): string => createHash("sha256").update(v).digest("hex");
 
@@ -350,6 +357,36 @@ export function acceptAdmin2Tokens(admin: TokenMap, admin2: TokenMap, rawAdmin: 
   return out;
 }
 
+const denyMemo = new Map<string, { raw: string | undefined; set: ReadonlySet<string> }>();
+
+/** PURE apart from one log line the first time a value is parsed: the denied hashes (lowercase). Logs carry COUNTS only. */
+export function parseDenyList(raw: string | undefined): ReadonlySet<string> {
+  const memo = denyMemo.get(MCP_TOKENS_DENY_ENV);
+  if (memo && memo.raw === raw) return memo.set;
+  const out = new Set<string>();
+  if (raw && raw.trim()) {
+    let v: unknown = null;
+    try { v = JSON.parse(raw); } catch { v = null; }
+    if (Array.isArray(v)) {
+      let dropped = 0;
+      let recovered = 0;
+      for (const item of v) {
+        if (typeof item === "string" && /^[0-9a-f]{64}$/i.test(item.trim())) { out.add(item.trim().toLowerCase()); continue; }
+        // not a clean hash string (nested array, two hashes in one string, a "sha256:" prefix, an object): over-collect every hash-shaped value in it. This can only remove access.
+        let found = 0;
+        try { for (const h of takenHashes(JSON.stringify(item))) { if (!out.has(h)) { out.add(h); recovered += 1; } found += 1; } } catch { /* an unserialisable item is dropped */ }
+        if (found === 0) dropped += 1;
+      }
+      console.warn(`[mcp-auth] ${MCP_TOKENS_DENY_ENV}: denying ${out.size} hash${out.size === 1 ? "" : "es"} (${recovered} recovered from odd items), ${dropped} item${dropped === 1 ? "" : "s"} dropped`);
+    } else {
+      for (const h of takenHashes(raw)) out.add(h);
+      console.warn(`[mcp-auth] ${MCP_TOKENS_DENY_ENV} malformed; denying ${out.size} hash-shaped values`);
+    }
+  }
+  denyMemo.set(MCP_TOKENS_DENY_ENV, { raw, set: out });
+  return out;
+}
+
 /** Returns the principal when authorized, else the failure to send. Never throws. */
 export function checkMcpBearer(req: Request): { ok: true; principal: McpPrincipal } | { ok: false; failure: McpAuthFailure } {
   const header = req.headers.get("authorization") ?? "";
@@ -377,8 +414,12 @@ export function checkMcpBearer(req: Request): { ok: true; principal: McpPrincipa
   if (!m) return { ok: false, failure: { status: 401, code: "unauthorized" } };
   const presented = m[1]!;
 
+  // Key denylist: first for every configured state, before the maps and the fallback. Not-configured is checked above, so a denied and an unknown token answer identically there (503).
+  const presentedHash = sha256Hex(presented);
+  if (parseDenyList(process.env[MCP_TOKENS_DENY_ENV]).has(presentedHash)) return { ok: false, failure: { status: 401, code: "unauthorized", denied: presentedHash.slice(0, 8) } };
+
   // §2.3 — the map first. Hash lookup: no comparison, so no timing signal from the map's size.
-  const hit = map[sha256Hex(presented)];
+  const hit = map[presentedHash];
   if (hit) return { ok: true, principal: { token_id: hit.actor, scopes: hit.scopes, rooms: hit.rooms, tools: hit.tools } };
 
   // Fallback: the original single token, unchanged — all three scopes, every room, actor operator-v1.

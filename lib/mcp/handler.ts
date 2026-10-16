@@ -24,7 +24,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import type { McpAuthFailure, McpPrincipal } from "@/lib/mcp/auth";
-import { auditToolCall, mcpActorId, type ErrKind } from "@/lib/mcp/audit";
+import { auditDeniedCall, auditToolCall, mcpActorId, type ErrKind } from "@/lib/mcp/audit";
 import type { McpTool, ToolArgs, ToolContext } from "@/lib/mcp/registry";
 import { ToolScopeError, ToolRoomError, ROOM_RESTRICTED_ALLOWED_TOOLS } from "@/lib/mcp/registry";
 import { CALLABLE_TOOLS } from "@/lib/mcp/surface";
@@ -93,6 +93,7 @@ export function mcpMethodNotAllowedResponse(): NextResponse {
 
 /** The 401/503 the routes send on failed auth — one shape for header and path alike. */
 export function mcpAuthFailureResponse(failure: McpAuthFailure): NextResponse {
+  if (failure.denied) void auditDeniedCall(failure.denied); // key denylist: one rate-limited audit row; the response below is the plain 401 (no ip or user agent: this function has no request)
   return NextResponse.json(rpcError(null, -32000, failure.code), { status: failure.status, headers: NO_STORE });
 }
 
