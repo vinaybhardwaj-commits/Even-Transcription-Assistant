@@ -119,6 +119,8 @@ _NO_CHANGE = re.compile(
     re.I,
 )
 _REFER_CUE = re.compile(r"\b(refer\w*|opinion|specialist)\b", re.I)
+RX_TEXT = ("generic", "brand_as_said", "strength", "route", "frequency", "duration", "instructions", "dosage_form",
+           "drug_class_said", "name_interpretation", "brand_as_said_as_heard", "generic_as_heard")
 SOCIAL_TYPES = {"social", "place", "travel", "occupation"}
 ORDER_KINDS = {"medicine", "investigation", "procedure", "referral"}
 SPEAKERS = {"doctor", "patient", "attendant", "staff", "other", "unknown"}
@@ -202,6 +204,39 @@ def duration(d) -> tuple[dict | None, str | None]:
     if u in ("DAYS", "WEEKS", "MONTHS", "YEARS") and 1 <= v <= 1000:
         return {"value": v, "unit": u}, None
     return None, f"duration {d.get('value')} {d.get('unit')} not representable"
+
+
+def duration_words(d) -> str | None:
+    """A duration as words for a text field: a str as given (stripped), {value, unit} as '3 days' ('1 week' when 1).
+    Anything else, or a value out of range, is None. Unlike duration() this keeps YEARS: it is text, not LlmDuration."""
+    if isinstance(d, str):
+        return d.strip()
+    if isinstance(d, dict):
+        v, u = d.get("value"), d.get("unit")
+        if isinstance(v, bool) or not isinstance(v, int) or not isinstance(u, str):
+            return None
+        u = u.upper()
+        if u in ("DAYS", "WEEKS", "MONTHS", "YEARS") and 1 <= v <= 1000:
+            return f"{v} {u[:-1].lower() if v == 1 else u.lower()}"
+    return None
+
+
+def as_text(v) -> str | None:
+    """A Stage A value that is about to become text. A str as is; a number as its digits; a flat list of strings and numbers joined
+    with ', '; a duration-shaped dict as words. A dict, a nested list, a bool or None has no text form: None, never its repr."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, list):
+        if all(isinstance(x, (str, int, float)) and not isinstance(x, bool) for x in v):
+            return ", ".join(x if isinstance(x, str) else str(x) for x in v)
+        return None
+    if isinstance(v, dict):
+        return duration_words(v)
+    return None
 
 
 def _tokens(s: str) -> set[str]:
@@ -508,6 +543,23 @@ class Builder:
     def unquarantined(self, turns) -> list[int]:
         return [t for t in turns if t not in self.b.quarantined]
 
+    def _txt(self, it, keys, kind: str, record: bool = True):
+        """`it` with each text field in `keys` that is neither a str nor None routed through as_text. A value with no text form
+        becomes None, so the site sees it as absent, and (record) one provenance item says so. A str is never touched."""
+        if not isinstance(it, dict):
+            return it
+        bad = [k for k in keys if it.get(k) is not None and not isinstance(it[k], str)]
+        if not bad:
+            return it
+        out = dict(it)
+        lost = False
+        for k in bad:
+            out[k] = as_text(it[k])
+            lost = lost or out[k] is None
+        if lost and record:
+            self.P(kind, f"{kind} (value not representable)", "discussed_only", self.unquarantined(self.turns(it)), 0.5, None)
+        return out
+
     def quarantine(self, kind, text, turns, names=None, lead=None) -> dict:
         return self.P(kind, f"[boundary_quarantine] {text}", "discussed_only", turns, 0.5, None, ["boundary_quarantined"], names=names, lead=lead)
 
@@ -594,6 +646,7 @@ class Builder:
     def comorbidities(self):
         com = []
         for it in self.enc.get("comorbidities") or []:
+            it = self._txt(it, ("name",), "comorbidity")
             nm = (it.get("name") or "").strip()
             if not nm:
                 continue
@@ -615,7 +668,7 @@ class Builder:
             self.gx["comorbidities"] = com
 
     def presenting(self) -> dict:
-        cc = self.enc.get("chief_complaint") or {}
+        cc = self._txt(self.enc.get("chief_complaint") or {}, ("text",), "symptoms")
         parts, turns = [], []
 
         def take(text, it):
@@ -628,11 +681,16 @@ class Builder:
             turns.extend(keep)
 
         if cc.get("text"):
-            take(cc["text"] + (f" ({cc['duration']})" if cc.get("duration") and str(cc["duration"]) not in cc["text"] else ""), cc)
+            words = duration_words(cc["duration"]) if cc.get("duration") else None
+            take(cc["text"] + (f" ({words})" if words and words.lower() not in cc["text"].lower() else ""), cc)
+            if cc.get("duration") and words is None:
+                self.P("symptoms", f"{cc['text']} (duration not representable)", "discussed_only", self.unquarantined(self.turns(cc)), 0.5, None)
         for it in self.enc.get("hpi") or []:
+            it = self._txt(it, ("text",), "symptoms")
             if it.get("text"):
                 take(it["text"], it)
         for it in self.enc.get("history") or []:
+            it = self._txt(it, ("text",), "symptoms")
             if not it.get("text"):
                 continue
             if it.get("type") in SOCIAL_TYPES and not it.get("clinically_relevant"):
@@ -650,6 +708,7 @@ class Builder:
     def diagnoses(self, pc: dict):
         cand = []
         for d in self.enc.get("diagnoses") or []:
+            d = self._txt(d, ("label", "raw_name", "as_said"), "diagnosis")
             lab = (d.get("label") or "").strip()
             if not lab:
                 continue
@@ -728,6 +787,7 @@ class Builder:
     def examination(self):
         ex, missing = [], []
         for e in self.enc.get("examination") or []:
+            e = self._txt(e, ("performed", "finding"), "examination")
             tl = self.unquarantined(self.turns(e))
             if self.turns(e) and not tl:
                 continue
@@ -748,6 +808,7 @@ class Builder:
     def medicines(self, plan_txt):
         meds = []
         for rx in self.enc.get("prescription") or []:
+            rx = self._txt(rx, RX_TEXT, "medicine")
             action = rx.get("action") or "start"
             generic, brand = rx.get("generic"), rx.get("brand_as_said")
             heard_name = str(brand or generic or "").strip()
@@ -1585,6 +1646,7 @@ class Builder:
     def investigations(self, plan_txt):
         inv = []
         for it in self.enc.get("investigations") or []:
+            it = self._txt(it, ("name", "timing"), "investigation")
             nm = (it.get("name") or "").strip()
             st = it.get("order_status") or "ordered"
             if not nm:
@@ -1624,6 +1686,7 @@ class Builder:
     def referrals(self):
         refs = []
         for it in self.enc.get("referrals") or []:
+            it = self._txt(it, ("to", "reason"), "referral")
             to = (it.get("to") or "").strip()
             if not to:
                 continue
@@ -1763,6 +1826,7 @@ class Builder:
             item["procedure"] = {"advised_kind": kind if kind in ("advised", "offered_elective", "ordered") else "advised"}
 
         for it in self.enc.get("procedures") or []:
+            it = self._txt(it, ("name", "raw_name", "notes"), "procedure")
             nm = (it.get("name") or "").strip()
             if not nm:
                 continue
@@ -1802,6 +1866,7 @@ class Builder:
                     else:
                         add(nm, [i], i)
         for p in self.enc.get("plan") or []:
+            p = self._txt(p, ("text",), "management_plan", record=False)
             if p.get("basis") != "said" or not p.get("text"):
                 continue
             tl = self.unquarantined(self.turns(p))
@@ -1825,6 +1890,7 @@ class Builder:
     def plan(self, plan_txt):
         said = []
         for p in self.enc.get("plan") or []:
+            p = self._txt(p, ("text",), "management_plan")
             if not p.get("text"):
                 continue
             tl = self.turns(p)
@@ -1840,6 +1906,7 @@ class Builder:
     def advice(self):
         cands: list[tuple[str, list[int]]] = []
         for a in (self.enc.get("advice") or []) + (self.enc.get("red_flags_safety_net") or []):
+            a = self._txt(a, ("text",), "advice")
             pieces = split_advice_items(a.get("text") or "")
             if not pieces:
                 continue
@@ -1891,7 +1958,7 @@ class Builder:
         return {"value": v, "unit": u}
 
     def follow_up(self):
-        fu = self.enc.get("follow_up") or {}
+        fu = self._txt(self.enc.get("follow_up") or {}, ("when", "condition"), "follow_up")
         tl = self.turns(fu)
         blob = " ".join(str(fu.get(k) or "") for k in ("when", "condition"))
         if fu.get("no_follow_up_needed") is True or re.search(r"\bno follow[- ]?up\b|\bno review needed\b", blob, re.I):
