@@ -92,6 +92,7 @@ class PollRoom(unittest.TestCase):
         for bad in ("sudo", ">", "rm ", "tee", "install", "sqlite3"):
             self.assertNotIn(bad, poll.REMOTE_COMMAND.replace("2>/dev/null", ""))
 
+    @unittest.skipUnless(sys.platform == "darwin", "REMOTE_COMMAND uses BSD stat; the kiosks are macOS")
     def test_remote_command_runs_locally_against_fake_home(self):
         with tempfile.TemporaryDirectory() as home:
             os.makedirs(home + "/Library/Logs")
@@ -153,12 +154,14 @@ class RunOnce(unittest.TestCase):
         self.tokf = self.d + "/tok"
         with open(self.tokf, "w") as fh:
             fh.write(AUTH_VALUE + "\n")
-        self.env = {"MICGUARD_KIOSKS": self.cfg, "MICGUARD_TOKEN_FILE": self.tokf, "MICGUARD_STATE": self.d + "/state.json",
+        self.env = {"MICGUARD_KIOSKS": self.cfg, "MICGUARD_TOKEN_FILE": self.tokf, "MICGUARD_STATE": self.d + "/state.json", "MICGUARD_ROOMS": "r1,r2",
                     "MICGUARD_INGEST_URL": "https://ingest.example.test/api/kiosk-health"}
         self.posts = []
+        self.timeouts = []
 
     def poster(self, status=200):
-        def f(url, token, body):
+        def f(url, token, body, timeout=None):
+            self.timeouts.append(timeout)
             self.posts.append((url, token, json.loads(body)))
             return status
         return f
@@ -222,6 +225,76 @@ class RunOnce(unittest.TestCase):
         out = self.run_it(boom, self.poster())
         self.assertNotIn("leak", out)
         self.assertNotIn(TARGET, out)
+
+    def test_restored_survives_ssh_failure_carry_forward(self):
+        base = 1_800_000_000 - (1_800_000_000 % 86400) + 4 * 3600  # 09:30 IST on some IST day
+        ok_restored = lambda *a: remote("2026-10-16 10:00:00 restored 0->2", restored=["2026-10-16 10:00:00"], now=base)
+        self.run_it(ok_restored, self.poster(), base)
+        self.run_it(lambda *a: None, self.poster(), base + 600)   # unreachable: restored must not drop to 0
+        self.run_it(lambda *a: None, self.poster(), base + 3600)
+        evs = [e for _, _, b in self.posts for e in b["events"] if e["room_id"] == "r1"]
+        last = evs[-1]["payload"]
+        self.assertEqual((last["state"], last["reason"], last["restored_today"]), ("stale", "ssh_unreachable", 1))
+        self.assertEqual(last["last_restored_at"], "2026-10-16T10:00:00+05:30")
+        self.assertTrue(all(e["payload"]["restored_today"] >= 1 for e in evs))
+
+    def test_carry_resets_on_next_ist_day(self):
+        base = 1_800_000_000
+        self.run_it(lambda *a: remote(restored=["2026-10-16 10:00:00"], now=base), self.poster(), base)
+        nxt = base + 86400
+        self.run_it(lambda *a: None, self.poster(), nxt)
+        last = [e for _, _, b in self.posts for e in b["events"] if e["room_id"] == "r1"][-1]["payload"]
+        self.assertEqual(last["restored_today"], 0)
+
+    def test_never_posts_lower_same_day_count(self):
+        base = 1_800_000_000
+        self.run_it(lambda *a: remote(restored=["2026-10-16 10:00:00", "2026-10-16 10:05:00"], now=base), self.poster(), base)
+        self.run_it(lambda *a: remote(restored=["2026-10-16 10:00:00"], now=base + 60), self.poster(), base + 60)
+        counts = [e["payload"]["restored_today"] for _, _, b in self.posts for e in b["events"] if e["room_id"] == "r1"]
+        self.assertEqual(counts, sorted(counts))
+
+    def test_second_run_exits_without_posting_while_locked(self):
+        import fcntl
+        os.makedirs(self.d, exist_ok=True)
+        fh = open(self.env["MICGUARD_STATE"] + ".lock", "w")
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            out = self.run_it(lambda *a: remote(), self.poster())
+        finally:
+            fh.close()
+        self.assertEqual(self.posts, [])
+        self.assertIn("lock", out)
+        self.run_it(lambda *a: remote(), self.poster())  # lock released: runs
+        self.assertEqual(len(self.posts), 1)
+
+    def test_post_timeout_capped_by_budget(self):
+        self.run_it(lambda *a: remote(), self.poster())
+        self.assertTrue(0 < self.timeouts[0] <= poll.POST_TIMEOUT_S)
+        self.assertLessEqual(poll.SSH_PHASE_S + poll.POST_TIMEOUT_S, poll.TOTAL_BUDGET_S + 0)  # 30 + 15 fits inside 50
+
+    def test_bad_target_and_unknown_room_skipped_without_printing_values(self):
+        with open(self.cfg, "w") as fh:
+            json.dump([
+                {"room_id": "r1", "machine": "m1", "ssh": "-oProxyCommand=EVILVALUE", "installed": True},
+                {"room_id": "not-a-room-EVILROOM", "machine": "m2", "ssh": TARGET, "installed": True},
+                {"room_id": "r2", "machine": "m3", "ssh": TARGET, "installed": True},
+            ], fh)
+        seen = []
+        out = self.run_it(lambda t, c, to: seen.append(t) or remote(), self.poster())
+        self.assertEqual(seen, [TARGET])
+        self.assertIn("bad_target", out)
+        self.assertIn("unknown_room", out)
+        self.assertNotIn("EVILVALUE", out)
+        self.assertNotIn("EVILROOM", out)
+
+    def test_load_config_validation_rules(self):
+        with open(self.cfg, "w") as fh:
+            json.dump([{"room_id": "r1", "machine": "bad machine!", "ssh": TARGET}, {"room_id": "r1", "machine": "m", "ssh": "user@host;rm", "installed": True},
+                       {"room_id": "r1", "machine": "m", "ssh": "anything", "installed": False}], fh)
+        entries, skipped = poll.load_config(self.cfg, ("r1",))
+        self.assertEqual(skipped, {"bad_machine": 1, "bad_target": 1})
+        self.assertEqual([e["installed"] for e in entries], [False])
+        self.assertEqual(entries[0]["ssh"], "")
 
 
 if __name__ == "__main__":

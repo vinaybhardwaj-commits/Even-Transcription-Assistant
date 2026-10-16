@@ -1,8 +1,9 @@
 /**
  * lib/micguard-read.ts — the READ half of the mic-guard state (kind "mic_guard", posted by tools/eta-micguard-poller to /api/kiosk-health).
  *
- * Source: kiosk_health_events (migration 0126). ONE query: the newest mic_guard row per room_id inside the last 24 h, bounded on `received_at`
- * (the trusted arrival time). room_id and the asOf bound are bound parameters (Neon HTTP driver: no sql.unsafe).
+ * Source: kiosk_health_events (migration 0126). ONE query: per room_id the newest mic_guard row (state comes from it) PLUS every row since IST midnight today that
+ * carries restored_today >= 1 (the restored alert is the MAX count and NEWEST last_restored_at of those, so it survives later stale/ssh_unreachable rows until IST midnight).
+ * Bounded on `ts` (rides the (kind, ts DESC) index: about 2.3k rows a day) and on `received_at` (the trusted arrival time). All values are bound parameters (Neon HTTP driver: no sql.unsafe).
  *
  * The server state is the poller's payload.state, with two rules applied here:
  *   - the newest row is more than 600 s old by received_at  -> state "stale", reason "poller_silent" (the poller is down, its last word is not current).
@@ -37,7 +38,7 @@ export type MicGuardView = {
   updated_at: string;
 };
 
-export type MicGuardRow = { room_id: string; ts: unknown; received_at: unknown; payload: unknown };
+export type MicGuardRow = { room_id: string; ts: unknown; received_at: unknown; payload: unknown; rn?: unknown };
 
 const IST_MS = 5.5 * 3_600_000;
 const istDate = (ms: number): string => new Date(ms + IST_MS).toISOString().slice(0, 10);
@@ -76,8 +77,11 @@ const nat = (x: unknown): number => {
   return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 100_000) : 0;
 };
 
-/** One row (or none) -> the view. Pure; `nowMs` is the clock. */
-export function micGuardView(row: MicGuardRow | undefined | null, nowMs: number): MicGuardView | null {
+/**
+ * The newest row (or none) -> the view. Pure; `nowMs` is the clock. `restoredRows` = the room's other rows since IST midnight (may include the newest):
+ * the restored alert takes the MAX restored_today and the NEWEST last_restored_at among rows whose restore is on today's IST date.
+ */
+export function micGuardView(row: MicGuardRow | undefined | null, nowMs: number, restoredRows: readonly MicGuardRow[] = []): MicGuardView | null {
   if (!row) return null;
   const receivedMs = ms(row.received_at);
   if (receivedMs === null) return null;
@@ -97,12 +101,26 @@ export function micGuardView(row: MicGuardRow | undefined | null, nowMs: number)
     reason = "poller_silent";
     ageS = null;
   }
-  const restoredToday = nat(p.restored_today);
-  const lastRestoredMs = ms(p.last_restored_at);
-  // restored today (IST): the restore's own stamp when it has one, else the day the row arrived
-  const restoredDay = lastRestoredMs !== null ? istDate(lastRestoredMs) : istDate(receivedMs);
-  const restoredNow = restoredToday > 0 && restoredDay === istDate(nowMs);
-  const label = restoredNow ? (lastRestoredMs !== null ? `restored ${istHm(lastRestoredMs)} IST` : "restored today") : null;
+  // restored today (IST): a row counts when its restore's own stamp (else the day the row arrived) is today's IST date
+  const today = istDate(nowMs);
+  let restoredToday = 0;
+  let lastRestoredMs: number | null = null;
+  let anyStamp = false;
+  for (const r of [row, ...restoredRows]) {
+    const rp = obj(r.payload);
+    const n = nat(rp.restored_today);
+    if (n === 0) continue;
+    const rMs = ms(rp.last_restored_at);
+    const day = rMs !== null ? istDate(rMs) : istDate(ms(r.received_at) ?? nowMs);
+    if (day !== today) continue;
+    restoredToday = Math.max(restoredToday, n);
+    if (rMs !== null) {
+      anyStamp = true;
+      if (lastRestoredMs === null || rMs > lastRestoredMs) lastRestoredMs = rMs;
+    }
+  }
+  const restoredNow = restoredToday > 0;
+  const label = restoredNow ? (anyStamp && lastRestoredMs !== null ? `restored ${istHm(lastRestoredMs)} IST` : "restored today") : null;
   return {
     state,
     reason,
@@ -110,7 +128,7 @@ export function micGuardView(row: MicGuardRow | undefined | null, nowMs: number)
     last_line_at: iso(p.last_line_at),
     age_s: ageS,
     restored_today: restoredToday,
-    last_restored_at: iso(p.last_restored_at),
+    last_restored_at: lastRestoredMs !== null ? new Date(lastRestoredMs).toISOString() : null,
     restored_label: label,
     updated_at: new Date(receivedMs).toISOString(),
   };
@@ -123,18 +141,32 @@ export async function readMicGuard(sql: WindowsDb, roomIds: readonly string[], a
     const ids = [...new Set(roomIds.filter((r) => typeof r === "string" && r.length > 0))];
     if (ids.length === 0) return { byRoom, ok: true };
     const hi = new Date(asOfMs).toISOString();
+    const midnight = new Date(Date.parse(`${istDate(asOfMs)}T00:00:00+05:30`)).toISOString();
     const rows = (await sql`
-      SELECT DISTINCT ON (k.room_id) k.room_id, k.ts, k.received_at, k.payload
-        FROM kiosk_health_events k
-       WHERE k.kind = 'mic_guard'
-         AND k.room_id = ANY(${ids}::text[])
-         AND k.received_at >= ${hi}::timestamptz - interval '24 hours'
-         AND k.received_at <= ${hi}::timestamptz
-       ORDER BY k.room_id, k.received_at DESC, k.ts DESC
+      SELECT r.room_id, r.ts, r.received_at, r.payload, r.rn
+        FROM (
+          SELECT k.room_id, k.ts, k.received_at, k.payload,
+                 row_number() OVER (PARTITION BY k.room_id ORDER BY k.received_at DESC, k.ts DESC) AS rn
+            FROM kiosk_health_events k
+           WHERE k.kind = 'mic_guard'
+             AND k.room_id = ANY(${ids}::text[])
+             AND k.ts >= ${hi}::timestamptz - interval '24 hours'
+             AND k.received_at <= ${hi}::timestamptz
+        ) r
+       WHERE r.rn = 1
+          OR (r.ts >= ${midnight}::timestamptz AND r.payload->>'restored_today' ~ '^[1-9]')
+       ORDER BY r.room_id, r.rn
     `) as unknown as MicGuardRow[];
+    const newest = new Map<string, MicGuardRow>();
+    const restored = new Map<string, MicGuardRow[]>();
     for (const r of rows) {
-      const v = micGuardView(r, asOfMs);
-      if (v && typeof r.room_id === "string") byRoom[r.room_id] = v;
+      if (typeof r.room_id !== "string") continue;
+      if (Number(r.rn) === 1) newest.set(r.room_id, r);
+      else restored.set(r.room_id, [...(restored.get(r.room_id) ?? []), r]);
+    }
+    for (const [id, r] of newest) {
+      const v = micGuardView(r, asOfMs, restored.get(id) ?? []);
+      if (v) byRoom[id] = v;
     }
     return { byRoom, ok: true };
   } catch {

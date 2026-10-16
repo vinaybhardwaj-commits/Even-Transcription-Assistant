@@ -42,8 +42,9 @@ import { readRoomsLive } from "@/lib/admin/rooms-live";
 
 const NOW = Date.parse("2026-10-16T06:00:00.000Z"); // 11:30 IST
 const ago = (s: number, base = NOW) => new Date(base - s * 1000).toISOString();
+const rowAt = (payload: Row, tsIso: string, rn = 1) => ({ room_id: "room_a", ts: tsIso, received_at: tsIso, payload, rn });
 const row = (payload: Row, receivedAgoS = 30, base = NOW): { room_id: string; ts: string; received_at: string; payload: Row } => ({
-  room_id: "room_a", ts: ago(receivedAgoS, base), received_at: ago(receivedAgoS, base), payload,
+  room_id: "room_a", ts: ago(receivedAgoS, base), received_at: ago(receivedAgoS, base), payload, rn: 1,
 });
 const pl = (state: string, over: Row = {}): Row => ({ state, reason: null, last_line_at: ago(20), age_s: 20, restored_today: 0, last_restored_at: null, ...over });
 
@@ -137,6 +138,44 @@ describe("micGuardView — restored today", () => {
   });
 });
 
+describe("M1 — the restored alert survives later rows until IST midnight", () => {
+  const T = (hm: string) => Date.parse(`2026-10-16T${hm}:00+05:30`);
+  const restoredRow = rowAt(pl("restored", { restored_today: 1, last_restored_at: "2026-10-16T10:00:00+05:30" }), new Date(T("10:00")).toISOString(), 2);
+  it("restored 10:00, ssh_unreachable rows after it, 21:30 IST: still alert, label restored 10:00 IST", async () => {
+    const now = T("21:30");
+    const newestIso = new Date(now - 30_000).toISOString();
+    H.mgRows.value = [
+      rowAt(pl("stale", { reason: "ssh_unreachable", age_s: null, restored_today: 0, last_restored_at: null }), newestIso, 1),
+      restoredRow,
+    ];
+    const r = await readMicGuard((await import("@/lib/db")).sql as never, ["room_a"], now);
+    const v = r.byRoom.room_a!;
+    expect([v.state, v.reason]).toEqual(["stale", "ssh_unreachable"]);
+    expect(v.alert).toBe(true);
+    expect(v.restored_label).toBe("restored 10:00 IST");
+    expect(v.restored_today).toBe(1);
+  });
+  it("takes the MAX count and the NEWEST stamp across the day's rows", () => {
+    const now = T("15:00");
+    const a = rowAt(pl("ok", { restored_today: 1, last_restored_at: "2026-10-16T10:00:00+05:30" }), new Date(T("10:30")).toISOString(), 2);
+    const b = rowAt(pl("ok", { restored_today: 3, last_restored_at: "2026-10-16T13:20:00+05:30" }), new Date(T("13:30")).toISOString(), 3);
+    const newest = rowAt(pl("ok"), new Date(now - 20_000).toISOString(), 1);
+    const v = micGuardView(newest, now, [a, b])!;
+    expect([v.restored_today, v.restored_label, v.alert, v.state]).toEqual([3, "restored 13:20 IST", true, "ok"]);
+  });
+  it("after IST midnight there is no alert from yesterday's rows", () => {
+    const now = Date.parse("2026-10-17T00:01:00+05:30");
+    const newest = rowAt(pl("ok"), new Date(now - 20_000).toISOString(), 1);
+    const v = micGuardView(newest, now, [restoredRow])!;
+    expect([v.alert, v.restored_label, v.restored_today]).toEqual([false, null, 0]);
+  });
+  it("a count carried by the newest row from yesterday does not alert either", () => {
+    const now = Date.parse("2026-10-17T00:01:00+05:30");
+    const newest = rowAt(pl("ok", { restored_today: 2, last_restored_at: "2026-10-16T23:50:00+05:30" }), new Date(now - 20_000).toISOString(), 1);
+    expect(micGuardView(newest, now)!.alert).toBe(false);
+  });
+});
+
 describe("micGuardBadge", () => {
   it("words and tones", () => {
     expect(micGuardBadge(micGuardView(row(pl("ok")), NOW)!)).toMatchObject({ text: "MIC-PERM ok", tone: "ok" });
@@ -160,10 +199,12 @@ describe("readMicGuard", () => {
     expect(Object.keys(r.byRoom)).toEqual(["room_a"]);
     expect(H.calls).toHaveLength(1);
     const c = H.calls[0]!;
-    expect(c.text).toMatch(/DISTINCT ON \(k\.room_id\)/);
+    expect(c.text).toMatch(/row_number\(\) OVER \(PARTITION BY k\.room_id ORDER BY k\.received_at DESC/);
     expect(c.text).toMatch(/k\.kind = 'mic_guard'/);
-    expect(c.text).toMatch(/received_at >= \?::timestamptz - interval '24 hours'/);
+    expect(c.text).toMatch(/k\.ts >= \?::timestamptz - interval '24 hours'/); // bounded on ts: rides (kind, ts DESC)
+    expect(c.text).toMatch(/r\.payload->>'restored_today' ~ '\^\[1-9\]'/);
     expect(c.values[0]).toEqual(["room_a", "room_b"]);
+    expect(c.values[3]).toBe("2026-10-15T18:30:00.000Z"); // IST midnight of 16 Oct
   });
   it("no rooms: no query", async () => {
     const r = await readMicGuard((await import("@/lib/db")).sql as never, [], NOW);
@@ -184,7 +225,7 @@ describe("GET /api/rooms-live/now — mic_guard is admin only", () => {
   beforeEach(() => {
     H.calls.length = 0;
     H.mgFail.value = false;
-    H.mgRows.value = [{ room_id: "room_a", ts: new Date().toISOString(), received_at: new Date().toISOString(), payload: pl("restored", { restored_today: 1 }) }];
+    H.mgRows.value = [{ room_id: "room_a", ts: new Date().toISOString(), received_at: new Date().toISOString(), payload: pl("restored", { restored_today: 1 }), rn: 1 }];
   });
   it("admin: every room has mic_guard (null where no row)", async () => {
     H.kind.value = "admin";
@@ -220,7 +261,7 @@ describe("bench twin (readRoomsLive) always carries mic_guard", () => {
     H.mgFail.value = false;
   });
   it("a room with a guard row gets it, a room without gets null", async () => {
-    H.mgRows.value = [{ room_id: "room_a", ts: new Date(NOW - 10_000).toISOString(), received_at: new Date(NOW - 10_000).toISOString(), payload: pl("ok") }];
+    H.mgRows.value = [{ room_id: "room_a", ts: new Date(NOW - 10_000).toISOString(), received_at: new Date(NOW - 10_000).toISOString(), payload: pl("ok"), rn: 1 }];
     const out = await readRoomsLive(new Date(NOW));
     expect(out.rooms).toHaveLength(1);
     expect(out.rooms[0]!.mic_guard?.state).toBe("ok");

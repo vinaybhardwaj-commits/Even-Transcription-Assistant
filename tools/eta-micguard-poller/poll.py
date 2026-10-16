@@ -10,6 +10,7 @@ no sudo, no installs. Raw line text, the ssh target and the token are never logg
 """
 import argparse
 import concurrent.futures
+import fcntl
 import json
 import os
 import re
@@ -25,7 +26,9 @@ KIND = "mic_guard"
 INSTALL_ID = "mini-micguard-poller"
 STALE_LINE_S = 300      # .last older than this = stale (line_old)
 REFRESH_S = 300         # re-post an unchanged room at least this often
-POLL_BUDGET_S = 50      # whole poll
+TOTAL_BUDGET_S = 50     # whole run, post included
+SSH_PHASE_S = 30        # ssh phase cap
+POST_TIMEOUT_S = 15     # post cap (also limited by what is left of TOTAL_BUDGET_S)
 SSH_CONNECT_S = 5
 MAX_PARALLEL = 8
 IST_OFFSET = "+05:30"   # the guard writes local (IST) wall-clock stamps
@@ -42,6 +45,11 @@ REMOTE_COMMAND = (
     'echo "NOW $(date +%s)"; D=$(date +%F); '
     'grep "^$D .* RESTORED " "$L.log" 2>/dev/null | tail -n 50 | sed "s/^\\([^ ]* [^ ]*\\) .*/RESTORED \\1/"'
 )
+
+# The rooms the board knows (lib/rooms-live/rooms.ts). A config room_id outside this list is skipped. MICGUARD_ROOMS (comma list) replaces it.
+KNOWN_ROOMS = ("room_yh3etjpf", "room_87frpus9", "room_ux92qpws", "room_4ggnkg5x", "room_pnyc9u49", "room_qyzghzaf", "room_ymch4bxu", "room_bh6jtq4t")
+_TARGET_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.:-]+$")
+_MACHINE_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 STATES = ("ok", "restored", "read_error", "missing", "write_failed", "db_missing", "stale", "not_installed")
 
@@ -162,7 +170,7 @@ def poll_room(entry, runner, now_epoch, deadline):
     return classify(parse_remote(text), now_epoch)
 
 
-def poll_all(entries, runner, now_epoch, budget_s=POLL_BUDGET_S):
+def poll_all(entries, runner, now_epoch, budget_s=SSH_PHASE_S):
     deadline = time.time() + budget_s
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PARALLEL) as ex:
@@ -197,6 +205,26 @@ def save_state(path, st):
     os.replace(tmp, path)
 
 
+def ist_day(epoch):
+    return datetime.fromtimestamp(epoch + 19800, timezone.utc).strftime("%Y-%m-%d")
+
+
+def _iso_ms(v):
+    try:
+        return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
+def apply_carry(payload, carry, now_epoch):
+    """Never report a lower same-IST-day restored_today than already seen; keep the matching last_restored_at.
+    Mutates and returns payload. carry: {day, restored_today, last_restored_at} or None."""
+    if carry and carry.get("day") == ist_day(now_epoch) and carry.get("restored_today", 0) > payload["restored_today"]:
+        payload["restored_today"] = carry["restored_today"]
+        payload["last_restored_at"] = carry.get("last_restored_at")
+    return payload
+
+
 def should_post(prev, payload, now_epoch):
     """prev: {state, reason, restored_today, posted_at} or None."""
     if not prev:
@@ -226,7 +254,7 @@ def build_events(entries, results, st, now_epoch):
 
 # ---------------------------------------------------------------- http
 
-def real_post(url, token, body_bytes, timeout=15):
+def real_post(url, token, body_bytes, timeout=POST_TIMEOUT_S):
     req = urllib.request.Request(url, data=body_bytes, method="POST", headers={
         "Content-Type": "application/json", "Authorization": "Bearer " + token})
     try:
@@ -247,38 +275,79 @@ def read_token(path):
         return None
 
 
-def load_config(path):
+def load_config(path, known_rooms=KNOWN_ROOMS):
+    """Returns (entries, skipped) where skipped is a dict of reason -> count. Values are never reported."""
     with open(os.path.expanduser(path)) as fh:
         raw = json.load(fh)
-    out = []
-    for e in raw:
-        if isinstance(e, dict) and e.get("room_id") and e.get("machine"):
-            out.append({"room_id": str(e["room_id"]), "machine": str(e["machine"]),
-                        "ssh": str(e.get("ssh", "")), "installed": e.get("installed") is not False})
-    return out
+    out, skipped = [], {}
+
+    def skip(reason):
+        skipped[reason] = skipped.get(reason, 0) + 1
+
+    for e in raw if isinstance(raw, list) else []:
+        if not isinstance(e, dict) or not e.get("room_id") or not e.get("machine"):
+            skip("incomplete")
+            continue
+        if str(e["room_id"]) not in known_rooms:
+            skip("unknown_room")
+            continue
+        if not _MACHINE_RE.match(str(e["machine"])):
+            skip("bad_machine")
+            continue
+        installed = e.get("installed") is not False
+        target = str(e.get("ssh", ""))
+        if installed and not _TARGET_RE.match(target):
+            skip("bad_target")
+            continue
+        out.append({"room_id": str(e["room_id"]), "machine": str(e["machine"]), "ssh": target if installed else "", "installed": installed})
+    return out, skipped
 
 
 # ---------------------------------------------------------------- main
 
 def run_once(env=None, runner=real_runner, poster=real_post, now_epoch=None):
     env = os.environ if env is None else env
-    now_epoch = int(time.time()) if now_epoch is None else now_epoch
+    t0 = time.time()
+    now_epoch = int(t0) if now_epoch is None else now_epoch
     token = read_token(env.get("MICGUARD_TOKEN_FILE", DEFAULT_CRED_PATH))
     if token is None:
         log("token file missing or empty; nothing posted")
         return 0
-    cfg = os.path.expanduser(env.get("MICGUARD_KIOSKS", DEFAULT_CONFIG))
+    state_path = os.path.expanduser(env.get("MICGUARD_STATE", DEFAULT_STATE))
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    lock_fh = open(state_path + ".lock", "w")
     try:
-        entries = load_config(cfg)
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("another run holds the lock; exiting")
+        lock_fh.close()
+        return 0
+    try:
+        return _run_locked(env, runner, poster, now_epoch, t0, token, state_path)
+    finally:
+        lock_fh.close()  # releases the flock
+
+
+def _run_locked(env, runner, poster, now_epoch, t0, token, state_path):
+    cfg = os.path.expanduser(env.get("MICGUARD_KIOSKS", DEFAULT_CONFIG))
+    rooms = tuple(r for r in env.get("MICGUARD_ROOMS", "").split(",") if r) or KNOWN_ROOMS
+    try:
+        entries, skipped = load_config(cfg, rooms)
     except (OSError, ValueError):
         log("kiosk config unreadable; nothing posted")
         return 0
+    if skipped:
+        log("skipped config entries %s" % json.dumps(skipped, sort_keys=True))
     if not entries:
         log("kiosk config empty; nothing posted")
         return 0
-    state_path = os.path.expanduser(env.get("MICGUARD_STATE", DEFAULT_STATE))
     st = load_state(state_path, now_epoch)
+    st.setdefault("carry", {})
     results = poll_all(entries, runner, now_epoch)
+    day = ist_day(now_epoch)
+    for rid, p in results.items():
+        apply_carry(p, st["carry"].get(rid), now_epoch)
+        st["carry"][rid] = {"day": day, "restored_today": p["restored_today"], "last_restored_at": p["last_restored_at"]}
     events, marks = build_events(entries, results, st, now_epoch)
     save_state(state_path, st)  # seq advanced before the post: never reused
     counts = {}
@@ -287,8 +356,12 @@ def run_once(env=None, runner=real_runner, poster=real_post, now_epoch=None):
     if not events:
         log("polled %d rooms %s; no change to post" % (len(entries), json.dumps(counts, sort_keys=True)))
         return 0
+    left = TOTAL_BUDGET_S - (time.time() - t0)
+    if left < 1:
+        log("no time left to post; will retry next poll")
+        return 0
     body = json.dumps({"events": events}).encode("utf-8")
-    status = poster(env.get("MICGUARD_INGEST_URL", DEFAULT_URL), token, body)
+    status = poster(env.get("MICGUARD_INGEST_URL", DEFAULT_URL), token, body, min(POST_TIMEOUT_S, left))
     if 200 <= status < 300:
         st["rooms"].update(marks)
         save_state(state_path, st)

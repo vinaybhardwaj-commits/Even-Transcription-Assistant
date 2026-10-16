@@ -1,4 +1,4 @@
 [
-  {"room_id": "room_example1", "machine": "kiosk-opd1-example", "ssh": "user@kiosk-opd1.example", "installed": true},
-  {"room_id": "room_example2", "machine": "kiosk-opd5-example", "ssh": "user@kiosk-opd5.example", "installed": false}
+  {"room_id": "room_yh3etjpf", "machine": "kiosk-opd1-example", "ssh": "user@kiosk-opd1.example", "installed": true},
+  {"room_id": "room_4ggnkg5x", "machine": "kiosk-opd5-example", "ssh": "user@kiosk-opd5.example", "installed": false}
 ]
