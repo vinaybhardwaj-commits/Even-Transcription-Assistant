@@ -40,6 +40,7 @@ import {
 } from "./read";
 import { STATUS_KEYS, statusFromRows } from "./steward-status";
 import { cardLine, isChange, lineOf, type StewardLine, type StewardStatus } from "./steward-lines";
+import type { MicGuardView } from "@/lib/micguard-read";
 import { computeState, type LevelRow, type RoomStateName, type StateInput } from "./state";
 
 export type RoomRow = {
@@ -62,6 +63,8 @@ export type RoomRow = {
   steward_log: StewardLine[];
   claim: ClaimView | null;
   ages_s: { listener: number | null; heartbeat: number | null; ext: number | null };
+  /** mic-permission guard state (lib/micguard-read.ts). Present ONLY on the admin response of /api/rooms-live/now; absent for staff and open callers. null = no guard row in 24 h. */
+  mic_guard?: MicGuardView | null;
 };
 /** v1.7 S3: a Steward action or alert (live or shadow) of today, tagged "Steward" */
 export type ChangeRow = StewardLine & { room_id: string; label: string; tag: "Steward" };

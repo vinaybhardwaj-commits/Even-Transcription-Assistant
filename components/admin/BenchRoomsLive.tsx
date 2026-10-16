@@ -29,6 +29,7 @@
 import * as React from "react";
 import { BenchLevelMeter } from "@/components/admin/BenchLevelMeter";
 import { isDigitalSilence } from "@/lib/bench-meter";
+import { micGuardBadge, type MicGuardView } from "@/lib/micguard-read";
 import { FleetAttentionBadge, FleetAttentionPanel, useFleetAttention } from "@/components/admin/FleetAttentionPanel";
 import { FleetHelperPanel } from "@/components/admin/FleetHelperPanel";
 // From the PURE constants module, NOT lib/admin/rooms-live: that file imports lib/db and
@@ -142,6 +143,7 @@ type ListenersResp = { now: string; freshness_window_ms: number; listeners: List
 
 type RoomLive = {
   room: { id: string; slug: string; name: string };
+  mic_guard?: MicGuardView | null;
   recording: boolean;
   paused_session: boolean;
   session_id: string | null;
@@ -295,6 +297,17 @@ const LEVEL_CLASS: Record<Level, string> = {
   red: "bg-danger-100 text-danger-700",
   unknown: "bg-even-ink-100 text-even-ink-500",
 };
+
+/** MIC-PERM: the mic-permission guard on the room Mac. Quiet when fine, amber when the guard restored, failed or went silent. */
+function MicPermPill({ view }: { view: MicGuardView | null | undefined }) {
+  if (!view) return null;
+  const b = micGuardBadge(view);
+  return (
+    <Pill level={b.tone === "alert" ? "amber" : b.tone === "idle" ? "unknown" : "ok"} title={b.title}>
+      {b.text}
+    </Pill>
+  );
+}
 
 function Pill({ level, children, title }: { level: Level; children: React.ReactNode; title?: string }) {
   return <span className={`${PILL} ${LEVEL_CLASS[level]}`} title={title}>{children}</span>;
@@ -1034,6 +1047,7 @@ export function BenchRoomsLive() {
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   <FleetAttentionBadge items={fleetAttention.data?.items} roomId={r.room.id} />
+                  <MicPermPill view={r.mic_guard} />
                   {st.state === "finished" ? (
                     <span className={`${PILL} ${FINISHED_PILL}`} title={st.hint ?? undefined}>{STATE_WORD.finished}</span>
                   ) : (
