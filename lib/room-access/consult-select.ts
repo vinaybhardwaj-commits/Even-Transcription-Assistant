@@ -32,6 +32,37 @@ export async function selectTranscribedConsults(n: number, days: number, sha: st
   return rows.map((r) => r.consult_key);
 }
 
+/**
+ * BACKFILL-SINCE pass 2: the SAME predicates as selectTranscribedConsults (transcribed rule, the uid's lexically smallest key, decided-for-sha/mode exclusion, oldest first) over the
+ * half-open range [`since` 00:00 IST, start of the `days` window). A uid with any window at or after that start is pass 1's, so it is excluded here: the two passes never share a uid.
+ * `since` is an IST date YYYY-MM-DD already validated by parseBackfillSince.
+ */
+export async function selectTranscribedConsultsBefore(n: number, days: number, since: string, sha: string | null, mode: string, subjectType: string): Promise<string[]> {
+  const rows = (await sql`
+    WITH b AS (
+      SELECT ((date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') - make_interval(days => ${days}::int)) AT TIME ZONE 'Asia/Kolkata') AS hi,
+             ((${since}::date)::timestamp AT TIME ZONE 'Asia/Kolkata') AS lo
+    ), q AS (
+      SELECT w.consult_key, w.consult_uid, w.t_close FROM eta_encounter_windows w, b
+       WHERE w.t_close IS NOT NULL AND w.consult_uid IS NOT NULL AND w.room_id IS NOT NULL
+         AND w.t_open >= b.lo AND w.t_open < b.hi
+         AND NOT EXISTS (SELECT 1 FROM eta_encounter_windows z WHERE z.consult_uid = w.consult_uid AND z.t_open >= b.hi AND z.t_open <= now())
+         AND EXISTS (SELECT 1 FROM encounter_catalog ec WHERE ec.consult_uid = w.consult_uid
+                       AND ec.stages->'sealed'->>'state' = 'ok' AND ec.stages->'stt'->>'state' = 'ok'
+                       AND (ec.stages->'translate'->>'state' = 'ok' OR (ec.stages->'translate'->>'state' = 'n/a' AND ec.stages->'translate'->>'reason' = 'english')))
+    ), pick AS (
+      SELECT DISTINCT ON (consult_uid) consult_key, consult_uid, t_close FROM q ORDER BY consult_uid, consult_key
+    )
+    SELECT p.consult_key FROM pick p
+     WHERE ${sha}::text IS NULL OR NOT EXISTS (
+       SELECT 1 FROM jev_decision d JOIN eta_encounter_windows x ON x.consult_key = d.subject_id
+        WHERE x.consult_uid = p.consult_uid AND d.subject_type = ${subjectType} AND d.question_set_sha256 = ${sha}::text AND d.mode = ${mode}::text AND d.order_variant = 'derived')
+     ORDER BY p.t_close ASC, p.consult_key ASC
+     LIMIT ${n}::int
+  `) as Array<{ consult_key: string }>;
+  return rows.map((r) => r.consult_key);
+}
+
 export async function coverageCutAndTranscribed(istDate: string): Promise<{ cut: number; transcribed: number }> {
   const [cut, trans] = (await Promise.all([
     sql`SELECT count(DISTINCT w.consult_uid)::int AS c FROM eta_encounter_windows w

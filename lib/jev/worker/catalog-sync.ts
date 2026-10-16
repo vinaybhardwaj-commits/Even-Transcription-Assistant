@@ -14,9 +14,10 @@
 import { FlagValueError } from "@/lib/flags";
 import { ConcurrentIngestError, ingestCatalogRows, validateBatch, type CatalogRow } from "@/lib/encounter-catalog/store";
 import { QUESTION_SET_FILES } from "@/jev/question-sets";
-import { selectC4Candidates, selectClefPicks, selectCurrentSets, selectJevPicks, type Candidate, type ClefPick, type CurrentSet, type Cursor, type JevPick } from "@/lib/room-access/catalog-c4-select";
+import { selectC4Candidates, selectC4CandidatesBefore, selectClefPicks, selectCurrentSets, selectJevPicks, type Candidate, type ClefPick, type CurrentSet, type Cursor, type JevPick } from "@/lib/room-access/catalog-c4-select";
 import { canonicalJson } from "./canonical";
 import { classifyDbError } from "./errors";
+import { parseBackfillSince } from "./consult-eligible";
 import { catalogC4SyncEnabled } from "./flags";
 import { validateSetFile, type QuestionSetFile } from "./sets";
 
@@ -41,8 +42,9 @@ export type CatalogCounts = {
   posted: number; updated: number; inserted: number; stale: number; unchanged: number;
   skipped_off_enum: number; skipped_bad_token: number; budget_hit: boolean; capped: number;
   missing: number; retried: number; retired: number; invariant_dropped: number; error_class: string | null;
+  backfill_rows: number;      // rows collected by the CATALOG_C4_BACKFILL_SINCE second scan (0 when OFF)
 };
-export const zeroCounts = (): CatalogCounts => ({ posted: 0, updated: 0, inserted: 0, stale: 0, unchanged: 0, skipped_off_enum: 0, skipped_bad_token: 0, budget_hit: false, capped: 0, missing: 0, retried: 0, retired: 0, invariant_dropped: 0, error_class: null });
+export const zeroCounts = (): CatalogCounts => ({ posted: 0, updated: 0, inserted: 0, stale: 0, unchanged: 0, skipped_off_enum: 0, skipped_bad_token: 0, budget_hit: false, capped: 0, missing: 0, retried: 0, retired: 0, invariant_dropped: 0, error_class: null, backfill_rows: 0 });
 
 type Kind = "choice" | "noul" | "score";
 type QDef = { kind: Kind; options: Set<string> | null; levels: number };
@@ -191,6 +193,9 @@ export function buildClef(r: ClefPick, c: CatalogCounts): { lanes: Array<{ lane:
 
 const same = (a: unknown, b: unknown): boolean => canonicalJson(a ?? null) === canonicalJson(b ?? null);
 
+/** CATALOG_C4_BACKFILL_SINCE: the second scan's lower bound (IST date), or null = OFF. */
+export const catalogC4BackfillSince = (nowMs: number = Date.now()): string | null => parseBackfillSince(process.env.CATALOG_C4_BACKFILL_SINCE, nowMs);
+
 /** One tick. Never throws: any failure comes back as `error_class` (a token). An ENABLED tick ends with exactly two console.info lines (tick, ceiling): counts and tokens only. */
 export async function runCatalogC4Sync(now: () => number = Date.now, stmtTimeoutMs: number = CATALOG_SYNC_STATEMENT_TIMEOUT_MS): Promise<CatalogCounts> {
   const c = zeroCounts();
@@ -209,7 +214,7 @@ export async function runCatalogC4Sync(now: () => number = Date.now, stmtTimeout
   const limit = (): number => { const left = hardDeadline - now(); if (left <= 0) throw new HardDeadlineError(); return Math.min(stmtTimeoutMs, left); };
   const scan = { pages: 0, candidates_scanned: 0 };
   try {
-    await runStep(c, scan, overBudget, limit);
+    await runStep(c, scan, overBudget, limit, catalogC4BackfillSince());
   } catch (e) {
     c.error_class = e instanceof StatementTimeoutError ? "statement_timeout" : e instanceof ConcurrentIngestError ? "concurrent_insert" : classifyDbError(e);
   }
@@ -218,16 +223,17 @@ export async function runCatalogC4Sync(now: () => number = Date.now, stmtTimeout
   return c;
 }
 
-async function runStep(c: CatalogCounts, scan: { pages: number; candidates_scanned: number }, overBudget: () => boolean, limit: () => number): Promise<void> {
+async function runStep(c: CatalogCounts, scan: { pages: number; candidates_scanned: number }, overBudget: () => boolean, limit: () => number, since: string | null): Promise<void> {
   const rows: CatalogRow[] = [];
-  let cursor: Cursor = null;
   let cur: CurrentSet[] | null = null;
-  try {
-    for (let page = 0; page < MAX_PAGES && rows.length < BATCH_ROWS; page++) {
-      if (overBudget()) { c.budget_hit = true; break; }
-      const cands: Candidate[] = await withTimeout(selectC4Candidates(WINDOW_DAYS, cursor, PAGE), limit());
+  // One paged scan over `fetchPage`. True = it ended exhausted (a short page or no candidates); false = stopped by budget, BATCH_ROWS or MAX_PAGES.
+  const scanRange = async (fetchPage: (cursor: Cursor) => Promise<Candidate[]>): Promise<boolean> => {
+    let cursor: Cursor = null;
+    while (scan.pages < MAX_PAGES && rows.length < BATCH_ROWS) {
+      if (overBudget()) { c.budget_hit = true; return false; }
+      const cands: Candidate[] = await fetchPage(cursor);
       scan.pages++; scan.candidates_scanned += cands.length;
-      if (cands.length === 0) break;
+      if (cands.length === 0) return true;
       cur ??= await withTimeout(selectCurrentSets(), limit());
       const uids = cands.map((x) => x.consult_uid);
       const lj = limit();
@@ -255,7 +261,17 @@ async function runStep(c: CatalogCounts, scan: { pages: number; candidates_scann
       }
       const last = cands[cands.length - 1]!;
       cursor = { t0: last.t0, uid: last.consult_uid };
-      if (cands.length < PAGE) break;
+      if (cands.length < PAGE) return true;
+    }
+    return false;
+  };
+  try {
+    const exhausted = await scanRange((cursor) => withTimeout(selectC4Candidates(WINDOW_DAYS, cursor, PAGE), limit()));
+    // BACKFILL-SINCE: a second scan over the older range, only once the live-window scan ended exhausted and nothing capped it; same rows array, page total, budget and deadline
+    if (since !== null && exhausted && !c.budget_hit && rows.length < BATCH_ROWS && scan.pages < MAX_PAGES) {
+      const before = rows.length;
+      try { await scanRange((cursor) => withTimeout(selectC4CandidatesBefore(WINDOW_DAYS, since, cursor, PAGE), limit())); }
+      finally { c.backfill_rows = rows.length - before; }
     }
   } catch (e) {
     if (!(e instanceof HardDeadlineError)) throw e;
