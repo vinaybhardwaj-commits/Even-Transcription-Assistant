@@ -54,10 +54,13 @@ describe("SCRIBE_MCP_TOKENS_DENY", () => {
     expect(!denied.ok && denied.failure.code).toBe("unauthorized");
     expect(!unknown.ok && unknown.failure.status).toBe(401);
   });
-  it("D3: the denylist outranks 'not configured'; hash case is ignored; surrounding spaces are tolerated", () => {
+  it("D3: hash case and surrounding spaces are tolerated; with nothing configured a denied and an unknown token answer identically (503)", () => {
     process.env[MCP_TOKENS_DENY_ENV] = json([` ${sha("d3x").toUpperCase()} `]);
-    expect(who("d3x")).toEqual({ fail: 401 }); // nothing configured at all: still the plain 401, not 503
+    expect(who("d3x")).toEqual({ fail: 503 });
     expect(who("other")).toEqual({ fail: 503 });
+    process.env.SCRIBE_MCP_TOKENS = json({ [sha("d3ok")]: { actor: "prim", scopes: ["read"] }, [sha("d3x")]: { actor: "dx", scopes: ["read"] } });
+    expect(who("d3x")).toEqual({ fail: 401 }); // configured: the case-insensitive, trimmed entry denies it
+    expect(who("d3ok")).toMatchObject({ actor: "prim" });
   });
   it("D4: unset or blank changes nothing", () => {
     process.env.SCRIBE_MCP_TOKENS = json({ [sha("d4")]: { actor: "prim", scopes: ["read"] } });
@@ -79,7 +82,16 @@ describe("SCRIBE_MCP_TOKENS_DENY", () => {
     process.env[MCP_TOKENS_DENY_ENV] = json([sha("d5a"), "short", 7, null, sha("d5b").slice(0, 63)]);
     expect(who("d5a")).toEqual({ fail: 401 });
     expect(who("d5b")).toMatchObject({ actor: "b" });
-    expect(logs.some((l) => /denying 1 hash, 4 items dropped/.test(l))).toBe(true);
+    expect(logs.some((l) => /denying 1 hash \(0 recovered from odd items\), 4 items dropped/.test(l))).toBe(true);
+  });
+  it("D5b: a valid array whose items are not clean hash strings still denies every hash-shaped value in them: nested array, two hashes in one string, a sha256: prefix, an object item", () => {
+    const toks = ["d5n", "d5t1", "d5t2", "d5p", "d5o", "d5keep"];
+    process.env.SCRIBE_MCP_TOKENS = json(Object.fromEntries(toks.map((t) => [sha(t), { actor: t, scopes: ["read"] }])));
+    process.env[MCP_TOKENS_DENY_ENV] = json([[sha("d5n")], `${sha("d5t1")},${sha("d5t2")}`, `sha256:${sha("d5p")}`, { h: sha("d5o") }, "short"]);
+    for (const t of ["d5n", "d5t1", "d5t2", "d5p", "d5o"]) expect(who(t), t).toEqual({ fail: 401 });
+    expect(who("d5keep")).toMatchObject({ actor: "d5keep" });
+    expect(logs.some((l) => /denying 5 hashes \(5 recovered from odd items\), 1 item dropped/.test(l))).toBe(true);
+    expect(logs.join("\n")).not.toContain(sha("d5n"));
   });
   it("D6: it only removes access: a denied-but-unlisted hash stays 401, and a listed hash keeps its exact scopes while the list names other hashes", () => {
     process.env.SCRIBE_MCP_TOKENS = json({ [sha("d6")]: { actor: "prim", scopes: ["read", "invoke"] } });

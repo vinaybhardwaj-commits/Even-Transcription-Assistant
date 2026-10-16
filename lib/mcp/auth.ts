@@ -369,11 +369,15 @@ export function parseDenyList(raw: string | undefined): ReadonlySet<string> {
     try { v = JSON.parse(raw); } catch { v = null; }
     if (Array.isArray(v)) {
       let dropped = 0;
+      let recovered = 0;
       for (const item of v) {
-        if (typeof item === "string" && /^[0-9a-f]{64}$/i.test(item.trim())) out.add(item.trim().toLowerCase());
-        else dropped += 1;
+        if (typeof item === "string" && /^[0-9a-f]{64}$/i.test(item.trim())) { out.add(item.trim().toLowerCase()); continue; }
+        // not a clean hash string (nested array, two hashes in one string, a "sha256:" prefix, an object): over-collect every hash-shaped value in it. This can only remove access.
+        let found = 0;
+        try { for (const h of takenHashes(JSON.stringify(item))) { if (!out.has(h)) { out.add(h); recovered += 1; } found += 1; } } catch { /* an unserialisable item is dropped */ }
+        if (found === 0) dropped += 1;
       }
-      console.warn(`[mcp-auth] ${MCP_TOKENS_DENY_ENV}: denying ${out.size} hash${out.size === 1 ? "" : "es"}, ${dropped} item${dropped === 1 ? "" : "s"} dropped`);
+      console.warn(`[mcp-auth] ${MCP_TOKENS_DENY_ENV}: denying ${out.size} hash${out.size === 1 ? "" : "es"} (${recovered} recovered from odd items), ${dropped} item${dropped === 1 ? "" : "s"} dropped`);
     } else {
       for (const h of takenHashes(raw)) out.add(h);
       console.warn(`[mcp-auth] ${MCP_TOKENS_DENY_ENV} malformed; denying ${out.size} hash-shaped values`);
@@ -406,14 +410,16 @@ export function checkMcpBearer(req: Request): { ok: true; principal: McpPrincipa
   );
   const single = process.env[MCP_TOKEN_ENV];
   const configured = Object.keys(map).length > 0 || Boolean(single);
-  // the denylist outranks everything, including "not configured": a denied token is always the 401
-  if (m && parseDenyList(process.env[MCP_TOKENS_DENY_ENV]).has(sha256Hex(m[1]!))) return { ok: false, failure: { status: 401, code: "unauthorized", denied: sha256Hex(m[1]!).slice(0, 8) } };
   if (!configured) return { ok: false, failure: { status: 503, code: "mcp_token_not_configured" } };
   if (!m) return { ok: false, failure: { status: 401, code: "unauthorized" } };
   const presented = m[1]!;
 
+  // Key denylist: first for every configured state, before the maps and the fallback. Not-configured is checked above, so a denied and an unknown token answer identically there (503).
+  const presentedHash = sha256Hex(presented);
+  if (parseDenyList(process.env[MCP_TOKENS_DENY_ENV]).has(presentedHash)) return { ok: false, failure: { status: 401, code: "unauthorized", denied: presentedHash.slice(0, 8) } };
+
   // §2.3 — the map first. Hash lookup: no comparison, so no timing signal from the map's size.
-  const hit = map[sha256Hex(presented)];
+  const hit = map[presentedHash];
   if (hit) return { ok: true, principal: { token_id: hit.actor, scopes: hit.scopes, rooms: hit.rooms, tools: hit.tools } };
 
   // Fallback: the original single token, unchanged — all three scopes, every room, actor operator-v1.
