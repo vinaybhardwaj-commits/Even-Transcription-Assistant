@@ -239,7 +239,7 @@ async function runStep(c: CatalogCounts, scan: { pages: number; candidates_scann
       const cands: Candidate[] = await fetchPage(cursor);
       scan.pages++; scan.candidates_scanned += cands.length;
       if (cands.length === 0) return true;
-      cur ??= await withTimeout(selectCurrentSets(), limit());
+      if (!cur) { const l = limit(); cur = await withTimeout(selectCurrentSets(), l); }
       const uids = cands.map((x) => x.consult_uid);
       const lj = limit();
       const [jevPicks, clefPicks] = await Promise.all([withTimeout(selectJevPicks(uids), lj), withTimeout(selectClefPicks(uids), lj)]);
@@ -271,7 +271,7 @@ async function runStep(c: CatalogCounts, scan: { pages: number; candidates_scann
     return false;
   };
   try {
-    const exhausted = await scanRange((cursor) => withTimeout(selectC4Candidates(WINDOW_DAYS, cursor, PAGE), limit()));
+    const exhausted = await scanRange((cursor) => { const l = limit(); return withTimeout(selectC4Candidates(WINDOW_DAYS, cursor, PAGE), l); });
     // BACKFILL-SINCE: a second scan over the older range, only once the live-window scan ended exhausted and nothing capped it; same rows array, page total, budget and deadline.
     // FIX1 F1: it starts at a rotating slot of [lo, hi) and wraps once to [lo, start), so every tick covers a different slice first.
     const room = (): boolean => !c.budget_hit && rows.length < BATCH_ROWS && scan.pages < MAX_PAGES;
@@ -282,8 +282,8 @@ async function runStep(c: CatalogCounts, scan: { pages: number; candidates_scann
         const startMs = bb.loMs + Math.floor(((((tickNo % BACKFILL_ROTATE_SLOTS) + BACKFILL_ROTATE_SLOTS) % BACKFILL_ROTATE_SLOTS) * (bb.hiMs - bb.loMs)) / BACKFILL_ROTATE_SLOTS);
         const start = new Date(startMs).toISOString();
         try {
-          const ended = await scanRange((cursor) => withTimeout(selectC4CandidatesBefore(bb.lo, bb.hi, start, bb.hi, cursor, PAGE), limit()));
-          if (ended && startMs > bb.loMs && room()) await scanRange((cursor) => withTimeout(selectC4CandidatesBefore(bb.lo, bb.hi, bb.lo, start, cursor, PAGE), limit()));
+          const ended = await scanRange((cursor) => { const l = limit(); return withTimeout(selectC4CandidatesBefore(bb.lo, bb.hi, start, bb.hi, cursor, PAGE), l); });
+          if (ended && startMs > bb.loMs && room()) await scanRange((cursor) => { const l = limit(); return withTimeout(selectC4CandidatesBefore(bb.lo, bb.hi, bb.lo, start, cursor, PAGE), l); });
         } finally { backfillCollected = rows.length - before; }
       }
     }
