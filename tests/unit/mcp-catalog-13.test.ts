@@ -144,14 +144,14 @@ describe("Part B: explorer_link", () => {
   const link = (args: Row, ctx: ToolContext = ADMIN_CTX) => call({ action: "explorer_link", ...args }, ctx);
 
   it("each form returns {ok, url, kind} on the configured base", async () => {
-    expect(await link({ consult_uid: UID })).toEqual({ ok: true, url: `${BASE}#consult=${UID}`, kind: "consult" });
-    expect(await link({ doctor_uid: "doc00001", date: "2026-10-12" })).toEqual({ ok: true, url: `${BASE}#doctor=doc00001&date=2026-10-12`, kind: "doctor_day" });
-    expect(await link({ individual_uid: "IND000001" })).toEqual({ ok: true, url: `${BASE}#patient=IND000001`, kind: "patient" });
+    expect(await link({ consult_uid: UID })).toEqual({ ok: true, url: `${BASE}#c-${UID}`, kind: "consult" });
+    expect(await link({ doctor_uid: "doc00001", date: "2026-10-12" })).toEqual({ ok: true, url: `${BASE}#d-646f633030303031~2026-10-12`, kind: "doctor_day" });
+    expect(await link({ individual_uid: "IND000001" })).toEqual({ ok: true, url: `${BASE}#p-494e44303030303031`, kind: "patient" });
   });
 
   it("the date is clamped to 2026-09-09 and must be a real date", async () => {
-    expect(await link({ doctor_uid: "doc00001", date: "2026-01-01" })).toMatchObject({ ok: true, url: `${BASE}#doctor=doc00001&date=2026-09-09` });
-    expect(await link({ doctor_uid: "doc00001", date: "2026-09-09" })).toMatchObject({ url: `${BASE}#doctor=doc00001&date=2026-09-09` });
+    expect(await link({ doctor_uid: "doc00001", date: "2026-01-01" })).toMatchObject({ ok: true, url: `${BASE}#d-646f633030303031~2026-09-09` });
+    expect(await link({ doctor_uid: "doc00001", date: "2026-09-09" })).toMatchObject({ url: `${BASE}#d-646f633030303031~2026-09-09` });
     for (const d of ["2026-02-30", "2026-13-01", "10/12/2026", "2026-10-1", "yesterday"]) expect(await link({ doctor_uid: "doc00001", date: d }), d).toMatchObject({ ok: false, error: "bad_args" });
   });
 
@@ -184,12 +184,53 @@ describe("Part B: explorer_link", () => {
     expect(await link({ consult_uid: UID })).toEqual({ ok: false, error: "explorer_url_not_configured" });
   });
 
-  it("the doctor id is percent-encoded in the link (: and @ become %3A and %40), consult and patient ids are not", async () => {
+  it("CATALOG-15: bare anchors with exact strings; hex is lowercase and a round trip gives the id back; no percent-encoding or key=value is ever emitted", async () => {
     const o = await link({ doctor_uid: "doc:1@x.y", date: "2026-10-05" });
-    expect(String(o.url)).toContain("doctor=doc%3A1%40x.y&date=2026-10-05");
-    expect(String(o.url).split("#")[1]).toBe("doctor=doc%3A1%40x.y&date=2026-10-05");
-    expect(String((await link({ consult_uid: UID })).url)).not.toContain("%");
-    expect(String((await link({ individual_uid: "IND-00_01" })).url)).toContain("patient=IND-00_01");
+    expect(o.url).toBe(`${BASE}#d-646f633a3140782e79~2026-10-05`);
+    expect(String((await link({ consult_uid: UID })).url)).toBe(`${BASE}#c-${UID}`);
+    expect(String((await link({ individual_uid: "IND-00_01" })).url)).toBe(`${BASE}#p-494e442d30305f3031`);
+    for (const id of ["doc:1@x.y", "DOC.Zz_9-@:", "Dr:ABC-x_1.2"]) {
+      const u = String((await link({ doctor_uid: id, date: "2026-10-05" })).url);
+      const m = /#d-([0-9a-f]+)~(\d{4}-\d{2}-\d{2})$/.exec(u);
+      expect(m, id).not.toBeNull();
+      expect(m![1]).toBe(m![1]!.toLowerCase());
+      expect(Buffer.from(m![1]!, "hex").toString("utf8")).toBe(id);
+      expect(u).not.toMatch(/[%=&]/);
+    }
+    const p = /#p-([0-9a-f]+)$/.exec(String((await link({ individual_uid: "IND-00_01" })).url))!;
+    expect(Buffer.from(p[1]!, "hex").toString("utf8")).toBe("IND-00_01");
+  });
+
+  it("CATALOG-15: every emitted fragment matches ^[A-Za-z0-9._~-]+$ for every form: a fuzz over the allowed id alphabets (and the refused characters never reach a link)", async () => {
+    const ANCHOR = /^[A-Za-z0-9._~-]+$/;
+    const UIDA = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    const DOCA = UIDA + ".:@";
+    let n = 0, seed = 12345;
+    const rnd = (m: number) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % m; };
+    const pick = (alpha: string, len: number) => Array.from({ length: len }, () => alpha[rnd(alpha.length)]).join("");
+    for (let i = 0; i < 200; i++) {
+      const uid = pick(UIDA, 6 + rnd(59));
+      const doc = pick(DOCA, 1 + rnd(64));
+      const forms: Row[] = [{ consult_uid: uid }, { doctor_uid: doc, date: `2026-${String(9 + rnd(4)).padStart(2, "0")}-${String(1 + rnd(28)).padStart(2, "0")}` }, { individual_uid: uid }];
+      for (const f of forms) {
+        const o = await link(f);
+        if (o.ok !== true) { expect(o.error, JSON.stringify(f)).toBe("bad_args"); continue; } // a month 12 date < today is fine; bad dates are refused
+        n += 1;
+        const frag = String(o.url).split("#")[1]!;
+        expect(frag, JSON.stringify(f)).toMatch(ANCHOR);
+        expect(String(o.url).split("#")).toHaveLength(2);
+      }
+    }
+    expect(n).toBeGreaterThan(500);
+    // every printable ASCII character in each id slot: either refused or an anchor-safe fragment
+    for (let c = 32; c < 127; c++) {
+      const ch = String.fromCharCode(c);
+      for (const f of [{ consult_uid: `ab${ch}cdef` }, { doctor_uid: `ab${ch}cd`, date: "2026-10-05" }, { individual_uid: `ab${ch}cdef` }, { doctor_uid: "doc00001", date: `2026-10-0${ch}` }] as Row[]) {
+        const o = await link(f);
+        if (o.ok === true) expect(String(o.url).split("#")[1], JSON.stringify(f)).toMatch(ANCHOR);
+        else expect(o.error).toBe("bad_args");
+      }
+    }
   });
 
   it("the base must be https://claude.ai/...: missing, other hosts, http, fragments, queries, a bare host and an over-long path are explorer_url_not_configured", async () => {

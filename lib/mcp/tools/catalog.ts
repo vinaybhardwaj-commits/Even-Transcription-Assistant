@@ -36,7 +36,7 @@ const HELP = [
   "action=clip_audio_url {consult_uid}: presigned GET of the clip, 900 s, {url, expires_at, bytes, minutes, audio_sha256, cut_signature_sha256}; audio_sha256 is the hash of the FLAC bytes (null when absent), cut_signature_sha256 hashes the cut metadata, not the audio. The URL is never audited or logged.",
   "action=clip_audio_chunk {consult_uid, offset?, length? <= 1 MiB}: the stored FLAC bytes as base64, {offset, length, total_bytes, content_type, base64, done, audio_sha256 (FLAC bytes hash, null when absent), cut_signature_sha256 (cut metadata, not the audio)}; bad_range past the end.",
   "A consult with no clip key answers no_clip {sealed: the row's stored seal reason token, or null} on clip_audio_url and clip_audio_chunk; bad_clip_key is a key that fails the allowlist or the row binding.",
-  "action=explorer_link {consult_uid} | {doctor_uid, date (IST, clamped to 2026-09-09)} | {individual_uid}: admin only (admin_required otherwise); {url, kind} deep link into the Encounter Explorer (SCRIBE_EXPLORER_URL); reads nothing and does not check the id exists.",
+  "action=explorer_link {consult_uid} | {doctor_uid, date (IST, clamped to 2026-09-09)} | {individual_uid}: admin only (admin_required otherwise); {url, kind} deep link into the Encounter Explorer (SCRIBE_EXPLORER_URL) as a bare anchor: #c-<consult_uid>, #d-<hex of doctor_uid>~<date>, #p-<hex of individual_uid>; reads nothing and does not check the id exists.",
   "Held-out room-days are refused blind_room_day on get, clip_audio_url and clip_audio_chunk and left out of search.",
 ].join(" ");
 
@@ -389,6 +389,10 @@ async function clipAudioUrl(args: ToolArgs): Promise<Row> {
 const EXPLORER_BASE = /^https:\/\/claude\.ai\/[A-Za-z0-9/_-]{1,200}$/;
 const EXPLORER_ARGS = new Set(["action", "consult_uid", "doctor_uid", "date", "individual_uid"]);
 
+/** CATALOG-15: the claude.ai artifact viewer passes only a bare #anchor of letters, digits and . _ ~ - into location.hash, so the links are #c-<consult_uid>, #d-<hex>~<date>, #p-<hex> (hex = lowercase hex of the id's UTF-8 bytes). */
+const ANCHOR = /^[A-Za-z0-9._~-]+$/;
+const hexOf = (id: string): string => Buffer.from(id, "utf8").toString("hex");
+
 /** CATALOG-13: a deep link into the Explorer, ADMIN ONLY for every form. No database, no R2, no catalog read: the ids are validated for shape only (the Explorer checks they exist). */
 function explorerLink(args: ToolArgs, isAdmin: boolean): Row {
   const given = Object.keys(args).filter((k) => args[k] !== undefined && args[k] !== null);
@@ -402,17 +406,18 @@ function explorerLink(args: ToolArgs, isAdmin: boolean): Row {
   if (consult) {
     const uid = argStr(args, "consult_uid", 64);
     if (!uid || !UID.test(uid)) return badArgs("consult_uid must match [A-Za-z0-9_-]{6,64}");
-    fragment = `consult=${uid}`; kind = "consult";
+    fragment = `c-${uid}`; kind = "consult";
   } else if (doctor) {
     const d = argStr(args, "doctor_uid", 64), date = argStr(args, "date", 10);
     if (!d || !DOCTOR.test(d) || !date) return badArgs("doctor_uid and date (IST YYYY-MM-DD) are both required");
     if (!realDate(date)) return badArgs("date must be a real IST date YYYY-MM-DD");
-    fragment = `doctor=${encodeURIComponent(d)}&date=${date < CATALOG_MIN_DATE ? CATALOG_MIN_DATE : date}`; kind = "doctor_day";
+    fragment = `d-${hexOf(d)}~${date < CATALOG_MIN_DATE ? CATALOG_MIN_DATE : date}`; kind = "doctor_day";
   } else {
     const ind = argStr(args, "individual_uid", 64);
     if (!ind || !UID.test(ind)) return badArgs("individual_uid must match [A-Za-z0-9_-]{6,64}");
-    fragment = `patient=${ind}`; kind = "patient";
+    fragment = `p-${hexOf(ind)}`; kind = "patient";
   }
+  if (!ANCHOR.test(fragment)) return badArgs("the id cannot be written as an anchor"); // invariant: every form above is anchor-safe by construction
   if (!isAdmin) return { ok: false, error: "admin_required" }; // the whole action is admin-only (FIX2), checked right after the arguments
   const base = process.env.SCRIBE_EXPLORER_URL ?? "";
   if (!EXPLORER_BASE.test(base)) return { ok: false, error: "explorer_url_not_configured" };
