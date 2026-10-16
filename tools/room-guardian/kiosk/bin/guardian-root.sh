@@ -11,6 +11,8 @@
 # Root is never trusted with the caller's environment. The test seam below only works when NOT root.
 # R16 (GR15-10): PATH is pinned as the first statement and every tool is called by absolute path, so a planted `killall` or `sqlite3` earlier on the caller's PATH never runs as root.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+# R16c (S1): bash 3.2 lets the environment set EUID, so the seams never read it. The real uid is asked once, by absolute path; no output or a non-number counts as root (fail closed: no seam).
+G_RUID="$(/usr/bin/id -u 2>/dev/null)"; case "$G_RUID" in ''|*[!0-9]*) G_RUID=0 ;; esac
 
 SVC="kTCCServiceMicrophone"
 CLIENT="com.evenscribe.room-recorder"
@@ -21,7 +23,7 @@ SQL_UPDATE="UPDATE access SET auth_value=2, auth_reason=2, last_modified=strftim
 
 db_for() { # user -> path, or fail
   local u="$1"
-  if [ "$EUID" -ne 0 ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_ROOT_TEST_DB:-}" ]; then
+  if [ "$G_RUID" != 0 ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_ROOT_TEST_DB:-}" ]; then
     printf '%s' "$GUARDIAN_ROOT_TEST_DB"; return 0
   fi
   case "$u" in ''|*[!A-Za-z0-9._-]*|root) return 1 ;; esac
@@ -80,7 +82,7 @@ case "$verb" in
     # exact argv: the verb alone. A test seam (GUARDIAN_SHUTDOWN_BIN) is honoured only when NOT root and GUARDIAN_ROOT_TESTMODE=1, like the TCC.db path above.
     if [ "$#" -ne 0 ]; then echo "bad_args" >&2; exit 2; fi
     sd=/sbin/shutdown
-    if [ "$EUID" -ne 0 ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_SHUTDOWN_BIN:-}" ]; then sd="$GUARDIAN_SHUTDOWN_BIN"; fi
+    if [ "$G_RUID" != 0 ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_SHUTDOWN_BIN:-}" ]; then sd="$GUARDIAN_SHUTDOWN_BIN"; fi
     exec "$sd" -r now
     ;;
   pmset-baseline) /usr/bin/pmset -a sleep 0 autorestart 1 ;;
@@ -88,7 +90,7 @@ case "$verb" in
     m="$1"; case "$m" in ''|*[!0-9]*) m=2 ;; esac
     # the test seam GUARDIAN_ROOT_LOG_BIN is honoured only when NOT root and GUARDIAN_ROOT_TESTMODE=1, like the other two seams
     lg=/usr/bin/log
-    if [ "$EUID" -ne 0 ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_ROOT_LOG_BIN:-}" ]; then lg="$GUARDIAN_ROOT_LOG_BIN"; fi
+    if [ "$G_RUID" != 0 ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_ROOT_LOG_BIN:-}" ]; then lg="$GUARDIAN_ROOT_LOG_BIN"; fi
     { "$lg" show --last "${m}m" --info --predicate 'subsystem == "com.apple.TCC" AND eventMessage CONTAINS[c] "kTCCServiceMicrophone"'
       "$lg" show --last "${m}m" --info --predicate 'eventMessage CONTAINS[c] "Update Access Record"'
       "$lg" show --last "${m}m" --predicate 'process == "System Settings"'

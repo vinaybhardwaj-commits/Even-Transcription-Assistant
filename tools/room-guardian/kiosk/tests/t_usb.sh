@@ -256,7 +256,7 @@ test_usb_root_helper_reboot_verb_is_exact() {
   done
   assert_eq "$(grep -c '^SHUTDOWN' "$CALLS")" "0" "no shutdown on a refused call"
   # the test seam is dead as root and outside test mode
-  assert_has "$(grep -n 'GUARDIAN_SHUTDOWN_BIN' "$h")" '\$EUID. -ne 0.*GUARDIAN_ROOT_TESTMODE' "the shutdown seam needs non-root (EUID) + test mode"
+  assert_has "$(grep -n 'GUARDIAN_SHUTDOWN_BIN' "$h")" 'G_RUID. != 0.*GUARDIAN_ROOT_TESTMODE' "the shutdown seam needs non-root (real uid) + test mode"
   unset GUARDIAN_ROOT_TESTMODE
   : >"$CALLS"
   # without test mode the real path is used; prove it by pointing PATH nowhere and checking the fake is NOT run (the real /sbin/shutdown is never started here: sandboxed by refusing before)
@@ -333,7 +333,7 @@ test_usb_control_64_rooms_parse_and_exactly_one_false_is_clear() {
 
 test_usb_static_c3_and_version() {
   assert_eq "$(grep -rn -E "start_""recording|stop_""recording|scribe_""room_command|rec_""start|rec_""stop|$SD_TOK" "$KDIR"/bin "$KDIR"/lib "$KDIR"/install.sh "$KDIR"/uninstall.sh | wc -l | tr -d ' ')" "0" "C3 grep (with the day-start command) over the kiosk tree is 0"
-  assert_has "$(cat "$KDIR/lib/common.sh")" 'GUARDIAN_VERSION="c1-0.4.4-r16"' "version"
+  assert_has "$(cat "$KDIR/lib/common.sh")" 'GUARDIAN_VERSION="c1-0.4.5-r16c"' "version"
   assert_has "$(grep -n 'USB_LOG_PREDICATE' "$KDIR/lib/common.sh" | head -n1)" 'process == "kernel" AND processID == 0 AND subsystem' "S8: predicate pins processID == 0"
   assert_eq "$(cat "$KDIR/lib/heal.sh" "$KDIR/lib/collect.sh" "$KDIR/lib/faulttree.sh" "$KDIR/bin/guardian.sh" | grep -v '^[[:space:]]*#' | grep -c 'shutdown')" "0" "the agent code never names shutdown: only the root helper does"
   assert_eq "$(grep -n 'shutdown' "$KDIR/bin/guardian-root.sh" | grep -v '^[0-9]*:#' | wc -l | tr -d ' ')" "1" "the helper's only code line naming shutdown is the absolute default path"
@@ -481,8 +481,10 @@ test_usb_s6_planted_symlinks_are_never_followed() {
 
 test_usb_s7_root_helper_never_resolves_id_through_path() {
   local h="$KDIR/bin/guardian-root.sh"
-  assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c 'id -u')" "0" "S7: no id -u in the helper"
-  assert_eq "$(grep -c 'EUID. -ne 0' "$h")" "3" "S7: all three test seams (db, shutdown, log) test \$EUID"
+  assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c 'id -u')" "1" "S7/R16c: one id -u in the helper"
+  assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c '/usr/bin/id -u')" "1" "S7/R16c: and it is the absolute path"
+  assert_eq "$(grep -c 'G_RUID. != 0' "$h")" "3" "S7/R16c: all three test seams (db, shutdown, log) test the real uid"
+  assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c 'EUID')" "0" "S7/R16c: the helper never reads EUID"
 }
 
 test_usb_s8_ist_date_ignores_the_local_zone() {

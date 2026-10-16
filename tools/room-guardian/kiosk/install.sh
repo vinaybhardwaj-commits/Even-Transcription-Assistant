@@ -28,7 +28,8 @@ case "$ROOM" in ''|*[!a-z0-9-]*) echo "--room <slug> required (lowercase letters
 if [ -n "$CONFIG" ]; then
   # R16: GUARDIAN_PIPE_SSH goes through `eval`, which strips one level of quotes, and OpenSSH splits UserKnownHostsFile / IdentityFile values on
   # whitespace. A value with a space that is not inner-quoted makes every ssh call fail (rc 255, OPD 6). Pattern check on the text only: no eval, no source.
-  # Flagged: KEY="a b" / KEY='a b' (bare), "KEY=a b" (outer-quoted, no inner quote). Not flagged: -o "KEY=\"a b\"". An unquoted KEY=a b cannot be told from KEY=a followed by the next option, so it is not checked.
+  # Advisory lint, not a parser. It catches exactly two forms: a bare quoted value (KEY="a b" or KEY='a b') and an outer-quoted pair with no inner quote ("KEY=a b").
+  # It does not catch -o "KEY=\"a b\"" (correct, passes), an unquoted KEY=a b (cannot be told from KEY=a plus the next option), or any other shape a space can hide in. A pass is not proof the ssh line works.
   pipe_ssh_lint() {
     local v="${GUARDIAN_PIPE_SSH:-}" re_bare re_wrapped
     re_bare='(^|[[:space:]])(UserKnownHostsFile|IdentityFile)=("[^"]* [^"]*"|'"'"'[^'"'"']* [^'"'"']*'"'"')'
