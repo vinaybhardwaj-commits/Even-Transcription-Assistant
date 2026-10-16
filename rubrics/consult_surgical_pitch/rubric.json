@@ -1,6 +1,6 @@
 {
   "id": "consult_surgical_pitch",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "title": "Surgical pitch in a consult",
   "unit": "consult",
   "inputs": [
@@ -178,6 +178,7 @@
       "own_contingent",
       "outside_surgeon"
     ],
+    "pitch_source_note": "outside_surgeon is set only when this doctor endorses, or relays with endorsement, the outside doctor's advice; a reported outside advice without endorsement is surgery_recommended false",
     "pitch_balance": {
       "unit": "the audible surgery pitch, if one exists",
       "fields": {
@@ -242,13 +243,16 @@
       "ranking a surgeon before follow-through is joined",
       "disease severity read as distress"
     ],
-    "engine_note": "engine llm_zdr. Reconciled in 1.1.0 with the GrokBot surgical-pitch skill (v0, frozen): what does not count as benefit, risk or alternative, no_surgery anti-pitch scored, pitch source, doubt codes, scored even when OT is never. Jev typed questions mirror the code-like items; Jev waits for its own bench (draft status). 1.1.1: recommendation_kind is set to no_surgery IN CODE whenever surgery_recommended is false (never null); when true and the model names no kind it stays null.",
-    "bench_population": "Meet scouts and Whisper episodes of Meet teleconsultations; no room tape.",
+    "engine_note": "engine llm_zdr. Reconciled in 1.1.0 with the GrokBot surgical-pitch skill (v0, frozen): what does not count as benefit, risk or alternative, no_surgery anti-pitch scored, pitch source, doubt codes, scored even when OT is never. Jev typed questions mirror the code-like items; Jev waits for its own bench (draft status). 1.1.1: recommendation_kind is set to no_surgery IN CODE whenever surgery_recommended is false (never null); when true and the model names no kind it stays null. 1.1.2: V rulings 16 Oct (own recommendation only, scope or endoscopic procedure counts, optional offer and stated plan count); no schema change.",
+    "bench_population": "human_v is room tape (bench.ts:86); the Meet scouts are the gold and grokbot sets.",
     "recommendation_kind_rules": [
       "only surgery (and a contingent surgery) trips pitch balance",
       "no_surgery is an anti-pitch (the doctor audibly advises against an operation): it is scored, not skipped",
       "a chart keyword alone is not a pitch",
-      "a pitch is scored even when the operation is never booked; a local referral for surgery is still a pitch"
+      "a pitch is scored even when the operation is never booked; a local referral for surgery is still a pitch",
+      "only the speaking doctor's OWN recommendation counts: an outside doctor's surgery advice that is merely reported is not a pitch unless this doctor endorses it",
+      "a scope or endoscopic procedure (short, no admission) counts as surgery for this rubric (recommendation_kind surgery)",
+      "an optional offer (\"not a must, your call\"), with or without a date, is a surgery recommendation (a soft pitch); a stated decision or plan to operate also counts as a recommendation. This is not advising against an operation; V3 takes precedence over the no_surgery rule."
     ]
   },
   "prompt": "prompt.json",
