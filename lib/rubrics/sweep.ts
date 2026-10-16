@@ -16,7 +16,8 @@ import { JobArgsError, submitJob } from "@/lib/jobs/submit";
 import { labStore } from "@/lib/sarvam-lab";
 
 export const SWEEP_ACTOR = "cron:rubric-sweep";
-export const SWEEP_SUMMARY_KEY = "rubric/sweep/last.json";
+export const SWEEP_SUMMARY_KEY = "rubric/sweep/1.0.0/last.json"; // fits the lab store's RUBRIC_KEY allowlist (rubric/<id>/<semver>/<name>.json)
+export const SWEEP_DEFER_HOURS = 24;
 export const SWEEP_MIN_DATE = "2026-09-09";
 export const SWEEP_JOB_UNITS = 200;
 export const SWEEP_DAILY_UNITS_DEFAULT = 1500;
@@ -79,7 +80,7 @@ export function candidatesOf(rows: Iterable<Row>, nowMs: number, backfill: boole
   return out.slice(0, SWEEP_CANDIDATE_CAP);
 }
 
-export type RubricSummary = { id: string; version: string; eligible: number; done: number; planned: number; submitted_job_id: string | null; skipped_reason: string | null; today_units: number };
+export type RubricSummary = { id: string; version: string; eligible: number; done: number; deferred: number; planned: number; submitted_job_id: string | null; skipped_reason: string | null; today_units: number };
 export type SweepSummary = { at: string; mode: "dry" | "live"; rubrics: RubricSummary[]; backfill_window: boolean };
 export type SweepOutcome = { skipped: "no_production_rubric" } | { summary: SweepSummary; summary_written: boolean };
 
@@ -101,11 +102,27 @@ async function freescriptSettled(uids: string[]): Promise<Set<string>> {
   return new Set(rows.map((r) => r.consult_uid));
 }
 
-/** One statement per rubric: which of the keys already have a result for this rubric AND version, any status. */
+/** One statement per rubric: which of the keys already have a PRODUCTION result (lab = false) for this rubric AND version, any status. */
 async function doneKeys(rubricId: string, version: string, uids: string[]): Promise<Set<string>> {
   if (uids.length === 0) return new Set();
   const rows = await dbRead(async () => (await sql`
-    SELECT unit_key FROM rubric_result WHERE rubric_id = ${rubricId}::text AND version = ${version}::text AND unit_key = ANY(${uids}::text[])
+    SELECT unit_key FROM rubric_result WHERE rubric_id = ${rubricId}::text AND version = ${version}::text AND lab = false AND unit_key = ANY(${uids}::text[])
+  `) as Array<{ unit_key: string }>);
+  return new Set(rows.map((r) => r.unit_key));
+}
+
+/**
+ * One statement per rubric: the keys (among the page) that were in the unit_keys of a FINISHED (done or failed) rubric_run job the sweep submitted for this rubric in the last
+ * 24 h. A key still without a row after that is DEFERRED for 24 h from the job's finished_at, so a unit a run cannot write never starves the units behind it.
+ */
+async function recentlyRun(rubricId: string, uids: string[]): Promise<Set<string>> {
+  if (uids.length === 0) return new Set();
+  const rows = await dbRead(async () => (await sql`
+    SELECT DISTINCT k.key AS unit_key
+      FROM scribe_job j, jsonb_array_elements_text(CASE WHEN jsonb_typeof(j.args->'unit_keys') = 'array' THEN j.args->'unit_keys' ELSE '[]'::jsonb END) AS k(key)
+     WHERE j.kind = 'rubric_run' AND j.actor = ${SWEEP_ACTOR}::text AND j.args->>'rubric_id' = ${rubricId}::text
+       AND j.status IN ('done', 'failed') AND j.finished_at > now() - make_interval(hours => ${SWEEP_DEFER_HOURS}::int)
+       AND k.key = ANY(${uids}::text[])
   `) as Array<{ unit_key: string }>);
   return new Set(rows.map((r) => r.unit_key));
 }
@@ -145,13 +162,15 @@ export async function runRubricSweep(mode: "dry" | "live", opts: { now?: number;
   const plans: Plan[] = [];
   for (const r of rubrics) {
     const done = await doneKeys(r.id, r.version, uids);
+    const ran = await recentlyRun(r.id, uids);
     const today = await todayUnits(r.id, r.version);
     const open = await dbRead(() => findOpenJob(RUBRIC_RUN_KIND, [["rubric_id", r.id]]));
     const remaining = Math.max(0, cap - today);
-    const todo = uids.filter((u) => !done.has(u));
+    const deferred = uids.filter((u) => !done.has(u) && ran.has(u)).length;
+    const todo = uids.filter((u) => !done.has(u) && !ran.has(u));
     const keys = open || remaining === 0 ? [] : todo.slice(0, Math.min(SWEEP_JOB_UNITS, remaining));
     const reason = open ? "job_open" : remaining === 0 ? "daily_units_cap" : todo.length === 0 ? "nothing_to_do" : null;
-    plans.push({ keys, summary: { id: r.id, version: r.version, eligible: uids.length, done: uids.length - todo.length, planned: keys.length, submitted_job_id: null, skipped_reason: reason, today_units: today } });
+    plans.push({ keys, summary: { id: r.id, version: r.version, eligible: uids.length, done: uids.filter((u) => done.has(u)).length, deferred, planned: keys.length, submitted_job_id: null, skipped_reason: reason, today_units: today } });
   }
 
   // ---- submit phase (live only); one rubric failing never stops the others ----
