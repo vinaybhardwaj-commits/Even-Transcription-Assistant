@@ -35,11 +35,13 @@ const STALE_LOG_EVERY_MS = 60_000;
 let retryAt = 0;
 let retryReason: StaleReason = "read_failed";
 let lastStaleLogAt: number | null = null;
+let lastUnavailLogAt: number | null = null;
 export function resetCatalogCacheForTests(): void {
   cache = null;
   retryAt = 0;
   retryReason = "read_failed";
   lastStaleLogAt = null;
+  lastUnavailLogAt = null;
 }
 
 const genKey = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && !Number.isNaN(Date.parse(v)) ? Date.parse(v) : Number.NEGATIVE_INFINITY);
@@ -73,20 +75,27 @@ export function parseCatalog(body: string): Catalog {
 /**
  * CATALOG-14: a read failed (throw, missing object, or a body with no rows) while a good catalog may be cached. Serve it, stale, for up to CATALOG_STALE_MAX_MS after it was last read
  * successfully, and leave the cache as it is; start the short retry backoff. Older than that, or nothing cached: null (a long outage stays visible). One log line per minute at most,
- * codes and counts only. With nothing cached the old read-failure line is kept and there is no backoff (every call tries again, as before).
+ * codes and counts only. With nothing cached (or past the limit) the failed read logs {code:"catalog_unavailable", reason, age_s|null}, also at most once a minute; with nothing cached there is no backoff (every call tries again, as before).
  */
 function failedRead(reason: StaleReason, now: number): Catalog | null {
-  if (!cache) {
-    if (reason === "read_failed") console.warn("[catalog]", JSON.stringify({ code: "catalog_read_failed" }));
-    return null;
-  }
+  if (!cache) return unavailable(reason, null, now);
   retryAt = now + CATALOG_RETRY_MS;
   retryReason = reason;
   return serveStale(reason, now);
 }
 
+/** CATALOG-14 FIX1: the failed read gives null (nothing cached, or the cached one is past the stale limit): one code-only line per minute at most, so a long outage is visible in the logs. */
+function unavailable(reason: StaleReason, ageMs: number | null, now: number): null {
+  if (lastUnavailLogAt === null || now - lastUnavailLogAt >= STALE_LOG_EVERY_MS) {
+    lastUnavailLogAt = now;
+    console.warn("[catalog]", JSON.stringify({ code: "catalog_unavailable", reason, age_s: ageMs === null ? null : Math.max(0, Math.round(ageMs / 1000)) }));
+  }
+  return null;
+}
+
 function serveStale(reason: StaleReason, now: number): Catalog | null {
-  if (!cache || now - cache.at > CATALOG_STALE_MAX_MS) return null;
+  if (!cache) return unavailable(reason, null, now);
+  if (now - cache.at > CATALOG_STALE_MAX_MS) return unavailable(reason, now - cache.at, now);
   if (lastStaleLogAt === null || now - lastStaleLogAt >= STALE_LOG_EVERY_MS) {
     lastStaleLogAt = now;
     console.warn("[catalog]", JSON.stringify({ code: "catalog_stale_served", reason, age_s: Math.max(0, Math.round((now - cache.at) / 1000)) }));

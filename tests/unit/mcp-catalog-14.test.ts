@@ -136,12 +136,12 @@ describe("rule 5: a new catalog with at least 1 row replaces the cache", () => {
 });
 
 describe("rule 6: the first load", () => {
-  it("failing with nothing cached is null, every call tries again (no backoff without a cache), and the old read_failed line is kept", async () => {
+  it("failing with nothing cached is null, every call tries again (no backoff without a cache), and the outage is logged as catalog_unavailable (FIX1), not as a stale serve", async () => {
     S.mode = "throw";
     expect(await loadCatalog(T0)).toBeNull();
     expect(await loadCatalog(T0 + 1)).toBeNull();
     expect(S.reads).toBe(2);
-    expect(logs.join("\n")).toContain("catalog_read_failed");
+    expect(logs.join("\n")).toContain("catalog_unavailable");
     expect(logs.join("\n")).not.toContain("catalog_stale_served");
     S.mode = "missing";
     expect(await loadCatalog(T0 + 2)).toBeNull();
@@ -175,6 +175,56 @@ describe("the log line", () => {
     }
     const all = logs.join("\n");
     expect(all).not.toMatch(/CONS0000|palimpsest|encounter-catalog|consult-clips|room_a/);
+  });
+});
+
+describe("FIX1: a long outage is visible in the logs", () => {
+  const unavailLines = () => logs.filter((l) => l.includes("catalog_unavailable")).map((l) => JSON.parse(l.replace("[catalog] ", "")) as Record<string, unknown>);
+
+  it("past the 6 h stale limit a failed read logs {code:catalog_unavailable, reason, age_s}, at most once per 60 s, with no key or text", async () => {
+    await loadGood();
+    S.mode = "throw";
+    const t = T0 + CATALOG_STALE_MAX_MS + 1_000;
+    expect(await loadCatalog(t)).toBeNull();
+    expect(await loadCatalog(t + CATALOG_RETRY_MS)).toBeNull();       // another failed read inside the minute
+    expect(await loadCatalog(t + 2 * CATALOG_RETRY_MS)).toBeNull();
+    expect(unavailLines()).toEqual([{ code: "catalog_unavailable", reason: "read_failed", age_s: Math.round((t - T0) / 1000) }]);
+    expect(await loadCatalog(t + 60_000)).toBeNull();                 // a minute after the first line: one more
+    expect(unavailLines()).toHaveLength(2);
+    expect(unavailLines()[1]).toEqual({ code: "catalog_unavailable", reason: "read_failed", age_s: Math.round((t + 60_000 - T0) / 1000) });
+    expect(logs.filter((l) => l.includes("catalog_stale_served"))).toHaveLength(0); // nothing was served stale
+    const all = logs.join("\n");
+    for (const l of unavailLines()) expect(Object.keys(l).sort()).toEqual(["age_s", "code", "reason"]);
+    expect(all).not.toMatch(/CONS0000|palimpsest|encounter-catalog|consult-clips|room_a/);
+  });
+
+  it("the reason follows the failure kind past the limit (missing); a stale serve inside the limit does not log catalog_unavailable", async () => {
+    await loadGood();
+    S.mode = "missing";
+    await loadCatalog(T0 + CATALOG_STALE_MAX_MS - 1_000);             // still within the limit: served stale
+    expect(unavailLines()).toHaveLength(0);
+    await loadCatalog(T0 + CATALOG_STALE_MAX_MS + 100_000);           // past it
+    expect(unavailLines()).toEqual([{ code: "catalog_unavailable", reason: "missing", age_s: Math.round((CATALOG_STALE_MAX_MS + 100_000) / 1000) }]);
+  });
+
+  it("past the limit inside the 15 s backoff (no read made) it still logs, rate-limited, with the reason of the failed read", async () => {
+    await loadGood();
+    S.mode = "throw";
+    await loadCatalog(T0 + CATALOG_STALE_MAX_MS);                      // fails at exactly 6 h: served stale, backoff starts
+    const t = T0 + CATALOG_STALE_MAX_MS + 5_000;                       // inside the backoff, now past the limit
+    S.reads = 0;
+    expect(await loadCatalog(t)).toBeNull();
+    expect(S.reads).toBe(0);
+    expect(unavailLines()).toEqual([{ code: "catalog_unavailable", reason: "read_failed", age_s: Math.round((t - T0) / 1000) }]);
+  });
+
+  it("nothing cached: the first-load failure logs catalog_unavailable with age_s null, once per minute", async () => {
+    S.mode = "missing";
+    await loadCatalog(T0);
+    await loadCatalog(T0 + 1_000);
+    expect(unavailLines()).toEqual([{ code: "catalog_unavailable", reason: "missing", age_s: null }]);
+    await loadCatalog(T0 + 60_000);
+    expect(unavailLines()).toHaveLength(2);
   });
 });
 
