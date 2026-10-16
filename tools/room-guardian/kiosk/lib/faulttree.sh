@@ -41,7 +41,10 @@ fault_tree() {
     restricted) echo "tcc|mic_restricted|mic_state=restricted"; l59=1 ;;
     *)
       if [ "$S_state" = "mic_denied" ]; then echo "tcc|mic_denied|state=mic_denied tcc_row=${S_tcc_row:-null}"; l59=1
-      elif [ -n "$S_tcc_row" ] && [ "$S_tcc_row" != "2" ] && [ "$S_tcc_row" != "error" ] && [ "$S_tcc_row" != "none" ]; then
+      elif case "$S_tcc_row" in error*) true ;; *) false ;; esac; then
+        # R15c: error, error:read, error:bad_user, error:<why> = the row is UNKNOWN (the helper could not read TCC.db): no verdict, no l59, no page.
+        once_per "tcc_row_unreadable:$S_tcc_row" 86400 && audit "tcc row unreadable: $S_tcc_row"
+      elif [ -n "$S_tcc_row" ] && [ "$S_tcc_row" != "2" ] && [ "$S_tcc_row" != "none" ]; then
         echo "tcc|mic_denied|tcc_row=$S_tcc_row mic_state=${S_mic_state:-null}"; l59=1
       elif [ "$S_tcc_row" = "none" ]; then
         echo "tcc|mic_row_missing|tcc_row=none"; l59=1
