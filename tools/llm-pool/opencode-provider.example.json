@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "llm-pool": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LLM pool (Bedrock Claude / Vertex Gemini via t4)",
+      "options": {
+        "baseURL": "http://100.86.4.104:4100/v1",
+        "apiKey": "{file:~/.config/llm-pool/client.token}"
+      },
+      "models": {
+        "opus": { "name": "Claude Opus 5.5 (pool)" },
+        "sonnet": { "name": "Claude Sonnet 5.5 (pool)" },
+        "haiku": { "name": "Claude Haiku 5.5 (pool)" },
+        "gemini": { "name": "Gemini 2.5 Pro (pool, Vertex)" }
+      }
+    }
+  }
+}

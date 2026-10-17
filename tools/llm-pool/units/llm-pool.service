@@ -1,0 +1,21 @@
+# llm-pool gateway (OpenAI-compatible, budget-capped Bedrock Claude + Vertex Gemini).
+# Install: cp this file ~/.config/systemd/user/llm-pool.service && systemctl --user daemon-reload
+#          systemctl --user enable --now llm-pool.service
+# The first start generates ~/.config/llm-pool/client.token (0600) when it is missing.
+# Binds only to the concrete tailnet address below; the server refuses wildcard binds.
+[Unit]
+Description=LLM pool gateway (OpenAI-compatible, budget-capped Bedrock/Vertex)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/wt/llm-pool/tools/llm-pool
+ExecStart=%h/wt/llm-pool/tools/llm-pool/.venv/bin/python -m llm_pool --host 100.86.4.104 --port 4100
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

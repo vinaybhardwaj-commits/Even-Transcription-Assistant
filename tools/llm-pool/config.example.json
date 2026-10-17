@@ -1,0 +1,20 @@
+{
+  "aws_daily_cap_usd": 500,
+  "aws_daily_cap_warn_fraction": 0.8,
+  "client_token_file": "~/.config/llm-pool/client.token",
+  "ledger_file": "~/.config/llm-pool/spend.sqlite3",
+  "default_max_tokens": 4096,
+  "callers": {},
+  "prices": {
+    "opus": { "in_per_m": 15.0, "out_per_m": 75.0, "cache_read_fraction_of_in": 0.1 },
+    "sonnet": { "in_per_m": 3.0, "out_per_m": 15.0, "cache_read_fraction_of_in": 0.1 },
+    "haiku": { "in_per_m": 1.0, "out_per_m": 5.0, "cache_read_fraction_of_in": 0.1 },
+    "gemini": { "in_per_m": 1.25, "out_per_m": 10.0, "cache_read_fraction_of_in": 0.1 }
+  },
+  "models": {
+    "opus": { "provider": "bedrock", "model_id": "global.anthropic.claude-opus-5-5", "price": "opus" },
+    "sonnet": { "provider": "bedrock", "model_id": "global.anthropic.claude-sonnet-5-5", "price": "sonnet" },
+    "haiku": { "provider": "bedrock", "model_id": "global.anthropic.claude-haiku-5-5", "price": "haiku" },
+    "gemini": { "provider": "vertex", "model_id": "gemini-2.5-pro", "price": "gemini" }
+  }
+}
