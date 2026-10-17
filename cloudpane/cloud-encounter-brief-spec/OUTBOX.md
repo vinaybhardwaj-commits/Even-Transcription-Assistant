@@ -8,3 +8,4 @@
 2026-10-17 M8 pushed 5c957d0c to cloudpane/cloud-encounter-brief-spec/v2; no PR; verdict DONE
 2026-10-17 M9 v3 round, serving model claude-opus-5-5 (configured id; not checked via get_session); branch cloudpane/cloud-encounter-brief-spec/v3 cut from v2 e45bd166
 2026-10-17 M10 wrote docs/freescript/ENCOUNTER-BRIEF-SPEC-v3.md (701 lines) and ENCOUNTER-BRIEF-V3-NOTES.md (closure N1 N2 N3 S6; D1 R2 moved-list reset leak; D2 OQ-5 reading; PHASE 0a BUILD SPEC); v1 v2 unchanged
+2026-10-17 M11 pushed 549d415e to cloudpane/cloud-encounter-brief-spec/v3; no PR; verdict DONE
