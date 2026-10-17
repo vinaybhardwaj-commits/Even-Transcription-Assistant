@@ -4,3 +4,4 @@
 - draft verdict FAIL committed; mutants pending
 - mutants own 12: 5 killed, 7 survived; M2/M5 rerun pending
 - M2/M5 killed; FINAL verdict FAIL pushed: cloudpane-reports/FRX-R2-VERDICT.md
+- R3 1dc901e0: gate 4058 passed 2 skipped; R2 findings closed; held-out G1 2/20, G2 2 visible; mutants 10/12; verdict FAIL pushed: cloudpane-reports/FRX-R3-VERDICT.md
