@@ -5,3 +5,5 @@
 2026-10-17T06:58:24Z F1-F9 + asm10 done; 73 passed; report written; pushing fix1
 2026-10-17T07:18:55Z fix2 branch from fix1 baa9d893; G1-G5 started
 2026-10-17T07:20:18Z G1-G5 done; 93 passed; report written; pushing fix2
+2026-10-17T08:02:24Z fix3 branch from fix2 106c19d4; H1-H3 started; psyn schema read from eb08e73
+2026-10-17T08:03:50Z H1-H3 done; 108 passed; report written; pushing fix3

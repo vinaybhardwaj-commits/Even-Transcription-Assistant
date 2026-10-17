@@ -28,7 +28,7 @@ EPS = 1e-9  # float slack for the new rule only; armc_old stays raw like merge_c
 KEYS = ["p_doctor", "p_patient", "p_attender", "p_staff"]
 ROLES = ["doctor", "patient", "attender", "staff"]
 KNOWN_ROLES = {"doctor", "patient", "attender", "staff", "translator", "other"}
-TRUE_ROLES = KNOWN_ROLES | {"other_clinician"}
+TRUE_ROLES = KNOWN_ROLES | {"other_clinician", "mixed"}
 SEG_BLOCK_MS = 2000
 CLEF_SET = "timbre-role-v1"
 SCHEMA = "role_votes.v1"
@@ -220,12 +220,14 @@ def vp_match(cos, mnl, mrc):
     return cos >= COS_MIN - EPS and (mnl is None or mnl >= MARGIN_MIN - EPS) and (mrc is not None and mrc >= MARGIN_MIN - EPS)
 
 
-def resolve_order(three, armc, v, vp_state):
+def resolve_order(three, armc, v, vp_state, cands=()):
     """Ruling 6 with the F2 rule. three: labels where all three voters say doctor. armc: armc_new label or None.
-    v: voiceprint_match_label or None. vp_state: "ok" (check ran), "unavailable" (no uid, no enrolment or an empty
+    v: voiceprint_match_label or None. cands: labels whose cos and runner-up-centroid margin pass with no next-label
+    margin (H1); any candidate other than the 3/3 label blocks the consult. vp_state: "ok" (check ran), "unavailable" (no uid, no enrolment or an empty
     vector set: case 7 applies), "missing" (consult absent from the uid or vector file: nothing orders).
     Returns (order_capable list, case 1..7 or None, extra flags)."""
     three = sorted(three)
+    cands = set(cands)
     if vp_state == "missing":
         return [], None, ["voiceprint_missing"]
     if vp_state != "ok":
@@ -235,13 +237,13 @@ def resolve_order(three, armc, v, vp_state):
     if len(three) == 0:
         if armc:
             return [armc], 3, []
-        return [], (2 if v else 1), []
+        return [], (2 if (v or cands) else 1), []
     if len(three) == 1:
         a = three[0]
-        if v and v != a:
+        if (v and v != a) or (cands - {a}):
             return [], 5, []
         return [a], (4 if armc == a else 6), []
-    if armc in three:
+    if armc in three and not (cands - set(three)):
         return [armc], None, ["multiple_3of3"]
     return [], None, ["multiple_3of3"]
 
@@ -301,7 +303,7 @@ def compute_consult(cin, cen, cid=None):
         flags += ["next_label_margin_incomplete", "partial_voiceprint"]
 
     jev_rank = {lab: i + 1 for i, lab in enumerate(sorted(cin.jev_p, key=lambda l: (-cin.jev_p[l][0], l)))}
-    out_labels, three, armc_new_l, v_label, routes = [], [], None, None, {}
+    out_labels, three, armc_new_l, v_label, routes, cands = [], [], None, None, {}, []
     for lab in labels:
         # voter 1: role layer majority by speech time; only the exact word "doctor" is doctor (F1)
         rm = ms.get(lab, {})
@@ -346,6 +348,8 @@ def compute_consult(cin, cen, cid=None):
             c, mnl, mrc = stats[lab]
             vp.update(logged_in_doctor_cos=c, margin_next_label=mnl, margin_runner_up_centroid=mrc)
             match = clean and vp_match(c, mnl, mrc)
+            if clean and c >= COS_MIN - EPS and mrc is not None and mrc >= MARGIN_MIN - EPS:
+                cands.append(lab)  # H1: N1 candidate, independent of the next-label margin
             vp["status"] = "match" if match else ("abstain" if clean else "absent")
         # D2 (F1, F8): any non-"doctor" role at p >= 0.6 blocks; Clef and Jev use the max over every row of the label
         contr = []
@@ -370,7 +374,7 @@ def compute_consult(cin, cen, cid=None):
     if clean and cin.clef_slot is not None and cin.clef_slot not in labels:
         flags.append("clef_slot_unknown_label")
 
-    order, case, extra = resolve_order(three, armc_new_l, v_label if clean else None, vp_state if clean else ("missing" if missing else "unavailable"))
+    order, case, extra = resolve_order(three, armc_new_l, v_label if clean else None, vp_state if clean else ("missing" if missing else "unavailable"), cands)
     flags += extra
     if case and CASE_LOG[case]:
         flags.append(CASE_LOG[case])
@@ -381,7 +385,7 @@ def compute_consult(cin, cen, cid=None):
     return {
         "layer": "role_votes", "engine": "role-votes", "version": "v1", "status": "ok", "label_space": "diar_nemotron", "consult_id": cid,
         "mapping": mapping, "labels": out_labels,
-        "three_of_three": three, "armc_old_label": t_old, "armc_new_label": armc_new_l, "voiceprint_match_label": v_label if clean else None,
+        "three_of_three": three, "n1_candidates": cands, "armc_old_label": t_old, "armc_new_label": armc_new_l, "voiceprint_match_label": v_label if clean else None,
         "order_capable": order, "order_routes": routes, "order_capable_armc_old": order_old, "case": case, "case_flags": flags, "degraded": degraded,
     }
 
@@ -489,7 +493,10 @@ def load_truth(path):
         role = norm_role(r.get("true_role"))
         if role not in TRUE_ROLES:
             raise ValueError("unknown true_role in truth file")
-        out[(r["consult_id"], r["label"])] = role
+        key = (r["consult_id"], r["label"])
+        if key in out:
+            raise ValueError("duplicate label row in truth file")  # H3
+        out[key] = role
     return out
 
 
@@ -511,7 +518,8 @@ def truth_counts(docs, truth):
                 else:
                     wrong[d["order_routes"][l["label"]]] += 1
     oc = sum(1 for d in docs for x in d["order_capable"] if truth.get((d["consult_id"], x)) == "other_clinician")
-    return {"labels": n_lab, "unlabelled_labels": unl, "order_capable_other_clinician": oc, "voiceprint_match_not_doctor": vp_wrong,
+    om = sum(1 for d in docs for x in d["order_capable"] if truth.get((d["consult_id"], x)) == "mixed")
+    return {"labels": n_lab, "unlabelled_labels": unl, "order_capable_other_clinician": oc, "order_capable_mixed": om, "voiceprint_match_not_doctor": vp_wrong,
             "order_capable_not_doctor": dict(wrong, total=sum(wrong.values())), "order_capable_yield_on_true_doctor": yield_n}
 
 

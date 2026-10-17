@@ -1,0 +1,1583 @@
+{
+  "affect_scenes": [],
+  "claims": [
+    {
+      "canonical_key": "test:cbc",
+      "claim_id": "C01",
+      "item_id": "I08",
+      "kind": "present",
+      "probe": null,
+      "text": "the doctor ordered Please get a complete blood count done"
+    },
+    {
+      "canonical_key": "advice:warm_fluids",
+      "claim_id": "C02",
+      "item_id": "I09",
+      "kind": "present",
+      "probe": null,
+      "text": "the doctor said: Drink plenty of warm fluids"
+    },
+    {
+      "canonical_key": "dx:fever_cold",
+      "claim_id": "C03",
+      "item_id": "I01",
+      "kind": "present",
+      "probe": null,
+      "text": "the doctor said: I think this is a viral upper respiratory infection, because it started with a running nose, the chest is clear and there is no breathing trouble"
+    },
+    {
+      "canonical_key": "med:cetirizine",
+      "claim_id": "C04",
+      "item_id": "I03",
+      "kind": "present",
+      "probe": null,
+      "text": "the doctor prescribed cetirizine"
+    },
+    {
+      "canonical_key": "ref:psychiatry",
+      "claim_id": "C05",
+      "item_id": null,
+      "kind": "decoy",
+      "probe": "to psychiatry",
+      "text": "the doctor referred to psychiatry"
+    },
+    {
+      "canonical_key": "med:paracetamol",
+      "claim_id": "C06",
+      "item_id": "I02",
+      "kind": "present",
+      "probe": null,
+      "text": "the doctor prescribed paracetamol"
+    },
+    {
+      "canonical_key": "drug:insulin_glargine",
+      "claim_id": "C07",
+      "item_id": null,
+      "kind": "decoy",
+      "probe": "insulin glargine",
+      "text": "the doctor prescribed insulin glargine"
+    },
+    {
+      "canonical_key": "med:nitrofurantoin",
+      "claim_id": "C08",
+      "item_id": "I07",
+      "kind": "present",
+      "probe": null,
+      "text": "the doctor prescribed nitrofurantoin"
+    }
+  ],
+  "codeswitch_lang": "hi",
+  "language_mode": "cs",
+  "metadata_variants": [
+    {
+      "description": "correct login and enrolled (default)",
+      "enrolled_pseudo_doctor_ids": [
+        "PD01",
+        "PD02",
+        "PD03",
+        "PD04",
+        "PD05",
+        "PD06",
+        "PD07",
+        "PD08",
+        "PD09",
+        "PD10",
+        "PD11",
+        "PD12",
+        "PD13",
+        "PD14",
+        "PD15",
+        "PD16",
+        "PD17",
+        "PD18",
+        "PD19",
+        "PD20",
+        "PD21",
+        "PD22",
+        "PD23",
+        "PD24",
+        "PD25",
+        "PD26",
+        "PD27",
+        "PD28",
+        "PD29",
+        "PD30",
+        "PD31",
+        "PD32"
+      ],
+      "logged_in_pseudo_doctor_id": "PD06",
+      "login_coverage": {
+        "end_frac": 1.0,
+        "start_frac": 0.0
+      },
+      "variant_id": "v1"
+    },
+    {
+      "description": "wrong pseudo-doctor logged in",
+      "enrolled_pseudo_doctor_ids": [
+        "PD01",
+        "PD02",
+        "PD03",
+        "PD04",
+        "PD05",
+        "PD06",
+        "PD07",
+        "PD08",
+        "PD09",
+        "PD10",
+        "PD11",
+        "PD12",
+        "PD13",
+        "PD14",
+        "PD15",
+        "PD16",
+        "PD17",
+        "PD18",
+        "PD19",
+        "PD20",
+        "PD21",
+        "PD22",
+        "PD23",
+        "PD24",
+        "PD25",
+        "PD26",
+        "PD27",
+        "PD28",
+        "PD29",
+        "PD30",
+        "PD31",
+        "PD32"
+      ],
+      "logged_in_pseudo_doctor_id": "PD05",
+      "login_coverage": {
+        "end_frac": 1.0,
+        "start_frac": 0.0
+      },
+      "variant_id": "v2"
+    },
+    {
+      "description": "treating pseudo-doctor not enrolled",
+      "enrolled_pseudo_doctor_ids": [
+        "PD01",
+        "PD02",
+        "PD03",
+        "PD04",
+        "PD05",
+        "PD07",
+        "PD08",
+        "PD09",
+        "PD10",
+        "PD11",
+        "PD12",
+        "PD13",
+        "PD14",
+        "PD15",
+        "PD16",
+        "PD17",
+        "PD18",
+        "PD19",
+        "PD20",
+        "PD21",
+        "PD22",
+        "PD23",
+        "PD24",
+        "PD25",
+        "PD26",
+        "PD27",
+        "PD28",
+        "PD29",
+        "PD30",
+        "PD31",
+        "PD32"
+      ],
+      "logged_in_pseudo_doctor_id": "PD06",
+      "login_coverage": {
+        "end_frac": 1.0,
+        "start_frac": 0.0
+      },
+      "variant_id": "v3"
+    },
+    {
+      "description": "no login for the slot",
+      "enrolled_pseudo_doctor_ids": [
+        "PD01",
+        "PD02",
+        "PD03",
+        "PD04",
+        "PD05",
+        "PD06",
+        "PD07",
+        "PD08",
+        "PD09",
+        "PD10",
+        "PD11",
+        "PD12",
+        "PD13",
+        "PD14",
+        "PD15",
+        "PD16",
+        "PD17",
+        "PD18",
+        "PD19",
+        "PD20",
+        "PD21",
+        "PD22",
+        "PD23",
+        "PD24",
+        "PD25",
+        "PD26",
+        "PD27",
+        "PD28",
+        "PD29",
+        "PD30",
+        "PD31",
+        "PD32"
+      ],
+      "logged_in_pseudo_doctor_id": null,
+      "login_coverage": null,
+      "variant_id": "v4"
+    },
+    {
+      "description": "login covers only part of the window",
+      "enrolled_pseudo_doctor_ids": [
+        "PD01",
+        "PD02",
+        "PD03",
+        "PD04",
+        "PD05",
+        "PD06",
+        "PD07",
+        "PD08",
+        "PD09",
+        "PD10",
+        "PD11",
+        "PD12",
+        "PD13",
+        "PD14",
+        "PD15",
+        "PD16",
+        "PD17",
+        "PD18",
+        "PD19",
+        "PD20",
+        "PD21",
+        "PD22",
+        "PD23",
+        "PD24",
+        "PD25",
+        "PD26",
+        "PD27",
+        "PD28",
+        "PD29",
+        "PD30",
+        "PD31",
+        "PD32"
+      ],
+      "logged_in_pseudo_doctor_id": "PD06",
+      "login_coverage": {
+        "end_frac": 0.6,
+        "start_frac": 0.0
+      },
+      "variant_id": "v5"
+    }
+  ],
+  "notes": {
+    "est_other_voice_share_of_label": 0.173,
+    "merged_label": "L0",
+    "merged_other_role": "patient",
+    "merged_other_speaker_id": "S2",
+    "patient_attender_fdr_rule": true
+  },
+  "pdqi9_plan": null,
+  "planted_items": [
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "content",
+          "relay_turn_ids": [],
+          "surface": "I think this is a viral upper respiratory infection, because it started with a running nose, the chest is clear and there is no breathing trouble",
+          "turn_ids": [
+            "T014"
+          ],
+          "value": "dx:fever_cold"
+        }
+      ],
+      "canonical_key": "dx:fever_cold",
+      "category": "diagnosis",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": false,
+      "item_id": "I01",
+      "kind": "diagnosis",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": null
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "drug",
+          "relay_turn_ids": [],
+          "surface": "paracetamol",
+          "turn_ids": [
+            "T015"
+          ],
+          "value": "paracetamol"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "strength",
+          "relay_turn_ids": [],
+          "surface": "500 mg",
+          "turn_ids": [
+            "T015"
+          ],
+          "value": "500 mg"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "dose",
+          "relay_turn_ids": [],
+          "surface": "ek goli",
+          "turn_ids": [
+            "T015"
+          ],
+          "value": "1tab"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "route",
+          "relay_turn_ids": [],
+          "surface": "muh se",
+          "turn_ids": [
+            "T015"
+          ],
+          "value": "PO"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "frequency",
+          "relay_turn_ids": [],
+          "surface": "din mein teen baar",
+          "turn_ids": [
+            "T015"
+          ],
+          "value": "TID"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "duration",
+          "relay_turn_ids": [],
+          "surface": "teen din tak",
+          "turn_ids": [
+            "T015"
+          ],
+          "value": "3d"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "instruction",
+          "relay_turn_ids": [],
+          "surface": "khane ke baad",
+          "turn_ids": [
+            "T015"
+          ],
+          "value": "after_food"
+        }
+      ],
+      "canonical_key": "med:paracetamol",
+      "category": "medicine_instruction",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": true,
+      "item_id": "I02",
+      "kind": "medicine",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": null
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "drug",
+          "relay_turn_ids": [],
+          "surface": "cetirizine",
+          "turn_ids": [
+            "T016"
+          ],
+          "value": "cetirizine"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "strength",
+          "relay_turn_ids": [],
+          "surface": "10 mg",
+          "turn_ids": [
+            "T016"
+          ],
+          "value": "10 mg"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "dose",
+          "relay_turn_ids": [],
+          "surface": "ek goli",
+          "turn_ids": [
+            "T016"
+          ],
+          "value": "1tab"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "route",
+          "relay_turn_ids": [],
+          "surface": "muh se",
+          "turn_ids": [
+            "T016"
+          ],
+          "value": "PO"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "frequency",
+          "relay_turn_ids": [],
+          "surface": "raat ko ek baar",
+          "turn_ids": [
+            "T016"
+          ],
+          "value": "HS"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "duration",
+          "relay_turn_ids": [],
+          "surface": "paanch din tak",
+          "turn_ids": [
+            "T016"
+          ],
+          "value": "5d"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "instruction",
+          "relay_turn_ids": [],
+          "surface": "khane ke baad",
+          "turn_ids": [
+            "T016"
+          ],
+          "value": "after_food"
+        }
+      ],
+      "canonical_key": "med:cetirizine",
+      "category": "medicine_instruction",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": true,
+      "item_id": "I03",
+      "kind": "medicine",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": null
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "drug",
+          "relay_turn_ids": [],
+          "surface": "loperamide",
+          "turn_ids": [
+            "T017"
+          ],
+          "value": "loperamide"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "strength",
+          "relay_turn_ids": [],
+          "surface": "2 mg",
+          "turn_ids": [
+            "T017"
+          ],
+          "value": "2 mg"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "dose",
+          "relay_turn_ids": [],
+          "surface": "ek capsule",
+          "turn_ids": [
+            "T017"
+          ],
+          "value": "1cap"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "route",
+          "relay_turn_ids": [],
+          "surface": "muh se",
+          "turn_ids": [
+            "T018"
+          ],
+          "value": "PO"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "frequency",
+          "relay_turn_ids": [],
+          "surface": "zaroorat ho tab",
+          "turn_ids": [
+            "T018"
+          ],
+          "value": "SOS"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "duration",
+          "relay_turn_ids": [],
+          "surface": "teen din tak",
+          "turn_ids": [
+            "T018"
+          ],
+          "value": "3d"
+        }
+      ],
+      "canonical_key": "med:loperamide",
+      "category": "medicine_instruction",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": true,
+      "item_id": "I04",
+      "kind": "medicine",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": "merged_other_voice"
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "test",
+          "relay_turn_ids": [],
+          "surface": "a thyroid test",
+          "turn_ids": [
+            "T019"
+          ],
+          "value": "test:thyroid_test"
+        }
+      ],
+      "canonical_key": "test:thyroid_test",
+      "category": "investigation",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": true,
+      "item_id": "I05",
+      "kind": "investigation",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": "merged_other_voice"
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "referral",
+          "relay_turn_ids": [],
+          "surface": "the heart clinic",
+          "turn_ids": [
+            "T020"
+          ],
+          "value": "ref:cardiology"
+        }
+      ],
+      "canonical_key": "ref:cardiology",
+      "category": "referral",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": true,
+      "item_id": "I06",
+      "kind": "referral",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": "merged_other_voice"
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "drug",
+          "relay_turn_ids": [],
+          "surface": "nitrofurantoin",
+          "turn_ids": [
+            "T022"
+          ],
+          "value": "nitrofurantoin"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "strength",
+          "relay_turn_ids": [],
+          "surface": "100 mg",
+          "turn_ids": [
+            "T023"
+          ],
+          "value": "100 mg"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "dose",
+          "relay_turn_ids": [],
+          "surface": "ek capsule",
+          "turn_ids": [
+            "T024"
+          ],
+          "value": "1cap"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "route",
+          "relay_turn_ids": [],
+          "surface": "muh se",
+          "turn_ids": [
+            "T025"
+          ],
+          "value": "PO"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "frequency",
+          "relay_turn_ids": [],
+          "surface": "din mein ek baar",
+          "turn_ids": [
+            "T025"
+          ],
+          "value": "OD"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "duration",
+          "relay_turn_ids": [],
+          "surface": "paanch din tak",
+          "turn_ids": [
+            "T025"
+          ],
+          "value": "5d"
+        },
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "instruction",
+          "relay_turn_ids": [],
+          "surface": "khane ke baad",
+          "turn_ids": [
+            "T025"
+          ],
+          "value": "after_food"
+        }
+      ],
+      "canonical_key": "med:nitrofurantoin",
+      "category": "medicine_instruction",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": true,
+      "item_id": "I07",
+      "kind": "medicine",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": "doctor_short_segment"
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "test",
+          "relay_turn_ids": [],
+          "surface": "Please get a complete blood count done",
+          "turn_ids": [
+            "T026"
+          ],
+          "value": "test:cbc"
+        }
+      ],
+      "canonical_key": "test:cbc",
+      "category": "investigation",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": true,
+      "item_id": "I08",
+      "kind": "investigation",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": null
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "content",
+          "relay_turn_ids": [],
+          "surface": "Drink plenty of warm fluids",
+          "turn_ids": [
+            "T027"
+          ],
+          "value": "advice:warm_fluids"
+        }
+      ],
+      "canonical_key": "advice:warm_fluids",
+      "category": "advice",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": false,
+      "item_id": "I09",
+      "kind": "advice",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": null
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "content",
+          "relay_turn_ids": [],
+          "surface": "This is a viral illness and it usually settles on its own in about a week",
+          "turn_ids": [
+            "T028"
+          ],
+          "value": "counselling:viral_self_limiting"
+        }
+      ],
+      "canonical_key": "counselling:viral_self_limiting",
+      "category": "counselling",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": false,
+      "item_id": "I10",
+      "kind": "counselling",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": null
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "content",
+          "relay_turn_ids": [],
+          "surface": "If you get breathless or the fever goes very high, come back the same day",
+          "turn_ids": [
+            "T029"
+          ],
+          "value": "warning:breathless_return"
+        }
+      ],
+      "canonical_key": "warning:breathless_return",
+      "category": "warning",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": false,
+      "item_id": "I11",
+      "kind": "warning",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": null
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "content",
+          "relay_turn_ids": [],
+          "surface": "Rest well and sleep early for the next few days",
+          "turn_ids": [
+            "T030"
+          ],
+          "value": "lifestyle:rest_sleep"
+        }
+      ],
+      "canonical_key": "lifestyle:rest_sleep",
+      "category": "lifestyle",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": false,
+      "item_id": "I12",
+      "kind": "lifestyle",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": null
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "content",
+          "relay_turn_ids": [],
+          "surface": "Come back for review after five days",
+          "turn_ids": [
+            "T031"
+          ],
+          "value": "follow_up:review_5d"
+        }
+      ],
+      "canonical_key": "follow_up:review_5d",
+      "category": "follow_up",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": false,
+      "item_id": "I13",
+      "kind": "follow_up",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": null
+    },
+    {
+      "affirmed_patient_raised": false,
+      "attributes": [
+        {
+          "context_turn_ids": [],
+          "forbidden_values": [],
+          "name": "content",
+          "relay_turn_ids": [],
+          "surface": "If the fever does not settle in three days, get the blood test done first",
+          "turn_ids": [
+            "T032"
+          ],
+          "value": "contingency:fever_beyond_3d"
+        }
+      ],
+      "canonical_key": "contingency:fever_beyond_3d",
+      "category": "contingency",
+      "emphasis": {
+        "repeat_count": 1,
+        "stressed": false
+      },
+      "is_order": false,
+      "item_id": "I14",
+      "kind": "contingency",
+      "pdqi_defect": false,
+      "priority_rank": null,
+      "stances": [],
+      "strength": "firm",
+      "trap": null
+    }
+  ],
+  "relays": [],
+  "scenario": "fever_cold",
+  "script_id": "PSYN-SM-002",
+  "seed": 20261017,
+  "speakers": [
+    {
+      "display_name": "Dr Wixux Velvetgale",
+      "enrolment": [
+        {
+          "text": "An old tram conductor carried eleven paper boats under a lavender sky.",
+          "utterance_id": "PD06-E01"
+        },
+        {
+          "text": "The lighthouse keeper whistled past seven brass lanterns under a lavender sky.",
+          "utterance_id": "PD06-E02"
+        },
+        {
+          "text": "The violet kite circled seven brass lanterns under a lavender sky.",
+          "utterance_id": "PD06-E03"
+        },
+        {
+          "text": "A striped umbrella whistled past the quiet library steps near the abandoned windmill.",
+          "utterance_id": "PD06-E04"
+        },
+        {
+          "text": "The harbour bell admired a field of sunflowers after the autumn fair.",
+          "utterance_id": "PD06-E05"
+        },
+        {
+          "text": "The violet kite circled seven brass lanterns near the abandoned windmill.",
+          "utterance_id": "PD06-E06"
+        },
+        {
+          "text": "A copper kettle polished a basket of plums near the abandoned windmill.",
+          "utterance_id": "PD06-E07"
+        },
+        {
+          "text": "An old tram conductor whistled past a basket of plums under a lavender sky.",
+          "utterance_id": "PD06-E08"
+        },
+        {
+          "text": "A copper kettle circled the railway bridge near the abandoned windmill.",
+          "utterance_id": "PD06-E09"
+        },
+        {
+          "text": "The harbour bell whistled past the quiet library steps before the evening tide.",
+          "utterance_id": "PD06-E10"
+        }
+      ],
+      "intended_diar_label": "L0",
+      "is_treating": true,
+      "language": "hi",
+      "note": null,
+      "pseudo_doctor_id": "PD06",
+      "role": "treating_doctor",
+      "speaker_id": "S1",
+      "voice_alike_of": null,
+      "voice_ref": "VOICE-PD06"
+    },
+    {
+      "display_name": "Nimingle Quillfiddle",
+      "enrolment": null,
+      "intended_diar_label": "L0",
+      "is_treating": false,
+      "language": "hi",
+      "note": "merged_with_treating_doctor",
+      "pseudo_doctor_id": null,
+      "role": "patient",
+      "speaker_id": "S2",
+      "voice_alike_of": null,
+      "voice_ref": "VOICE-PSYN-SM-002-S2"
+    }
+  ],
+  "split": "dev",
+  "split_cell": "patient",
+  "split_group": "PSYN-SM-002",
+  "stratum": "S-M",
+  "synthetic": true,
+  "trap_tags": [
+    "sm:patient"
+  ],
+  "treating_speaker_id": "S1",
+  "turns": [
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 4.2,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Hello, please have a seat. What brings you in today, bataiye?",
+      "turn_id": "T001"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 2.7,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": "complaint",
+      "short_segment": false,
+      "speaker_id": "S2",
+      "text": "Mujhe bukhar aur naak beh rahi hai.",
+      "turn_id": "T002"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 2.7,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Since when has this been there, bataiye?",
+      "turn_id": "T003"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 1.2,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": "onset",
+      "short_segment": false,
+      "speaker_id": "S2",
+      "text": "Teen din se.",
+      "turn_id": "T004"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 2.3,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Anything else along with it, bataiye?",
+      "turn_id": "T005"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 3.1,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": "assoc",
+      "short_segment": false,
+      "speaker_id": "S2",
+      "text": "Thoda badan dard hai, saans ki taklif nahi.",
+      "turn_id": "T006"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 2.3,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Have you had this before, bataiye?",
+      "turn_id": "T007"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 1.5,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S2",
+      "text": "Nahi, aisa kuch nahi.",
+      "turn_id": "T008"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 1.9,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Any allergy to medicines, bataiye?",
+      "turn_id": "T009"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 1.5,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S2",
+      "text": "Nahi, aisa kuch nahi.",
+      "turn_id": "T010"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 4.6,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, so this has been going on since three days, theek hai?",
+      "turn_id": "T011"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 2.7,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, let me examine you, theek hai?",
+      "turn_id": "T012"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 6.2,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": "exam",
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, your temperature is mildly raised and the throat looks red, chest is clear, theek hai?",
+      "turn_id": "T013"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 11.2,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, I think this is a viral upper respiratory infection, because it started with a running nose, the chest is clear and there is no breathing trouble, theek hai?",
+      "turn_id": "T014"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 6.9,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Paracetamol 500 mg lijiye, ek goli muh se, din mein teen baar, teen din tak, khane ke baad.",
+      "turn_id": "T015"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 6.9,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Cetirizine 10 mg lijiye, ek goli muh se, raat ko ek baar, paanch din tak, khane ke baad.",
+      "turn_id": "T016"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 3.8,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S2",
+      "text": "Kya loperamide 2 mg bhi le sakte hain, ek capsule?",
+      "turn_id": "T017"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 4.6,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S2",
+      "text": "Muh se, zaroorat ho tab, teen din tak, aise hi lete hain.",
+      "turn_id": "T018"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 2.7,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S2",
+      "text": "Kya a thyroid test bhi karwa lein?",
+      "turn_id": "T019"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 2.7,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S2",
+      "text": "Shayad the heart clinic bhi dikhana chahiye.",
+      "turn_id": "T020"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 4.6,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, let us stay with the plan I have given, theek hai?",
+      "turn_id": "T021"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 0.4,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": true,
+      "speaker_id": "S1",
+      "text": "Nitrofurantoin.",
+      "turn_id": "T022"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 0.8,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": true,
+      "speaker_id": "S1",
+      "text": "100 mg.",
+      "turn_id": "T023"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 0.8,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": true,
+      "speaker_id": "S1",
+      "text": "Ek capsule.",
+      "turn_id": "T024"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 5.8,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, muh se, din mein ek baar, paanch din tak, khane ke baad, theek hai?",
+      "turn_id": "T025"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 3.8,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, please get a complete blood count done, theek hai?",
+      "turn_id": "T026"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 3.1,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, drink plenty of warm fluids, theek hai?",
+      "turn_id": "T027"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 7.3,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, this is a viral illness and it usually settles on its own in about a week, theek hai?",
+      "turn_id": "T028"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 6.9,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, if you get breathless or the fever goes very high, come back the same day, theek hai?",
+      "turn_id": "T029"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 5.0,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, rest well and sleep early for the next few days, theek hai?",
+      "turn_id": "T030"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 3.8,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, come back for review after five days, theek hai?",
+      "turn_id": "T031"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 6.9,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, if the fever does not settle in three days, get the blood test done first, theek hai?",
+      "turn_id": "T032"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 3.8,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, let me explain the plan once more, theek hai?",
+      "turn_id": "T033"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 4.6,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, I am writing all of this down for you, theek hai?",
+      "turn_id": "T034"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 4.2,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, please tell me if anything is not clear, theek hai?",
+      "turn_id": "T035"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 3.1,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Do you have any questions so far, bataiye?",
+      "turn_id": "T036"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 1.2,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S2",
+      "text": "Theek hai, doctor.",
+      "turn_id": "T037"
+    },
+    {
+      "affect": null,
+      "clip_region": "in_clip",
+      "est_seconds": 3.1,
+      "intended_diar_label": "L0",
+      "lang": "hi",
+      "overlap_with": null,
+      "relay_of": null,
+      "section_hint": null,
+      "short_segment": false,
+      "speaker_id": "S1",
+      "text": "Dekhiye, take care, see you soon, theek hai?",
+      "turn_id": "T038"
+    }
+  ]
+}

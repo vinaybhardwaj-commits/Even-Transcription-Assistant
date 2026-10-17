@@ -750,47 +750,6 @@ def load_psyn():
     return m
 
 
-def test_g4_psyn_mapping_script(tmp_path, capsys):
-    pt = load_psyn()
-    raw = [
-        {"consult_id": "c1", "label": "speaker_0", "role": "Doctor", "treating_doctor": True},
-        {"consult_id": "c1", "label": "speaker_1", "role": "doctor"},                 # a second doctor, not the treating one
-        {"consult_id": "c1", "label": "speaker_2", "role": "Resident"},
-        {"consult_id": "c1", "label": "speaker_3", "role": "other_clinician"},
-        {"consult_id": "c1", "label": "speaker_4", "role": "patient"},
-        {"consult_id": "c1", "label": "speaker_5", "role": "nurse"},
-        {"consult_id": "c1", "label": "speaker_6", "role": "relative"},
-        {"consult_id": "c1", "label": "speaker_7", "role": "interpreter"},
-        {"consult_id": "c1", "label": "speaker_8", "role": "mystery"},
-        {"consult_id": "c2", "label": "speaker_0", "role": "doctor"},                 # no treating flag: never doctor
-    ]
-    src, dst = tmp_path / "raw.jsonl", tmp_path / "truth.jsonl"
-    src.write_text("".join(json.dumps(r) + "\n" for r in raw))
-    assert pt.main(["--in", str(src), "--out", str(dst)]) == 0
-    out = capsys.readouterr().out
-    assert json.loads(out) == {"doctor": 1, "other_clinician": 4, "other_unknown_word": 1, "rows": 10}
-    assert "c1" not in out
-    rows = [json.loads(l) for l in dst.read_text().splitlines()]
-    got = {(r["consult_id"], r["label"]): r["true_role"] for r in rows}
-    assert [k for k, v in got.items() if v == "doctor"] == [("c1", "speaker_0")]
-    assert got[("c1", "speaker_1")] == "other_clinician" and got[("c2", "speaker_0")] == "other_clinician"
-    assert got[("c1", "speaker_5")] == "staff" and got[("c1", "speaker_6")] == "attender" and got[("c1", "speaker_7")] == "translator"
-    assert got[("c1", "speaker_8")] == "other"
-    assert stat.S_IMODE(os.stat(dst).st_mode) == 0o600
-    assert set(got.values()) <= rv.TRUE_ROLES
-    assert rv.load_truth(str(dst))[("c1", "speaker_2")] == "other_clinician"  # the output is accepted by fa-check
-
-
-def test_g4_psyn_mapping_refuses_contradictions(tmp_path, capsys):
-    pt = load_psyn()
-    src = tmp_path / "raw.jsonl"
-    for rows in ([{"consult_id": "c", "label": "a", "role": "doctor", "treating_doctor": True}, {"consult_id": "c", "label": "b", "role": "doctor", "treating_doctor": True}],
-                 [{"consult_id": "c", "label": "a", "role": "patient", "treating_doctor": True}]):
-        src.write_text("".join(json.dumps(r) + "\n" for r in rows))
-        assert pt.main(["--in", str(src), "--out", str(tmp_path / "t.jsonl")]) == 2
-    assert not (tmp_path / "t.jsonl").exists()
-
-
 # ---- G5
 def test_g5_symlinked_consult_dir_is_refused(tmp_path, capsys):
     flags = write_inputs(tmp_path, {"c": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")})
@@ -838,3 +797,211 @@ def test_g5_build_into_wide_out_dir_fails_in_one_line(tmp_path, capsys):
     assert rv.main(["build"] + flags + ["--out-dir", str(out)]) == 2
     err = capsys.readouterr().err
     assert "Traceback" not in err and len(err.strip().splitlines()) == 1
+
+
+# ================================================================ fix round 3
+
+# ---- H1
+def test_h1_two_other_labels_at_cos_09_block_the_consult():
+    # 3/3 on speaker_0 (far voice), speaker_1 and speaker_2 both at cos 0.9: no next-label margin exists, N1 still blocks
+    vecs = {"speaker_0": E[5], "speaker_1": vec(0.9), "speaker_2": vec(0.9, far=6)}
+    d = run(cin(vecs, roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"))
+    assert d["three_of_three"] == ["speaker_0"] and d["voiceprint_match_label"] is None
+    assert d["n1_candidates"] == ["speaker_1", "speaker_2"]
+    assert d["order_capable"] == [] and d["case"] == 5 and "doctor_conflict" in d["case_flags"]
+
+
+def test_h1_holds_when_the_3of3_label_has_no_vector():
+    vecs = {"speaker_1": vec(0.9), "speaker_2": vec(0.9, far=6)}  # speaker_0 (the 3/3 label) has no vector
+    d = run(cin(vecs, roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"))
+    assert d["order_capable"] == [] and d["case"] == 5 and "partial_voiceprint" in d["case_flags"]
+
+
+def test_h1_single_candidate_with_no_next_margin_inputs_still_blocks():
+    # two candidates tie, so margin_next is 0 for both and the old rule saw no match at all
+    vecs = {"speaker_0": E[5], "speaker_1": vec(0.8), "speaker_2": vec(0.8, far=6)}
+    d = run(cin(vecs, roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"))
+    assert d["order_capable"] == [] and d["case"] == 5
+
+
+def test_h1_3of3_label_as_the_only_candidate_still_orders():
+    d = run(cin(far_vecs(speaker_0=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"))
+    assert d["n1_candidates"] == ["speaker_0"] and d["order_capable"] == ["speaker_0"] and d["case"] == 4
+
+
+def test_h1_candidate_needs_the_runner_up_centroid_margin():
+    # cos 0.9 but just as close to another enrolled centroid: not a candidate
+    vecs = {"speaker_0": E[5], "speaker_1": vec(0.70, 0.651)}
+    d = run(cin(vecs, roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"))
+    assert d["n1_candidates"] == [] and d["order_capable"] == ["speaker_0"]
+    vecs = {"speaker_0": E[5], "speaker_1": vec(0.70, 0.65)}
+    assert run(cin(vecs, roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"))["n1_candidates"] == ["speaker_1"]
+
+
+def test_h1_no_3of3_and_two_candidates_orders_nothing():
+    vecs = {"speaker_0": vec(0.9), "speaker_1": vec(0.9, far=6)}
+    d = run(cin(vecs, roles=ALL_DOCTOR_ROLES, jev={k: p4(att=0.3, doc=0.4) for k in LABS}, slot=None))
+    assert d["order_capable"] == [] and d["case"] == 2
+
+
+def test_h1_two_3of3_labels_plus_foreign_candidate_orders_nothing():
+    assert rv.resolve_order(["a", "b"], "a", "a", "ok", cands=["a", "c"])[0] == []
+    assert rv.resolve_order(["a", "b"], "a", "a", "ok", cands=["a"])[0] == ["a"]
+
+
+# ---- H3
+def test_h3_duplicate_label_rows_refuse(tmp_path, capsys):
+    flags = write_inputs(tmp_path, {"c": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")})
+    dup = truth_file(tmp_path, [("c", "speaker_0", "doctor"), ("c", "speaker_0", "patient")])
+    assert rv.main(["fa-check"] + flags + ["--truth", dup]) == 2
+    err = capsys.readouterr().err
+    assert "duplicate" in err and len(err.strip().splitlines()) == 1
+    rv.main(["build"] + flags + ["--out-dir", str(tmp_path / "o")]); capsys.readouterr()
+    assert rv.main(["reproduce", "--in-dir", str(tmp_path / "o"), "--truth", dup]) == 2
+    with pytest.raises(ValueError):
+        rv.load_truth(dup)
+
+
+def test_h3_mixed_order_capable_label_is_a_false_accept_never_yield(tmp_path, capsys):
+    flags = write_inputs(tmp_path, {"c": cin(far_vecs(speaker_0=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")})
+    truth = truth_file(tmp_path, [("c", "speaker_0", "mixed"), ("c", "speaker_1", "patient"), ("c", "speaker_2", "attender")])
+    assert rv.main(["fa-check"] + flags + ["--truth", truth]) == 1
+    t = json.loads(capsys.readouterr().out)
+    assert t["order_capable_mixed"] == 1 and t["order_capable_yield_on_true_doctor"] == 0
+    assert t["order_capable_not_doctor"]["total"] == 1 and t["voiceprint_match_not_doctor"] == 1
+
+
+# ---- H2: psyn_truth against the real cloud-psyn-gen/v1 schema (verbatim generator output, default seed)
+FIX = HERE.parent / "fixtures" / "psyn"
+
+
+def fx(cid):
+    return json.loads((FIX / cid / "script.json").read_text())
+
+
+def seg_rows(cid, d=None, label_of=None):
+    """Nemotron-like rows from a real script: one segment per turn on the label the script intended (L2 -> speaker_2)."""
+    pt = load_psyn()
+    d = d or fx(cid)
+    times = pt.est_timeline(d)
+    lab = label_of or {s["speaker_id"]: "speaker_" + s["intended_diar_label"][1:] for s in d["speakers"]}
+    return [{"consult_id": d["script_id"], "label": lab[t["speaker_id"]], "t0_ms": times[t["turn_id"]][0], "t1_ms": times[t["turn_id"]][1]} for t in d["turns"]]
+
+
+def load_psyn():
+    sp = importlib.util.spec_from_file_location("psyn_truth", SRC.parent / "psyn_truth.py")
+    m = importlib.util.module_from_spec(sp)
+    sp.loader.exec_module(m)
+    return m
+
+
+def write_rows(path, rows):
+    Path(path).write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+def run_psyn(tmp_path, rows, *extra, scripts=None):
+    pt = load_psyn()
+    write_rows(tmp_path / "nem.jsonl", rows)
+    out = tmp_path / "truth.jsonl"
+    rc = pt.main(["--scripts-dir", str(scripts or FIX), "--nemotron", str(tmp_path / "nem.jsonl"), "--out", str(out), *extra])
+    return rc, out
+
+
+def test_h2_real_generator_scripts_project_to_expected_roles(tmp_path, capsys):
+    rows = sum((seg_rows(c) for c in ("PSYN-SM-014", "PSYN-SV-002", "PSYN-SV-035")), [])
+    rc, out = run_psyn(tmp_path, rows, "--est-timeline")
+    assert rc == 0
+    got = {(r["consult_id"], r["label"]): r["true_role"] for r in map(json.loads, out.read_text().splitlines())}
+    assert got[("PSYN-SV-002", "speaker_0")] == "doctor" and got[("PSYN-SV-002", "speaker_1")] == "patient"
+    assert got[("PSYN-SV-002", "speaker_2")] == "other_clinician"
+    assert [k for k, v in got.items() if v == "doctor"] == [("PSYN-SM-014", "speaker_0"), ("PSYN-SV-002", "speaker_0"), ("PSYN-SV-035", "speaker_0")]
+    assert all(got[("PSYN-SV-035", f"speaker_{i}")] == "attender" for i in (2, 3, 4))
+    assert set(got.values()) <= rv.TRUE_ROLES and stat.S_IMODE(os.stat(out).st_mode) == 0o600
+    printed = capsys.readouterr().out
+    assert json.loads(printed)["consults"] == 3 and "PSYN" not in printed
+    assert len(rv.load_truth(str(out))) == len(got)  # accepted by fa-check, no duplicates
+
+
+def test_h2_real_script_ids_never_mark_a_second_doctor():
+    for cid in ("PSYN-SM-002", "PSYN-SM-014", "PSYN-SV-002", "PSYN-SV-035"):
+        roles = load_psyn().speaker_roles(fx(cid))
+        assert list(roles.values()).count("doctor") == 1
+
+
+def test_h2_label_shared_by_doctor_and_other_clinician_follows_the_majority():
+    pt = load_psyn()
+    d = fx("PSYN-SM-014")
+    # every speaker's turns on ONE Nemotron label: roles pool by ms; doctor holds under 60% of a three-voice mix
+    times = pt.est_timeline(d)
+    segs = [("speaker_0", *times[t["turn_id"]]) for t in d["turns"]]
+    roles, none = pt.project(d, times, segs)
+    ms = {}
+    for t in d["turns"]:
+        r = pt.speaker_roles(d)[t["speaker_id"]]
+        ms[r] = ms.get(r, 0) + times[t["turn_id"]][1] - times[t["turn_id"]][0]
+    top = max(ms.values()) / sum(ms.values())
+    assert roles["speaker_0"] == (max(ms, key=ms.get) if top >= 0.6 else "mixed") and none == 0
+
+
+def test_h2_mixed_below_60_percent_and_at_the_boundary():
+    pt = load_psyn()
+    d = fx("PSYN-SV-002")
+    sid = {s["role"]: s["speaker_id"] for s in d["speakers"]}
+    tid = {r: next(t["turn_id"] for t in d["turns"] if t["speaker_id"] == sid[r]) for r in ("treating_doctor", "patient")}
+    times = {tid["treating_doctor"]: (0, 600), tid["patient"]: (600, 1000)}
+    assert pt.project(d, times, [("speaker_0", 0, 1000)])[0] == {"speaker_0": "doctor"}   # 60% holds
+    times = {tid["treating_doctor"]: (0, 599), tid["patient"]: (599, 1000)}
+    assert pt.project(d, times, [("speaker_0", 0, 1000)])[0] == {"speaker_0": "mixed"}    # 59.9% does not
+    assert pt.project(d, times, [("speaker_9", 5000, 6000)])[0] == {"speaker_9": "mixed"}  # no overlap at all
+    assert pt.project(d, times, [("speaker_9", 5000, 6000)])[1] == 1
+
+
+def test_h2_turn_times_file_is_used_and_exactly_one_timeline_source_is_required(tmp_path):
+    d = fx("PSYN-SV-002")
+    rows = seg_rows("PSYN-SV-002")
+    pt = load_psyn()
+    times = pt.est_timeline(d)
+    write_rows(tmp_path / "tt.jsonl", [{"consult_id": d["script_id"], "turn_id": k, "t0_ms": v[0], "t1_ms": v[1]} for k, v in times.items()])
+    rc, out = run_psyn(tmp_path, rows, "--turn-times", str(tmp_path / "tt.jsonl"))
+    assert rc == 0 and len(out.read_text().splitlines()) == 3
+    assert run_psyn(tmp_path, rows)[0] == 2
+    assert run_psyn(tmp_path, rows, "--est-timeline", "--turn-times", str(tmp_path / "tt.jsonl"))[0] == 2
+
+
+def test_h2_refuses_bad_scripts_and_unknown_consults(tmp_path, capsys):
+    import shutil
+    rows = seg_rows("PSYN-SV-002")
+    bad = tmp_path / "bad" / "PSYN-SV-002"
+    bad.mkdir(parents=True)
+    d = fx("PSYN-SV-002")
+    d["speakers"][1]["is_treating"] = True                       # two treating speakers, and role/flag disagree
+    (bad / "script.json").write_text(json.dumps(d))
+    assert run_psyn(tmp_path, rows, "--est-timeline", scripts=tmp_path / "bad")[0] == 2
+    d = fx("PSYN-SV-002")
+    d["speakers"][0]["role"] = "patient"                          # nobody is the treating doctor
+    (bad / "script.json").write_text(json.dumps(d))
+    assert run_psyn(tmp_path, rows, "--est-timeline", scripts=tmp_path / "bad")[0] == 2
+    assert run_psyn(tmp_path, [dict(rows[0], consult_id="PSYN-XX-999")], "--est-timeline")[0] == 2
+    err = capsys.readouterr().err
+    assert "Traceback" not in err and all(len(l) < 200 for l in err.splitlines())
+    shutil.rmtree(bad)
+
+
+def test_h2_treating_doctor_is_a_doctor_word():
+    pt = load_psyn()
+    assert "treating_doctor" in pt.DOCTOR_LIKE
+
+
+def test_h2_end_to_end_with_fa_check(tmp_path, capsys):
+    """A P-SYN truth file from real script ids drives fa-check: the doctor label orders, the other clinician's label does not."""
+    d = fx("PSYN-SV-002")
+    rows = seg_rows("PSYN-SV-002")
+    rc, truth = run_psyn(tmp_path, rows, "--est-timeline")
+    assert rc == 0
+    cid = d["script_id"]
+    cons = {cid: cin(far_vecs(speaker_0=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")}
+    flags = write_inputs(tmp_path, cons)
+    capsys.readouterr()
+    assert rv.main(["fa-check"] + flags + ["--truth", str(truth)]) == 0
+    t = json.loads(capsys.readouterr().out)
+    assert t["order_capable_yield_on_true_doctor"] == 1 and t["order_capable_not_doctor"]["total"] == 0
