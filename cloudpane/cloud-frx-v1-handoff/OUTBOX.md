@@ -11,3 +11,4 @@
 2026-10-17 F6 fix round 3 on branch cloudpane/cloud-frx-v1-handoff/v4: R10-R14; mutants 188/188; vocab false fails 0/7 + 0/20, held-out 3/10 and 2/10 (reported); index 221 files
 2026-10-17 F7 report cloudpane-reports/FRX-V1-FIX3-REPORT.md; fix commit 7a1fd23f; pushing v4
 2026-10-17 F8 fix round 4 on branch cloudpane/cloud-frx-v1-handoff/v5: R15-R20; mutants 210/210; false fails 0/7, 0/20; held-out 0/10, 0/10, 2/10 (batch3 out-of-sample); index 247 files
+2026-10-17 F9 report cloudpane-reports/FRX-V1-FIX4-REPORT.md; fix commit a5b3f98b; pushing v5
