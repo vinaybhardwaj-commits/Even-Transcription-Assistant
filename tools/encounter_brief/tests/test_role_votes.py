@@ -37,6 +37,7 @@ def cin(vecs=None, uid=DOC, slot=None, jev=None, clef=None, roles=None, with_dat
     """Three labels, 10 s each. jev/clef: {label: p4}. roles: {label: role}."""
     c = rv.ConsultIn()
     c.vecs = {k: rv.unit(v) for k, v in (vecs or {}).items()}
+    c.vecs_present = c.uid_present = True
     c.doctor_uid = uid
     if with_data:
         c.clef_slot_present, c.clef_slot = True, slot
@@ -44,7 +45,7 @@ def cin(vecs=None, uid=DOC, slot=None, jev=None, clef=None, roles=None, with_dat
         for i, lab in enumerate(LABS):
             c.timeline.append((lab, i * 10000, (i + 1) * 10000))
             if roles and lab in roles:
-                c.role_segments.append((i * 10000, (i + 1) * 10000, roles[lab]))
+                c.role_segments.append((i * 10000, (i + 1) * 10000, roles[lab], None))
     c.jev_p = dict(jev or {})
     c.clef_p = dict(clef or {})
     return c
@@ -65,7 +66,7 @@ def lab(d, name):
 
 
 DOC_ROLES = {"speaker_0": "doctor", "speaker_1": "patient", "speaker_2": "attender"}
-UNKNOWN_ROLES = {l: "unknown" for l in LABS}
+ALL_DOCTOR_ROLES = {l: "doctor" for l in LABS}  # role layer silent on non-doctors, so nothing blocks arm (c)
 DOC_JEV = {"speaker_0": p4(doc=0.9), "speaker_1": p4(pat=0.9), "speaker_2": p4(att=0.9)}
 
 
@@ -164,7 +165,7 @@ def test_voiceprint_unconfirmed_case2():
 
 def test_arm_c_only_case3():
     jev = {k: p4(att=0.3, doc=0.4) for k in LABS}
-    d = run(cin(far_vecs(speaker_1=vec(0.9)), roles=UNKNOWN_ROLES, jev=jev, slot=None))
+    d = run(cin(far_vecs(speaker_1=vec(0.9)), roles=ALL_DOCTOR_ROLES, jev=jev, slot=None))
     assert d["order_capable"] == ["speaker_1"] and d["case"] == 3
 
 
@@ -177,12 +178,12 @@ def test_no_signal_case1():
 def test_two_three_of_three_labels(armc, expected):
     # voiceprint available; 3/3 labels a and b. arm (c) on a / on neither / on a third label c.
     v = armc
-    order, case, flags = rv.resolve_order(["a", "b"], armc, v, True)
+    order, case, flags = rv.resolve_order(["a", "b"], armc, v, "ok")
     assert order == expected and "multiple_3of3" in flags
 
 
 def test_two_three_of_three_without_voiceprint_orders_nothing():
-    order, case, flags = rv.resolve_order(["a", "b"], None, None, False)
+    order, case, flags = rv.resolve_order(["a", "b"], None, None, "unavailable")
     assert order == [] and "multiple_3of3" in flags
 
 
@@ -210,7 +211,7 @@ def test_no_enrolment_without_three_of_three_orders_nothing():
 
 def test_mapping_ambiguous_drops_voters_2_and_3():
     c = cin(far_vecs(speaker_0=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")
-    c.role_segments.append((9000, 11000, "doctor"))  # 1 s on speaker_0, 1 s on speaker_1: a tie
+    c.role_segments.append((9000, 11000, "doctor", None))  # 1 s on speaker_0, 1 s on speaker_1: a tie
     d = run(c)
     assert d["mapping"]["status"] == "ambiguous" and "mapping_ambiguous" in d["degraded"]
     for l in d["labels"]:
@@ -229,53 +230,6 @@ def test_mapping_failed_when_a_voter_has_no_data():
 def test_mapping_failed_when_role_track_empty():
     d = run(cin(far_vecs(), roles=None, jev=DOC_JEV, slot="speaker_0"))
     assert d["mapping"]["status"] == "failed" and d["order_capable"] == []
-
-
-# ---- property: armc_old equals merge_c's treating()
-
-def merge_c_vote(vecs, cen, duid):
-    """Re-implementation of merge_c.treating(), written from the merge_c source."""
-    def unit(v):
-        v = np.asarray(v, dtype=np.float64)
-        return v / (np.linalg.norm(v) + 1e-12)
-    if not duid or duid not in cen:
-        return None
-    if not vecs:
-        return None
-    sims = sorted(((float(unit(v) @ cen[duid]), l) for l, v in vecs.items()), reverse=True)
-    b, label = sims[0]
-    r = sims[1][0] if len(sims) > 1 else None
-    if b < 0.65:
-        return None
-    if r is not None and b - r < 0.05:
-        return None
-    return label
-
-
-def test_armc_old_matches_merge_c_on_200_random_consults():
-    rng = np.random.default_rng(20261017)
-    dim = 16
-    cen = {f"d{i}": rv.unit(rng.normal(size=dim)) for i in range(20)}
-    uids = list(cen)
-    hits = 0
-    for n in range(200):
-        uid = uids[rng.integers(20)] if n % 10 else (None if n % 20 == 0 else "ghost")
-        k = int(rng.integers(1, 6))
-        vecs = {}
-        for i in range(k):
-            v = rng.normal(size=dim)
-            if uid in cen and rng.random() < 0.5:
-                v = cen[uid] * rng.uniform(1.5, 4.0) + 0.5 * v / np.linalg.norm(v)
-            vecs[f"speaker_{i}"] = v * rng.uniform(0.5, 3.0)
-        c = rv.ConsultIn()
-        c.vecs, c.doctor_uid = vecs, uid
-        d = rv.compute_consult(c, cen)
-        expect = merge_c_vote(vecs, cen, uid)
-        got = [l["label"] for l in d["labels"] if l["armc_old"]]
-        assert got == ([expect] if expect else [])
-        assert d["armc_old_label"] == expect
-        hits += expect is not None
-    assert 20 < hits < 180  # the property is not trivially all-None
 
 
 # ---- CLI end to end
@@ -299,8 +253,8 @@ def write_inputs(tmp, consults):
                 p = ps.get(l)
                 row.update({k: (p[i] if p else None) for i, k in enumerate(rv.KEYS)})
                 lst.append(row)
-        for a, b, role in c.role_segments:
-            rseg.append({"consult_id": cid, "t0_ms": a, "t1_ms": b, "role": role})
+        for a, b, role, p in c.role_segments:
+            rseg.append({"consult_id": cid, "t0_ms": a, "t1_ms": b, "role": role, **({} if p is None else {"p": p})})
     (tmp / "vecs.json").write_text(json.dumps(vecs))
     (tmp / "uids.json").write_text(json.dumps(uids))
     (tmp / "slots.json").write_text(json.dumps(slots))
@@ -321,30 +275,11 @@ def synthetic_consults():
     return out
 
 
-def test_fa_check_zero_on_non_enrolled_voices(tmp_path, capsys):
-    # voices live outside the span of every enrolled centroid, so none is an enrolled doctor
-    cons = synthetic_consults()
-    for c in cons.values():
-        for v in c.vecs.values():
-            assert max(abs(float(rv.unit(v) @ u)) for u in CEN.values()) < 1e-9
-    flags = write_inputs(tmp_path, cons)
-    assert rv.main(["fa-check"] + flags) == 0
-    assert json.loads(capsys.readouterr().out)["false_accept_order_capable_or_voiceprint_match"] == 0
-
-
-def test_fa_check_catches_planted_false_accept(tmp_path, capsys):
-    cons = synthetic_consults()
-    cons["c1"].vecs["speaker_1"] = rv.unit(vec(0.95))  # planted: a voice that matches the logged-in doctor
-    flags = write_inputs(tmp_path, cons)
-    assert rv.main(["fa-check"] + flags) == 1
-    assert json.loads(capsys.readouterr().out)["false_accept_order_capable_or_voiceprint_match"] >= 1
-
-
 def test_build_reproduce_mode_bytes_layout(tmp_path, capsys):
     cons = {
         "c_both": cin(far_vecs(speaker_0=vec(0.9)), slot="speaker_0", roles=DOC_ROLES, jev=DOC_JEV),
         "c_none": cin(far_vecs(), slot=None, roles=DOC_ROLES, jev=DOC_JEV),
-        "c_armc": cin(far_vecs(speaker_1=vec(0.9)), slot=None, roles=UNKNOWN_ROLES, jev={k: p4(att=0.3, doc=0.4) for k in LABS}),
+        "c_armc": cin(far_vecs(speaker_1=vec(0.9)), slot=None, roles=ALL_DOCTOR_ROLES, jev={k: p4(att=0.3, doc=0.4) for k in LABS}),
     }
     flags = write_inputs(tmp_path, cons)
     out1, out2 = tmp_path / "o1", tmp_path / "o2"
@@ -364,7 +299,9 @@ def test_build_reproduce_mode_bytes_layout(tmp_path, capsys):
     assert rv.main(["reproduce", "--in-dir", str(out1)]) == 0
     rep = json.loads(capsys.readouterr().out)
     # c_none: no 3/3 (clef null) and no arm (c): zero everywhere. c_armc: arm (c) only. c_both: 3/3.
-    assert rep == {"consults": 3, "zero_order_3of3_alone": 2, "zero_order_armc_old": 1, "zero_order_armc_new": 1}
+    assert rep["consults"] == 3 and rep["zero_order_3of3_alone"] == 2
+    assert rep["zero_order_with_armc_one_margin"] == 1 and rep["zero_order_with_armc_both_margins"] == 1
+    assert rep["case7_consults"] == 0 and rep["voiceprint_missing"] == 0
 
 
 def test_layout_file_mirrors_and_rejects_escape(tmp_path):
@@ -405,3 +342,320 @@ def test_import_ban():
     assert not any(t in ("lib", "app") for t in tops)
     assert not any(m.startswith(".") for m in mods)
     assert "tools" not in tops
+
+
+# ================================================================ fix round 1
+
+def armc_case(roles, jev=None, clef=None, **kw):
+    """speaker_0 matches the voiceprint; returns the output dict."""
+    return run(cin(far_vecs(speaker_0=vec(0.9)), roles=roles, jev=jev or DOC_JEV, clef=clef, slot="speaker_1", **kw))
+
+
+# ---- F1
+@pytest.mark.parametrize("word", ["attendant", "nurse", "translator", "relative", "family", "caregiver", "patient ", "PATIENT", "bystander"])
+def test_f1_any_non_doctor_role_word_blocks_arm_c(word):
+    d = armc_case(dict(DOC_ROLES, speaker_0=word))
+    assert lab(d, "speaker_0")["armc_new"] is False and lab(d, "speaker_0")["armc_contradiction"] == ["role"]
+    assert d["order_capable"] == []
+
+
+@pytest.mark.parametrize("word,flagged", [("nurse", True), ("bystander", True), ("translator", False), ("patient ", False)])
+def test_f1_unknown_role_word_sets_flag(word, flagged):
+    d = armc_case(dict(DOC_ROLES, speaker_0=word))
+    assert ("unknown_role_word" in d["case_flags"]) is flagged
+
+
+def test_f1_doctor_word_is_normalised_and_exact():
+    d = run(cin(far_vecs(), roles=dict(DOC_ROLES, speaker_0=" Doctor "), jev=DOC_JEV, slot="speaker_0"))
+    assert lab(d, "speaker_0")["role_track"]["role"] == "doctor" and d["three_of_three"] == ["speaker_0"]
+    d = run(cin(far_vecs(), roles=dict(DOC_ROLES, speaker_0="doctors"), jev=DOC_JEV, slot="speaker_0"))
+    assert d["three_of_three"] == [] and "unknown_role_word" in d["case_flags"]
+
+
+def test_f1_empty_role_is_dropped_by_loader(tmp_path):
+    c = cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot=None)
+    c.role_segments.append((0, 1000, "  ", None))
+    flags = write_inputs(tmp_path, {"c": c})
+    ins = rv.load_inputs(*[flags[i] for i in (1, 7, 9, 11, 13, 15)][:0] or [str(tmp_path / n) for n in ("vecs.json", "uids.json", "clef.jsonl", "jev.jsonl", "slots.json", "roles.jsonl")])
+    assert all(r[2] for r in ins["c"].role_segments)
+
+
+# ---- F2
+def test_f2_consult_missing_from_files_orders_nothing_and_is_not_case7():
+    for field in ("uid_present", "vecs_present"):
+        c = cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")
+        setattr(c, field, False)
+        d = run(c)
+        assert d["order_capable"] == [] and d["case"] is None and "case7_no_voiceprint" not in d["case_flags"]
+        assert "voiceprint_missing" in d["degraded"] and "voiceprint_missing" in d["case_flags"]
+        assert lab(d, "speaker_0")["voiceprint"]["status"] == "voiceprint_missing"
+
+
+def test_f2_loader_and_exit_report_count_missing(tmp_path, capsys):
+    cons = {"c_ok": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"),
+            "c_nouid": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"),
+            "c_novec": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")}
+    flags = write_inputs(tmp_path, cons)
+    u = json.loads((tmp_path / "uids.json").read_text()); u.pop("c_nouid"); (tmp_path / "uids.json").write_text(json.dumps(u))
+    v = json.loads((tmp_path / "vecs.json").read_text()); v.pop("c_novec"); (tmp_path / "vecs.json").write_text(json.dumps(v))
+    out = tmp_path / "o"
+    assert rv.main(["build"] + flags + ["--out-dir", str(out)]) == 0
+    capsys.readouterr()
+    ids = tmp_path / "ids.json"
+    assert rv.main(["reproduce", "--in-dir", str(out), "--ids-out", str(ids)]) == 0
+    stdout = capsys.readouterr().out
+    rep = json.loads(stdout)
+    assert rep["voiceprint_missing"] == 2 and rep["case7_consults"] == 0
+    assert "c_nouid" not in stdout and "c_ok" not in stdout  # ids never on stdout
+    assert stat.S_IMODE(os.stat(ids).st_mode) == 0o600
+    assert sorted(json.loads(ids.read_text())["voiceprint_missing"]) == ["c_nouid", "c_novec"]
+
+
+# ---- F3
+def test_f3_nested_output_dirs_are_0700_under_umask_0(tmp_path):
+    old = os.umask(0)
+    try:
+        res = {"c": rv.compute_consult(cin(far_vecs(), slot="speaker_0", roles=DOC_ROLES, jev=DOC_JEV), CEN, "c")}
+        out = tmp_path / "a" / "b" / "out"
+        rv.write_all(res, str(out), {"c": "x/y"})
+        for d in (out.parent, out, out / "x", out / "x" / "y"):
+            assert stat.S_IMODE(os.stat(d).st_mode) == 0o700, d
+        assert stat.S_IMODE(os.stat(out / "x" / "y" / "role_votes.v1.json").st_mode) == 0o600
+    finally:
+        os.umask(old)
+
+
+def test_f3_existing_wide_directory_is_an_error(tmp_path):
+    res = {"c": rv.compute_consult(cin(far_vecs(), slot="speaker_0", roles=DOC_ROLES, jev=DOC_JEV), CEN, "c")}
+    out = tmp_path / "wide"
+    out.mkdir(); os.chmod(out, 0o755)
+    with pytest.raises(PermissionError):
+        rv.write_all(res, str(out))
+    out2 = tmp_path / "ok"
+    out2.mkdir(); os.chmod(out2, 0o700)
+    (out2 / "c").mkdir(); os.chmod(out2 / "c", 0o750)
+    with pytest.raises(PermissionError):
+        rv.write_all(res, str(out2))
+
+
+# ---- F4
+def truth_file(tmp_path, rows):
+    p = tmp_path / "truth.jsonl"
+    p.write_text("".join(json.dumps({"consult_id": c, "label": l, "true_role": r}) + "\n" for c, l, r in rows))
+    return str(p)
+
+
+def test_f4_fa_check_refuses_without_truth(tmp_path):
+    flags = write_inputs(tmp_path, {"c": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot=None)})
+    assert rv.main(["fa-check"] + flags) == 2
+
+
+def test_f4_bad_true_role_refuses(tmp_path):
+    flags = write_inputs(tmp_path, {"c": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot=None)})
+    assert rv.main(["fa-check"] + flags + ["--truth", truth_file(tmp_path, [("c", "speaker_0", "surgeon")])]) == 2
+
+
+def test_f4_clean_run_and_yield(tmp_path, capsys):
+    cons = {"c": cin(far_vecs(speaker_0=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")}
+    flags = write_inputs(tmp_path, cons)
+    truth = truth_file(tmp_path, [("c", "speaker_0", "doctor"), ("c", "speaker_1", "patient"), ("c", "speaker_2", "attender")])
+    assert rv.main(["fa-check"] + flags + ["--truth", truth]) == 0
+    t = json.loads(capsys.readouterr().out)
+    assert t["voiceprint_match_not_doctor"] == 0 and t["order_capable_not_doctor"]["total"] == 0
+    assert t["order_capable_yield_on_true_doctor"] == 1 and t["unlabelled_labels"] == 0
+
+
+def test_f4_wrong_voiceprint_match_and_route_split(tmp_path, capsys):
+    cons = {
+        # arm (c) route: voiceprint on speaker_1, no 3/3; truth says speaker_1 is a staff member
+        "c_arm": cin(far_vecs(speaker_1=vec(0.9)), roles=ALL_DOCTOR_ROLES, jev={k: p4(att=0.3, doc=0.4) for k in LABS}, slot=None),
+        # 3/3 route (case 6): voiceprint matches nothing, 3/3 label is truly a translator
+        "c_3of3": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"),
+        # case 7: no doctor_uid, 3/3 label truly a patient
+        "c_7": cin(far_vecs(), uid=None, roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"),
+    }
+    flags = write_inputs(tmp_path, cons)
+    truth = truth_file(tmp_path, [("c_arm", "speaker_1", "staff"), ("c_3of3", "speaker_0", "translator"), ("c_7", "speaker_0", "patient")])
+    assert rv.main(["fa-check"] + flags + ["--truth", truth]) == 1
+    t = json.loads(capsys.readouterr().out)
+    assert t["voiceprint_match_not_doctor"] == 1
+    assert t["order_capable_not_doctor"] == {"3of3": 1, "arm_c": 1, "case7": 1, "total": 3}
+    assert t["unlabelled_labels"] == 6  # labels without a truth row count as not the doctor
+
+
+def test_f4_reproduce_prints_truth_counts(tmp_path, capsys):
+    cons = {"c": cin(far_vecs(speaker_0=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")}
+    flags = write_inputs(tmp_path, cons)
+    rv.main(["build"] + flags + ["--out-dir", str(tmp_path / "o")]); capsys.readouterr()
+    truth = truth_file(tmp_path, [("c", "speaker_0", "patient")])
+    assert rv.main(["reproduce", "--in-dir", str(tmp_path / "o"), "--truth", truth]) == 0
+    t = json.loads(capsys.readouterr().out)["truth"]
+    assert t["voiceprint_match_not_doctor"] == 1 and t["order_capable_not_doctor"]["3of3"] == 1
+
+
+# ---- F5
+def test_f5_build_refuses_without_created_at(tmp_path, monkeypatch):
+    monkeypatch.delenv("SOURCE_DATE_EPOCH", raising=False)
+    flags = write_inputs(tmp_path, {"c": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")})
+    i = flags.index("--created-at")
+    bare = flags[:i] + flags[i + 2:]
+    assert rv.main(["build"] + bare + ["--out-dir", str(tmp_path / "o")]) == 2
+    assert not (tmp_path / "o").exists()
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "not-a-number")
+    assert rv.main(["build"] + bare + ["--out-dir", str(tmp_path / "o")]) == 2
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1792195200")
+    assert rv.main(["build"] + bare + ["--out-dir", str(tmp_path / "o")]) == 0
+    d = json.loads((tmp_path / "o" / "c" / "role_votes.v1.json").read_text())
+    assert d["metadata"]["created_at"] == "2026-10-17T00:00:00Z"
+
+
+def test_f5_no_wall_clock_in_source():
+    src = SRC.read_text()
+    import re
+    assert not re.search(r"datetime\.now|utcnow|\btime\.time\b|\btime\.localtime", src)
+
+
+# ---- F6
+def test_f6_jev_tie_is_not_doctor():
+    assert rv.jev_vote([0.6, 0.6, 0.0, 0.0]) is None
+    assert rv.jev_vote([0.6, 0.4, 0.0, 0.0]) == "doctor"
+    assert rv.jev_vote([0.59, 0.1, 0.1, 0.1]) is None
+    assert rv.jev_vote([0.7, 0.7, 0.0, 0.0]) is None
+    d = run(cin(far_vecs(), roles=DOC_ROLES, jev=dict(DOC_JEV, speaker_0=p4(doc=0.6, pat=0.6)), slot="speaker_0"))
+    assert d["three_of_three"] == []
+
+
+# ---- F7
+def test_f7_missing_vector_on_another_label_abstains():
+    vecs = {"speaker_0": vec(0.9), "speaker_1": E[5]}  # speaker_2 has speech but no vector
+    d = run(cin(vecs, roles=DOC_ROLES, jev=DOC_JEV, slot=None))
+    assert d["armc_new_label"] is None and d["voiceprint_match_label"] is None
+    assert "next_label_margin_incomplete" in d["case_flags"]
+    assert d["armc_old_label"] == "speaker_0"  # merge_c unchanged
+
+
+def test_f7_true_single_label_consult_may_skip_next_margin():
+    c = rv.ConsultIn()
+    c.vecs, c.vecs_present, c.uid_present, c.doctor_uid = {"speaker_0": rv.unit(vec(0.9))}, True, True, DOC
+    c.timeline, c.jev_rows, c.clef_slot_present, c.clef_slot = [("speaker_0", 0, 10000)], 1, True, "speaker_0"
+    c.role_segments, c.jev_p = [(0, 10000, "doctor", None)], {"speaker_0": p4(doc=0.9)}
+    d = run(c)
+    assert d["armc_new_label"] == "speaker_0" and "next_label_margin_incomplete" not in d["case_flags"]
+    assert d["order_capable"] == ["speaker_0"]
+
+
+# ---- F8
+def f8_roles(segs):
+    c = cin(far_vecs(speaker_0=vec(0.9)), roles={k: v for k, v in DOC_ROLES.items() if k != "speaker_0"}, jev=DOC_JEV, slot="speaker_1")
+    c.role_segments += segs
+    return run(c)
+
+
+@pytest.mark.parametrize("dur,p,blocked", [(3000, 0.9, True), (2000, 0.6, True), (1999, 0.9, False), (3000, 0.59, False), (3000, None, False)])
+def test_f8_single_long_non_doctor_role_segment_blocks(dur, p, blocked):
+    d = f8_roles([(0, 10000 - dur, "doctor", None), (10000 - dur, 10000, "nurse", p)])
+    l0 = lab(d, "speaker_0")
+    assert l0["role_track"]["role"] == "doctor"  # majority rule alone would not block
+    assert (l0["armc_new"] is False) is blocked
+
+
+def test_f8_max_over_all_rows_for_clef_and_jev():
+    c = cin(far_vecs(speaker_0=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_1")
+    c.jev_nd = {"speaker_0": 0.8}
+    assert lab(run(c), "speaker_0")["armc_contradiction"] == ["jev"]
+    c = cin(far_vecs(speaker_0=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_1")
+    c.clef_nd = {"speaker_0": 0.8}
+    assert lab(run(c), "speaker_0")["armc_contradiction"] == ["clef"]
+
+
+def test_f8_loader_takes_max_over_rows_not_first_row(tmp_path, capsys):
+    c = cin(far_vecs(speaker_0=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_1")
+    flags = write_inputs(tmp_path, {"c": c})
+    extra = {"consult_id": "c", "t0_ms": 0, "t1_ms": 500, "slot": "speaker_0", "voter": "jev_cue", "p_doctor": 0.1, "p_patient": 0.8, "p_attender": 0.05, "p_staff": 0.05}
+    with open(tmp_path / "jev.jsonl", "a") as f:
+        f.write(json.dumps(extra) + "\n")
+    assert rv.main(["build"] + flags + ["--out-dir", str(tmp_path / "o")]) == 0
+    d = json.loads((tmp_path / "o" / "c" / "role_votes.v1.json").read_text())
+    l0 = next(l for l in d["labels"] if l["label"] == "speaker_0")
+    assert l0["armc_contradiction"] == ["jev"] and d["order_capable"] == []
+
+
+# ---- F9 and the lead's metadata flags
+MC_COS_MIN, MC_MARGIN = 0.65, 0.05
+
+
+def mc_unit(v):
+    v = np.asarray(v, dtype=np.float64)
+    return v / (np.linalg.norm(v) + 1e-12)
+
+
+def mc_treating(cid, vecs, cen, duid):
+    """Verbatim copy of merge_c.treating() from the brief (names prefixed, constants inlined as globals)."""
+    unit = mc_unit
+    COS_MIN, MARGIN = MC_COS_MIN, MC_MARGIN
+    if not duid or duid not in cen:
+        return None, "no_centroid", None, None
+    labs = vecs.get(cid, {})
+    if not labs:
+        return None, "no_label_vector", None, None
+    sims = sorted(((float(unit(v) @ cen[duid]), lab) for lab, v in labs.items()), reverse=True)
+    b, lab = sims[0]
+    r = sims[1][0] if len(sims) > 1 else None
+    if b < COS_MIN:
+        return None, "below_cos_min", b, r
+    if r is not None and b - r < MARGIN:
+        return None, "inside_margin", b, r
+    return lab, "ok", b, r
+
+
+def test_f9_armc_old_parity_with_verbatim_merge_c_on_1000_consults():
+    rng = np.random.default_rng(1017)
+    dim = 16
+    cen = {f"d{i}": mc_unit(rng.normal(size=dim)) for i in range(20)}
+    uids = list(cen)
+    mism = hits = 0
+    for n in range(1000):
+        uid = uids[rng.integers(20)] if n % 10 else (None if n % 20 == 0 else "ghost")
+        k = int(rng.integers(0, 6))
+        vecs = {}
+        for i in range(k):
+            v = rng.normal(size=dim)
+            if uid in cen and rng.random() < 0.5:
+                v = cen[uid] * rng.uniform(0.8, 4.0) + 0.5 * v / np.linalg.norm(v)
+            vecs[f"speaker_{i}"] = v * rng.uniform(0.5, 3.0)
+        expect = mc_treating("c", {"c": vecs}, cen, uid)[0]
+        c = rv.ConsultIn()
+        c.vecs, c.vecs_present, c.uid_present, c.doctor_uid = vecs, True, True, uid
+        d = rv.compute_consult(c, cen)
+        got = [l["label"] for l in d["labels"] if l["armc_old"]]
+        mism += got != ([expect] if expect else []) or d["armc_old_label"] != expect or rv.treating_old(vecs, cen, uid) != expect
+        hits += expect is not None
+    assert mism == 0
+    assert 100 < hits < 900  # not trivially all-None
+
+
+def test_metadata_flags_for_missing_jev_ids(tmp_path):
+    flags = write_inputs(tmp_path, {"c": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")})
+    rv.main(["build"] + flags + ["--out-dir", str(tmp_path / "o1")])
+    d = json.loads((tmp_path / "o1" / "c" / "role_votes.v1.json").read_text())
+    assert d["metadata"]["jev_question_id"] is None and "jev_question_id_missing" in d["case_flags"] and "jev_model_missing" in d["case_flags"]
+    rv.main(["build"] + flags + ["--jev-question-id", "q7", "--jev-model", "m1", "--out-dir", str(tmp_path / "o2")])
+    d = json.loads((tmp_path / "o2" / "c" / "role_votes.v1.json").read_text())
+    assert d["metadata"]["jev_question_id"] == "q7" and d["metadata"]["jev_model"] == "m1"
+    assert not [f for f in d["case_flags"] if f.endswith("_missing")]
+
+
+def test_exit_report_lists_case7_and_ambiguous_separately(tmp_path, capsys):
+    amb = cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")
+    amb.role_segments.append((9000, 11000, "doctor", None))
+    cons = {"c7": cin(far_vecs(), uid=None, roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"), "camb": amb,
+            "cok": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")}
+    flags = write_inputs(tmp_path, cons)
+    rv.main(["build"] + flags + ["--out-dir", str(tmp_path / "o")]); capsys.readouterr()
+    ids = tmp_path / "ids.json"
+    assert rv.main(["reproduce", "--in-dir", str(tmp_path / "o"), "--ids-out", str(ids)]) == 0
+    out = capsys.readouterr().out
+    rep = json.loads(out)
+    assert rep["case7_consults"] == 1 and rep["mapping_ambiguous_consults"] == 1 and "c7" not in out and "camb" not in out
+    j = json.loads(ids.read_text())
+    assert j["case7"] == ["c7"] and j["mapping_ambiguous"] == ["camb"]
