@@ -137,6 +137,12 @@ CHI2_95_HALF = 1.9207294103470620  # chi2.ppf(0.95, 1) / 2: the 0.95 two-sided p
 RHO_MAX = 0.5
 _RHO_GRID = np.concatenate(([0.0], np.geomspace(1e-6, RHO_MAX, 60)))
 _HALF_LN_2PI = 0.5 * math.log(2.0 * math.pi)
+RHO_POLISH_XATOL = 1e-10  # polish tolerance, in log rho
+
+try:
+    from scipy.optimize import minimize_scalar as _MINIMIZE_SCALAR
+except ImportError:  # pragma: no cover - golden section below covers this
+    _MINIMIZE_SCALAR = None
 
 
 def gammaln(x):
@@ -167,11 +173,64 @@ def _ll_over_rho(p: float, n: np.ndarray, f: np.ndarray, rho: np.ndarray) -> np.
     return out
 
 
+def _ll_scalar(p: float, n, f, rho: float) -> float:
+    return float(_ll_over_rho(p, n, f, np.array([rho]))[0])
+
+
+def _max_rho_log(p: float, n, f, t_lo: float, t_hi: float) -> tuple[float, float]:
+    """(max of ll(p, exp t) for t in [t_lo, t_hi], the t attaining it). Bounded 1-D maximiser with
+    xatol RHO_POLISH_XATOL in log rho: scipy bounded Brent when available, else golden section."""
+    def neg_ll(t: float) -> float:
+        return -_ll_scalar(p, n, f, math.exp(t))
+    if _MINIMIZE_SCALAR is not None:
+        res = _MINIMIZE_SCALAR(neg_ll, bounds=(t_lo, t_hi), method="bounded",
+                               options={"xatol": RHO_POLISH_XATOL})
+        return -float(res.fun), float(res.x)
+    gr = (math.sqrt(5.0) - 1.0) / 2.0
+    c, d = t_hi - gr * (t_hi - t_lo), t_lo + gr * (t_hi - t_lo)
+    fc, fd = neg_ll(c), neg_ll(d)
+    for _ in range(300):
+        if t_hi - t_lo <= RHO_POLISH_XATOL:
+            break
+        if fc < fd:
+            t_hi, d, fd = d, c, fc
+            c = t_hi - gr * (t_hi - t_lo)
+            fc = neg_ll(c)
+        else:
+            t_lo, c, fc = c, d, fd
+            d = t_lo + gr * (t_hi - t_lo)
+            fd = neg_ll(d)
+    t = (t_lo + t_hi) / 2.0
+    return -neg_ll(t), t
+
+
 def _profile(p: float, n, f) -> tuple[float, float]:
-    """(max over rho in [0, 0.5] of the log-likelihood at p, the rho that attains it)."""
-    ll = _ll_over_rho(min(max(p, 1e-300), 1.0 - 1e-12), n, f, _RHO_GRID)
+    """(max over rho in [0, 0.5] of the log-likelihood at p, the rho that attains it).
+
+    Grid argmax on _RHO_GRID, then a bounded 1-D polish (xatol 1e-10 in log rho) on the
+    bracketing neighbours. The bracket endpoints (and rho = 0 when the grid argmax is 0)
+    stay candidates: the bounded maximiser certifies interior points only, and a boundary
+    maximum (e.g. the zero-event edge at rho = 0.5) must be returned exactly.
+    """
+    pc = min(max(p, 1e-300), 1.0 - 1e-12)
+    g = _RHO_GRID
+    ll = _ll_over_rho(pc, n, f, g)
     i = int(np.argmax(ll))
-    return float(ll[i]), float(_RHO_GRID[i])
+    if i <= 1:  # rho = 0 (or its first neighbour) is the grid argmax: keep 0 as a candidate
+        lo_b, hi_b = g[1], g[2]
+        cands = [(0.0, float(ll[0]))]
+    elif i == len(g) - 1:
+        lo_b, hi_b = g[i - 1], g[i]
+        cands = []
+    else:
+        lo_b, hi_b = g[i - 1], g[i + 1]
+        cands = []
+    v, t = _max_rho_log(pc, n, f, math.log(lo_b), math.log(hi_b))
+    cands.append((math.exp(t), v))
+    cands.append((float(lo_b), _ll_scalar(pc, n, f, lo_b)))
+    cands.append((float(hi_b), _ll_scalar(pc, n, f, hi_b)))
+    best_r, best_ll = max(cands, key=lambda cr: cr[1])
+    return best_ll, best_r
 
 
 def betabinom_profile_upper(n_i, f_i) -> dict:

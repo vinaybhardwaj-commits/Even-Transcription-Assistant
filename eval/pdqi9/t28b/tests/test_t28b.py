@@ -3,9 +3,11 @@ import ast
 import base64
 import io
 import json
+import math
 import os
 import pathlib
 import stat
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -1003,3 +1005,196 @@ def test_census_requires_truth_and_expect_exclude():
         with pytest.raises(SystemExit) as ex:
             run.parser().parse_args(a)
         assert ex.value.code == 2
+
+
+# ---------------------------------------------------------------- FIX5: independent-refute follow-ups
+
+def _gs_max_log(fn, t_lo: float, t_hi: float, xatol: float = 1e-12) -> tuple[float, float]:
+    """(max of fn over t in [t_lo, t_hi], the t attaining it); golden section, xatol in t (log rho)."""
+    gr = (math.sqrt(5.0) - 1.0) / 2.0
+    c, d = t_hi - gr * (t_hi - t_lo), t_lo + gr * (t_hi - t_lo)
+    fc, fd = fn(c), fn(d)
+    for _ in range(300):
+        if t_hi - t_lo <= xatol:
+            break
+        if fc > fd:
+            t_hi, d, fd = d, c, fc
+            c = t_hi - gr * (t_hi - t_lo)
+            fc = fn(c)
+        else:
+            t_lo, c, fc = c, d, fd
+            d = t_lo + gr * (t_hi - t_lo)
+            fd = fn(d)
+    t = (t_lo + t_hi) / 2.0
+    return fn(t), t
+
+
+BF_RHO_T = np.linspace(math.log(1e-8), math.log(0.5), 801)
+
+
+def bf_profile(p, n, f) -> tuple[float, float]:
+    """Independent brute-force profile: dense log-rho grid (1e-8..0.5, 801 pts) + golden polish to 1e-12."""
+    pc = min(max(p, 1e-300), 1.0 - 1e-12)
+    g = lambda t: ref_ll(pc, float(np.exp(t)), n, f)
+    vals = np.array([g(t) for t in BF_RHO_T])
+    i = int(np.argmax(vals))
+    cands = [(0.0, ref_ll(pc, 0.0, n, f)),
+             (float(np.exp(BF_RHO_T[i])), float(vals[i]))]
+    t_lo, t_hi = BF_RHO_T[max(i - 1, 0)], BF_RHO_T[min(i + 1, len(BF_RHO_T) - 1)]
+    if t_hi > t_lo:
+        v, t = _gs_max_log(g, t_lo, t_hi)
+        cands.append((float(np.exp(t)), v))
+    best_r, best_ll = max(cands, key=lambda cr: cr[1])
+    return best_ll, best_r
+
+
+def bf_upper(n, f) -> float:
+    """Independent brute-force 97.5% upper: dense p search + polished rho profile + bisection crossing."""
+    n = np.asarray(n, dtype=float)
+    f = np.asarray(f, dtype=float)
+    F, N = float(f.sum()), float(n.sum())
+    if F == 0.0:
+        p_hat, ll_max = 0.0, 0.0
+    else:
+        p0 = min(max(F / N, 1e-9), 0.99)
+        pg = np.geomspace(p0 / 100.0, min(p0 * 100.0, 0.9999), 201)
+        prof = lambda p: bf_profile(p, n, f)[0]
+        vals = np.array([prof(p) for p in pg])
+        i = int(np.argmax(vals))
+        lo, hi = pg[max(i - 1, 0)], pg[min(i + 1, len(pg) - 1)]
+        gr = (math.sqrt(5.0) - 1.0) / 2.0
+        c, d = hi - gr * (hi - lo), lo + gr * (hi - lo)
+        fc, fd = prof(c), prof(d)
+        for _ in range(40):
+            if fc > fd:
+                hi, d, fd = d, c, fc
+                c = hi - gr * (hi - lo)
+                fc = prof(c)
+            else:
+                lo, c, fc = c, d, fd
+                d = lo + gr * (hi - lo)
+                fd = prof(d)
+        p_hat = (lo + hi) / 2.0
+        ll_max = prof(p_hat)
+    thr = ll_max - stats.CHI2_95_HALF
+    lo, hi = p_hat, max(p_hat * 1.5, 1e-6)
+    cap = 1.0 - 1e-9
+    while bf_profile(hi, n, f)[0] >= thr:
+        lo = hi
+        if hi >= cap:
+            return 1.0
+        hi = min(hi * 2.0, cap)
+    for _ in range(50):
+        mid = (lo + hi) / 2.0
+        if bf_profile(mid, n, f)[0] >= thr:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+BF_CASES = {
+    "events_three_k20_n137": (np.full(20, 137.0), np.array([0.0] * 14 + [1.0] * 3 + [0.0] * 3)),
+    "events_twelve_k15_n500": (np.full(15, 500.0), np.array([1.0] * 12 + [0.0] * 3)),
+    "events_concentrated_one_cluster": (np.full(20, 500.0), np.array([6.0] + [0.0] * 19)),
+    "events_uneven_cluster_sizes": (np.array([3000.0, 5000.0, 1200.0, 8000.0, 600.0]),
+                                    np.array([0.0, 10.0, 0.0, 5.0, 5.0])),
+    "events_degenerate_all_in_one_cluster": (np.full(10, 100.0), np.array([100.0] + [0.0] * 9)),
+    "zero_events_k15_n2000": (np.full(15, 2000.0), np.zeros(15)),
+}
+
+
+@pytest.mark.parametrize("case", sorted(BF_CASES))
+def test_bound_matches_independent_bruteforce(case):
+    """M1: the polished grid bound must agree with an independent dense-grid + polish reference (<= 1e-4)."""
+    n, f = BF_CASES[case]
+    got = stats.betabinom_profile_upper(n, f)["upper"]
+    want = bf_upper(n, f)
+    assert want > 0
+    assert abs(got - want) / want <= 1e-4, (case, got, want)
+
+
+def test_chi2_95_half_pinned_to_chi2_ppf_095_1_over_2():
+    """S1: CHI2_95_HALF is chi2.ppf(0.95, 1) / 2, pinned literally to 1e-12."""
+    assert stats.CHI2_95_HALF == pytest.approx(1.920729410347062, abs=1e-12)
+
+
+def test_coverage_sim_uses_smallest_eligible_pool_not_largest(monkeypatch):
+    """S2: the coverage sim runs at the SMALLEST eligible pool (K and n_per pin the choice)."""
+    monkeypatch.setattr(stats, "coverage_sim", fake_sim(0.95))
+    scored = [{"doctor_uid": f"d{i % 20}", "centroid_uid": f"c{i % 10}"} for i in range(1000)]
+    scored_nd = [{"doctor_uid": f"g{i % 18}", "centroid_uid": f"g{i % 18}"} for i in range(990)]
+    cov = run._coverage(scored, scored_nd, SimpleNamespace(target_coverage=0.90, sim_reps=7, seed=7))
+    # pools: 20x50, 10x100, 18x55, 18x55 -> min picks 10x100; a max would give 20x50
+    assert cov["K"] == 10 and cov["n_per_cluster"] == 100
+
+
+def test_k_exactly_at_floor_passes_and_one_below_is_underpowered():
+    """S3: K exactly == floor (15) is powered; 14 is not."""
+    ids = [i % 15 for i in range(1500)]  # exactly 15 clusters of 100
+    fa = [1 if i % 300 == 0 else 0 for i in range(1500)]
+    r = stats.cluster_bound(ids, fa, reps=200, seed=1, floor=15)
+    assert r["underpowered"] is False and r["upper_975"] is not None
+    r14 = stats.cluster_bound([i % 14 for i in range(1400)], [0] * 1400, reps=200, seed=1, floor=15)
+    assert r14["underpowered"] is True and r14["upper_975"] is None
+
+
+def test_coverage_exactly_at_target_counts_as_ok(monkeypatch):
+    """S3: min coverage exactly == target (0.90) meets the target."""
+    monkeypatch.setattr(stats, "coverage_sim", fake_sim(0.90))
+    scored = [{"doctor_uid": f"d{i % 15}", "centroid_uid": f"d{i % 15}"} for i in range(900)]
+    cov = run._coverage(scored, [], SimpleNamespace(target_coverage=0.90, sim_reps=7, seed=7))
+    assert cov["min_coverage"] == 0.90 and cov["status"] == "ok"
+
+
+def test_strict_json_serialisation_maps_non_finite_to_null():
+    """S4: NaN/inf serialise as null and allow_nan=False must succeed."""
+    s = {"a": float("nan"), "b": float("inf"), "c": [-float("inf"), 1.5, "x"],
+         "d": {"e": float("nan")}, "f": None, "g": 3}
+    obj = json.loads(run._strict_json(s))
+    assert obj == {"a": None, "b": None, "c": [None, 1.5, "x"], "d": {"e": None}, "f": None, "g": 3}
+    json.dumps(obj, allow_nan=False)
+
+
+def _reject_constant(const):
+    raise AssertionError(f"summary.json carries a non-strict JSON constant: {const}")
+
+
+def single_label_world(p):
+    """One label per consult: with --one-label-pass std trials exist, but there are no nd trials at all."""
+    rng = np.random.default_rng(0)
+    docs = [f"doc{i:02d}" for i in range(12)]
+    cents = {d: core._unit(rng.normal(size=64)) for d in docs}
+    manifest, vecs = [], {}
+    for i in range(60):
+        d = docs[i % len(docs)]
+        cu = f"c{i:04d}"
+        manifest.append({"consult_uid": cu, "doctor_uid": d, "logged_in_doctor_uid": d})
+        vecs[cu] = {"speaker_0": core._unit(cents[d] + 0.02 * rng.normal(size=64)).tolist()}
+    truth = [{"consult_uid": r["consult_uid"], "label": "speaker_0", "source": "role_votes_3of3"} for r in manifest]
+    return write_world(p, cents, vecs, manifest, truth=truth)
+
+
+def test_summary_json_is_strict_json_when_a_block_has_no_trials(tmp_path, monkeypatch):
+    """S4: a trials-less block has point NaN in memory; on disk it must be null, never NaN."""
+    monkeypatch.setattr(core, "git_dirty", lambda *a, **k: {"dirty": False, "porcelain_lines": 0, "reason": "clean"})
+    monkeypatch.setattr(stats, "coverage_sim", fake_sim(0.95))
+    p = single_label_world(tmp_path)
+    s, _ = full(p, {"--min-trials": 10, "--target-trials": 100, "--one-label-pass": True}, {"--sim-reps": 7})
+    assert s["T28b-nd"]["n"] == 0 and s["T28b-nd"]["point"] != s["T28b-nd"]["point"]  # NaN in memory
+    data = json.loads((p / "out" / "summary.json").read_text(), parse_constant=_reject_constant)
+    assert data["T28b-nd"]["point"] is None
+
+
+def test_summary_json_is_strict_json_for_zero_event_clusters(tmp_path, monkeypatch):
+    """S4: a powered zero-event cluster has rho_hat NaN in memory; on disk it must be null."""
+    monkeypatch.setattr(core, "git_dirty", lambda *a, **k: {"dirty": False, "porcelain_lines": 0, "reason": "clean"})
+    monkeypatch.setattr(stats, "coverage_sim", fake_sim(0.95))
+    p = powered_world(tmp_path)
+    s, _ = full(p, {"--min-trials": 100, "--target-trials": 3000}, {"--sim-reps": 7})
+    assert s["T28b"]["k"] == 0
+    data = json.loads((p / "out" / "summary.json").read_text(), parse_constant=_reject_constant)
+    for name in ("T28b", "T28b-LOO", "T28b-nd"):
+        for cl in data[name]["clusterings"].values():
+            if cl["method"] == stats.METHOD:
+                assert cl["rho_hat"] is None

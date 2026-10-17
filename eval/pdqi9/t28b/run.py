@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter
@@ -19,6 +20,19 @@ INPUT_FLAGS = ("manifest", "centroids", "truth", "exclude")
 
 def _pct(x: float) -> str:
     return f"{100 * x:.3f}%"
+
+
+def _strict_json(x) -> str:
+    """Strict-JSON serialisation: non-finite floats become null, so allow_nan=False must succeed."""
+    def clean(v):
+        if isinstance(v, dict):
+            return {k: clean(q) for k, q in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [clean(q) for q in v]
+        if isinstance(v, float) and not math.isfinite(v):
+            return None
+        return v
+    return json.dumps(clean(x), indent=2, sort_keys=True, allow_nan=False)
 
 
 def _config(args) -> dict:
@@ -299,8 +313,7 @@ def score(args, out=sys.stdout) -> dict:
         print(f"  coverage rho {r['rho']}: {r['coverage']:.3f} ({r['sims']} sims)", file=out)
     for line in readout(summary, args.armc_fire_rate, args.consults_per_month, meta['tree']['dirty'], cov):
         print(line, file=out)
-    core.write_private(os.path.join(args.out_dir, "summary.json"),
-                       json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    core.write_private(os.path.join(args.out_dir, "summary.json"), _strict_json(summary) + "\n")
     return summary
 
 
