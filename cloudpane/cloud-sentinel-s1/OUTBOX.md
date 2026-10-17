@@ -4,3 +4,4 @@
 - 2026-10-17 gate: typecheck rc0; vitest 55 fail = baseline 55 (docker), +9 new green; build rc0; check:silent 9 accepted; swift UNPROVEN (no toolchain)
 - 2026-10-17 mutant deviceClass=webcam: 5 red incl TONOR silent/unplugged; restored 8/8 green
 - 2026-10-17 report cloudpane-reports/SENTINEL-S1-BUILD.md
+- 2026-10-17 scrub origin/main..HEAD rc0; pushed
