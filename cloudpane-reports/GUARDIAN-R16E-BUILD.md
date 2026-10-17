@@ -38,3 +38,20 @@
 - If tape lag pushes play 1's tone tail past the play-1 sample point (lag over SAMPLE_S-2.5 s = 4.5 s), the gap scan reads it as speech and aborts play 2 (fail closed: aborted, never pass).
 ## Scrub
 - `bash scripts/steward/scrub.sh origin/guardian/fr1-c1-r16..HEAD` rc 0 (gitleaks 8.21.2 in scratch; 8.18.4 lacked the git subcommand, rc 2), run on the code commit and again on HEAD.
+## FIX (fable ruling on refute GUARDIAN-R16E-VERDICT, PASS-WITH-FIXES). Test-only; no lib change
+- A1: KEEP would_do for kill/mode between plays. Unchanged.
+- A2: tests/t_r16e.sh test_r16e_play1_position_reset_per_slot. Two consecutive slots in ONE process: pm plays twice, then the next am slot's tape has 3 s of speech-level sound just past the stale CANARY_P1_SIZE, followed by 6 s of quiet. With the reset (canary.sh:330), the am slot plays twice and passes.
+- A3: test_r16e_gap_loud_half_second_burst_aborts (RMS 2000 burst, 0.5 s, 7.75-8.25 s of the gap) and test_r16e_gap_half_second_burst_pins_hop (RMS 240 on a bed of RMS 30). With the burst inside one 2 s window that window reads -48.5 dBFS; split across two windows each reads -51.3 dBFS; the gate is -50. Both pass at the existing hop of 0.25 s (4000 samples), so the hop was not shrunk. A speech-loud burst alone cannot pin the hop, because any 2 s window holding even part of it clears the gate.
+- A4: r16e_abort now also asserts, after re-arming the clock, status, tape and control and running 2 more ticks: still 1 afplay call, no second event, and the slot file still holds the committed key (as r3_case).
+- Run (Linux, BSD date/stat shim; t_canary.sh is sourced as a dependency and its tests run too):
+  `TFILES="t_canary.sh t_r16d.sh t_r16d3.sh t_r16e.sh"`: `tests: 85 functions, 542 assertions passed, 3 failed (0 leaked sandbox dirs)`
+  The 3 failed assertions are the pre-existing root-only t_canary ones (test_night_state_fails_closed, test_unreadable_directory_and_garbage_actions_log_count_as_cap_reached), also red at base 41b88298. t_r16d.sh, t_r16d3.sh and t_r16e.sh: 0 failures. t_r16e: 14 functions ok.
+- Mutants EXECUTED (mutated kiosk/ copy in scratch, real t_r16e tests):
+  a4 `sed 's/CANARY_PLAYS=""; CANARY_P1_FILE=""; CANARY_P1_SIZE=""/CANARY_PLAYS=""/'` KILLED:
+  ` not ok test_r16e_play1_position_reset_per_slot`
+  `  FAIL: slot 2 (am): 2 plays (no stale gap scan before play 1): expected [2] got [0]`
+  `  FAIL: slot 2: never aborted:speech: [aborted:speech] unexpectedly present`  (`tests: 14 functions, 109 assertions passed, 3 failed`)
+  a6 `sed 's/W = 32000; H = 4000;/W = 32000; H = 32000;/'` (hop 2 s) KILLED:
+  ` not ok test_r16e_gap_half_second_burst_pins_hop`
+  `  FAIL: burst hop: exactly 1 afplay call: expected [1] got [2]`  (`tests: 14 functions, 107 assertions passed, 5 failed`)
+- shellcheck -x tests/t_r16e.sh rc 0. scrub rc: see OUTBOX (run on HEAD after this commit).

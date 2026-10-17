@@ -28,6 +28,12 @@ r16e_abort() {
   assert_has "$ev" "\"slot\":\"$slot\"" "$name: the committed slot name"
   assert_has "$ev" "\"night\":\"20261014\"" "$name: the committed IST date"
   assert_has "$(cat "$GUARDIAN_HOME/audit.log")" "canary aborted: $why play=2 slot=20261014-$slot" "$name: audit line"
+  # A4: the slot stays committed and is not retried (as r3_case): the clock back inside the window, eligible again, several ticks
+  GUARDIAN_FAKE_NOW="$(ist_epoch "$at")"; write_status; mk_pcm_tone 100 10; consult_clear; go_heal
+  cn_run; cn_run
+  assert_eq "$(cn_plays)" "1" "$name: not retried (still 1 afplay call)"
+  assert_eq "$(r3_events_n)" "1" "$name: no second event"
+  assert_eq "$(cat "$CANARY_SLOT_FILE")" "20261014-$slot" "$name: the slot stays committed"
 }
 
 # ---- SHOULD-1: a kill between the plays is the kill result (would_do, the existing kill word), never aborted:consult_not_clear ----
@@ -61,6 +67,38 @@ test_r16e_gap_silence_still_plays() {
   assert_eq "$(cn_plays)" "2" "silence across the gap: 2 plays"
   assert_has "$(cn_events)" '"result":"pass"' "silence across the gap: pass"
 }
+
+# ---- A2: the play-1 tape position is reset per slot (two consecutive slots in ONE process) ----
+# Slot 1 (pm) plays twice and leaves CANARY_P1_SIZE behind. Slot 2 (next am) gets a tape that is quiet except for 3 s of speech-level sound sitting just past that stale offset,
+# followed by 6 s of quiet (so the last-2 s arm and the pre range see quiet). With the reset, play 1 of slot 2 has no gap scan and the slot plays twice; without it, play 1 scans
+# from the stale offset and aborts.
+test_r16e_play1_position_reset_per_slot() {
+  local stale tape="$RR_ROOT/captures/c1/seg_001/tape.pcm"
+  r6_at 22:00; cn_run
+  assert_eq "$(cn_plays)" "2" "slot 1 (pm): 2 plays"
+  stale="$CANARY_P1_SIZE"
+  assert_eq "$([ -n "$stale" ] && [ "$stale" -gt 0 ] && echo set)" "set" "slot 1 left a play-1 position behind ($stale)"
+  r6_at 07:30 1
+  perl -e 'my($q)=@ARGV; my @s; my $i=0; push @s, int(100*1.41421356*sin(6.28318530718*1000*$i++/16000)+0.5) for 1..$q; push @s, int(2000*1.41421356*sin(6.28318530718*300*$i++/16000)+0.5) for 1..48000; push @s, int(100*1.41421356*sin(6.28318530718*1000*$i++/16000)+0.5) for 1..96000; print pack("s<*",@s)' "$((stale / 2))" >"$tape"
+  touch -t "$(date -j -f %s "$GUARDIAN_FAKE_NOW" +%Y%m%d%H%M.%S)" "$tape"
+  cn_run
+  assert_eq "$(cn_plays)" "2" "slot 2 (am): 2 plays (no stale gap scan before play 1)"
+  assert_not "$(cn_events)" 'aborted:speech' "slot 2: never aborted:speech"
+  assert_has "$(cn_events)" '"result":"pass"' "slot 2: pass"
+}
+
+# ---- A3: one 0.5 s burst in the middle of the gap aborts play 2 (pins the 0.25 s hop) ----
+# r16e_burst <rms> <bed rms>: a 15 s gap with a 0.5 s burst (300 Hz) at 7.75-8.25 s, straddling the 8 s boundary of a 2 s hop grid.
+r16e_burst() {
+  local tape="$RR_ROOT/captures/c1/seg_001/tape.pcm"
+  perl -e 'my($a,$b)=@ARGV; my @s; for my $i (0..(15*16000-1)) { my $t=$i/16000; push @s, ($t>=7.75 && $t<8.25) ? int($a*1.41421356*sin(6.28318530718*300*$i/16000)+0.5) : int($b*1.41421356*sin(6.28318530718*1000*$i/16000)+0.5) } print pack("s<*",@s)' "$1" "$2" >>"$tape"
+  touch -t "$(date -j -f %s "$GUARDIAN_FAKE_NOW" +%Y%m%d%H%M.%S)" "$tape"
+}
+# speech-loud burst (RMS 2000): caught whatever the hop
+test_r16e_gap_loud_half_second_burst_aborts() { r16e_abort "burst loud" 22:00 'r16e_burst 2000 100' aborted:speech speech; }
+# a burst just over the gate once diluted into ONE 2 s window (0.5/2 of the window: RMS 240 on a bed of RMS 30, -48.5 dBFS) but under it when split across two
+# windows (0.25/2 each, -51.3 dBFS; the gate is -50): only a window that holds the whole burst catches it, which a 0.25 s hop finds and a 2 s hop does not
+test_r16e_gap_half_second_burst_pins_hop() { r16e_abort "burst hop" 22:00 'r16e_burst 240 30' aborted:speech speech; }
 
 # ---- EXECUTED mutants (inside the suite; the same mutants run against the whole file are quoted in the build report) ----
 # M1: the kill-first ordering removed (both the kill and the mode lines). In the am slot a kill between the plays then reads as consult_not_clear.
