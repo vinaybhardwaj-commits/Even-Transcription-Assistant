@@ -1,3 +1,7 @@
 - start: target 7ad33769 checked out on cloudpane/cloud-scribe-oauth-r2-refute/verdict
 - probes: tests/unit/mcp-oauth-r2-refute-probes.test.ts 55/55 (x3); R2-P1 real Chromium 141 sends Origin null on consent POST
 - probes: +R2-P7 flag-off POST 404 and one grant row; 57/57 x3
+- gate: tsc 0, typecheck:tests 0, build 0, check:silent 9 (baseline), vitest 455 files/9549 tests passed, 6 skipped, 0 failed rc 0 (docker up), o2-pg 10, o3-pg 14, 0171-pg 9 on PG16.15, scrub rc 0
+- mutants: 15 run, 15 killed (M7 only by o2-pg; M10/M13 only by refuter probes)
+- C4 B1: e4c1406f o3-pg with 0171 = 12/13 (audit_append_only); R2 o3-pg 14/14
+- verdict: PASS-WITH-FIXES; F1 MUST consent Origin null (Referrer-Policy no-referrer), F2 LOW consent replay, F3 LOW test gaps; cloudpane-reports/SCRIBE-OAUTH-R2-VERDICT.md
