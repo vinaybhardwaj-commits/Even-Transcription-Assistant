@@ -43,7 +43,7 @@ export function RoomTile({ row, nowMs, eng, calm, level, durMs, canClaim, onClai
   const st = esc ? cardStyle(level!, row.state) : null;
   const fg = st ? st.fg : "#22262B";
   const since = esc && durMs !== undefined && durMs >= 0 ? forMinutes(new Date(nowMs - durMs).toISOString(), nowMs) : forMinutes(row.state_since, nowMs);
-  const first = stepsFor(row.state)[0];
+  const first = stepsFor(row.state, row.device.kind)[0];
   const cardStyleObj: CSSProperties = st
     ? { ...box, background: st.bg, color: fg, border: `${st.borderWidth}px solid ${st.border}` }
     : { ...box, color: fg };

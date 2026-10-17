@@ -12,11 +12,11 @@ describe("copy, exactly", () => {
   it("FIX-1 F3: Mic silent (the webcams have no mute button)", () => {
     expect(WORD.muted).toBe("Mic silent");
     expect(headline({ state: "muted", detail_code: null })).toBe("The mic is sending only silence");
-    expect(stepsFor("muted")).toEqual(["Check the webcam's USB cable is pushed firmly into the back of the room computer. If it does not clear in 5 minutes, tell IT."]);
+    expect(stepsFor("muted", "webcam")).toEqual(["Check the webcam's USB cable is pushed firmly into the back of the room computer. If it does not clear in 5 minutes, tell IT."]);
   });
   it("Mic unplugged note, then the escalation line; not recording and computer off end with the escalation line, never a phone number", () => {
     expect(STILL_NOT_WORKING).toBe("Still not working? This card turns darker red the longer it stays, so everyone can see it.");
-    expect(stepsFor("unplugged")).toEqual([
+    expect(stepsFor("unplugged", "webcam")).toEqual([
       "The computer cannot find the webcam mic. Push the webcam's USB cable firmly into the back of the room computer.",
       "Wait 30 seconds. The card clears by itself.",
       STILL_NOT_WORKING,
@@ -28,12 +28,15 @@ describe("copy, exactly", () => {
     expect(WORD.unknown).toBe("Can't tell");
     expect(stepsFor("unknown")).toEqual(["No live sound reading from this room. Check the room computer is on."]);
   });
-  it("no 'mute button' / 'on mute' wording anywhere a member of staff can read it (copy, tiles, detail, legend, login)", async () => {
+  it("no 'mute button' / 'on mute' wording anywhere a member of staff can read it (copy, tiles, detail, legend, login), except the TONOR line (Sentinel S1: the TONOR TM20 has one)", async () => {
     const { readFileSync, readdirSync } = await import("node:fs");
     const { join } = await import("node:path");
+    const { MUTED_STEP } = await import("@/lib/rooms-live/present");
     for (const f of ["lib/rooms-live/present.ts", ...readdirSync(join(process.cwd(), "components/rooms-live")).map((x) => `components/rooms-live/${x}`)]) {
-      expect(/mute button|on mute|press the mute|unmute/i.test(readFileSync(join(process.cwd(), f), "utf8")), f).toBe(false);
+      const src = readFileSync(join(process.cwd(), f), "utf8").split(MUTED_STEP.tonor).join("");
+      expect(/mute button|on mute|press the mute|unmute/i.test(src), f).toBe(false);
     }
+    expect(/mute button/i.test(MUTED_STEP.webcam + MUTED_STEP.unknown)).toBe(false);
   });
   it("FIX-1 F5: staff-facing words — the degraded banner, the day-strip legend and its plain segment words; no snake_case reaches a tooltip", () => {
     expect(DEGRADED_NOTE).toBe("Some live readings are delayed. This screen may be a few minutes behind.");
@@ -111,7 +114,7 @@ describe("FIX-2", () => {
   it("N2: no note says 'stays red'; Mic silent says 'does not clear in 5 minutes'", () => {
     const all = (["muted", "unplugged", "notrec", "off", "unknown"] as const).flatMap((s) => stepsFor(s)).join("\n");
     expect(/stays red/i.test(all)).toBe(false);
-    expect(stepsFor("muted")[0]).toContain("If it does not clear in 5 minutes, tell IT.");
+    expect(stepsFor("muted", "webcam")[0]).toContain("If it does not clear in 5 minutes, tell IT.");
   });
   it("N4: every known segment code maps to a legend word; an unknown code is 'Unknown'", () => {
     const words = DAY_LEGEND.map((l) => l.word);

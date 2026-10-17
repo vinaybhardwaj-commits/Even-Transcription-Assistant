@@ -23,7 +23,7 @@ export function RoomDetail({ row, nowMs, onClose }: { row: RoomRow; nowMs: numbe
     };
   }, [row.room_id]);
   const c = COLORS[row.state];
-  const steps = stepsFor(row.state);
+  const steps = stepsFor(row.state, row.device.kind);
   const start = dayStartMs(nowMs);
   return (
     <div role="dialog" aria-modal="true" aria-label={`${row.label} details`} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.4)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50 }} onClick={onClose}>

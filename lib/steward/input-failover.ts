@@ -35,8 +35,8 @@ export const ENUM_RULE = "input_failover_enum";
 /** clinic kiosk rooms the rule applies to (V: OPD 1,3,4,5,6,7, Cardiology, Dietary) */
 export const FAILOVER_ROOM_RE = /^\s*(opd\s*(1|3|4|5|6|7)|cardiology|dietary)\b/i;
 export const NEVER_FAILOVER_RE = /orb\s*2|orb\s*3|home\s*office|audiometry/i;
-export const WEBCAM_RE = /c270|webcam/i;
-export const TONOR_RE = /tonor/i;
+import { WEBCAM_RE, TONOR_RE } from "./device-class";
+export { WEBCAM_RE, TONOR_RE };
 
 export const ZERO_RATIO = 0.98;
 export const ZERO_SECONDS = 90;
