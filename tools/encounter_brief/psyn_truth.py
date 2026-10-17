@@ -49,11 +49,14 @@ def speaker_roles(script):
 
 
 def est_timeline(script):
-    """{turn_id: (t0_ms, t1_ms)}: back to back by est_seconds; an overlapping turn starts with the turn it overlaps."""
+    """{turn_id: (t0_ms, t1_ms)}: back to back by est_seconds; an overlapping turn starts with the turn it overlaps.
+    A forward or unknown overlap_with is refused (S2) rather than silently treated as back to back."""
     pos, out = 0.0, {}
     for t in script["turns"]:
         ov = t.get("overlap_with")
-        start = out[ov][0] / 1000.0 if ov in out else pos
+        if ov is not None and ov not in out:
+            raise ValueError("overlap_with names a later or unknown turn")
+        start = out[ov][0] / 1000.0 if ov is not None else pos
         end = start + float(t["est_seconds"])
         out[t["turn_id"]] = (int(round(start * 1000)), int(round(end * 1000)))
         pos = max(pos, end)
@@ -115,6 +118,10 @@ def run(scripts_dir, nem_path, turn_times_path, use_est):
         times = est_timeline(scripts[cid]) if use_est else tt.get(cid)
         if not times:
             raise ValueError("a consult has Nemotron segments but no turn times")
+        if not use_est:  # S1: a dropped turn can flip a majority, so refuse instead of projecting short
+            missing = sum(1 for t in scripts[cid]["turns"] if t["turn_id"] not in times)
+            if missing:
+                raise ValueError(f"{missing} script turns missing from the turn times")
         roles, none = project(scripts[cid], times, segs[cid])
         counts["consults"] += 1
         counts["no_overlap_labels"] += none

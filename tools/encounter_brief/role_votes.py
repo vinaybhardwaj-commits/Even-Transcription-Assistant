@@ -122,11 +122,10 @@ def load_inputs(vecs_path, doctor_uids_path, clef_votes_path, jev_votes_path, cl
     for r in jev_rows:
         get(r["consult_id"]).jev_rows += 1
     for rows, attr in ((clef_rows, "clef_nd"), (jev_rows, "jev_nd")):
-        for r in rows:
-            if r.get("p_doctor") is not None:
-                nd = max(0.0 if r.get(x) is None else float(r[x]) for x in KEYS[1:])
-                d = getattr(get(r["consult_id"]), attr)
-                d[r["slot"]] = max(d.get(r["slot"], 0.0), nd)
+        for r in rows:  # D2: every row counts, even one with p_doctor null; null keys are 0.0
+            nd = max(0.0 if r.get(x) is None else float(r[x]) for x in KEYS[1:])
+            d = getattr(get(r["consult_id"]), attr)
+            d[r["slot"]] = max(d.get(r["slot"], 0.0), nd)
     for (cid, lab), p in per_label_p(clef_rows).items():
         get(cid).clef_p[lab] = p
     for (cid, lab), p in per_label_p(jev_rows).items():
@@ -223,7 +222,8 @@ def vp_match(cos, mnl, mrc):
 def resolve_order(three, armc, v, vp_state, cands=()):
     """Ruling 6 with the F2 rule. three: labels where all three voters say doctor. armc: armc_new label or None.
     v: voiceprint_match_label or None. cands: labels whose cos and runner-up-centroid margin pass with no next-label
-    margin (H1); any candidate other than the 3/3 label blocks the consult. vp_state: "ok" (check ran), "unavailable" (no uid, no enrolment or an empty
+    margin (H1); any candidate other than the 3/3 label blocks the consult, and with no 3/3 label arm (c) needs
+    cands == {armc} and (v is None or v == armc), else case 2. vp_state: "ok" (check ran), "unavailable" (no uid, no enrolment or an empty
     vector set: case 7 applies), "missing" (consult absent from the uid or vector file: nothing orders).
     Returns (order_capable list, case 1..7 or None, extra flags)."""
     three = sorted(three)
@@ -236,6 +236,10 @@ def resolve_order(three, armc, v, vp_state, cands=()):
         return [], (None if len(three) > 1 else 1), (["multiple_3of3"] if len(three) > 1 else [])
     if len(three) == 0:
         if armc:
+            # N1: with no 3/3 label, arm (c) may fire only when no other voiceprint candidate exists
+            # and the voiceprint match (if any) is on the same label.
+            if (cands - {armc}) or (v is not None and v != armc):
+                return [], 2, []
             return [armc], 3, []
         return [], (2 if (v or cands) else 1), []
     if len(three) == 1:

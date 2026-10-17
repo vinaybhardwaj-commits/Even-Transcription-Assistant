@@ -1005,3 +1005,119 @@ def test_h2_end_to_end_with_fa_check(tmp_path, capsys):
     assert rv.main(["fa-check"] + flags + ["--truth", str(truth)]) == 0
     t = json.loads(capsys.readouterr().out)
     assert t["order_capable_yield_on_true_doctor"] == 1 and t["order_capable_not_doctor"]["total"] == 0
+
+
+# ================================================================ fix round 4
+
+# ---- M1: arm (c) with zero 3/3 labels still obeys the N1 candidate rule
+def test_m1_arm_c_with_zero_3of3_needs_exclusive_candidate_and_voiceprint():
+    assert rv.resolve_order([], "speaker_0", "speaker_0", "ok", cands=["speaker_0"]) == (["speaker_0"], 3, [])
+    assert rv.resolve_order([], "speaker_0", "speaker_0", "ok", cands=["speaker_0", "speaker_1"]) == ([], 2, [])
+    assert rv.resolve_order([], "speaker_0", "speaker_1", "ok", cands=["speaker_0"]) == ([], 2, [])
+    assert rv.resolve_order([], "speaker_0", None, "ok", cands=["speaker_0"]) == (["speaker_0"], 3, [])
+
+
+def test_m1_second_candidate_blocks_arm_c_end_to_end():
+    # speaker_0 matches (cos 0.9, next-label margin 0.2); speaker_1 is still an N1 candidate at cos 0.70
+    vecs = far_vecs(speaker_0=vec(0.9), speaker_1=vec(0.70))
+    d = run(cin(vecs, roles=ALL_DOCTOR_ROLES, jev={k: p4(att=0.3, doc=0.4) for k in LABS}, slot=None))
+    assert d["three_of_three"] == [] and d["armc_new_label"] == "speaker_0"
+    assert sorted(d["n1_candidates"]) == ["speaker_0", "speaker_1"]
+    assert d["order_capable"] == [] and d["case"] == 2 and "voiceprint_unconfirmed" in d["case_flags"]
+
+
+def test_m1_single_candidate_arm_c_still_orders_case3():
+    vecs = far_vecs(speaker_0=vec(0.9), speaker_1=vec(0.64))  # speaker_1 below cos_min: not a candidate
+    d = run(cin(vecs, roles=ALL_DOCTOR_ROLES, jev={k: p4(att=0.3, doc=0.4) for k in LABS}, slot=None))
+    assert d["n1_candidates"] == ["speaker_0"] and d["order_capable"] == ["speaker_0"] and d["case"] == 3
+
+
+# ---- M2: the loader counts every row, even one with p_doctor null
+def test_m2_loader_counts_rows_with_null_p_doctor(tmp_path, capsys):
+    c = cin(far_vecs(speaker_0=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_1")
+    flags = write_inputs(tmp_path, {"c": c})
+    row = {"consult_id": "c", "t0_ms": 0, "t1_ms": 500, "slot": "speaker_0", "voter": "jev_cue",
+           "p_doctor": None, "p_patient": 0.9, "p_attender": 0.05, "p_staff": 0.05}
+    with open(tmp_path / "jev.jsonl", "a") as f:
+        f.write(json.dumps(row) + "\n")
+    ins = rv.load_inputs(str(tmp_path / "vecs.json"), str(tmp_path / "uids.json"), str(tmp_path / "clef.jsonl"),
+                         str(tmp_path / "jev.jsonl"), str(tmp_path / "slots.json"), str(tmp_path / "roles.jsonl"))
+    assert ins["c"].jev_nd["speaker_0"] == 0.9
+    assert rv.main(["build"] + flags + ["--out-dir", str(tmp_path / "o")]) == 0
+    d = json.loads((tmp_path / "o" / "c" / "role_votes.v1.json").read_text())
+    l0 = next(l for l in d["labels"] if l["label"] == "speaker_0")
+    assert l0["armc_contradiction"] == ["jev"] and l0["armc_new"] is False and d["order_capable"] == []
+
+
+def test_m2_loader_null_p_doctor_row_on_clef_blocks_too(tmp_path):
+    c = cin(far_vecs(speaker_0=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_1")
+    flags = write_inputs(tmp_path, {"c": c})
+    row = {"consult_id": "c", "t0_ms": 0, "t1_ms": 500, "slot": "speaker_0", "voter": "clef_omni",
+           "p_doctor": None, "p_patient": 0.05, "p_attender": 0.85, "p_staff": 0.05}
+    with open(tmp_path / "clef.jsonl", "a") as f:
+        f.write(json.dumps(row) + "\n")
+    ins = rv.load_inputs(str(tmp_path / "vecs.json"), str(tmp_path / "uids.json"), str(tmp_path / "clef.jsonl"),
+                         str(tmp_path / "jev.jsonl"), str(tmp_path / "slots.json"), str(tmp_path / "roles.jsonl"))
+    assert ins["c"].clef_nd["speaker_0"] == 0.85
+    assert rv.main(["build"] + flags + ["--out-dir", str(tmp_path / "o2")]) == 0
+    d = json.loads((tmp_path / "o2" / "c" / "role_votes.v1.json").read_text())
+    l0 = next(l for l in d["labels"] if l["label"] == "speaker_0")
+    assert l0["armc_contradiction"] == ["clef"] and d["order_capable"] == []
+
+
+def test_m2_all_null_p_row_is_zero_and_does_not_block():
+    c = cin(far_vecs(speaker_0=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_1")
+    c.jev_nd = {"speaker_0": 0.0}
+    assert lab(run(c), "speaker_0")["armc_contradiction"] == []
+
+
+# ---- S1: script turns missing from --turn-times refuse the run
+def test_s1_missing_turn_times_rows_exit2_naming_the_count(tmp_path, capsys):
+    d = fx("PSYN-SV-002")
+    rows = seg_rows("PSYN-SV-002")
+    times = sorted(load_psyn().est_timeline(d).items())
+    write_rows(tmp_path / "tt.jsonl", [{"consult_id": d["script_id"], "turn_id": k, "t0_ms": v[0], "t1_ms": v[1]}
+                                       for k, v in times[:-1]])  # drop exactly one turn
+    rc, out = run_psyn(tmp_path, rows, "--turn-times", str(tmp_path / "tt.jsonl"))
+    assert rc == 2 and not out.exists()
+    err = capsys.readouterr().err
+    assert "1 script turns missing" in err
+    assert times[-1][0] not in err and "Traceback" not in err and len(err.strip().splitlines()) == 1
+
+
+def test_s1_complete_turn_times_still_project(tmp_path):
+    d = fx("PSYN-SV-002")
+    rows = seg_rows("PSYN-SV-002")
+    times = load_psyn().est_timeline(d)
+    write_rows(tmp_path / "tt.jsonl", [{"consult_id": d["script_id"], "turn_id": k, "t0_ms": v[0], "t1_ms": v[1]}
+                                       for k, v in times.items()])
+    rc, out = run_psyn(tmp_path, rows, "--turn-times", str(tmp_path / "tt.jsonl"))
+    assert rc == 0 and len(out.read_text().splitlines()) == 3
+
+
+# ---- S2: a forward or unknown overlap_with is refused instead of falling back
+def test_s2_forward_and_unknown_overlap_with_raise():
+    pt = load_psyn()
+    d = fx("PSYN-SV-002")
+    d["turns"][5]["overlap_with"] = d["turns"][6]["turn_id"]  # names a later turn
+    with pytest.raises(ValueError):
+        pt.est_timeline(d)
+    d = fx("PSYN-SV-002")
+    d["turns"][5]["overlap_with"] = "T999"  # names no turn at all
+    with pytest.raises(ValueError):
+        pt.est_timeline(d)
+    d = fx("PSYN-SV-002")
+    d["turns"][5]["overlap_with"] = d["turns"][3]["turn_id"]  # a genuine earlier turn is fine
+    assert pt.est_timeline(d)
+
+
+def test_s2_forward_overlap_with_exits_2_from_the_cli(tmp_path, capsys):
+    bad = tmp_path / "bad" / "PSYN-SV-002"
+    bad.mkdir(parents=True)
+    d = fx("PSYN-SV-002")
+    d["turns"][5]["overlap_with"] = d["turns"][6]["turn_id"]
+    (bad / "script.json").write_text(json.dumps(d))
+    rc, out = run_psyn(tmp_path, seg_rows("PSYN-SV-002"), "--est-timeline", scripts=tmp_path / "bad")
+    assert rc == 2 and not out.exists()
+    err = capsys.readouterr().err
+    assert "overlap_with" in err and "Traceback" not in err and len(err.strip().splitlines()) == 1
