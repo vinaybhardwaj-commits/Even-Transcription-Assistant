@@ -1,0 +1,3 @@
+- 2026-10-17T00:17:17Z code commit ea2818ee on cloudpane/cloud-frx-r1b-build/r1b (from R1 1e4d660b); 6 files; rulings B1 B2 B3 B4 F2 applied
+- 2026-10-17T00:17:17Z full suite 3954 passed, 2 skipped, 0 failed; mutants 8/8 killed; OFF oracle 200/200 identical incl. write decision, flips 0; ON label_kept 107; gitleaks 0
+- 2026-10-17T00:17:17Z report cloudpane-reports/FRX-R1B-BUILD-REPORT.md; flag: R1-5 G1 pointer clash rejects 39/200 ON (pre-existing in R1, for R1c)
