@@ -30,12 +30,24 @@ CONTROL_RE='^\{"kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|he
 # The consult hold (CTRL_HOLD) is "clear" ONLY on a fresh, new-form payload whose consult_open is well formed (<= 64 rooms, strictly ascending keys, true|false values) and holds this
 # room's key exactly once with false. Everything else is "set": the old form, a missing, true, duplicate, malformed or oversize consult_open, a stale or killed control, an invalid room name.
 # A malformed consult_open never changes kill or modes.
+# S3 (G1 form 3): the payload may ALSO begin with consult_live (json.dumps sort_keys puts it before consult_open):
+#   {"consult_live": {"<room>": true|false, ...}, "consult_open": {...}, "kill": true|false, "modes": {...}, "ts": <epoch>}
+# (a form-3 line may omit consult_open; the remainder is then exactly the old form). The consult_live value is parsed like consult_open (CONTROL_CONSULT_RE, same key rule and 64-room cap),
+# into CTRL_LIVE (live|not_live|unknown): live only when this room's key appears exactly once with true, not_live once with false. A malformed consult_live changes NOTHING else: the split
+# off the kill/modes/ts member is found by the only occurrence of the kill member that is well formed to the end of the line, and the consult_open member is credited only when it is
+# well formed, so kill, modes, ts and the consult hold are parsed IDENTICALLY with or without the field. An invalid room name is never live.
+# consult_live_state reports the freshest parsed state; nothing consumes it yet (S4 will).
 CONTROL_TAIL_RE=', "kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$'
 CONTROL_CONSULT_RE='^\{("[a-z0-9_-]{1,64}": (true|false)(, "[a-z0-9_-]{1,64}": (true|false)){0,63})?\}$'
 CONTROL_NEW_PFX='{"consult_open": '
+CONTROL_LIVE_PFX='{"consult_live": '
+# the kill/modes/ts member region, anchored at the end of the line (form 1, or the tail of form 2/3)
+CONTROL_KILL_RE='"kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$'
+# the consult_open member at the end of the prefix before the kill member; the greedy prefix takes the rightmost occurrence that leaves a well-formed consult_open value
+CONTROL_OPEN_FAG_RE='^.*"consult_open": (\{("[a-z0-9_-]{1,64}": (true|false)(, "[a-z0-9_-]{1,64}": (true|false)){0,63})?\}), $'
 CONTROL_RECV_RE='^[1-9][0-9]{0,14}$'
 CONTROL_ROOM_RE='^[a-z0-9_-]{1,64}$'
-if [ "${G_RUNMODE:-}" = 1 ]; then readonly CONTROL_RE CONTROL_TAIL_RE CONTROL_CONSULT_RE CONTROL_NEW_PFX CONTROL_LAST; fi   # R13 S6 (library tests may re-point CONTROL_LAST)
+if [ "${G_RUNMODE:-}" = 1 ]; then readonly CONTROL_RE CONTROL_TAIL_RE CONTROL_CONSULT_RE CONTROL_NEW_PFX CONTROL_LIVE_PFX CONTROL_KILL_RE CONTROL_OPEN_FAG_RE CONTROL_LAST; fi   # R13 S6 (library tests may re-point CONTROL_LAST)
 
 # 0 when the keys of a validated modes body ('"a": "heal", "b": "shadow"', no braces) are strictly ascending bytewise, so none repeats.
 # One split on "," and two expansions per room (R11: the old pattern walk was quadratic). Keys and values hold no comma and no glob character (the regex proved it).
@@ -51,8 +63,8 @@ modes_keys_ascending() {
 
 control_parse() {
   local LC_ALL=C
-  local recv payload now latch size bad nl ts modes_part pat rest cnt body ctail frag=""
-  CTRL_FLEET=unreachable; CTRL_MODE=shadow; CTRL_WHY=missing; CTRL_AGE=""; CTRL_HOLD="set"
+  local recv payload now latch size bad nl ts modes_part pat rest cnt body ctail frag="" frag_live="" kreg cpre c live_suf
+  CTRL_FLEET=unreachable; CTRL_MODE=shadow; CTRL_WHY=missing; CTRL_AGE=""; CTRL_HOLD="set"; CTRL_LIVE="unknown"
   # R12: a bad guardian.conf or a safety constant that could not be pinned = killed, whatever control.last says
   if [ "${G_CONF_BAD:-}" = 1 ]; then CTRL_WHY=conf; return 1; fi
   if [ -n "${G_BAD_CONST:-}" ]; then CTRL_WHY=constants; return 1; fi
@@ -82,6 +94,27 @@ control_parse() {
     "$G_MKDIR" -p "$STATE_DIR" 2>/dev/null; printf '%s\n' "$recv" >"$STATE_DIR/control_latch"
     CTRL_WHY=stale; return 1
   fi
+  # 3a0. (S3) form 3: peel off the consult_live map. The kill member region is searched anchored at the end of the line (only the real one can
+  # be well formed to the end), and the consult_open member is credited only when it is well formed, so a malformed consult_live changes
+  # nothing but CTRL_LIVE: kill, modes, ts and the consult hold are parsed identically with or without the field.
+  case "$payload" in
+    "$CONTROL_LIVE_PFX"*)
+      body="${payload#"$CONTROL_LIVE_PFX"}"
+      if [[ $body =~ $CONTROL_KILL_RE ]]; then
+        kreg="${BASH_REMATCH[0]}"
+        cpre="${body%"$kreg"}"
+        if [[ $cpre =~ $CONTROL_OPEN_FAG_RE ]]; then
+          c="${BASH_REMATCH[1]}"
+          live_suf='"consult_open": '"$c"', '
+          frag_live="${cpre%"$live_suf"}"
+          payload='{"consult_open": '"$c"', '"$kreg"
+        else
+          case "$cpre" in *", ") frag_live="${cpre%, }" ;; *) frag_live="$cpre" ;; esac
+          payload="{${kreg}"
+        fi
+        case "$frag_live" in *", ") frag_live="${frag_live%, }" ;; esac
+      fi ;;
+  esac
   # 3a. (2.4 d') the new form: split off the consult_open value; the remainder is the old form and takes every check below unchanged.
   case "$payload" in
     "$CONTROL_NEW_PFX"*)
@@ -123,6 +156,19 @@ control_parse() {
         if [ "$cnt" -eq 1 ]; then case "$frag" in *"\"$GUARDIAN_ROOM\": false"*) CTRL_HOLD=clear ;; esac; fi
       fi
     fi
+    # the consult live (S3): live only on the exact form 3, this room's key once, with true; the same well-formedness bar as the hold.
+    # An absent, false, duplicate, malformed or oversize consult_live, the old forms, kill, stale, an invalid room name = unknown.
+    if [ -n "$frag_live" ] && [[ $frag_live =~ $CONTROL_CONSULT_RE ]]; then
+      rest="${frag_live#\{}"; rest="${rest%\}}"
+      if modes_keys_ascending "$rest"; then
+        rest="${frag_live//"$pat"/}"
+        cnt=$(( (${#frag_live} - ${#rest}) / ${#pat} ))
+        if [ "$cnt" -eq 1 ]; then
+          case "$frag_live" in *"\"$GUARDIAN_ROOM\": true"*) CTRL_LIVE=live ;; esac
+          case "$frag_live" in *"\"$GUARDIAN_ROOM\": false"*) CTRL_LIVE=not_live ;; esac
+        fi
+      fi
+    fi
   fi
   return 0
 }
@@ -132,6 +178,16 @@ consult_hold_clear() {
   [ -n "$GUARDIAN_CONTROL_SUB_CMD" ] || return 1
   control_parse || return 1
   [ "$CTRL_HOLD" = clear ]
+}
+
+# S3 (G1 form 3): this kiosk's consult_live from the freshest parsed control. live = a fresh form-3 payload whose consult_live is well
+# formed and holds this room exactly once with true; not_live = the same with false; unknown = everything else (no control command, the
+# old forms, an absent room, a malformed or oversize map, kill, stale, an invalid room name). Nothing consumes it yet (S4 will).
+# It reports the wire's state; it never changes kill or modes.
+consult_live_state() {
+  [ -n "$GUARDIAN_CONTROL_SUB_CMD" ] || { echo unknown; return; }
+  control_parse || { echo unknown; return; }
+  echo "$CTRL_LIVE"
 }
 
 # One audit line per state change (on <-> killed, or a new reason for being killed).
