@@ -8,3 +8,4 @@
 - blocked: none. Pending, not run here: macOS suite, swift build/test
 - scrub origin/guardian/fr1-c1-r16..HEAD rc 0 (gitleaks 8.21.2); code commit 2282ad3b
 - pushed cloudpane/cloud-guardian-r16e/r16e; DONE
+- FIX A2-A4 (test-only) commit a59825b4: t_r16e 14 fns ok; t_canary+t_r16d+t_r16d3+t_r16e 85 fns 542 pass 3 fail (pre-existing root-only t_canary); mutants a4 and a6 KILLED; hop stays 0.25 s; scrub rc 0; pushed

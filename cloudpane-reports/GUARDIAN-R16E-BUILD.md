@@ -54,4 +54,4 @@
   a6 `sed 's/W = 32000; H = 4000;/W = 32000; H = 32000;/'` (hop 2 s) KILLED:
   ` not ok test_r16e_gap_half_second_burst_pins_hop`
   `  FAIL: burst hop: exactly 1 afplay call: expected [1] got [2]`  (`tests: 14 functions, 107 assertions passed, 5 failed`)
-- shellcheck -x tests/t_r16e.sh rc 0. scrub rc: see OUTBOX (run on HEAD after this commit).
+- shellcheck -x tests/t_r16e.sh rc 0. scrub.sh origin/guardian/fr1-c1-r16..HEAD rc 0 (gitleaks 8.21.2).
