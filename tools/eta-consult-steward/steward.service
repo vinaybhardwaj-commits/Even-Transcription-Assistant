@@ -1,0 +1,7 @@
+[Unit]
+Description=ENC steward advise run (no actions executed)
+
+[Service]
+Type=oneshot
+ExecStart=%h/oc/consult/steward/steward_run.sh
+TimeoutStartSec=15min
