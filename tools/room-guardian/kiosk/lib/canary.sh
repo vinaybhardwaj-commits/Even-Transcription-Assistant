@@ -231,6 +231,7 @@ canary_play_once() { # afplay_bin
   [ "$f1" = "$f0" ] || { CANARY_PLAY_RES="inconclusive:segment_rolled"; return 1; }
   s1="$(canary_size "$f1")"
   case "$s1" in ''|*[!0-9]*) CANARY_PLAY_RES="inconclusive:tape_unreadable"; return 1 ;; esac
+  P_END_FILE="$f1"; P_END_SIZE="$s1"   # R16e: where play 1 ended on the tape; the gate before play 2 scans everything written after it for speech
   blen=$((s1 - s0)); [ "$blen" -le 320000 ] || blen=320000   # everything written since the start (up to 10 s): the tone may sit anywhere in it
   [ "$blen" -ge 32000 ] || { CANARY_PLAY_RES="inconclusive:tape_stalled"; return 1; }
   pre_off=$((s0 - 160000)); [ "$pre_off" -ge 0 ] || pre_off=0   # the 5 s before the start
@@ -255,13 +256,50 @@ canary_play_json() {
     "$(jnum "$P_PRE")" "$(jnum "$P_BURST")" "$(jnum "$P_RISE")" "$(jnum "$P_PRB")" "$(jnum "$P_BB")" "$(jnum "$P_RB")" "$P_PBB"
 }
 
+# R16e (fable SHOULD-2): dBFS of the loudest 2 s window (the rms_dbfs_2s statistic, hop 0.25 s) inside a byte range of the tape; a range shorter than 2 s is measured whole.
+# Prints a number, or nothing for an empty range.
+canary_speech_peak() { # file offset_bytes length_bytes
+  local off=$(( $2 / 2 * 2 ))
+  [ "$3" -ge 2 ] || return 0
+  tail -c "+$((off + 1))" "$1" 2>/dev/null | head -c "$3" | od -An -v -t d2 | awk '
+    { for (i = 1; i <= NF; i++) { n++; c[n] = c[n - 1] + $i * $i } }
+    END {
+      W = 32000; H = 4000; best = -1
+      if (n == 0) exit
+      if (n < W) best = c[n] / n; else for (a = 0; a + W <= n; a += H) { m = (c[a + W] - c[a]) / W; if (m > best) best = m }
+      r = sqrt(best) / 32768
+      if (r <= 0) printf "-120.0\n"; else printf "%.1f\n", 20 * log(r) / log(10)
+    }'
+}
+
+# R16e (fable SHOULD-2): 0 when the tape holds speech anywhere in the whole gap since the previous play ended ($1 file, $2 its size then), not only in its last 2 s.
+# A rolled segment is scanned over its last CANARY_PLAY_GAP_S + 2 s. A speech hit is noted (speech_seen) as note_speech does for a tick.
+canary_gap_speech() { # p_end_file p_end_size
+  local f sz off len pk
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  f="$(canary_tape_file)"; sz="$(canary_size "$f")"
+  case "$sz" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$f" = "$1" ]; then off="$2"; else off=$(( sz - (CANARY_PLAY_GAP_S + 2) * 32000 )); fi
+  [ "$off" -ge 0 ] || off=0
+  len=$((sz - off))
+  pk="$(canary_speech_peak "$f" "$off" "$len")"
+  rms_is_speech "$pk" || return 1
+  S_rms="$pk" note_speech
+  return 0
+}
+
 # R16d-3 (fable G2): the gate set, re-checked on FRESHLY READ inputs directly before EACH play. canary_eligible runs once per tick on values collected at the start of the tick;
 # play 2 starts CANARY_PLAY_GAP_S later, so every input is read again here (status.json, the tape, HID, the control payload, the clock).
-# Same gates, same order and same CANARY_WHY as canary_eligible. NOT re-run: canary_state_ok and the heal rate (the slot is committed and its action spent). The kill switch
-# and the mode stay with act_step (would_do). $1 = the committed slot key. 0 = may play; 1 = abort, CANARY_WHY set.
+# Same gates, same order and same CANARY_WHY as canary_eligible. NOT re-run: canary_state_ok and the heal rate (the slot is committed and its action spent).
+# R16e (fable SHOULD-1): the kill switch and the mode come FIRST (CANARY_WHY kill | mode_not_heal), before the consult hold, which a kill payload also fails: a kill between
+# the plays is never reported as consult_not_clear. act_step still re-checks both directly before each tone.
+# R16e (fable SHOULD-2): before play 2 (CANARY_P1_FILE CANARY_P1_SIZE = where play 1 ended on the tape) the whole gap is scanned for speech (CANARY_WHY speech).
+# $1 = the committed slot key. 0 = may play; 1 = abort, CANARY_WHY set.
 canary_play_gate() {
   local key="$1" idle
   CANARY_WHY=""
+  if killswitch_engaged; then CANARY_WHY="kill"; return 1; fi
+  [ "$(current_mode)" = heal ] || { CANARY_WHY=mode_not_heal; return 1; }
   { [ -n "$key" ] && [ "$(canary_slot_key)" = "$key" ]; } || { CANARY_WHY=outside_window; return 1; }
   if ! in_night_window && ! consult_hold_clear; then CANARY_WHY=consult_not_clear; return 1; fi
   idle="$(hid_idle_s)"
@@ -274,7 +312,14 @@ canary_play_gate() {
   S_rms="$(rms_dbfs_2s)"
   [ -n "$S_rms" ] || { CANARY_WHY=tape_not_advancing; return 1; }
   if speech_recent; then CANARY_WHY=recorder_busy; return 1; fi
+  if [ -n "${CANARY_P1_FILE:-}" ] && canary_gap_speech "$CANARY_P1_FILE" "$CANARY_P1_SIZE"; then CANARY_WHY=speech; return 1; fi
   return 0
+}
+
+# A failed gate: one audit line and one event. R16e: the kill switch or the mode gives the existing kill result word, would_do (as act_step gives), never aborted:consult_not_clear.
+canary_play_aborted() { # n key pre burst rise
+  audit "canary aborted: $CANARY_WHY play=$1 slot=$2"
+  case "$CANARY_WHY" in kill|mode_not_heal) canary_event would_do "$3" "$4" "$5" ;; *) canary_event "aborted:$CANARY_WHY" "$3" "$4" "$5" ;; esac
 }
 
 # R16d item 8: exactly two plays per slot, the second starting CANARY_PLAY_GAP_S (15 s, R16d-3 G1) after the first started; tape lag can only cause a false FAIL and 15 s removes it.
@@ -282,7 +327,7 @@ canary_play_gate() {
 canary_play_and_confirm() {
   local ap="$G_AFPLAY" n wait_ms r1_pre r1_burst r1_rise ok=0 first_start ckey="${CANARY_COMMIT_KEY:-$(canary_slot_key)}"
   [ "${G_RUNMODE:-}" != 1 ] && [ "${GUARDIAN_TESTMODE:-}" = 1 ] && ap="${CANARY_AFPLAY:-/usr/bin/false}"   # test mode never reaches the real afplay
-  CANARY_PLAYS=""
+  CANARY_PLAYS=""; CANARY_P1_FILE=""; CANARY_P1_SIZE=""
   if ! canary_volume_ok; then audit "canary not played: CANARY_VOLUME is not in (0,0.5]"; canary_event "inconclusive:bad_volume"; return 0; fi
   canary_output_present || { canary_event "inconclusive:output_absent"; return 0; }
   canary_make_wav "$CANARY_WAV"
@@ -291,12 +336,12 @@ canary_play_and_confirm() {
       wait_ms=$(( first_start + CANARY_PLAY_GAP_S * 1000 - $(mono_ms) ))
       if [ "$wait_ms" -gt 0 ]; then gsleep "$(printf '%d.%03d' $((wait_ms / 1000)) $((wait_ms % 1000)))"; fi
     fi
-    canary_play_gate "$ckey" || { audit "canary aborted: $CANARY_WHY play=$n slot=$ckey"; canary_event "aborted:$CANARY_WHY" "${r1_pre:-}" "${r1_burst:-}" "${r1_rise:-}"; return 0; }
+    canary_play_gate "$ckey" || { canary_play_aborted "$n" "$ckey" "${r1_pre:-}" "${r1_burst:-}" "${r1_rise:-}"; return 0; }
     if ! canary_play_once "$ap"; then
       canary_event "$CANARY_PLAY_RES" "${r1_pre:-}" "${r1_burst:-}" "${r1_rise:-}"
       return 0
     fi
-    [ "$n" = 1 ] && { first_start="$P_START"; r1_pre="$P_PRE"; r1_burst="$P_BURST"; r1_rise="$P_RISE"; }
+    [ "$n" = 1 ] && { first_start="$P_START"; CANARY_P1_FILE="$P_END_FILE"; CANARY_P1_SIZE="$P_END_SIZE"; r1_pre="$P_PRE"; r1_burst="$P_BURST"; r1_rise="$P_RISE"; }
     CANARY_PLAYS="${CANARY_PLAYS:+$CANARY_PLAYS,}$(canary_play_json)"
     awk -v r="$P_RB" -v t="$CANARY_BAND_PASS_DB" 'BEGIN { exit !(r + 0 >= t + 0) }' && ok=$((ok + 1))
   done
