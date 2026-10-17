@@ -75,6 +75,12 @@ class Rec:
         os.replace(dst + ".sha256.tmp", dst + ".sha256")  # sidecar last: its presence marks the piece closed
         log(self.a.events, "piece", file=dst, epoch_ns=ep, frames=frames, sha256=h.hexdigest())
         self.epoch = ep + (frames * 10**9 + RATE // 2) // RATE
+    def rm_work_dir(self, wd):
+        """Remove a finished work dir, only if empty (os.rmdir never deletes a file); a dir still holding anything is kept."""
+        try: os.rmdir(wd)
+        except OSError: return False
+        log(self.a.events, "work_dir_removed", dir=wd)
+        return True
     def recover(self):
         """Finalize pieces a crashed follower left in .work; the dir name is the first piece's epoch_ns."""
         if not os.path.isdir(self.work): return
@@ -83,6 +89,7 @@ class Rec:
             if n.isdigit() and os.path.isdir(wd) and wd != self.wd:
                 self.wd, self.epoch, self.done = wd, int(n), set()
                 self.pump(final=True)
+                self.rm_work_dir(wd)
         self.wd = None
     def stop(self, why):
         if self.p:
@@ -92,6 +99,7 @@ class Rec:
                 except Exception: self.p.kill(); self.p.wait()
             self.pump(final=True)
             log(self.a.events, "stop", dir=self.wd, reason=why)
+            if self.wd: self.rm_work_dir(self.wd)
         self.p = None
     def check(self):
         """Finalize closed pieces; handle arecord exit. Returns True if arecord is running."""
@@ -99,6 +107,7 @@ class Rec:
             err = (self.p.stderr.read() or "")[-300:]
             log(self.a.events, "arecord_exit", rc=self.p.returncode, stderr=err)
             self.pump(final=True); self.p = None
+            if self.wd: self.rm_work_dir(self.wd)
         else:
             self.pump()
         return self.p is not None
@@ -129,7 +138,7 @@ def main():
     ap.add_argument("--poll-timeout", type=float, default=4)
     ap.add_argument("--unreach-hold-s", type=float, default=60)
     ap.add_argument("--retry-s", type=float, default=10)
-    ap.add_argument("--stop-after", type=int, default=2)
+    ap.add_argument("--stop-after", type=int, default=2)  # keep 2: a 2 to 4 s tail after ORB3 stops is accepted by the lead (R13 item 2)
     ap.add_argument("--stats-s", type=float, default=600)
     ap.add_argument("--timesync-s", type=float, default=600)
     a = ap.parse_args(); a.arecord = a.arecord.split()

@@ -1,0 +1,7 @@
+{
+  "out_dir": "/var/lib/mcrec",
+  "mics": [
+    {"place": "corner", "port": "usb3/3-4/3-4:1.0", "gain": 41},
+    {"place": "high", "port": "usb3/3-6/3-6:1.0", "gain": 41}
+  ]
+}
