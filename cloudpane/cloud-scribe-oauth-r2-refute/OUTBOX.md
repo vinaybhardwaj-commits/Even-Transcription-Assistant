@@ -1,0 +1,2 @@
+- start: target 7ad33769 checked out on cloudpane/cloud-scribe-oauth-r2-refute/verdict
+- probes: tests/unit/mcp-oauth-r2-refute-probes.test.ts 55/55 (x3); R2-P1 real Chromium 141 sends Origin null on consent POST
