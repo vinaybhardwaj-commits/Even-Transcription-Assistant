@@ -239,8 +239,8 @@
       "t1": "2026-10-15T10:03:24+05:30",
       "label": "speaker_0",
       "lang": "en",
-      "quote_native": "continue metformin 500 twice a day after food",
-      "quote_en": "continue metformin 500 twice a day after food",
+      "quote_native": "increase the metformin to 1000 twice a day after food",
+      "quote_en": "increase the metformin to 1000 twice a day after food",
       "span_source": "both",
       "order_capable": true,
       "boundary_quarantined": false,
@@ -321,6 +321,38 @@
       "lang": "en",
       "quote_native": "we will recheck your sugars",
       "quote_en": "we will recheck your sugars",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s14",
+      "segment_refs": [
+        "EXAMPLE-W3:14"
+      ],
+      "t0": "2026-10-15T10:04:41+05:30",
+      "t1": "2026-10-15T10:04:46+05:30",
+      "label": "speaker_1",
+      "lang": "en",
+      "quote_native": "I also take levothyroxine 50 every morning",
+      "quote_en": "I also take levothyroxine 50 every morning",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s15",
+      "segment_refs": [
+        "EXAMPLE-W3:15"
+      ],
+      "t0": "2026-10-15T10:04:47+05:30",
+      "t1": "2026-10-15T10:04:49+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "yes, continue that",
+      "quote_en": "yes, continue that",
       "span_source": "both",
       "order_capable": true,
       "boundary_quarantined": false,
@@ -449,15 +481,15 @@
     {
       "prompt_id": "p2",
       "kind": "medicine",
-      "action": "continue",
+      "action": "change_dose",
       "drug": {
-        "spoken": "metformin 500",
+        "spoken": "metformin",
         "brand_recognised": null,
         "generic": "METFORMIN",
         "components": [],
         "base_molecule": "metformin",
         "form": "tablet",
-        "strength_heard": "500",
+        "strength_heard": "1000",
         "lasa_risk": {
           "pair_with": null,
           "note": "not on the curated LASA list"
@@ -465,7 +497,7 @@
       },
       "attributes": {
         "strength": {
-          "value": "500",
+          "value": "1000",
           "cited_spans": [
             "s8"
           ],
@@ -568,6 +600,71 @@
       },
       "doctor_confirm_reason": [
         "notes_only"
+      ]
+    },
+    {
+      "prompt_id": "p4",
+      "kind": "medicine",
+      "action": "continue",
+      "drug": {
+        "spoken": "levothyroxine 50",
+        "brand_recognised": null,
+        "generic": "LEVOTHYROXINE",
+        "components": [],
+        "base_molecule": "levothyroxine",
+        "form": "tablet",
+        "strength_heard": "50",
+        "lasa_risk": {
+          "pair_with": null,
+          "note": "not on the curated LASA list"
+        }
+      },
+      "attributes": {
+        "strength": {
+          "value": "50",
+          "cited_spans": [
+            "s14",
+            "s15"
+          ],
+          "support": "affirmed_from_patient"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": "every morning",
+          "cited_spans": [
+            "s14",
+            "s15"
+          ],
+          "support": "affirmed_from_patient"
+        },
+        "duration": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "instruction": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        }
+      },
+      "who_said": {
+        "label": "speaker_1",
+        "role": "patient"
+      },
+      "doctor_confirm_reason": [
+        "notes_only",
+        "patient_reported",
+        "affirmed_from_patient"
       ]
     }
   ],
@@ -700,7 +797,7 @@
     {
       "item_id": "e3-met",
       "kind": "medicine",
-      "text": "Metformin 500 BD",
+      "text": "Metformin dose raised to 1000 BD",
       "names": [
         "metformin",
         "Glycomet 500"
@@ -717,6 +814,29 @@
       "prompt_id": "p2",
       "withheld_reason": null,
       "flags": []
+    },
+    {
+      "item_id": "e3-thy",
+      "kind": "medicine",
+      "text": "levothyroxine raised by the patient; doctor said continue",
+      "names": [
+        "levothyroxine"
+      ],
+      "status": "continued",
+      "negated": false,
+      "support": "affirmed_from_patient",
+      "cited_spans": [
+        "s14",
+        "s15"
+      ],
+      "alignment": "aligned_llm",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": "p4",
+      "withheld_reason": null,
+      "flags": [
+        "affirmed_from_patient"
+      ]
     },
     {
       "item_id": "e3-glu",
@@ -834,7 +954,7 @@
       "flags": []
     }
   ],
-  "note_text": "Co-morbidities: Type 2 Diabetes Mellitus for 5 years\nPresenting Complaint: Giddiness and sweating in the mornings for 1 week.\nExamination: BP 128/82. Pulse 88. Random blood sugar 72 mg/dL.\nDiagnoses: ?Hypoglycaemia\nPlan of Management: Recheck sugars. Medication changes discussed: see the confirm list.\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nMETFORMIN 500 — confirm\nGLUCOSE — confirm\nFurther Investigation: HbA1c\nFasting Blood Sugar\nLipid profile\nFollow up: Come back with the reports.\nRefer to:\nGeneral Advice: Don't skip meals.",
+  "note_text": "Co-morbidities: Type 2 Diabetes Mellitus for 5 years\nPresenting Complaint: Giddiness and sweating in the mornings for 1 week.\nExamination: BP 128/82. Pulse 88. Random blood sugar 72 mg/dL.\nDiagnoses: ?Hypoglycaemia\nPlan of Management: Recheck sugars. Medication changes discussed: see the confirm list.\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nMETFORMIN 1000 — dose change discussed — confirm\nGLUCOSE — confirm\nLEVOTHYROXINE — confirm\nFurther Investigation: HbA1c\nFasting Blood Sugar\nLipid profile\nFollow up: Come back with the reports.\nRefer to:\nGeneral Advice: Don't skip meals.",
   "qa": {
     "floors": {
       "untaped_drugs": 0,
@@ -848,11 +968,11 @@
     },
     "counts": {
       "posted": 9,
-      "prompts": 3,
+      "prompts": 4,
       "withheld": 0,
       "h_unattrib": 0,
       "unaligned": 0,
-      "affirmed_from_patient": 0
+      "affirmed_from_patient": 1
     },
     "inputs": {
       "mode": "current",

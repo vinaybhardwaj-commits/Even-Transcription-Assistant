@@ -1,0 +1,27 @@
+{
+  "version": "1.0",
+  "source": "ETA ruling S6 (17 Oct). For these the full phrase is the base molecule; matching uses the full phrase, never a single salt word.",
+  "drugs": [
+    "calcium carbonate",
+    "calcium citrate",
+    "potassium chloride",
+    "potassium citrate",
+    "sodium bicarbonate",
+    "sodium chloride",
+    "folic acid",
+    "ferrous sulphate",
+    "ferrous sulfate",
+    "ferrous fumarate",
+    "ferrous ascorbate",
+    "zinc sulphate",
+    "zinc sulfate",
+    "magnesium sulphate",
+    "magnesium hydroxide",
+    "magnesium oxide",
+    "ors",
+    "oral rehydration salts",
+    "vitamin d3",
+    "vitamin b12",
+    "vitamin c"
+  ]
+}

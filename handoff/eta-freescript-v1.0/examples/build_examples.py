@@ -6,7 +6,7 @@ import json, os, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from validate_artifact import DRAFT_LINE, HEADINGS, PLAN_LINE, med_line, strip_qualifiers  # noqa: E402
+from validate_artifact import PLAN_LINE, base_of, render_note  # noqa: E402
 
 Z = "0" * 64
 DAY = "2026-10-15"
@@ -49,7 +49,7 @@ def attrs(**kw):
 
 
 def drug(spoken, generic, brand=None, components=(), form="tablet", strength=None, lasa=None):
-    base = " + ".join(strip_qualifiers(c) for c in components) if components else strip_qualifiers(generic)
+    base = " + ".join(base_of(c) for c in (components or generic.split("+")))
     return dict(spoken=spoken, brand_recognised=brand, generic=generic, components=list(components), base_molecule=base,
                 form=form, strength_heard=strength,
                 lasa_risk=dict(pair_with=lasa, note="curated LASA pair; confirm the molecule" if lasa else "not on the curated LASA list"))
@@ -118,41 +118,6 @@ class Consult:
                 rest.append(w["text_en"])
         return " ".join(rf + rest)
 
-    def note(self):
-        g, s = self.gx, {h: [] for h in HEADINGS}
-        for m in g.get("comorbidities", []):
-            du = m.get("duration")
-            s["Co-morbidities"].append(m["name"] + (" for %d %s" % (du["value"], du["unit"].lower()) if du else ""))
-        pc = g.get("presenting_complaints", {})
-        if pc.get("symptoms"):
-            s["Presenting Complaint"].append(pc["symptoms"])
-        if g.get("examination"):
-            s["Examination"].append(g["examination"])
-        for d in pc.get("diagnoses", []):
-            s["Diagnoses"].append(("?" if d.get("is_differential_diagnosis") else "") + d["diagnosis_or_impression"])
-        pm = g.get("plan_of_management", {})
-        if pm.get("management_plan"):
-            s["Plan of Management"].append(pm["management_plan"])
-        for x in pm.get("surgery_or_procedure_recommendations", []):
-            s["Surgery or Procedure"].append(x["name"])
-        listed = [p for p in self.prompts if p["kind"] == "medicine" and p["action"] in ("start", "continue")]
-        if listed:
-            s["Medication"] = [DRAFT_LINE] + [med_line(p["drug"]) for p in listed]
-        for x in g.get("further_investigations", []):
-            s["Further Investigation"].append(x["name"])
-        if g.get("follow_up", {}).get("follow_up_instructions"):
-            s["Follow up"].append(g["follow_up"]["follow_up_instructions"])
-        for x in g.get("referrals", []):
-            s["Refer to"].append(x["speciality"])
-        if g.get("general_advice"):
-            s["General Advice"].append(g["general_advice"])
-        out = []
-        for h in HEADINGS:
-            body = s[h]
-            out.append(("%s: %s" % (h, body[0])) if body else "%s:" % h)
-            out += body[1:]
-        return "\n".join(out)
-
     def build(self, withheld_reasons=None, models=MODELS, role_votes=True):
         withheld = bool(withheld_reasons)
         prov = self.prov
@@ -173,7 +138,7 @@ class Consult:
                  roster=list(self.roster.values()), spans=self.spans, gp_extraction=self.gx, confirm_prompts=self.prompts,
                  doctor_words=self.words, red_flags=self.red_flags, provenance=prov)
         if not withheld:
-            a["note_text"] = self.note()
+            a["note_text"] = render_note(a)
         a["qa"] = dict(
             floors=dict(untaped_drugs=0, invented_doses=0, dose_precedence_errors=0, clip_leakage=0, placeholders=0,
                         red_flags_missing=0, hallucinations_est=0.0, validator_pass=True),
@@ -188,7 +153,7 @@ class Consult:
 
 
 def ex1():
-    """Fever. The patient's own home drug (Crocin) is discussed_only: a continue prompt with an affirmed_from_patient dose."""
+    """Fever. The patient's own home drug (Crocin) is discussed_only: it lives only in provenance, with no prompt and no Medication line."""
     c = Consult(1, ["en", "hi"], 14, [doc(410), pat(260)])
     s1 = c.span(P, "00:40", "00:48", "I have had fever for two days and body pain", "hi", "do din se bukhar hai aur badan dard ho raha hai")
     s11 = c.span(P, "00:50", "00:55", "no other illness as such", "hi", "aur koi bimari nahi hai")
@@ -214,13 +179,11 @@ def ex1():
     p1 = c.prompt("medicine", "start", D, ["notes_only"], attrs(strength=att("650", [s7]), frequency=att("three times a day", [s7]),
                   duration=att("three days", [s7]), instruction=att("after food, only if there is fever", [s7])),
                   drug("Dolo 650", "PARACETAMOL", brand="Dolo 650", strength="650"))
-    p2 = c.prompt("medicine", "continue", P, ["notes_only", "patient_reported", "affirmed_from_patient", "strength_unstated"],
-                  attrs(dose=att("one", [s2, s3], "affirmed_from_patient")), drug("Crocin", "PARACETAMOL", brand="Crocin"))
     c.item("e1-sym", "symptoms", "fever 2 days, body ache", "prescribed", [s1, s4], "/presenting_complaints/symptoms", flags=["translation_uncertain"])
     c.item("e1-com", "comorbidity", "whole-value missing statement about other illness", "prescribed", [s11], support="not_stated",
            withheld="missing_value", flags=["field_withheld"], alignment="aligned_llm")
     c.item("e1-home", "medicine", "Crocin taken at home by the patient", "discussed_only", [s2, s3], support="affirmed_from_patient",
-           prompt_id=p2, names=["Crocin", "paracetamol"], flags=["affirmed_from_patient", "strength_unstated"], alignment="aligned_llm")
+           names=["Crocin", "paracetamol"], flags=["affirmed_from_patient", "strength_unstated"], alignment="aligned_llm")
     c.item("e1-exam", "examination", "temp 100.2 F, throat congested, chest clear", "prescribed", [s5], "/examination")
     c.item("e1-dx", "diagnosis", "likely viral fever", "prescribed", [s6], "/presenting_complaints/diagnoses/0")
     c.item("e1-med", "medicine", "Dolo 650 three times a day for 3 days", "prescribed", [s7], prompt_id=p1, names=["Dolo 650", "paracetamol"])
@@ -272,7 +235,8 @@ def ex2():
 
 
 def ex3():
-    """Stopped drug: glimepiride is a stop prompt and is never named in note_text. Comorbidity duration sent as YEARS."""
+    """Stopped drug: glimepiride is a stop prompt, never named in note_text. Metformin is a change_dose prompt; levothyroxine
+    is a patient-raised continue prompt whose values are affirmed_from_patient, never supported. Duration sent as YEARS."""
     c = Consult(3, ["en", "kn"], 19, [doc(450), pat(300)])
     s1 = c.span(P, "00:30", "00:36", "I have sugar for five years", "kn", "nanage aidu varshadinda sugar ide")
     s2 = c.span(D, "00:37", "00:40", "diabetes for five years")
@@ -281,12 +245,14 @@ def ex3():
     s5 = c.span(D, "02:00", "02:15", "BP 128 by 82, pulse 88, sugar 72")
     s6 = c.span(D, "03:00", "03:06", "this could be low sugar from the glimepiride")
     s7 = c.span(D, "03:07", "03:15", "stop the glimepiride from today")
-    s8 = c.span(D, "03:16", "03:24", "continue metformin 500 twice a day after food")
+    s8 = c.span(D, "03:16", "03:24", "increase the metformin to 1000 twice a day after food")
     s9 = c.span(D, "03:25", "03:30", "keep glucose tablets with you, take one if you feel giddy")
     s10 = c.span(D, "04:00", "04:10", "do HbA1c and fasting sugar tomorrow morning")
     s11 = c.span(D, "04:12", "04:20", "don't skip meals")
     s12 = c.span(D, "04:30", "04:35", "come back with the reports")
     s13 = c.span(D, "04:36", "04:40", "we will recheck your sugars")
+    s14 = c.span(P, "04:41", "04:46", "I also take levothyroxine 50 every morning")
+    s15 = c.span(D, "04:47", "04:49", "yes, continue that")
     c.word("diet", "Don't skip meals.", [s11], counselling=True)
     c.word("follow_up", "Come back with the reports.", [s12])
     c.gx = dict(
@@ -301,8 +267,8 @@ def ex3():
         follow_up=dict(followup_type="FOLLOW_UP_WITH_REPORTS", follow_up_instructions="Come back with the reports."),
         general_advice=c.advice())
     p1 = c.prompt("medicine", "stop", D, ["notes_only", "stop_order"], drug_=drug("glimepiride", "GLIMEPIRIDE"))
-    p2 = c.prompt("medicine", "continue", D, ["notes_only"], attrs(strength=att("500", [s8]), frequency=att("twice a day", [s8]),
-                  instruction=att("after food", [s8])), drug("metformin 500", "METFORMIN", strength="500"))
+    p2 = c.prompt("medicine", "change_dose", D, ["notes_only"], attrs(strength=att("1000", [s8]), frequency=att("twice a day", [s8]),
+                  instruction=att("after food", [s8])), drug("metformin", "METFORMIN", strength="1000"))
     p3 = c.prompt("medicine", "start", D, ["notes_only"], attrs(dose=att("one", [s9]), instruction=att("if you feel giddy", [s9])),
                   drug("glucose tablets", "GLUCOSE"))
     c.item("e3-com", "comorbidity", "T2DM 5 years", "prescribed", [s1, s2], "/comorbidities/0", flags=["translation_uncertain"])
@@ -311,7 +277,13 @@ def ex3():
     c.item("e3-dx", "diagnosis", "?hypoglycaemia", "prescribed", [s6], "/presenting_complaints/diagnoses/0")
     c.item("e3-glim", "medicine", "Glimepiride 1 mg", "stopped", [s7], prompt_id=p1, negated=True, flags=["negation_cue_nearby"],
            names=["glimepiride", "Glimepiride 1", "Amaryl"])
-    c.item("e3-met", "medicine", "Metformin 500 BD", "continued", [s8], prompt_id=p2, names=["metformin", "Glycomet 500"])
+    af = "affirmed_from_patient"
+    p4 = c.prompt("medicine", "continue", P, ["notes_only", "patient_reported", af],
+                  attrs(strength=att("50", [s14, s15], af), frequency=att("every morning", [s14, s15], af)),
+                  drug("levothyroxine 50", "LEVOTHYROXINE", strength="50"))
+    c.item("e3-met", "medicine", "Metformin dose raised to 1000 BD", "continued", [s8], prompt_id=p2, names=["metformin", "Glycomet 500"])
+    c.item("e3-thy", "medicine", "levothyroxine raised by the patient; doctor said continue", "continued", [s14, s15], support=af,
+           prompt_id=p4, flags=[af], alignment="aligned_llm", names=["levothyroxine"])
     c.item("e3-glu", "medicine", "Glucose tablets when symptomatic", "prescribed", [s9], prompt_id=p3, flags=["duration_unstated"], names=["glucose"])
     c.item("e3-hba1c", "investigation", "HbA1c", "prescribed", [s10], "/further_investigations/0", names=["HbA1c"])
     c.item("e3-fbs", "investigation", "Fasting sugar", "prescribed", [s10], "/further_investigations/1", names=["Fasting Blood Sugar", "FBS"])

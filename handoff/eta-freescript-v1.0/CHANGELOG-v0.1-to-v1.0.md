@@ -60,16 +60,17 @@ Legend: **same** = unchanged, **changed**, **new**, **removed**.
 | `withheld_reason` | none | placeholder, repr, missing_value, frx_n1_phrase, bracket, or null | new |
 | `flags` values | 8 values | the 8 plus field_withheld, affirmed_from_patient, translator_relay, not_order_capable, lasa, combination_unexpanded, case7_no_voiceprint | changed (added values) |
 | a prescribed item kept out of gp_extraction | not allowed | allowed only with a `prompt_id` or a `withheld_reason` | changed |
+| a medicine the patient only mentioned | `discussed_only`, kept out | `discussed_only`, kept out, and never given a prompt | changed |
 
 ## `note_text`
 
 | Rule | v0.1 | v1.0 | Change |
 |---|---|---|---|
 | headings | 11, in order, once each | the same | same |
-| Medication section | one line per posted medicine | `Draft list, not a prescription; the treating doctor checks each drug.` then one `GENERIC (Brand) strength — confirm` line per start or continue prompt | changed |
-| stopped / not-given orders | "Stop X" allowed under Plan | never named anywhere; Plan says `Medication changes discussed: see the confirm list.` | changed |
+| Medication section | one line per posted medicine | `Draft list, not a prescription; the treating doctor checks each drug.` then one `GENERIC (Brand) strength — confirm` line per start or continue prompt, and `GENERIC (Brand) — dose change discussed — confirm` per change_dose prompt; a strength shows only when the treating doctor stated it | changed |
+| stopped / not-given orders | "Stop X" allowed under Plan | never named in note_text or any gp_extraction string; Plan says `Medication changes discussed: see the confirm list.` | changed |
 | placeholders, brackets, reprs, "TBD", FRX-N1 phrases | not checked | rejected (V11) | new |
-| source | same content as gp_extraction | rendered only from posted gp_extraction, red_flags and doctor_words | changed |
+| source | same content as gp_extraction | must equal the validator's rendering of gp_extraction and confirm_prompts, line for line; advice comes only from red_flags and final doctor_words | changed |
 
 ## Guarantees
 
@@ -82,3 +83,5 @@ Legend: **same** = unchanged, **changed**, **new**, **removed**.
 | G5 11 headings | V5, also rejects a heading-shaped line outside the 11 |
 | G6 one line per order entry | V6, plus the exact Medication rendering |
 | none | V7 to V16 (see README-FOR-PULSE.md) |
+
+`doctor_words` gains an optional `red_flag` boolean: an instruction so marked, or of category `warning`, must have a `red_flags` entry (V10).

@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Validate eta.freescript.v1.0 artifacts: JSON Schema (draft-07) plus the cross-field guarantees V1-V16 the schema
 cannot express. Usage: validate_artifact.py FILE... ; exit 1 on any failure. Every failure line names its rule
-(V0 = schema). Stdlib plus jsonschema only; curated lists are read from data/."""
+(V0 = schema). Stdlib plus jsonschema only; curated lists are read from data/.
+
+Every name match folds text first (fold): NFKD, accents and zero-width characters removed, casefold, Cyrillic and
+Greek lookalikes mapped to Latin. Tokens split on anything that is not a letter or digit (hyphens, dots, spaces), and
+three or more single letters in a row are joined ("g l i m" -> "glim"). note_text is also rendered from its sources
+(render_note) and must match that rendering line for line."""
 import difflib, json, os, re, sys, unicodedata
 from datetime import datetime
 import jsonschema
@@ -14,14 +19,56 @@ def _data(name):
     return json.load(open(os.path.join(HERE, "data", name), encoding="utf-8"))
 
 
+# ---------- folding and tokens ----------
+_HOMO = str.maketrans({
+    # Cyrillic
+    "а": "a", "в": "b", "е": "e", "ё": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c", "т": "t",
+    "у": "y", "х": "x", "ѕ": "s", "і": "i", "ї": "i", "ј": "j", "ԁ": "d", "һ": "h", "ӏ": "l", "ԛ": "q", "ԝ": "w",
+    "ɡ": "g", "ь": "b", "п": "n", "г": "r", "з": "3",
+    # Greek
+    "α": "a", "β": "b", "γ": "y", "ε": "e", "ζ": "z", "η": "n", "ι": "i", "κ": "k", "μ": "u", "ν": "v", "ο": "o",
+    "ρ": "p", "σ": "o", "ς": "c", "τ": "t", "υ": "u", "χ": "x", "ω": "w",
+    # Latin lookalikes
+    "ı": "i", "ł": "l", "ø": "o", "đ": "d", "ħ": "h", "ŀ": "l",
+})
+
+
+def fold(text):
+    t = unicodedata.normalize("NFKD", text or "")
+    t = "".join(c for c in t if not unicodedata.combining(c) and unicodedata.category(c) != "Cf")
+    return t.casefold().translate(_HOMO)
+
+
+_TOK = re.compile(r"[^\W\d_]+|\d+(?:\.\d+)?")
+
+
+def toks(text):
+    """Folded tokens: letter runs and digit runs apart ("Dolo-650" -> dolo, 650); 3+ single letters joined."""
+    out, buf = [], []
+    for t in _TOK.findall(fold(text)):
+        if len(t) == 1 and t.isalpha():
+            buf.append(t)
+            continue
+        out += ["".join(buf)] if len(buf) >= 3 else buf
+        buf = []
+        out.append(t)
+    out += ["".join(buf)] if len(buf) >= 3 else buf
+    return out
+
+
 LASA_PAIRS = [tuple(p) for p in _data("lasa_pairs.json")["pairs"]]
 _QW = _data("qualifier_words.json")
 QUALIFIERS, FORM_WORDS, UNIT_WORDS = set(_QW["words"]), set(_QW["form_words"]), set(_QW["unit_words"])
 BRAND_MAP = _data("brand_generic_min.json")["entries"]
+_MN = _data("medicine_names_min.json")
+CONDITION_CONTEXT = set(_MN["condition_context"])
+SALT_PHRASES = sorted({tuple(toks(s)) for s in _data("salt_drugs.json")["drugs"]}, key=len, reverse=True)
 _N1 = _data("frx_n1_phrases.json")
 N1_ANY = [(p["id"], re.compile(p["regex"])) for p in _N1["anywhere"]]
 N1_ORDER = [(p["id"], re.compile(p["regex"])) for p in _N1["order_sections_only"]]
+N1_MED = [(p["id"], re.compile(p["regex"])) for p in _N1["d4_medication_only"]]
 N1_SECTIONS = set(_N1["order_sections"])
+D4_FIELDS, D4_MISSING = set(_N1["d4_fields"]), set(_N1["d4_missing"])
 FILLER = re.compile(_N1["filler_line"])
 
 HEADINGS = ["Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses", "Plan of Management",
@@ -30,6 +77,8 @@ LISTS = {  # gp_extraction list path -> provenance kind
     "/medicines": "medicine", "/further_investigations": "investigation", "/comorbidities": "comorbidity",
     "/referrals": "referral", "/presenting_complaints/diagnoses": "diagnosis",
     "/plan_of_management/surgery_or_procedure_recommendations": "procedure"}
+SCALARS = {"/examination": "examination", "/general_advice": "advice", "/presenting_complaints/symptoms": "symptoms",
+           "/plan_of_management/management_plan": "management_plan", "/follow_up": "follow_up"}
 ORDER_LISTS = {  # provenance kind -> (gp_extraction list, note heading)
     "medicine": ("/medicines", "Medication"),
     "investigation": ("/further_investigations", "Further Investigation"),
@@ -37,14 +86,138 @@ ORDER_LISTS = {  # provenance kind -> (gp_extraction list, note heading)
     "referral": ("/referrals", "Refer to"),
 }
 ORDER_KINDS = set(ORDER_LISTS)
+CONDITION_PATHS = re.compile(r"^/(presenting_complaints/diagnoses/\d+/(diagnosis_or_impression|raw_name|aliases/\d+)"
+                             r"|comorbidities/\d+/(name|raw_name|notes|aliases/\d+))$")
 DRAFT_LINE = "Draft list, not a prescription; the treating doctor checks each drug."
 PLAN_LINE = "Medication changes discussed: see the confirm list."
+CONFIRM_TAIL = " — confirm"
+CHANGE_TAIL = " — dose change discussed"
 HELD_ACTIONS = {"stop", "hold", "not_given"}
-LISTED_ACTIONS = {"start", "continue"}
-DOCTOR_ROLES = {"treating_doctor", "other_clinician"}
+LISTED_ACTIONS = {"start", "continue", "change_dose"}
+TD = "treating_doctor"
+DOCTOR_ROLES = {TD, "other_clinician"}
 NEVER_CAPABLE = {"translator", "staff", "attender", "patient"}
+ADVICE_CATS = {"lifestyle", "diet", "warning", "counselling", "test_prep", "other"}
 SEG_COS = 0.65
-BAD_MODEL_IDS = {"", "none", "unknown", "n/a", "na", "tbd", "null"}
+FUZZY = 0.85
+MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{2,}$")
+BAD_MODEL_IDS = {"none", "null", "unknown", "n/a", "na", "tbd", "default", "model", "auto", "latest", "placeholder", "any"}
+
+
+def alpha_toks(text):
+    return [t for t in toks(text) if not t[0].isdigit() and t not in FORM_WORDS and t not in UNIT_WORDS]
+
+
+def base_of(text):
+    """Base molecule: a salt drug keeps its whole phrase ("folic acid"); otherwise letters only with form, unit and
+    qualifier words removed. A phrase that is all qualifiers keeps its whole phrase."""
+    a = alpha_toks(text)
+    for ph in SALT_PHRASES:
+        for i in range(len(a) - len(ph) + 1):
+            if tuple(a[i:i + len(ph)]) == ph:
+                return " ".join(ph)
+    base = [t for t in a if t not in QUALIFIERS]
+    return " ".join(base or a)
+
+
+strip_qualifiers = base_of
+
+
+def name_key(text):
+    """Joined base form: 'Hydroxy Chloroquine Sulphate 200' -> 'hydroxychloroquine'; 'Folic acid 5' -> 'folicacid'."""
+    return base_of(text).replace(" ", "")
+
+
+def runs(text, max_len=6):
+    """Every run of 1..max_len consecutive letter tokens joined without spaces: the split-spelling normalisation.
+    Whole-word by construction: a run never starts or ends inside a word."""
+    a = alpha_toks(text)
+    return {"".join(a[i:j]) for i in range(len(a)) for j in range(i + 1, min(len(a), i + max_len) + 1)}
+
+
+def fuzzy_hit(key, rs):
+    return any(abs(len(r) - len(key)) <= 3 and difflib.SequenceMatcher(None, key, r).ratio() >= FUZZY for r in rs)
+
+
+def brand_entry(name):
+    k = name_key(name or "")
+    for e in BRAND_MAP:
+        if k and (k == e["key"] or k == name_key(e["brand"])):
+            return e
+    return None
+
+
+def shown_value(p):
+    """The value a Medication line may show: supported on the treating doctor's span (V8 checks the support)."""
+    at = p["attributes"]
+    if p["action"] == "change_dose" and at["dose"]["support"] == "supported":
+        return at["dose"]["value"]
+    return at["strength"]["value"] if at["strength"]["support"] == "supported" else None
+
+
+def med_line(p):
+    """One Medication line: GENERIC (Brand as spoken) supported-strength — confirm; change_dose adds
+    ' — dose change discussed' before ' — confirm'."""
+    d = p["drug"]
+    parts = [d["generic"] or d["spoken"]]
+    if d["brand_recognised"] and d["generic"]:
+        parts.append("(%s)" % d["brand_recognised"])
+    s = shown_value(p)
+    if s and not (d["brand_recognised"] and set(toks(s)) <= set(toks(d["brand_recognised"]))):
+        parts.append(s)
+    return " ".join(parts) + (CHANGE_TAIL if p["action"] == "change_dose" else "") + CONFIRM_TAIL
+
+
+def render_sections(a):
+    g, s = a.get("gp_extraction") or {}, {h: [] for h in HEADINGS}
+    for m in g.get("comorbidities", []):
+        du = m.get("duration")
+        s["Co-morbidities"].append(m["name"] + (" for %d %s" % (du["value"], du["unit"].lower()) if du else ""))
+    pc = g.get("presenting_complaints", {})
+    if pc.get("symptoms"):
+        s["Presenting Complaint"].append(pc["symptoms"])
+    if g.get("examination"):
+        s["Examination"].append(g["examination"])
+    for d in pc.get("diagnoses", []):
+        s["Diagnoses"].append(("?" if d.get("is_differential_diagnosis") else "") + d["diagnosis_or_impression"])
+    pm = g.get("plan_of_management", {})
+    if pm.get("management_plan"):
+        s["Plan of Management"].append(pm["management_plan"])
+    for x in pm.get("surgery_or_procedure_recommendations", []):
+        s["Surgery or Procedure"].append(x["name"])
+    listed = [p for p in a.get("confirm_prompts", []) if p["kind"] == "medicine" and p["action"] in LISTED_ACTIONS and p.get("drug")]
+    if listed:
+        s["Medication"] = [DRAFT_LINE] + [med_line(p) for p in listed]
+    for x in g.get("further_investigations", []):
+        s["Further Investigation"].append(x["name"])
+    if g.get("follow_up", {}).get("follow_up_instructions"):
+        s["Follow up"].append(g["follow_up"]["follow_up_instructions"])
+    for x in g.get("referrals", []):
+        s["Refer to"].append(x["speciality"])
+    if g.get("general_advice"):
+        s["General Advice"].append(g["general_advice"])
+    return s
+
+
+def render_note(a):
+    """The only note_text a valid artifact may carry: the 11 headings rendered from gp_extraction and confirm_prompts."""
+    out = []
+    for h, body in render_sections(a).items():
+        out.append(("%s: %s" % (h, body[0])) if body else "%s:" % h)
+        out += body[1:]
+    return "\n".join(out)
+
+
+def raw_sections(note):
+    out, cur = {}, None
+    for line in (note or "").split("\n"):
+        head, sep, body = line.partition(":")
+        if sep and head in HEADINGS:
+            cur = head
+            out.setdefault(cur, []).append(body[1:] if body.startswith(" ") else body)
+        elif cur:
+            out[cur].append(line)
+    return {k: [x for x in v if x] for k, v in out.items()}
 
 
 # ---------- shared helpers ----------
@@ -64,79 +237,11 @@ def list_at(gx, path):
 
 
 def norm(s):
-    return " ".join(re.sub(r"[^a-z0-9 ]", " ", (s or "").lower()).split())
+    return " ".join(toks(s))
 
 
-_TOK = re.compile(r"[^\W\d_]+|\d+(?:\.\d+)?")
-
-
-def toks(text):
-    """Lowercase NFKC tokens: letter runs and digit runs apart ("Dolo-650" -> dolo, 650)."""
-    return _TOK.findall(unicodedata.normalize("NFKC", text or "").lower())
-
-
-def alpha_toks(text):
-    return [t for t in toks(text) if not t[0].isdigit() and t not in FORM_WORDS and t not in UNIT_WORDS]
-
-
-def strip_qualifiers(text):
-    """Base form: letters only, form/unit/qualifier words removed. A phrase that is all qualifiers keeps its whole
-    phrase ("vitamin d3"), which then only matches as that whole phrase."""
-    a = alpha_toks(text)
-    base = [t for t in a if t not in QUALIFIERS]
-    return " ".join(base) if base else " ".join(t for t in toks(text) if t not in FORM_WORDS and t not in UNIT_WORDS)
-
-
-def name_key(text):
-    """Joined base form: 'Hydroxy Chloroquine Sulphate 200' -> 'hydroxychloroquine'."""
-    return strip_qualifiers(text).replace(" ", "")
-
-
-def runs(text, max_len=4):
-    """Every run of 1..max_len consecutive letter tokens joined without spaces: the split-spelling normalisation.
-    Whole-word by construction: a run never starts or ends inside a word."""
-    a = alpha_toks(text)
-    out = set()
-    for i in range(len(a)):
-        for j in range(i + 1, min(len(a), i + max_len) + 1):
-            out.add("".join(a[i:j]))
-    return out
-
-
-def brand_entry(name):
-    k = name_key(name)
-    for e in BRAND_MAP:
-        if k and (k == e["key"] or k == name_key(e["brand"])):
-            return e
-    return None
-
-
-def med_line(d):
-    """The one Medication line for a start/continue prompt: GENERIC (Brand as spoken) strength-if-heard — confirm."""
-    head = d["generic"] or d["spoken"]
-    parts = [head]
-    if d["brand_recognised"] and d["generic"]:
-        parts.append("(%s)" % d["brand_recognised"])
-    s = d["strength_heard"]
-    if s and not (d["brand_recognised"] and set(toks(s)) <= set(toks(d["brand_recognised"]))):
-        parts.append(s)
-    return " ".join(parts) + " — confirm"
-
-
-def note_sections(note):
-    out, cur = {}, None
-    for line in (note or "").split("\n"):
-        head = line.split(":", 1)[0]
-        if head in HEADINGS and ":" in line:
-            cur = head
-            out[cur] = [line.split(":", 1)[1].strip()]
-        elif cur:
-            out[cur].append(line.strip())
-    return {k: [x for x in v if x] for k, v in out.items()}
-
-
-def advice_items(s):
-    return [x for x in re.split(r"(?<=[.!])\s+", (s or "").strip()) if x]
+def split_items(s):
+    return [x.strip() for x in re.split(r"(?<=[.!;])\s+|\n", (s or "").strip()) if x.strip()]
 
 
 def has_content(node):
@@ -169,7 +274,7 @@ def name_tokens(names):
 
 
 def same_drug(names_a, names_b, text_a=(), ratio=0.85):
-    """v0.1 G3 match, unchanged: normalised substring either way, or any significant name-token pair at
+    """v0.1 G3 match on folded text: normalised substring either way, or any significant name-token pair at
     SequenceMatcher ratio >= 0.85 (names only, never free text)."""
     na = [norm(x) for x in list(names_a) + list(text_a) if x and x.strip()]
     nb = [norm(x) for x in names_b if x and x.strip()]
@@ -183,24 +288,36 @@ def entry_names(m):
     return [x for x in [m.get("name", ""), m.get("raw_name", ""), m.get("speciality", "")] + list(m.get("aliases") or []) if x]
 
 
+def drug_names(d):
+    """Every name a drug block holds, with each '+' part and each component of its brand map entry."""
+    names = [d["spoken"], d["brand_recognised"], d["generic"]] + list(d["components"]) + d["base_molecule"].split("+")
+    names += (d["generic"] or "").split("+")
+    for n in (d["spoken"], d["brand_recognised"]):
+        e = brand_entry(n)
+        if e:
+            names += [e["brand"], e["key"], e["generic"]] + list(e["components"]) + e["generic"].split("+")
+    return [n for n in names if n and n.strip()]
+
+
 def held_names(prov_item, prompt):
-    """Every name a held (stop / hold / not_given) order can be written under."""
-    names = list(prov_item.get("names") or []) + [prov_item.get("text", "")] if prov_item else []
+    """Every name a held (stop / hold / not_given) order can be written under: its own names, every component and
+    '+' part, every brand of the same molecule set, and every brand that contains a held molecule."""
+    names = (list(prov_item.get("names") or []) + [prov_item.get("text", "")]) if prov_item else []
     if prompt:
         if prompt.get("name"):
             names.append(prompt["name"])
-        d = prompt.get("drug")
-        if d:
-            names += [d["spoken"], d["brand_recognised"], d["generic"]] + list(d["components"]) + d["base_molecule"].split("+")
-    generics = set()
+        if prompt.get("drug"):
+            names += drug_names(prompt["drug"])
+    gens = set()
     for n in list(names):
-        e = brand_entry(n or "")
+        e = brand_entry(n)
         if e:
-            generics.add(e["generic"])
-    if prompt and prompt.get("drug") and prompt["drug"]["generic"]:
-        generics.add(prompt["drug"]["generic"])
-    for e in BRAND_MAP:  # every brand of the same molecule set, attested or guard-only
-        if e["generic"] in generics:
+            gens.add(name_key(e["generic"]))
+            names += [e["brand"], e["key"], e["generic"]] + list(e["components"])
+        gens.add(name_key(n))
+    for e in BRAND_MAP:
+        comps = {name_key(c) for c in e["components"]} | {name_key(e["generic"])}
+        if comps & gens:
             names += [e["brand"], e["key"]]
     return [n for n in names if n and n.strip()]
 
@@ -209,11 +326,58 @@ def parse_dt(v):
     return datetime.fromisoformat(v.replace("Z", "+00:00"))
 
 
-def value_heard(value, quotes):
-    """Every digit token and every letter token of 3+ letters in the attribute value occurs in the given quotes."""
+def value_heard(value, quote):
+    """Every digit token and every letter token of 3+ letters in the value occurs in this one quote."""
     want = [t for t in toks(value) if t[0].isdigit() or len(t) >= 3]
-    have = set(t for q in quotes for t in toks(q))
+    have = set(toks(quote))
     return bool(want) and all(t in have for t in want)
+
+
+def words_from(text, quotes):
+    """text_en is copied or minimally joined from its cited quotes: each of its 3+ letter words occurs in them."""
+    have = {t for q in quotes for t in toks(q)}
+    return all(t in have for t in toks(text) if len(t) >= 3 and not t[0].isdigit())
+
+
+def d4(text, med=False):
+    if med and any(rx.search(text) for _, rx in N1_MED):
+        return True
+    raw = re.findall(r"\w+(?:/\w+)?|\?", text.lower())
+    ents = []
+    for k, t in enumerate(raw):
+        if t == "n/a":
+            ents.append(("n/a", "n/a"))
+        elif "/" in t:
+            ents.extend((f, None) for f in t.split("/"))
+        elif t == "na" or (t == "nil" and raw[k + 1:k + 2] == ["by"]):
+            ents.append((t, None))
+        else:
+            ents.append((t, t))
+    return any(f in D4_FIELDS and any(m in D4_MISSING for _, m in ents[max(0, i - 3):i] + ents[i + 1:i + 4]) for i, (f, _) in enumerate(ents))
+
+
+def printable(text, order=False, med=False, ascii_letters=True):
+    """FRX-N1 and placeholder checks on one NFKC-normalised string; returns the ids that fire."""
+    t = unicodedata.normalize("NFKC", text)
+    hits = []
+    if "\n" in t or "\r" in t:
+        hits.append("line_break")
+    if any(unicodedata.category(c) == "Cf" for c in t):
+        hits.append("invisible_character")
+    if any(unicodedata.category(c) == "Cc" and c not in "\n\r" for c in t):
+        hits.append("control_character")
+    if any(unicodedata.category(c) in ("Ps", "Pe", "Pi", "Pf") and c not in "()" for c in t):
+        hits.append("bracket")
+    if ascii_letters and any(c.isalpha() and ord(c) > 127 for c in t):
+        hits.append("non_ascii_letter")
+    if t.strip() and FILLER.match(t):
+        hits.append("missing_value_only")
+    hits += [rid for rid, rx in N1_ANY if rx.search(t)]
+    if order:
+        hits += [rid for rid, rx in N1_ORDER if rx.search(t)]
+        if d4(t, med):
+            hits.append("d4")
+    return hits
 
 
 # ---------- the checks ----------
@@ -238,16 +402,28 @@ def check(a):
     pr_by_id = {p["prompt_id"]: p for p in prompts}
     withheld = a["emission"]["state"] == "withheld"
     note = a.get("note_text")
-    sec = note_sections(note) if isinstance(note, str) else {}
     qa = a["qa"]
     notes_only = a["policy"]["medicine_policy"] == "notes_only"
+    order = sorted(a["spans"], key=lambda s: (parse_dt(s["t0"]), a["spans"].index(s)))
+    gx_strings = list(walk_strings(gx))
 
     def role_of(sid):
         s = spans.get(sid)
         return roster[s["label"]]["role"] if s and s["label"] in roster else None
 
-    def capable(sid):
-        return sid in spans and spans[sid]["order_capable"]
+    def cap_td(sid):
+        """An order may stand only on an order-capable span of the treating doctor's label."""
+        return sid in spans and spans[sid]["order_capable"] and role_of(sid) == TD
+
+    def names_in_turn(sid, keys):
+        """The span, or an earlier span of the same speaker turn, names one of keys."""
+        i = next(k for k, s in enumerate(order) if s["span_id"] == sid)
+        lab = order[i]["label"]
+        while i >= 0 and order[i]["label"] == lab:
+            if keys & runs(order[i]["quote_en"]):
+                return True
+            i -= 1
+        return False
 
     # V1 pointers resolve, each claimed once
     pointed = {}
@@ -265,25 +441,27 @@ def check(a):
         pointed[ptr] = p["item_id"]
 
     # V2 exactly one provenance per posted entry, prompt and item; qa.counts match
-    ids = [p["item_id"] for p in prov]
-    if len(ids) != len(set(ids)):
-        E("V2 duplicate provenance item_id")
+    for what, ids in (("provenance item_id", [p["item_id"] for p in prov]), ("prompt_id", [p["prompt_id"] for p in prompts]),
+                      ("instruction_id", [w["instruction_id"] for w in a["doctor_words"]])):
+        if len(ids) != len(set(ids)):
+            E("V2 duplicate %s" % what)
+    kind_at = {p["json_pointer"]: p["kind"] for p in prov if p["json_pointer"]}
     for path, kind in LISTS.items():
         for i, _ in enumerate(list_at(gx, path)):
             ptr = "%s/%d" % (path, i)
             if ptr not in pointed:
                 E("V2 gp_extraction%s has no provenance item" % ptr)
-            else:
-                k = next(p["kind"] for p in prov if p["json_pointer"] == ptr)
-                if k != kind:
-                    E("V2 %s kind %s != expected %s" % (ptr, k, kind))
-    for path in ["/examination", "/general_advice", "/presenting_complaints/symptoms", "/plan_of_management/management_plan", "/follow_up"]:
+            elif kind_at[ptr] != kind:
+                E("V2 %s kind %s != expected %s" % (ptr, kind_at[ptr], kind))
+    for path, kind in SCALARS.items():
         try:
             v = pointer_get(gx, path)
         except (KeyError, IndexError):
             continue
         if has_content(v) and path not in pointed:
             E("V2 gp_extraction%s has no provenance item" % path)
+        elif path in kind_at and kind_at[path] != kind:
+            E("V2 %s kind %s != expected %s" % (path, kind_at[path], kind))
     owners = {}
     for p in prov:
         if p["prompt_id"] is not None:
@@ -306,17 +484,20 @@ def check(a):
         if qa["counts"][k] != v:
             E("V2 qa.counts.%s=%d but the artifact holds %d" % (k, qa["counts"][k], v))
 
-    # V3 held-out orders never in their gp_extraction list under any held name (v0.1 G3)
+    # V3 held-out orders never in their gp_extraction list under any held name (v0.1 G3, on folded text)
     held = []
     for p in prov:
         pr = pr_by_id.get(p["prompt_id"]) if p["prompt_id"] else None
         if p["kind"] in ORDER_KINDS and (p["status"] in ("stopped", "not_given") or (pr and pr["action"] in HELD_ACTIONS)):
             held.append((p, pr))
+    for pr in prompts:
+        if pr["action"] in HELD_ACTIONS and pr["prompt_id"] not in owners:
+            held.append(({}, pr))
     for p, pr in held:
-        path = ORDER_LISTS[p["kind"]][0]
+        path = ORDER_LISTS[p.get("kind") or pr["kind"]][0]
         for i, m in enumerate(list_at(gx, path)):
-            if same_drug(held_names(p, pr), entry_names(m), text_a=[p["text"]]):
-                E("V3 %s: %s %s matches gp_extraction%s/%d" % (p["item_id"], p["status"], p["kind"], path, i))
+            if same_drug(held_names(p, pr), entry_names(m), text_a=[p.get("text", "")]):
+                E("V3 %s: held %s matches gp_extraction%s/%d" % (p.get("item_id") or pr["prompt_id"], p.get("kind") or pr["kind"], path, i))
 
     # V4 posted items carry cited spans or the no_evidence flag
     for p in prov:
@@ -330,138 +511,173 @@ def check(a):
         if [h for h in heads if h in HEADINGS] != HEADINGS or any(h not in HEADINGS for h in heads):
             E("V5 note_text headings %s != the 11 FreeScript headings in order" % heads)
 
-    # V6 one line per order entry; Medication holds only the draft line and one line per start/continue prompt
+    # V6 note_text equals its rendering from gp_extraction and confirm_prompts, section by section, line by line
     if isinstance(note, str):
-        for kind, (path, heading) in ORDER_LISTS.items():
-            if kind == "medicine":
-                continue
-            entries, lines_h = list_at(gx, path), sec.get(heading, [])
-            if len(lines_h) != len(entries):
-                E("V6 note %s has %d lines but gp_extraction%s has %d entries" % (heading, len(lines_h), path, len(entries)))
-            else:
-                for i, (line, m) in enumerate(zip(lines_h, entries)):
-                    if not same_drug(entry_names(m), [line]):
-                        E("V6 note %s line %d does not name gp_extraction%s/%d" % (heading, i, path, i))
-        listed = [p for p in prompts if p["kind"] == "medicine" and p["action"] in LISTED_ACTIONS]
-        want_lines = ([DRAFT_LINE] + [med_line(p["drug"]) for p in listed]) if listed else []
-        got = sec.get("Medication", [])
-        if got != want_lines:
-            E("V6 note Medication lines %r != expected %r" % (got, want_lines))
+        want_s, got_s = render_sections(a), raw_sections(note)
+        bad = [h for h in HEADINGS if got_s.get(h, []) != want_s[h]]
+        for h in bad:
+            E("V6 note %s lines %r differ from their source %r" % (h, got_s.get(h, [])[:4], want_s[h][:4]))
+        if not bad and note != render_note(a):
+            E("V6 note_text differs from its rendering outside the section bodies")
 
-    # V7 notes_only: no posted medicine; every medicine provenance has a prompt
+    # V7 notes_only: no posted medicine, no medicine name in any gp_extraction string; prompts only for decided drugs
     if list_at(gx, "/medicines"):
         E("V7 gp_extraction.medicines is not empty under medicine_policy=%s" % a["policy"]["medicine_policy"]
           + ("" if notes_only else " (taped_draft posting is not enabled in v1.0)"))
     for p in prov:
-        if p["kind"] == "medicine" and not p["prompt_id"]:
+        if p["kind"] != "medicine":
+            continue
+        if p["status"] == "discussed_only":
+            if p["prompt_id"]:
+                E("V7 %s: a discussed_only medicine has a prompt (it lives only in provenance)" % p["item_id"])
+        elif not p["prompt_id"]:
             E("V7 %s: medicine provenance has no prompt_id" % p["item_id"])
     for pr in prompts:
         if pr["kind"] == "medicine" and notes_only and "notes_only" not in pr["doctor_confirm_reason"]:
             E("V7 %s: medicine prompt lacks the notes_only reason" % pr["prompt_id"])
+    med_names = list(_MN["generics"]) + [x for e in BRAND_MAP for x in [e["brand"], e["key"], e["generic"]] + e["components"]]
+    med_names += [" ".join(ph) for ph in SALT_PHRASES] + [x for pair in LASA_PAIRS for x in pair]
+    med_names += [n for pr in prompts if pr.get("drug") for n in drug_names(pr["drug"])]
+    med_names += [n for p in prov if p["kind"] == "medicine" for n in (p.get("names") or [])]
+    med_keys = {k for n in med_names for k in (name_key(x) for x in n.split("+")) if len(k) >= 3}
+    if notes_only:
+        for path, s in gx_strings:
+            hits = med_keys & runs(s)
+            if hits and CONDITION_PATHS.match(path) and CONDITION_CONTEXT & set(alpha_toks(s)):
+                continue
+            for k in sorted(hits):
+                E("V7 gp_extraction%s names the medicine '%s' under notes_only" % (path, k))
 
-    # V8 support: posted items and supported attributes stand on order-capable (orders) or doctor (notes) spans
+    # V8 support: orders stand on the treating doctor's order-capable spans; values heard there, naming the drug
     for p in prov:
         if p["json_pointer"] is None:
             continue
         if p["support"] != "supported":
             E("V8 %s: posted with support=%s" % (p["item_id"], p["support"]))
         if p["kind"] in ORDER_KINDS:
-            if not any(capable(s) for s in p["cited_spans"]):
-                E("V8 %s: posted %s cites no order-capable span" % (p["item_id"], p["kind"]))
-        elif not any(capable(s) or role_of(s) in DOCTOR_ROLES for s in p["cited_spans"]):
+            if not any(cap_td(s) for s in p["cited_spans"]):
+                E("V8 %s: posted %s cites no order-capable span of the treating doctor" % (p["item_id"], p["kind"]))
+            try:
+                entry = pointer_get(gx, p["json_pointer"])
+            except (KeyError, IndexError, ValueError, TypeError):
+                entry = None
+            if isinstance(entry, dict):
+                keys = {name_key(n) for n in entry_names(entry)} - {""}
+                if not any(cap_td(s) and keys & runs(spans[s]["quote_en"]) for s in p["cited_spans"]):
+                    E("V8 %s: no cited order-capable span names the posted %s or an alias" % (p["item_id"], p["kind"]))
+        elif not any(role_of(s) in DOCTOR_ROLES for s in p["cited_spans"]):
             E("V8 %s: posted %s cites no doctor span" % (p["item_id"], p["kind"]))
     for pr in prompts:
+        who = roster.get(pr["who_said"]["label"])
+        who_ok = bool(who and who["order_capable"] and who["role"] == TD)
+        keys = {name_key(n) for n in (drug_names(pr["drug"]) if pr.get("drug") else [pr.get("name", "")])} - {""}
         for name, at in pr["attributes"].items():
             if at["support"] == "supported":
-                caps = [spans[s]["quote_en"] for s in at["cited_spans"] if capable(s)]
-                if not caps:
-                    E("V8 %s.%s: supported but cites no order-capable span" % (pr["prompt_id"], name))
-                elif at["value"] is None or not value_heard(at["value"], caps):
-                    E("V8 %s.%s: supported value is not heard on an order-capable span" % (pr["prompt_id"], name))
+                if not who_ok:
+                    E("V8 %s.%s: supported but who_said (%s) is not the order-capable treating doctor" % (pr["prompt_id"], name, pr["who_said"]["label"]))
+                if "affirmed_from_patient" in pr["doctor_confirm_reason"]:
+                    E("V8 %s.%s: supported on a patient-affirmed prompt" % (pr["prompt_id"], name))
+                if at["value"] is None or not any(cap_td(s) and value_heard(at["value"], spans[s]["quote_en"]) and names_in_turn(s, keys)
+                                                  for s in at["cited_spans"] if s in spans):
+                    E("V8 %s.%s: value is not heard on an order-capable doctor span that names the drug" % (pr["prompt_id"], name))
             if at["support"] == "not_stated" and at["value"] is not None:
                 E("V8 %s.%s: value present but support=not_stated" % (pr["prompt_id"], name))
-        if pr["who_said"]["role"] == "translator" and any(at["support"] == "supported" for at in pr["attributes"].values()):
-            E("V8 %s: a translator-originated order has supported attributes" % pr["prompt_id"])
     for w in a["doctor_words"]:
-        if not any(capable(s) for s in w["cited_spans"]):
-            E("V8 %s: doctor_words cites no order-capable span" % w["instruction_id"])
+        if not any(cap_td(s) for s in w["cited_spans"]):
+            E("V8 %s: doctor_words cites no order-capable span of the treating doctor" % w["instruction_id"])
+        if not words_from(w["text_en"], [spans[s]["quote_en"] for s in w["cited_spans"] if s in spans]):
+            E("V8 %s: doctor_words text_en is not copied from its cited spans" % w["instruction_id"])
     for sid, s in spans.items():
         if s["relay_of"] is not None:
             if s["label"] not in roster or roster[s["label"]]["role"] != "translator":
                 E("V8 %s: relay_of set on a non-translator span" % sid)
-            elif not capable(s["relay_of"]):
-                E("V8 %s: relays %s, which is not an order-capable span" % (sid, s["relay_of"]))
+            elif not cap_td(s["relay_of"]):
+                E("V8 %s: relays %s, which is not an order-capable doctor span" % (sid, s["relay_of"]))
     for f in ("untaped_drugs", "invented_doses", "dose_precedence_errors"):
         if qa["floors"][f] != 0:
             E("V8 qa.floors.%s=%d, floor is 0" % (f, qa["floors"][f]))
 
-    # V9 no held order named anywhere in note_text (base molecule, brand, generic, alias, split spelling)
-    if isinstance(note, str):
-        note_runs = runs(note)
+    # V9 no held order named in note_text or in any gp_extraction string (folded, split, spaced, fuzzy on drugs)
+    targets = ([("note_text", note)] if isinstance(note, str) else []) + [("gp_extraction" + p_, s) for p_, s in gx_strings]
+    for where, text in targets:
+        rs = runs(text)
         for p, pr in held:
-            for n in held_names(p, pr):
-                k = name_key(n)
-                if len(k) >= 3 and k in note_runs:
-                    E("V9 %s: held %s named in note_text as '%s'" % (p["item_id"], p["kind"], n))
-                    break
-        if any(pr["kind"] == "medicine" and pr["action"] in HELD_ACTIONS for pr in prompts) and PLAN_LINE not in " ".join(sec.get("Plan of Management", [])):
+            names = held_names(p, pr)
+            keys = {name_key(n) for n in names} - {""}
+            hit = sorted(k for k in keys if len(k) >= 3 and k in rs)
+            is_drug = (p.get("kind") or pr["kind"]) == "medicine"
+            if not hit and is_drug:
+                hit = sorted(k for k in keys if len(k) >= 6 and fuzzy_hit(k, rs))
+            if hit:
+                E("V9 %s: held %s named in %s as '%s'" % (p.get("item_id") or pr["prompt_id"], p.get("kind") or pr["kind"], where, hit[0]))
+    if isinstance(note, str) and any(pr["kind"] == "medicine" and pr["action"] in HELD_ACTIONS for pr in prompts):
+        if PLAN_LINE not in " ".join(raw_sections(note).get("Plan of Management", [])):
             E("V9 Plan of Management lacks '%s'" % PLAN_LINE)
 
-    # V10 red flags first in General Advice, never trimmed; the rest within budget
-    items = advice_items(gx.get("general_advice", ""))
+    # V10 red flags first in General Advice, never trimmed, never missing; the rest is the doctor's words within budget
+    adv = gx.get("general_advice", "")
     rfs = a["red_flags"]
+    prefix = " ".join(f["text_en"] for f in rfs)
+    if rfs and not (adv == prefix or adv.startswith(prefix + " ")):
+        E("V10 general_advice does not start with the %d red flag(s) in order" % len(rfs))
     for i, f in enumerate(rfs):
-        if i >= len(items) or items[i] != f["text_en"]:
-            E("V10 red flag %d is not at position %d of general_advice" % (i, i))
         if not any(role_of(s) in DOCTOR_ROLES for s in f["cited_spans"]):
             E("V10 red flag %d cites no doctor span" % i)
-    rest = items[len(rfs):]
+        if not words_from(f["text_en"], [spans[s]["quote_en"] for s in f["cited_spans"] if s in spans]):
+            E("V10 red flag %d text is not copied from its cited spans" % i)
+    rest = split_items(adv[len(prefix):] if rfs and adv.startswith(prefix) else adv)
     bud = a["policy"]["advice_budget"]
     if len(rest) > bud["items"] or len(" ".join(rest)) > bud["chars"]:
         E("V10 general_advice beyond red flags has %d items / %d chars, budget %d / %d" % (len(rest), len(" ".join(rest)), bud["items"], bud["chars"]))
-    if isinstance(note, str) and " ".join(sec.get("General Advice", [])) != gx.get("general_advice", ""):
-        E("V10 note General Advice differs from gp_extraction.general_advice")
-    if qa["floors"]["red_flags_missing"] != 0:
-        E("V10 qa.floors.red_flags_missing=%d, floor is 0" % qa["floors"]["red_flags_missing"])
+    eligible = {fold(x) for w in a["doctor_words"] if w["final_position"] and w["category"] in ADVICE_CATS for x in split_items(w["text_en"])}
+    for x in rest:
+        if fold(x) not in eligible:
+            E("V10 advice item '%s' is not a final doctor_words instruction" % x[:60])
+    rf_texts = {fold(f["text_en"]) for f in rfs}
+    missing = [w["instruction_id"] for w in a["doctor_words"] if (w["category"] == "warning" or w.get("red_flag")) and fold(w["text_en"]) not in rf_texts]
+    for wid in missing:
+        E("V10 %s is a warning / red flag with no red_flags entry" % wid)
+    if qa["floors"]["red_flags_missing"] != len(missing):
+        E("V10 qa.floors.red_flags_missing=%d but %d recomputed" % (qa["floors"]["red_flags_missing"], len(missing)))
 
-    # V11 no placeholder, bracket, repr, missing-value-only value or FRX-N1 phrase
-    for path, v in walk_strings(gx):
-        if FILLER.match(v):
-            E("V11 gp_extraction%s is a missing-value-only value" % path)
-        for rid, rx in N1_ANY:
-            if rx.search(v):
-                E("V11 gp_extraction%s carries FRX-N1 %s" % (path, rid))
+    # V11 no placeholder, bracket, repr, missing-value-only value, FRX-N1 phrase, invisible or non-ASCII letter
+    for path, v in gx_strings:
+        for rid in printable(v):
+            E("V11 gp_extraction%s: %s" % (path, rid))
+    for pr in prompts:
+        d = pr.get("drug")
+        fields = ([("drug.%s" % k, d[k]) for k in ("spoken", "brand_recognised", "generic", "form", "strength_heard", "base_molecule") if d[k]]
+                  + [("drug.components", c) for c in d["components"]]) if d else []
+        fields += [("name", pr["name"])] if pr.get("name") else []
+        fields += [("attributes.%s" % n, at["value"]) for n, at in pr["attributes"].items() if at["value"]]
+        rendered = {"drug.generic", "drug.brand_recognised", "drug.strength_heard"} | ({"drug.spoken"} if d and not d["generic"] else set())
+        for k, v in fields:
+            for rid in printable(v, order=True, med=True, ascii_letters=k in rendered):
+                E("V11 %s.%s: %s" % (pr["prompt_id"], k, rid))
     if isinstance(note, str):
-        nfkc = unicodedata.normalize("NFKC", note)
-        if any(unicodedata.category(c) in ("Ps", "Pe") and c not in "()" for c in nfkc):
-            E("V11 note_text contains a bracket")
-        cur = None
-        for line in nfkc.split("\n"):
-            head, sep, body = line.partition(":")
-            if sep and head in HEADINGS:
-                cur = head
-            else:
-                body = line
-            where = cur or "un-headed line"
-            if body.strip() and FILLER.match(body):
-                E("V11 note %s: filler line body" % where)
-            t = body.strip()
-            if cur == "Diagnoses" and t.startswith("?"):
-                t = t[1:]
-            if "?" in t:
-                E("V11 note %s: '?' outside the Diagnoses differential prefix" % where)
-            for rid, rx in N1_ANY:
-                if rx.search(body):
-                    E("V11 note %s: FRX-N1 %s" % (where, rid))
-            if cur in N1_SECTIONS:
-                for rid, rx in N1_ORDER:
-                    if rx.search(body):
-                        E("V11 note %s: FRX-N1 %s" % (where, rid))
+        if note != unicodedata.normalize("NFKC", note):
+            E("V11 note_text is not NFKC-normal")
+        for h, lines in raw_sections(note).items():
+            for j, body in enumerate(lines):
+                is_med = h == "Medication"
+                if is_med and j == 0 and body == DRAFT_LINE:
+                    continue
+                if is_med and body.endswith(CONFIRM_TAIL):
+                    body = body[:-len(CONFIRM_TAIL)]
+                t = body.strip()
+                if h == "Diagnoses" and t.startswith("?"):
+                    t = t[1:]
+                if "?" in t:
+                    E("V11 note %s: '?' outside the Diagnoses differential prefix" % h)
+                for rid in printable(body, order=h in N1_SECTIONS, med=is_med):
+                    E("V11 note %s: %s" % (h, rid))
     if qa["floors"]["placeholders"] != 0:
         E("V11 qa.floors.placeholders=%d, floor is 0" % qa["floors"]["placeholders"])
 
     # V12 span ids resolve; cited spans inside the window and not boundary-quarantined
     w0, w1 = parse_dt(a["encounter"]["window_start"]), parse_dt(a["encounter"]["window_end"])
+    if len(spans) != len(a["spans"]):
+        E("V12 duplicate span_id")
     cited = [(p["item_id"], s) for p in prov for s in p["cited_spans"]]
     cited += [("%s.%s" % (pr["prompt_id"], n), s) for pr in prompts for n, at in pr["attributes"].items() for s in at["cited_spans"]]
     cited += [(w["instruction_id"], s) for w in a["doctor_words"] for s in w["cited_spans"]]
@@ -469,6 +685,9 @@ def check(a):
     for w in a["doctor_words"]:
         if w["superseded_by"] is not None and w["superseded_by"] not in {x["instruction_id"] for x in a["doctor_words"]}:
             E("V12 %s: superseded_by %s does not resolve" % (w["instruction_id"], w["superseded_by"]))
+    for pr in prompts:
+        if pr["who_said"]["label"] not in roster or roster[pr["who_said"]["label"]]["role"] != pr["who_said"]["role"]:
+            E("V12 %s: who_said %s does not match the roster" % (pr["prompt_id"], pr["who_said"]["label"]))
     for sid, s in spans.items():
         if s["relay_of"] is not None and s["relay_of"] not in spans:
             E("V12 %s: relay_of %s does not resolve" % (sid, s["relay_of"]))
@@ -492,23 +711,25 @@ def check(a):
     if qa["floors"]["clip_leakage"] != 0:
         E("V12 qa.floors.clip_leakage=%d, floor is 0" % qa["floors"]["clip_leakage"])
 
-    # V13 roster consistency (design section 2)
+    # V13 roster consistency (design section 2); only the treating doctor's label may order
     gate, case7 = qa["inputs"]["armc_gate"], qa["inputs"]["case7"]
     armc_on = gate == "on" and not case7
     for r in a["roster"]:
         v = r["role_votes"]
         if r["armc"]["gate_flag"] != gate:
             E("V13 %s: armc.gate_flag %s != qa.inputs.armc_gate %s" % (r["label"], r["armc"]["gate_flag"], gate))
-        if r["three_of_three"] != (v["role_track"] == v["clef"] == v["jev"] == "treating_doctor"):
+        if r["three_of_three"] != (v["role_track"] == v["clef"] == v["jev"] == TD):
             E("V13 %s: three_of_three does not match the role votes" % r["label"])
         if r["armc"]["state"] == "pass" and not r["voiceprint_match"]:
             E("V13 %s: armc pass without a voiceprint match" % r["label"])
         if case7 and (r["voiceprint_match"] or r["armc"]["state"] != "off"):
             E("V13 %s: case7 (no voiceprint) but arm (c) is not off" % r["label"])
-        if r["order_capable"] and r["role"] in NEVER_CAPABLE:
+        if r["order_capable"] and r["role"] != TD:
             E("V13 %s: %s label is order-capable" % (r["label"], r["role"]))
         if r["translator_of"] is not None and r["role"] != "translator":
             E("V13 %s: translator_of set on a %s label" % (r["label"], r["role"]))
+    if len(roster) != len(a["roster"]):
+        E("V13 duplicate roster label")
     t33 = [r for r in a["roster"] if r["three_of_three"]]
     vp = [r["label"] for r in a["roster"] if r["voiceprint_match"]]
     names = lambda r: r["armc"]["state"] == "pass"
@@ -522,7 +743,7 @@ def check(a):
     else:
         named = [r["label"] for r in a["roster"] if names(r)]
         exp = {named[0]} if len(named) == 1 and len(vp) <= 1 else set()
-    exp = {l for l in exp if roster[l]["role"] not in NEVER_CAPABLE}
+    exp = {l for l in exp if roster[l]["role"] == TD}
     actual = {r["label"] for r in a["roster"] if r["order_capable"]}
     if len(actual) > 1:
         E("V13 %d labels are order-capable: %s" % (len(actual), sorted(actual)))
@@ -544,28 +765,28 @@ def check(a):
                 E("V13 %s: armc-only span is order-capable without passing the segment check" % sid)
 
     # V14 drug naming: no match on a qualifier word alone; base molecule; attested combinations; LASA flagged
-    lasa_names = {x for pair in LASA_PAIRS for x in pair}
+    lasa_names = {name_key(x) for pair in LASA_PAIRS for x in pair}
     for pr in prompts:
         d = pr.get("drug")
         if not d:
             continue
         pid = pr["prompt_id"]
+        e = brand_entry(d["brand_recognised"] or "") or brand_entry(d["spoken"])
         if d["generic"]:
-            want_base = " + ".join(strip_qualifiers(c) for c in d["components"]) if d["components"] else strip_qualifiers(d["generic"])
+            parts = d["components"] or d["generic"].split("+")
+            want_base = " + ".join(base_of(c) for c in parts)
             if d["base_molecule"] != want_base:
                 E("V14 %s: base_molecule '%s' != '%s' (generic with salt and qualifier words stripped)" % (pid, d["base_molecule"], want_base))
-            if not any(t not in QUALIFIERS for t in alpha_toks(d["generic"])):
+            if not any(t not in QUALIFIERS for t in alpha_toks(d["generic"])) and not any(set(ph) <= set(alpha_toks(d["generic"])) for ph in SALT_PHRASES):
                 E("V14 %s: generic is qualifier words only" % pid)
-            keys = {name_key(c) for c in d["base_molecule"].split("+")}
+            keys = {name_key(c) for c in parts}
             if d["brand_recognised"]:
                 keys.add(name_key(d["brand_recognised"]))
-            e = brand_entry(d["brand_recognised"] or "") or brand_entry(d["spoken"])
-            if e and e["generic"] == d["generic"]:
+            if e and name_key(e["generic"]) == name_key(d["generic"]):
                 keys |= {e["key"], name_key(e["brand"])}
             spoken = {r_ for r_ in runs(d["spoken"]) if r_ not in QUALIFIERS}
-            if not (keys - {""}) & spoken:
+            if not (keys - {""} - QUALIFIERS) & spoken:
                 E("V14 %s: spoken '%s' shares no non-qualifier word with %s" % (pid, d["spoken"], d["generic"]))
-        e = brand_entry(d["brand_recognised"] or d["spoken"])
         if d["components"]:
             if not e or e["status"] != "attested" or e["components"] != d["components"]:
                 E("V14 %s: combination expanded without an attested entry in the curated map" % pid)
@@ -574,7 +795,12 @@ def check(a):
                 E("V14 %s: unattested combination brand must stay combination_unexpanded with no generic" % pid)
         if d["generic"] is None and "combination_unexpanded" not in pr["doctor_confirm_reason"]:
             E("V14 %s: generic is null without combination_unexpanded" % pid)
-        hit = (runs(d["generic"] or "") | runs(d["base_molecule"]) | runs(d["spoken"])) & lasa_names
+        mapped = [e["generic"]] + e["components"] if e else []
+        hit = set()
+        for n in [d["generic"] or "", d["base_molecule"], d["spoken"], d["brand_recognised"] or ""] + d["components"] + mapped:
+            hit |= runs(n) & lasa_names
+        if d["generic"] is None and e and any(runs(x) & lasa_names for x in mapped):
+            E("V14 %s: brand maps to a LASA generic, so generic may not be null" % pid)
         if hit and (d["lasa_risk"]["pair_with"] is None or "lasa" not in pr["doctor_confirm_reason"]):
             E("V14 %s: LASA-listed name %s without lasa_risk and the lasa reason" % (pid, sorted(hit)))
 
@@ -593,16 +819,16 @@ def check(a):
         if not isinstance(note, str):
             E("V15 emission=full but note_text is absent")
 
-    # V16 models read back
+    # V16 model ids: present and well-shaped (read-back from calls is a generator guarantee, not checked here)
     served = qa["models_served"]
     if not served:
         E("V16 qa.models_served is empty")
-    for m in served:
-        if m.strip().lower() in BAD_MODEL_IDS:
-            E("V16 qa.models_served entry '%s' is not a served model id" % m)
     gen = [m["served_model_id"] for m in a["generator"]["models"]]
-    if any(m.strip().lower() in BAD_MODEL_IDS for m in gen):
-        E("V16 generator.models has an entry without a served model id")
+    if not gen:
+        E("V16 generator.models is empty")
+    for m in served + gen:
+        if not MODEL_ID.match(m) or m.strip().lower() in BAD_MODEL_IDS:
+            E("V16 model id '%s' is not a served model id" % m)
     if set(served) != set(gen):
         E("V16 qa.models_served %s != generator.models %s" % (sorted(set(served)), sorted(set(gen))))
     if qa["inputs"]["mode"] != a["policy"]["inputs_mode"]:

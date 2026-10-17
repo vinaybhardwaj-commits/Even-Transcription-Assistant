@@ -394,69 +394,6 @@
       "doctor_confirm_reason": [
         "notes_only"
       ]
-    },
-    {
-      "prompt_id": "p2",
-      "kind": "medicine",
-      "action": "continue",
-      "drug": {
-        "spoken": "Crocin",
-        "brand_recognised": "Crocin",
-        "generic": "PARACETAMOL",
-        "components": [],
-        "base_molecule": "paracetamol",
-        "form": "tablet",
-        "strength_heard": null,
-        "lasa_risk": {
-          "pair_with": null,
-          "note": "not on the curated LASA list"
-        }
-      },
-      "attributes": {
-        "strength": {
-          "value": null,
-          "cited_spans": [],
-          "support": "not_stated"
-        },
-        "dose": {
-          "value": "one",
-          "cited_spans": [
-            "s3",
-            "s4"
-          ],
-          "support": "affirmed_from_patient"
-        },
-        "route": {
-          "value": null,
-          "cited_spans": [],
-          "support": "not_stated"
-        },
-        "frequency": {
-          "value": null,
-          "cited_spans": [],
-          "support": "not_stated"
-        },
-        "duration": {
-          "value": null,
-          "cited_spans": [],
-          "support": "not_stated"
-        },
-        "instruction": {
-          "value": null,
-          "cited_spans": [],
-          "support": "not_stated"
-        }
-      },
-      "who_said": {
-        "label": "speaker_1",
-        "role": "patient"
-      },
-      "doctor_confirm_reason": [
-        "notes_only",
-        "patient_reported",
-        "affirmed_from_patient",
-        "strength_unstated"
-      ]
     }
   ],
   "doctor_words": [
@@ -546,7 +483,7 @@
       "alignment": "aligned_llm",
       "span_source": "both",
       "json_pointer": null,
-      "prompt_id": "p2",
+      "prompt_id": null,
       "withheld_reason": null,
       "flags": [
         "affirmed_from_patient",
@@ -677,7 +614,7 @@
     },
     "counts": {
       "posted": 6,
-      "prompts": 2,
+      "prompts": 1,
       "withheld": 1,
       "h_unattrib": 0,
       "unaligned": 0,

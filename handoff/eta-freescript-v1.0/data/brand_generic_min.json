@@ -1,7 +1,7 @@
 {
-  "version": "1.0",
-  "source": "tools/eta2freescript medication_safety.BRANDS, combinations.CATALOGUE and r1_floors.GUARD_ALIASES (ETA eta2freescript code at commit fd65cdc6)",
-  "attested_meaning": "attested = the current code releases this brand to its generic (curated map or attested catalogue). unattested = the current code does not release it; it may only widen the stop/hold guard. A combination brand expands into components only when attested; otherwise combination_unexpanded.",
+  "version": "1.1",
+  "source": "tools/eta2freescript medication_safety.BRANDS, combinations.CATALOGUE and r1_floors.GUARD_ALIASES (ETA eta2freescript code at commit fd65cdc6). Every brand-to-generic pair those hold is listed; the self-map 'amlodipine' is omitted.",
+  "attested_meaning": "attested = the current code releases this brand to its generic (curated map or attested catalogue). unattested = the current code does not release it; it only widens the stop/hold guard. A combination brand expands into components only when attested; otherwise combination_unexpanded.",
   "entries": [
     {
       "brand": "Dolo 650",
@@ -56,6 +56,143 @@
       ],
       "status": "unattested",
       "basis": "absent from medication_safety.BRANDS and combinations.CATALOGUE; stays combination_unexpanded"
+    },
+    {
+      "brand": "Amlong",
+      "key": "amlong",
+      "generic": "AMLODIPINE",
+      "components": [],
+      "status": "attested",
+      "basis": "medication_safety.BRANDS"
+    },
+    {
+      "brand": "Ascoril",
+      "key": "ascoril",
+      "generic": "AMBROXOL",
+      "components": [],
+      "status": "attested",
+      "basis": "medication_safety.BRANDS (a single product here; not expanded)"
+    },
+    {
+      "brand": "Concor",
+      "key": "concor",
+      "generic": "BISOPROLOL",
+      "components": [],
+      "status": "attested",
+      "basis": "medication_safety.BRANDS"
+    },
+    {
+      "brand": "Foracort",
+      "key": "foracort",
+      "generic": "FORMOTEROL + BUDESONIDE",
+      "components": [
+        "FORMOTEROL",
+        "BUDESONIDE"
+      ],
+      "status": "attested",
+      "basis": "combinations.CATALOGUE and medication_safety.BRANDS"
+    },
+    {
+      "brand": "Glycomet GP",
+      "key": "glycometgp",
+      "generic": "METFORMIN + GLIMEPIRIDE",
+      "components": [
+        "METFORMIN",
+        "GLIMEPIRIDE"
+      ],
+      "status": "attested",
+      "basis": "combinations.CATALOGUE and medication_safety.BRANDS"
+    },
+    {
+      "brand": "Glycomet Trio",
+      "key": "glycomettrio",
+      "generic": "METFORMIN + GLIMEPIRIDE + VOGLIBOSE",
+      "components": [
+        "METFORMIN",
+        "GLIMEPIRIDE",
+        "VOGLIBOSE"
+      ],
+      "status": "attested",
+      "basis": "combinations.CATALOGUE (attest fields found in the db13 lexicon)"
+    },
+    {
+      "brand": "Janumet",
+      "key": "janumet",
+      "generic": "SITAGLIPTIN + METFORMIN",
+      "components": [
+        "SITAGLIPTIN",
+        "METFORMIN"
+      ],
+      "status": "attested",
+      "basis": "combinations.CATALOGUE and medication_safety.BRANDS"
+    },
+    {
+      "brand": "Seroflo",
+      "key": "seroflo",
+      "generic": "SALMETEROL + FLUTICASONE",
+      "components": [
+        "SALMETEROL",
+        "FLUTICASONE"
+      ],
+      "status": "attested",
+      "basis": "combinations.CATALOGUE and medication_safety.BRANDS"
+    },
+    {
+      "brand": "Telma-AM",
+      "key": "telmaam",
+      "generic": "TELMISARTAN + AMLODIPINE",
+      "components": [
+        "TELMISARTAN",
+        "AMLODIPINE"
+      ],
+      "status": "attested",
+      "basis": "combinations.CATALOGUE and medication_safety.BRANDS"
+    },
+    {
+      "brand": "Telma-H",
+      "key": "telmah",
+      "generic": "TELMISARTAN + HYDROCHLOROTHIAZIDE",
+      "components": [
+        "TELMISARTAN",
+        "HYDROCHLOROTHIAZIDE"
+      ],
+      "status": "attested",
+      "basis": "combinations.CATALOGUE and medication_safety.BRANDS"
+    },
+    {
+      "brand": "Duonase",
+      "key": "duonase",
+      "generic": "AZELASTINE + FLUTICASONE",
+      "components": [
+        "AZELASTINE",
+        "FLUTICASONE"
+      ],
+      "status": "attested",
+      "basis": "combinations.CATALOGUE (attest fields found in the db13 lexicon)"
+    },
+    {
+      "brand": "Voquezna",
+      "key": "voquezna",
+      "generic": "VONOPRAZAN",
+      "components": [],
+      "status": "attested",
+      "basis": "medication_safety.BRANDS"
+    },
+    {
+      "brand": "Vonopraz",
+      "key": "vonopraz",
+      "generic": "VONOPRAZAN",
+      "components": [],
+      "status": "attested",
+      "basis": "medication_safety.BRANDS"
+    },
+    {
+      "brand": "Xarelto",
+      "key": "xarelto",
+      "generic": "RIVAROXABAN",
+      "components": [],
+      "status": "attested",
+      "basis": "medication_safety.BRANDS"
     }
   ]
 }

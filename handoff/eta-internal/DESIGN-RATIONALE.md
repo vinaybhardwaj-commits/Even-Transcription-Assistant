@@ -204,3 +204,24 @@ Clinical-owner question for V: generic first with the brand in brackets (IMC 200
 - **A21** `GPLlmExtraction`'s description text was updated for v1.0. Its fields and nesting are identical to v0.1, except DurationUnit.
 - **A22** In ex5 the staff label's three role votes all say treating_doctor (that is how it fools the vote), and its recorded role is `staff`. The voiceprint-matched label is the treating doctor.
 - **A23** The brief's branch rule (`cloudpane/cloud-frx-v1-handoff/*`) was followed over the session's default branch.
+
+---
+
+## Fix round 1 (17 Oct): lead rulings and new Builder ASSUMPTIONs
+
+Lead rulings, applied:
+- **A5 changed.** Order kinds stand only on order-capable spans of the treating doctor's label (V8), and V13 now allows only a `treating_doctor` label to be order-capable. `other_clinician` spans support note kinds only.
+- **A7 rejected.** A discussed_only medicine has no prompt and no Medication line; it lives only in provenance. V7 rejects a discussed_only medicine that carries a prompt. ex1 was fixed.
+- **A9 changed.** `change_dose` is listed as `GENERIC (Brand) — dose change discussed — confirm`.
+- **A11 narrowed.** Only the exact draft label line and the trailing ` — confirm` are exempt. d1, d2 and d4 (now ported in full) run on every other Medication-line character and on every drug field.
+- **A17.** The 8 unordered LASA pairs are the 16 ordered pairs; the data file says so.
+- A13, A14 and A22 accepted.
+
+New Builder ASSUMPTIONs:
+- **A24** A Medication line shows a strength only when the strength attribute is `supported`; `strength_heard` stays in the JSON but is never rendered on its own. For `change_dose` the shown value is the dose if supported, else the strength if supported.
+- **A25** The medicine-name check (M1, V7) uses the GENERICS list of the current code, the brand map, the salt drugs, the LASA names and the artifact's own drug names. A name is allowed only in a diagnosis or comorbidity string that also holds a condition word (allergy, poisoning, induced, resistance and similar, in `data/medicine_names_min.json`). Held names (V9) are never allowed anywhere.
+- **A26** Curly quotes and other Pi/Pf punctuation count as brackets. Non-ASCII letters, invisible characters, control characters and line breaks are rejected in every gp_extraction string, every rendered drug field and note_text.
+- **A27** note_text must equal `render_note(artifact)` exactly. The renderer lives in the validator and the example builder uses it.
+- **A28** Every advice item after the red flags must be a final_position doctor_words text, and doctor_words and red flag texts must be copied from their cited quotes (each 3+ letter word appears there).
+- **A29** Fuzzy held-name matching (ratio ≥ 0.85) applies to held medicines only, on keys of 6+ letters; investigations match exactly after folding.
+- **A30** A prompt's `who_said` label and role must match the roster (V12).

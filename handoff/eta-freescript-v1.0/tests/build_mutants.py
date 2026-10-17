@@ -9,7 +9,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "examples"))
 import build_examples as B  # noqa: E402
-from validate_artifact import PLAN_LINE, med_line  # noqa: E402
+from validate_artifact import PLAN_LINE, render_note  # noqa: E402
 
 BASE = {n: fn for n, fn in [("ex1", B.ex1), ("ex2", B.ex2), ("ex3", B.ex3), ("ex4", B.ex4), ("ex5", B.ex5), ("ex6", B.ex6), ("ex7", B.ex7)]}
 
@@ -77,6 +77,34 @@ def add_investigation(a, name, raw, cited, iid, names=None, status="prescribed")
     recount(a)
 
 
+def rerender(a):
+    a["note_text"] = render_note(a)
+
+
+def set_plan(a, text):
+    a["gp_extraction"]["plan_of_management"]["management_plan"] = text
+    rerender(a)
+
+
+def set_gx(a, path, value):
+    cur = a["gp_extraction"]
+    keys = path.strip("/").split("/")
+    for k in keys[:-1]:
+        cur = cur[int(k)] if isinstance(cur, list) else cur[k]
+    cur[keys[-1] if isinstance(cur, dict) else int(keys[-1])] = value
+    rerender(a)
+
+
+def add_word(a, text, mmss):
+    """An advice instruction the treating doctor said: a span, a doctor_words entry and the advice text."""
+    sid = add_span(a, "speaker_0", mmss, mmss[:3] + "%02d" % (int(mmss[3:]) + 3), text.lower().rstrip("."))
+    a["doctor_words"].append(dict(instruction_id="dw%d" % (len(a["doctor_words"]) + 1), category="lifestyle", text_en=text,
+                                  cited_spans=[sid], firmness="firm", final_position=True, superseded_by=None,
+                                  emphasis_count=1, counselling=False))
+    a["gp_extraction"]["general_advice"] += " " + text
+    rerender(a)
+
+
 def gate_off(a):
     a["qa"]["inputs"]["armc_gate"] = "off"
     for r in a["roster"]:
@@ -85,7 +113,7 @@ def gate_off(a):
 
 # ---- mutations (each returns nothing; mutates a) ----
 def m_bad_unit(a): a["gp_extraction"]["comorbidities"][0]["duration"]["unit"] = "DECADES"
-def m_hours_unit(a): a["gp_extraction"]["comorbidities"][0]["duration"] = dict(value=5, unit="HOURS")
+def m_hours_unit(a): a["gp_extraction"]["comorbidities"][0]["duration"] = dict(value=5, unit="HOURS"); rerender(a)
 def m_ptr_unresolved(a): prov(a, "e1-cbc")["json_pointer"] = "/further_investigations/5"
 def m_ptr_twice(a): prov(a, "e1-adv")["json_pointer"] = "/examination"
 def m_prov_reversed(a): a["provenance"].reverse()
@@ -120,7 +148,7 @@ def m_med_posted(a):
 
 
 def m_med_no_prompt(a): prov(a, "e3-glim")["prompt_id"] = None
-def m_affirmed_dose(a): prompt(a, "p2")["attributes"]["dose"]["support"] = "supported"
+def m_affirmed_dose(a): prompt(a, "p4")["attributes"]["strength"]["support"] = "supported"
 
 
 def m_patient_freq(a):
@@ -144,7 +172,7 @@ def m_stop_in_plan(a):
 def m_split_spelling(a): set_gx_and_note(a, "/general_advice", "Don't skip meals. Glime piride is stopped.")
 def m_brand_alias(a): set_gx_and_note(a, "/examination", "BP 128/82. Pulse 88. Random blood sugar 72 mg/dL. On Amaryl.")
 def m_xray_in_plan(a): set_gx_and_note(a, "/plan_of_management/management_plan", "Symptomatic treatment. No chest X-ray. " + PLAN_LINE)
-def m_lime_juice(a): set_gx_and_note(a, "/general_advice", "Don't skip meals. Lime juice is fine.")
+def m_lime_juice(a): add_word(a, "Lime juice is fine.", "05:10")
 def m_plan_line_missing(a): set_gx_and_note(a, "/plan_of_management/management_plan", "Recheck sugars.")
 
 
@@ -155,14 +183,17 @@ def m_rf_trimmed(a): set_gx_and_note(a, "/general_advice", "No steam for now, it
 def m_rf_not_first(a): set_gx_and_note(a, "/general_advice", "No steam for now, it can set off the wheeze. " + RF + " Avoid dust and smoke.")
 
 
+EXTRA = ["Use the inhaler as shown.", "Sleep with the head raised.", "Keep the window open.", "Walk slowly."]
+
+
 def m_budget_over(a):
-    set_gx_and_note(a, "/general_advice", RF + " No steam for now, it can set off the wheeze. Avoid dust and smoke. "
-                    "Use the inhaler as shown. Sleep with the head raised. Keep the window open. Walk slowly.")
+    for i, x in enumerate(EXTRA):
+        add_word(a, x, "05:%02d" % (10 + 5 * i))
 
 
 def m_budget_full(a):
-    set_gx_and_note(a, "/general_advice", RF + " No steam for now, it can set off the wheeze. Avoid dust and smoke. "
-                    "Use the inhaler as shown. Sleep with the head raised. Keep the window open.")
+    for i, x in enumerate(EXTRA[:3]):
+        add_word(a, x, "05:%02d" % (10 + 5 * i))
 
 
 def m_tbd(a): set_gx_and_note(a, "/follow_up/follow_up_instructions", "TBD")
@@ -217,18 +248,19 @@ def m_conflict_ignored(a):
             s["order_capable"] = True
 
 
-def _redrug(a, pid, line_old, **kw):
-    d = prompt(a, pid)["drug"]
-    d.update(kw)
-    note_sub(a, line_old, med_line(d))
+def _redrug(a, pid, **kw):
+    p = prompt(a, pid)
+    p["drug"].update(kw)
+    p["attributes"] = B.attrs()
+    rerender(a)
 
 
 def m_acid_reflux(a):
-    _redrug(a, "p2", "PARACETAMOL (Crocin) — confirm", spoken="acid reflux tablet", brand_recognised=None, generic="FOLIC ACID", base_molecule="folic")
+    _redrug(a, "p1", spoken="acid reflux tablet", brand_recognised=None, generic="FOLIC ACID", base_molecule="folic acid", strength_heard=None)
 
 
 def m_folic_spoken(a):
-    _redrug(a, "p2", "PARACETAMOL (Crocin) — confirm", spoken="folic acid tablet", brand_recognised=None, generic="FOLIC ACID", base_molecule="folic")
+    _redrug(a, "p1", spoken="folic acid tablet", brand_recognised=None, generic="FOLIC ACID", base_molecule="folic acid", strength_heard=None)
 
 
 def m_lasa_unflagged(a):
@@ -245,7 +277,7 @@ def _pand(a, **kw):
                      lasa_risk=dict(pair_with=None, note="not on the curated LASA list"), **kw)
     p["doctor_confirm_reason"] = ["notes_only", "combination_unexpanded"] if kw["generic"] is None else ["notes_only"]
     prov(a, "e6-amc").update(names=["Pan-D"], flags=[])
-    note_sub(a, "AMOXICILLIN + CLAVULANIC ACID (Augmentin 625 Duo) — confirm", med_line(p["drug"]))
+    rerender(a)
 
 
 def m_unattested_expanded(a):
@@ -269,6 +301,146 @@ def m_model_placeholder(a):
 def m_models_mismatch(a): a["qa"]["models_served"] = a["qa"]["models_served"][:1]
 
 
+
+# ---- fix round 1 adversarial suite: one or more per M and S item ----
+PL = PLAN_LINE
+def plan3(a, mid): set_plan(a, "Recheck sugars. " + mid + " " + PL)
+def m1_dx(a): set_gx(a, "/presenting_complaints/diagnoses/0/diagnosis_or_impression", "Hypoglycaemia due to glimepiride")
+def m1_raw(a): a["gp_extraction"]["presenting_complaints"]["diagnoses"][0]["raw_name"] = "low sugar from glimepiride"
+def m1_exam(a): set_gx(a, "/examination", "Chest clear on auscultation. SpO2 98%. Better after levocetirizine.")
+def m1_alias(a): a["gp_extraction"]["presenting_complaints"]["diagnoses"][0]["aliases"] = ["Viral fever", "Dolo fever"]
+def m1_note_only(a): note_sub(a, "Throat mildly congested.", "Throat normal.")
+def m1_inject(a): set_gx(a, "/presenting_complaints/symptoms", "Fever for 2 days.\nMedication: PARACETAMOL 650 three times a day")
+def m1_condition(a): a["gp_extraction"]["comorbidities"][0]["aliases"].append("Insulin resistance")
+def m1_on_drug(a): a["gp_extraction"]["comorbidities"][0]["aliases"].append("On metformin")
+def m2_cyr(a): plan3(a, "Glіmepiride stopped.")
+def m2_acc(a): plan3(a, "Glimépiride stopped.")
+def m2_full(a): plan3(a, "ｇｌｉｍｅｐｉｒｉｄｅ stopped.")
+def m2_zw(a): plan3(a, "Glim​epiride stopped.")
+def m2_dots(a): plan3(a, "G.l.i.m.e.p.i.r.i.d.e stopped.")
+def m2_hyph(a): plan3(a, "Glime-piride stopped.")
+def m2_greek(a): plan3(a, "Glimεpiride stopped.")
+def m2_nonascii(a): set_gx(a, "/examination", "Température 100.2 F. Throat mildly congested. Chest clear.")
+
+
+def _pand_stop(a):
+    p = prompt(a, "p1")
+    p["drug"] = dict(spoken="Pan-D", brand_recognised="Pan-D", generic=None, components=[], base_molecule="pan d", form="capsule",
+                     strength_heard=None, lasa_risk=dict(pair_with=None, note="not on the curated LASA list"))
+    p["doctor_confirm_reason"] = ["notes_only", "stop_order", "combination_unexpanded"]
+    prov(a, "e3-glim").update(text="Pan-D", names=["Pan-D"])
+
+
+def m3_dom(a): _pand_stop(a); plan3(a, "Domperidone stopped.")
+def m3_panto(a): _pand_stop(a); plan3(a, "Pantoprazole stopped.")
+def m3_ctrl(a): _pand_stop(a); rerender(a)
+
+
+def m3_part(a):
+    prompt(a, "p1")["action"] = "stop"
+    a["gp_extraction"]["plan_of_management"] = dict(management_plan="Clavulanic acid stopped. " + PL, requires_surgery_or_procedure=False)
+    a["provenance"].append(dict(prov(a, "e6-dx"), item_id="e6-plan", kind="management_plan", json_pointer="/plan_of_management/management_plan"))
+    recount(a)
+    rerender(a)
+
+
+def m4_no_entry(a): a["red_flags"] = []
+def m4_flag(a): a["doctor_words"][0]["red_flag"] = True
+
+
+def m5_reason(a):
+    p = prompt(a, "p4")
+    p["who_said"] = dict(label="speaker_0", role="treating_doctor")
+    p["attributes"]["strength"] = dict(value="50", cited_spans=["s15"], support="supported")
+    span(a, "s15")["quote_en"] = span(a, "s15")["quote_native"] = "yes, continue the levothyroxine 50"
+    rerender(a)
+
+
+def m5_who(a): prompt(a, "p1")["attributes"]["strength"]["support"] = "supported"; rerender(a)
+
+
+def m5_unnamed(a):
+    add_span(a, "speaker_1", "05:08", "05:09", "how often")
+    sid = add_span(a, "speaker_0", "05:10", "05:12", "take it three times a day")
+    prompt(a, "p1")["attributes"]["frequency"]["cited_spans"] = [sid]
+
+
+def m5_same_turn(a):
+    sid = add_span(a, "speaker_0", "05:10", "05:12", "remember, three times a day")
+    prompt(a, "p1")["attributes"]["frequency"]["cited_spans"] = [sid]
+
+
+def m5_oc(a): a["roster"][0]["role"] = "other_clinician"
+def m6_tbd(a): prompt(a, "p1")["drug"]["strength_heard"] = "TBD"
+def m6_d1(a): prompt(a, "p1")["drug"]["brand_recognised"] = "Dolo not specified"; rerender(a)
+def m6_q(a): prompt(a, "p2")["drug"]["brand_recognised"] = "Wysolone?"; rerender(a)
+def m6_d4(a): prompt(a, "p2")["drug"]["brand_recognised"] = "Wysolone dose unknown"; rerender(a)
+
+
+def m7_prompt(a):
+    a["confirm_prompts"].append(dict(prompt_id="p2", kind="medicine", action="continue",
+                                     drug=B.drug("Crocin", "PARACETAMOL", brand="Crocin"), attributes=B.attrs(),
+                                     who_said=dict(label="speaker_1", role="patient"),
+                                     doctor_confirm_reason=["notes_only", "patient_reported"]))
+    prov(a, "e1-home")["prompt_id"] = "p2"
+    recount(a)
+    rerender(a)
+
+
+def m8_missing(a): note_sub(a, "METFORMIN 1000 — dose change discussed — confirm\n", "")
+def m8_shown(a): prompt(a, "p2")["attributes"]["strength"]["support"] = "h_unattrib"
+def m8_hidden(a): m8_shown(a); rerender(a)
+def m9(text): return lambda a: set_gx(a, "/examination", text)
+def m9_fu(text): return lambda a: set_gx(a, "/follow_up/follow_up_instructions", text)
+def v12_who(a): prompt(a, "p1")["who_said"]["label"] = "speaker_9"
+def m2_deva(a): plan3(a, "\u0917\u094d\u0932\u093f\u092e\u0947\u092a\u093f\u0930\u093e\u0907\u0921 stopped.")
+def m1_crlf(a): a["note_text"] = a["note_text"].replace("\n", "\r\n")
+def s1_leet(a): plan3(a, "Gl1mepiride stopped.")
+def m4_superseded(a): set_gx_and_note(a, "/general_advice", a["gp_extraction"]["general_advice"] + " You may try steam inhalation.")
+def s1_fuzzy(a): plan3(a, "Glimepride stopped.")
+def s1_spaced(a): plan3(a, "G l i m e p i r i d e stopped.")
+
+
+def s1_xarelto(a):
+    prompt(a, "p1")["drug"].update(spoken="rivaroxaban", generic="RIVAROXABAN", base_molecule="rivaroxaban")
+    prov(a, "e3-glim").update(text="rivaroxaban", names=["rivaroxaban"])
+    plan3(a, "Xarelto stopped.")
+
+
+def s1_ctrl(a): plan3(a, "Glimpse at the reports.")
+def s2_unnamed(a): prov(a, "e1-cbc")["cited_spans"] = ["s7"]
+
+
+def s3_semicolon(a):
+    set_gx_and_note(a, "/general_advice", RF + " " + "; ".join(["No steam for now, it can set off the wheeze", "Avoid dust and smoke"] * 3) + ".")
+
+
+def s4_null(a):
+    p = prompt(a, "p1")
+    p["drug"].update(generic=None, components=[], base_molecule="augmentin")
+    p["doctor_confirm_reason"] = ["notes_only", "lasa", "combination_unexpanded"]
+    rerender(a)
+
+
+def s4_unflagged(a):
+    p = prompt(a, "p1")
+    p["drug"]["lasa_risk"] = dict(pair_with=None, note="not on the curated LASA list")
+    p["doctor_confirm_reason"] = ["notes_only"]
+
+
+def s5(mid): return lambda a: (a["generator"]["models"][0].update(served_model_id=mid), a["qa"]["models_served"].__setitem__(0, mid))
+def s6_salt(spoken): return lambda a: _redrug(a, "p1", spoken=spoken, brand_recognised=None, generic="POTASSIUM CHLORIDE", base_molecule="potassium chloride", strength_heard=None)
+
+
+def _folic_stop(a):
+    prompt(a, "p1")["drug"].update(spoken="folic acid", generic="FOLIC ACID", base_molecule="folic acid")
+    prov(a, "e3-glim").update(text="folic acid", names=["folic acid"])
+
+
+def s6_held(a): _folic_stop(a); plan3(a, "Folic acid stopped.")
+def s6_ctrl(a): _folic_stop(a); plan3(a, "Acid reflux reviewed.")
+
+
 # name, base, mutation, expected verdict, rule that must be named on failure ("-" for pass)
 MUTANTS = [
     ("V0_bad_duration_unit", "ex3", m_bad_unit, "fail", "V0"),
@@ -290,7 +462,7 @@ MUTANTS = [
     ("V6_draft_line_missing", "ex6", m_no_draft_line, "fail", "V6"),
     ("V7_medicine_in_gp_extraction", "ex1", m_med_posted, "fail", "V7"),
     ("V7_medicine_provenance_without_prompt", "ex3", m_med_no_prompt, "fail", "V7"),
-    ("V8_affirmed_from_patient_supports_dose", "ex1", m_affirmed_dose, "fail", "V8"),
+    ("V8_affirmed_from_patient_supports_dose", "ex3", m_affirmed_dose, "fail", "V8"),
     ("V8_translator_created_order", "ex4", m_translator_order, "fail", "V8"),
     ("V8_patient_span_supports_frequency", "ex1", m_patient_freq, "fail", "V8"),
     ("V8_posted_unsupported", "ex5", m_posted_unsupported, "fail", "V8"),
@@ -333,6 +505,72 @@ MUTANTS = [
     ("V16_models_served_empty", "ex1", m_models_empty, "fail", "V16"),
     ("V16_model_id_placeholder", "ex1", m_model_placeholder, "fail", "V16"),
     ("V16_models_served_mismatch", "ex1", m_models_mismatch, "fail", "V16"),
+    ("M1_held_drug_in_diagnosis", "ex3", m1_dx, "fail", "V9"),
+    ("M1_held_drug_in_raw_name_only", "ex3", m1_raw, "fail", "V9"),
+    ("M1_medicine_in_examination", "ex2", m1_exam, "fail", "V7"),
+    ("M1_medicine_in_diagnosis_alias", "ex1", m1_alias, "fail", "V7"),
+    ("M1_note_line_differs_from_source", "ex1", m1_note_only, "fail", "V6"),
+    ("M1_heading_injection_line_break", "ex1", m1_inject, "fail", "V11"),
+    ("M1_medicine_in_comorbidity_without_condition", "ex3", m1_on_drug, "fail", "V7"),
+    ("M1_control_condition_named", "ex3", m1_condition, "pass", "-"),
+    ("M2_cyrillic_homoglyph_held", "ex3", m2_cyr, "fail", "V9"),
+    ("M2_greek_homoglyph_held", "ex3", m2_greek, "fail", "V9"),
+    ("M2_accented_held", "ex3", m2_acc, "fail", "V9"),
+    ("M2_fullwidth_held", "ex3", m2_full, "fail", "V9"),
+    ("M2_zero_width_held", "ex3", m2_zw, "fail", "V9"),
+    ("M2_dotted_held", "ex3", m2_dots, "fail", "V9"),
+    ("M2_hyphenated_held", "ex3", m2_hyph, "fail", "V9"),
+    ("M2_non_ascii_letter_in_note", "ex1", m2_nonascii, "fail", "V11"),
+    ("M3_pand_stop_domperidone_named", "ex3", m3_dom, "fail", "V9"),
+    ("M3_pand_stop_pantoprazole_named", "ex3", m3_panto, "fail", "V9"),
+    ("M3_combination_part_named", "ex6", m3_part, "fail", "V9"),
+    ("M3_control_pand_stop_unnamed", "ex3", m3_ctrl, "pass", "-"),
+    ("M4_warning_without_red_flag_entry", "ex6", m4_no_entry, "fail", "V10"),
+    ("M4_red_flag_marked_without_entry", "ex1", m4_flag, "fail", "V10"),
+    ("M5_affirmed_reason_supported", "ex3", m5_reason, "fail", "V8"),
+    ("M5_who_not_order_capable_supported", "ex5", m5_who, "fail", "V8"),
+    ("M5_value_on_span_not_naming_drug", "ex1", m5_unnamed, "fail", "V8"),
+    ("M5_other_clinician_supports_order", "ex1", m5_oc, "fail", "V8"),
+    ("M5_control_value_in_same_doctor_turn", "ex1", m5_same_turn, "pass", "-"),
+    ("M6_strength_heard_tbd", "ex1", m6_tbd, "fail", "V11"),
+    ("M6_brand_missing_value_phrase", "ex1", m6_d1, "fail", "V11"),
+    ("M6_medication_line_question_mark", "ex6", m6_q, "fail", "V11"),
+    ("M6_medication_line_dose_unknown", "ex6", m6_d4, "fail", "V11"),
+    ("M7_discussed_only_drug_prompted", "ex1", m7_prompt, "fail", "V7"),
+    ("M8_change_dose_line_missing", "ex3", m8_missing, "fail", "V6"),
+    ("M8_change_dose_unsupported_value_shown", "ex3", m8_shown, "fail", "V6"),
+    ("M8_control_unsupported_value_hidden", "ex3", m8_hidden, "pass", "-"),
+    ("M9_guillemets", "ex1", m9("Temperature «100.2» F."), "fail", "V11"),
+    ("M9_angle_quotes", "ex1", m9("Temperature ‹value› F."), "fail", "V11"),
+    ("M9_fullwidth_brackets", "ex1", m9("Temperature ［pending］ F."), "fail", "V11"),
+    ("M9_cjk_angle_brackets", "ex1", m9("Temperature 〈value〉 F."), "fail", "V11"),
+    ("M9_whole_value_NA_dots", "ex1", m9_fu("N.A."), "fail", "V11"),
+    ("M9_whole_value_not_applicable", "ex1", m9_fu("Not applicable"), "fail", "V11"),
+    ("M9_whole_value_not_known", "ex1", m9_fu("Not known"), "fail", "V11"),
+    ("M9_whole_value_pending", "ex1", m9_fu("Pending"), "fail", "V11"),
+    ("M9_whole_value_nil", "ex1", m9_fu("Nil"), "fail", "V11"),
+    ("M9_whole_value_unknown", "ex1", m9_fu("Unknown"), "fail", "V11"),
+    ("M1_note_crlf_line_ends", "ex1", m1_crlf, "fail", "V6"),
+    ("M2_devanagari_held", "ex3", m2_deva, "fail", "V11"),
+    ("M4_superseded_word_rendered", "ex6", m4_superseded, "fail", "V10"),
+    ("M9_tab_control_character", "ex1", m9("Throat\tred."), "fail", "V11"),
+    ("S1_leetspeak_held", "ex3", s1_leet, "fail", "V9"),
+    ("V12_who_said_not_in_roster", "ex1", v12_who, "fail", "V12"),
+    ("S1_fuzzy_misspelt_held", "ex3", s1_fuzzy, "fail", "V9"),
+    ("S1_spaced_letters_held", "ex3", s1_spaced, "fail", "V9"),
+    ("S1_brand_map_alias_held", "ex3", s1_xarelto, "fail", "V9"),
+    ("S1_control_lookalike_word", "ex3", s1_ctrl, "pass", "-"),
+    ("S2_posted_test_not_named_in_span", "ex1", s2_unnamed, "fail", "V8"),
+    ("S3_semicolon_items_over_budget", "ex6", s3_semicolon, "fail", "V10"),
+    ("S4_lasa_brand_generic_null", "ex6", s4_null, "fail", "V14"),
+    ("S4_lasa_combination_unflagged", "ex6", s4_unflagged, "fail", "V14"),
+    ("S5_model_id_default", "ex1", s5("default"), "fail", "V16"),
+    ("S5_model_id_latest", "ex1", s5("latest"), "fail", "V16"),
+    ("S5_model_id_empty", "ex1", s5(""), "fail", "V16"),
+    ("S6_salt_word_only_match", "ex1", s6_salt("potassium tablet"), "fail", "V14"),
+    ("S6_control_salt_full_phrase", "ex1", s6_salt("potassium chloride syrup"), "pass", "-"),
+    ("S6_held_salt_drug_named", "ex3", s6_held, "fail", "V9"),
+    ("S6_control_salt_word_alone", "ex3", s6_ctrl, "pass", "-"),
 ]
 
 

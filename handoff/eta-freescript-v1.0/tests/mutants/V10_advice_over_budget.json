@@ -308,6 +308,70 @@
       "order_capable": true,
       "boundary_quarantined": false,
       "relay_of": null
+    },
+    {
+      "span_id": "s13",
+      "segment_refs": [
+        "MUT:12"
+      ],
+      "t0": "2026-10-15T10:05:10+05:30",
+      "t1": "2026-10-15T10:05:13+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "use the inhaler as shown",
+      "quote_en": "use the inhaler as shown",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s14",
+      "segment_refs": [
+        "MUT:13"
+      ],
+      "t0": "2026-10-15T10:05:15+05:30",
+      "t1": "2026-10-15T10:05:18+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "sleep with the head raised",
+      "quote_en": "sleep with the head raised",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s15",
+      "segment_refs": [
+        "MUT:14"
+      ],
+      "t0": "2026-10-15T10:05:20+05:30",
+      "t1": "2026-10-15T10:05:23+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "keep the window open",
+      "quote_en": "keep the window open",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s16",
+      "segment_refs": [
+        "MUT:15"
+      ],
+      "t0": "2026-10-15T10:05:25+05:30",
+      "t1": "2026-10-15T10:05:28+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "walk slowly",
+      "quote_en": "walk slowly",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
     }
   ],
   "gp_extraction": {
@@ -528,6 +592,58 @@
       "text_en": "Come back in five days.",
       "cited_spans": [
         "s12"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 1,
+      "counselling": false
+    },
+    {
+      "instruction_id": "dw6",
+      "category": "lifestyle",
+      "text_en": "Use the inhaler as shown.",
+      "cited_spans": [
+        "s13"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 1,
+      "counselling": false
+    },
+    {
+      "instruction_id": "dw7",
+      "category": "lifestyle",
+      "text_en": "Sleep with the head raised.",
+      "cited_spans": [
+        "s14"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 1,
+      "counselling": false
+    },
+    {
+      "instruction_id": "dw8",
+      "category": "lifestyle",
+      "text_en": "Keep the window open.",
+      "cited_spans": [
+        "s15"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 1,
+      "counselling": false
+    },
+    {
+      "instruction_id": "dw9",
+      "category": "lifestyle",
+      "text_en": "Walk slowly.",
+      "cited_spans": [
+        "s16"
       ],
       "firmness": "firm",
       "final_position": true,

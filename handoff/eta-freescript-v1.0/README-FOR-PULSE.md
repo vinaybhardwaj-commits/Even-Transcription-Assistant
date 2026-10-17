@@ -2,30 +2,32 @@
 
 ETA records the OPD room, transcribes it and turns each consult into one JSON artifact. This bundle defines version `eta.freescript.v1.0` of that artifact, with a schema, a validator, seven invented examples and a test set. It replaces `eta.freescript.v0.1` (29 Sep). Everything in this bundle is synthetic: no real patient, doctor, room or id appears anywhere.
 
+Every claim below is either checked by `validate_artifact.py` (the rule is named) or marked **generator guarantee (not checked by validator)**. A generator guarantee is tested in ETA's generator, not by this bundle.
+
 ## What Pulse needs to read
 
 Pulse needs only three parts of the artifact:
 
 - the header (`schema_version`, `artifact_id`, `supersedes`, `created_at`, `emission`, `encounter`, `pulse_link`);
-- `gp_extraction`, which has the exact shape of `pulsepb.GPLlmExtraction`, so it can go to `hospitalGPMapper.Build` in place of the extraction LLM's output;
+- `gp_extraction`, which has the exact shape of `pulsepb.GPLlmExtraction` (schema), so it can go to `hospitalGPMapper.Build` in place of the extraction LLM's output;
 - `note_text`, the same content as an English note under the 11 FreeScript headings, for the text path.
 
 Pulse drops unknown keys, so the rest of the artifact can be ignored safely. The rest is ETA's audit and review layer.
 
 ## What changed since v0.1, and why
 
-1. **No medicine is posted.** In v0.1 a medicine in `gp_extraction` was a draft order. In v1.0 the default policy (`notes_only`) leaves `gp_extraction.medicines` empty. Every medicine the consult mentions, including drugs that were stopped or refused, becomes a structured prompt for the doctor to confirm. Room audio cannot always support a medicine order, and a prompt says so honestly. This is why the version is a MAJOR bump.
-2. **Every item cites the speech it came from.** A span registry holds verbatim quotes with times and speaker labels, and every item cites span ids. v0.1 had only free-text evidence quotes.
-3. **Rooms can hold more than two voices.** A roster records each voice and its role (treating doctor, other clinician, patient, attender, staff, translator, unknown). Only the treating doctor's voice can support an order. A translator repeating the doctor can support an item but never create one.
-4. **Each drug attribute stands on its own.** Strength, dose, route, frequency, duration and instruction each cite their own speech and carry their own support state. A patient saying "twice a day" never supports a frequency.
-5. **The doctor's own words are kept.** Each instruction records whether it was firm or hedged, the doctor's final position when they changed their mind, how often they stressed it, and whether it was counselling. Advice is built from these.
-6. **Red flags always carry.** An emergency or return-now condition the doctor says aloud is placed first in General Advice and is never cut by the advice length limit.
-7. **Each prompt names the drug carefully.** It gives the drug as spoken, the brand recognised, the GENERIC in capitals (IMC Regulations 2002 cl. 1.5), combination components, the base molecule with salt words removed, any look-alike/sound-alike risk, and the strength and form as heard.
-8. **Withholding is explicit.** Placeholders, data-structure text and "not stated"-only values are withheld and recorded, never posted.
-9. **Stopped and refused drugs never appear in `note_text`.** v0.1 allowed "Stop X" under Plan, which a text parser can read back as an order. In v1.0 they live only in the confirm prompts and in provenance.
-10. **Every consult in scope gets a record.** `emission` is `full`, or `withheld` with a reason code, so a missing note always has a stated cause.
-11. **Quality checks travel with the artifact.** The `qa` block carries the safety floors and the model ids actually served.
-12. **Duration units match Pulse.** DurationUnit is DAYS, WEEKS, MONTHS, YEARS or HOURS. YEARS is sent directly, no longer as months × 12.
+1. **No medicine is posted.** In v0.1 a medicine in `gp_extraction` was a draft order. In v1.0 the default policy (`notes_only`) leaves `gp_extraction.medicines` empty, and no medicine name may appear in any `gp_extraction` string (V7). Each medicine the doctor decided on, including drugs stopped, held or refused, becomes a structured prompt for the doctor to confirm (V7). A drug the patient only mentioned stays in provenance, with no prompt and no Medication line (V7). This is why the version is a MAJOR bump.
+2. **Every posted item cites the speech it came from.** A span registry holds quotes with times and speaker labels, and every posted item cites span ids (V4, V8, V12). That the quotes are verbatim STT or translation is a generator guarantee (not checked by validator).
+3. **Rooms can hold more than two voices.** A roster records each voice and its role (treating doctor, other clinician, patient, attender, staff, translator, unknown). Only the treating doctor's voice can support an order, and only one voice may order (V8, V13). A translator repeating the doctor can support an item but never create one (V8). Which role each voice really has is a generator guarantee (not checked by validator); the validator checks that the roster obeys the fixed rules.
+4. **Each drug attribute stands on its own.** Strength, dose, route, frequency, duration and instruction each cite their own speech and carry their own support state. A value counts as supported only when the treating doctor says it in a span that names the drug, or in the same turn. A patient saying "twice a day", or a doctor's bare "okay" after the patient said it, never supports a value (V8).
+5. **The doctor's own words are kept.** Each instruction records whether it was firm or hedged, the doctor's final position when they changed their mind, how often they stressed it, and whether it was counselling. Advice is built only from final instructions copied from the doctor's speech (V8, V10). That a hedged instruction is never reworded as firm is a generator guarantee (not checked by validator).
+6. **Red flags always carry.** An emergency or return-now condition the doctor says aloud is placed first in General Advice and is never cut by the advice length limit. Every warning instruction must have a red flag entry (V10).
+7. **Each prompt names the drug carefully.** It gives the drug as spoken, the brand recognised, the GENERIC in capitals (IMC Regulations 2002 cl. 1.5), combination components, the base molecule with salt words removed, any look-alike/sound-alike risk, and the strength and form as heard (schema, V14).
+8. **Placeholders never post.** Placeholders, data-structure text, brackets and "not stated"-only values are rejected in every posted string and in `note_text` (V11). Recording each withheld field in provenance is a generator guarantee (not checked by validator).
+9. **Stopped and refused orders are never named.** v0.1 allowed "Stop X" under Plan, which a text parser can re-extract as an order. In v1.0 a stopped, held or refused order is never named in `note_text` or in any `gp_extraction` string (V9). It lives only in the confirm prompts and in provenance.
+10. **Every consult in scope gets a record.** `emission` is `full`, or `withheld` with a reason code (V15). That ETA emits a record for every consult in scope is a generator guarantee (not checked by validator).
+11. **Quality checks travel with the artifact.** The `qa` block carries the safety floors and the served model ids. The validator re-checks the counts and the red-flag floor itself (V2, V10) and requires the other floors to read 0. That the other floor values were measured is a generator guarantee (not checked by validator).
+12. **Duration units match Pulse.** DurationUnit is DAYS, WEEKS, MONTHS, YEARS or HOURS. YEARS is sent directly, no longer as months × 12 (schema).
 
 ## The fields
 
@@ -35,17 +37,17 @@ Pulse drops unknown keys, so the rest of the artifact can be ignored safely. The
 | `artifact_id`, `supersedes`, `created_at` | This artifact's id, the id it replaces (or null), and when it was written. |
 | `emission` | `state` is `full` or `withheld`. A withheld artifact gives reason codes: `no_bundle`, `no_role_track`, `no_stt`, `never_queued`, `no_order_capable_span`, `validator_fail`. |
 | `policy` | `medicine_policy` (`notes_only`, the default; `taped_draft` is reserved), the advice budget (5 items / 300 characters) and the inputs mode. |
-| `generator` | Code and prompt hashes, the models used (each with the served model id the provider returned), temperature and run id. Every model call is zero-data-retention. |
+| `generator` | Code and prompt hashes, the models used (each with a served model id), temperature and run id. That every model call is zero-data-retention is a generator guarantee (not checked by validator). |
 | `encounter` | ETA's encounter id, room, IST visit date, consult window, languages and transcript facts. |
-| `pulse_link` | The ids Pulse needs to bind the artifact, each null when ETA does not know it. ETA never guesses an id. Unchanged from v0.1. |
-| `roster` | One entry per voice: role, the three role votes (fields `role_track`, `clef`, `jev`), whether all three said treating doctor, the voiceprint check, translator link and whether the voice may order. |
-| `spans` | The cited speech: segment refs, times, speaker label, native and English quotes (both verbatim), and whether the span may support an order. |
-| `gp_extraction` | `pulsepb.GPLlmExtraction`, field for field. ETA never adds keys. Only supported items appear. |
-| `confirm_prompts` | One per medicine, and one per order that cannot be supported. Each has an action (start, continue, stop, hold, change_dose, not_given), the drug-naming block, per-attribute support, who said it and why the doctor must confirm. |
+| `pulse_link` | The ids Pulse needs to bind the artifact, each null when ETA does not know it. Unchanged from v0.1. That ETA never guesses an id is a generator guarantee (not checked by validator). |
+| `roster` | One entry per voice: role, the votes of three independent role voters, whether all three said treating doctor, the voiceprint check, translator link and whether the voice may order. |
+| `spans` | The cited speech: segment refs, times, speaker label, native and English quotes, and whether the span may support an order. |
+| `gp_extraction` | `pulsepb.GPLlmExtraction`, field for field. ETA never adds keys (schema). Only supported items appear (V8). |
+| `confirm_prompts` | One per medicine the doctor decided on, and one per order that cannot be supported. Each has an action (start, continue, stop, hold, change_dose, not_given), the drug-naming block, per-attribute support, who said it and why the doctor must confirm. |
 | `doctor_words` | The doctor's instructions with firmness, final position, emphasis and counselling flags. |
 | `red_flags` | Conditions the doctor stated that must always be shown. |
-| `provenance` | One record for every posted item, prompt, kept-out item and withheld field, with its status, support, cited spans and pointer into `gp_extraction`. |
-| `note_text` | The 11 headings, rendered only from the posted items, red flags and doctor's words. Absent when withheld. |
+| `provenance` | One record for every posted item and prompt (V2), and for kept-out items and withheld fields, with status, support, cited spans and pointer into `gp_extraction`. |
+| `note_text` | The 11 headings. The validator renders the note from `gp_extraction` and `confirm_prompts` and requires `note_text` to match that rendering line for line (V5, V6). Absent when withheld (V15). |
 | `qa` | Safety floors, counts, the inputs used, the served model ids and the neutral render template id. |
 
 The Medication section of `note_text` looks like this:
@@ -53,37 +55,40 @@ The Medication section of `note_text` looks like this:
 ```
 Medication: Draft list, not a prescription; the treating doctor checks each drug.
 AMOXICILLIN + CLAVULANIC ACID (Augmentin 625 Duo) — confirm
+METFORMIN 1000 — dose change discussed — confirm
 PREDNISOLONE — confirm
 ```
 
-## Guarantees
+A strength appears on a line only when the treating doctor stated it for that drug (V6, V8).
 
-`validate_artifact.py` checks each artifact against the schema and these sixteen rules. ETA refuses to send an artifact that fails any of them.
+## Guarantees checked by the validator
+
+`validate_artifact.py` checks each artifact against the schema and these sixteen rules. Name matching folds case, accents, invisible characters, lookalike Cyrillic and Greek letters, hyphens, dots and spaced-out letters before comparing.
 
 | Rule | Guarantee |
 |---|---|
 | V1 | Every pointer from provenance into `gp_extraction` resolves, and each is claimed once. |
-| V2 | Every posted entry, prompt and kept-out item has exactly one provenance record, and the `qa` counts match. |
-| V3 | A stopped or not-given order never appears in a `gp_extraction` list under any name ETA holds for it. |
+| V2 | Every posted entry and prompt has exactly one provenance record of the right kind, ids are unique, and the `qa` counts match. |
+| V3 | A stopped, held or not-given order never appears in a `gp_extraction` list under any name ETA holds for it. |
 | V4 | Every posted item cites speech, or carries the `no_evidence` flag. |
 | V5 | `note_text` has the 11 FreeScript headings, once each, in order. |
-| V6 | Each order section of `note_text` has one line per posted entry. Medication holds only the draft line and one confirm line per start or continue prompt. |
-| V7 | Under `notes_only`, `gp_extraction.medicines` is empty and every medicine has a confirm prompt. |
-| V8 | A posted order and every supported drug attribute stand on speech from the voice allowed to order; a note item stands on a doctor's speech. A patient's words that the doctor only acknowledged never support a drug or dose. |
-| V9 | No stopped, held or not-given order is named anywhere in `note_text`, under its generic, brand, alias, base molecule or a split spelling. |
-| V10 | Red flags come first in General Advice and survive the length limit; the rest stays within 5 items and 300 characters. |
-| V11 | No placeholder, bracket, data-structure text, "not stated"-only value, "TBD" or addressed-to-doctor phrase in any posted string or in `note_text`. |
+| V6 | `note_text` equals the rendering of `gp_extraction` and `confirm_prompts`, section by section and line by line. Medication holds only the draft line and one confirm line per start, continue or change_dose prompt. |
+| V7 | Under `notes_only`, `gp_extraction.medicines` is empty, no medicine name appears in any `gp_extraction` string (except a condition such as "insulin resistance" in a diagnosis or comorbidity), every decided medicine has a prompt, and a drug the patient only mentioned has none. |
+| V8 | A posted order cites a span of the order-capable treating doctor that names it. A supported drug attribute is said by the order-capable treating doctor, in a span that names the drug or in the same turn. A patient-affirmed prompt, or a prompt from any other voice, never has a supported value. Advice and red flags are copied from the doctor's speech. |
+| V9 | No stopped, held or not-given order is named in `note_text` or in any `gp_extraction` string: not under its generic, brand, alias, any combination component, a split or spaced spelling, or a close misspelling. |
+| V10 | Red flags come first in General Advice and survive the length limit. Every warning instruction has a red flag. The rest are final doctor instructions within 5 items and 300 characters. |
+| V11 | No placeholder, bracket of any kind, data-structure text, "not stated"-only value (N/A, nil, unknown, pending and similar), "TBD", addressed-to-doctor phrase, invisible or control character, or line break in any posted string, drug field or `note_text`; no non-ASCII letter in any posted string, rendered drug field or `note_text`. |
 | V12 | Every cited span exists, lies inside the consult window, and is not at a quarantined consult boundary. |
-| V13 | The roster is consistent: at most one voice may order, chosen by fixed rules; a voiceprint conflict means no voice may order; with the voiceprint gate off, the voiceprint never contributes. |
-| V14 | No drug name is matched on a salt or qualifier word alone ("acid reflux" never becomes folic acid), combinations expand only when the curated map attests them, and every look-alike/sound-alike drug is flagged. |
+| V13 | The roster is consistent. At most one voice may order, and it must be the treating doctor, chosen by fixed rules. A voiceprint conflict means no voice may order. With the voiceprint gate off, the voiceprint never contributes. |
+| V14 | No drug name is matched on a salt or qualifier word alone ("acid reflux" never becomes folic acid; "potassium" alone never becomes potassium chloride). Combinations expand only when the curated map attests them. Every look-alike/sound-alike drug, whether named by generic or by brand, is flagged. |
 | V15 | A withheld artifact has a reason code, an empty `gp_extraction` and no `note_text`. |
-| V16 | The served model ids are recorded, non-empty and read back from the calls. |
+| V16 | Model ids are present and well-shaped (not empty, "default", "latest", "unknown" or similar), and `qa.models_served` matches `generator.models`. The validator checks the shape of model ids only. That they were read back from the calls is a generator guarantee (not checked by validator). |
 
 ## Limits
 
 - An artifact proves what was said in the room, not what is clinically right. The doctor confirms every medicine.
-- The brand-to-generic map, the salt-word list and the look-alike list in `data/` are small curated lists. A brand that is not in the map stays unresolved; a combination brand that is not attested stays unexpanded.
-- Speaker roles come from automatic voting and voice matching. When they disagree, no voice may order and everything becomes a prompt, which is safe but adds work for the doctor.
+- The brand-to-generic map, the medicine-name list, the salt drugs and the look-alike list in `data/` are small curated lists. A brand that is not listed and not spoken next to its generic can slip past the name checks; a combination brand that is not attested stays unexpanded.
+- Speaker roles come from automatic voting and voice matching. When they disagree, no voice may order and everything becomes a prompt. This is safe, but it adds work for the doctor.
 - `taped_draft`, which would post well-supported medicines as draft lines, is reserved. The validator rejects any posted medicine until it is agreed.
 - The examples are invented and short. They show the shape and the rules, not real performance.
 
@@ -110,22 +115,23 @@ One question sits with ETA's clinical owner rather than Pulse: should the generi
 ## Integration sketch
 
 1. Read `schema_version`. Route `eta.freescript.v0.1` to the current path and `eta.freescript.v1.0` to the new one.
-2. If `emission.state` is `withheld`, ingest nothing. Log the reason codes.
-3. Bind with `pulse_link`. If the ids are not enough to bind with confidence, ingest nothing (Q2).
-4. Pass `gp_extraction` to `hospitalGPMapper.Build`. Its `medicines` list is empty under `notes_only`.
-5. Show `confirm_prompts` to the doctor as a checklist (Q5). Each confirmed medicine becomes a prescription line only through the doctor's action.
-6. Use `note_text` only for the text path. Never parse orders out of it.
-7. Treat a later artifact whose `supersedes` names an earlier `artifact_id` as a replacement, not an addition (Q6).
+2. Run `validate_artifact.py` (or an equivalent port) and ingest nothing that fails.
+3. If `emission.state` is `withheld`, ingest nothing. Log the reason codes.
+4. Bind with `pulse_link`. If the ids are not enough to bind with confidence, ingest nothing (Q2).
+5. Pass `gp_extraction` to `hospitalGPMapper.Build`. Its `medicines` list is empty under `notes_only`.
+6. Show `confirm_prompts` to the doctor as a checklist (Q5). A confirmed medicine becomes a prescription line only through the doctor's action.
+7. Use `note_text` only for the text path. Never parse orders out of it.
+8. Treat a later artifact whose `supersedes` names an earlier `artifact_id` as a replacement, not an addition (Q6).
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `eta-freescript-artifact.v1.0.schema.json` | JSON Schema (draft-07). |
-| `validate_artifact.py` | Schema plus V1–V16. `python3 validate_artifact.py FILE...`; exits 1 on any failure and prints one line per failure naming its rule (V0 is the schema). Needs `jsonschema`. |
-| `data/*.json` | The curated look-alike pairs, salt and qualifier words, brand-to-generic map and FRX-N1 phrases. |
+| `validate_artifact.py` | Schema plus V1–V16, and the note renderer. `python3 validate_artifact.py FILE...`; exits 1 on any failure and prints one line per failure naming its rule (V0 is the schema). Needs `jsonschema`. |
+| `data/*.json` | The curated look-alike pairs, salt and qualifier words, salt drugs, medicine names, brand-to-generic map and FRX-N1 phrases. |
 | `examples/ex1`–`ex7` and `build_examples.py` | Seven invented valid artifacts and their deterministic builder. |
-| `tests/mutants/`, `tests/expected.tsv`, `tests/build_mutants.py`, `tests/run_mutants.py` | 62 one-change artifacts, at least two per rule, with their expected verdicts. |
+| `tests/mutants/`, `tests/expected.tsv`, `tests/build_mutants.py`, `tests/run_mutants.py` | One-change artifacts with their expected verdicts: at least two per rule, plus an adversarial set for each fix item. |
 | `run_checks.sh` | Runs all checks; exits 0 only when every example is valid, every mutant matches and both builders reproduce their output byte for byte. |
 | `CHANGELOG-v0.1-to-v1.0.md` | Field-by-field diff. |
 | `HANDOFF-INDEX.md` | sha256 of every file, and the privacy sweep. |

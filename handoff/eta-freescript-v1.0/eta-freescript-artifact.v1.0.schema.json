@@ -1268,6 +1268,10 @@
         },
         "counselling": {
           "type": "boolean"
+        },
+        "red_flag": {
+          "type": "boolean",
+          "description": "Set by the generator when the instruction is an emergency or return-now condition; it then needs a matching red_flags entry (V10)."
         }
       },
       "allOf": [

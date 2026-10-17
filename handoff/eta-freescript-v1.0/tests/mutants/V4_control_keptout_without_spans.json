@@ -394,69 +394,6 @@
       "doctor_confirm_reason": [
         "notes_only"
       ]
-    },
-    {
-      "prompt_id": "p2",
-      "kind": "medicine",
-      "action": "continue",
-      "drug": {
-        "spoken": "Crocin",
-        "brand_recognised": "Crocin",
-        "generic": "PARACETAMOL",
-        "components": [],
-        "base_molecule": "paracetamol",
-        "form": "tablet",
-        "strength_heard": null,
-        "lasa_risk": {
-          "pair_with": null,
-          "note": "not on the curated LASA list"
-        }
-      },
-      "attributes": {
-        "strength": {
-          "value": null,
-          "cited_spans": [],
-          "support": "not_stated"
-        },
-        "dose": {
-          "value": "one",
-          "cited_spans": [
-            "s3",
-            "s4"
-          ],
-          "support": "affirmed_from_patient"
-        },
-        "route": {
-          "value": null,
-          "cited_spans": [],
-          "support": "not_stated"
-        },
-        "frequency": {
-          "value": null,
-          "cited_spans": [],
-          "support": "not_stated"
-        },
-        "duration": {
-          "value": null,
-          "cited_spans": [],
-          "support": "not_stated"
-        },
-        "instruction": {
-          "value": null,
-          "cited_spans": [],
-          "support": "not_stated"
-        }
-      },
-      "who_said": {
-        "label": "speaker_1",
-        "role": "patient"
-      },
-      "doctor_confirm_reason": [
-        "notes_only",
-        "patient_reported",
-        "affirmed_from_patient",
-        "strength_unstated"
-      ]
     }
   ],
   "doctor_words": [
@@ -544,7 +481,7 @@
       "alignment": "aligned_llm",
       "span_source": "both",
       "json_pointer": null,
-      "prompt_id": "p2",
+      "prompt_id": null,
       "withheld_reason": null,
       "flags": [
         "affirmed_from_patient",
@@ -662,7 +599,7 @@
       "flags": []
     }
   ],
-  "note_text": "Co-morbidities:\nPresenting Complaint: Fever for 2 days with body ache.\nExamination: Temperature 100.2 F. Throat mildly congested. Chest clear.\nDiagnoses: ?Acute viral fever\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nPARACETAMOL (Dolo 650) — confirm\nPARACETAMOL (Crocin) — confirm\nFurther Investigation: Complete Blood Count\nFollow up: Come back if the fever lasts beyond 3 days.\nRefer to:\nGeneral Advice: Drink plenty of water and take rest.",
+  "note_text": "Co-morbidities:\nPresenting Complaint: Fever for 2 days with body ache.\nExamination: Temperature 100.2 F. Throat mildly congested. Chest clear.\nDiagnoses: ?Acute viral fever\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nPARACETAMOL (Dolo 650) — confirm\nFurther Investigation: Complete Blood Count\nFollow up: Come back if the fever lasts beyond 3 days.\nRefer to:\nGeneral Advice: Drink plenty of water and take rest.",
   "qa": {
     "floors": {
       "untaped_drugs": 0,
@@ -676,7 +613,7 @@
     },
     "counts": {
       "posted": 6,
-      "prompts": 2,
+      "prompts": 1,
       "withheld": 1,
       "h_unattrib": 0,
       "unaligned": 0,
