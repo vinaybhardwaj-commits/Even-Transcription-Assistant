@@ -70,6 +70,13 @@ N1_MED = [(p["id"], re.compile(p["regex"])) for p in _N1["d4_medication_only"]]
 N1_SECTIONS = set(_N1["order_sections"])
 D4_FIELDS, D4_MISSING = set(_N1["d4_fields"]), set(_N1["d4_missing"])
 FILLER = re.compile(_N1["filler_line"])
+EN_WORDS = set(_data("english_words_min.json")["words"])
+_DP = _data("dose_patterns.json")
+DOSE_RX = [(p["id"], re.compile(p["regex"].replace("{N}", _DP["number"])), p.get("history_exempt", False)) for p in _DP["patterns"]]
+HISTORY_PATHS = re.compile(_DP["history_paths"])
+ORDER_VERBS, SKIP_WORDS = set(_DP["order_verbs"]), set(_DP["skip_words"])
+_CR = _data("copy_rules.json")
+NEGATORS, NEG_SUFFIX, ACTION_WORDS = set(_CR["negators"]), _CR["negator_suffix"], set(_CR["action_words"])
 
 HEADINGS = ["Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses", "Plan of Management",
             "Surgery or Procedure", "Medication", "Further Investigation", "Follow up", "Refer to", "General Advice"]
@@ -135,8 +142,27 @@ def runs(text, max_len=6):
     return {"".join(a[i:j]) for i in range(len(a)) for j in range(i + 1, min(len(a), i + max_len) + 1)}
 
 
+def edit1(a, b):
+    """Levenshtein distance <= 1."""
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) > len(b):
+        a, b = b, a
+    i = 0
+    while i < len(a) and a[i] == b[i]:
+        i += 1
+    return a[i:] == b[i + 1:] or (len(a) == len(b) and a[i + 1:] == b[i + 1:])
+
+
 def fuzzy_hit(key, rs):
-    return any(abs(len(r) - len(key)) <= 3 and difflib.SequenceMatcher(None, key, r).ratio() >= FUZZY for r in rs)
+    """Close misspelling of a held name: ratio >= 0.85 for keys of 6+ letters, edit distance 1 for keys of 4-5 letters.
+    A common English word is never a misspelling ('and' is not 'pand')."""
+    rs = [r for r in rs if r not in EN_WORDS]
+    if len(key) >= 6:
+        return any(abs(len(r) - len(key)) <= 3 and difflib.SequenceMatcher(None, key, r).ratio() >= FUZZY for r in rs)
+    if len(key) >= 4:
+        return any(r != key and edit1(key, r) for r in rs)
+    return False
 
 
 def brand_entry(name):
@@ -148,10 +174,11 @@ def brand_entry(name):
 
 
 def shown_value(p):
-    """The value a Medication line may show: supported on the treating doctor's span (V8 checks the support)."""
+    """The value a Medication line may show, supported on the treating doctor's span (V8 checks the support).
+    change_dose shows only the NEW dose (the dose attribute), never the old strength; unsupported means no number."""
     at = p["attributes"]
-    if p["action"] == "change_dose" and at["dose"]["support"] == "supported":
-        return at["dose"]["value"]
+    if p["action"] == "change_dose":
+        return at["dose"]["value"] if at["dose"]["support"] == "supported" else None
     return at["strength"]["value"] if at["strength"]["support"] == "supported" else None
 
 
@@ -322,6 +349,22 @@ def held_names(prov_item, prompt):
     return [n for n in names if n and n.strip()]
 
 
+def qualified_by_condition(text, key):
+    """Every occurrence of the drug key sits next to a condition word that qualifies it ('insulin resistance',
+    'metformin-induced', 'allergy to penicillin'); the rest of the string earns no exemption."""
+    a = alpha_toks(text)
+    occ = [(i, j) for i in range(len(a)) for j in range(i + 1, min(len(a), i + 6) + 1) if "".join(a[i:j]) == key]
+    if not occ:
+        return False
+    for i, j in occ:
+        after = a[j] if j < len(a) else ""
+        before = a[i - 1] if i >= 1 else ""
+        before2 = a[i - 2] if i >= 2 else ""
+        if not (after in CONDITION_CONTEXT or before in CONDITION_CONTEXT or (before in ("to", "of") and before2 in CONDITION_CONTEXT)):
+            return False
+    return True
+
+
 def parse_dt(v):
     return datetime.fromisoformat(v.replace("Z", "+00:00"))
 
@@ -333,10 +376,59 @@ def value_heard(value, quote):
     return bool(want) and all(t in have for t in want)
 
 
-def words_from(text, quotes):
-    """text_en is copied or minimally joined from its cited quotes: each of its 3+ letter words occurs in them."""
-    have = {t for q in quotes for t in toks(q)}
-    return all(t in have for t in toks(text) if len(t) >= 3 and not t[0].isdigit())
+def _norm_ws(s):
+    return " ".join(unicodedata.normalize("NFKC", s or "").replace("\u2019", "'").replace("\u2018", "'").casefold().split())
+
+
+_WORD = re.compile(r"[a-z]+(?:'[a-z]+)?")
+
+
+def _negators(s):
+    return [m.span() for m in _WORD.finditer(s) if m.group(0) in NEGATORS or m.group(0).endswith(NEG_SUFFIX)]
+
+
+def copied_from(text, quotes, whole_sentences=False):
+    """None when text is a contiguous, word-aligned substring of one quote (whitespace and case normalised; one final
+    '.' or '!' may be added) and no negator of that quote falls outside the copied part; else the reason it is not.
+    whole_sentences: the copied part must also start and end on sentence boundaries of the quote (no truncation)."""
+    t = _norm_ws(text)
+    t = t[:-1] if t[-1:] in ".!" else t
+    if not t:
+        return "empty text"
+    why = "not a contiguous substring of any cited quote"
+    for q in quotes:
+        qn = _norm_ws(q)
+        i = qn.find(t)
+        while i >= 0:
+            j = i + len(t)
+            if (i == 0 or not qn[i - 1].isalnum()) and (j == len(qn) or not qn[j].isalnum()):
+                outside = [s for s in _negators(qn) if s[1] <= i or s[0] >= j]
+                cut = whole_sentences and not ((i == 0 or re.search(r"[.;!?]\s*$", qn[:i])) and (j == len(qn) or re.match(r"\s*[.;!?]", qn[j:])))
+                if not outside and not cut:
+                    return None
+                why = "drops the negator '%s' of its quote" % qn[outside[0][0]:outside[0][1]] if outside else "truncates a sentence of its quote"
+            i = qn.find(t, i + 1)
+    return why
+
+
+def dose_hits(text, history=False):
+    t = unicodedata.normalize("NFKC", text or "")
+    return [pid for pid, rx, hist in DOSE_RX if not (history and hist) and rx.search(t)]
+
+
+def unresolved_after_verbs(text):
+    """Words that follow an order verb ('start X', 'take X') and are neither English nor clinical vocabulary."""
+    a = [w for w in re.findall(r"[a-z]+", fold(text))]
+    out = []
+    for i, w in enumerate(a):
+        if w in ORDER_VERBS:
+            for x in a[i + 1:i + 6]:
+                if x in SKIP_WORDS:
+                    continue
+                if x not in EN_WORDS:
+                    out.append((w, x))
+                break
+    return out
 
 
 def d4(text, med=False):
@@ -543,8 +635,8 @@ def check(a):
     if notes_only:
         for path, s in gx_strings:
             hits = med_keys & runs(s)
-            if hits and CONDITION_PATHS.match(path) and CONDITION_CONTEXT & set(alpha_toks(s)):
-                continue
+            if hits and CONDITION_PATHS.match(path):
+                hits = {k for k in hits if not qualified_by_condition(s, k)}
             for k in sorted(hits):
                 E("V7 gp_extraction%s names the medicine '%s' under notes_only" % (path, k))
 
@@ -585,8 +677,6 @@ def check(a):
     for w in a["doctor_words"]:
         if not any(cap_td(s) for s in w["cited_spans"]):
             E("V8 %s: doctor_words cites no order-capable span of the treating doctor" % w["instruction_id"])
-        if not words_from(w["text_en"], [spans[s]["quote_en"] for s in w["cited_spans"] if s in spans]):
-            E("V8 %s: doctor_words text_en is not copied from its cited spans" % w["instruction_id"])
     for sid, s in spans.items():
         if s["relay_of"] is not None:
             if s["label"] not in roster or roster[s["label"]]["role"] != "translator":
@@ -607,7 +697,7 @@ def check(a):
             hit = sorted(k for k in keys if len(k) >= 3 and k in rs)
             is_drug = (p.get("kind") or pr["kind"]) == "medicine"
             if not hit and is_drug:
-                hit = sorted(k for k in keys if len(k) >= 6 and fuzzy_hit(k, rs))
+                hit = sorted(k for k in keys if len(k) >= 4 and fuzzy_hit(k, rs))
             if hit:
                 E("V9 %s: held %s named in %s as '%s'" % (p.get("item_id") or pr["prompt_id"], p.get("kind") or pr["kind"], where, hit[0]))
     if isinstance(note, str) and any(pr["kind"] == "medicine" and pr["action"] in HELD_ACTIONS for pr in prompts):
@@ -623,8 +713,6 @@ def check(a):
     for i, f in enumerate(rfs):
         if not any(role_of(s) in DOCTOR_ROLES for s in f["cited_spans"]):
             E("V10 red flag %d cites no doctor span" % i)
-        if not words_from(f["text_en"], [spans[s]["quote_en"] for s in f["cited_spans"] if s in spans]):
-            E("V10 red flag %d text is not copied from its cited spans" % i)
     rest = split_items(adv[len(prefix):] if rfs and adv.startswith(prefix) else adv)
     bud = a["policy"]["advice_budget"]
     if len(rest) > bud["items"] or len(" ".join(rest)) > bud["chars"]:
@@ -795,6 +883,8 @@ def check(a):
                 E("V14 %s: unattested combination brand must stay combination_unexpanded with no generic" % pid)
         if d["generic"] is None and "combination_unexpanded" not in pr["doctor_confirm_reason"]:
             E("V14 %s: generic is null without combination_unexpanded" % pid)
+        if d["generic"] is None and (d["lasa_risk"]["pair_with"] is None or "lasa" not in pr["doctor_confirm_reason"]):
+            E("V14 %s: generic is null, so the drug must carry lasa_risk and the lasa reason" % pid)
         mapped = [e["generic"]] + e["components"] if e else []
         hit = set()
         for n in [d["generic"] or "", d["base_molecule"], d["spoken"], d["brand_recognised"] or ""] + d["components"] + mapped:
@@ -835,6 +925,48 @@ def check(a):
         E("V16 qa.inputs.mode %s != policy.inputs_mode %s" % (qa["inputs"]["mode"], a["policy"]["inputs_mode"]))
     if not qa["floors"]["validator_pass"]:
         E("V16 qa.floors.validator_pass is false")
+
+    # V17 copied text: doctor_words, advice items and red flags are contiguous substrings of a cited quote, negators kept
+    for w in a["doctor_words"]:
+        why = copied_from(w["text_en"], [spans[s]["quote_en"] for s in w["cited_spans"] if s in spans])
+        if why:
+            E("V17 %s: text_en %s" % (w["instruction_id"], why))
+    for i, f in enumerate(rfs):
+        why = copied_from(f["text_en"], [spans[s]["quote_en"] for s in f["cited_spans"] if s in spans], whole_sentences=True)
+        if why:
+            E("V17 red flag %d: %s" % (i, why))
+        if not ACTION_WORDS & set(re.findall(r"[a-z]+", fold(f["text_en"]))):
+            E("V17 red flag %d has no action clause (go, come, call, return ...)" % i)
+    adv_quotes = [spans[s]["quote_en"] for w in a["doctor_words"] if w["final_position"] and w["category"] in ADVICE_CATS
+                  for s in w["cited_spans"] if s in spans]
+    for x in rest:
+        why = copied_from(x.rstrip(";"), adv_quotes)
+        if why:
+            E("V17 advice item '%s': %s" % (x[:50], why))
+
+    # V18 dose patterns and medicine-like mentions: no regimen text and no unresolved drug-like word in posted text
+    for path, s in gx_strings:
+        if path.startswith("/medicines/"):
+            continue
+        for pid in dose_hits(s, history=bool(HISTORY_PATHS.match(path))):
+            E("V18 gp_extraction%s carries a dose pattern (%s) where no medicine may stand" % (path, pid))
+        if notes_only and FORM_WORDS & set(re.findall(r"[a-z]+", fold(s))) - {"inhaler"}:
+            E("V18 gp_extraction%s names a dosage form (tablet, syrup ...): a medicine-like mention" % path)
+        if path in ("/plan_of_management/management_plan", "/general_advice", "/follow_up/follow_up_instructions"):
+            for verb, word in unresolved_after_verbs(s):
+                E("V18 gp_extraction%s: '%s %s' is a medicine-like word that resolves to no listed prompt" % (path, verb, word))
+    if isinstance(note, str):
+        for h, lines in raw_sections(note).items():
+            if h == "Medication":
+                for line in lines[1:]:
+                    head = line.split(" (")[0].split(" — ")[0]
+                    if not any(len(x) >= 3 for x in alpha_toks(head)):
+                        E("V18 note Medication line '%s' carries no drug name" % line[:40])
+                continue
+            hist = h in ("Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses")
+            for line in lines:
+                for pid in dose_hits(line, history=hist):
+                    E("V18 note %s line carries a dose pattern (%s)" % (h, pid))
     return errs
 
 

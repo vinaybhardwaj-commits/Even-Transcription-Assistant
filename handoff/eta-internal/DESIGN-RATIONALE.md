@@ -225,3 +225,19 @@ New Builder ASSUMPTIONs:
 - **A28** Every advice item after the red flags must be a final_position doctor_words text, and doctor_words and red flag texts must be copied from their cited quotes (each 3+ letter word appears there).
 - **A29** Fuzzy held-name matching (ratio ≥ 0.85) applies to held medicines only, on keys of 6+ letters; investigations match exactly after folding.
 - **A30** A prompt's `who_said` label and role must match the roster (V12).
+
+---
+
+## Fix round 2 (17 Oct): rulings R1-R8 and new Builder ASSUMPTIONs
+
+Rulings applied: R1 copy rule (new V17), R2 dose-pattern guard and R3 medicine-like mentions (new V18; V7 condition exemption now needs adjacency), R4 change_dose new dose only, R5 edit distance 1 for 4-5 letter held names, R6 null generic needs lasa_risk (V14), R7 README rows V7/V9/V10 rewritten as catches / does not catch, R8 run_checks fails on any `__pycache__`. A26 (with generator-side ASCII folding in `build_examples.ascii_fold`), A27 and A30 accepted. A24, A25, A28 and A29 are superseded by R4, R2/R3, R1 and R5.
+
+- **A31** Copy rule: only whitespace, case, curly-versus-straight apostrophes and one added final `.` or `!` may differ. When an item cites several quotes, one quote that fully contains it with no negator outside the copied part is enough.
+- **A32** The negators are not, never, no, nor, avoid, stop, without, cannot, neither, none, nothing and any word ending in n't (`data/copy_rules.json`). A red flag must be whole sentences of its quote (boundaries `.` `;` `!` `?`) and contain an action word (go, come, call, return, rush, visit, seek, attend, report, contact, see, dial, get).
+- **A33** "for N days" is a dose pattern everywhere except the illness-history fields (symptoms, diagnoses, comorbidities, examination), where it is a duration of illness. Lab units with a slash (mg/dL, g/dL) and ISO dates are not doses.
+- **A34** Under notes_only no gp_extraction field may hold a medicine, so "a dose pattern next to an unlisted word" reduces to "any dose pattern in any gp string outside /medicines".
+- **A35** A medicine-like mention is a dosage-form word anywhere, or, in Plan, Advice and Follow up, a word after an order verb that is in neither the vendored English list nor the clinical word list (`data/english_words_min.json`, 8.7k words; the drug-name words "acid" and "vitamin" and one word that collides with ETA's internal-name sweep were removed).
+- **A36** change_dose carries its new dose in the `dose` attribute. The line shows it only when supported, never the strength. Without it the line is `GENERIC (Brand) — dose change discussed — confirm` with no number. R4's "dose — confirm" is read as that existing tail.
+- **A37** Fuzzy held-name matching never treats a common English word as a misspelling, at any key length.
+- **A38** A null generic must carry `lasa_risk.pair_with` (for example "unresolved generic") and the `lasa` reason.
+- **A39** A condition word "sits next to" a drug name when it is the word directly before or after it, or "allergy/allergic to/of" precedes it. Every occurrence of the drug in the string must be so qualified.

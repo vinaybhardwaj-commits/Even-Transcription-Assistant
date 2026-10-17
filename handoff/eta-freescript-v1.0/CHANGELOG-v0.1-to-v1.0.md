@@ -67,7 +67,7 @@ Legend: **same** = unchanged, **changed**, **new**, **removed**.
 | Rule | v0.1 | v1.0 | Change |
 |---|---|---|---|
 | headings | 11, in order, once each | the same | same |
-| Medication section | one line per posted medicine | `Draft list, not a prescription; the treating doctor checks each drug.` then one `GENERIC (Brand) strength — confirm` line per start or continue prompt, and `GENERIC (Brand) — dose change discussed — confirm` per change_dose prompt; a strength shows only when the treating doctor stated it | changed |
+| Medication section | one line per posted medicine | `Draft list, not a prescription; the treating doctor checks each drug.` then one `GENERIC (Brand) strength — confirm` line per start or continue prompt, and `GENERIC (Brand) — dose change discussed — confirm` per change_dose prompt, showing only the new dose the doctor stated; a strength shows only when the treating doctor stated it | changed |
 | stopped / not-given orders | "Stop X" allowed under Plan | never named in note_text or any gp_extraction string; Plan says `Medication changes discussed: see the confirm list.` | changed |
 | placeholders, brackets, reprs, "TBD", FRX-N1 phrases | not checked | rejected (V11) | new |
 | source | same content as gp_extraction | must equal the validator's rendering of gp_extraction and confirm_prompts, line for line; advice comes only from red_flags and final doctor_words | changed |
@@ -82,6 +82,6 @@ Legend: **same** = unchanged, **changed**, **new**, **removed**.
 | G4 evidence or no_evidence flag | V4, evidence is `cited_spans` |
 | G5 11 headings | V5, also rejects a heading-shaped line outside the 11 |
 | G6 one line per order entry | V6, plus the exact Medication rendering |
-| none | V7 to V16 (see README-FOR-PULSE.md) |
+| none | V7 to V18 (see README-FOR-PULSE.md); V17 copied text and V18 dose patterns were added in fix round 2 |
 
 `doctor_words` gains an optional `red_flag` boolean: an instruction so marked, or of category `warning`, must have a `red_flags` entry (V10).

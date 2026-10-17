@@ -318,8 +318,8 @@
       "t1": "2026-10-15T10:05:13+05:30",
       "label": "speaker_0",
       "lang": "en",
-      "quote_native": "use the inhaler as shown",
-      "quote_en": "use the inhaler as shown",
+      "quote_native": "rest with the window open",
+      "quote_en": "rest with the window open",
       "span_source": "both",
       "order_capable": true,
       "boundary_quarantined": false,
@@ -394,7 +394,7 @@
       "followup_type": "MANDATORY_FOLLOW_UP",
       "follow_up_instructions": "Come back in five days."
     },
-    "general_advice": "If your breathing gets worse or your lips turn blue, go to the emergency department at once. No steam for now, it can set off the wheeze. Avoid dust and smoke. Use the inhaler as shown. Sleep with the head raised. Keep the window open. Walk slowly."
+    "general_advice": "If your breathing gets worse or your lips turn blue, go to the emergency department at once. No steam for now, it can set off the wheeze. Avoid dust and smoke. Rest with the window open. Sleep with the head raised. Keep the window open. Walk slowly."
   },
   "confirm_prompts": [
     {
@@ -602,7 +602,7 @@
     {
       "instruction_id": "dw6",
       "category": "lifestyle",
-      "text_en": "Use the inhaler as shown.",
+      "text_en": "Rest with the window open.",
       "cited_spans": [
         "s13"
       ],
@@ -800,7 +800,7 @@
       "flags": []
     }
   ],
-  "note_text": "Co-morbidities:\nPresenting Complaint: Breathlessness and wheeze for 3 days with yellow sputum.\nExamination: Bilateral wheeze. SpO2 95%. Temperature 99.8 F.\nDiagnoses: Acute exacerbation of asthma with lower respiratory tract infection\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nAMOXICILLIN + CLAVULANIC ACID (Augmentin 625 Duo) — confirm\nPREDNISOLONE — confirm\nFurther Investigation:\nFollow up: Come back in five days.\nRefer to:\nGeneral Advice: If your breathing gets worse or your lips turn blue, go to the emergency department at once. No steam for now, it can set off the wheeze. Avoid dust and smoke. Use the inhaler as shown. Sleep with the head raised. Keep the window open. Walk slowly.",
+  "note_text": "Co-morbidities:\nPresenting Complaint: Breathlessness and wheeze for 3 days with yellow sputum.\nExamination: Bilateral wheeze. SpO2 95%. Temperature 99.8 F.\nDiagnoses: Acute exacerbation of asthma with lower respiratory tract infection\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nAMOXICILLIN + CLAVULANIC ACID (Augmentin 625 Duo) — confirm\nPREDNISOLONE — confirm\nFurther Investigation:\nFollow up: Come back in five days.\nRefer to:\nGeneral Advice: If your breathing gets worse or your lips turn blue, go to the emergency department at once. No steam for now, it can set off the wheeze. Avoid dust and smoke. Rest with the window open. Sleep with the head raised. Keep the window open. Walk slowly.",
   "qa": {
     "floors": {
       "untaped_drugs": 0,

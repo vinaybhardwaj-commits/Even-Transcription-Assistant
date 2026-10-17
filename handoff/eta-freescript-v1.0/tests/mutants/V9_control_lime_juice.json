@@ -505,7 +505,7 @@
         "components": [],
         "base_molecule": "metformin",
         "form": "tablet",
-        "strength_heard": "1000",
+        "strength_heard": null,
         "lasa_risk": {
           "pair_with": null,
           "note": "not on the curated LASA list"
@@ -513,16 +513,16 @@
       },
       "attributes": {
         "strength": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "dose": {
           "value": "1000",
           "cited_spans": [
             "s8"
           ],
           "support": "supported"
-        },
-        "dose": {
-          "value": null,
-          "cited_spans": [],
-          "support": "not_stated"
         },
         "route": {
           "value": null,

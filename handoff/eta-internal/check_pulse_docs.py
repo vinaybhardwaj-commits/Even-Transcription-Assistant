@@ -13,7 +13,7 @@ if re.search(r"(?<![a-z_])role_track\b|\bclef\b|\bjev\b", readme, re.I):
     fails.append("S8 README names a role-voter engine")
 if "three independent role voters" not in readme:
     fails.append("S8 README does not describe the role voters neutrally")
-for rule in ["V%d" % i for i in range(1, 17)]:
+for rule in ["V%d" % i for i in range(1, 19)]:
     if not re.search(r"^\| %s \|" % rule, readme, re.M):
         fails.append("S7 README guarantee table lacks %s" % rule)
 for ln, line in enumerate(readme.split("\n"), 1):

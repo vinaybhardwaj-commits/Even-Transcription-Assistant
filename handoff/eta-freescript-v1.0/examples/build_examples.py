@@ -2,7 +2,7 @@
 """Builds the seven INVENTED eta.freescript.v1.0 example artifacts (no real patient, doctor, room or id; all-zero UUIDs).
 Deterministic: same input, byte-identical output. Usage: build_examples.py [OUT_DIR]   (default: this folder).
 note_text is rendered only from posted gp_extraction, red_flags and doctor_words, as design section 9 requires."""
-import json, os, sys
+import json, os, sys, unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -15,6 +15,18 @@ TD = "treating_doctor"
 ADVICE_CATS = {"lifestyle", "diet", "warning", "counselling", "test_prep", "other"}
 MODELS = [dict(role="stageA", served_model_id="example-model-a-2026-10", provider="example-provider", zdr=True),
           dict(role="stageB", served_model_id="example-model-b-2026-10", provider="example-provider", zdr=True)]
+
+
+def ascii_fold(node):
+    """Generator-side fold (A26): curly quotes and dashes to ASCII, accents stripped, before validation."""
+    if isinstance(node, dict):
+        return {k: ascii_fold(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [ascii_fold(v) for v in node]
+    if isinstance(node, str):
+        s = node.translate(str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'}))
+        return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    return node
 
 
 def ts(mmss):
@@ -135,7 +147,7 @@ class Consult:
                                 doctor=dict(pulse_doctor_uid=None, specialty="General Practitioner")),
                  pulse_link=dict(type_of_prescription="HOSPITAL_GP", individual_uid=None, hospital_uid=None, consult_uid=None,
                                  prescription_uid=None, draft_exists="unknown", link_status="none", link_basis=None),
-                 roster=list(self.roster.values()), spans=self.spans, gp_extraction=self.gx, confirm_prompts=self.prompts,
+                 roster=list(self.roster.values()), spans=self.spans, gp_extraction=ascii_fold(self.gx), confirm_prompts=self.prompts,
                  doctor_words=self.words, red_flags=self.red_flags, provenance=prov)
         if not withheld:
             a["note_text"] = render_note(a)
@@ -267,8 +279,8 @@ def ex3():
         follow_up=dict(followup_type="FOLLOW_UP_WITH_REPORTS", follow_up_instructions="Come back with the reports."),
         general_advice=c.advice())
     p1 = c.prompt("medicine", "stop", D, ["notes_only", "stop_order"], drug_=drug("glimepiride", "GLIMEPIRIDE"))
-    p2 = c.prompt("medicine", "change_dose", D, ["notes_only"], attrs(strength=att("1000", [s8]), frequency=att("twice a day", [s8]),
-                  instruction=att("after food", [s8])), drug("metformin", "METFORMIN", strength="1000"))
+    p2 = c.prompt("medicine", "change_dose", D, ["notes_only"], attrs(dose=att("1000", [s8]), frequency=att("twice a day", [s8]),
+                  instruction=att("after food", [s8])), drug("metformin", "METFORMIN"))
     p3 = c.prompt("medicine", "start", D, ["notes_only"], attrs(dose=att("one", [s9]), instruction=att("if you feel giddy", [s9])),
                   drug("glucose tablets", "GLUCOSE"))
     c.item("e3-com", "comorbidity", "T2DM 5 years", "prescribed", [s1, s2], "/comorbidities/0", flags=["translation_uncertain"])

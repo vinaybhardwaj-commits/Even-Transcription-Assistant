@@ -1,0 +1,34 @@
+{
+ "version": "1.0",
+ "source": "ETA ruling R1 (fix round 2)",
+ "rule": "doctor_words text, advice items and red-flag text are contiguous substrings of one cited quote after whitespace and case normalisation (curly apostrophes read as straight; one final full stop or exclamation mark may be added). No negator of that quote may fall outside the copied part. A red flag must cover whole sentences of its quote and contain an action word.",
+ "negators": [
+  "not",
+  "never",
+  "no",
+  "nor",
+  "avoid",
+  "stop",
+  "without",
+  "cannot",
+  "neither",
+  "none",
+  "nothing"
+ ],
+ "negator_suffix": "n't",
+ "action_words": [
+  "go",
+  "come",
+  "call",
+  "return",
+  "rush",
+  "visit",
+  "seek",
+  "attend",
+  "report",
+  "contact",
+  "see",
+  "dial",
+  "get"
+ ]
+}

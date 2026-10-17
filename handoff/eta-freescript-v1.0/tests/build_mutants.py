@@ -183,7 +183,7 @@ def m_rf_trimmed(a): set_gx_and_note(a, "/general_advice", "No steam for now, it
 def m_rf_not_first(a): set_gx_and_note(a, "/general_advice", "No steam for now, it can set off the wheeze. " + RF + " Avoid dust and smoke.")
 
 
-EXTRA = ["Use the inhaler as shown.", "Sleep with the head raised.", "Keep the window open.", "Walk slowly."]
+EXTRA = ["Rest with the window open.", "Sleep with the head raised.", "Keep the window open.", "Walk slowly."]
 
 
 def m_budget_over(a):
@@ -274,8 +274,8 @@ def _pand(a, **kw):
     p = prompt(a, "p1")
     p["attributes"] = B.attrs(frequency=B.att("once a day", ["s5"]), instruction=B.att("before breakfast", ["s5"]))
     p["drug"] = dict(spoken="Pan-D", brand_recognised="Pan-D", form="capsule", strength_heard=None,
-                     lasa_risk=dict(pair_with=None, note="not on the curated LASA list"), **kw)
-    p["doctor_confirm_reason"] = ["notes_only", "combination_unexpanded"] if kw["generic"] is None else ["notes_only"]
+                     lasa_risk=dict(pair_with="unresolved generic" if kw["generic"] is None else None, note="generic not resolved; confirm the molecule"), **kw)
+    p["doctor_confirm_reason"] = ["notes_only", "combination_unexpanded", "lasa"] if kw["generic"] is None else ["notes_only"]
     prov(a, "e6-amc").update(names=["Pan-D"], flags=[])
     rerender(a)
 
@@ -326,8 +326,8 @@ def m2_nonascii(a): set_gx(a, "/examination", "Température 100.2 F. Throat mild
 def _pand_stop(a):
     p = prompt(a, "p1")
     p["drug"] = dict(spoken="Pan-D", brand_recognised="Pan-D", generic=None, components=[], base_molecule="pan d", form="capsule",
-                     strength_heard=None, lasa_risk=dict(pair_with=None, note="not on the curated LASA list"))
-    p["doctor_confirm_reason"] = ["notes_only", "stop_order", "combination_unexpanded"]
+                     strength_heard=None, lasa_risk=dict(pair_with="unresolved generic", note="generic not resolved; confirm the molecule"))
+    p["doctor_confirm_reason"] = ["notes_only", "stop_order", "combination_unexpanded", "lasa"]
     prov(a, "e3-glim").update(text="Pan-D", names=["Pan-D"])
 
 
@@ -388,7 +388,7 @@ def m7_prompt(a):
 
 
 def m8_missing(a): note_sub(a, "METFORMIN 1000 — dose change discussed — confirm\n", "")
-def m8_shown(a): prompt(a, "p2")["attributes"]["strength"]["support"] = "h_unattrib"
+def m8_shown(a): prompt(a, "p2")["attributes"]["dose"]["support"] = "h_unattrib"
 def m8_hidden(a): m8_shown(a); rerender(a)
 def m9(text): return lambda a: set_gx(a, "/examination", text)
 def m9_fu(text): return lambda a: set_gx(a, "/follow_up/follow_up_instructions", text)
@@ -439,6 +439,71 @@ def _folic_stop(a):
 
 def s6_held(a): _folic_stop(a); plan3(a, "Folic acid stopped.")
 def s6_ctrl(a): _folic_stop(a); plan3(a, "Acid reflux reviewed.")
+
+
+
+# ---- fix round 2: R1-R6 ----
+def set_word(a, idx, text):
+    old = a["doctor_words"][idx]["text_en"]
+    a["doctor_words"][idx]["text_en"] = text
+    a["gp_extraction"]["general_advice"] = a["gp_extraction"]["general_advice"].replace(old, text)
+    rerender(a)
+
+
+def set_rf(a, text):
+    old = a["red_flags"][0]["text_en"]
+    a["red_flags"][0]["text_en"] = text
+    set_word(a, 0, text)
+    a["gp_extraction"]["general_advice"] = a["gp_extraction"]["general_advice"].replace(old, text)
+    rerender(a)
+
+
+def r3_dose_only(a):
+    p = prompt(a, "p1")
+    p["drug"].update(spoken="650", brand_recognised=None, generic=None, base_molecule="650",
+                     lasa_risk=dict(pair_with="unresolved generic", note="generic not resolved"))
+    p["doctor_confirm_reason"] = ["notes_only", "combination_unexpanded", "lasa"]
+    p["attributes"] = B.attrs()
+    rerender(a)
+
+
+def r3_advice(a): add_word(a, "Take zorvix daily.", "05:10")
+
+
+def r4_fallback(a, render=False):
+    p = prompt(a, "p2")
+    p["attributes"]["dose"] = B.att()
+    p["attributes"]["strength"] = B.att("1000", ["s8"])
+    if render:
+        rerender(a)
+
+
+def r4_heard(a):
+    p = prompt(a, "p2")
+    p["attributes"]["dose"]["support"] = "h_unattrib"
+    p["drug"]["strength_heard"] = "500"
+    note_sub(a, "METFORMIN 1000 — dose", "METFORMIN 500 — dose")
+
+
+def _stop_dolo(a):
+    prompt(a, "p1")["drug"].update(spoken="Dolo 650", brand_recognised="Dolo 650", generic="PARACETAMOL", base_molecule="paracetamol")
+    prov(a, "e3-glim").update(text="Dolo 650", names=["Dolo 650"])
+
+
+def r5_dollo(a): _stop_dolo(a); plan3(a, "Dollo stopped.")
+def r5_solo(a): _stop_dolo(a); plan3(a, "Solo visit next week.")
+def r5_pamd(a): _pand_stop(a); plan3(a, "Pamd stopped.")
+def r5_band(a): _pand_stop(a); plan3(a, "Band of pain reviewed.")
+
+
+def r6(pair, reasons):
+    def f(a):
+        _pand(a, generic=None, components=[], base_molecule="pan")
+        p = prompt(a, "p1")
+        p["drug"]["lasa_risk"]["pair_with"] = pair
+        p["doctor_confirm_reason"] = reasons
+        rerender(a)
+    return f
 
 
 # name, base, mutation, expected verdict, rule that must be named on failure ("-" for pass)
@@ -571,6 +636,37 @@ MUTANTS = [
     ("S6_control_salt_full_phrase", "ex1", s6_salt("potassium chloride syrup"), "pass", "-"),
     ("S6_held_salt_drug_named", "ex3", s6_held, "fail", "V9"),
     ("S6_control_salt_word_alone", "ex3", s6_ctrl, "pass", "-"),
+    ("R1_word_reordered_doctor_words", "ex1", lambda a: set_word(a, 0, "Take rest and drink plenty of water."), "fail", "V17"),
+    ("R1_negator_dropped", "ex3", lambda a: set_word(a, 0, "Skip meals."), "fail", "V17"),
+    ("R1_red_flag_action_truncated", "ex6", lambda a: set_rf(a, "If your breathing gets worse or your lips turn blue."), "fail", "V17"),
+    ("R1_red_flag_reworded", "ex6", lambda a: set_rf(a, "If breathing worsens, come to emergency."), "fail", "V17"),
+    ("R1_control_contiguous_part", "ex4", lambda a: set_word(a, 0, "Drink at least three litres of water."), "pass", "-"),
+    ("R1_control_case_only", "ex1", lambda a: set_word(a, 0, "Drink Plenty Of Water And Take Rest."), "pass", "-"),
+    ("R2_unknown_brand_dose_in_plan", "ex3", lambda a: plan3(a, "Zorvix 10 mg at night."), "fail", "V18"),
+    ("R2_frequency_token_in_follow_up", "ex1", lambda a: set_gx(a, "/follow_up/follow_up_instructions", "Return after the Zorvix BD course."), "fail", "V18"),
+    ("R2_regimen_in_follow_up", "ex1", lambda a: set_gx(a, "/follow_up/follow_up_instructions", "Review after the 1-0-1 course."), "fail", "V18"),
+    ("R2_times_days_in_plan", "ex3", lambda a: plan3(a, "Course x 5 days."), "fail", "V18"),
+    ("R2_number_word_tablets_in_examination", "ex1", lambda a: set_gx(a, "/examination", "Took two tablets at home. Chest clear."), "fail", "V18"),
+    ("R2_dotted_frequency_in_plan", "ex3", lambda a: plan3(a, "Zorvix B.D. after food."), "fail", "V18"),
+    ("R2_hourly_frequency_in_follow_up", "ex1", lambda a: set_gx(a, "/follow_up/follow_up_instructions", "Return if Zorvix q8h does not help."), "fail", "V18"),
+    ("R2_condition_word_not_adjacent", "ex3", lambda a: a["gp_extraction"]["comorbidities"][0]["aliases"].append("Insulin resistance on metformin"), "fail", "V7"),
+    ("R2_control_lab_values", "ex1", lambda a: set_gx(a, "/examination", "Temperature 100.2 F. Hb 12 g/dL. SpO2 98%."), "pass", "-"),
+    ("R2_control_iso_date", "ex1", lambda a: a["gp_extraction"]["follow_up"].update(followup_date="2026-10-20"), "pass", "-"),
+    ("R2_control_condition_adjacent", "ex3", lambda a: a["gp_extraction"]["comorbidities"][0]["aliases"].append("Metformin-induced lactic acidosis"), "pass", "-"),
+    ("R3_unknown_name_in_plan", "ex3", lambda a: plan3(a, "Start Zorvix tomorrow."), "fail", "V18"),
+    ("R3_unknown_name_in_advice", "ex3", r3_advice, "fail", "V18"),
+    ("R3_dose_without_name_in_medication", "ex1", r3_dose_only, "fail", "V18"),
+    ("R3_control_plain_object", "ex3", lambda a: plan3(a, "Start walking daily."), "pass", "-"),
+    ("R4_change_dose_falls_back_to_strength", "ex3", r4_fallback, "fail", "V6"),
+    ("R4_change_dose_shows_heard_strength", "ex3", r4_heard, "fail", "V6"),
+    ("R4_control_change_dose_no_number", "ex3", lambda a: r4_fallback(a, render=True), "pass", "-"),
+    ("R5_edit1_four_letter_brand", "ex3", r5_dollo, "fail", "V9"),
+    ("R5_edit1_combination_brand", "ex3", r5_pamd, "fail", "V9"),
+    ("R5_control_common_word_solo", "ex3", r5_solo, "pass", "-"),
+    ("R5_control_common_word_band", "ex3", r5_band, "pass", "-"),
+    ("R6_null_generic_without_lasa_risk", "ex6", r6(None, ["notes_only", "combination_unexpanded", "lasa"]), "fail", "V14"),
+    ("R6_null_generic_without_lasa_reason", "ex6", r6("unresolved generic", ["notes_only", "combination_unexpanded"]), "fail", "V14"),
+    ("R6_control_null_generic_flagged", "ex6", r6("unresolved generic", ["notes_only", "combination_unexpanded", "lasa"]), "pass", "-"),
 ]
 
 

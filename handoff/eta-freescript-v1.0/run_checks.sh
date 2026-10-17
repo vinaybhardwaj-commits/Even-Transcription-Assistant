@@ -4,6 +4,8 @@
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 cd "$(dirname "$0")"
+no_pycache() { if [ -n "$(find . -name __pycache__ -print -quit)" ]; then echo "FAIL: __pycache__ present in the bundle ($1)"; exit 1; fi; }
+no_pycache "before checks"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -29,4 +31,5 @@ for f in tests/mutants/*.json; do cmp "$f" "$TMP/t/mutants/$(basename "$f")"; do
 [ "$(ls "$TMP/t/mutants" | wc -l)" -eq "$(ls tests/mutants | wc -l)" ]
 echo "identical: $(ls tests/mutants | wc -l) mutants + expected.tsv"
 
+no_pycache "after checks"
 echo "ALL CHECKS PASSED"

@@ -344,7 +344,7 @@
         "strength_heard": null,
         "lasa_risk": {
           "pair_with": null,
-          "note": "not on the curated LASA list"
+          "note": "generic not resolved; confirm the molecule"
         },
         "generic": "PANTOPRAZOLE + DOMPERIDONE",
         "components": [

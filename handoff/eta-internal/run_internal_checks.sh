@@ -15,4 +15,5 @@ plant; echo "Branch cloudpane/x/y." >> "$TMP/b/data/salt_drugs.json"; expect_fai
 plant; touch "$TMP/b/DESIGN-RATIONALE.md"; expect_fail python3 check_pulse_docs.py "$TMP/b"
 plant; echo "The role_track voter decides." >> "$TMP/b/README-FOR-PULSE.md"; expect_fail python3 check_pulse_docs.py "$TMP/b"
 plant; echo "Model ids are read back from the calls." >> "$TMP/b/README-FOR-PULSE.md"; expect_fail python3 check_pulse_docs.py "$TMP/b"
+plant; mkdir -p "$TMP/b/tests/__pycache__"; expect_fail bash "$TMP/b/run_checks.sh"
 echo "ALL INTERNAL CHECKS PASSED"
