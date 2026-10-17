@@ -20,6 +20,13 @@ GUARDIAN_SUBSCRIBE_CMD='<command that streams topic<TAB>payload lines>'
 GUARDIAN_CONTROL_SUB_CMD='<command that streams one control payload line per message>'
 # Extra environment for the transport commands (exported).
 # export GUARDIAN_PIPE_SSH='<ssh options for the pipe>'
+# GUARDIAN_PIPE_SSH is expanded by `eval "$GUARDIAN_PIPE_SSH" ...`, which removes one level of quotes. OpenSSH splits the value of UserKnownHostsFile
+# (and IdentityFile in -o form) on whitespace, and the real path has a space ("Application Support"). So write -o "Key=\"path with space\"" (R16):
+# the literal quotes then reach ssh. A bare -o UserKnownHostsFile="$HOME/Library/Application Support/..." makes ssh read two wrong files, the host key is
+# unknown, and every publish fails with rc 255. (-i "<path>" is fine: -i takes the path as one argument.) install.sh --config refuses the bare form.
+# The lines starting with `#>` are the tested form: tests/t_r16_pipe_ssh.sh strips the `#> ` and runs them against a real loopback sshd.
+#> export GUARDIAN_PIPE_SSH='ssh -p 2225 -i "$HOME/Library/Application Support/EvenScribe/Guardian/keys/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes -o "UserKnownHostsFile=\"$HOME/Library/Application Support/EvenScribe/Guardian/known_hosts\"" -o StrictHostKeyChecking=yes -o ConnectTimeout=5 pipe.example'
+#> GUARDIAN_PUBLISH_CMD='eval "$GUARDIAN_PIPE_SSH" pub -c -b=false "$1"'
 # The kiosk-sudo path: a command that runs its arguments as root (sudoers NOPASSWD for the root helper only).
 GUARDIAN_SUDO="sudo -n"
 GUARDIAN_ROOT_HELPER="/usr/local/libexec/eta-guardian-root"

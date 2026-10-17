@@ -9,7 +9,7 @@ put_ctl() {
 SA_HEAL='{"kill": false, "modes": {"opd9": "heal"}, "ts": 0}'
 SA_SHADOW='{"kill": false, "modes": {"opd9": "shadow"}, "ts": 0}'
 SA_KILL='{"kill": true, "modes": {"opd9": "heal"}, "ts": 0}'
-MUTATING='launchctl boot(out|strap)|^killall|^pkill|^open |tcc-heal|coreaudiod-kill|pmset-baseline|tcc-prune|install-launch-agent|^afplay '
+MUTATING='launchctl boot(out|strap)|^killall|^pkill|^open |tcc-heal|coreaudiod-kill|pmset-baseline|tcc-prune|install-launch-agent|^afplay |guardian-root.sh reboot|^SHUTDOWN'
 
 # sa_ctl <shadow|oldflag|none|stale|kill|heal>
 sa_ctl() {
@@ -17,6 +17,8 @@ sa_ctl() {
   rm -f "$STATE_DIR/control.last" "$STATE_DIR/control_latch" "$STATE_DIR/control_state" "$STATE_DIR/flags.cache"
   rm -rf "$STATE_DIR/once"; rm -f "$STATE_DIR/actions" "$STATE_DIR/flag_last"
   export GUARDIAN_CONTROL_SUB_CMD='true'
+  if [ "${SA_CLEAR:-}" = 1 ]; then SA_HEAL='{"consult_open": {"opd9": false}, "kill": false, "modes": {"opd9": "heal"}, "ts": 0}'; SA_SHADOW='{"consult_open": {"opd9": false}, "kill": false, "modes": {"opd9": "shadow"}, "ts": 0}'; SA_KILL='{"consult_open": {"opd9": false}, "kill": true, "modes": {"opd9": "heal"}, "ts": 0}'
+  else SA_HEAL='{"kill": false, "modes": {"opd9": "heal"}, "ts": 0}'; SA_SHADOW='{"kill": false, "modes": {"opd9": "shadow"}, "ts": 0}'; SA_KILL='{"kill": true, "modes": {"opd9": "heal"}, "ts": 0}'; fi
   case "$m" in
     oldflag) export GUARDIAN_CONTROL_SUB_CMD=""; go_shadow; return ;;
     none) ;;
@@ -33,6 +35,7 @@ sa_prep() {
   : >"$CALLS"; : >"$T/pub.log"; rm -f "$RR_PLIST.gone"
   GUARDIAN_FAKE_NOW="$(ist_epoch 11:00)"; : >"$RR_PLIST"
   printf 'sleep 0\nautorestart 1\n' >"$T/pmset"; echo 4242 >"$T/rec_pid"; printf 'USB Audio C270 HD\n' >"$T/usb.txt"; printf 'C270 engine\n' >"$T/engine.txt"
+  SA_CLEAR=0; rm -f "$STATE_DIR"/usb_absent "$STATE_DIR"/cc_probe.neg "$STATE_DIR"/usb-reboot "$STATE_DIR"/usb-reboot.tmp "$STATE_DIR"/usb-reboot-lock; USB_REBOOT_ISSUED=0
   mk_tcc 2; write_status capture_open=false; touch "$T/boot_ok"
   case "$1" in
     tcc) mk_tcc 0; write_status mic_state=denied capture_open=false state=mic_denied; SA_CALL="heal_tcc"; SA_POS="tcc-heal" ;;
@@ -43,7 +46,10 @@ sa_prep() {
     chrome) GUARDIAN_FAKE_NOW="$(ist_epoch 23:00)"; write_status capture_open=false; SA_CALL="heal_chrome"; SA_POS="pkill -x Google Chrome" ;;
     pmset) printf 'sleep 10\nautorestart 0\n' >"$T/pmset"; SA_CALL="heal_drift pmset_drift"; SA_POS="pmset-baseline" ;;
     la_missing) rm -f "$RR_PLIST"; SA_CALL="heal_drift launchagent_missing"; SA_POS="install-launch-agent" ;;
-    canary) GUARDIAN_FAKE_NOW="$(ist_epoch 23:00)"; write_status capture_open=false; mk_pcm 100 10; rm -f "$STATE_DIR/canary_night"; SA_CALL="canary_cycle"; SA_POS="afplay" ;;
+    canary) GUARDIAN_FAKE_NOW="$(ist_epoch 22:00)"; write_status capture_open=false; mk_pcm_tone 100 10; rm -f "$STATE_DIR/canary_slot"; SA_CALL="canary_cycle"; SA_POS="afplay" ;;
+    usb) SA_CLEAR=1; : >"$T/usb.txt"; : >"$T/engine.txt"; echo 1000000000000 >"$T/hid"
+         { printf 'header\n'; printf '%s.104 Df  kernel[0:694] [com.apple.usb:all] usb-drd3-port-hs@03100000: AppleUSBHostPort::cableChangeOccurred: powering off\n' "$(date -r "$((GUARDIAN_FAKE_NOW - 60))" '+%Y-%m-%d %H:%M:%S')"; } >"$T/log.txt"
+         printf '2 %s %s\n' "$((GUARDIAN_FAKE_NOW - 10))" "$((GUARDIAN_FAKE_NOW - 30))" >"$STATE_DIR/usb_absent"; SA_CALL="heal_usb_power_off x"; SA_POS="guardian-root.sh reboot" ;;
     cycle) GUARDIAN_FAKE_NOW="$(ist_epoch 23:00)"; mk_tcc 0; write_status mic_state=denied capture_open=false state=mic_denied
            printf 'sleep 10\nautorestart 0\n' >"$T/pmset"; rm -f "$RR_PLIST"; : >"$T/usb.txt"
            SA_CALL="heal_cycle"; SA_POS="tcc-heal" ;;
@@ -54,7 +60,7 @@ sa_prep() {
 test_every_action_is_report_only_unless_heal() {
   load_libs; export CONFIRM_TIMEOUT_S=1
   local a m row0 row1 n=0
-  for a in tcc coreaudiod rec_dead rec_hung rec_enrol chrome pmset la_missing cycle canary; do
+  for a in tcc coreaudiod rec_dead rec_hung rec_enrol chrome pmset la_missing cycle canary usb; do
     for m in shadow oldflag none stale kill; do
       sa_prep "$a"; sa_ctl "$m"
       [ "$a" = tcc ] || [ "$a" = cycle ] && row0="$(tcc_val)"
@@ -66,13 +72,13 @@ test_every_action_is_report_only_unless_heal() {
       assert_has "$(events)" 'WOULD-DO' "$a/$m: WOULD-DO reported"
     done
   done
-  assert_eq "$n" "50" "all 50 cases ran"
+  assert_eq "$n" "55" "all 55 cases ran"
 }
 
 test_heal_mode_reaches_every_action_path() {
   load_libs; export CONFIRM_TIMEOUT_S=1
   local a
-  for a in tcc coreaudiod rec_dead rec_hung rec_enrol chrome pmset la_missing cycle canary; do
+  for a in tcc coreaudiod rec_dead rec_hung rec_enrol chrome pmset la_missing cycle canary usb; do
     sa_prep "$a"; sa_ctl heal; collect_all
     $SA_CALL >/dev/null 2>&1
     assert_has "$(cat "$CALLS")" "$SA_POS" "$a: HEAL reaches the action"

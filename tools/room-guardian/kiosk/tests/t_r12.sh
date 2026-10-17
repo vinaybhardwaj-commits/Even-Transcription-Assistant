@@ -352,6 +352,12 @@ test_r12_installed_tree_runs_the_check() {
 r13_live_start() {
   local name="$1" body="$2" d="$T/$1" h; shift 2
   h="$d/home"; mkdir -p "$d/bin" "$h/state"
+  # R15: R15_TREE=1 runs the Guardian from an installed-shape copy of the code under $h (bin/, lib/) instead of the checkout, so a test can loosen that tree
+  local entry="$KDIR/bin/guardian.sh"
+  if [ -n "${R15_TREE:-}" ]; then
+    mkdir -p "$h/bin" "$h/lib"; cp -p "$KDIR/bin/guardian.sh" "$h/bin/"; cp -p "$KDIR"/lib/*.sh "$h/lib/"
+    chmod 700 "$h"; chmod -R go-w "$h/bin" "$h/lib"; entry="$h/bin/guardian.sh"
+  fi
   cat >"$d/bin/launchctl" <<F
 #!/bin/bash
 echo "\$(/bin/date +%s) launchctl \$*" >>"$d/calls.ts"
@@ -373,7 +379,10 @@ F
 case "$*" in *coreaudiod*) echo 9999; exit 0 ;; esac
 exit 1
 F
-  chmod +x "$d/bin/launchctl" "$d/bin/ioreg" "$d/bin/pgrep"
+  # R15: nothing that makes a sound, opens an app or kills a process by name can reach the real one from a live run
+  local n
+  for n in afplay open killall say osascript; do printf '#!/bin/bash\necho "%s $*" >>"%s/other.calls"\nexit 0\n' "$n" "$d" >"$d/bin/$n"; done
+  chmod +x "$d/bin/launchctl" "$d/bin/ioreg" "$d/bin/pgrep" "$d/bin/afplay" "$d/bin/open" "$d/bin/killall" "$d/bin/say" "$d/bin/osascript"
   : >"$d/calls.ts"
   printf '%s\n' "$body" >"$d/ctl.sh"
   # R14 A5: R14_PLANT = a script body planted as `sleep` in the PATH the Guardian itself is started with (the fakes' bin dir is first in that PATH)
@@ -391,7 +400,7 @@ F
   chmod 600 "$h/guardian.conf"
   GUARDIAN_FAKE_NOW="$(/bin/date +%s)" write_status state=recording poll_age=5
   ( exec /usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$h" PATH="$d/bin:$PROD_PATH" RR_ROOT="$RR_ROOT" RR_PLIST="$RR_PLIST" RR_APP="$RR_APP" "$@" \
-      /bin/bash -p "$KDIR/bin/guardian.sh" run >"$d/run.out" 2>&1 ) &
+      /bin/bash -p "$entry" run >"$d/run.out" 2>&1 ) &
   echo $! >"$d/main.pid"
   # keep the 3/h cap from ending the run of actions early
   ( while :; do : >"$h/state/actions"; /bin/sleep 2; done ) &
@@ -449,15 +458,23 @@ test_r12_live_wedged_subscriber_no_action_after_91_s() {
 # fresh heal feed when it reaches the child. With the clean environment the real sleep runs: no message ever arrives, the switch stays engaged, 0 mutating calls.
 # The test must fail when `env -i` is taken out of g_conf_cmd (the gate shows that mutation run).
 test_r13_live_env_injection_into_the_transport_child_is_inert() {
-  local i a b c nf nb np
+  local i a b c nf nb np ng1 ng2
   printf 'sleep%s\n' "$R13_FORGE" >"$T/benv.sh"
-  r13_live_start bashfunc 'RAW:sleep 1000' 'BASH_FUNC_sleep%%'"$R13_FORGE"
+  # R15: the exported function needs its `=` (env takes the text before the first `=` as the name); the R14 spelling lacked it, so the forged function never existed
+  r13_live_start bashfunc 'RAW:sleep 1000' 'BASH_FUNC_sleep%%='"$R13_FORGE"
   r13_live_start bashenv 'RAW:sleep 1000' BASH_ENV="$T/benv.sh" ENV="$T/benv.sh"
   # the one vector that bash -p does not stop: the caller's PATH. A `sleep` planted ahead of /bin in the Guardian's own PATH answers 1000 with a forged feed.
   R14_PLANT=$'#!/bin/bash\nif [ "$1" = 1000 ]; then while :; do printf \'{"kill": false, "modes": {"opd9": "heal"}, "ts": %s}\\n\' "$(/bin/date +%s)"; /bin/sleep 5; done; else exec /bin/sleep "$@"; fi' \
     r13_live_start pathplant 'RAW:sleep 1000'
+  # R15 (G14-3 iii): the grandchild case. The control command prints one fresh heal and then runs `/bin/sh -c "sleep 1000"`; sh imports an exported BASH_FUNC_sleep%%,
+  # so a child environment that only lost `-i` (bash -p alone) lets the forged feed take over in the grandchild. Only a real `env -i` stops it.
+  r13_live_start grand 'RAW:printf "{\"kill\": false, \"modes\": {\"opd9\": \"heal\"}, \"ts\": %s}\n" "$(/bin/date +%s)"; /bin/sh -c "sleep 1000"' 'BASH_FUNC_sleep%%='"$R13_FORGE"
+  ng1="$(r13_wait_msg grand)"
+  assert_eq "$([ -n "$ng1" ] && echo yes || echo no)" "yes" "grandchild run: its one legit message arrived (harness check)"
   # the forged feed (when it leaks) writes control.last within a second or two and the Guardian then acts at once
   i=0; while [ "$i" -lt 24 ]; do sleep 0.5; i=$((i + 1)); done
+  ng2="$(r13_msg_epoch grand)"
+  assert_eq "$ng2" "$ng1" "grandchild /bin/sh -c sleep: no second control message (the forged BASH_FUNC_sleep%% did not reach sh)"
   nf="$(r13_msg_epoch bashfunc)"; nb="$(r13_msg_epoch bashenv)"; np="$(r13_msg_epoch pathplant)"
   assert_eq "$nf" "" "BASH_FUNC_sleep%%: no control message arrived (the real sleep ran)"
   assert_eq "$nb" "" "BASH_ENV: no control message arrived (the real sleep ran)"
@@ -466,10 +483,10 @@ test_r13_live_env_injection_into_the_transport_child_is_inert() {
   assert_eq "$c" "0" "planted sleep: 0 mutating calls"
   assert_eq "$a" "0" "BASH_FUNC_sleep%%: 0 mutating calls"
   assert_eq "$b" "0" "BASH_ENV: 0 mutating calls"
-  assert_has "$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$T/bashfunc/home" PATH="$PROD_PATH" 'BASH_FUNC_sleep%%'"$R13_FORGE" /bin/bash -p "$KDIR/bin/guardian.sh" check 2>/dev/null)" "killswitch=engaged mode=shadow" "BASH_FUNC_sleep: engaged"
+  assert_has "$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$T/bashfunc/home" PATH="$PROD_PATH" 'BASH_FUNC_sleep%%='"$R13_FORGE" /bin/bash -p "$KDIR/bin/guardian.sh" check 2>/dev/null)" "killswitch=engaged mode=shadow" "BASH_FUNC_sleep: engaged"
   assert_has "$(/usr/bin/env -i HOME="$HOME" GUARDIAN_HOME="$T/bashenv/home" PATH="$PROD_PATH" BASH_ENV="$T/benv.sh" /bin/bash -p "$KDIR/bin/guardian.sh" check 2>/dev/null)" "killswitch=engaged mode=shadow" "BASH_ENV: engaged"
   kill -0 "$(cat "$T/bashfunc/main.pid")" 2>/dev/null && ok || fail "BASH_FUNC run: the Guardian itself is not running (harness check)"
-  r13_live_stop bashfunc bashenv pathplant
+  r13_live_stop bashfunc bashenv pathplant grand
 }
 
 # M1. The children of a conf command (publish, subscribe, control subscribe, the sudo path) get an allow-listed environment and bash -p.
