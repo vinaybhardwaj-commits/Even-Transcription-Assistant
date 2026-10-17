@@ -2,3 +2,5 @@
 - 2026-10-17 report cloudpane-reports/FRX-R2-BUILD.md pushed to cloudpane/cloud-frx-r2-build/r2
 - 2026-10-17 r3 code 1dc901e0: allowlist scan; GEN-D3 83->0/232, F2 42->0, F3 6->0, F5 116->0/500, F6 1->0, F7 3->0, red flags 14/14, D1 OFF 500/500; suite 4058 passed 0 failed
 - 2026-10-17 report cloudpane-reports/FRX-R3-BUILD.md pushed to cloudpane/cloud-frx-r2-build/r3
+- 2026-10-17 r4 code eda751f3+e934a512: G1 2->0/20, G2 2->0, G3 4/4 kept, G4 7->0/103, h9 5->0/5, Y6 Y10 killed, add7 12/12, add8 6->0/6, add9 0/20 rejections; suite 4106 passed 0 failed; D1 OFF 500/500
+- 2026-10-17 report cloudpane-reports/FRX-R4-BUILD.md + Y12 test pushed to cloudpane/cloud-frx-r2-build/r4

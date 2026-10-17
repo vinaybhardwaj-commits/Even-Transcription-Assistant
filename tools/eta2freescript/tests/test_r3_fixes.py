@@ -347,3 +347,14 @@ def test_r4_9_unfamiliar_clinical_words_never_reject_the_note(tmp_path):
         assert drug_mentions(f"{dx}; {exam}") == [], dx
     print(f"\nR4 addendum 9: 20 notes with unfamiliar clinical words: written with the Rx {written}/20, diagnosis and exam kept {kept}/20")
     assert written == 20 and kept == 20
+
+
+def test_r4_f4_order_red_flag_inside_a_withheld_item_is_carried():
+    """Kills Y12 (R1-5 before the allowlist): the one advice item names an unposted drug AND holds the red flag. R1-5 must run
+    after the item is withheld, or it calls the red flag covered and the flag is lost."""
+    art = hand_art()
+    art["gp_extraction"]["general_advice"] = "Take Brufen if pain, and if you vomit blood go to the emergency immediately"
+    turns = [{"role": "doctor", "text": "If you vomit blood, go to the emergency immediately.", "idx": 6, "lang": "en"}]
+    out, c = apply_r1(art, turns)
+    assert out["gp_extraction"]["general_advice"] == "If you vomit blood, go to the emergency immediately."
+    assert c["r1_2b_withheld"] == 1 and c["r1_5_added"] == 1
