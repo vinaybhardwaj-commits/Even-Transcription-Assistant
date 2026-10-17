@@ -4,3 +4,8 @@
 - plan written: docs/pdqi9/PDQI9-EVIDENCE-PLAN-v5.md (conforms to spec v5 A; section 6a arm (c) evidence)
 - notes written: docs/pdqi9/V5-NOTES.md; R4 6/6 MUST closed, 3/3 SHOULD closed (worst room name still UNVERIFIED); 6 open items listed
 - verdict-ready: pushed to cloudpane/cloud-pdqi9-v5/v5, no PR
+- 2026-10-17 v6 start: branch cloudpane/cloud-pdqi9-v5/v6 from v5 head ff2e9fb; inputs R5 (4 MUST, 5 SHOULD) + margin ruling; serving model claude-opus-5-5
+- v6 spec: docs/pdqi9/PDQI9-E-SPEC-v6.md (T28b-LOO, T28b clustered CI + 2,736 min, A4.1a.8 segment check + S-M 18 + T28e, dev-only S2 + prereg freeze + test T24/T28a at S4, pool numbers fixed, bootstrap of product, conflict only when armc used + conflict_loss, pre-S2c denominator, T28a lower bound + S-V 54; P-SYN 252)
+- v6 plan: docs/pdqi9/PDQI9-EVIDENCE-PLAN-v6.md (conforms to spec v6 A)
+- v6 notes: docs/pdqi9/V6-NOTES.md; R5 4/4 MUST + 5/5 SHOULD + margin ruling closed; 1 own call open (G13 LOO bar); 5 new UNVERIFIED
+- v6 pushed to cloudpane/cloud-pdqi9-v5/v6, no PR; serving model claude-opus-5-5
