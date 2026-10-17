@@ -63,11 +63,19 @@ def make_world(tmp_path, n_consults=60, n_docs=12, seed=0, **kw):
     return write_world(tmp_path, cents, vecs, manifest, **kw)
 
 
+def n_exclude(p):
+    if not (p / "exclude.txt").exists():
+        return 0
+    return len({core.norm_uid(l) for l in (p / "exclude.txt").read_text().splitlines() if l.strip()})
+
+
 def argv(p, cmd, **kw):
     a = [cmd, "--manifest", str(p / "manifest.jsonl"), "--vecs", str(p / "vecs.json"),
          "--centroids", str(p / "centroids.json"), "--truth", str(p / "truth.jsonl"),
-         "--exclude", str(p / "exclude.txt"), "--out-dir", str(p / "out"), "--seed", "7"]
-    opts = {"prereg": {"--target-trials": "500", "--min-trials": "100"},
+         "--exclude", str(p / "exclude.txt"), "--out-dir", str(p / "out"), "--seed", "7",
+         "--anchor", str(p / "anchor.sha256")]
+    opts = {"prereg": {"--target-trials": "500", "--min-trials": "100", "--expect-exclude": n_exclude(p),
+                "--sim-reps": "0"},
             "score": {"--boot-reps": "500", "--sim-reps": "0", "--armc-fire-rate": "0.3",
                       "--consults-per-month": "1000"}}[cmd]
     for k, v in {**opts, **kw}.items():
@@ -85,9 +93,19 @@ def do_score(p, **kw):
     return run.score(run.parser().parse_args(argv(p, "score", **kw)), out=out), out.getvalue()
 
 
+SHARED = ("--sim-reps", "--sim-boot-reps", "--doctor-floor", "--target-coverage")
+
+
 def full(p, prereg_kw=None, score_kw=None):
-    do_prereg(p, **(prereg_kw or {}))
-    return do_score(p, **(score_kw or {}))
+    """Sim and floor settings are frozen at prereg, so they are mirrored into score."""
+    pk, sk = dict(prereg_kw or {}), dict(score_kw or {})
+    for k in SHARED:
+        if k in sk and k not in pk:
+            pk[k] = sk[k]
+        if k in pk and k not in sk:
+            sk[k] = pk[k]
+    do_prereg(p, **pk)
+    return do_score(p, **sk)
 
 
 # ---------------------------------------------------------------- arm (c) thresholds
@@ -149,11 +167,12 @@ def test_determinism(tmp_path):
     # second run in a fresh output dir
     import shutil
     shutil.rmtree(p / "out")
-    m2, _ = do_prereg(p)
+    m2, _ = do_prereg(p, **{"--anchor": p / "anchor2.sha256"})
     assert (p / "out" / "prereg_trials.jsonl").read_bytes() == first
-    assert m1["trial_list_sha256"] == m2["trial_list_sha256"] and do_score(p)[0] == s1
+    assert m1["trial_list_sha256"] == m2["trial_list_sha256"]
+    assert do_score(p, **{"--anchor": p / "anchor2.sha256"})[0] == s1
     shutil.rmtree(p / "out")
-    assert do_prereg(p, **{"--seed": 8})[0]["trial_list_sha256"] != m1["trial_list_sha256"]
+    assert do_prereg(p, **{"--seed": 8, "--anchor": p / "anchor3.sha256"})[0]["trial_list_sha256"] != m1["trial_list_sha256"]
 
 
 def test_insufficient_trials_aborts(tmp_path):
@@ -270,12 +289,11 @@ def test_dirty_manifest_uid_matches_clean_exclude(tmp_path):
     assert meta["counts"]["dropped_excluded"] == 1
 
 
-def test_unmatched_exclusion_exits_2_unless_ok(tmp_path, capsys):
+def test_unmatched_exclusion_always_exits_2(tmp_path, capsys):
     p = make_world(tmp_path, exclude="c0001\nnot-in-manifest\n")
     assert run.main(argv(p, "prereg")) == 2
     assert "matched no manifest consult" in capsys.readouterr().err
-    meta, _ = do_prereg(p, **{"--exclude-unmatched-ok": True})
-    assert meta["exclude_unmatched_count"] == 1 and meta["exclude_unmatched_ok"] is True
+    assert not (p / "anchor.sha256").exists()
 
 
 def test_duplicate_manifest_rows_exit_2(tmp_path, capsys):
@@ -303,7 +321,7 @@ def test_single_cluster_is_underpowered_even_with_floor_one():
 
 def test_underpowered_readout_prints_no_pass_and_no_bound(tmp_path):
     p = make_world(tmp_path, n_docs=3, n_consults=30)  # 3 doctor clusters
-    s, text = full(p, {"--min-trials": 10, "--target-trials": 80}, {"--doctor-floor": 15})
+    s, text = full(p, {"--min-trials": 10, "--target-trials": 80, "--doctor-floor": 15})
     head = next(l for l in text.splitlines() if l.startswith("S2c headline"))
     assert "UNDERPOWERED" in head and "PASS" not in head.replace("no PASS", "")
     assert s["T28b-LOO"]["larger_upper_975"] is None
@@ -567,7 +585,8 @@ def test_readout_pass_fail_and_c8():
 
 BANNED = {"http", "urllib", "urllib3", "requests", "httpx", "aiohttp", "socket", "ssl", "ftplib", "smtplib",
           "xmlrpc", "websocket", "websockets", "sqlite3", "psycopg", "psycopg2", "asyncpg", "pymysql",
-          "mysql", "sqlalchemy", "pymongo", "redis", "boto3", "subprocess"}
+          "mysql", "sqlalchemy", "pymongo", "redis", "boto3"}
+SUBPROCESS_ONLY_IN = {"core.py"}  # H4: one fixed `git status --porcelain` call, no shell
 
 
 def test_import_ban():
@@ -580,3 +599,204 @@ def test_import_ban():
                 names = [node.module]
             for n in names:
                 assert n.split(".")[0] not in BANNED, (f.name, n)
+                if n.split(".")[0] == "subprocess":
+                    assert f.name in SUBPROCESS_ONLY_IN, f.name
+
+
+# ---------------------------------------------------------------- H1 expect-exclude
+
+def test_expect_exclude_is_required():
+    a = argv(pathlib.Path("/x"), "prereg")
+    i = a.index("--expect-exclude")
+    del a[i:i + 2]
+    with pytest.raises(SystemExit) as ex:
+        run.parser().parse_args(a)
+    assert ex.value.code == 2
+
+
+@pytest.mark.parametrize("n", [1, 3])
+def test_expect_exclude_mismatch_exits_2_and_writes_nothing(tmp_path, capsys, n):
+    p = make_world(tmp_path, exclude="c0001\nc0002\n")
+    assert run.main(argv(p, "prereg", **{"--expect-exclude": n})) == 2
+    assert "holds 2 unique normalised uids, expected" in capsys.readouterr().err
+    assert not (p / "anchor.sha256").exists() and not (p / "out" / "prereg.json").exists()
+
+
+def test_expect_exclude_counts_unique_normalised_uids(tmp_path):
+    p = make_world(tmp_path, exclude="c0001\n C0001 \n\ufeffc0002\n")
+    meta, _ = do_prereg(p, **{"--expect-exclude": 2})
+    assert meta["expect_exclude"] == 2 and meta["counts"]["dropped_excluded"] == 2
+
+
+# ---------------------------------------------------------------- H2 frozen config
+
+def test_config_frozen_in_prereg(tmp_path):
+    p = make_world(tmp_path)
+    meta, _ = do_prereg(p, **{"--doctor-floor": 20, "--sim-reps": 0, "--target-coverage": 0.92})
+    assert meta["config"] == {"doctor_floor": 20, "sim_reps": 0, "sim_boot_reps": 500,
+                              "target_coverage": 0.92, "rho_grid": [0.01, 0.05, 0.10]}
+
+
+@pytest.mark.parametrize("flag,val", [("--doctor-floor", 25), ("--sim-reps", 7), ("--target-coverage", 0.8),
+                                      ("--sim-boot-reps", 11)])
+def test_score_refuses_changed_config(tmp_path, flag, val):
+    p = make_world(tmp_path)
+    do_prereg(p, **{"--sim-reps": 0})
+    kw = {"--sim-reps": 0, flag: val}
+    with pytest.raises(core.InputError, match="config"):
+        do_score(p, **kw)
+
+
+def test_score_refuses_changed_rho_grid(tmp_path, monkeypatch):
+    p = make_world(tmp_path)
+    do_prereg(p, **{"--sim-reps": 0})
+    monkeypatch.setattr(run, "SIM_RHOS", [0.01, 0.05])
+    with pytest.raises(core.InputError, match="config"):
+        do_score(p, **{"--sim-reps": 0})
+
+
+# ---------------------------------------------------------------- H3 anchor
+
+def test_prereg_prints_hash_and_writes_anchor_outside_out_dir(tmp_path):
+    p = make_world(tmp_path)
+    meta, text = do_prereg(p)
+    h = core.sha256_file(str(p / "out" / "prereg.json"))
+    assert text.strip().splitlines()[-1] == h
+    assert (p / "anchor.sha256").read_text().split()[0] == h
+    assert stat.S_IMODE(os.stat(p / "anchor.sha256").st_mode) == 0o600
+    assert "doc0" not in text and "c00" not in text
+
+
+def test_anchor_inside_out_dir_refused(tmp_path):
+    p = make_world(tmp_path)
+    for where in (p / "out" / "anchor.sha256", p / "out" / "sub" / "a"):
+        with pytest.raises(core.InputError, match="inside the output dir"):
+            do_prereg(p, **{"--anchor": where})
+
+
+def test_anchor_required_and_not_overwritten(tmp_path):
+    for cmd in ("prereg", "score"):
+        a = argv(pathlib.Path("/x"), cmd)
+        i = a.index("--anchor")
+        del a[i:i + 2]
+        with pytest.raises(SystemExit) as ex:
+            run.parser().parse_args(a)
+        assert ex.value.code == 2
+    p = make_world(tmp_path)
+    (p / "anchor.sha256").write_text("stale\n")
+    with pytest.raises(core.InputError, match="already exists"):
+        do_prereg(p)
+
+
+def test_rewriting_files_inside_out_dir_alone_no_longer_scores(tmp_path):
+    p = make_world(tmp_path)
+    do_prereg(p)
+    out = p / "out"
+    meta = json.loads((out / "prereg.json").read_text())
+    meta["seed"] = 999  # consistent in-dir rewrite: prereg.json and its in-dir hash both replaced
+    (out / "prereg.json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    (out / "prereg.sha256").write_text(core.sha256_file(str(out / "prereg.json")) + "  prereg.json\n")
+    with pytest.raises(core.InputError, match="anchor"):
+        do_score(p)
+
+
+def test_score_refuses_missing_or_wrong_anchor(tmp_path):
+    p = make_world(tmp_path)
+    do_prereg(p)
+    with pytest.raises(core.InputError, match="anchor file not found"):
+        do_score(p, **{"--anchor": p / "nope.sha256"})
+    (p / "other.sha256").write_text("0" * 64 + "  prereg.json\n")
+    with pytest.raises(core.InputError, match="anchor"):
+        do_score(p, **{"--anchor": p / "other.sha256"})
+
+
+# ---------------------------------------------------------------- H4 dirty tree
+
+def test_git_dirty_on_a_real_repo(tmp_path):
+    import subprocess
+    repo = tmp_path / "r"
+    (repo / "pkg").mkdir(parents=True)
+    git = lambda *a: subprocess.run(["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a", *a],
+                                    check=True, capture_output=True)
+    git("init", "-q")
+    (repo / "pkg" / "m.py").write_text("x = 1\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "c")
+    assert core.git_dirty(str(repo / "pkg"))["dirty"] is False
+    (repo / "pkg" / "m.py").write_text("x = 2\n")
+    d = core.git_dirty(str(repo / "pkg"))
+    assert d["dirty"] is True and d["porcelain_lines"] == 1
+
+
+def test_git_unavailable_counts_as_dirty(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("no git")
+    monkeypatch.setattr(core.subprocess, "run", boom)
+    assert core.git_dirty()["dirty"] is True
+
+
+def test_dirty_prereg_blocks_pass(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "git_dirty", lambda *a, **k: {"dirty": True, "porcelain_lines": 2,
+                                                            "reason": "uncommitted changes"})
+    p = make_world(tmp_path, n_consults=240, n_docs=20)
+    meta, ptext = do_prereg(p, **{"--min-trials": 100, "--target-trials": 2000, "--sim-reps": 0})
+    assert meta["tree"]["dirty"] is True and "DIRTY" in ptext
+    s, text = do_score(p, **{"--sim-reps": 0})
+    assert "DIRTY" in text
+    assert "S2c T28b point 0.000% <= 0.2%: DIRTY, no PASS" in text
+    assert ": PASS" not in text
+
+
+def test_clean_prereg_can_pass(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "git_dirty", lambda *a, **k: {"dirty": False, "porcelain_lines": 0, "reason": "clean"})
+    p = make_world(tmp_path, n_consults=240, n_docs=20)
+    s, text = full(p, {"--min-trials": 100, "--target-trials": 2000, "--sim-reps": 0})
+    assert "S2c T28b point 0.000% <= 0.2%: PASS" in text and "DIRTY" not in text
+
+
+def test_readout_dirty_never_passes_but_fail_still_fails():
+    blk = lambda pt, up: {"point": pt, "n": 3000, "larger_upper_975": up, "underpowered": False,
+                          "exact_info_975": up, "clusterings": {"c": {"flags": []}}}
+    lines = run.readout({"T28b": blk(0.0, 0.001), "T28b-LOO": blk(0.003, 0.004), "T28b-nd": blk(0.0, 0.002)},
+                        None, None, dirty=True)
+    assert lines[0].startswith("DIRTY") and all("PASS" not in l.replace("no PASS", "") for l in lines)
+    assert "T28b-LOO point 0.300% <= 0.2%: FAIL" in "\n".join(lines)
+
+
+# ---------------------------------------------------------------- H5 covering clinician
+
+def covering_world(p, speaker_enrolled):
+    """Logged-in doctor T; the true speaker B covers. B's voice sits at 0.80 to T's centroid."""
+    lab = with_cos(e(0), 0.80, e(1))
+    cents = {"T": e(0), "Y": e(5)}
+    if speaker_enrolled:
+        cents["B"] = lab
+    return write_world(p, cents, {"cx": {"speaker_0": lab.tolist(), "speaker_1": e(6).tolist()}},
+                       [{"consult_uid": "cx", "doctor_uid": "B", "logged_in_doctor_uid": "T"}],
+                       truth=[{"consult_uid": "cx", "label": "speaker_0", "source": "manual"}])
+
+
+def test_covering_speaker_truth_label_against_logged_in_centroid_is_nd_trial(tmp_path):
+    p = covering_world(tmp_path, speaker_enrolled=False)
+    s, ptext = None, None
+    meta, ptext = do_prereg(p, **{"--min-trials": 1, "--sim-reps": 0})
+    s, text = do_score(p, **{"--sim-reps": 0})
+    assert "covering-clinician consults (speaker != logged-in) 1" in ptext
+    assert meta["counts"]["covering_consults"] == 1
+    assert s["T28b-nd"]["n"] == 2 and s["T28b-nd"]["k"] == 1  # truth label fires; the noise label does not
+    nd = core.load_json_lines(str(p / "out" / "trials_nd_scored.jsonl"))
+    assert [t["fa"] for t in nd if t.get("truth_label")] == [True]
+    assert "covering-clinician consults 1" in text
+
+
+def test_covering_fire_suppressed_when_speakers_own_centroid_is_enrolled(tmp_path):
+    p = covering_world(tmp_path, speaker_enrolled=True)
+    do_prereg(p, **{"--min-trials": 1, "--sim-reps": 0})
+    s, _ = do_score(p, **{"--sim-reps": 0})
+    assert s["T28b-nd"]["n"] == 2 and s["T28b-nd"]["k"] == 0  # B's centroid is the runner-up and wins
+
+
+def test_non_covering_consults_add_no_truth_label_trial(tmp_path):
+    p = make_world(tmp_path)
+    meta, _ = do_prereg(p)
+    assert meta["counts"]["covering_consults"] == 0 and meta["nd_trials"] == 60

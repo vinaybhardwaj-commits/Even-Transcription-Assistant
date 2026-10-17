@@ -18,6 +18,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 from dataclasses import dataclass
 
 import numpy as np
@@ -86,6 +87,20 @@ def prepare_out_dir(path: str, *, must_exist: bool = False) -> None:
     else:
         os.makedirs(path, mode=0o700)
         os.chmod(path, 0o700)
+
+
+def check_anchor_path(anchor: str, out_dir: str, *, must_exist: bool) -> None:
+    """The anchor lives outside the out dir; prereg also refuses to overwrite one."""
+    a, d = os.path.realpath(anchor), os.path.realpath(out_dir)
+    if a == d or a.startswith(d + os.sep):
+        raise InputError("anchor path is inside the output dir")
+    if must_exist and not os.path.isfile(a):
+        raise InputError("anchor file not found")
+    if not must_exist:
+        if os.path.exists(a):
+            raise InputError("anchor file already exists")
+        if not os.path.isdir(os.path.dirname(a)):
+            raise InputError("anchor parent dir does not exist")
 
 
 def load_json_lines(path: str) -> list[dict]:
@@ -280,17 +295,15 @@ def assert_disjoint(selected_consults, exclude: set[str]) -> None:
         raise DisjointnessError(f"{len(clash)} selected consults are in the exclude list")
 
 
-def build_universe(manifest, exclude, truth, loader, cents, *, one_label_pass=False,
-                   exclude_unmatched_ok=False):
+def build_universe(manifest, exclude, truth, loader, cents, *, one_label_pass=False):
     """Returns (T28b universe rows, nd trial rows, counts). Everything is uid-normalised already."""
     manifest_uids = {r["consult_uid"] for r in manifest}
     unmatched = len(exclude - manifest_uids)
-    if unmatched and not exclude_unmatched_ok:
-        raise InputError(f"{unmatched} exclusion uids matched no manifest consult "
-                         "(pass --exclude-unmatched-ok to accept)")
+    if unmatched:
+        raise InputError(f"{unmatched} exclusion uids matched no manifest consult")
     counts = {"manifest": len(manifest), "exclude_entries": len(exclude), "exclude_unmatched": unmatched,
               "dropped_excluded": 0, "no_truth": 0, "no_vectors": 0, "truth_label_not_in_vectors": 0,
-              "one_label_consults": 0, "no_impostors": 0, "no_logged_in_centroid": 0,
+              "one_label_consults": 0, "no_impostors": 0, "no_logged_in_centroid": 0, "covering_consults": 0,
               "consults_scored": 0, "truth_rows_not_in_manifest": len(set(truth) - manifest_uids),
               "truth_by_source": {s: 0 for s in TRUTH_SOURCES}}
     kept = []
@@ -330,6 +343,12 @@ def build_universe(manifest, exclude, truth, loader, cents, *, one_label_pass=Fa
                              "logged_in_doctor_uid": row["logged_in_doctor_uid"],
                              "label": label, "impostors": imps})
         if row["logged_in_doctor_uid"] in cents:
+            if row["doctor_uid"] != row["logged_in_doctor_uid"]:
+                # covering clinician: the speaker's own truth label against the logged-in doctor's centroid
+                counts["covering_consults"] += 1
+                nd.append({"consult_uid": row["consult_uid"], "doctor_uid": row["doctor_uid"],
+                           "logged_in_doctor_uid": row["logged_in_doctor_uid"], "label": label,
+                           "centroid_uid": row["logged_in_doctor_uid"], "truth_label": True})
             for other in sorted(v):
                 if other != label:
                     nd.append({"consult_uid": row["consult_uid"], "doctor_uid": row["doctor_uid"],
@@ -385,6 +404,17 @@ def git_head(start: str = PKG_DIR) -> str | None:
     except OSError:
         pass
     return None
+
+
+def git_dirty(start: str = PKG_DIR) -> dict:
+    """`git status --porcelain` on the package dir. Unknown (no git) counts as dirty."""
+    try:
+        r = subprocess.run(["git", "-C", start, "status", "--porcelain", "--", start],
+                           capture_output=True, text=True, timeout=30, check=True)
+    except (OSError, subprocess.SubprocessError):
+        return {"dirty": True, "porcelain_lines": None, "reason": "git status unavailable"}
+    n = len([ln for ln in r.stdout.splitlines() if ln.strip()])
+    return {"dirty": n > 0, "porcelain_lines": n, "reason": "uncommitted changes" if n else "clean"}
 
 
 def code_identity() -> dict:

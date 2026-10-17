@@ -21,6 +21,12 @@ def _pct(x: float) -> str:
     return f"{100 * x:.3f}%"
 
 
+def _config(args) -> dict:
+    """Run parameters that prereg freezes and score must repeat unchanged (H2)."""
+    return {"doctor_floor": args.doctor_floor, "sim_reps": args.sim_reps, "sim_boot_reps": args.sim_boot_reps,
+            "target_coverage": args.target_coverage, "rho_grid": SIM_RHOS}
+
+
 def _paths(args) -> dict:
     return {k: getattr(args, k) for k in INPUT_FLAGS}
 
@@ -39,20 +45,23 @@ def _load(args):
 
 def prereg(args, out=sys.stdout) -> dict:
     core.prepare_out_dir(args.out_dir)
+    core.check_anchor_path(args.anchor, args.out_dir, must_exist=False)
     if os.path.exists(os.path.join(args.out_dir, "prereg.json")):
         raise core.InputError("prereg.json already exists in the output dir")
     cents, manifest, exclude, truth, loader = _load(args)
+    if len(exclude) != args.expect_exclude:
+        raise core.InputError(f"exclusion file holds {len(exclude)} unique normalised uids, "
+                              f"expected {args.expect_exclude}")
     universe, nd, counts = core.build_universe(
-        manifest, exclude, truth, loader, cents, one_label_pass=args.one_label_pass,
-        exclude_unmatched_ok=args.exclude_unmatched_ok)
+        manifest, exclude, truth, loader, cents, one_label_pass=args.one_label_pass)
     print(f"manifest consults {counts['manifest']}; exclusion entries {counts['exclude_entries']} "
           f"(unmatched {counts['exclude_unmatched']}); dropped as excluded {counts['dropped_excluded']}", file=out)
     print(f"no truth {counts['no_truth']}; no vectors {counts['no_vectors']}; truth label not in vectors "
           f"{counts['truth_label_not_in_vectors']}; one-label consults {counts['one_label_consults']} "
           f"({'scored' if args.one_label_pass else 'abstained'}); scored consults {counts['consults_scored']}; "
           f"truth by source {counts['truth_by_source']}", file=out)
-    print(f"centroids {len(cents)}; T28b universe {counts['universe_trials']}; T28b-nd trials {counts['nd_trials']}",
-          file=out)
+    print(f"centroids {len(cents)}; T28b universe {counts['universe_trials']}; T28b-nd trials {counts['nd_trials']}; "
+          f"covering-clinician consults (speaker != logged-in) {counts['covering_consults']}", file=out)
     if counts["universe_trials"] < args.min_trials:
         raise core.InsufficientTrials(f"universe {counts['universe_trials']} < min trials {args.min_trials}")
     trials = core.sample_trials(universe, args.target_trials, args.seed)
@@ -71,15 +80,18 @@ def prereg(args, out=sys.stdout) -> dict:
         "trial_list_sha256": core.sha256_file(tp), "nd_trial_list_sha256": core.sha256_file(np_),
         "inputs_sha256": core.input_hashes(_paths(args), manifest, core.VecsLoader(args.vecs)),
         "thresholds": core.thresholds(args.one_label_pass),
-        "exclude_unmatched_ok": bool(args.exclude_unmatched_ok),
-        "exclude_unmatched_count": counts["exclude_unmatched"],
-        "code": core.code_identity(), "counts": counts,
+        "expect_exclude": args.expect_exclude, "exclude_unmatched_count": counts["exclude_unmatched"],
+        "config": _config(args), "code": core.code_identity(), "tree": core.git_dirty(), "counts": counts,
     }
     core.write_private(os.path.join(d, "prereg.json"), json.dumps(meta, indent=2, sort_keys=True) + "\n")
-    core.write_private(os.path.join(d, "prereg.sha256"),
-                       f"{core.sha256_file(os.path.join(d, 'prereg.json'))}  prereg.json\n")
+    pre_sha = core.sha256_file(os.path.join(d, "prereg.json"))
+    core.write_private(os.path.join(d, "prereg.sha256"), f"{pre_sha}  prereg.json\n")
+    core.write_private(args.anchor, f"{pre_sha}  prereg.json\n")
     print(f"prereg written before scoring: seed {args.seed}, trial list sha256 {meta['trial_list_sha256']}; "
-          f"code {meta['code']['code_sha256'][:12]}, commit {(meta['code']['git_commit'] or 'none')[:12]}", file=out)
+          f"code {meta['code']['code_sha256'][:12]}, commit {(meta['code']['git_commit'] or 'none')[:12]}; "
+          f"tree {'DIRTY (' + meta['tree']['reason'] + ')' if meta['tree']['dirty'] else 'clean'}; "
+          f"anchor written outside the out dir", file=out)
+    print(pre_sha, file=out)
     return meta
 
 
@@ -89,9 +101,10 @@ def _verify(args, meta_path_dir: str) -> dict:
     pj = os.path.join(d, "prereg.json")
     if not os.path.exists(pj):
         raise core.InputError("no prereg.json in the output dir; run prereg first")
-    want = open(os.path.join(d, "prereg.sha256")).read().split()[0]
+    core.check_anchor_path(args.anchor, d, must_exist=True)
+    want = open(args.anchor).read().split()[0]
     if core.sha256_file(pj) != want:
-        raise core.InputError("MISMATCH prereg.json")
+        raise core.InputError("MISMATCH prereg.json vs anchor")
     meta = json.load(open(pj))
     manifest = core.load_manifest(args.manifest)
     now = core.input_hashes(_paths(args), manifest, core.VecsLoader(args.vecs))
@@ -102,6 +115,8 @@ def _verify(args, meta_path_dir: str) -> dict:
         bad.append("thresholds")
     if core.code_identity() != meta["code"]:
         bad.append("code")
+    if _config(args) != meta["config"]:
+        bad.append("config")
     if core.sha256_file(os.path.join(d, "prereg_trials.jsonl")) != meta["trial_list_sha256"]:
         bad.append("trial_list")
     if core.sha256_file(os.path.join(d, "prereg_nd_trials.jsonl")) != meta["nd_trial_list_sha256"]:
@@ -135,16 +150,19 @@ def _test_block(trials: list[dict], key: str, reps: int, seed: int, floor) -> di
     return block
 
 
-def readout(summary: dict, fire_rate, per_month) -> list[str]:
+def readout(summary: dict, fire_rate, per_month, dirty: bool = False) -> list[str]:
     std, loo, nd = summary["T28b"], summary["T28b-LOO"], summary["T28b-nd"]
+    PASS = "DIRTY, no PASS" if dirty else "PASS"
 
     def point(name, b):
         if b["n"] == 0:
             return f"S2c {name} point: NO TRIALS (no PASS)"
-        ok = "PASS" if b["point"] <= core.GATE_POINT_MAX else "FAIL"
+        ok = PASS if b["point"] <= core.GATE_POINT_MAX else "FAIL"
         return f"S2c {name} point {_pct(b['point'])} <= 0.2%: {ok}"
 
     lines = [point("T28b", std), point("T28b-LOO", loo), point("T28b-nd", nd)]
+    if dirty:
+        lines.insert(0, "DIRTY: eval/pdqi9/t28b had uncommitted changes at prereg; no PASS can be issued")
     worse = None
     if loo["underpowered"] or nd["underpowered"]:
         info = ", ".join(f"{n} exact CP upper {_pct(b['exact_info_975'])} (info only)" if b["n"] else f"{n} no trials"
@@ -152,7 +170,7 @@ def readout(summary: dict, fire_rate, per_month) -> list[str]:
         lines.append(f"S2c headline cluster-robust 97.5% upper <= 0.5%: UNDERPOWERED, no bootstrap bound, no PASS; {info}")
     else:
         worse = max(loo["larger_upper_975"], nd["larger_upper_975"])
-        ok = "PASS" if worse <= core.GATE_UPPER_MAX else "FAIL"
+        ok = PASS if worse <= core.GATE_UPPER_MAX else "FAIL"
         lines.append(f"S2c headline worse of T28b-LOO {_pct(loo['larger_upper_975'])} and T28b-nd "
                      f"{_pct(nd['larger_upper_975'])} = {_pct(worse)} <= 0.5%: {ok}")
     flags = [f"{t}/{c}: {f}" for t in ("T28b", "T28b-LOO", "T28b-nd") for c, b in summary[t]["clusterings"].items()
@@ -186,7 +204,8 @@ def score(args, out=sys.stdout) -> dict:
     n_per = max(stats.MIN_TRIALS_PER_CLUSTER, round(len(scored) / max(k_data, 1)))
     if args.sim_reps > 0:
         fl = stats.choose_floor(k_data=k_data, configured=args.doctor_floor, n_per=n_per, p=SIM_P,
-                                rhos=SIM_RHOS, sims=args.sim_reps, reps=args.sim_boot_reps, seed=args.seed)
+                                rhos=SIM_RHOS, sims=args.sim_reps, reps=args.sim_boot_reps, seed=args.seed,
+                                target=args.target_coverage)
     else:
         fl = {"configured_floor": args.doctor_floor, "chosen_floor": args.doctor_floor,
               "status": "unverified (coverage sim disabled)", "k_data": k_data, "table": []}
@@ -194,14 +213,17 @@ def score(args, out=sys.stdout) -> dict:
 
     summary = {
         "seed": args.seed, "trial_list_sha256": meta["trial_list_sha256"], "counts": meta["counts"],
-        "exclude_unmatched_count": meta["exclude_unmatched_count"], "floor": fl,
+        "exclude_unmatched_count": meta["exclude_unmatched_count"], "tree": meta["tree"], "config": meta["config"],
+        "floor": fl,
         "T28b": _test_block(scored, "fa_std", args.boot_reps, args.seed, floor),
         "T28b-LOO": _test_block(scored, "fa_loo", args.boot_reps, args.seed + 1, floor),
         "T28b-nd": _test_block(scored_nd, "fa", args.boot_reps, args.seed + 2, floor),
     }
     c = meta["counts"]
     print(f"prereg verified (inputs, thresholds, code, trial lists); truth by source {c['truth_by_source']}; "
-          f"no truth {c['no_truth']}; one-label consults {c['one_label_consults']}", file=out)
+          f"no truth {c['no_truth']}; one-label consults {c['one_label_consults']}; "
+          f"covering-clinician consults {c['covering_consults']}; "
+          f"tree {'DIRTY' if meta['tree']['dirty'] else 'clean'}", file=out)
     for name in ("T28b", "T28b-LOO", "T28b-nd"):
         b = summary[name]
         print(f"{name}: {b['k']}/{b['n']} point {_pct(b['point']) if b['n'] else 'n/a'}; "
@@ -219,7 +241,7 @@ def score(args, out=sys.stdout) -> dict:
           f"({fl['status']}); data K {fl['k_data']}", file=out)
     for r in fl["table"]:
         print(f"  coverage sim K {r['K']} rho {r['rho']}: {r['coverage']:.3f}", file=out)
-    for line in readout(summary, args.armc_fire_rate, args.consults_per_month):
+    for line in readout(summary, args.armc_fire_rate, args.consults_per_month, meta['tree']['dirty']):
         print(line, file=out)
     core.write_private(os.path.join(args.out_dir, "summary.json"),
                        json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -240,6 +262,12 @@ def parser() -> argparse.ArgumentParser:
                        help="jsonl {consult_uid, label, source in role_votes_3of3|manual}")
         s.add_argument("--exclude", required=True, help="tuning-consult exclude list (uid per line or jsonl)")
         s.add_argument("--out-dir", required=True, help="0700; prereg and score share it")
+        s.add_argument("--anchor", required=True,
+                       help="file OUTSIDE the out dir holding the prereg.json sha256; prereg writes it, score verifies it")
+        s.add_argument("--doctor-floor", type=int, default=stats.K_MIN_CLUSTERS)
+        s.add_argument("--sim-reps", type=int, default=200, help="coverage replicates per cell; 0 disables")
+        s.add_argument("--sim-boot-reps", type=int, default=500)
+        s.add_argument("--target-coverage", type=float, default=0.90)
 
     a = sub.add_parser("prereg", help="register the trial set and hash all inputs (run first)")
     common(a)
@@ -248,16 +276,13 @@ def parser() -> argparse.ArgumentParser:
     a.add_argument("--min-trials", type=int, default=core.MIN_TRIALS_DEFAULT)
     a.add_argument("--one-label-pass", action="store_true",
                    help="one-label consults pass the next-label margin; default is abstain")
-    a.add_argument("--exclude-unmatched-ok", action="store_true",
-                   help="accept exclusion uids that match no manifest consult (count is recorded)")
+    a.add_argument("--expect-exclude", type=int, required=True,
+                   help="exact number of unique normalised uids the exclude file must hold, all matching the manifest")
 
     b = sub.add_parser("score", help="verify every prereg hash, then score")
     common(b)
     b.add_argument("--seed", type=int, required=True, help="bootstrap and simulation seed")
     b.add_argument("--boot-reps", type=int, default=10000)
-    b.add_argument("--doctor-floor", type=int, default=stats.K_MIN_CLUSTERS)
-    b.add_argument("--sim-reps", type=int, default=200, help="coverage replicates per cell; 0 disables")
-    b.add_argument("--sim-boot-reps", type=int, default=500)
     b.add_argument("--armc-fire-rate", type=float)
     b.add_argument("--consults-per-month", type=float)
     return p
