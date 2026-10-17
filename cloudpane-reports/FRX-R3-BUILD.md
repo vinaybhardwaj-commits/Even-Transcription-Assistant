@@ -1,5 +1,4 @@
 # FRX-R3 build report: fable's R3 order on FRX-R2-VERDICT
-
 Handle cloud-frx-r2-build. Branch `cloudpane/cloud-frx-r2-build/r3`, from r2 `9c5d3dea` (base R1b `ea2818ee`). Code `1dc901e0`.
 Model serving this build: `claude-opus-5-5`. **Verdict: built; every gate line green; every order target met.**
 
