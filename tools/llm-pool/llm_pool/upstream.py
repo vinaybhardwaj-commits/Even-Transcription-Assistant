@@ -7,7 +7,7 @@ from typing import Iterator
 
 from . import convert
 from .auth import AuthError
-from .config import ModelSpec
+from .config import GEMINI_ID_RE, ModelSpec
 from .errors import UpstreamError
 from .pricing import Usage
 
@@ -15,6 +15,41 @@ log = logging.getLogger("llm_pool.upstream")
 
 _AUTH_EXPIRED_CODES = {"ExpiredTokenException", "ExpiredToken", "UnrecognizedClientException", "InvalidIdentityToken"}
 _MAX_MESSAGE = 300
+_EMPTY = object()
+
+
+def open_stream(open_fn, mapper, invalidate):
+    """Open a provider event stream and pull its first event inside the try.
+
+    The real transports are lazy generators: nothing is sent (and no ExpiredToken can surface) until the
+    first next(). Priming the first event here lets the one refresh+retry fire for streams too. Returns
+    (first_event_or__EMPTY, iterator)."""
+    refreshed = False
+    while True:
+        try:
+            events = iter(open_fn())
+            return next(events, _EMPTY), events
+        except Exception as exc:
+            mapped = exc if isinstance(exc, UpstreamError) else mapper(exc)
+            if mapped.auth_expired and not refreshed:
+                refreshed = True
+                invalidate()
+                continue
+            raise mapped from None
+
+
+def drain_events(first, events, mapper):
+    if first is _EMPTY:
+        return
+    yield first
+    while True:
+        try:
+            event = next(events)
+        except StopIteration:
+            return
+        except Exception as exc:
+            raise exc if isinstance(exc, UpstreamError) else mapper(exc) from None
+        yield event
 
 
 class BotoTransport:
@@ -92,12 +127,18 @@ class BedrockUpstream:
             mapped = exc if isinstance(exc, UpstreamError) else bedrock_error_to_upstream(exc)
             raise mapped from None
 
-    def complete(self, body: dict, spec: ModelSpec, request_id: str | None = None) -> tuple[dict, Usage]:
+    def complete(self, body: dict, spec: ModelSpec, request_id: str | None = None,
+                 usage: Usage | None = None) -> tuple[dict, Usage]:
+        usage = usage if usage is not None else Usage()
         kwargs = convert.to_bedrock(body, spec.model_id, default_max_tokens=self.default_max_tokens)
         raw = self._call("converse", spec.model_id, kwargs)
+        # The call is billed from here on: record usage before any conversion that might fail.
+        billed = convert.bedrock_usage(raw)
+        usage.input_tokens, usage.output_tokens = billed.input_tokens, billed.output_tokens
+        usage.cache_tokens, usage.reported, usage.accepted = billed.cache_tokens, billed.reported, True
         requested = body.get("model") or spec.model_id
         response = convert.bedrock_result_to_openai(raw, requested_model=requested, request_id=request_id)
-        return response, convert.bedrock_usage(raw)
+        return response, usage
 
     def stream(self, body: dict, spec: ModelSpec, usage: Usage, request_id: str | None = None):
         kwargs = convert.to_bedrock(body, spec.model_id, default_max_tokens=self.default_max_tokens)
@@ -108,14 +149,14 @@ class BedrockUpstream:
             include_usage=convert.include_usage(body),
             usage=usage,
         )
-        events = iter(self._call("converse_stream", spec.model_id, kwargs))
-        while True:
-            try:
-                event = next(events)
-            except StopIteration:
-                break
-            except Exception as exc:
-                raise exc if isinstance(exc, UpstreamError) else bedrock_error_to_upstream(exc) from None
+        first, events = open_stream(
+            lambda: self.transport.converse_stream(spec.model_id, kwargs),
+            bedrock_error_to_upstream,
+            self.auth.invalidate,
+        )
+        if first is not _EMPTY:
+            usage.accepted = True
+        for event in drain_events(first, events, bedrock_error_to_upstream):
             yield from translator.feed(event)
         yield from translator.final()
 
@@ -163,6 +204,10 @@ class VertexTransport:
         self.timeout_s = float(timeout_s)
 
     def _url(self, model_id: str, method: str) -> str:
+        if not GEMINI_ID_RE.match(model_id or ""):
+            # Defence in depth: the id lands in a URL path that carries the SA bearer token.
+            raise UpstreamError(400, "invalid gemini model id", "invalid_request_error",
+                                err_type="invalid_request_error")
         location = self.auth.location
         host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
         return f"https://{host}/v1/projects/{self.auth.project}/locations/{location}/publishers/google/models/{model_id}:{method}"
@@ -226,12 +271,17 @@ class VertexUpstream:
         except Exception as exc:
             raise vertex_error_to_upstream(exc) from None
 
-    def complete(self, body: dict, spec: ModelSpec, request_id: str | None = None) -> tuple[dict, Usage]:
+    def complete(self, body: dict, spec: ModelSpec, request_id: str | None = None,
+                 usage: Usage | None = None) -> tuple[dict, Usage]:
+        usage = usage if usage is not None else Usage()
         payload = convert.to_vertex(body, spec.model_id, default_max_tokens=self.default_max_tokens)
         raw = self._call("generate", spec.model_id, payload)
+        billed = convert.vertex_usage(raw)
+        usage.input_tokens, usage.output_tokens = billed.input_tokens, billed.output_tokens
+        usage.cache_tokens, usage.reported, usage.accepted = billed.cache_tokens, billed.reported, True
         requested = body.get("model") or spec.model_id
         response = convert.vertex_result_to_openai(raw, requested_model=requested, request_id=request_id)
-        return response, convert.vertex_usage(raw)
+        return response, usage
 
     def stream(self, body: dict, spec: ModelSpec, usage: Usage, request_id: str | None = None):
         payload = convert.to_vertex(body, spec.model_id, default_max_tokens=self.default_max_tokens)
@@ -242,13 +292,13 @@ class VertexUpstream:
             include_usage=convert.include_usage(body),
             usage=usage,
         )
-        events = iter(self._call("stream_generate", spec.model_id, payload))
-        while True:
-            try:
-                event = next(events)
-            except StopIteration:
-                break
-            except Exception as exc:
-                raise vertex_error_to_upstream(exc) from None
+        first, events = open_stream(
+            lambda: self.transport.stream_generate(spec.model_id, payload),
+            vertex_error_to_upstream,
+            self.auth.invalidate,
+        )
+        if first is not _EMPTY:
+            usage.accepted = True
+        for event in drain_events(first, events, vertex_error_to_upstream):
             yield from translator.feed(event)
         yield from translator.final()

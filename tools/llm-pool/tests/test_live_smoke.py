@@ -65,6 +65,7 @@ def gateway():
         [
             python, "-m", "llm_pool",
             "--host", "127.0.0.1",
+            "--allow-loopback",
             "--port", str(port),
             "--ledger", str(ledger_path),
             "--client-token-file", str(token_file),
@@ -212,8 +213,9 @@ def test_live_spend_and_budget(gateway):
     )
     assert response.status_code == 200
     spend = response.json()
-    assert spend["aws_daily_cap_usd"] == 500.0
-    assert spend["aws_remaining_usd"] <= 500.0
+    assert spend["aws_daily_cap_usd_per_caller"] == 500.0
+    main = [c for c in spend["callers"] if c["caller"] == "main"][0]
+    assert main["remaining_usd"] <= 500.0
 
     conn = sqlite3.connect(gateway["ledger"])
     conn.row_factory = sqlite3.Row

@@ -159,13 +159,17 @@ def to_bedrock_messages(messages: list) -> tuple[list, list]:
     return system, out
 
 
+def effective_max_tokens(body: dict, default_max_tokens: int) -> int:
+    """The output ceiling the upstream call will actually carry (also used to size the cap reservation)."""
+    max_tokens = body.get("max_tokens")
+    if isinstance(max_tokens, (int, float)) and not isinstance(max_tokens, bool) and max_tokens > 0:
+        return int(max_tokens)
+    return int(default_max_tokens)
+
+
 def _inference_config(body: dict, default_max_tokens: int) -> dict:
     config: dict = {}
-    max_tokens = body.get("max_tokens")
-    if isinstance(max_tokens, (int, float)) and max_tokens > 0:
-        config["maxTokens"] = int(max_tokens)
-    else:
-        config["maxTokens"] = int(default_max_tokens)
+    config["maxTokens"] = effective_max_tokens(body, default_max_tokens)
     temperature = body.get("temperature")
     if isinstance(temperature, (int, float)):
         config["temperature"] = float(temperature)
@@ -184,9 +188,7 @@ def _tool_choice_is_none(choice) -> bool:
     return choice == "none" or (isinstance(choice, dict) and choice.get("type") == "none")
 
 
-def _tool_config(body: dict) -> dict | None:
-    if _tool_choice_is_none(body.get("tool_choice")):
-        return None
+def _tool_specs(body: dict) -> list:
     tools = body.get("tools")
     specs: list = []
     if isinstance(tools, list):
@@ -209,6 +211,13 @@ def _tool_config(body: dict) -> dict | None:
                     }
                 }
             )
+    return specs
+
+
+def _tool_config(body: dict) -> dict | None:
+    if _tool_choice_is_none(body.get("tool_choice")):
+        return None
+    specs = _tool_specs(body)
     choice = body.get("tool_choice")
     if not specs:
         if choice in (None, "auto"):
@@ -247,6 +256,38 @@ def _tool_config(body: dict) -> dict | None:
     return config
 
 
+def _history_tool_names(messages: list) -> tuple[bool, list[str]]:
+    """(history has any toolUse/toolResult block, distinct toolUse names in order)."""
+    has_tools = False
+    names: list[str] = []
+    for message in messages:
+        for block in message.get("content") or []:
+            if "toolResult" in block:
+                has_tools = True
+            elif "toolUse" in block:
+                has_tools = True
+                name = block["toolUse"].get("name")
+                if name and name not in names:
+                    names.append(name)
+    return has_tools, names
+
+
+def _history_tool_config(body: dict, out: list) -> dict | None:
+    """Converse rejects toolUse/toolResult blocks without a toolConfig. When the request omits tools (or says
+    tool_choice=none) still send one: the request's tools if any, else a minimal stub per tool used in history.
+    Converse has no 'none' choice, so no toolChoice is set here."""
+    has_tools, names = _history_tool_names(out)
+    if not has_tools:
+        return None
+    specs = _tool_specs(body)
+    if not specs:
+        specs = [
+            {"toolSpec": {"name": name, "description": "", "inputSchema": {"json": {"type": "object", "properties": {}}}}}
+            for name in (names or ["tool"])
+        ]
+    return {"tools": specs}
+
+
 def to_bedrock(body: dict, model_id: str, *, default_max_tokens: int = 4096) -> dict:
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -260,6 +301,8 @@ def to_bedrock(body: dict, model_id: str, *, default_max_tokens: int = 4096) -> 
     if system:
         kwargs["system"] = system
     tool_config = _tool_config(body)
+    if tool_config is None:
+        tool_config = _history_tool_config(body, out)
     if tool_config is not None:
         kwargs["toolConfig"] = tool_config
     return kwargs
@@ -271,6 +314,7 @@ def bedrock_usage(raw: dict) -> Usage:
         input_tokens=int(usage.get("inputTokens") or 0),
         output_tokens=int(usage.get("outputTokens") or 0),
         cache_tokens=int(usage.get("cacheReadInputTokens") or 0),
+        reported=bool(usage),
     )
 
 
@@ -356,6 +400,7 @@ class BedrockStreamTranslator:
         self.usage.input_tokens = usage.input_tokens
         self.usage.output_tokens = usage.output_tokens
         self.usage.cache_tokens = usage.cache_tokens
+        self.usage.reported = True
 
     def feed(self, event: dict) -> list[dict]:
         chunks: list[dict] = []
@@ -570,11 +615,7 @@ def to_vertex(body: dict, model_id: str, *, default_max_tokens: int = 4096) -> d
     payload: dict = {"contents": contents}
     if system_parts:
         payload["systemInstruction"] = {"parts": [{"text": "\n".join(system_parts)}]}
-    max_tokens = body.get("max_tokens")
-    generation: dict = {
-        "maxOutputTokens": int(max_tokens) if isinstance(max_tokens, (int, float)) and max_tokens > 0
-        else int(default_max_tokens)
-    }
+    generation: dict = {"maxOutputTokens": effective_max_tokens(body, default_max_tokens)}
     temperature = body.get("temperature")
     if isinstance(temperature, (int, float)):
         generation["temperature"] = float(temperature)
@@ -602,6 +643,7 @@ def vertex_usage(raw: dict) -> Usage:
         input_tokens=int(meta.get("promptTokenCount") or 0),
         output_tokens=int(meta.get("candidatesTokenCount") or 0),
         cache_tokens=int(meta.get("cachedContentTokenCount") or 0),
+        reported=bool(meta),
     )
 
 
@@ -652,7 +694,8 @@ def vertex_result_to_openai(raw: dict, *, requested_model: str, request_id: str 
             {
                 "index": 0,
                 "message": message_body,
-                "finish_reason": _gemini_finish(candidate.get("finishReason")),
+                "finish_reason": "tool_calls" if tool_calls and _gemini_finish(candidate.get("finishReason")) == "stop"
+                else _gemini_finish(candidate.get("finishReason")),
                 "logprobs": None,
             }
         ],
@@ -673,6 +716,10 @@ class VertexStreamTranslator:
         self._emitted_usage = False
         self._tool_count = 0
 
+    def _finish(self, reason: str | None) -> str:
+        finish = _gemini_finish(reason)
+        return "tool_calls" if self._tool_count and finish == "stop" else finish
+
     def _chunk(self, delta: dict, finish_reason: str | None = None) -> dict:
         return {
             "id": self.id,
@@ -686,6 +733,7 @@ class VertexStreamTranslator:
         self.usage.input_tokens = usage.input_tokens
         self.usage.output_tokens = usage.output_tokens
         self.usage.cache_tokens = usage.cache_tokens
+        self.usage.reported = True
 
     def feed(self, event: dict) -> list[dict]:
         chunks: list[dict] = []
@@ -724,7 +772,7 @@ class VertexStreamTranslator:
                     )
             reason = candidate.get("finishReason")
             if reason and not self._emitted_finish:
-                self.finish_reason = _gemini_finish(reason)
+                self.finish_reason = self._finish(reason)
                 chunks.append(self._chunk({}, self.finish_reason))
                 self._emitted_finish = True
         return chunks
@@ -732,7 +780,7 @@ class VertexStreamTranslator:
     def final(self) -> list[dict]:
         chunks: list[dict] = []
         if not self._emitted_finish:
-            self.finish_reason = self.finish_reason or "stop"
+            self.finish_reason = self.finish_reason or ("tool_calls" if self._tool_count else "stop")
             chunks.append(_finish_chunk(self.id, self.created, self.requested_model, self.finish_reason))
             self._emitted_finish = True
         if self.include_usage and not self._emitted_usage:

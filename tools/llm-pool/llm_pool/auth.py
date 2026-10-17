@@ -8,7 +8,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -81,9 +81,9 @@ def _expiry_to_float(value) -> float:
 @dataclass(frozen=True)
 class BedrockSession:
     region: str
-    access_key_id: str
-    secret_access_key: str
-    session_token: str
+    access_key_id: str = field(repr=False)
+    secret_access_key: str = field(repr=False)
+    session_token: str = field(repr=False)
     expires_at: float
 
     def boto_kwargs(self) -> dict:

@@ -3,14 +3,29 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
+import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
+
+log = logging.getLogger("llm_pool.config")
+
+# Vertex model ids are interpolated into a URL path; only this shape may ever reach it.
+GEMINI_ID_RE = re.compile(r"^gemini-[0-9a-z.\-]+$")
+# Bedrock inference-profile ids (also a URL path segment in the SDK).
+BEDROCK_ID_RE = re.compile(r"^[a-z]{2,6}\.anthropic\.claude-[0-9a-z.\-]+(:[0-9]+)?$")
+CALLER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+MAIN_CALLER = "main"
 
 DEFAULT_CONFIG_PATH = "~/.config/llm-pool/config.json"
 
 DEFAULT_CONFIG = {
-    "aws_daily_cap_usd": 500.0,
+    # V, 18 Oct: USD 500 per authenticated caller per IST day. The cap prevents wasted compute, not cost.
+    "aws_daily_cap_usd_per_caller": 500.0,
+    # Optional ceiling over all callers together; null = off.
+    "aws_daily_total_cap_usd": None,
     "aws_daily_cap_warn_fraction": 0.8,
     "client_token_file": "~/.config/llm-pool/client.token",
     "ledger_file": "~/.config/llm-pool/spend.sqlite3",
@@ -75,15 +90,49 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
         raise ConfigError(f"config file {candidate.name} is not readable JSON: {type(exc).__name__}") from exc
     if not isinstance(raw, dict):
         raise ConfigError(f"config file {candidate.name} must hold a JSON object")
+    if "aws_daily_cap_usd_per_caller" not in raw and "aws_daily_cap_usd" in raw:
+        # Legacy single-cap key from the first release: it now means the per-caller cap.
+        raw = dict(raw)
+        raw["aws_daily_cap_usd_per_caller"] = raw.pop("aws_daily_cap_usd")
     merged = _deep_merge(DEFAULT_CONFIG, raw)
+    merged.pop("aws_daily_cap_usd", None)
     _validate(merged)
+    if merged.get("callers"):
+        _require_private(candidate)
     return merged
 
 
+def _require_private(path: Path) -> None:
+    """config.json holds caller tokens when callers is set, so it must be 0600."""
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o077:
+            path.chmod(0o600)
+            log.warning("llm-pool: config %s holds caller tokens and was group/world readable; tightened to 0600",
+                        path.name)
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            raise OSError("mode still too open")
+    except OSError as exc:
+        raise ConfigError(f"config file {path.name} holds caller tokens and must be mode 0600") from exc
+
+
 def _validate(config: dict) -> None:
-    cap = config.get("aws_daily_cap_usd")
-    if not isinstance(cap, (int, float)) or cap <= 0:
-        raise ConfigError("aws_daily_cap_usd must be a positive number")
+    cap = config.get("aws_daily_cap_usd_per_caller")
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
+        raise ConfigError("aws_daily_cap_usd_per_caller must be a positive number")
+    total = config.get("aws_daily_total_cap_usd")
+    if total is not None and (isinstance(total, bool) or not isinstance(total, (int, float)) or total <= 0):
+        raise ConfigError("aws_daily_total_cap_usd must be null or a positive number")
+    callers = config.get("callers")
+    if not isinstance(callers, dict):
+        raise ConfigError("callers must be an object of name -> token")
+    for name, token in callers.items():
+        if not isinstance(name, str) or not CALLER_NAME_RE.match(name):
+            raise ConfigError("callers names must match [A-Za-z0-9._-]{1,64}")
+        if name == MAIN_CALLER:
+            raise ConfigError('caller name "main" is reserved for the main token')
+        if not isinstance(token, str) or not token:
+            raise ConfigError(f"callers.{name} token must be a non-empty string")
     if not isinstance(config.get("prices"), dict) or not config["prices"]:
         raise ConfigError("prices must map at least one price family")
     for family, entry in config["prices"].items():
@@ -98,6 +147,10 @@ def _validate(config: dict) -> None:
             raise ConfigError(f"models.{name}.provider must be bedrock or vertex")
         if not isinstance(entry.get("model_id"), str) or not entry["model_id"]:
             raise ConfigError(f"models.{name}.model_id must be a non-empty string")
+        if entry["provider"] == "vertex" and not GEMINI_ID_RE.match(entry["model_id"]):
+            raise ConfigError(f"models.{name}.model_id is not a valid gemini id")
+        if entry["provider"] == "bedrock" and not BEDROCK_ID_RE.match(entry["model_id"]):
+            raise ConfigError(f"models.{name}.model_id is not a valid bedrock profile id")
         if entry.get("price") not in config["prices"]:
             raise ConfigError(f"models.{name}.price family {entry.get('price')!r} is not in prices")
     warn = config.get("aws_daily_cap_warn_fraction")
@@ -113,12 +166,14 @@ def resolve_model(config: dict, name: str) -> ModelSpec | None:
     if entry is not None:
         return ModelSpec(name, entry["provider"], entry["model_id"], entry["price"])
     if name.startswith(_BEDROCK_PROFILE_PREFIXES) and "anthropic.claude-" in name:
+        if not BEDROCK_ID_RE.match(name):
+            return None
         for family in _FAMILIES:
             if f"claude-{family}" in name:
                 return ModelSpec(name, "bedrock", name, family)
         return None
-    if name.startswith("gemini"):
-        return ModelSpec(name, "vertex", name, "gemini")
+    # Unknown gemini ids are refused: they have no price entry (never silently priced as 2.5-pro) and the
+    # id would be spliced into a Vertex URL. Add the id (with its price family) to config "models".
     return None
 
 

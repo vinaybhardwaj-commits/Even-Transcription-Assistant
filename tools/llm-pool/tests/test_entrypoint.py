@@ -7,11 +7,27 @@ from llm_pool.__main__ import build_parser, ensure_token_file, validate_bind_hos
 
 
 def test_wildcard_bind_refused():
-    for host in ("0.0.0.0", "::", "", " "):
+    for host in ("0.0.0.0", "::", "", " ", "0", "::0", "0:0:0:0:0:0:0:0", "0x0", "00", "*", "0.0.0.0/0"):
         with pytest.raises(SystemExit):
             validate_bind_host(host)
+        with pytest.raises(SystemExit):
+            validate_bind_host(host, allow_loopback=True)
+
+
+def test_bind_must_be_tailnet():
     assert validate_bind_host("100.86.4.104") == "100.86.4.104"
-    assert validate_bind_host("127.0.0.1") == "127.0.0.1"
+    assert validate_bind_host("100.64.0.1") == "100.64.0.1"
+    assert validate_bind_host("100.127.255.255") == "100.127.255.255"
+    for host in ("100.128.0.1", "100.63.255.255", "10.0.0.1", "192.168.1.5", "8.8.8.8", "127.0.0.1", "::1",
+                 "localhost", "172.16.0.1"):
+        with pytest.raises(SystemExit):
+            validate_bind_host(host)
+
+
+def test_loopback_only_with_flag():
+    assert validate_bind_host("127.0.0.1", allow_loopback=True) == "127.0.0.1"
+    with pytest.raises(SystemExit):
+        validate_bind_host("10.0.0.1", allow_loopback=True)
 
 
 def test_token_file_created_0600(tmp_path):

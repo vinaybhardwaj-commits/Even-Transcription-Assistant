@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
 import os
 import secrets
+import socket
 import stat
 import sys
 from pathlib import Path
@@ -18,13 +20,45 @@ from .upstream import BedrockUpstream, VertexUpstream
 
 log = logging.getLogger("llm_pool")
 
-WILDCARD_HOSTS = {"", "0.0.0.0", "::", "[::]", "*"}
+TAILNET_NET = ipaddress.ip_network("100.64.0.0/10")  # Tailscale CGNAT range
+LOOPBACK_NETS = (ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128"))
 
 
-def validate_bind_host(host: str) -> str:
-    if host.strip() in WILDCARD_HOSTS:
+def validate_bind_host(host: str, *, allow_loopback: bool = False) -> str:
+    """Resolve the bind host and return the concrete, checked IP the server must bind.
+
+    Refuses anything that is unspecified (0.0.0.0, ::, "0", "0x0", "0:0:0:0:0:0:0:0", ...) and anything outside
+    the tailnet range 100.64.0.0/10. Loopback is allowed only with allow_loopback (tests, local smoke).
+    Parsing goes through getaddrinfo + ipaddress, never string comparison, so alternative spellings of the
+    wildcard cannot slip through."""
+    text = (host or "").strip()
+    if not text or text == "*":
         raise SystemExit("refusing to bind a wildcard address; pass a concrete tailnet IP (e.g. 100.86.4.104)")
-    return host
+    try:
+        infos = socket.getaddrinfo(text, None, type=socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError, ValueError):
+        raise SystemExit("bind host does not resolve to an address; pass a concrete tailnet IP") from None
+    addresses = []
+    for info in infos:
+        raw = str(info[4][0]).split("%", 1)[0]
+        try:
+            addr = ipaddress.ip_address(raw)
+        except ValueError:
+            raise SystemExit("bind host did not resolve to an IP address") from None
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+            addr = addr.ipv4_mapped
+        addresses.append(addr)
+    if not addresses:
+        raise SystemExit("bind host did not resolve to an address")
+    for addr in addresses:
+        if addr.is_unspecified:
+            raise SystemExit("refusing to bind a wildcard address; pass a concrete tailnet IP (e.g. 100.86.4.104)")
+        if addr in TAILNET_NET:
+            continue
+        if allow_loopback and any(addr in net for net in LOOPBACK_NETS):
+            continue
+        raise SystemExit("refusing to bind outside the tailnet range 100.64.0.0/10; pass a tailnet IP")
+    return str(addresses[0])
 
 
 def ensure_token_file(path) -> str:
@@ -54,6 +88,8 @@ def ensure_token_file(path) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="llm-pool", description="Budget-capped OpenAI-compatible gateway")
     parser.add_argument("--host", default="100.86.4.104", help="bind address (concrete IP only, not 0.0.0.0)")
+    parser.add_argument("--allow-loopback", action="store_true",
+                        help="permit a 127.0.0.0/8 bind (tests and local smoke only)")
     parser.add_argument("--port", type=int, default=4100)
     parser.add_argument("--config", default=None, help="JSON config path (default ~/.config/llm-pool/config.json)")
     parser.add_argument("--ledger", default=None, help="spend sqlite path (default from config)")
@@ -72,7 +108,7 @@ def main(argv=None) -> int:
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    host = validate_bind_host(args.host)
+    host = validate_bind_host(args.host, allow_loopback=args.allow_loopback)
     try:
         config = load_config(args.config)
     except ConfigError as exc:
@@ -86,7 +122,12 @@ def main(argv=None) -> int:
     vertex_auth = VertexAuth(args.vertex_env)
     bedrock = BedrockUpstream(bedrock_auth, default_max_tokens=config["default_max_tokens"])
     vertex = VertexUpstream(vertex_auth, default_max_tokens=config["default_max_tokens"])
-    cap_guard = CapGuard(ledger, config["aws_daily_cap_usd"], config.get("aws_daily_cap_warn_fraction", 0.8))
+    cap_guard = CapGuard(
+        ledger,
+        config["aws_daily_cap_usd_per_caller"],
+        config.get("aws_daily_cap_warn_fraction", 0.8),
+        total_cap_usd=config.get("aws_daily_total_cap_usd"),
+    )
     app = create_app(
         config,
         ledger=ledger,
@@ -104,8 +145,8 @@ def main(argv=None) -> int:
         refresher.start()
     import uvicorn
 
-    log.info("llm-pool: listening on %s:%d (aws cap USD %.2f/day since 00:00 IST)", host, args.port,
-             float(config["aws_daily_cap_usd"]))
+    log.info("llm-pool: listening on %s:%d (aws cap USD %.2f per caller per day since 00:00 IST)", host, args.port,
+             float(config["aws_daily_cap_usd_per_caller"]))
     try:
         uvicorn.run(app, host=host, port=args.port, log_level=args.log_level)
     finally:

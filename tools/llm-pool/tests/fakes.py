@@ -39,47 +39,70 @@ class FakeVertexAuth:
 
 
 class FakeBedrockTransport:
-    def __init__(self, response=None, events=None, error=None, stream_error=None, fail_first=False):
+    """Mirrors boto: converse_stream is a LAZY generator, so errors surface on the first next(), not at call."""
+
+    def __init__(self, response=None, events=None, error=None, stream_error=None, fail_first=False,
+                 delay=0.0, gate=None, gate_after=1, break_after=None):
         self.response = response
         self.events = list(events or [])
         self.error = error
         self.stream_error = stream_error
         self.fail_first = bool(fail_first)
+        self.delay = float(delay)
+        self.gate = gate
+        self.gate_after = int(gate_after)
+        self.break_after = break_after
         self.calls = []
 
     def converse(self, model_id, kwargs):
         self.calls.append(("converse", model_id, kwargs))
+        if self.delay:
+            time.sleep(self.delay)
         if self.error is not None and not (self.fail_first and len(self.calls) > 1):
             raise self.error
         return self.response
 
     def converse_stream(self, model_id, kwargs):
         self.calls.append(("converse_stream", model_id, kwargs))
+        attempt = len(self.calls)
         if self.stream_error is not None:
             raise self.stream_error
-        if self.error is not None and not (self.fail_first and len(self.calls) > 1):
+        return self._events(attempt)
+
+    def _events(self, attempt):
+        if self.error is not None and not (self.fail_first and attempt > 1):
             raise self.error
-        return iter(self.events)
+        for index, event in enumerate(self.events):
+            if self.break_after is not None and index >= self.break_after:
+                raise RuntimeError("stream broke")
+            if self.gate is not None and index == self.gate_after:
+                self.gate.wait(15)
+            yield event
 
 
 class FakeVertexTransport:
-    def __init__(self, response=None, events=None, error=None):
+    def __init__(self, response=None, events=None, error=None, fail_first=False):
         self.response = response
         self.events = list(events or [])
         self.error = error
+        self.fail_first = bool(fail_first)
         self.calls = []
 
     def generate(self, model_id, payload):
         self.calls.append(("generate", model_id, payload))
-        if self.error is not None:
+        if self.error is not None and not (self.fail_first and len(self.calls) > 1):
             raise self.error
         return self.response
 
     def stream_generate(self, model_id, payload):
         self.calls.append(("stream_generate", model_id, payload))
-        if self.error is not None:
+        attempt = len(self.calls)
+        if self.error is not None and not (self.fail_first and attempt > 1):
             raise self.error
-        return iter(self.events)
+        return self._events()
+
+    def _events(self):
+        yield from self.events
 
 
 class FakeClientError(Exception):

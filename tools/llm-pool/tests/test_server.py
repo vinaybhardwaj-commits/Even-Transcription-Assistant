@@ -98,13 +98,14 @@ def chat_body(model="haiku", content="Say hi", **extra):
     return body
 
 
-def seed_usd(ledger, usd):
+def seed_usd(ledger, usd, principal="main", provider="bedrock"):
     ledger.add(
         LedgerRow(
             caller="seed",
+            principal=principal,
             model="haiku",
             model_id="global.anthropic.claude-haiku-5-5",
-            provider="bedrock",
+            provider=provider,
             price_family="haiku",
             in_tokens=1,
             out_tokens=1,
@@ -285,7 +286,7 @@ def test_cap_refusal_at_boundary(serve, ledger, caplog):
     assert body["error"]["code"] == "aws_daily_cap_exceeded"
     assert kit.transport.calls == []
     assert kit.ledger.row_count() == 1
-    assert "refusing bedrock call" in caplog.text
+    assert "refusing bedrock call for caller main" in caplog.text
 
 
 def test_vertex_not_blocked_by_aws_cap(serve, ledger):
@@ -390,8 +391,9 @@ def test_spend_endpoint_numbers(serve, ledger):
     assert by_model["global.anthropic.claude-haiku-5-5"]["calls"] == 1
     assert by_model["global.anthropic.claude-haiku-5-5"]["in_tokens"] == 1000
     assert by_model["global.anthropic.claude-sonnet-5-5"]["calls"] == 1
-    assert spend["aws_daily_cap_usd"] == 500.0
-    assert spend["aws_remaining_usd"] == pytest.approx(500.0 - spend["aws_daily_total_usd"])
+    assert spend["aws_daily_cap_usd_per_caller"] == 500.0
+    main = [c for c in spend["callers"] if c["caller"] == "main"][0]
+    assert main["remaining_usd"] == pytest.approx(500.0 - spend["aws_daily_total_usd"])
     assert spend["aws_daily_total_usd"] == pytest.approx(
         (1000 * 1.0 + 500 * 5.0 + 1000 * 3.0 + 500 * 15.0) / 1_000_000
     )
@@ -402,7 +404,7 @@ def test_caller_header_attribution(serve, ledger):
     kit.post_json(chat_body(), headers={"X-LLM-Pool-Caller": "opencode-pane1"})
     kit.post_json(chat_body())
     callers = [row[0] for row in ledger._conn.execute("SELECT caller FROM spend ORDER BY id")]
-    assert callers == ["opencode-pane1", "default"]
+    assert callers == ["opencode-pane1", "main"]
 
 
 def test_per_caller_token(serve, ledger, config):

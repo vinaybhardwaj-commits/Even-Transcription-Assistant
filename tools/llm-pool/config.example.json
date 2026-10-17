@@ -1,5 +1,6 @@
 {
-  "aws_daily_cap_usd": 500,
+  "aws_daily_cap_usd_per_caller": 500,
+  "aws_daily_total_cap_usd": null,
   "aws_daily_cap_warn_fraction": 0.8,
   "client_token_file": "~/.config/llm-pool/client.token",
   "ledger_file": "~/.config/llm-pool/spend.sqlite3",

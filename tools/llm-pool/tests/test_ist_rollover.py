@@ -26,6 +26,7 @@ def test_ist_day_start_utc():
 def row(ts_value, est_usd, provider="bedrock"):
     return LedgerRow(
         caller="tester",
+        principal="tester",
         model="haiku",
         model_id="global.anthropic.claude-haiku-5-5",
         provider=provider,
@@ -54,10 +55,10 @@ def test_cap_ignores_previous_ist_day(tmp_path):
     ledger = Ledger(tmp_path / "spend.sqlite3", clock=lambda: clock["now"])
     ledger.add(row(ts(2026, 10, 17, 18, 29, 59), 500.0))
     guard = CapGuard(ledger, 500.0, 0.8, clock=lambda: clock["now"])
-    assert guard.check("bedrock").allowed is True
+    assert guard.reserve("tester", "bedrock", 0.0).allowed is True
     clock["now"] = ts(2026, 10, 17, 18, 29, 59)
     guard = CapGuard(ledger, 500.0, 0.8, clock=lambda: clock["now"])
-    assert guard.check("bedrock").allowed is False
+    assert guard.reserve("tester", "bedrock", 0.0).allowed is False
     ledger.close()
 
 
