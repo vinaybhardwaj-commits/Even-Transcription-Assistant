@@ -1,0 +1,1731 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eta.lab/schemas/eta.freescript.v1.0.json",
+  "title": "ETA -> FreeScript encounter artifact v1.0",
+  "description": "One artifact per ETA consult in scope. Pulse ingests only the header, gp_extraction and note_text; it drops unknown keys. gp_extraction mirrors pulsepb.GPLlmExtraction field-for-field. Under the default medicine_policy=notes_only no medicine is posted: every medicine is a structured doctor-confirm prompt. roster, spans, confirm_prompts, doctor_words, red_flags, provenance and qa are the audit and review layer. The cross-field guarantees V1-V16 are enforced by validate_artifact.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "supersedes",
+    "created_at",
+    "emission",
+    "policy",
+    "generator",
+    "encounter",
+    "pulse_link",
+    "roster",
+    "spans",
+    "gp_extraction",
+    "confirm_prompts",
+    "doctor_words",
+    "red_flags",
+    "provenance",
+    "qa"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "eta.freescript.v1.0"
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "supersedes": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "emission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reasons"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "full",
+            "withheld"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "no_bundle",
+              "no_role_track",
+              "no_stt",
+              "never_queued",
+              "no_order_capable_span",
+              "validator_fail"
+            ]
+          }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "medicine_policy",
+        "advice_budget",
+        "inputs_mode"
+      ],
+      "properties": {
+        "medicine_policy": {
+          "enum": [
+            "notes_only",
+            "taped_draft"
+          ]
+        },
+        "advice_budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "items",
+            "chars"
+          ],
+          "properties": {
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "chars": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "inputs_mode": {
+          "enum": [
+            "current",
+            "brief",
+            "brief_words"
+          ]
+        }
+      }
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "code_sha256",
+        "prompt_sha256s",
+        "models",
+        "temperature",
+        "run_id"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "code_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "prompt_sha256s": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "stageA",
+            "stageB"
+          ],
+          "properties": {
+            "stageA": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "stageB": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "role",
+              "served_model_id",
+              "provider",
+              "zdr"
+            ],
+            "properties": {
+              "role": {
+                "type": "string"
+              },
+              "served_model_id": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "zdr": {
+                "const": true
+              }
+            }
+          }
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "run_id": {
+          "type": "string"
+        }
+      }
+    },
+    "encounter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eta_encounter_id",
+        "room",
+        "visit_date_ist",
+        "window_start",
+        "window_end",
+        "languages",
+        "transcript",
+        "doctor"
+      ],
+      "properties": {
+        "eta_encounter_id": {
+          "type": "string"
+        },
+        "room": {
+          "type": "string"
+        },
+        "visit_date_ist": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "window_start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "window_end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "transcript": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "segment_count",
+            "diarised",
+            "english_source",
+            "stt_engines"
+          ],
+          "properties": {
+            "segment_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "diarised": {
+              "type": "boolean"
+            },
+            "english_source": {
+              "type": "string"
+            },
+            "stt_engines": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "doctor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "pulse_doctor_uid",
+            "specialty"
+          ],
+          "properties": {
+            "pulse_doctor_uid": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "specialty": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "pulse_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type_of_prescription",
+        "individual_uid",
+        "hospital_uid",
+        "consult_uid",
+        "prescription_uid",
+        "draft_exists",
+        "link_status",
+        "link_basis"
+      ],
+      "description": "Keys Pulse needs to bind the artifact to one prescription. Anything ETA does not know is null; ETA never guesses an id.",
+      "properties": {
+        "type_of_prescription": {
+          "const": "HOSPITAL_GP"
+        },
+        "individual_uid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hospital_uid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "consult_uid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Pulse ConsultUid (calendar event id) if known."
+        },
+        "prescription_uid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Pulse prescription doc id if known."
+        },
+        "draft_exists": {
+          "enum": [
+            "unknown",
+            "yes",
+            "no"
+          ]
+        },
+        "link_status": {
+          "enum": [
+            "confirmed",
+            "probable",
+            "none"
+          ],
+          "description": "How ETA tied room audio to this consult."
+        },
+        "link_basis": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "roster": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/RosterEntry"
+      }
+    },
+    "spans": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Span"
+      }
+    },
+    "gp_extraction": {
+      "$ref": "#/definitions/GPLlmExtraction"
+    },
+    "confirm_prompts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ConfirmPrompt"
+      }
+    },
+    "doctor_words": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DoctorWords"
+      }
+    },
+    "red_flags": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/RedFlag"
+      }
+    },
+    "provenance": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ProvenanceItem"
+      }
+    },
+    "note_text": {
+      "type": "string",
+      "description": "11 FreeScript headings in order, rendered only from posted gp_extraction, red_flags and doctor_words. Absent when emission=withheld."
+    },
+    "qa": {
+      "$ref": "#/definitions/Qa"
+    }
+  },
+  "definitions": {
+    "str": {
+      "type": "string"
+    },
+    "strList": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 3
+    },
+    "LlmMedicine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "raw_name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Normalised generic or brand name with strength, no Tab/Cap/Syp/Inj prefix."
+        },
+        "frequency": {
+          "type": "string"
+        },
+        "duration": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "raw_name": {
+          "type": "string"
+        },
+        "aliases": {
+          "$ref": "#/definitions/strList"
+        }
+      }
+    },
+    "LlmDiagnosis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "diagnosis_or_impression",
+        "raw_name"
+      ],
+      "properties": {
+        "diagnosis_or_impression": {
+          "type": "string"
+        },
+        "is_differential_diagnosis": {
+          "type": "boolean"
+        },
+        "raw_name": {
+          "type": "string"
+        },
+        "aliases": {
+          "$ref": "#/definitions/strList"
+        }
+      }
+    },
+    "LlmSurgeryRecommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "raw_name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "scheduled_date": {
+          "type": "string",
+          "pattern": "^(\\d{4}-\\d{2}-\\d{2})?$"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "raw_name": {
+          "type": "string"
+        },
+        "aliases": {
+          "$ref": "#/definitions/strList"
+        }
+      }
+    },
+    "LlmFurtherInvestigation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "raw_name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "scheduled_date": {
+          "type": "string",
+          "pattern": "^(\\d{4}-\\d{2}-\\d{2})?$"
+        },
+        "urgent": {
+          "type": "boolean"
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "raw_name": {
+          "type": "string"
+        },
+        "aliases": {
+          "$ref": "#/definitions/strList"
+        }
+      }
+    },
+    "LlmDuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "unit"
+      ],
+      "properties": {
+        "value": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "unit": {
+          "enum": [
+            "DAYS",
+            "WEEKS",
+            "MONTHS",
+            "YEARS",
+            "HOURS"
+          ],
+          "description": "evenpb.DurationUnit names. YEARS (=4) and HOURS (=5) are read from Pulse code; YEARS is sent directly, no longer as MONTHS x 12."
+        }
+      }
+    },
+    "LlmComorbidity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "raw_name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "duration": {
+          "$ref": "#/definitions/LlmDuration"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "raw_name": {
+          "type": "string"
+        },
+        "aliases": {
+          "$ref": "#/definitions/strList"
+        }
+      }
+    },
+    "LlmFollowUp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "followup_type": {
+          "enum": [
+            "IF_REQUIRED",
+            "MANDATORY_FOLLOW_UP",
+            "FOLLOW_UP_WITH_REPORTS",
+            "FOLLOW_UP_WITH_REFERRAL_PRESCRIPTION",
+            "FOLLOW_UP_WITH_REPORT_AND_REFERRAL_PRESCRIPTION"
+          ]
+        },
+        "follow_up_instructions": {
+          "type": "string"
+        },
+        "followup_date": {
+          "type": "string",
+          "pattern": "^(\\d{4}-\\d{2}-\\d{2})?$"
+        },
+        "no_follow_up_needed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "LlmReferral": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "speciality"
+      ],
+      "properties": {
+        "speciality": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "GPLlmExtraction": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Field names and nesting of pulsepb.GPLlmExtraction (proto3 JSON, snake_case), unchanged from v0.1 except the DurationUnit enum. ETA never adds keys. Only items whose provenance support is 'supported' appear here. Under medicine_policy=notes_only 'medicines' is empty: every medicine is a confirm_prompts entry instead.",
+      "properties": {
+        "examination": {
+          "type": "string"
+        },
+        "general_advice": {
+          "type": "string"
+        },
+        "presenting_complaints": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "symptoms": {
+              "type": "string"
+            },
+            "diagnoses": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/LlmDiagnosis"
+              }
+            }
+          }
+        },
+        "plan_of_management": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "management_plan": {
+              "type": "string"
+            },
+            "requires_surgery_or_procedure": {
+              "type": "boolean"
+            },
+            "surgery_or_procedure_recommendations": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/LlmSurgeryRecommendation"
+              }
+            }
+          }
+        },
+        "medicines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmMedicine"
+          }
+        },
+        "further_investigations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmFurtherInvestigation"
+          }
+        },
+        "comorbidities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmComorbidity"
+          }
+        },
+        "follow_up": {
+          "$ref": "#/definitions/LlmFollowUp"
+        },
+        "referrals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/LlmReferral"
+          }
+        }
+      }
+    },
+    "AttrSupport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "cited_spans",
+        "support"
+      ],
+      "properties": {
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The attribute as heard, verbatim from a cited span; null when not stated."
+        },
+        "cited_spans": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "support": {
+          "enum": [
+            "supported",
+            "h_unattrib",
+            "unaligned",
+            "affirmed_from_patient",
+            "not_stated"
+          ]
+        }
+      }
+    },
+    "Armc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "cos",
+        "margin_next_label",
+        "margin_runner_up_centroid",
+        "gate_flag"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "pass",
+            "fail",
+            "off",
+            "blocked_contradiction"
+          ]
+        },
+        "cos": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "margin_next_label": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "margin_runner_up_centroid": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "gate_flag": {
+          "enum": [
+            "on",
+            "off"
+          ]
+        }
+      }
+    },
+    "RosterEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "talk_s",
+        "role",
+        "role_votes",
+        "three_of_three",
+        "armc",
+        "voiceprint_match",
+        "translator_of",
+        "order_capable"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "pattern": "^speaker_[0-9]+$"
+        },
+        "talk_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "role": {
+          "enum": [
+            "treating_doctor",
+            "other_clinician",
+            "patient",
+            "attender",
+            "staff",
+            "translator",
+            "unknown"
+          ]
+        },
+        "role_votes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "role_track",
+            "clef",
+            "jev"
+          ],
+          "properties": {
+            "role_track": {
+              "oneOf": [
+                {
+                  "enum": [
+                    "treating_doctor",
+                    "other_clinician",
+                    "patient",
+                    "attender",
+                    "staff",
+                    "translator",
+                    "unknown"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "clef": {
+              "oneOf": [
+                {
+                  "enum": [
+                    "treating_doctor",
+                    "other_clinician",
+                    "patient",
+                    "attender",
+                    "staff",
+                    "translator",
+                    "unknown"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "jev": {
+              "oneOf": [
+                {
+                  "enum": [
+                    "treating_doctor",
+                    "other_clinician",
+                    "patient",
+                    "attender",
+                    "staff",
+                    "translator",
+                    "unknown"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "three_of_three": {
+          "type": "boolean",
+          "description": "True when all three role votes are treating_doctor."
+        },
+        "armc": {
+          "$ref": "#/definitions/Armc"
+        },
+        "voiceprint_match": {
+          "type": "boolean"
+        },
+        "translator_of": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^speaker_[0-9]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "order_capable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "Span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "span_id",
+        "segment_refs",
+        "t0",
+        "t1",
+        "label",
+        "lang",
+        "quote_native",
+        "quote_en",
+        "span_source",
+        "order_capable",
+        "boundary_quarantined",
+        "relay_of"
+      ],
+      "properties": {
+        "span_id": {
+          "type": "string",
+          "pattern": "^s[0-9]+$"
+        },
+        "segment_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "t0": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "t1": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "label": {
+          "type": "string",
+          "pattern": "^speaker_[0-9]+$"
+        },
+        "lang": {
+          "type": "string"
+        },
+        "quote_native": {
+          "type": "string",
+          "description": "Verbatim STT text."
+        },
+        "quote_en": {
+          "type": "string",
+          "description": "Verbatim English (native or machine translation), never model prose."
+        },
+        "span_source": {
+          "enum": [
+            "3of3",
+            "armc",
+            "both",
+            "none"
+          ]
+        },
+        "order_capable": {
+          "type": "boolean"
+        },
+        "segcheck": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cos",
+            "rank_first"
+          ],
+          "properties": {
+            "cos": {
+              "type": "number"
+            },
+            "rank_first": {
+              "type": "boolean"
+            }
+          }
+        },
+        "overlap": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "other_label",
+            "share"
+          ],
+          "properties": {
+            "other_label": {
+              "type": "string",
+              "pattern": "^speaker_[0-9]+$"
+            },
+            "share": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "boundary_quarantined": {
+          "type": "boolean"
+        },
+        "relay_of": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For a translator span: the span_id of the doctor span it restates."
+        }
+      }
+    },
+    "Drug": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spoken",
+        "brand_recognised",
+        "generic",
+        "components",
+        "base_molecule",
+        "form",
+        "strength_heard",
+        "lasa_risk"
+      ],
+      "properties": {
+        "spoken": {
+          "type": "string"
+        },
+        "brand_recognised": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generic": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Z0-9][A-Z0-9 +\\-]*$",
+          "description": "UPPERCASE INN; null only for an unattested combination brand (combination_unexpanded)."
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z0-9][A-Z0-9 \\-]*$"
+          }
+        },
+        "base_molecule": {
+          "type": "string",
+          "description": "Lowercase; salt and qualifier words stripped; components joined with ' + '."
+        },
+        "form": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "strength_heard": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lasa_risk": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "pair_with",
+            "note"
+          ],
+          "properties": {
+            "pair_with": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "note": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "ConfirmPrompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prompt_id",
+        "kind",
+        "action",
+        "attributes",
+        "who_said",
+        "doctor_confirm_reason"
+      ],
+      "properties": {
+        "prompt_id": {
+          "type": "string",
+          "pattern": "^p[0-9]+$"
+        },
+        "kind": {
+          "enum": [
+            "medicine",
+            "investigation",
+            "procedure",
+            "referral"
+          ]
+        },
+        "action": {
+          "enum": [
+            "start",
+            "continue",
+            "stop",
+            "hold",
+            "change_dose",
+            "not_given"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "description": "Non-medicine prompts: the order as spoken."
+        },
+        "drug": {
+          "$ref": "#/definitions/Drug"
+        },
+        "attributes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "strength",
+            "dose",
+            "route",
+            "frequency",
+            "duration",
+            "instruction"
+          ],
+          "properties": {
+            "strength": {
+              "$ref": "#/definitions/AttrSupport"
+            },
+            "dose": {
+              "$ref": "#/definitions/AttrSupport"
+            },
+            "route": {
+              "$ref": "#/definitions/AttrSupport"
+            },
+            "frequency": {
+              "$ref": "#/definitions/AttrSupport"
+            },
+            "duration": {
+              "$ref": "#/definitions/AttrSupport"
+            },
+            "instruction": {
+              "$ref": "#/definitions/AttrSupport"
+            }
+          }
+        },
+        "who_said": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "label",
+            "role"
+          ],
+          "properties": {
+            "label": {
+              "type": "string",
+              "pattern": "^speaker_[0-9]+$"
+            },
+            "role": {
+              "enum": [
+                "treating_doctor",
+                "other_clinician",
+                "patient",
+                "attender",
+                "staff",
+                "translator",
+                "unknown"
+              ]
+            }
+          }
+        },
+        "doctor_confirm_reason": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "notes_only",
+              "untaped",
+              "not_order_capable",
+              "lasa",
+              "strength_unstated",
+              "translator_relay",
+              "stop_order",
+              "combination_unexpanded",
+              "patient_reported",
+              "affirmed_from_patient",
+              "not_given"
+            ]
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "medicine"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "drug"
+            ]
+          },
+          "else": {
+            "required": [
+              "name"
+            ]
+          }
+        }
+      ]
+    },
+    "DoctorWords": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instruction_id",
+        "category",
+        "text_en",
+        "cited_spans",
+        "firmness",
+        "final_position",
+        "superseded_by",
+        "emphasis_count",
+        "counselling"
+      ],
+      "properties": {
+        "instruction_id": {
+          "type": "string",
+          "pattern": "^dw[0-9]+$"
+        },
+        "category": {
+          "enum": [
+            "dosing",
+            "lifestyle",
+            "diet",
+            "warning",
+            "follow_up",
+            "test_prep",
+            "counselling",
+            "other"
+          ]
+        },
+        "text_en": {
+          "type": "string"
+        },
+        "cited_spans": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "firmness": {
+          "enum": [
+            "firm",
+            "hedged"
+          ]
+        },
+        "final_position": {
+          "type": "boolean"
+        },
+        "superseded_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "emphasis_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "counselling": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "final_position": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "superseded_by": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "RedFlag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text_en",
+        "cited_spans",
+        "must_carry"
+      ],
+      "properties": {
+        "text_en": {
+          "type": "string"
+        },
+        "cited_spans": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "must_carry": {
+          "const": true
+        }
+      }
+    },
+    "ProvenanceItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "kind",
+        "text",
+        "status",
+        "negated",
+        "support",
+        "cited_spans",
+        "alignment",
+        "span_source",
+        "json_pointer",
+        "prompt_id",
+        "withheld_reason",
+        "flags"
+      ],
+      "properties": {
+        "item_id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "medicine",
+            "diagnosis",
+            "investigation",
+            "procedure",
+            "comorbidity",
+            "symptoms",
+            "examination",
+            "management_plan",
+            "advice",
+            "follow_up",
+            "referral"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6,
+          "description": "For order items (medicine, investigation, procedure, referral): every name ETA holds for it (as spoken, normalised, brand/generic, acronym/full name). Used to keep stopped / not-given orders out of gp_extraction and out of the matching note_text section under any of these names."
+        },
+        "status": {
+          "enum": [
+            "prescribed",
+            "continued",
+            "stopped",
+            "not_given",
+            "discussed_only"
+          ],
+          "description": "prescribed = newly ordered/advised this visit; continued = existing therapy the doctor says to keep; stopped = doctor discontinues; not_given = considered or asked for but explicitly not ordered; discussed_only = mentioned (e.g. by the patient) without a doctor decision."
+        },
+        "negated": {
+          "type": "boolean"
+        },
+        "support": {
+          "enum": [
+            "supported",
+            "h_unattrib",
+            "unaligned",
+            "affirmed_from_patient",
+            "not_stated"
+          ]
+        },
+        "cited_spans": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "alignment": {
+          "enum": [
+            "aligned_code",
+            "aligned_llm",
+            "unaligned"
+          ]
+        },
+        "span_source": {
+          "enum": [
+            "3of3",
+            "armc",
+            "both",
+            "none"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "json_pointer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "withheld_reason": {
+          "oneOf": [
+            {
+              "enum": [
+                "placeholder",
+                "repr",
+                "missing_value",
+                "frx_n1_phrase",
+                "bracket"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "low_confidence",
+              "no_evidence",
+              "speaker_uncertain",
+              "strength_unstated",
+              "frequency_unstated",
+              "duration_unstated",
+              "translation_uncertain",
+              "negation_cue_nearby",
+              "field_withheld",
+              "affirmed_from_patient",
+              "translator_relay",
+              "not_order_capable",
+              "lasa",
+              "combination_unexpanded",
+              "case7_no_voiceprint"
+            ]
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "stopped",
+                  "not_given",
+                  "discussed_only"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "json_pointer": {
+                "const": null
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "negated": {
+                "const": true
+              },
+              "kind": {
+                "enum": [
+                  "medicine",
+                  "investigation",
+                  "procedure",
+                  "referral"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "stopped",
+                  "not_given",
+                  "discussed_only"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "withheld_reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "withheld_reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "json_pointer": {
+                "const": null
+              },
+              "flags": {
+                "contains": {
+                  "const": "field_withheld"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "json_pointer": {
+                "const": null
+              },
+              "status": {
+                "enum": [
+                  "prescribed",
+                  "continued"
+                ]
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "prompt_id": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "withheld_reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "confidence": {
+                "exclusiveMaximum": 0.6
+              }
+            },
+            "required": [
+              "confidence"
+            ]
+          },
+          "then": {
+            "properties": {
+              "flags": {
+                "contains": {
+                  "const": "low_confidence"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Qa": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "floors",
+        "counts",
+        "inputs",
+        "models_served",
+        "render_template"
+      ],
+      "properties": {
+        "floors": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "untaped_drugs",
+            "invented_doses",
+            "dose_precedence_errors",
+            "clip_leakage",
+            "placeholders",
+            "red_flags_missing",
+            "hallucinations_est",
+            "validator_pass"
+          ],
+          "properties": {
+            "untaped_drugs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "invented_doses": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "dose_precedence_errors": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "clip_leakage": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "placeholders": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "red_flags_missing": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "hallucinations_est": {
+              "type": "number",
+              "minimum": 0
+            },
+            "validator_pass": {
+              "type": "boolean"
+            }
+          }
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "posted",
+            "prompts",
+            "withheld",
+            "h_unattrib",
+            "unaligned",
+            "affirmed_from_patient"
+          ],
+          "properties": {
+            "posted": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "prompts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "withheld": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "h_unattrib": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unaligned": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "affirmed_from_patient": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "role_votes_present",
+            "armc_gate",
+            "case7"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "current",
+                "brief",
+                "brief_words"
+              ]
+            },
+            "role_votes_present": {
+              "type": "boolean"
+            },
+            "armc_gate": {
+              "enum": [
+                "on",
+                "off"
+              ]
+            },
+            "case7": {
+              "type": "boolean"
+            }
+          }
+        },
+        "models_served": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Model ids read back from the provider responses, never typed."
+        },
+        "render_template": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

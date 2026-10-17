@@ -1,0 +1,69 @@
+{
+  "version": "1.0",
+  "source": "tools/eta2freescript/validate.py printable_errors (FRX-N1) and note.py FILLER (origin/cloudpane/cloud-frx-r2-build/r2 @ fd65cdc6). Copied as regexes; d4's token-window test is reduced to its two regexes (ASSUMPTION).",
+  "order_sections": [
+    "Follow up",
+    "Further Investigation",
+    "Surgery or Procedure",
+    "Refer to"
+  ],
+  "order_sections_note": "validate.py also applies d1/d2/d4 to Medication. v1.0 exempts Medication because the design mandates the '— confirm' line format there (ASSUMPTION).",
+  "anywhere": [
+    {
+      "id": "bracket",
+      "regex": "[\\[\\]{}]"
+    },
+    {
+      "id": "angle_slot",
+      "regex": "<[A-Za-z]"
+    },
+    {
+      "id": "underscore_blank",
+      "regex": "_{2,}"
+    },
+    {
+      "id": "x_unit_slot",
+      "regex": "(?i)(?<!\\w)x+(?=\\s+(?:mg|ml|mcg|g|iu|units|days|weeks|months)\\b)"
+    },
+    {
+      "id": "d3",
+      "regex": "(?i)\\b(?:doctor\\s+to|dr\\.?\\s+to|ask\\s+doctor|ask\\s+dr)\\b"
+    },
+    {
+      "id": "d5",
+      "regex": "(?i)\\bunnamed\\s+drug\\b|\\bplaceholder\\b|\\bdose\\s+not\\s+stated\\b|\\bheld_back\\b|\\bkept\\s+out\\b(?!\\s+of\\b)|\\bredacted\\b|\\blorem\\b"
+    },
+    {
+      "id": "tbd",
+      "regex": "(?i)\\b(?:tbd|tbc)\\b"
+    },
+    {
+      "id": "repr",
+      "regex": "\\{\\s*['\"]|['\"]\\s*:\\s*['\"\\[{]|\\bNone\\b|\\bnull\\b|\\bundefined\\b|\\bNaN\\b"
+    }
+  ],
+  "order_sections_only": [
+    {
+      "id": "d1",
+      "regex": "(?i)(?:\\b(?:not|(?:was|is)\\s+not|(?:wasn|isn)['\\u2019]t)\\s+(?:\\w+ly\\s+)?|\\bun)(?:stated|mentioned|specified|known|clear|decided|recorded|documented|provided|confirmed|verified|determined|filled)\\b"
+    },
+    {
+      "id": "d2",
+      "regex": "(?i)\\b(?:verif|confirm|decid|determin|clarif|tbd|tbc)\\w*"
+    },
+    {
+      "id": "d3pp",
+      "regex": "(?i)\\bto\\s+be\\s+(?:confirmed|decided|determined|verified|clarified|specified|filled|entered)\\b"
+    },
+    {
+      "id": "d4_no",
+      "regex": "(?i)\\bno\\s+(?:date|dosage|dose|drug|duration|frequency|medicine|name|strength|timing)\\s+(?:given|stated|mentioned|specified)\\b"
+    },
+    {
+      "id": "d4_add",
+      "regex": "(?i)\\badd\\s+(?:date|dosage|dose|drug|duration|frequency|medicine|name|strength|timing)\\b"
+    }
+  ],
+  "filler_line": "(?i)^\\s*(not\\s+(documented|stated|recorded|examined|mentioned|done|available)|none( stated)?|nil|n/?a|-+|—|unknown|tbd)\\s*\\.?\\s*$",
+  "filler_note": "note.py FILLER plus 'unknown' and 'tbd' as whole values (missing-value-only)."
+}

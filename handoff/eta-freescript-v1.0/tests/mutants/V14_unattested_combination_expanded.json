@@ -1,0 +1,710 @@
+{
+  "schema_version": "eta.freescript.v1.0",
+  "artifact_id": "00000000-0000-4000-8000-000000000006",
+  "supersedes": null,
+  "created_at": "2026-10-15T10:30:00+05:30",
+  "emission": {
+    "state": "full",
+    "reasons": []
+  },
+  "policy": {
+    "medicine_policy": "notes_only",
+    "advice_budget": {
+      "items": 5,
+      "chars": 300
+    },
+    "inputs_mode": "current"
+  },
+  "generator": {
+    "name": "hand-authored-example",
+    "version": "1.0",
+    "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "prompt_sha256s": {
+      "stageA": "0000000000000000000000000000000000000000000000000000000000000000",
+      "stageB": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "models": [
+      {
+        "role": "stageA",
+        "served_model_id": "example-model-a-2026-10",
+        "provider": "example-provider",
+        "zdr": true
+      },
+      {
+        "role": "stageB",
+        "served_model_id": "example-model-b-2026-10",
+        "provider": "example-provider",
+        "zdr": true
+      }
+    ],
+    "temperature": 0,
+    "run_id": "EXAMPLE-RUN-6"
+  },
+  "encounter": {
+    "eta_encounter_id": "EXAMPLE-ENC-6",
+    "room": "EXAMPLE-ROOM",
+    "visit_date_ist": "2026-10-15",
+    "window_start": "2026-10-15T10:00:00+05:30",
+    "window_end": "2026-10-15T10:15:00+05:30",
+    "languages": [
+      "en"
+    ],
+    "transcript": {
+      "segment_count": 21,
+      "diarised": true,
+      "english_source": "native",
+      "stt_engines": [
+        "example-stt-a"
+      ]
+    },
+    "doctor": {
+      "pulse_doctor_uid": null,
+      "specialty": "General Practitioner"
+    }
+  },
+  "pulse_link": {
+    "type_of_prescription": "HOSPITAL_GP",
+    "individual_uid": null,
+    "hospital_uid": null,
+    "consult_uid": null,
+    "prescription_uid": null,
+    "draft_exists": "unknown",
+    "link_status": "none",
+    "link_basis": null
+  },
+  "roster": [
+    {
+      "label": "speaker_0",
+      "talk_s": 520,
+      "role": "treating_doctor",
+      "role_votes": {
+        "role_track": "treating_doctor",
+        "clef": "treating_doctor",
+        "jev": "treating_doctor"
+      },
+      "three_of_three": true,
+      "armc": {
+        "state": "pass",
+        "cos": 0.84,
+        "margin_next_label": 0.21,
+        "margin_runner_up_centroid": 0.17,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": true,
+      "translator_of": null,
+      "order_capable": true
+    },
+    {
+      "label": "speaker_1",
+      "talk_s": 240,
+      "role": "patient",
+      "role_votes": {
+        "role_track": "patient",
+        "clef": "patient",
+        "jev": "patient"
+      },
+      "three_of_three": false,
+      "armc": {
+        "state": "fail",
+        "cos": 0.22,
+        "margin_next_label": null,
+        "margin_runner_up_centroid": null,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": false,
+      "translator_of": null,
+      "order_capable": false
+    }
+  ],
+  "spans": [
+    {
+      "span_id": "s1",
+      "segment_refs": [
+        "EXAMPLE-W6:1"
+      ],
+      "t0": "2026-10-15T10:00:30+05:30",
+      "t1": "2026-10-15T10:00:42+05:30",
+      "label": "speaker_1",
+      "lang": "en",
+      "quote_native": "I am breathless and wheezing for three days, and coughing yellow phlegm",
+      "quote_en": "I am breathless and wheezing for three days, and coughing yellow phlegm",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s2",
+      "segment_refs": [
+        "EXAMPLE-W6:2"
+      ],
+      "t0": "2026-10-15T10:00:43+05:30",
+      "t1": "2026-10-15T10:00:52+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "so wheeze and breathlessness for three days with yellow sputum",
+      "quote_en": "so wheeze and breathlessness for three days with yellow sputum",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s3",
+      "segment_refs": [
+        "EXAMPLE-W6:3"
+      ],
+      "t0": "2026-10-15T10:02:00+05:30",
+      "t1": "2026-10-15T10:02:14+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "wheeze on both sides, saturation 95, temperature 99.8",
+      "quote_en": "wheeze on both sides, saturation 95, temperature 99.8",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s4",
+      "segment_refs": [
+        "EXAMPLE-W6:4"
+      ],
+      "t0": "2026-10-15T10:03:00+05:30",
+      "t1": "2026-10-15T10:03:06+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "this is an asthma flare with a chest infection",
+      "quote_en": "this is an asthma flare with a chest infection",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s5",
+      "segment_refs": [
+        "EXAMPLE-W6:5"
+      ],
+      "t0": "2026-10-15T10:03:10+05:30",
+      "t1": "2026-10-15T10:03:20+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "take Pan-D once a day before breakfast",
+      "quote_en": "take Pan-D once a day before breakfast",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s6",
+      "segment_refs": [
+        "EXAMPLE-W6:6"
+      ],
+      "t0": "2026-10-15T10:03:21+05:30",
+      "t1": "2026-10-15T10:03:32+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "and prednisolone once a day in the morning after breakfast for five days",
+      "quote_en": "and prednisolone once a day in the morning after breakfast for five days",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s7",
+      "segment_refs": [
+        "EXAMPLE-W6:7"
+      ],
+      "t0": "2026-10-15T10:03:40+05:30",
+      "t1": "2026-10-15T10:03:50+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "if your breathing gets worse or your lips turn blue, go to the emergency department at once",
+      "quote_en": "if your breathing gets worse or your lips turn blue, go to the emergency department at once",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s8",
+      "segment_refs": [
+        "EXAMPLE-W6:8"
+      ],
+      "t0": "2026-10-15T10:03:51+05:30",
+      "t1": "2026-10-15T10:04:00+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "if your breathing gets worse or your lips turn blue, go to the emergency department at once, do not wait",
+      "quote_en": "if your breathing gets worse or your lips turn blue, go to the emergency department at once, do not wait",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s9",
+      "segment_refs": [
+        "EXAMPLE-W6:9"
+      ],
+      "t0": "2026-10-15T10:04:05+05:30",
+      "t1": "2026-10-15T10:04:08+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "you may try steam inhalation",
+      "quote_en": "you may try steam inhalation",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s10",
+      "segment_refs": [
+        "EXAMPLE-W6:10"
+      ],
+      "t0": "2026-10-15T10:04:09+05:30",
+      "t1": "2026-10-15T10:04:15+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "actually, no steam for now, it can set off the wheeze",
+      "quote_en": "actually, no steam for now, it can set off the wheeze",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s11",
+      "segment_refs": [
+        "EXAMPLE-W6:11"
+      ],
+      "t0": "2026-10-15T10:04:16+05:30",
+      "t1": "2026-10-15T10:04:19+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "avoid dust and smoke",
+      "quote_en": "avoid dust and smoke",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s12",
+      "segment_refs": [
+        "EXAMPLE-W6:12"
+      ],
+      "t0": "2026-10-15T10:04:30+05:30",
+      "t1": "2026-10-15T10:04:34+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "come back in five days",
+      "quote_en": "come back in five days",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    }
+  ],
+  "gp_extraction": {
+    "presenting_complaints": {
+      "symptoms": "Breathlessness and wheeze for 3 days with yellow sputum.",
+      "diagnoses": [
+        {
+          "diagnosis_or_impression": "Acute exacerbation of asthma with lower respiratory tract infection",
+          "is_differential_diagnosis": false,
+          "raw_name": "asthma flare with a chest infection",
+          "aliases": [
+            "Asthma exacerbation"
+          ]
+        }
+      ]
+    },
+    "examination": "Bilateral wheeze. SpO2 95%. Temperature 99.8 F.",
+    "medicines": [],
+    "follow_up": {
+      "followup_type": "MANDATORY_FOLLOW_UP",
+      "follow_up_instructions": "Come back in five days."
+    },
+    "general_advice": "If your breathing gets worse or your lips turn blue, go to the emergency department at once. No steam for now, it can set off the wheeze. Avoid dust and smoke."
+  },
+  "confirm_prompts": [
+    {
+      "prompt_id": "p1",
+      "kind": "medicine",
+      "action": "start",
+      "drug": {
+        "spoken": "Pan-D",
+        "brand_recognised": "Pan-D",
+        "form": "capsule",
+        "strength_heard": null,
+        "lasa_risk": {
+          "pair_with": null,
+          "note": "not on the curated LASA list"
+        },
+        "generic": "PANTOPRAZOLE + DOMPERIDONE",
+        "components": [
+          "PANTOPRAZOLE",
+          "DOMPERIDONE"
+        ],
+        "base_molecule": "pantoprazole + domperidone"
+      },
+      "attributes": {
+        "strength": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": "once a day",
+          "cited_spans": [
+            "s5"
+          ],
+          "support": "supported"
+        },
+        "duration": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "instruction": {
+          "value": "before breakfast",
+          "cited_spans": [
+            "s5"
+          ],
+          "support": "supported"
+        }
+      },
+      "who_said": {
+        "label": "speaker_0",
+        "role": "treating_doctor"
+      },
+      "doctor_confirm_reason": [
+        "notes_only"
+      ]
+    },
+    {
+      "prompt_id": "p2",
+      "kind": "medicine",
+      "action": "start",
+      "drug": {
+        "spoken": "prednisolone",
+        "brand_recognised": null,
+        "generic": "PREDNISOLONE",
+        "components": [],
+        "base_molecule": "prednisolone",
+        "form": "tablet",
+        "strength_heard": null,
+        "lasa_risk": {
+          "pair_with": "prednisone",
+          "note": "curated LASA pair; confirm the molecule"
+        }
+      },
+      "attributes": {
+        "strength": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": "once a day in the morning",
+          "cited_spans": [
+            "s6"
+          ],
+          "support": "supported"
+        },
+        "duration": {
+          "value": "five days",
+          "cited_spans": [
+            "s6"
+          ],
+          "support": "supported"
+        },
+        "instruction": {
+          "value": "after breakfast",
+          "cited_spans": [
+            "s6"
+          ],
+          "support": "supported"
+        }
+      },
+      "who_said": {
+        "label": "speaker_0",
+        "role": "treating_doctor"
+      },
+      "doctor_confirm_reason": [
+        "notes_only",
+        "lasa",
+        "strength_unstated"
+      ]
+    }
+  ],
+  "doctor_words": [
+    {
+      "instruction_id": "dw1",
+      "category": "warning",
+      "text_en": "If your breathing gets worse or your lips turn blue, go to the emergency department at once.",
+      "cited_spans": [
+        "s7",
+        "s8"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 2,
+      "counselling": true
+    },
+    {
+      "instruction_id": "dw2",
+      "category": "lifestyle",
+      "text_en": "You may try steam inhalation.",
+      "cited_spans": [
+        "s9"
+      ],
+      "firmness": "hedged",
+      "final_position": false,
+      "superseded_by": "dw3",
+      "emphasis_count": 1,
+      "counselling": false
+    },
+    {
+      "instruction_id": "dw3",
+      "category": "lifestyle",
+      "text_en": "No steam for now, it can set off the wheeze.",
+      "cited_spans": [
+        "s10"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 1,
+      "counselling": true
+    },
+    {
+      "instruction_id": "dw4",
+      "category": "lifestyle",
+      "text_en": "Avoid dust and smoke.",
+      "cited_spans": [
+        "s11"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 1,
+      "counselling": true
+    },
+    {
+      "instruction_id": "dw5",
+      "category": "follow_up",
+      "text_en": "Come back in five days.",
+      "cited_spans": [
+        "s12"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 1,
+      "counselling": false
+    }
+  ],
+  "red_flags": [
+    {
+      "text_en": "If your breathing gets worse or your lips turn blue, go to the emergency department at once.",
+      "cited_spans": [
+        "s7",
+        "s8"
+      ],
+      "must_carry": true
+    }
+  ],
+  "provenance": [
+    {
+      "item_id": "e6-sym",
+      "kind": "symptoms",
+      "text": "wheeze, breathlessness 3 days, yellow sputum",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s1",
+        "s2"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/presenting_complaints/symptoms",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e6-exam",
+      "kind": "examination",
+      "text": "bilateral wheeze, SpO2 95, T 99.8",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s3"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/examination",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e6-dx",
+      "kind": "diagnosis",
+      "text": "asthma exacerbation with LRTI",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s4"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/presenting_complaints/diagnoses/0",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e6-amc",
+      "kind": "medicine",
+      "text": "Augmentin 625 Duo BD x 5 days",
+      "names": [
+        "Pan-D"
+      ],
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s5"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": "p1",
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e6-pred",
+      "kind": "medicine",
+      "text": "prednisolone OD x 5 days, strength unstated",
+      "names": [
+        "prednisolone"
+      ],
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s6"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": "p2",
+      "withheld_reason": null,
+      "flags": [
+        "lasa",
+        "strength_unstated"
+      ]
+    },
+    {
+      "item_id": "e6-fu",
+      "kind": "follow_up",
+      "text": "review in 5 days",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s12"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/follow_up",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e6-adv",
+      "kind": "advice",
+      "text": "red flag first; no steam; avoid dust and smoke",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s7",
+        "s8",
+        "s10",
+        "s11"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/general_advice",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    }
+  ],
+  "note_text": "Co-morbidities:\nPresenting Complaint: Breathlessness and wheeze for 3 days with yellow sputum.\nExamination: Bilateral wheeze. SpO2 95%. Temperature 99.8 F.\nDiagnoses: Acute exacerbation of asthma with lower respiratory tract infection\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nPANTOPRAZOLE + DOMPERIDONE (Pan-D) — confirm\nPREDNISOLONE — confirm\nFurther Investigation:\nFollow up: Come back in five days.\nRefer to:\nGeneral Advice: If your breathing gets worse or your lips turn blue, go to the emergency department at once. No steam for now, it can set off the wheeze. Avoid dust and smoke.",
+  "qa": {
+    "floors": {
+      "untaped_drugs": 0,
+      "invented_doses": 0,
+      "dose_precedence_errors": 0,
+      "clip_leakage": 0,
+      "placeholders": 0,
+      "red_flags_missing": 0,
+      "hallucinations_est": 0.0,
+      "validator_pass": true
+    },
+    "counts": {
+      "posted": 5,
+      "prompts": 2,
+      "withheld": 0,
+      "h_unattrib": 0,
+      "unaligned": 0,
+      "affirmed_from_patient": 0
+    },
+    "inputs": {
+      "mode": "current",
+      "role_votes_present": true,
+      "armc_gate": "on",
+      "case7": false
+    },
+    "models_served": [
+      "example-model-a-2026-10",
+      "example-model-b-2026-10"
+    ],
+    "render_template": "neutral-11h-v1"
+  }
+}

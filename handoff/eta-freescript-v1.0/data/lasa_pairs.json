@@ -1,0 +1,39 @@
+{
+  "version": "1.0",
+  "source": "Design v1.0 section 5 (curated LASA groups). ASSUMPTION: the 16 L2 pairs are not held in the repo code; this list expands only the groups the design names, and is extensible.",
+  "match": "whole word on the base molecule after split-spelling normalisation; never on a salt or qualifier word; no prefix or fuzzy rule",
+  "pairs": [
+    [
+      "prednisolone",
+      "prednisone"
+    ],
+    [
+      "hydroxychloroquine",
+      "hydroxyzine"
+    ],
+    [
+      "hydroxychloroquine",
+      "hydrochlorothiazide"
+    ],
+    [
+      "hydroxyzine",
+      "hydrochlorothiazide"
+    ],
+    [
+      "chloroquine",
+      "chlorpheniramine"
+    ],
+    [
+      "chloroquine",
+      "chlorthalidone"
+    ],
+    [
+      "chlorpheniramine",
+      "chlorthalidone"
+    ],
+    [
+      "amoxicillin",
+      "amoxiclav"
+    ]
+  ]
+}

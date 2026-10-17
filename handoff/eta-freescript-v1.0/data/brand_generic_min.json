@@ -1,0 +1,61 @@
+{
+  "version": "1.0",
+  "source": "tools/eta2freescript medication_safety.BRANDS, combinations.CATALOGUE and r1_floors.GUARD_ALIASES (origin/cloudpane/cloud-frx-r2-build/r2 @ fd65cdc6)",
+  "attested_meaning": "attested = the current code releases this brand to its generic (curated map or attested catalogue). unattested = the current code does not release it; it may only widen the stop/hold guard. A combination brand expands into components only when attested; otherwise combination_unexpanded.",
+  "entries": [
+    {
+      "brand": "Dolo 650",
+      "key": "dolo",
+      "generic": "PARACETAMOL",
+      "components": [],
+      "status": "attested",
+      "basis": "medication_safety.BRANDS"
+    },
+    {
+      "brand": "Crocin",
+      "key": "crocin",
+      "generic": "PARACETAMOL",
+      "components": [],
+      "status": "attested",
+      "basis": "medication_safety.BRANDS"
+    },
+    {
+      "brand": "Calpol",
+      "key": "calpol",
+      "generic": "PARACETAMOL",
+      "components": [],
+      "status": "unattested",
+      "basis": "r1_floors.GUARD_ALIASES only (guard-only, never releases)"
+    },
+    {
+      "brand": "PCM",
+      "key": "pcm",
+      "generic": "PARACETAMOL",
+      "components": [],
+      "status": "unattested",
+      "basis": "r1_floors.GUARD_ALIASES only (guard-only, never releases)"
+    },
+    {
+      "brand": "Augmentin 625 Duo",
+      "key": "augmentin",
+      "generic": "AMOXICILLIN + CLAVULANIC ACID",
+      "components": [
+        "AMOXICILLIN",
+        "CLAVULANIC ACID"
+      ],
+      "status": "attested",
+      "basis": "combinations.CATALOGUE (no attest fields, so attested) and medication_safety.BRANDS"
+    },
+    {
+      "brand": "Pan-D",
+      "key": "pand",
+      "generic": "PANTOPRAZOLE + DOMPERIDONE",
+      "components": [
+        "PANTOPRAZOLE",
+        "DOMPERIDONE"
+      ],
+      "status": "unattested",
+      "basis": "absent from medication_safety.BRANDS and combinations.CATALOGUE; stays combination_unexpanded"
+    }
+  ]
+}
