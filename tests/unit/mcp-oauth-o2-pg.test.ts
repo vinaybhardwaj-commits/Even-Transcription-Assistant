@@ -27,6 +27,9 @@ beforeAll(() => {
   const mig = readFileSync("db/migrations/0170_mcp_oauth.sql", "utf8");
   pg.exec(mig);
   pg.exec(mig); // idempotent
+  const burn = readFileSync("db/migrations/0172_mcp_oauth_consent_burn.sql", "utf8");
+  pg.exec(burn);
+  pg.exec(burn); // idempotent
   H.sql = pg.sql as never;
 }, 300_000);
 afterAll(() => { if (HAVE) pg.stop(); });
@@ -214,5 +217,18 @@ describe.skipIf(!HAVE)("R2 F3 on real postgres: the refresh family ends 30 days 
     await S.insertToken({ token_hash: hashSecret(young), kind: "refresh", email: "aged@example.test", client_id: CLIENT, scopes: ["read"], resource: RESOURCE, family_id: fam2, ttl_s: 3600 });
     await q`UPDATE mcp_oauth_token SET created_at = now() - interval '29 days 23 hours' WHERE family_id = ${fam2}`;
     expect((await S.getToken(hashSecret(young)))?.family_expired).toBe(false);
+  });
+});
+
+describe.skipIf(!HAVE)("R3 on real postgres: a consent page is burned exactly once (0172)", () => {
+  it("burnConsent: one winner under concurrency (x12), every later call false, distinct hashes independent", async () => {
+    for (let i = 0; i < 12; i++) {
+      const h = `burn-${i}`;
+      const wins = await Promise.all([S.burnConsent(h), S.burnConsent(h), S.burnConsent(h)]);
+      expect(wins.filter(Boolean), `iteration ${i}`).toHaveLength(1);
+      expect(await S.burnConsent(h)).toBe(false);
+    }
+    expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM mcp_oauth_consent_burn WHERE csrf_hash LIKE 'burn-%'`)[0]!.n).toBe(12);
+    expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM schema_migrations WHERE version = 172`)[0]!.n).toBe(1);
   });
 });

@@ -16,6 +16,7 @@ export const state = {
   granted: new Map<string, number>(), // email -> tick of the last (re)grant
   created: new Map<string, number>(), // token hash -> tick of creation
   codeCreated: new Map<string, number>(), // code hash -> tick of creation
+  burned: new Set<string>(), // R3: consent csrf hashes already used
   familyBorn: new Map<string, number>(), // family id -> Date.now() of its first token (R2 F3); a test may backdate it
 };
 export function resetFakeStore(): void {
@@ -41,6 +42,11 @@ export const personGrantedSinceCode = async (email: string, codeHash: string, _t
 export const insertCode = async (c: { code_hash: string; client_id: string; email: string; code_challenge: string; redirect_uri: string; resource: string; scopes: string[]; ttl_s: number }) => {
   state.codeCreated.set(c.code_hash, tick());
   state.codes.set(c.code_hash, { code_hash: c.code_hash, client_id: c.client_id, email: c.email, code_challenge: c.code_challenge, redirect_uri: c.redirect_uri, resource: c.resource, scopes: c.scopes, expires_at: "", used_at: null, exp: Date.now() + c.ttl_s * 1000 });
+};
+export const burnConsent = async (h: string) => {
+  if (state.burned.has(h)) return false;
+  state.burned.add(h);
+  return true;
 };
 export const claimCode = async (h: string) => {
   const c = state.codes.get(h);

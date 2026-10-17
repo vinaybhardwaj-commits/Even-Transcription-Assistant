@@ -5,7 +5,7 @@
  * Success does NOT mint a code (R2 F2): it re-signs the cookie as a consent blob (5 min, with a CSRF token) and renders a same-origin page naming the client and the redirect host.
  * POST (Allow) re-checks the person and mints a one-time 60 s code bound to client, redirect_uri, challenge, resource, email and the person's scopes; one mcp.oauth_granted row.
  * POST (Deny) redirects with error=access_denied and iss; one mcp.oauth_refused row (consent_denied). A POST without the consent cookie, or with a wrong CSRF token or a foreign Origin,
- * is a plain HTML 400 that never redirects and never mints.
+ * is a plain HTML 400 that never redirects and never mints. The page answers once (R3): the first Allow or Deny burns its CSRF hash (migration 0172); a replay is a 400 consent_replay.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { CODE_TTL_S, CONSENT_PURPOSE, CONSENT_TTL_S, PENDING_COOKIE, PENDING_PURPOSE, mcpIssuer, mcpOauthDomain } from "@/lib/mcp/oauth/config";
@@ -13,7 +13,7 @@ import { hashSecret, randomId, safeEqual, signBlob, verifyBlob } from "@/lib/mcp
 import { consentPage, describeClient, type Consent } from "@/lib/mcp/oauth/consent";
 import { exchangeGoogleCode, verifyGoogleIdToken } from "@/lib/mcp/oauth/google";
 import { htmlError, NO_STORE, oauthGate, redirectError } from "@/lib/mcp/oauth/http";
-import { getPerson, insertCode } from "@/lib/mcp/oauth/store";
+import { burnConsent, getPerson, insertCode } from "@/lib/mcp/oauth/store";
 import { auditOauthGranted, auditOauthRefused } from "@/lib/mcp/audit";
 
 export const runtime = "nodejs";
@@ -100,11 +100,22 @@ export async function POST(req: NextRequest) {
     return htmlError(400, "invalid_request"); // the cookie is kept: the real page can still be answered
   }
   const decision = form.get("decision");
+  if (decision !== "allow" && decision !== "deny") return htmlError(400, "invalid_request");
+  // R3: the consent page answers ONCE. The first Allow or Deny burns the CSRF hash; a replay, a double click or Deny-then-Allow mints nothing.
+  let first: boolean;
+  try {
+    first = await burnConsent(hashSecret(`consent:${consent.csrf}`));
+  } catch {
+    return done(redirectError(consent.ru, "server_error", consent.st, 303));
+  }
+  if (!first) {
+    await auditOauthRefused(consent.email, "consent_replay");
+    return done(htmlError(400, "invalid_request"));
+  }
   if (decision === "deny") {
     await auditOauthRefused(consent.email, "consent_denied");
     return done(redirectError(consent.ru, "access_denied", consent.st, 303));
   }
-  if (decision !== "allow") return htmlError(400, "invalid_request");
 
   try {
     const person = await getPerson(consent.email);

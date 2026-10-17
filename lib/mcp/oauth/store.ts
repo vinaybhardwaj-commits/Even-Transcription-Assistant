@@ -46,6 +46,14 @@ export async function insertCode(c: { code_hash: string; client_id: string; emai
   `;
 }
 
+/** R3: atomic single-use claim of a consent page (migration 0172). True only for the FIRST Allow or Deny that presents this CSRF hash; every replay gets false. */
+export async function burnConsent(csrfHash: string): Promise<boolean> {
+  const rows = (await sql`
+    INSERT INTO mcp_oauth_consent_burn (csrf_hash) VALUES (${csrfHash}) ON CONFLICT (csrf_hash) DO NOTHING RETURNING csrf_hash
+  `) as unknown[];
+  return rows.length > 0;
+}
+
 /** Atomic single-use claim. Returns the row only for the first caller within the TTL. */
 export async function claimCode(codeHash: string): Promise<CodeRow | null> {
   const rows = (await sql`

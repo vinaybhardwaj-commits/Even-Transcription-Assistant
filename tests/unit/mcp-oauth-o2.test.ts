@@ -894,6 +894,7 @@ describe("R2 F2: consent step between Google and the code", () => {
     expect(page.headers.get("location")).toBeNull();
     expect(page.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     expect(page.headers.get("x-frame-options")).toBe("DENY");
+    expect(page.headers.get("referrer-policy")).toBe("same-origin"); // R3: no-referrer made browsers send Origin: null on the POST
     expect(html).toContain('<dd data-consent="client">client.example.test</dd>');
     expect(html).toContain('<dd data-consent="redirect-host">claude.ai</dd>');
     expect(html).toContain('method="post" action="/api/oauth/google/callback"');
@@ -997,6 +998,32 @@ describe("R2 F2: consent step between Google and the code", () => {
     const forged = signBlob("pending", { cid: CIMD, ru: CLAUDE_CALLBACK, cc: CHALLENGE, st: null, res: RESOURCE, email: ALICE, csrf: "c".repeat(32), exp: 9999999999 });
     expect((await consentPost(forged, { csrf: "c".repeat(32), decision: "allow" })).status).toBe(400);
     expect(fake.state.codes.size).toBe(0);
+  });
+});
+
+describe("R3: the consent page answers once", () => {
+  it("a replayed Allow, a double click and Deny-then-Allow mint nothing after the first answer; the burn stores a hash, never the csrf", async () => {
+    const { cookie, csrf } = await consentPageFor();
+    const body = { csrf, decision: "allow" };
+    const [a, b] = await Promise.all([consentPost(cookie, body), consentPost(cookie, body)]);
+    expect([a.status, b.status].sort()).toEqual([303, 400]);
+    expect(fake.state.codes.size).toBe(1);
+    expect(grantedRows()).toHaveLength(1);
+    expect([...fake.state.burned].some((h) => h.includes(csrf))).toBe(false);
+    const d = await consentPageFor();
+    expect((await consentPost(d.cookie, { csrf: d.csrf, decision: "deny" })).status).toBe(303);
+    const late = await consentPost(d.cookie, { csrf: d.csrf, decision: "allow" });
+    expect(late.status).toBe(400);
+    expect(late.headers.get("location")).toBeNull();
+    expect(fake.state.codes.size).toBe(1);
+  });
+
+  it("a forged POST (wrong csrf) does not burn the page; a POST with no decision does not burn it either", async () => {
+    const { cookie, csrf } = await consentPageFor();
+    expect((await consentPost(cookie, { csrf: "Z".repeat(32), decision: "allow" })).status).toBe(400);
+    expect((await consentPost(cookie, { csrf })).status).toBe(400);
+    expect(fake.state.burned.size).toBe(0);
+    expect(loc(await consentPost(cookie, { csrf, decision: "allow" })).searchParams.get("code")).toBeTruthy();
   });
 });
 

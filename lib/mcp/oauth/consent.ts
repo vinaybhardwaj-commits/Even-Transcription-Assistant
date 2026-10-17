@@ -35,7 +35,7 @@ export function consentPage(p: { clientLabel: string; redirectHost: string; emai
   return new NextResponse(html, {
     status: 200,
     headers: {
-      "content-type": "text/html; charset=utf-8", ...NO_STORE, "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "no-referrer",
+      "content-type": "text/html; charset=utf-8", ...NO_STORE, "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "same-origin", // R3: no-referrer makes the browser send Origin: null on the POST, which the Origin check refuses
       // no form-action: browsers apply it to the redirect after the POST, which would block the hop back to the client
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
     },
