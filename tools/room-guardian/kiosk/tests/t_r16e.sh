@@ -61,7 +61,7 @@ test_r16e_mutant_kill_after_consult_gives_consult_not_clear_am() {
   r6_at 07:30
   awk '/^canary_play_gate\(\)/ { g = 1 } g && /act_step \|\| \{ CANARY_WHY=would_do/ { held = held $0 "\n"; next } { print } g && /CANARY_WHY=consult_not_clear/ { printf "%s", held; g = 0 }' \
     "$KDIR/lib/canary.sh" >"$T/canary_mut.sh"
-  assert_eq "$(grep -c 'CANARY_WHY=would_do' "$T/canary_mut.sh")" "1" "mutant applied (one kill line)"
+  assert_eq "$(grep -c 'act_step || { CANARY_WHY=would_do' "$T/canary_mut.sh")" "1" "mutant applied (one kill line)"
   assert_eq "$(awk '/^canary_play_gate\(\)/ { g = 1 } g && /consult_hold_clear/ { print "consult"; exit } g && /CANARY_WHY=would_do/ { print "kill"; exit }' "$T/canary_mut.sh")" "consult" "mutant: consult before kill"
   . "$T/canary_mut.sh"
   r3_hook 1 'r16e_kill'
