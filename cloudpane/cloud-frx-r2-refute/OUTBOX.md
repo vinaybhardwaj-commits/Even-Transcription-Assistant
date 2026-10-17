@@ -1,0 +1,4 @@
+- gate: 4009 passed 2 skipped; schema check 0; vendored 3/3 OK; py3.10 4/4; gitleaks 0
+- D1 OFF 500/500 x7 checks; D5 0/7; L2 0/16; L1 0/10
+- findings so far: F1 GEN-D3 83/232 visible; F3 split-spelling 6/6; F4 red flag lost; F5 116/500 rejected
+- draft verdict FAIL committed; mutants pending
