@@ -1435,7 +1435,8 @@
                 "repr",
                 "missing_value",
                 "frx_n1_phrase",
-                "bracket"
+                "bracket",
+                "r13_vocab"
               ]
             },
             {

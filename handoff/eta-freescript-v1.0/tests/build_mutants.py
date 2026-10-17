@@ -571,6 +571,21 @@ def r14(quote, dose):
     return f
 
 
+
+# ---- fix round 4: R15-R20 ----
+def r18_withheld(path, text):
+    def f(a):
+        from validate_artifact import withhold_clinical_fields
+        set_gx(a, path, text)
+        assert withhold_clinical_fields(a)
+    return f
+
+
+def _calcium_stop(a):
+    prompt(a, "p1")["drug"].update(spoken="calcium carbonate", generic="CALCIUM CARBONATE", base_molecule="calcium carbonate")
+    prov(a, "e3-glim").update(text="calcium carbonate", names=["calcium carbonate"])
+
+
 # name, base, mutation, expected verdict, rule that must be named on failure ("-" for pass)
 MUTANTS = [
     ("V0_bad_duration_unit", "ex3", m_bad_unit, "fail", "V0"),
@@ -700,7 +715,7 @@ MUTANTS = [
     ("S6_salt_word_only_match", "ex1", s6_salt("potassium tablet"), "fail", "V14"),
     ("S6_control_salt_full_phrase", "ex1", s6_salt("potassium chloride syrup"), "pass", "-"),
     ("S6_held_salt_drug_named", "ex3", s6_held, "fail", "V9"),
-    ("S6_control_salt_word_alone", "ex3", s6_ctrl, "pass", "-"),
+    ("S6_control_held_salt_drug_unnamed", "ex3", lambda a: (_folic_stop(a), plan3(a, "Heartburn reviewed.")), "pass", "-"),
     ("R1_word_reordered_doctor_words", "ex1", lambda a: set_word(a, 0, "Take rest and drink plenty of water."), "fail", "V17"),
     ("R1_negator_dropped", "ex3", lambda a: set_word(a, 0, "Skip meals."), "fail", "V17"),
     ("R1_red_flag_action_truncated", "ex6", lambda a: set_rf(a, "If your breathing gets worse or your lips turn blue."), "fail", "V17"),
@@ -761,6 +776,28 @@ MUTANTS = [
     ("R14_make_it_mismatch", "ex3", r14("metformin, make it 750, not 1000, twice a day after food", "1000"), "fail", "V8"),
     ("R14_control_from_to_new_dose", "ex3", r14("reduce the metformin from 1000 to 500 twice a day after food", "500"), "pass", "-"),
     ("R14_control_number_words", "ex3", r14("metformin, make it five hundred, twice a day after food", "five hundred"), "pass", "-"),
+    ("R15_brand_benadryl_in_plan", "ex3", lambda a: plan3(a, "Benadryl at night."), "fail", "V18"),
+    ("R15_brand_sumo_in_symptoms", "ex1", lambda a: set_gx(a, "/presenting_complaints/symptoms", "Fever for 2 days with body ache. Took Sumo at home."), "fail", "V18"),
+    ("R15_control_ordinary_word_kept", "ex1", lambda a: set_gx(a, "/presenting_complaints/symptoms", "Fever for 2 days with body ache. Candid about the history."), "pass", "-"),
+    ("R16_take_unlisted_brand", "ex3", lambda a: add_word(a, "Take sumo for the pain.", "05:10"), "fail", "V18"),
+    ("R16_continue_same_medicines", "ex3", lambda a: plan3(a, "Continue the same medicines."), "fail", "V18"),
+    ("R16_use_general_english_object", "ex3", lambda a: plan3(a, "Use the spray daily."), "fail", "V18"),
+    ("R16_control_closed_objects", "ex3", lambda a: plan3(a, "Take rest and have plenty of fluids."), "pass", "-"),
+    ("R17_no_wait_after_new_dose", "ex3", r14("increase the metformin to 1000, no wait, 750 twice a day after food", "1000"), "fail", "V8"),
+    ("R17_actually_keep_it", "ex3", r14("increase the metformin to 1000 twice a day, actually keep it as before", "1000"), "fail", "V8"),
+    ("R17_second_from_to", "ex3", r14("increase the metformin from 500 to 1000 and then from 1000 to 1500 after food", "1000"), "fail", "V8"),
+    ("R17_control_number_before_change", "ex3", r14("the 500 was low, increase the metformin to 1000 twice a day after food", "1000"), "pass", "-"),
+    ("R18_unknown_word_in_diagnosis_posted", "ex3", lambda a: set_gx(a, "/presenting_complaints/diagnoses/0/diagnosis_or_impression", "Telogen effluvium"), "fail", "V18"),
+    ("R18_unknown_word_in_plan_not_withheld", "ex3", lambda a: plan3(a, "Tinel sign review."), "fail", "V18"),
+    ("R18_control_diagnosis_withheld", "ex3", r18_withheld("/presenting_complaints/diagnoses/0/diagnosis_or_impression", "Telogen effluvium"), "pass", "-"),
+    ("R18_control_examination_withheld", "ex1", r18_withheld("/examination", "Positive Tinel sign at the wrist."), "pass", "-"),
+    ("R18_control_clinical_suffix_word", "ex5", lambda a: set_gx(a, "/presenting_complaints/diagnoses/0/diagnosis_or_impression", "Plantar fasciitis"), "pass", "-"),
+    ("R19_continue_salt_of_held_drug", "ex3", lambda a: (_calcium_stop(a), plan3(a, "Continue calcium.")), "fail", "V18"),
+    ("R19_salt_word_of_held_salt_drug", "ex3", lambda a: (_folic_stop(a), plan3(a, "Acid reflux reviewed.")), "fail", "V18"),
+    ("R19_control_salt_word_nothing_held", "ex1", lambda a: set_gx(a, "/examination", "Serum calcium normal. Chest clear."), "pass", "-"),
+    ("R20_pan_d_as_drug", "ex3", lambda a: plan3(a, "Pan D before food."), "fail", "V7"),
+    ("R20_pan_after_order_verb", "ex3", lambda a: plan3(a, "Continue pan daily."), "fail", "V7"),
+    ("R20_control_pan_ordinary_phrase", "ex3", lambda a: plan3(a, "Steam from a pan of hot water."), "pass", "-"),
 ]
 
 

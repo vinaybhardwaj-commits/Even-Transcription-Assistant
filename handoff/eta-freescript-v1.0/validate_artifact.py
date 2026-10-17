@@ -75,8 +75,13 @@ _CV = _data("clinical_vocab_extra.json")
 _DD = _data("drug_denylist.json")
 DRUG_DENY, DRUG_STEMS = set(_DD["names"]), re.compile(_DD["stems_regex"])
 # scowl_words.json is filtered against the denylist when it is built; only the small lists are filtered here.
-VOCAB = {w for w in EN_WORDS | set(_CV["words"]) | set(_CV["clinical_terms_tokens"]) if w not in DRUG_DENY and not DRUG_STEMS.search(w)}
+BRAND_WORDS = set(_data("brand_names_curated.json")["names"])
+CLIN_ABBR = set(_data("clinical_abbreviations.json")["words"])
+_OO = _data("order_objects.json")
+R16_VERBS, R16_STOPS, R16_OBJECTS = set(_OO["order_verbs"]), set(_OO["phrase_stops"]), set(_OO["words"])
+VOCAB = {w for w in EN_WORDS | set(_CV["words"]) | set(_CV["clinical_terms_tokens"]) | CLIN_ABBR if w not in DRUG_DENY and not DRUG_STEMS.search(w)}
 VOCAB |= set(_data("scowl_words.json")["words"])
+CLIN_SUFFIX = re.compile(r"(itis|osis|oma|aemia|emia|pathy|ectomy|otomy|scopy|algia|plasty|uria)$")
 _DP = _data("dose_patterns.json")
 _NUMW = _DP["number_words"]
 NUM_VALUE = dict(zip(_NUMW["en"][:20], range(20)))
@@ -365,6 +370,24 @@ def held_names(prov_item, prompt):
     return [n for n in names if n and n.strip()]
 
 
+_FREQ_TOK = {"od", "bd", "bid", "tds", "tid", "qid", "qds", "hs", "sos", "prn", "stat"}
+
+
+def drug_context(text, key):
+    """An ordinary-word drug key ('pan') stands as a drug: followed by a number, number word, unit, form word,
+    frequency token or the single letter 'd', or preceded by an order verb (R20)."""
+    a = toks(text)
+    for i, w in enumerate(a):
+        if w != key:
+            continue
+        nxt = a[i + 1] if i + 1 < len(a) else ""
+        prv = a[i - 1] if i else ""
+        if nxt[:1].isdigit() or nxt in NUM_VALUE or nxt in UNIT_WORDS or nxt in FORM_WORDS or nxt in _FREQ_TOK or nxt == "d" \
+                or prv in ORDER_VERBS or prv in R16_VERBS:
+            return True
+    return False
+
+
 def qualified_by_condition(text, key):
     """Every occurrence of the drug key sits next to a condition word that qualifies it ('insulin resistance',
     'metformin-induced', 'allergy to penicillin'); the rest of the string earns no exemption."""
@@ -432,15 +455,56 @@ def dose_hits(text, history=False):
     return [pid for pid, rx, hist in DOSE_RX if not (history and hist) and rx.search(t)]
 
 
-def in_vocab(t):
-    """English or clinical vocabulary, allowing plain inflections (fluids, mildly, persists, sponging)."""
-    if t in VOCAB or t in QUALIFIERS:
+def forbidden_words():
+    """Drug and brand words that may never be vocabulary (R15): brand-map keys and brand words, LASA names, curated
+    brands, the drug denylist and the bundle's medicine names. The dictionary file is built without them
+    (tests/vocab/build_vocab.py); they are subtracted here again for every vocabulary layer."""
+    words = {e["key"] for e in BRAND_MAP}
+    words |= {x for pair in LASA_PAIRS for x in pair} | BRAND_WORDS | DRUG_DENY
+    words |= {w for g in _MN["generics"] for w in g.split() if w not in QUALIFIERS}
+    return {w for w in words if len(w) >= 3}
+
+
+def in_vocab(t, salt_ok=True):
+    """English or clinical vocabulary, allowing plain inflections (fluids, mildly, persists, sponging) and clinical
+    suffix words (-itis, -osis, -oma ...) that are no drug or brand. A salt word counts only when salt_ok (R19)."""
+    if t in QUALIFIERS:
+        return salt_ok
+    if t in FORBIDDEN or DRUG_STEMS.search(t):
+        return False
+    if t in VOCAB:
+        return True
+    if CLIN_SUFFIX.search(t) and len(t) >= 7:
         return True
     cands = []
     for suf, add in (("ies", "y"), ("es", ""), ("s", ""), ("ly", ""), ("ing", ""), ("ing", "e"), ("ed", ""), ("ed", "e"), ("er", ""), ("est", "")):
         if t.endswith(suf) and len(t) - len(suf) >= 3:
             cands.append(t[:-len(suf)] + add)
-    return any(c in VOCAB for c in cands)
+    return any(c in VOCAB and c not in FORBIDDEN for c in cands)
+
+
+def order_object_misses(text, allowed):
+    """R16: after take/start/continue/give/apply/use/have/add the head of the next noun phrase must be a closed
+    non-drug word (data/order_objects.json) or one of `allowed` (listed prompt names and attested generics)."""
+    a = re.findall(r"[a-z]+|[.,;:!?()]", fold(text))
+    out = []
+    for i, w in enumerate(a):
+        if w not in R16_VERBS:
+            continue
+        np_ = []
+        for x in a[i + 1:i + 8]:
+            if not x.isalpha() or x in R16_STOPS or len(np_) == 3:
+                break
+            if not np_ and x in SKIP_WORDS:
+                continue
+            np_.append(x)
+        if not np_:
+            continue
+        head = np_[-1]
+        ok = head in allowed or head in R16_OBJECTS or any(head[:-len(s)] in R16_OBJECTS for s in ("s", "es") if head.endswith(s))
+        if not ok or any(not in_vocab(x, salt_ok=False) and x not in allowed for x in np_):
+            out.append((w, " ".join(np_)))
+    return out
 
 
 def parse_number(s):
@@ -476,12 +540,19 @@ _CHG = [re.compile(r"\bfrom\s+(?P<x>%s)\s*[a-z]*\s+to\s+(?P<y>%s)" % (NUMBER_RX,
         re.compile(r"\bmake\s+it\s+(?P<y>%s)" % NUMBER_RX)]
 
 
+_AFTER_Y = re.compile(r"(?:%s)|\bno\s+wait\b|\bactually\b|\bkeep\s+it\b|\bmake\s+it\b|\binstead\b|\bfrom\b|\bto\b" % NUMBER_RX)
+
+
 def change_dose_xy(quote):
-    """(old, new) dose numbers stated in a change_dose quote, or None when the quote does not say it."""
+    """(old, new) dose numbers stated in a change_dose quote, or None when the quote does not decide it: no change
+    pattern, or (R17) another dose number, 'no wait', 'actually', 'keep it', 'make it', 'instead' or a second
+    from/to after the new dose."""
     q = fold(quote)
     for rx in _CHG:
         m = rx.search(q)
         if m:
+            if _AFTER_Y.search(q[m.end("y"):]):
+                return None
             x = parse_number(m.group("x")) if "x" in m.groupdict() and m.group("x") else None
             return x, parse_number(m.group("y"))
     return None
@@ -504,7 +575,7 @@ def unresolved_after_verbs(text):
             for x in a[i + 1:i + 6]:
                 if x in SKIP_WORDS:
                     continue
-                if not in_vocab(x):
+                if not in_vocab(x, salt_ok=False):
                     out.append((w, x))
                 break
     return out
@@ -549,6 +620,75 @@ def printable(text, order=False, med=False, ascii_letters=True):
         if d4(t, med):
             hits.append("d4")
     return hits
+
+
+FORBIDDEN = forbidden_words()
+CLINICAL_FIELD = re.compile(r"^/(presenting_complaints/diagnoses/\d+|comorbidities/\d+|examination)(/|$)")
+STRONG_FORMS = {"tab", "tabs", "tablet", "tablets", "cap", "caps", "capsule", "capsules", "syp", "syrup", "syrups", "inj",
+                "injection", "injections", "ointment", "suspension", "sachet", "sachets"}
+
+
+def form_mentions(text):
+    """Dosage-form words standing as a medicine: tablet, capsule, syrup, injection, ointment ... always; drops,
+    cream, gel, spray, solution, lotion only after a number, an unknown word or eye/ear/nasal/nose/skin."""
+    a = toks(text)
+    out = []
+    for i, w in enumerate(a):
+        if w in STRONG_FORMS:
+            out.append(w)
+        elif w in FORM_WORDS or w in ("lotion", "lotions"):
+            prv = a[i - 1] if i else ""
+            if prv[:1].isdigit() or prv in NUM_VALUE or prv in ("eye", "ear", "nasal", "nose", "skin") or (prv and prv.isalpha() and not in_vocab(prv)):
+                out.append(w)
+    return out
+
+
+def r13_unknown(text, path, prompt_toks):
+    """R13: words of 3+ letters that are neither vocabulary nor a listed prompt's name; a drug word qualified by an
+    adjacent condition word inside a diagnosis or comorbidity is allowed."""
+    cond = bool(CONDITION_PATHS.match(path))
+    return sorted({x for x in alpha_toks(text) if len(x) >= 3 and not in_vocab(x) and x not in prompt_toks
+                   and not (cond and qualified_by_condition(text, x))})
+
+
+def withhold_clinical_fields(a):
+    """R18, generator side: a diagnosis, comorbidity or examination field with an R13 hit is withheld (removed from
+    gp_extraction; its provenance becomes field_withheld / r13_vocab), never posted. Returns the paths withheld."""
+    gx, prov = a["gp_extraction"], a["provenance"]
+    prompt_toks = {x for pr in a["confirm_prompts"] for n in ((drug_names(pr["drug"]) if pr.get("drug") else []) + [pr.get("name") or ""]) for x in alpha_toks(n)}
+    withheld = []
+    lists = [("/presenting_complaints/diagnoses", (gx.get("presenting_complaints") or {}).get("diagnoses")), ("/comorbidities", gx.get("comorbidities"))]
+    for base, lst in lists:
+        if not lst:
+            continue
+        keep = []
+        for i, entry in enumerate(lst):
+            ptr = "%s/%d" % (base, i)
+            if any(r13_unknown(s, ptr + p_, prompt_toks) for p_, s in walk_strings(entry)):
+                withheld.append(ptr)
+            else:
+                keep.append((ptr, entry))
+        newptr = {old: "%s/%d" % (base, j) for j, (old, _) in enumerate(keep)}
+        for p in prov:
+            jp = p["json_pointer"]
+            if jp in withheld:
+                p.update(json_pointer=None, withheld_reason="r13_vocab", flags=sorted(set(p["flags"]) | {"field_withheld"}))
+            elif jp in newptr:
+                p["json_pointer"] = newptr[jp]
+        lst[:] = [e for _, e in keep]
+    if gx.get("examination") and r13_unknown(gx["examination"], "/examination", prompt_toks):
+        withheld.append("/examination")
+        del gx["examination"]
+        for p in prov:
+            if p["json_pointer"] == "/examination":
+                p.update(json_pointer=None, withheld_reason="r13_vocab", flags=sorted(set(p["flags"]) | {"field_withheld"}))
+    if withheld:
+        c = a["qa"]["counts"]
+        c["posted"] = sum(p["json_pointer"] is not None for p in prov)
+        c["withheld"] = sum(p["withheld_reason"] is not None for p in prov)
+        if "note_text" in a:
+            a["note_text"] = render_note(a)
+    return withheld
 
 
 # ---------- the checks ----------
@@ -733,9 +873,11 @@ def check(a):
     med_names += [n for pr in prompts if pr.get("drug") for n in drug_names(pr["drug"])]
     med_names += [n for p in prov if p["kind"] == "medicine" for n in (p.get("names") or [])]
     med_keys = {k for n in med_names for k in (name_key(x) for x in n.split("+")) if len(k) >= 3}
+    weak = {k for k in med_keys if k in VOCAB}  # drug keys that are also ordinary words ("pan"): flagged only in drug context (R20)
     if notes_only:
         for path, s in gx_strings:
             hits = med_keys & runs(s)
+            hits = {k for k in hits if k not in weak or drug_context(s, k)}
             if hits and CONDITION_PATHS.match(path):
                 hits = {k for k in hits if not qualified_by_condition(s, k)}
             for k in sorted(hits):
@@ -1073,21 +1215,28 @@ def check(a):
 
     # V18 dose patterns and medicine-like mentions: no regimen text and no unresolved drug-like word in posted text
     prompt_toks = {x for pr in prompts for n in ((drug_names(pr["drug"]) if pr.get("drug") else []) + [pr.get("name") or ""]) for x in alpha_toks(n)}
+    listed_ps = [pr for pr in prompts if pr.get("drug") and pr["action"] in LISTED_ACTIONS]
+    r16_allowed = {x for pr in listed_ps for n in [pr["drug"]["spoken"], pr["drug"]["brand_recognised"] or "", pr["drug"]["generic"] or ""] for x in alpha_toks(n)}
+    held_salt = {x for pr in prompts if pr.get("drug") and pr["action"] in HELD_ACTIONS
+                 for x in alpha_toks((pr["drug"]["generic"] or "") + " " + pr["drug"]["spoken"]) if x in QUALIFIERS}
     for path, s in gx_strings:
         if path.startswith("/medicines/"):
             continue
         for pid in dose_hits(s, history=bool(HISTORY_PATHS.match(path))):
             E("V18 gp_extraction%s carries a dose pattern (%s) where no medicine may stand" % (path, pid))
-        if notes_only and FORM_WORDS & set(re.findall(r"[a-z]+", fold(s))) - {"inhaler"}:
-            E("V18 gp_extraction%s names a dosage form (tablet, syrup ...): a medicine-like mention" % path)
+        if notes_only and form_mentions(s):
+            E("V18 gp_extraction%s names a dosage form (%s): a medicine-like mention" % (path, ", ".join(form_mentions(s))))
         if notes_only:
-            cond = bool(CONDITION_PATHS.match(path))
-            for w in sorted({x for x in alpha_toks(s) if len(x) >= 3 and not in_vocab(x) and x not in prompt_toks
-                             and not (cond and qualified_by_condition(s, x))}):
-                E("V18 gp_extraction%s: '%s' is neither vocabulary nor a listed prompt's name (a possible unlisted drug)" % (path, w))
+            for w in r13_unknown(s, path, prompt_toks):
+                where = " (withhold this field: r13_vocab)" if CLINICAL_FIELD.match(path) else ""
+                E("V18 gp_extraction%s: '%s' is neither vocabulary nor a listed prompt's name (a possible unlisted drug)%s" % (path, w, where))
+            for w in sorted(held_salt & set(alpha_toks(s))):
+                E("V18 gp_extraction%s: salt word '%s' of a held drug is not vocabulary (R19)" % (path, w))
         if path in ("/plan_of_management/management_plan", "/general_advice", "/follow_up/follow_up_instructions"):
             for verb, word in unresolved_after_verbs(s):
                 E("V18 gp_extraction%s: '%s %s' is a medicine-like word that resolves to no listed prompt" % (path, verb, word))
+            for verb, phrase in order_object_misses(s, r16_allowed):
+                E("V18 gp_extraction%s: '%s %s' names no listed prompt and no closed non-drug object (R16)" % (path, verb, phrase))
     if isinstance(note, str):
         for h, lines in raw_sections(note).items():
             if h == "Medication":

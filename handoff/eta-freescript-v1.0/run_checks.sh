@@ -33,6 +33,9 @@ echo "identical: $(ls tests/mutants | wc -l) mutants + expected.tsv"
 
 echo "== 5. vocabulary coverage and false fails (7 examples, 20 clean notes)"
 python3 tests/vocab/check_vocab.py
+cp data/scowl_words.json "$TMP/scowl_before.json"
+python3 tests/vocab/build_vocab.py >/dev/null
+cmp data/scowl_words.json "$TMP/scowl_before.json" && echo "R15 build step is a no-op on the shipped dictionary (brands already subtracted)"
 
 no_pycache "after checks"
 echo "ALL CHECKS PASSED"

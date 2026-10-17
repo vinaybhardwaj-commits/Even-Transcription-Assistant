@@ -82,6 +82,6 @@ Legend: **same** = unchanged, **changed**, **new**, **removed**.
 | G4 evidence or no_evidence flag | V4, evidence is `cited_spans` |
 | G5 11 headings | V5, also rejects a heading-shaped line outside the 11 |
 | G6 one line per order entry | V6, plus the exact Medication rendering |
-| none | V7 to V18 (see README-FOR-PULSE.md); V17 copied text and V18 dose patterns were added in fix round 2; fix round 3 added attested-only generics (V14), split negators (V17), spelled and Hindi/Kannada doses and the vocabulary rule (V18), and the change_dose new-dose check (V8) |
+| none | V7 to V18 (see README-FOR-PULSE.md); V17 copied text and V18 dose patterns were added in fix round 2; fix round 3 added attested-only generics (V14), split negators (V17), spelled and Hindi/Kannada doses and the vocabulary rule (V18), and the change_dose new-dose check (V8); fix round 4 added brand-free vocabulary, the closed order-object list, undecidable change_dose, field withholding with `r13_vocab`, held-salt words and drug-context-only ordinary-word keys |
 
 `doctor_words` gains an optional `red_flag` boolean: an instruction so marked, or of category `warning`, must have a `red_flags` entry (V10).

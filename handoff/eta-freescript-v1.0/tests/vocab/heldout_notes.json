@@ -1,5 +1,5 @@
 {
- "note": "Invented clean notes measured once each and never used to tune: batch1 was written after the in-sample tuning (it then informed the move to the larger SCOWL list); batch2 was written after that move. Reported, not gated.",
+ "note": "Invented clean notes measured once each and never used to tune: batch1 was written after the in-sample tuning (it then informed the move to the larger SCOWL list); batch2 was written after that move. Reported, not gated. batch3 was written after fix round 4's rules were final and measured once without tuning.",
  "batch1": [
   {
    "symptoms": "Swelling of both feet for 10 days, worse by evening. Mild breathlessness on walking.",
@@ -162,6 +162,88 @@
    "plan": "Hip ultrasound ordered.",
    "advice": "Rest and avoid running for a week.",
    "follow_up": "Return at once if fever develops or the child cannot stand."
+  }
+ ],
+ "batch3": [
+  {
+   "symptoms": "Bleeding gums while brushing for 1 month. No other bleeding.",
+   "examination": "Swollen, red gums with plaque. No ulcers.",
+   "diagnosis": "Gingivitis",
+   "plan": "Dental referral for scaling.",
+   "advice": "Brush twice a day gently. Use dental floss daily.",
+   "follow_up": "Review after the dental visit."
+  },
+  {
+   "symptoms": "Pain and stiffness in the neck for 5 days after sleeping awkwardly.",
+   "examination": "Spasm of the right trapezius. Full neurological examination normal.",
+   "diagnosis": "Acute neck strain",
+   "plan": "Posture advice and gentle neck exercises.",
+   "advice": "Apply a warm compress twice a day. Take breaks from the screen.",
+   "follow_up": "Return if arm weakness or numbness appears."
+  },
+  {
+   "symptoms": "Itchy red rash in the groin for 3 weeks.",
+   "examination": "Well defined red patch with a raised scaly edge in both groins.",
+   "diagnosis": "Tinea cruris",
+   "plan": "Skin care explained.",
+   "advice": "Keep the area dry. Wear loose cotton underwear.",
+   "follow_up": "Review in two weeks."
+  },
+  {
+   "symptoms": "Cough at night for 6 weeks after a cold. No fever, no weight loss.",
+   "examination": "Chest clear. Peak flow normal.",
+   "diagnosis": "Post-infectious cough",
+   "plan": "Chest X-ray if not settling.",
+   "advice": "Have warm fluids and honey at night. Avoid cold drinks.",
+   "follow_up": "Review in three weeks."
+  },
+  {
+   "symptoms": "Swelling and pain in the big toe joint since last night. Unable to wear shoes.",
+   "examination": "Hot, red, tender first metatarsophalangeal joint.",
+   "diagnosis": "Suspected acute gout",
+   "plan": "Serum uric acid ordered.",
+   "advice": "Rest the foot and keep it raised. Avoid red meat and alcohol.",
+   "follow_up": "Review with the report."
+  },
+  {
+   "symptoms": "Recurrent burning in the chest after spicy food for 2 months.",
+   "examination": "Abdomen soft, mild epigastric tenderness.",
+   "diagnosis": "Dyspepsia",
+   "plan": "Lifestyle changes discussed.",
+   "advice": "Eat dinner three hours before bed. Avoid spicy and fried food.",
+   "follow_up": "Review in four weeks."
+  },
+  {
+   "symptoms": "Child with a red, weeping rash around the mouth for 4 days.",
+   "examination": "Honey-coloured crusts around the mouth and nose.",
+   "diagnosis": "Impetigo",
+   "plan": "Hygiene measures explained to the parents.",
+   "advice": "Keep the child's nails short. Use a separate towel for the child.",
+   "follow_up": "Return if the rash spreads or fever starts."
+  },
+  {
+   "symptoms": "Ringing in both ears for 2 months, worse at night.",
+   "examination": "Ear canals clear. Tuning fork tests normal.",
+   "diagnosis": "Tinnitus",
+   "plan": "Audiometry ordered.",
+   "advice": "Avoid loud noise. Keep a fan on at night.",
+   "follow_up": "Review with the audiometry report."
+  },
+  {
+   "symptoms": "Lump in the left breast noticed 2 weeks ago. Not painful.",
+   "examination": "Firm, mobile 2 cm lump in the upper outer quadrant of the left breast. No skin change.",
+   "diagnosis": "Left breast lump for evaluation",
+   "plan": "Breast ultrasound and surgical referral.",
+   "advice": "Bring the scan report to the surgeon.",
+   "follow_up": "Review with the scan."
+  },
+  {
+   "symptoms": "Low mood, poor sleep and loss of interest for 6 weeks.",
+   "examination": "Flat affect. No thoughts of self-harm.",
+   "diagnosis": "Moderate depressive episode",
+   "plan": "Counselling referral and safety plan discussed.",
+   "advice": "Keep a daily routine. Stay in touch with family.",
+   "follow_up": "Return at once or call the emergency number if you feel unsafe."
   }
  ]
 }
