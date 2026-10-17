@@ -1,0 +1,79 @@
+{
+  "$id": "psyn/enrolment.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "note": {
+      "type": "string"
+    },
+    "pseudo_doctors": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "enrolment": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "utterance_id": {
+                  "pattern": "^PD[0-9]{2}-E[0-9]{2}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text",
+                "utterance_id"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "pseudo_doctor_id": {
+            "pattern": "^PD[0-9]{2}$",
+            "type": "string"
+          },
+          "voice_alike_of": {
+            "anyOf": [
+              {
+                "pattern": "^PD[0-9]{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "voice_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "display_name",
+          "enrolment",
+          "pseudo_doctor_id",
+          "voice_alike_of",
+          "voice_ref"
+        ],
+        "type": "object"
+      },
+      "minItems": 32,
+      "type": "array"
+    },
+    "synthetic": {
+      "const": true
+    }
+  },
+  "required": [
+    "note",
+    "pseudo_doctors",
+    "synthetic"
+  ],
+  "title": "P-SYN pseudo-doctor enrolment sets",
+  "type": "object"
+}

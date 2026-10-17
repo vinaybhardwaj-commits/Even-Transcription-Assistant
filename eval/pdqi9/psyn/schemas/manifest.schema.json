@@ -1,0 +1,105 @@
+{
+  "$id": "psyn/manifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "counts": {
+      "type": "object"
+    },
+    "files": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "bytes": {
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bytes",
+          "path",
+          "sha256"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "generator_version": {
+      "type": "string"
+    },
+    "scripts": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "dir": {
+            "type": "string"
+          },
+          "script_id": {
+            "pattern": "^PSYN-(SE|SN|SC|SR|SD|SA|SV|SM)-[0-9]{3}$",
+            "type": "string"
+          },
+          "split": {
+            "enum": [
+              "dev",
+              "test"
+            ]
+          },
+          "stratum": {
+            "enum": [
+              "S-E",
+              "S-N",
+              "S-C",
+              "S-R",
+              "S-D",
+              "S-A",
+              "S-V",
+              "S-M"
+            ]
+          }
+        },
+        "required": [
+          "dir",
+          "script_id",
+          "split",
+          "stratum"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "seed": {
+      "type": "integer"
+    },
+    "spec": {
+      "type": "string"
+    },
+    "split_seed": {
+      "type": "integer"
+    },
+    "synthetic": {
+      "const": true
+    },
+    "total_scripts": {
+      "const": 252
+    }
+  },
+  "required": [
+    "counts",
+    "files",
+    "generator_version",
+    "scripts",
+    "seed",
+    "spec",
+    "split_seed",
+    "synthetic",
+    "total_scripts"
+  ],
+  "title": "P-SYN build manifest",
+  "type": "object"
+}

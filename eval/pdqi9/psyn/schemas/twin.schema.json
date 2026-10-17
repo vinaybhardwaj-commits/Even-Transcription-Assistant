@@ -1,0 +1,122 @@
+{
+  "$id": "psyn/twin.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artefact": {
+      "enum": [
+        "twin",
+        "twin_defect"
+      ]
+    },
+    "defect": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "planted_level": {
+              "enum": [
+                1,
+                3,
+                5
+              ]
+            },
+            "target_item": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "planted_level",
+            "target_item"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "format": {
+      "type": "string"
+    },
+    "script_id": {
+      "pattern": "^PSYN-(SE|SN|SC|SR|SD|SA|SV|SM)-[0-9]{3}$",
+      "type": "string"
+    },
+    "sections": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "cited_turns": {
+                  "items": {
+                    "pattern": "^T[0-9]{3}$",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "defect": {
+                  "type": "boolean"
+                },
+                "fields": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "item_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text",
+                "cited_turns",
+                "item_id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "section": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entries",
+          "section"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "synthetic": {
+      "const": true
+    }
+  },
+  "required": [
+    "artefact",
+    "defect",
+    "format",
+    "script_id",
+    "sections",
+    "synthetic"
+  ],
+  "title": "P-SYN code-built twin note",
+  "type": "object"
+}

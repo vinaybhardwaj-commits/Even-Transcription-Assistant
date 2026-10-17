@@ -1,0 +1,1051 @@
+{
+  "$id": "psyn/truth.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "affect_scenes": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "agreement_design": {
+            "type": "string"
+          },
+          "expected_arm4_effect": {
+            "enum": [
+              "none",
+              "reorder_or_emphasis_only"
+            ]
+          },
+          "intended_state": {
+            "type": "string"
+          },
+          "new_items_allowed": {
+            "const": 0
+          },
+          "scene_id": {
+            "type": "string"
+          },
+          "speaker_id": {
+            "pattern": "^S[0-9]+$",
+            "type": "string"
+          },
+          "turn_ids": {
+            "items": {
+              "pattern": "^T[0-9]{3}$",
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "agreement_design",
+          "expected_arm4_effect",
+          "intended_state",
+          "new_items_allowed",
+          "scene_id",
+          "speaker_id",
+          "turn_ids"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "claims": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_key": {
+            "type": "string"
+          },
+          "claim_id": {
+            "type": "string"
+          },
+          "item_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "present",
+              "decoy"
+            ]
+          }
+        },
+        "required": [
+          "canonical_key",
+          "claim_id",
+          "item_id",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "decoy_list": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "decoy_share": {
+      "type": "number"
+    },
+    "generator_version": {
+      "type": "string"
+    },
+    "instructions": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_key": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "emphasis": {
+            "additionalProperties": false,
+            "properties": {
+              "repeat_count": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "stressed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "repeat_count",
+              "stressed"
+            ],
+            "type": "object"
+          },
+          "instruction_id": {
+            "type": "string"
+          },
+          "priority_rank": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reversal_chain": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "strength": {
+                  "enum": [
+                    "firm",
+                    "hedged"
+                  ]
+                },
+                "turn_id": {
+                  "pattern": "^T[0-9]{3}$",
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "strength",
+                "turn_id",
+                "value"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "spans": {
+            "items": {
+              "pattern": "^T[0-9]{3}$",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "strength": {
+            "enum": [
+              "firm",
+              "hedged"
+            ]
+          }
+        },
+        "required": [
+          "canonical_key",
+          "category",
+          "emphasis",
+          "instruction_id",
+          "priority_rank",
+          "reversal_chain",
+          "spans",
+          "strength"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "items": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "affirmed_patient_raised": {
+            "type": "boolean"
+          },
+          "attributes": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "allowed_labels": {
+                  "items": {
+                    "enum": [
+                      "supported",
+                      "h_unattrib",
+                      "unaligned",
+                      "precedence_error",
+                      "clip_leak",
+                      "not_stated"
+                    ]
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "context_turn_ids": {
+                  "items": {
+                    "pattern": "^T[0-9]{3}$",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "expected_in_note": {
+                  "type": "boolean"
+                },
+                "forbidden_labels": {
+                  "items": {
+                    "enum": [
+                      "supported",
+                      "h_unattrib",
+                      "unaligned",
+                      "precedence_error",
+                      "clip_leak",
+                      "not_stated"
+                    ]
+                  },
+                  "type": "array"
+                },
+                "forbidden_values": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "label": {
+                        "enum": [
+                          "supported",
+                          "h_unattrib",
+                          "unaligned",
+                          "precedence_error",
+                          "clip_leak",
+                          "not_stated"
+                        ]
+                      },
+                      "turn_ids": {
+                        "items": {
+                          "pattern": "^T[0-9]{3}$",
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "value": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "label",
+                      "turn_ids",
+                      "value"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "ideal_label": {
+                  "enum": [
+                    "supported",
+                    "h_unattrib",
+                    "unaligned",
+                    "precedence_error",
+                    "clip_leak",
+                    "not_stated"
+                  ]
+                },
+                "invented_value_label": {
+                  "enum": [
+                    "supported",
+                    "h_unattrib",
+                    "unaligned",
+                    "precedence_error",
+                    "clip_leak",
+                    "not_stated"
+                  ]
+                },
+                "label_by_cited_source": {
+                  "additionalProperties": {
+                    "enum": [
+                      "supported",
+                      "h_unattrib",
+                      "unaligned",
+                      "precedence_error",
+                      "clip_leak",
+                      "not_stated"
+                    ]
+                  },
+                  "propertyNames": {
+                    "enum": [
+                      "3of3",
+                      "armc",
+                      "both",
+                      "none"
+                    ]
+                  },
+                  "type": "object"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "placeholder_forbidden": {
+                  "type": "boolean"
+                },
+                "relay_turn_ids": {
+                  "items": {
+                    "pattern": "^T[0-9]{3}$",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "said_by": {
+                  "items": {
+                    "pattern": "^S[0-9]+$",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "said_by_roles": {
+                  "items": {
+                    "enum": [
+                      "treating_doctor",
+                      "other_clinician",
+                      "staff",
+                      "translator",
+                      "patient",
+                      "attender"
+                    ]
+                  },
+                  "type": "array"
+                },
+                "segcheck_applies": {
+                  "type": "boolean"
+                },
+                "segcheck_expected_fail": {
+                  "enum": [
+                    "duration",
+                    "cosine_or_role",
+                    null
+                  ]
+                },
+                "surface": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "t28e_counted": {
+                  "type": "boolean"
+                },
+                "turn_ids": {
+                  "items": {
+                    "pattern": "^T[0-9]{3}$",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "value",
+                "surface",
+                "turn_ids",
+                "context_turn_ids",
+                "relay_turn_ids",
+                "forbidden_values",
+                "said_by",
+                "said_by_roles",
+                "ideal_label",
+                "allowed_labels",
+                "forbidden_labels",
+                "label_by_cited_source",
+                "expected_in_note",
+                "segcheck_applies",
+                "t28e_counted",
+                "placeholder_forbidden",
+                "segcheck_expected_fail"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "canonical_key": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "emphasis": {
+            "additionalProperties": false,
+            "properties": {
+              "repeat_count": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "stressed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "repeat_count",
+              "stressed"
+            ],
+            "type": "object"
+          },
+          "expected_in_note": {
+            "type": "boolean"
+          },
+          "is_order": {
+            "type": "boolean"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "medicine",
+              "investigation",
+              "referral",
+              "procedure",
+              "other_order",
+              "diagnosis",
+              "advice",
+              "counselling",
+              "warning",
+              "lifestyle",
+              "follow_up",
+              "contingency",
+              "patient_concern"
+            ]
+          },
+          "pdqi_defect": {
+            "type": "boolean"
+          },
+          "priority_rank": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reversal_chain": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "strength": {
+                  "enum": [
+                    "firm",
+                    "hedged"
+                  ]
+                },
+                "turn_id": {
+                  "pattern": "^T[0-9]{3}$",
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "strength",
+                "turn_id",
+                "value"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "said_by_roles": {
+            "items": {
+              "enum": [
+                "treating_doctor",
+                "other_clinician",
+                "staff",
+                "translator",
+                "patient",
+                "attender"
+              ]
+            },
+            "type": "array"
+          },
+          "strength": {
+            "enum": [
+              "firm",
+              "hedged"
+            ]
+          },
+          "trap": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "affirmed_patient_raised",
+          "attributes",
+          "canonical_key",
+          "category",
+          "emphasis",
+          "expected_in_note",
+          "is_order",
+          "item_id",
+          "kind",
+          "pdqi_defect",
+          "priority_rank",
+          "reversal_chain",
+          "said_by_roles",
+          "strength",
+          "trap"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "language_mode": {
+      "enum": [
+        "en",
+        "cs"
+      ]
+    },
+    "oracle_ablation": {
+      "const": [
+        "script_text",
+        "pipeline_transcript"
+      ]
+    },
+    "patient_concerns": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_key": {
+            "type": "string"
+          },
+          "concern_id": {
+            "type": "string"
+          },
+          "turn_ids": {
+            "items": {
+              "pattern": "^T[0-9]{3}$",
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "canonical_key",
+          "concern_id",
+          "turn_ids"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "pdqi9": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "defect_code": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ]
+            },
+            "defect_in": {
+              "enum": [
+                "consult",
+                "twin",
+                null
+              ]
+            },
+            "off_target": {
+              "const": "clean_baseline"
+            },
+            "planted_level": {
+              "enum": [
+                1,
+                3,
+                5
+              ]
+            },
+            "rubric": {
+              "enum": [
+                "pdqi9-encounter",
+                "pdqi9-note@2",
+                "all"
+              ]
+            },
+            "target_item": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "defect_code",
+            "defect_in",
+            "off_target",
+            "planted_level",
+            "rubric",
+            "target_item"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "relays": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "adds_content": {
+            "type": "boolean"
+          },
+          "changed_attribute": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "changes_value": {
+            "type": "boolean"
+          },
+          "doctor_value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_event": {
+            "enum": [
+              "relay",
+              "relay_conflict",
+              "translator_added"
+            ]
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "of_turn_id": {
+            "pattern": "^T[0-9]{3}$",
+            "type": "string"
+          },
+          "relay_turn_id": {
+            "pattern": "^T[0-9]{3}$",
+            "type": "string"
+          },
+          "relay_value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "adds_content",
+          "changed_attribute",
+          "changes_value",
+          "doctor_value",
+          "expected_event",
+          "item_id",
+          "of_turn_id",
+          "relay_turn_id",
+          "relay_value"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "roster": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "intended_diar_label": {
+            "type": "string"
+          },
+          "is_treating": {
+            "type": "boolean"
+          },
+          "pseudo_doctor_id": {
+            "anyOf": [
+              {
+                "pattern": "^PD[0-9]{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "speaker_id": {
+            "pattern": "^S[0-9]+$",
+            "type": "string"
+          },
+          "true_role": {
+            "enum": [
+              "treating_doctor",
+              "other_clinician",
+              "staff",
+              "translator",
+              "patient",
+              "attender"
+            ]
+          }
+        },
+        "required": [
+          "intended_diar_label",
+          "is_treating",
+          "pseudo_doctor_id",
+          "speaker_id",
+          "true_role"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "script_id": {
+      "pattern": "^PSYN-(SE|SN|SC|SR|SD|SA|SV|SM)-[0-9]{3}$",
+      "type": "string"
+    },
+    "segments": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "clip_region": {
+            "type": "string"
+          },
+          "est_seconds": {
+            "type": "number"
+          },
+          "intended_diar_label": {
+            "type": "string"
+          },
+          "on_treating_label": {
+            "type": "boolean"
+          },
+          "section_hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "short_segment": {
+            "type": "boolean"
+          },
+          "speaker_id": {
+            "pattern": "^S[0-9]+$",
+            "type": "string"
+          },
+          "true_identity": {
+            "type": "string"
+          },
+          "true_role": {
+            "enum": [
+              "treating_doctor",
+              "other_clinician",
+              "staff",
+              "translator",
+              "patient",
+              "attender"
+            ]
+          },
+          "turn_id": {
+            "pattern": "^T[0-9]{3}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "clip_region",
+          "est_seconds",
+          "intended_diar_label",
+          "on_treating_label",
+          "section_hint",
+          "short_segment",
+          "speaker_id",
+          "true_identity",
+          "true_role",
+          "turn_id"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "speaker_gate_ideal": {
+      "additionalProperties": false,
+      "properties": {
+        "doctor_conf_seconds": {
+          "type": "number"
+        },
+        "doctor_conf_segments": {
+          "type": "integer"
+        },
+        "doctor_conf_share": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "doctor_conf_seconds",
+        "doctor_conf_segments",
+        "doctor_conf_share"
+      ],
+      "type": "object"
+    },
+    "split": {
+      "enum": [
+        "dev",
+        "test"
+      ]
+    },
+    "stratum": {
+      "enum": [
+        "S-E",
+        "S-N",
+        "S-C",
+        "S-R",
+        "S-D",
+        "S-A",
+        "S-V",
+        "S-M"
+      ]
+    },
+    "synthetic": {
+      "const": true
+    },
+    "t28e_items": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "treating_label": {
+      "type": "string"
+    },
+    "treating_speaker_id": {
+      "pattern": "^S[0-9]+$",
+      "type": "string"
+    },
+    "variants": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "armc_label_turn_ids": {
+            "items": {
+              "pattern": "^T[0-9]{3}$",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "expected_armc": {
+            "additionalProperties": false,
+            "properties": {
+              "allowed_fallback_reasons": {
+                "items": {
+                  "enum": [
+                    "armc_no_centroid",
+                    "armc_no_login",
+                    "armc_partial_login",
+                    "armc_no_match",
+                    "armc_margin",
+                    "armc_rank",
+                    "armc_contradiction",
+                    "armc_no_output"
+                  ]
+                },
+                "type": "array"
+              },
+              "fires": {
+                "type": "boolean"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "must_not_fire_on_label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "allowed_fallback_reasons",
+              "fires",
+              "label",
+              "must_not_fire_on_label"
+            ],
+            "type": "object"
+          },
+          "expected_contradicted_turn_ids": {
+            "items": {
+              "pattern": "^T[0-9]{3}$",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "expected_doctor_spans": {
+            "additionalProperties": false,
+            "properties": {
+              "3of3": {
+                "items": {
+                  "pattern": "^T[0-9]{3}$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "armc": {
+                "items": {
+                  "pattern": "^T[0-9]{3}$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "both": {
+                "items": {
+                  "pattern": "^T[0-9]{3}$",
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "3of3",
+              "armc",
+              "both"
+            ],
+            "type": "object"
+          },
+          "fallback_equals_3of3_only": {
+            "type": "boolean"
+          },
+          "logged_in_pseudo_doctor_id": {
+            "anyOf": [
+              {
+                "pattern": "^PD[0-9]{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scored_in_primary": {
+            "type": "boolean"
+          },
+          "t28c_eligible": {
+            "type": "boolean"
+          },
+          "treating_label": {
+            "type": "string"
+          },
+          "treating_pseudo_doctor_id": {
+            "pattern": "^PD[0-9]{2}$",
+            "type": "string"
+          },
+          "used_for": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "variant_id": {
+            "enum": [
+              "v1",
+              "v2",
+              "v3",
+              "v4",
+              "v5"
+            ]
+          }
+        },
+        "required": [
+          "armc_label_turn_ids",
+          "expected_armc",
+          "expected_contradicted_turn_ids",
+          "expected_doctor_spans",
+          "fallback_equals_3of3_only",
+          "logged_in_pseudo_doctor_id",
+          "scored_in_primary",
+          "t28c_eligible",
+          "treating_label",
+          "treating_pseudo_doctor_id",
+          "used_for",
+          "variant_id"
+        ],
+        "type": "object"
+      },
+      "maxItems": 5,
+      "minItems": 5,
+      "type": "array"
+    }
+  },
+  "required": [
+    "affect_scenes",
+    "claims",
+    "decoy_list",
+    "decoy_share",
+    "generator_version",
+    "instructions",
+    "items",
+    "language_mode",
+    "oracle_ablation",
+    "patient_concerns",
+    "pdqi9",
+    "relays",
+    "roster",
+    "script_id",
+    "segments",
+    "speaker_gate_ideal",
+    "split",
+    "stratum",
+    "synthetic",
+    "t28e_items",
+    "treating_label",
+    "treating_speaker_id",
+    "variants"
+  ],
+  "title": "P-SYN truth sheet (spec A4.4)",
+  "type": "object"
+}

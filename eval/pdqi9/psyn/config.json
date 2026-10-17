@@ -1,0 +1,8 @@
+{
+  "seed": 20261017,
+  "split_seed": 7090252,
+  "dev_counts": {"S-E": 18, "S-N": 18, "S-C": 4, "S-R": 10, "S-D": 6, "S-A": 4, "S-V": 18, "S-M": 6},
+  "dev_total": 84,
+  "test_total": 168,
+  "note": "split_seed is the prereg split seed (spec A2.1). dev counts for S-V and S-M are fixed by the spec; the rest are ASSUMPTION (one third per stratum, S-D and S-A rounded to keep matched pairs together)."
+}
