@@ -1,0 +1,10 @@
+[Unit]
+Description=Room audio state hourly write, :20 past the hour (after the tape pull)
+
+[Timer]
+OnCalendar=*:20:00
+Persistent=false
+Unit=ras-hourly.service
+
+[Install]
+WantedBy=timers.target
