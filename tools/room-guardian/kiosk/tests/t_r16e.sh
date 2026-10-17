@@ -1,5 +1,5 @@
 #!/bin/bash
-# shellcheck disable=SC2030,SC2031,SC2154
+# shellcheck disable=SC2030,SC2031,SC2154,SC1091
 # R16e (fable rulings on the R16d-3 refute SHOULDs): canary_play_gate checks the kill switch and the mode FIRST; before play 2 the speech check covers the whole gap since play 1.
 # Uses r6_at / r6_mut / cn_* / r3_* from t_canary.sh, t_r16d.sh and t_r16d3.sh (sourced before this file).
 
@@ -40,10 +40,10 @@ test_r16e_gap_silent_still_plays_twice() {
 # EXECUTED mutant (SHOULD-1): the kill and mode lines moved after the consult gate. The am kill case then reads consult_not_clear (the am test above would be red).
 test_r16e_mutant_kill_after_consult_gives_consult_not_clear_am() {
   r6_at 07:30
-  awk '/^canary_play_gate\(\)/ { g = 1 } g && /CANARY_WHY=kill|CANARY_WHY=mode/ { held = held $0 "\n"; next } { print } g && /CANARY_WHY=consult_not_clear/ { printf "%s", held; g = 0 }' \
+  awk '/^canary_play_gate\(\)/ { g = 1 } g && /CANARY_WHY="kill"|CANARY_WHY=mode/ { held = held $0 "\n"; next } { print } g && /CANARY_WHY=consult_not_clear/ { printf "%s", held; g = 0 }' \
     "$KDIR/lib/canary.sh" >"$T/canary_mut.sh"
-  assert_eq "$(grep -c 'CANARY_WHY=kill' "$T/canary_mut.sh")" "1" "mutant applied (one kill line)"
-  assert_eq "$(awk '/^canary_play_gate\(\)/ { g = 1 } g && /consult_hold_clear/ { print "consult"; exit } g && /CANARY_WHY=kill/ { print "kill"; exit }' "$T/canary_mut.sh")" "consult" "mutant: consult before kill"
+  assert_eq "$(grep -c 'CANARY_WHY="kill"' "$T/canary_mut.sh")" "1" "mutant applied (one kill line)"
+  assert_eq "$(awk '/^canary_play_gate\(\)/ { g = 1 } g && /consult_hold_clear/ { print "consult"; exit } g && /CANARY_WHY="kill"/ { print "kill"; exit }' "$T/canary_mut.sh")" "consult" "mutant: consult before kill"
   . "$T/canary_mut.sh"
   r3_hook 1 'r16e_kill'
   cn_run

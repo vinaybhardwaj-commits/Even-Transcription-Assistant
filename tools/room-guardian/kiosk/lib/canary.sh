@@ -297,7 +297,7 @@ canary_gap_speech() { # play1_tape_file play1_end_bytes
 canary_play_gate() {
   local key="$1" idle
   CANARY_WHY=""
-  if killswitch_engaged; then CANARY_WHY=kill; return 1; fi
+  if killswitch_engaged; then CANARY_WHY="kill"; return 1; fi
   [ "$(current_mode)" = heal ] || { CANARY_WHY=mode; return 1; }
   { [ -n "$key" ] && [ "$(canary_slot_key)" = "$key" ]; } || { CANARY_WHY=outside_window; return 1; }
   if ! in_night_window && ! consult_hold_clear; then CANARY_WHY=consult_not_clear; return 1; fi
