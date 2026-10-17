@@ -37,4 +37,4 @@
 ## Risk to flag
 - If tape lag pushes play 1's tone tail past the play-1 sample point (lag over SAMPLE_S-2.5 s = 4.5 s), the gap scan reads it as speech and aborts play 2 (fail closed: aborted, never pass).
 ## Scrub
-- `bash scripts/steward/scrub.sh origin/guardian/fr1-c1-r16..HEAD`: see OUTBOX for the rc (gitleaks 8.18.4 downloaded into scratch).
+- `bash scripts/steward/scrub.sh origin/guardian/fr1-c1-r16..HEAD` rc 0 (gitleaks 8.21.2 in scratch; 8.18.4 lacked the git subcommand, rc 2), run on the code commit and again on HEAD.

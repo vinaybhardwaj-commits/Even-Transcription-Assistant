@@ -6,3 +6,4 @@
 - mutants M1 (kill-first removed) and M2 (2 s window) EXECUTED: both red (6 and 18 failed)
 - mini tests 40 OK (7 skipped); shellcheck rc 0
 - blocked: none. Pending, not run here: macOS suite, swift build/test
+- scrub origin/guardian/fr1-c1-r16..HEAD rc 0 (gitleaks 8.21.2); code commit 2282ad3b
