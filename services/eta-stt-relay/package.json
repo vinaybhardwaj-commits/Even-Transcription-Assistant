@@ -1,0 +1,9 @@
+{
+  "name": "eta-stt-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "stt-relay.mjs",
+  "scripts": { "start": "node stt-relay.mjs" },
+  "dependencies": { "ws": "^8.18.0" }
+}
