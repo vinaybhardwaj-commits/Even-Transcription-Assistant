@@ -1,5 +1,6 @@
-"""FreeScript R2, on R1b (ea2818ee): fable rulings 4-8 on FRX-R1-VERDICT (D3, D5, L2, L1, L6). D1 / D2 / D4 are R1b's (lead
-rulings B1-B4, F2) and are not redone here. Synthetic fixtures only; no model calls (FakeClient)."""
+"""FreeScript R2, on R1b (ea2818ee): fable rulings 4-8 on FRX-R1-VERDICT (D3, D5, L2, L1, L6), as R3 redesigned D3 (the
+allowlist, FRX-R2-VERDICT F1 / F2 / F7). D1 / D2 / D4 are R1b's (lead rulings B1-B4, F2) and are not redone here. Synthetic
+fixtures only; no model calls (FakeClient)."""
 from __future__ import annotations
 
 import copy
@@ -15,7 +16,8 @@ from tools.eta2freescript.models import FakeClient
 from tools.eta2freescript.note import HEADINGS, MEDICATION_LABEL
 from tools.eta2freescript.pipeline import Options, run_consult
 from tools.eta2freescript.r1_floors import (
-    QUALIFIERS, apply_r1, apply_r1_ex, guard_names, moved_in_note, name_in_text, name_on_tape, overlap, red_flag_clauses,
+    QUALIFIERS, apply_r1, apply_r1_ex, drug_mentions, name_in_text, name_on_tape, overlap, red_flag_clauses, unposted,
+    unposted_in_note,
 )
 
 
@@ -74,12 +76,19 @@ def test_d3_moved_drug_never_visible_in_600_runs(tmp_path):
     assert visible == 0 and written >= 500
 
 
-@pytest.mark.parametrize("moved,said", [("Calpol", "paracetamol"), ("paracetamol", "Calpol"), ("paracetamol", "PCM"),
-                                        ("Dolo 650", "crocin"), ("paracetamol", "Dolo-650")])
-def test_d3_guard_matches_generic_raw_name_alias_and_brand(moved, said):
-    names = guard_names({"name": f"{moved} 500 mg", "raw_name": moved})
-    assert moved_in_note([names], f"General Advice: continue {said} as advised")
-    assert not moved_in_note([names], "General Advice: drink warm water and rest")
+@pytest.mark.parametrize("said,word", [("paracetamol", "paracetamol"), ("Calpol", "calpol"), ("PCM", "pcm"), ("crocin", "crocin"),
+                                       ("Dolo-650", "dolo"), ("paracetemol", "paracetamol"), ("para-cetamol", "paracetamol"),
+                                       ("P-650", "p650")])
+def test_d3_scan_finds_generic_brand_abbreviation_misspelling_and_split(said, word):
+    """R3 allowlist: the scan needs no list of the moved drug's names; the lexicon, a fuzzy edit and a split join find it."""
+    assert (word,) in drug_mentions(f"continue {said} as advised")
+    assert drug_mentions("drink warm water and rest; reduce salt to 5 g a day; review if fever persists") == []
+
+
+def test_d3_a_mention_of_a_posted_drug_resolves():
+    art = hand_art()  # paracetamol (alias Calpol), amoxicillin, pantoprazole posted
+    assert unposted(art, "continue Calpol and paracetemol as advised") == []
+    assert unposted(art, "continue Azee as advised") == [("azee",)]
 
 
 def test_d3_posted_field_naming_a_moved_drug_is_withheld_whole():
@@ -94,19 +103,21 @@ def test_d3_posted_field_naming_a_moved_drug_is_withheld_whole():
     assert sorted(p["text"] for p in w) == ["follow_up withheld (unconfirmed drug)", "general_advice withheld (unconfirmed drug)"]
 
 
-def test_d3_a_posted_duplicate_of_a_moved_drug_moves_too():
+def test_d3_a_posted_drug_of_the_same_molecule_as_a_moved_one_stays():
+    """R3 allowlist: a doctor-confirmed Dolo 650 stays posted when a patient's paracetamol moves; a mention of either name is
+    then a mention of the posted drug (R2 moved both)."""
     art = hand_art(para=("patient", "Take paracetamol 500 mg twice a day."))
     art["gp_extraction"]["medicines"][2].update({"name": "Dolo 650", "raw_name": "Dolo 650"})  # panto slot, doctor quote lacks Dolo
     art["provenance"][9]["evidence"][0]["quote_en"] = art["provenance"][9]["evidence"][0]["quote"] = "Dolo 650 once a day for 5 days."
     out, _ = apply_r1(art)
-    assert meds(out) == ["amoxicillin 500 mg"] and sorted(p["detail"] for p in picks(out)) == ["Dolo 650", "paracetamol 500 mg"]
+    assert meds(out) == ["amoxicillin 500 mg", "Dolo 650"] and [p["detail"] for p in picks(out)] == ["paracetamol 500 mg"]
 
 
 def test_d3_stored_note_that_names_a_moved_drug_is_replaced():
     art = hand_art(para=("patient", "Take paracetamol 500 mg twice a day."))
     art["note_text"] = "\n".join(f"{h}: {'continue PCM as advised' if h == 'General Advice' else ''}".rstrip() for h in HEADINGS)
-    out, c, moved = apply_r1_ex(art)
-    assert c["r1_4_note_rewritten"] == 1 and c["r1_4_pick_drug_in_note"] == 0 and not moved_in_note(moved, out["note_text"])
+    out, c, known = apply_r1_ex(art)
+    assert c["r1_4_note_rewritten"] == 1 and c["r1_4_pick_drug_in_note"] == 0 and not unposted_in_note(out, out["note_text"], known)
 
 
 # --- D5: a name on tape needs the base molecule word ---------------------------------------------------------
@@ -174,10 +185,10 @@ L1_NEGATED = [  # the verdict's negated / non-clinical class (its quoted example
     "If you start walking daily, return for a review in a month.",
 ]
 L1_ROUTINE = [  # 16 routine sentences (rebuilt; the verdict does not list its hand set)
-    "Come back after one week for review.", "If the fever continues, come back after three days.", "Come back with the reports.",
+    "Come back after one week for review.", "If the reports are normal, come back after three days.", "Come back with the reports.",
     "If you start feeling better, stop the syrup.", "Return for follow-up in two weeks.", "If the cough continues, come back next week.",
     "Come back if needed.", "If you start the tablets today, come back on Monday.", "Drink warm water and rest.",
-    "If it continues, return to the clinic next month.", "Return the form at the desk.", "If you start exercising, return slowly to running.",
+    "If it is convenient, return to the clinic next month.", "Return the form at the desk.", "If you start exercising, return slowly to running.",
     "Continue the same diet.", "If the rash continues, come back for a review.", "Come back after the blood test.",
     "If you start the new job, return for a fitness certificate.",
 ]
@@ -247,4 +258,4 @@ def test_r2_no_posted_string_names_a_moved_drug_over_2000_artifacts():
         out, c, moved = apply_r1_ex(copy.deepcopy(art))
         for i, m in enumerate(out["gp_extraction"].get("medicines") or []):
             assert name_on_tape(m, next(p for p in out["provenance"] if p.get("json_pointer") == f"/medicines/{i}")), seed
-        assert not moved_in_note(moved, json.dumps(out["gp_extraction"])), seed
+        assert not unposted(out, json.dumps(out["gp_extraction"]), moved), seed

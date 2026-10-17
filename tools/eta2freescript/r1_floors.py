@@ -17,12 +17,14 @@ apply_r1(art, turns) runs offline on a stored artifact.json too; the lead replay
 from __future__ import annotations
 
 import copy
+import json
 import re
 import unicodedata
+from pathlib import Path
 
 from .guard import numerals
 from .mapper import iso
-from .medication_safety import BRANDS, GENERICS, instruction_only, molecules
+from .medication_safety import BRANDS, GENERICS, molecules
 from .note import combination_groups, flags_by_pointer, medication_floor, scrub_identity
 from .recover import _demote_medicine, _kept_out
 from .note import MEDICATION_LABEL
@@ -250,7 +252,9 @@ def _to_pick_drug(art: dict, idxs: dict[int, str | None]) -> int:
         m = meds[i]
         owner = (_owners(art, f"/medicines/{i}") or [None])[0]
         label = _med_label(m)
-        art.setdefault(_MOVED, []).append(guard_names(m, (owner or {}).get("names")))  # before the demote empties the owner's names
+        art.setdefault(_KNOWN, []).extend(  # before the demote empties the owner's names
+            n for n in [m.get("name"), m.get("raw_name")] + list(m.get("aliases") or []) + list((owner or {}).get("names") or [])
+            if isinstance(n, str))
         _demote_medicine(art, i)
         if owner is None:
             owner = _kept_out(art, "medicine", f"{label} (not on tape)")
@@ -327,7 +331,24 @@ def r1_posted_fields(art: dict, c: dict, hits: list[tuple] | None = None, why: s
 # Unit, form and pack words: never part of a name.
 _FORM = {"mg", "mcg", "ml", "gm", "g", "iu", "unit", "units", "tab", "tabs", "tablet", "tablets", "cap", "caps", "capsule",
          "capsules", "syp", "syrup", "inj", "injection", "cream", "gel", "drops", "drop", "ointment", "lotion", "spray", "oral",
-         "suspension", "solution", "the", "for", "kit", "respules", "powder", "dt", "md"}
+         "suspension", "solution", "the", "for", "kit", "respules", "powder", "dt", "md", "sachet", "inhaler"}
+# The dosage forms and units that, next to a word, make it a drug name ("tab Pan", "Pan 40", "fever tablet").
+_ADJ_FORM = _FORM - {"the", "for", "oral", "kit", "powder"}
+_TIME = {"day", "days", "week", "weeks", "month", "months", "hour", "hours", "hr", "hrs", "year", "years", "yr", "yrs",
+         "times", "time", "x", "min", "mins", "minutes", "am", "pm", "o", "clock"}
+
+
+def _adjacent(raw: list[tuple[str, str]], x: int) -> bool:
+    """raw[x] makes the word next to it a drug name: a dosage form or unit ("tab", "mg"), or a strength that is not a duration
+    or a count ("Pan 40" yes; "Fever (2 days)", "BP 3 times" no)."""
+    if not 0 <= x < len(raw):
+        return False
+    t, k = raw[x]
+    if t in _ADJ_FORM:
+        return True
+    return k in ("num", "gnum") and not (x + 1 < len(raw) and raw[x + 1][0] in _TIME)
+
+
 # Joiners split a combination into its components ("amoxicillin and clavulanic acid", "calcium + vitamin D3").
 _JOIN = {"and", "plus", "with"}
 # Salt, qualifier, vitamin and pack words (fable ruling D5): they never count alone as the name on tape.
@@ -338,7 +359,14 @@ QUALIFIERS = {"acid", "sodium", "potassium", "calcium", "magnesium", "zinc", "ir
               "forte", "plus", "sr", "xr", "er", "cr", "la", "od", "mr", "pr", "ds", "dsr", "xl", "cv", "gold", "junior",
               "kid", "kids", "paediatric", "pediatric", "adult", "extra", "max", "fast", "new", "advance", "advanced", "lc",
               "mini", "total", "ultra", "strong"}
+# F3 (R3): a word before a name that makes it another molecule ("hydroxy chloroquine", "levo cetirizine", "es omeprazole").
+PREFIXES = {"hydroxy", "methyl", "levo", "es", "dex", "des", "nor", "chlor"}
+# F4 (R3): a mention in a stop / avoid / negated clause is not a drug-use mention for posting.
+_NOT_USE = {"stop", "stopped", "stopping", "avoid", "avoided", "no", "not", "don", "dont", "never", "without", "allergic",
+            "allergy", "nahi", "mat", "band", "discontinue", "withhold", "skip"}
 _TOK = re.compile(r"[^\W\d_]+|\d+(?:\.\d+)?")
+_STRENGTH = re.compile(r"\d+(?:\.\d+)?(?:mg|mcg|ml|g|iu)?")
+_DATA = Path(__file__).resolve().parents[2] / "data"
 
 
 def _toks(text: str) -> list[str]:
@@ -347,142 +375,346 @@ def _toks(text: str) -> list[str]:
 
 
 def _alnum(text: str) -> list[str]:
-    """Words with a glued letter-digit word kept whole ("D3", "B12"), for the qualifier test."""
-    return [t.lower() for t in re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", text or ""))]
+    """Words with a glued letter-digit word kept whole ("D3", "B12"), for the qualifier test. "+", "&" and "/" join."""
+    t = re.sub(r"[+&/]", " and ", unicodedata.normalize("NFKC", text or ""))
+    return [w.lower() for w in re.findall(r"[^\W_]+", t)]
 
 
-_STRENGTH = re.compile(r"\d+(?:\.\d+)?(?:mg|mcg|ml|g|iu)?")
-
-
-def _name_toks(text: str) -> list[str]:
-    """The words of `text` that can be part of a name: a standalone strength ("650", "500mg") and unit / form / pack words
-    out; the rest split into letter and digit runs ("dolo650" -> dolo, 650; "D3" -> d, 3)."""
-    return [t for w in _alnum(text) if not _STRENGTH.fullmatch(w) and w not in _FORM for t in _toks(w)]
+def _raw(text: str) -> list[tuple[str, str]]:
+    """(token, kind) for the name matcher: kind "num" (a standalone strength), "form" (unit / form / pack word), "word", or
+    "gnum" (the digits of a glued word: "D3" -> d, 3; "pan40" -> pan, 40). A gnum is part of the word sequence (so "vitamin
+    D3" matches) and also counts as a strength next to a name (F6)."""
+    out = []
+    for w in _alnum(text):
+        if _STRENGTH.fullmatch(w):
+            out.append((w, "num"))
+        elif w in _FORM:
+            out.append((w, "form"))
+        else:
+            out += [(t, "gnum" if t[0].isdigit() else "word") for t in _toks(w)]
+    return out
 
 
 def name_phrases(name: str) -> list[tuple[str, ...]]:
     """The phrases a name must show on tape, one per component of a combination; [] when it has no usable component.
     A component is its words without digits, unit / form / pack words. Its base is that minus the QUALIFIERS (salt, vitamin,
     pack). A component with a base needs the base phrase ("pantoprazole sodium" -> pantoprazole, "Augmentin 625 Duo" ->
-    augmentin, "folic acid" -> folic). A component that is all qualifiers needs its whole phrase, of 2+ words ("vitamin D3",
-    "potassium chloride"); a lone qualifier ("calcium") never counts."""
-    out: list[tuple[str, ...]] = []
-    comp: list[str] = []
-    words = [w for w in _alnum(name) if not _STRENGTH.fullmatch(w) and w not in _FORM]
-    for w in words + ["and"]:
+    augmentin, "folic acid" -> folic). A component that is all qualifiers needs its whole phrase ("vitamin D3", "potassium
+    chloride"). A lone qualifier ("calcium") never counts on its own; inside a combination of 2+ components it is that
+    component's phrase ("Calcium + Vitamin D3" needs calcium AND vitamin d3, R3 L1)."""
+    comps: list[list[str]] = [[]]
+    for w in _alnum(name):
         if w in _JOIN:
-            if comp:
-                base = tuple(x for x in comp if x not in QUALIFIERS)
-                if base:
-                    out.append(tuple(t for x in base for t in _toks(x)))
-                elif len(comp) >= 2:
-                    out.append(tuple(t for x in comp for t in _toks(x)))
-                else:
-                    return []
-            comp = []
+            comps.append([])
+        elif not _STRENGTH.fullmatch(w) and w not in _FORM:
+            comps[-1].append(w)
+    comps = [c for c in comps if c]
+    out: list[tuple[str, ...]] = []
+    for comp in comps:
+        base = tuple(x for x in comp if x not in QUALIFIERS)
+        if base:
+            out.append(tuple(t for x in base for t in _toks(x)))
+        elif len(comp) >= 2 or len(comps) >= 2:
+            out.append(tuple(t for x in comp for t in _toks(x)))
         else:
-            comp.append(w)
+            return []
     return out
 
 
-def _has_phrase(phrase: tuple[str, ...], toks: list[str]) -> bool:
-    n = len(phrase)
-    return n > 0 and any(tuple(toks[i:i + n]) == phrase for i in range(len(toks) - n + 1))
+# --- drug vocabulary (R3): the lexicon, the generics and brands, and the plain words that are not drugs -------------
+def _wordlist(name: str, key: str = "words") -> set[str]:
+    try:
+        d = json.loads((_DATA / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {w.lower() for k in ([key] if isinstance(key, str) else key) for x in d.get(k) or [] for w in re.findall(r"[a-z]+", str(x).lower())}
 
 
-def name_in_text(name: str, text: str) -> bool:
+# Hindi-romanised everyday words heard in an Indian OPD (they are not English, and some are brand names too).
+HINDI_WORDS = {"pan", "paan", "dawa", "dawai", "goli", "chai", "dard", "bukhar", "khana", "pani", "dahi", "doodh", "nimbu",
+               "haldi", "tulsi", "neem", "amla", "jeera", "ajwain", "saunf", "gud", "namak", "cheeni", "roti", "dal", "chawal",
+               "subah", "shaam", "raat", "din", "abhi", "kal", "aaj", "thoda", "zyada", "bas", "theek", "accha", "haan", "nahi",
+               "mat", "band", "masala", "gutka", "beedi", "desi", "ghee", "tel", "sona", "chandan", "shanti", "raja", "rani"}
+# Drug abbreviations an Indian OPD writes that no lexicon row carries ("PCM" is paracetamol). They only widen the scan.
+DRUG_ABBREVIATIONS = {"pcm"}
+# Short brands that are everyday words (F6): such a brand posts only with its strength or a form word next to it on tape.
+SHORT_BRAND_SEED = {"pan", "mox", "dolo", "azee", "zinc"}
+# Clinical abbreviations and plain words that a lexicon row may carry but that are never a drug mention by themselves.
+_NOT_DRUG = {"bp", "hr", "rr", "spo", "cbc", "ecg", "ekg", "tsh", "esr", "crp", "lft", "kft", "rft", "rbs", "fbs", "ppbs",
+             "usg", "mri", "ent", "opd", "ipd", "icu", "hba", "urine", "blood", "test", "day", "days", "week", "weeks", "month",
+             "dose", "doses", "once", "twice", "thrice", "daily", "night", "morning", "after", "before", "food", "sos", "bd",
+             "tds", "qid", "hs", "stat", "doctor", "dr", "patient", "drug", "drugs", "medicine", "medicines", "other",
+             "advised", "continue", "review", "if", "required", "follow", "up", "x", "one", "two", "three", "four", "five", "six",
+             "seven", "eight", "nine", "ten", "half", "times"} | _FORM | QUALIFIERS | _JOIN
+
+
+_MOLECULE = re.compile(r"(?:ol|ine|ide|ate|azole|mycin|cillin|sartan|pril|olol|statin|oxacin|tidine|vir|one|ium|ane|ene|cin|xib|"
+                       r"fen|pam|lam|mab|ast|gliptin|flozin|parin|dipine|zine|xone|sone|lone|tide|amine|ase|ose|in)$")
+_CLINICAL = re.compile(r"(?:itis|osis|algia|a?emia|pathy|ectomy|scopy|graphy|ache|ness|ity|ency|ing|tion|ful|less|ous|ive)$")
+_CLINICAL_WORDS = {"hyperpigmentation", "amorphous", "hydrous", "prostrate", "glide", "reactivate", "intrauterine", "methane",
+                   "dioxide", "sol", "sone", "klin", "monodose", "neoprene", "deficiency", "acidity", "backache", "bloating",
+                   "heartburn", "indigestion", "flatulence", "dandruff", "ulcer", "cramps", "spasms", "menopause", "gerd", "ibs",
+                   "encephalitis", "influenzae", "polio", "pertussis", "hairfall", "hairloss", "warts", "corns", "melasma"}
+
+
+class _Vocab:
+    def __init__(self) -> None:
+        from .medication_safety import _INSTRUCTION_WORDS, _PACK_WORDS
+        self.plain = (_wordlist("common-english-words.json") | _wordlist("clinical-english-words.json")
+                      | _wordlist("clinical-terms.json", ("terms", "analytes")) | HINDI_WORDS | _NOT_DRUG
+                      | _INSTRUCTION_WORDS | _PACK_WORDS)
+        names: list[str] = []
+        try:
+            lx = json.loads((_DATA / "drug-lexicon.json").read_text(encoding="utf-8"))
+            names = [n for n in lx.get("names") or [] if isinstance(n, str)]
+            invest = {w for n in lx.get("investigations") or [] for w in re.findall(r"[a-z]+", str(n).lower())}
+        except (OSError, ValueError):
+            invest = set()
+        first = {(_toks(n) or [""])[0] for n in names}  # a lexicon row's first word: the brand, or the molecule
+        known = {t for n in sorted(GENERICS) + sorted(BRANDS) for t in _toks(n) if t.isalpha()}
+        later = {t for n in names for t in _toks(n)[1:] if t.isalpha()}
+        # A strong drug word: a brand / first word, a generic or brand of medication_safety, or a later lexicon word that looks
+        # like a molecule (its suffix). Never a plain word, an investigation word, or a clinical-looking word ("deficiency",
+        # "heartburn", "ulcer" sit in lexicon rows as descriptions).
+        cand = first | known | {t for t in later if _MOLECULE.search(t)}
+        self.strong = ({t for t in cand if t.isalpha() and len(t) >= 3 and t not in self.plain and t not in invest
+                        and t not in _CLINICAL_WORDS and (t in known or not _CLINICAL.search(t))} | DRUG_ABBREVIATIONS)
+        self.everyday = SHORT_BRAND_SEED | {t for t in first if t.isalpha() and 3 <= len(t) <= 6 and t in self.plain - _NOT_DRUG}
+        self.fuzzy: dict[str, set[str]] = {}
+        for w in self.strong:
+            if len(w) >= 6:
+                for d in {w} | {w[:i] + w[i + 1:] for i in range(len(w))}:
+                    self.fuzzy.setdefault(d, set()).add(w)
+
+    def fuzzy_hit(self, t: str) -> str | None:
+        """The strong drug word within one edit of `t` (6+ letters, `t` not a plain word): "paracetemol" -> paracetamol."""
+        if len(t) < 6 or t in self.plain:
+            return None
+        cands = set()
+        for d in {t} | {t[:i] + t[i + 1:] for i in range(len(t))}:
+            cands |= self.fuzzy.get(d, set())
+        return min((w for w in cands if _edit1(t, w)), default=None)
+
+
+def _edit1(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    if len(a) > len(b):
+        a, b = b, a
+    return any(b[:i] + b[i + 1:] == a for i in range(len(b)))
+
+
+_VOCAB: _Vocab | None = None
+
+
+def vocab() -> _Vocab:
+    global _VOCAB
+    if _VOCAB is None:
+        _VOCAB = _Vocab()
+    return _VOCAB
+
+
+# --- R1-2: the name on tape -------------------------------------------------------------------------------------
+def _clauses(text: str) -> list[str]:
+    return [x for x in re.split(r"[.;,!?\n]+", text or "") if x.strip()]
+
+
+def name_in_text(name: str, text: str, own: set[str] | None = None, use: bool = False) -> bool:
     """`name` is said in `text`: every component phrase of name_phrases appears as whole, contiguous words (digits and unit /
-    form words in the text skipped). Exact only: no prefix, no fuzzy spelling (fable ruling L2)."""
+    form words in the text skipped). Exact only: no prefix, no fuzzy spelling (fable ruling L2). With `use` (posting, R1-2)
+    a phrase also must not be:
+      - joined to the word before it into another drug, or follow a molecule prefix (PREFIXES: "hydroxy chloroquine",
+        "methyl prednisolone", "levo cetirizine", "es omeprazole") (F3);
+      - followed by another drug word that is not this medicine's own (`own`): "amoxicillin clavulanate" (F3);
+      - in a stop / avoid / negated clause ("Stop pan masala", "avoid ibuprofen") (F4);
+      - a short brand that is an everyday word (vocab().everyday: Pan, Mox, Dolo, Azee, Zinc ...) without its strength or a
+        form word next to it on tape ("Pan 40", "tab Pan") (F6)."""
     phrases = name_phrases(name)
-    toks = _name_toks(text)
-    return bool(phrases) and all(_has_phrase(p, toks) for p in phrases)
+    if not phrases:
+        return False
+    v = vocab() if use else None
+    for clause in (_clauses(text) if use else [text]):
+        raw = _raw(clause)
+        words = [(i, t) for i, (t, k) in enumerate(raw) if k in ("word", "gnum")]
+        seq = [t for _, t in words]
+        ok = True
+        for ph in phrases:
+            n = len(ph)
+            hit = False
+            for j in range(len(seq) - n + 1):
+                if tuple(seq[j:j + n]) != ph:
+                    continue
+                if use:
+                    prev = seq[j - 1] if j else ""
+                    nxt = seq[j + n] if j + n < len(seq) else ""
+                    if prev in PREFIXES or (prev and prev + ph[0] in v.strong):
+                        continue
+                    if nxt and (nxt in v.strong or ph[-1] + nxt in v.strong) and nxt not in (own or set()):
+                        continue
+                    if _NOT_USE & set(seq[max(0, j - 3):j]) or {"not", "no", "stop", "avoid"} & set(seq[j + n:j + n + 3]):
+                        continue  # "stop Pan 40", "avoid ibuprofen", "Pan 40 not needed"
+                    if n == 1 and ph[0] in v.everyday:
+                        a, b = words[j][0], words[j + n - 1][0]
+                        full = [t for x in _alnum(name) if not _STRENGTH.fullmatch(x) and x not in _FORM for t in _toks(x)]
+                        whole = len(full) >= 2 and tuple(seq[j:j + len(full)]) == tuple(full)  # "Pan D": the brand's own full name
+                        near_ok = _adjacent(raw, a - 1) or _adjacent(raw, b + 1)
+                        if not near_ok and not whole:
+                            continue
+                hit = True
+                break
+            if not hit:
+                ok = False
+                break
+        if ok:
+            return True
+    return False
+
+
+def _own_words(m: dict) -> set[str]:
+    """The words that name medicine `m` itself: its names' words, its molecules, and the same-molecule brands."""
+    names = [n for n in [m.get("name"), m.get("raw_name")] + list(m.get("aliases") or []) if isinstance(n, str) and n.strip()]
+    mols = {x for x in (molecules(n) for n in names) if x}
+    names += [b for b, ms in BRANDS.items() if ms in mols] + [g for ms in mols for g in ms]
+    return {t for n in names for t in _toks(n) if t.isalpha()} | {"".join(t for t in _toks(n) if t.isalpha()) for n in names}
 
 
 def name_on_tape(m: dict, owner: dict | None) -> bool:
     """R1-2. Medicine `m` stays posted only if BOTH:
       (a) its provenance owner (json_pointer /medicines/<i>) has evidence_state heard_in_room; and
       (b) at least one evidence entry with speaker == "doctor" has a quote_en or quote that says the drug's name, raw_name or
-          one of its listed aliases (name_in_text).
-    Matching (R2, fable rulings D5 and L2): case-insensitive, whole words, EXACT on the normalised name. The normalised name is
-    the name without strength digits, unit / form / pack words and salt / qualifier words (QUALIFIERS); a combination needs
-    every component in the one quote. There is no prefix rule and no fuzzy rule: prednisolone never matches prednisone,
-    amoxicillin never matches amoxiclav, unless that word is itself a listed alias. A salt, qualifier or vitamin word alone
-    ("acid", "sodium", "calcium", "vitamin", "Duo") never counts. Any other speaker, or no owner, and the drug does not post."""
+          one of its listed aliases (name_in_text with use=True).
+    Matching (R2 D5 / L2, R3 F3 / F4 / F6 / L1): case-insensitive, whole words, EXACT on the normalised name. The normalised
+    name is the name without strength digits, unit / form / pack words and salt / qualifier words (QUALIFIERS); a combination
+    needs every component in the one clause. There is no prefix rule and no fuzzy rule. A salt, qualifier or vitamin word alone
+    never counts. A molecule prefix or a joined drug word before the name, another drug word after it, a stop / avoid / negated
+    clause, and an everyday-word brand without its strength or form word, all refuse the match. Any other speaker, or no owner,
+    and the drug does not post."""
     if not owner or owner.get("evidence_state") != "heard_in_room":
         return False
     names = [n for n in [m.get("name"), m.get("raw_name")] + list(m.get("aliases") or []) if isinstance(n, str) and n.strip()]
+    own = _own_words(m)
     for ev in owner.get("evidence") or []:
         if not isinstance(ev, dict) or ev.get("speaker") != "doctor":
             continue
         for k in ("quote_en", "quote"):
-            if any(name_in_text(n, ev.get(k) or "") for n in names):
+            if any(name_in_text(n, ev.get(k) or "", own, use=True) for n in names):
                 return True
     return False
 
 
-# --- R1-2b (R2, fable ruling D3): a moved drug is never visible ---------------------------------------------------
-_MOVED = "_r1_moved"  # scratch key on the working copy: the guard names of every moved drug; apply_r1 pops it
-
-
+# --- R1-2b (R3, fable F1 / F2 / F7 / L2): an ALLOWLIST. A drug in a posted string or the note must be a posted drug ---
+_KNOWN = "_r1_known"  # scratch key on the working copy: names of the medicines R1 moved; apply_r1_ex pops it
+_PX = re.compile(r"\b([A-Za-z]{1,3})[-\s]?(125|250|325|400|500|625|650|1000)\b")  # a letter-strength code: "P-650", "PCM 500"
 _NOT_A_NAME = {"this", "that", "these", "those", "it", "same", "one", "other", "another", "name", "unnamed", "drug", "medicine",
                "new", "old", "your", "my", "his", "her", "their", "white", "pink", "yellow", "small", "big"}
 
 
-# Guard-only short forms and brands the existing alias data (medication_safety.BRANDS) does not hold. They only make the
-# moved-drug guard wider (a note or posted field naming them is withheld); they never let a drug post.
-GUARD_ALIASES: dict[str, tuple[str, ...]] = {"paracetamol": ("calpol", "pcm", "crocin", "dolo")}
-_GUARD_REVERSE = {a: g for g, al in GUARD_ALIASES.items() for a in al}
+def known_names(art: dict, extra: list[str] | None = None) -> list[str]:
+    """Drug names this consult knows that the lexicon may not: `extra` (the Stage A rx rows' generic / brand_as_said /
+    _heard_name, drug history, and the names of medicines R1 moved), and every medicine provenance item's names (the
+    mapper's own held and pick_drug medicines included, F2). A mapper pick_drug detail is regimen text, not a name."""
+    out = [n for n in extra or [] if isinstance(n, str)]
+    for p in art.get("provenance") or []:
+        if isinstance(p, dict) and p.get("kind") == "medicine":
+            out += [n for n in p.get("names") or [] if isinstance(n, str)]
+    return [n for n in dict.fromkeys(n.strip() for n in out) if n and not withhold_reason(n, "medicines")]
 
 
-def guard_names(m: dict, owner_names: list | None = None) -> list[str]:
-    """Every name a moved medicine can be written under: its name, raw_name and aliases, its provenance owner's names, plus,
-    through the alias data (medication_safety.BRANDS and GENERICS, and GUARD_ALIASES), each brand and the generic of the same
-    molecule set (Dolo 650 -> paracetamol, crocin, dolo, calpol, pcm)."""
-    names = [n for n in [m.get("name"), m.get("raw_name")] + list(m.get("aliases") or []) + list(owner_names or [])
-             if isinstance(n, str) and n.strip()]
-    mols = {x for x in (molecules(n) for n in names) if x}
-    mols |= {frozenset({_GUARD_REVERSE[w]}) for n in names for w in _toks(n) if w in _GUARD_REVERSE}
-    names += [b for b, ms in BRANDS.items() if ms in mols]
-    names += [g for g in GENERICS if frozenset({g}) in mols]
-    names += [a for ms in mols if len(ms) == 1 for a in GUARD_ALIASES.get(next(iter(ms)), ())]
-    out: list[str] = []
-    for n in names:
-        # a placeholder or a bare pointing word ("this tablet") is not a name to look for
-        if n in out or withhold_reason(n, "medicines") or instruction_only(n):
-            continue
-        phrases = name_phrases(n)
-        if phrases and not all(set(ph) <= _NOT_A_NAME for ph in phrases):
-            out.append(n)
+def drug_mentions(text: str, known: list[str] | None = None) -> list[tuple[str, ...]]:
+    """Every drug mention in `text`, as the words that name it:
+      - a strong drug word (the lexicon, GENERICS, BRANDS: not a plain English / clinical / Hindi word), or one edit from one
+        (6+ letters: "paracetemol"), or two adjacent words that join into one ("para cetamol", "para-cetamol");
+      - a letter-strength code ("P-650");
+      - a known name (known_names): its strong words, or its whole phrase when it is all qualifiers ("calcium", F7), or an
+        everyday / plain word of it with a strength or form word next to it ("Pan 40");
+      - a SHORT_BRAND_SEED brand with a strength or form word next to it. (The wider vocab().everyday list is for posting
+        only: in the scan it would withhold "reduce salt to 5 g".)"""
+    v = vocab()
+    out: list[tuple[str, ...]] = []
+    for line in (text or "").split("\n"):
+        raw = _raw(line)
+        seq = [t for t, k in raw if k in ("word", "gnum")]  # "vitamin D3" keeps its 3
+        pos = [i for i, (t, k) in enumerate(raw) if k in ("word", "gnum")]
+        near = lambda j: _adjacent(raw, pos[j] - 1) or _adjacent(raw, pos[j] + 1)
+        known_strong, known_weak, known_phr = set(), set(), []
+        for n in known or []:
+            for t in _toks(n):
+                if t.isalpha() and len(t) >= 3 and t not in _NOT_A_NAME and t not in _FORM:
+                    (known_weak if t in v.plain else known_strong).add(t)
+            # a name made only of qualifiers ("calcium", "vitamin D3") is found by its whole phrase (F7)
+            phs = [tuple(t for x in _alnum(n) if not _STRENGTH.fullmatch(x) and x not in _FORM for t in _toks(x))]
+            known_phr += [p for p in phs if p and all(t in QUALIFIERS or t.isdigit() for t in p) and any(t.isalpha() for t in p)]
+        j = 0
+        while j < len(seq):
+            t = seq[j]
+            two = t + seq[j + 1] if j + 1 < len(seq) else ""
+            if two and t not in v.strong and (two in v.strong or v.fuzzy_hit(two)):  # "para cetamol", "para-cetamol"
+                out.append((two if two in v.strong else v.fuzzy_hit(two),))
+                j += 1
+            elif two and two in v.strong:
+                out.append((two,))
+                j += 1
+            elif t in v.strong or t in known_strong:
+                out.append((t,))
+            elif v.fuzzy_hit(t):
+                out.append((v.fuzzy_hit(t),))
+            elif (t in SHORT_BRAND_SEED or t in known_weak) and near(j):
+                out.append((t,))
+            j += 1
+        for ph in known_phr:
+            n = len(ph)
+            if any(tuple(seq[j:j + n]) == ph for j in range(len(seq) - n + 1)):
+                out.append(ph)
+        out += [(m.group(1).lower() + m.group(2),) for m in _PX.finditer(line) if m.group(1).lower() not in _NOT_DRUG
+                and m.group(1).lower() not in v.plain]
     return out
 
 
-def moved_in_text(moved: list[list[str]], text: str) -> bool:
-    """`text` names a drug R1 moved to pick_drug (`moved`: guard_names of each moved drug; whole words, line by line)."""
-    return any(name_in_text(n, line) for names in moved or [] for n in names for line in (text or "").split("\n"))
+def posted_words(art: dict) -> set[str]:
+    """The words a POSTED medicine may be written under: its own words (_own_words) and its provenance owner's names."""
+    gx = art.get("gp_extraction") or {}
+    out: set[str] = set()
+    for i, m in enumerate(gx.get("medicines") or []):
+        if not isinstance(m, dict):
+            continue
+        out |= _own_words(m)
+        for p in _owners(art, f"/medicines/{i}"):
+            out |= {t for n in p.get("names") or [] if isinstance(n, str) for t in _toks(n) if t.isalpha()}
+    return out
 
 
-def r1_moved_mentions(art: dict, c: dict) -> None:
-    """Withhold, whole, every posted gp_extraction string that names a moved drug (as R1-1 does, flag field_withheld). A posted
-    medicine whose name is that drug moves to pick_drug too, which adds its names: repeat until nothing names a moved drug."""
-    for _ in range(20):
-        gx = art.get("gp_extraction")
-        if not isinstance(gx, dict) or not art.get(_MOVED):
-            return
-        hits: list[tuple] = []
+def unposted(art: dict, text: str, known: list[str] | None = None) -> list[tuple[str, ...]]:
+    """The drug mentions in `text` that do not resolve to a posted, tape-supported medicine (posted_words). Each one is
+    treated as a moved drug."""
+    pw = posted_words(art)
+    return [m for m in drug_mentions(text, known) if not set(m) <= pw]
 
-        def walk(node, path):
-            if isinstance(node, dict):
-                for k, v in node.items():
-                    walk(v, path + (k,))
-            elif isinstance(node, list):
-                for i, v in enumerate(node):
-                    walk(v, path + (i,))
-            elif isinstance(node, str) and moved_in_text(art[_MOVED], node):
-                hits.append(path)
 
-        walk(gx, ())
-        if not hits:
-            return
+def r1_allowlist(art: dict, c: dict, known: list[str] | None = None) -> None:
+    """R1-2b. Withhold, whole, every posted gp_extraction string with a drug mention that is not a posted medicine (as R1-1
+    does, flag field_withheld, "<section> withheld (unconfirmed drug)"). A medicine's own name fields always resolve to it."""
+    gx = art.get("gp_extraction")
+    if not isinstance(gx, dict):
+        return
+    known = known_names(art, known)
+    hits: list[tuple] = []
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, path + (k,))
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                walk(v, path + (i,))
+        elif isinstance(node, str) and unposted(art, node, known):
+            hits.append(path)
+
+    walk(gx, ())
+    if hits:
         r1_posted_fields(art, c, hits, "unconfirmed drug", "r1_2b")
 
 
@@ -530,7 +762,9 @@ _WORSE = (r"(?:worse|worsens?|worsening|increases?|increasing|goes\s+up|severe|u
           r"does\s*n[o']?t\s+(?:settle|stop|improve|reduce|go\s+down)|not\s+(?:settl|stopp|improv|reduc)\w*|"
           r"keeps?\s+(?:coming|going|vomiting|bleeding)|bleed\w*|blood\s+in\b|vomit\w*|faint\w*|breathless\w*|"
           r"breathing\s+(?:difficulty|problem)|difficulty\s+(?:in\s+)?breathing|chest\s+pain|unconscious|drows\w*|fits?|"
-          r"seizures?|convulsions?|high\s+fever|black\s+stools?)")
+          r"seizures?|convulsions?|high\s+fever|black\s+stools?|"
+          # R3 L3: "not better in two days", "if the fever continues", "if it continues"
+          r"not\s+(?:better|improving|improved)|(?:it|fever|pain|vomiting|bleeding|swelling|symptoms?)\s+(?:continues|persists))")
 _PLACE = r"(?:the\s+)?(?:emergency(?:\s+room|\s+department)?|casualty|er|a\s*&\s*e|hospital)"
 RED_FLAG_PATTERNS = tuple(re.compile(p, re.I) for p in (
     # come (back) immediately / at once / straight away / right away
@@ -543,10 +777,12 @@ RED_FLAG_PATTERNS = tuple(re.compile(p, re.I) for p in (
     + r"|rush\s+to\s+" + _PLACE + r"|see\s+(?:me|us|a\s+doctor)\s+(?:immediately|at\s+once|urgently))\b",
     # rush (him / her) to hospital
     r"\brush\s+(?:\w+\s+){0,2}?to\s+" + _PLACE + r"\b",
+    # bring / take him to casualty (R3 L3)
+    r"\b(?:bring|take|carry)\s+(?:\w+\s+){0,2}?to\s+" + _PLACE + r"\b",
 ))
 # A worsening or red-flag cue in the sentence itself, the emergency words included.
 RED_FLAG_CUE = re.compile(r"\b" + _WORSE + r"|\b(?:emergency|casualty|er|a\s*&\s*e|immediately|at\s+once|straight\s*away|"
-                          r"right\s+away|urgently|rush)\b", re.I)
+                          r"right\s+away|urgently|rush|drowsy)\b", re.I)
 # Negated or "not needed" instructions never fire ("No need to go to the emergency", "You don't need to come back"). Only a
 # negation of the instruction itself: "Don't worry, but if it gets worse come back immediately" still fires.
 NEGATION = re.compile(r"\b(?:no\s+need|(?:do|does)\s*n[o']?t\s+(?:need|have\s+to|go|come|rush)|need\s*n[o']?t|"
@@ -602,11 +838,14 @@ def _trim(s: str, n: int = 200) -> str:
     return (cut.rsplit(" ", 1)[0] if " " in cut else cut).rstrip(" ,;")
 
 
-def r1_red_flags(art: dict, turns, c: dict) -> None:
-    """R1-5. Each doctor emergency / return clause not already covered by the advice (token overlap >= 0.6 with general_advice
-    or any advice provenance text, or an advice item citing the same segment_ref) becomes one advice line, built from the
-    doctor's own clause through scrub_identity and trimmed to 200 characters. A line that fails R1-1, printable_errors or the
-    FRX-A1 limits is not added and is counted. English doctor turns only; quarantined turns are another patient's."""
+def r1_red_flags(art: dict, turns, c: dict, known: list[str] | None = None) -> None:
+    """R1-5. Each doctor emergency / return clause not already covered by the POSTED advice (token overlap >= 0.6 with
+    general_advice or a posted advice item's text, or a posted advice item citing the same segment_ref) becomes one advice line,
+    built from the doctor's own clause through scrub_identity and trimmed to 200 characters. It runs after R1-2b (R3 F4), so a
+    withheld advice field never hides a red flag. Its provenance item is a new advice item with json_pointer null (R3 F5): it
+    claims nothing, so it never clashes with the advice owner. A line that fails R1-1, printable_errors, the FRX-A1 limits or
+    the allowlist (it names a drug that is not posted) is not added and is counted. English doctor turns only; quarantined
+    turns are another patient's."""
     if turns is None:
         c["r1_5_no_turns"] += 1
         return
@@ -627,7 +866,8 @@ def r1_red_flags(art: dict, turns, c: dict) -> None:
             c["r1_5_detected"] += 1
             ref = f"{uid}:{t['idx']}"
             advice = gx.get("general_advice") if isinstance(gx.get("general_advice"), str) else ""
-            prov_adv = [p for p in art.get("provenance") or [] if isinstance(p, dict) and p.get("kind") == "advice"]
+            prov_adv = [p for p in art.get("provenance") or [] if isinstance(p, dict) and p.get("kind") == "advice"
+                        and (p.get("json_pointer") or str(p.get("item_id") or "").startswith("advr1_"))]
             texts = [x for x in advice.split("; ") if x] + [re.sub(r"^\[[^\]]*\]\s*", "", str(p.get("text") or "")) for p in prov_adv]
             cited = any(str((ev or {}).get("segment_ref")) == ref for p in prov_adv for ev in p.get("evidence") or [])
             if cited or any(overlap(clause, x) >= 0.6 for x in texts):
@@ -636,6 +876,7 @@ def r1_red_flags(art: dict, turns, c: dict) -> None:
             line = _trim(scrub_identity(clause))
             new = f"{advice}; {line}" if advice else line
             if (not line or withhold_reason(line, "general_advice") or printable_errors(f"General Advice: {line}", [])
+                    or unposted(art, line, known_names(art, known))
                     or len(new) > 300 or len([x for x in new.split("; ") if x]) > 5):
                 c["r1_5_blocked"] += 1
                 continue
@@ -645,10 +886,14 @@ def r1_red_flags(art: dict, turns, c: dict) -> None:
             ev = {"segment_ref": ref, "t0": t0, "t1": t1, "quote_en": t["text"], "quote": t["text"], "lang": t["lang"],
                   "speaker": "doctor", "speaker_source": ss}
             gx["general_advice"] = new
+            # F5: one owner per pointer. With an advice owner already, this is a new item that claims nothing (json_pointer
+            # null, which the schema allows only with a non-posting status: "conditional", an if-then instruction). With none,
+            # it is the owner (FRX-A1 needs one), so it cannot clash either.
+            owned = bool(_owners(art, "/general_advice"))
             art.setdefault("provenance", []).append({
                 "item_id": _new_id(art, "advr1_"), "kind": "advice", "text": line[:300], "evidence_state": "heard_in_room",
-                "status": "prescribed", "negated": False, "speaker": "doctor", "speaker_source": ss, "evidence": [ev],
-                "confidence": 0.8, "json_pointer": "/general_advice", "flags": [],
+                "status": "conditional" if owned else "prescribed", "negated": False, "speaker": "doctor", "speaker_source": ss,
+                "evidence": [ev], "confidence": 0.8, "json_pointer": None if owned else "/general_advice", "flags": [],
                 "decision": {"turn": t["idx"], "speaker": "doctor", "quote": t["text"][:400]}})
             c["r1_5_added"] += 1
 
@@ -664,10 +909,9 @@ def notes_only_note(art: dict, note: str) -> tuple[str, bool]:
     return out, f"Medication: {MEDICATION_LABEL}" in out.split("\n")
 
 
-def moved_in_note(moved: list[list[str]], note: str) -> bool:
-    """A drug R1 moved to pick_drug (`moved`, from apply_r1_ex) is named in `note`: by its name, raw_name, an alias, its
-    owner's names, or a brand / generic of the same molecule (guard_names). Such a note is never kept (R2, fable ruling D3)."""
-    return moved_in_text(moved, note)
+def unposted_in_note(art: dict, note: str, known: list[str] | None = None) -> list[tuple[str, ...]]:
+    """The drug mentions in `note` that are not a posted medicine (unposted, R3 allowlist). A note with any is never kept."""
+    return unposted(art, note, known_names(art, known))
 
 
 # --- entry point ----------------------------------------------------------------------------------------------
@@ -677,7 +921,7 @@ COUNTERS = ("r1_1_withheld", "r1_1_rows_removed", "r1_2_moved", "r1_2b_withheld"
 
 
 def apply_r1(art: dict, turns: list | None = None, notes_only: bool = True) -> tuple[dict, dict]:
-    """R1-1, R1-2 (with R1-2b), R1-3 and R1-5 on a copy of `art` (the input is never mutated), then R1-4 on its note_text when
+    """R1-1, R1-2, R1-3, R1-2b (the allowlist) and R1-5 on a copy of `art` (the input is never mutated), then R1-4 on its note_text when
     it has one (a stored artifact). `turns`: the consult's turns (ingest.Turn or dicts with role / text or quote_en / lang /
     idx / t0_ms / t1_ms); None skips R1-5. notes_only False returns an unchanged copy: R1 off is the base behaviour.
     Returns (new artifact, counters) with every key of COUNTERS, plus "notes_only"."""
@@ -685,29 +929,33 @@ def apply_r1(art: dict, turns: list | None = None, notes_only: bool = True) -> t
     return out, c
 
 
-def apply_r1_ex(art: dict, turns: list | None = None, notes_only: bool = True) -> tuple[dict, dict, list[list[str]]]:
-    """apply_r1, plus the guard_names of every drug it moved to pick_drug (for moved_in_note). A stored note_text that still
-    names a moved drug after R1-4 is replaced by the deterministic note (R2, fable ruling D3)."""
+def apply_r1_ex(art: dict, turns: list | None = None, notes_only: bool = True,
+                known: list[str] | None = None) -> tuple[dict, dict, list[str]]:
+    """apply_r1, plus the known drug names (for unposted_in_note): `known` (the Stage A rx rows' generic / brand_as_said /
+    _heard_name and drug history, when the caller has them) and the names of every medicine R1 moved. Order: R1-1, R1-2,
+    R1-3, R1-2b (the allowlist), then R1-5 (R3 F4). A stored note_text that still names a drug that is not posted after R1-4
+    is replaced by the deterministic note."""
     out = copy.deepcopy(art)
     c = {k: 0 for k in COUNTERS}
     c["notes_only"] = bool(notes_only)
     if not notes_only:
         return out, c, []
-    out[_MOVED] = []
+    out[_KNOWN] = []
     r1_posted_fields(out, c)
     r1_medicine_floor(out, c)
     r1_dose_floor(out, c)
-    r1_red_flags(out, turns, c)
-    r1_moved_mentions(out, c)  # last: an R1-5 line, or a row moved by R1-1 / R1-3, can name a moved drug too
-    moved = out.pop(_MOVED)
+    names = list(known or []) + out[_KNOWN]
+    r1_allowlist(out, c, names)
+    r1_red_flags(out, turns, c, names + out[_KNOWN])
+    names = list(dict.fromkeys(names + out.pop(_KNOWN)))
     if isinstance(out.get("note_text"), str) and out["note_text"].strip():
         note, kept = notes_only_note(out, out["note_text"])
-        if moved_in_note(moved, note):
+        if unposted_in_note(out, note, names):
             from .pipeline import _fallback_note_ex
             banned = [n for p in out.get("provenance") or [] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
             note, kept = notes_only_note(out, _fallback_note_ex(out, flags_by_pointer(out), banned)[0])
         c["r1_4_note_rewritten"] = int(note != out["note_text"])
         c["r1_4_label_kept"] = int(kept)
-        c["r1_4_pick_drug_in_note"] = int(moved_in_note(moved, note))
+        c["r1_4_pick_drug_in_note"] = int(bool(unposted_in_note(out, note, names)))
         out["note_text"] = note
-    return out, c, moved
+    return out, c, names

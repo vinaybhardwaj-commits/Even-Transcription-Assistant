@@ -120,7 +120,9 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     r1, moved = None, []
     if opts.notes_only:  # before Stage B sees gp_extraction: the model never sees withheld content
         from .r1_floors import apply_r1_ex
-        art, r1, moved = apply_r1_ex(art, c.turns)
+        rx_names = [r.get(k) for r in (enc.get("prescription") or []) + (enc.get("drug_history") or []) if isinstance(r, dict)
+                    for k in ("generic", "brand_as_said", "_heard_name", "name", "drug")]  # Stage A's own names (R3 F1)
+        art, r1, moved = apply_r1_ex(art, c.turns, known=[n for n in rx_names if isinstance(n, str) and n.strip()])
     flags = flags_by_pointer(art)
     banned = [n for p in art["provenance"] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
     det, det_rem = _fallback_note_ex(art, flags, banned)
@@ -184,16 +186,16 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         log["field_recovery"] = recovered
     moved_err = []
     if opts.notes_only:
-        from .r1_floors import moved_in_note
-        if moved_in_note(moved, art["note_text"]):  # a drug R1 moved to pick_drug is never in note_text: the fallback, if that clears it
+        from .r1_floors import unposted_in_note
+        if unposted_in_note(art, art["note_text"], moved):  # only a posted drug is ever in note_text: the fallback, if that clears it
             alt, alt_rem = _fallback_note_ex(art, flags_by_pointer(art), banned)
             alt = med_floor(alt)
-            if not moved_in_note(moved, alt):
+            if not unposted_in_note(art, alt, moved):
                 art["note_text"], llm_rem = alt, alt_rem
                 log["note_source"] = "deterministic_fallback"
-            else:  # never kept (R2, D3): R1-2b withheld every posted field naming it, so this is an invariant; it rejects the write
-                moved_err = ["FRX-R1 note_text names a drug moved to pick_drug"]
-            r1["r1_4_pick_drug_in_note"] = int(moved_in_note(moved, art["note_text"]))
+            else:  # never kept (R3 allowlist): R1-2b withheld every posted field naming it, so this is an invariant; it rejects
+                moved_err = ["FRX-R1 note_text names a drug that is not posted"]
+            r1["r1_4_pick_drug_in_note"] = int(bool(unposted_in_note(art, art["note_text"], moved)))
         from .note import MEDICATION_LABEL
         r1["r1_4_label_kept"] = int(f"Medication: {MEDICATION_LABEL}" in art["note_text"].split("\n"))
         if any(v for k, v in r1.items() if k not in ("notes_only", "r1_5_no_turns")):  # only when R1 acted, as sanitize_removed
