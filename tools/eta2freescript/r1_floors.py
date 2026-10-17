@@ -23,7 +23,8 @@ from .guard import numerals
 from .mapper import iso
 from .note import combination_groups, flags_by_pointer, medication_floor, scrub_identity
 from .recover import _demote_medicine, _kept_out
-from .validate import _D1, _D5, _d4, V, check, printable_errors
+from .note import MEDICATION_LABEL
+from .validate import _D1, _D4_ADD, _D4_FIELDS, _D4_MED_NOT, _D4_MED_PENDING, _D4_MISSING, _D4_NO, _D5, _d4, V, printable_errors
 
 FLAG = "field_withheld"
 PICK_PROMPT = "Name this drug"  # the mapper's pick_drug prompt (mapper.Builder.slot); no new wording
@@ -40,9 +41,54 @@ _MISSING = re.compile(r"\b(?:not\s+specified|unspecified|to\s+be\s+(?:decided|co
 _D4_SEC = {"medicines": "Medication"}
 
 
+# F2 (FRX-R1b clinical ruling): a missing-value word withholds a field only when the value IS a missing-value statement: the
+# whole value, a sentence of it (split on ; . newline), or a comma clause that has its own subject ("BP not specified"). A
+# clinical qualifier posts unchanged: "fever of unknown origin", "hypertension, unspecified", "pain of unclear aetiology".
+_SENTENCE = re.compile(r"[;\n]|\.(?:\s|$)")
+_LABEL = re.compile(r"^\s*[A-Za-z][\w /-]{0,30}:\s*")
+_NEGATED = re.compile(r"^(?:not|is|was|isn|wasn|to|no)\b", re.I)  # "not specified", "is not known", "to be decided", "no dose given"
+_FILLER = {"is", "was", "are", "yet", "still", "currently", "as", "of", "the"}
+_QUALIFIER = {"of", "with", "for", "in", "on", "due", "from", "and", "or"}
+
+
+def _missing_kind(t: str, section: str) -> str | None:
+    if _MISSING.search(t):
+        return "missing"
+    if _D1.search(t):
+        return "d1"
+    if _d4(t, _D4_SEC.get(section, "")):
+        return "d4"
+    return None
+
+
+def _is_missing_statement(clause: str, own: bool, section: str) -> str | None:
+    """The detector name when `clause` is a missing-value statement, else None. `own`: the clause is the whole value or a
+    sentence of it, so a bare missing phrase ("not specified", "unknown") is a statement; a bare phrase after a comma
+    qualifies the item before it ("hypertension, unspecified") and posts."""
+    kind = _missing_kind(clause, section)
+    if kind is None:
+        return None
+    body = _LABEL.sub("", clause, count=1)
+    labelled = body != clause
+    phrases = [_MISSING, _D1, _D4_NO, _D4_ADD] + ([_D4_MED_NOT, _D4_MED_PENDING] if section == "medicines" else [])
+    negated = False
+    for rx in phrases:
+        negated |= any(_NEGATED.match(m.group(0)) for m in rx.finditer(body))
+        body = rx.sub(" ", body)
+    words = [w for w in re.findall(r"\w+(?:/\w+)?", body.lower()) if w not in _D4_MISSING and w not in _FILLER]
+    if not words:
+        return kind if (own or labelled) else None
+    if all(w in _D4_FIELDS for w in words):  # "dose unknown", "frequency not stated"
+        return kind
+    if negated and len(words) <= 3 and not _QUALIFIER & set(words):  # "BP not specified"
+        return kind
+    return None
+
+
 def withhold_reason(s: str, section: str = "") -> str | None:
-    """Why the posted string `s` must be withheld, or None. NFKC first, as printable_errors does. The d1 / d4 / d5 patterns
-    are validate.py's own (_D1, _d4, _D5), applied to every gp_extraction section."""
+    """Why the posted string `s` must be withheld, or None. NFKC first, as printable_errors does. Placeholders (brackets,
+    reprs, slots, blanks, d5 markers) withhold anywhere in the value. The missing-value words (_MISSING and validate.py's own
+    _D1 / _d4) withhold only a missing-value statement (F2 above)."""
     if not isinstance(s, str) or not s:
         return None
     t = unicodedata.normalize("NFKC", s)
@@ -54,12 +100,14 @@ def withhold_reason(s: str, section: str = "") -> str | None:
         return "angle"
     if _BLANK.search(t):
         return "blank"
-    if _MISSING.search(t):
-        return "missing"
-    if _D1.search(t):
-        return "d1"
-    if _d4(t, _D4_SEC.get(section, "")):
-        return "d4"
+    if _missing_kind(t, section):
+        for sentence in _SENTENCE.split(t):
+            why = _is_missing_statement(sentence, True, section)
+            parts = sentence.split(",")
+            if not why and len(parts) > 1:
+                why = next((w for p in parts if (w := _is_missing_statement(p, False, section))), None)
+            if why:
+                return why
     if _D5.search(t):
         return "d5"
     return None
@@ -467,21 +515,13 @@ def r1_red_flags(art: dict, turns, c: dict) -> None:
 
 # --- R1-4 -----------------------------------------------------------------------------------------------------
 def notes_only_note(art: dict, note: str) -> tuple[str, bool]:
-    """The note with its Medication section made deterministic (note.medication_floor). The label line is kept only when the
-    artifact raises no error with it that it does not raise without it; returns (note, label_kept)."""
+    """The note with its Medication section made deterministic (note.medication_floor), MEDICATION_LABEL its first line whenever
+    a drug posts (FRX-R1b B2 / B3: the label passes printable_errors, and validate._unlabelled skips it for G6 / C4 / FRX-C2).
+    Returns (note, label_kept)."""
     flags = flags_by_pointer(art)
     banned = [n for p in art.get("provenance") or [] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
-    gx, groups = art.get("gp_extraction") or {}, combination_groups(art)
-    bare = medication_floor(note, gx, flags, banned, groups, label=False)
-    labelled = medication_floor(note, gx, flags, banned, groups, label=True)
-    if labelled == bare:
-        return bare, False
-    a, b = dict(art), dict(art)
-    a["note_text"], b["note_text"] = labelled, bare
-    without = set(check(b))
-    if any(e not in without for e in check(a)):
-        return bare, False
-    return labelled, True
+    out = medication_floor(note, art.get("gp_extraction") or {}, flags, banned, combination_groups(art), label=True)
+    return out, f"Medication: {MEDICATION_LABEL}" in out.split("\n")
 
 
 def r1_pick_drug_names(art: dict) -> list[str]:

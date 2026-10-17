@@ -13,7 +13,7 @@ from tools.eta2freescript import note as note_mod
 from tools.eta2freescript.ingest import load_consult
 from tools.eta2freescript.models import FakeClient
 from tools.eta2freescript.note import HEADINGS, ORDER_HEADINGS, SPAN_BENIGN_HEADINGS, sanitize_note, sanitize_note_ex, span_errors
-from tools.eta2freescript.pipeline import run_consult
+from tools.eta2freescript.pipeline import Options, run_consult
 from tools.eta2freescript.validate import _D4_FIELDS, check
 
 UID = "synth-fever-dose"
@@ -252,11 +252,11 @@ def test_f1_probe_prefixed_general_advice_posts_with_count(tmp_path):
 
 
 # --- FIX1 F2: the span accounting points the first round left untested ---
-def _run_a(tmp_path, stage_b, mutate_a):
+def _run_a(tmp_path, stage_b, mutate_a, opts=None):
     c = load_consult(CONSULTS, UID)
     a = copy.deepcopy(stage_a(UID))
     mutate_a(a)
-    return run_consult(c, FakeClient({"stageA": json.dumps(a), "stageB": stage_b}), tmp_path), tmp_path / UID
+    return run_consult(c, FakeClient({"stageA": json.dumps(a), "stageB": stage_b}), tmp_path, opts), tmp_path / UID
 
 
 def test_m4_repaired_llm_note_that_loses_a_span_is_not_kept(tmp_path):
@@ -265,10 +265,29 @@ def test_m4_repaired_llm_note_that_loses_a_span_is_not_kept(tmp_path):
     (`CBC (today)`) is the defect; the span check on the repaired note must stop it."""
     def m(a):
         a["investigations"][0]["timing"] = "today [fasting]"
-    lg, od = _run_a(tmp_path, STAGE_B.replace("Medication: paracetamol 1 g three times a day x 3 days", "Medication:"), m)
+    lg, od = _run_a(tmp_path, STAGE_B.replace("Medication: paracetamol 1 g three times a day x 3 days", "Medication:"), m,
+                    Options(notes_only=False))  # R1 off: the base path, where the bracket reaches gp_extraction
     assert lg["note_repaired"] is False
     assert "FRX-L1 bracket span removed from Further Investigation" in lg["llm_note_errors"]
     assert lg["note_source"] == "deterministic_fallback" and not lg["llm_note_valid"]
+
+
+def test_m4_r1_on_withholds_the_bracketed_instruction_at_source(tmp_path):
+    """R1 on (FRX-R1b ruling B1): R1-1 withholds `today [fasting]` whole before Stage B, so no bracket and no `today` span
+    can post from Further Investigation, whichever note is kept."""
+    def m(a):
+        a["investigations"][0]["timing"] = "today [fasting]"
+    lg, od = _run_a(tmp_path, STAGE_B.replace("Medication: paracetamol 1 g three times a day x 3 days", "Medication:"), m,
+                    Options(notes_only=True))
+    art = lg["artifact"]
+    assert lg["r1"]["r1_1_withheld"] >= 1
+    assert not any("[" in json.dumps(x) or "today" in json.dumps(x).lower() for x in art["gp_extraction"].get("further_investigations") or [])
+    assert any("field_withheld" in (p.get("flags") or []) and p["kind"] == "investigation" for p in art["provenance"])
+    note = art["note_text"]
+    assert "[" not in note and "]" not in note
+    fi = note_mod._split_sections(note)["Further Investigation"]
+    assert not any("today" in line.lower() for line in fi)
+    assert not any(e.startswith("FRX-L1") for e in lg["final_errors"]) and lg["final_valid"]
 
 
 def test_m5_recovery_rerender_replaces_the_removed_spans(tmp_path, monkeypatch):

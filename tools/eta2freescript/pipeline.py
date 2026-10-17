@@ -133,7 +133,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         return notes_only_note(art, note)[0]
 
     def note_errs(errs: list[str]) -> list[str]:
-        """Off: FRX-G1 does not choose the note, so the note stays byte-identical to the base. It still gates the write."""
+        """Off: FRX-G1 neither chooses the note nor gates the write (FRX-R1b B4): OFF is the base, note and decision alike."""
         return errs if opts.notes_only else [e for e in errs if not e.startswith("FRX-G1")]
 
     det = med_floor(det)
@@ -195,7 +195,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         r1["r1_4_label_kept"] = int(f"Medication: {MEDICATION_LABEL}" in art["note_text"].split("\n"))
         if any(v for k, v in r1.items() if k not in ("notes_only", "r1_5_no_turns")):  # only when R1 acted, as sanitize_removed
             log["r1"] = r1
-    final = check(art) + span_errors(llm_rem)
+    final = note_errs(check(art)) + span_errors(llm_rem)
     if llm_rem:  # only when a span was removed, so a consult with none keeps a byte-identical log
         log["sanitize_removed"] = len(llm_rem)
     log.update({"final_errors": final, "final_valid": not final, "written": not final,

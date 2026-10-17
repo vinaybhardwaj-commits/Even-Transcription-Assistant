@@ -168,9 +168,24 @@ def _order_entries(art: dict, path: str, lines: list[str]) -> list:
     return out
 
 
+def _unlabelled(note: str) -> str:
+    """note_text without the notes_only Medication label line (note.MEDICATION_LABEL, FRX-R1b B3), for the one-line-per-entry
+    G6 / C4 / FRX-C2 and the v0.1 projection. Only that exact line is skipped; the first drug line, if any, moves onto the heading."""
+    from .note import MEDICATION_LABEL
+    lines = (note or "").split("\n")
+    head = f"Medication: {MEDICATION_LABEL}"
+    if head not in lines:
+        return note
+    i = lines.index(head)
+    nxt = lines[i + 1] if i + 1 < len(lines) else ""
+    if nxt.strip() and not (":" in nxt and nxt.split(":", 1)[0] in V.HEADINGS):
+        return "\n".join(lines[:i] + [f"Medication: {nxt}"] + lines[i + 2:])
+    return "\n".join(lines[:i] + ["Medication:"] + lines[i + 1:])
+
+
 def _expanded_note(art: dict) -> str:
     """note_text with each collapsed combination line repeated once per component, for the vendored one-line-per-entry G6."""
-    note = art.get("note_text") or ""
+    note = _unlabelled(art.get("note_text") or "")
     sec = V.note_sections(note)
     units = _med_units(art, sec.get("Medication", []))
     if not units:
@@ -265,7 +280,7 @@ def _c_rules(art: dict, errs: list[str], *, slots: bool) -> None:
         bad = [t for t in art["clip_boundary"]["quarantined_turns"] if t >= n]
         if bad:
             errs.append(f"C3 quarantined turns {bad} outside the transcript ({n} segments)")
-        sec = V.note_sections(art.get("note_text") or "")
+        sec = V.note_sections(_unlabelled(art.get("note_text") or ""))
         gx = art.get("gp_extraction") or {}
         for kind, (path, heading) in V.ORDER_LISTS.items():
             lines = sec.get(heading, [])
@@ -830,7 +845,7 @@ def frx(art: dict) -> list[str]:
             e.append(f"FRX-C1 {c.get('kind')} item_id {iid} must be a kept-out provenance item or a slot")
 
     try:
-        sec = V.note_sections(art.get("note_text") or "")
+        sec = V.note_sections(_unlabelled(art.get("note_text") or ""))
         lines = [l.split(":", 1)[0] for l in (art.get("note_text") or "").split("\n") if re.match(r"^[A-Z][A-Za-z -]+:", l)]
         heads = [l for l in lines if l in V.HEADINGS]
         if heads != V.HEADINGS:

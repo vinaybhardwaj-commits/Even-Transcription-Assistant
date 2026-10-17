@@ -146,6 +146,8 @@ FIELDS = {
     ("presenting_complaints", "diagnoses", 1, "diagnosis_or_impression"): ("diagnosis", "diagnoses", "row"),
     ("plan_of_management", "surgery_or_procedure_recommendations", 0, "notes"): ("procedure", "surgery_or_procedure_recommendations", "field"),
 }
+# Missing-value words withhold only a missing-value statement (F2), so these go in as their own clause; placeholders go anywhere.
+MISSING_PATS = {"not_specified", "unspecified", "to_be_decided", "to_be_confirmed", "to_be_determined", "d1", "d4"}
 ROW_LEN = {"medicines": 1, "further_investigations": 1, "referrals": 1, "diagnoses": 2, "surgery_or_procedure_recommendations": 1}
 
 
@@ -169,7 +171,7 @@ def _expected(path, mode) -> dict:
 @pytest.mark.parametrize("path", list(FIELDS), ids=lambda p: "/".join(map(str, p)))
 def test_r1_1_every_pattern_in_every_section_is_withheld(path, pat):
     art = hand_art()
-    _put(art["gp_extraction"], path, f"{_at(art['gp_extraction'], path)} {PATTERNS[pat]}")
+    _put(art["gp_extraction"], path, f"{_at(art['gp_extraction'], path)}{'; ' if pat in MISSING_PATS else ' '}{PATTERNS[pat]}")
     before = copy.deepcopy(art)
     out, c = apply_r1(art)
     assert art == before  # never mutates its input
@@ -188,7 +190,7 @@ def test_r1_1_withheld_row_renumbers_later_rows():
     art = hand_art()
     art["gp_extraction"]["presenting_complaints"]["diagnoses"].append({"diagnosis_or_impression": "Mild dehydration", "raw_name": "dehydration"})
     art["provenance"].append(item("dia3", "diagnosis", "/presenting_complaints/diagnoses/2", [ev(2, "doctor", "Mild dehydration.")]))
-    art["gp_extraction"]["presenting_complaints"]["diagnoses"][1]["diagnosis_or_impression"] = "rhinitis, unspecified"
+    art["gp_extraction"]["presenting_complaints"]["diagnoses"][1]["diagnosis_or_impression"] = "unspecified"
     out, _ = apply_r1(art)
     p = ptrs(out)
     assert p["dia1"] == "/presenting_complaints/diagnoses/0" and p["dia2"] is None and p["dia3"] == "/presenting_complaints/diagnoses/1"
@@ -211,8 +213,13 @@ def test_frx_g1_fires_when_r1_is_skipped():
     assert not [e for e in frx(apply_r1(art)[0]) if e.startswith("FRX-G1")]
 
 
-_INDEPENDENT = re.compile(r"[{}\[\]【】]|__|<site>|\bTBD\b|\bXX\b|not specified|unspecified|to be (?:decided|confirmed|determined)"
-                          r"|not stated|no dose given|unnamed drug|'route'", re.I)
+_INDEPENDENT = re.compile(r"[{}\[\]【】]|__|<site>|\bTBD\b|\bXX\b|unnamed drug|'route'", re.I)
+
+
+def _missing_clause_posted(s: str) -> bool:
+    """Independent of r1_floors: a sentence of `s` (split on ; or .) that is exactly one of the missing-value patterns."""
+    want = {PATTERNS[k].lower() for k in MISSING_PATS}
+    return any(x.strip().lower() in want for x in re.split(r"[;.]", s))
 
 
 def _string_paths(node, path=()):
@@ -229,6 +236,7 @@ def _string_paths(node, path=()):
 def test_r1_1_property_no_posted_match_after_apply_r1():
     """2,000 seeded artifacts, 1-4 placeholders each in random strings (nested lists included): none posts after apply_r1."""
     pats = list(PATTERNS.values())
+    missing_values = {PATTERNS[k] for k in MISSING_PATS}
     hit = 0
     for seed in range(2000):
         rng = random.Random(seed)
@@ -236,11 +244,14 @@ def test_r1_1_property_no_posted_match_after_apply_r1():
         gx = art["gp_extraction"]
         for path in rng.sample(list(_string_paths(gx)), rng.randint(1, 4)):
             cur, p = _at(gx, path), rng.choice(pats)
-            _put(gx, path, rng.choice([f"{cur} {p}", f"{p} {cur}", p, f"{cur}, {p}; ok"]))
+            forms = ([f"{cur}; {p}", f"{p}. {cur}", p, f"{cur}; {p}; ok"] if p in missing_values
+                     else [f"{cur} {p}", f"{p} {cur}", p, f"{cur}, {p}; ok"])
+            _put(gx, path, rng.choice(forms))
         out, c = apply_r1(art)
         hit += c["r1_1_withheld"]
         assert posted_hits(out["gp_extraction"]) == [], seed
-        assert not [s for s in (_at(out["gp_extraction"], q) for q in _string_paths(out["gp_extraction"])) if _INDEPENDENT.search(s)], seed
+        posted = [_at(out["gp_extraction"], q) for q in _string_paths(out["gp_extraction"])]
+        assert not [s for s in posted if _INDEPENDENT.search(s) or _missing_clause_posted(s)], seed
         if seed % 50 == 0:
             assert not [e for e in frx(out) if e.startswith("FRX-G1")], seed
     assert hit >= 2000
@@ -340,19 +351,32 @@ def test_r1_4_medication_floor_replaces_model_lines():
     assert _split_sections(medication_floor(llm, {}, label=True))["Medication"] == []  # no medicine posted: no section body
 
 
-def test_r1_4_label_text_as_specified_fails_frx_n1():
-    """The brief says the label passes printable_errors. It does not: d1 reads 'unconfirmed', d2 reads 'confirms' under Medication.
-    notes_only_note therefore keeps it out (fail closed). Wording is the lead's call; this test pins the conflict."""
-    errs = printable_errors(f"Medication: {MEDICATION_LABEL}\nparacetamol 500 mg", [])
-    assert errs == ["FRX-N1 d1 missing-value phrase 'unconfirmed' (Medication)", "FRX-N1 d2 request word 'confirms' (Medication)"]
-    for bad in ("doctor to", "to be confirmed", "not stated", "placeholder"):
-        assert bad not in MEDICATION_LABEL.lower()
+def test_r1_4_label_wording_is_the_ruling_and_prints():
+    """FRX-R1b B2: the exact wording, and printable_errors returns []."""
+    assert MEDICATION_LABEL == "Draft list, not a prescription; the treating doctor checks each drug."
+    assert printable_errors(f"Medication: {MEDICATION_LABEL}\nparacetamol 500 mg", []) == []
+    assert printable_errors(f"Medication: {MEDICATION_LABEL}", []) == []
 
 
-def test_r1_4_label_is_kept_out_while_it_breaks_validation():
+def _labelled_art():
     art = hand_art()
     art["note_text"] = render_note(art["gp_extraction"], flags_by_pointer(art))
-    note, kept = notes_only_note(art, art["note_text"])
+    return art, notes_only_note(art, art["note_text"])
+
+
+def test_r1_4_label_is_the_first_medication_line_when_a_drug_posts():
+    art, (note, kept) = _labelled_art()
+    assert kept is True
+    med = _split_sections(note)["Medication"]
+    assert med[0] == MEDICATION_LABEL and med[1:] == _split_sections(render_note(art["gp_extraction"], flags_by_pointer(art)))["Medication"]
+    assert len(art["gp_extraction"]["medicines"]) == 3  # the label is never a gp_extraction medicine
+    assert not any(MEDICATION_LABEL in json.dumps(m) for m in art["gp_extraction"]["medicines"])
+
+
+def test_r1_4_no_drug_no_label():
+    art = hand_art()
+    art["gp_extraction"].pop("medicines")
+    note, kept = notes_only_note(art, render_note(art["gp_extraction"]))
     assert kept is False and MEDICATION_LABEL not in note
 
 
@@ -371,6 +395,37 @@ def _rx(g, t, freq, dur, strength="500 mg"):
             "duration": dur, "route": "oral", "basis": "said", "confidence": 0.85, "source_quote_turn": t, "source_turns": [t]}
 
 
+def test_b3_label_line_is_skipped_by_g6_c4_frx_c2_and_v01(tmp_path, monkeypatch):
+    """FRX-R1b B3: G6 / C4 / FRX-C2 count the Medication lines without the exact label line; the v0.1 note carries none."""
+    from tools.eta2freescript import validate
+    from tools.eta2freescript.validate import V, _unlabelled, to_v01
+    c = mk_consult(R4_LINES, roles={"0": "doctor", "1": "patient", "2": "doctor"})
+    enc = empty_encounter(examination=[{"performed": "Throat", "finding": "red", "basis": "said", "source_turns": [2]}],
+                          prescription=[_rx("paracetamol", 3, "twice a day", "3 days"), _rx("amoxicillin", 4, "three times a day", "5 days")],
+                          advice=[{"text": "Drink warm water and rest.", "basis": "said", "source_turns": [5]}])
+    lg = run_consult(c, FakeClient({"stageA": json.dumps(enc), "stageB": _llm_note([], "Drink warm water and rest")}), tmp_path)
+    art = lg["artifact"]
+    assert lg["written"] and lg["final_errors"] == [] and lg["r1"]["r1_4_label_kept"] == 1
+    assert _split_sections(art["note_text"])["Medication"][0] == MEDICATION_LABEL and len(art["gp_extraction"]["medicines"]) == 2
+    bare = medication_floor(art["note_text"], art["gp_extraction"], flags_by_pointer(art), label=False)
+    assert _unlabelled(art["note_text"]) == bare and _unlabelled(bare) == bare
+    assert check(dict(art, note_text=bare)) == []
+    v01 = to_v01(art)
+    assert V.check(v01) == [] and MEDICATION_LABEL not in v01["note_text"] and len(v01["gp_extraction"]["medicines"]) == 2
+    assert len(V.note_sections(v01["note_text"])["Medication"]) == 2
+    # without the skip the label is one Medication line too many
+    monkeypatch.setattr(validate, "_unlabelled", lambda note: note)
+    errs = check(art)
+    assert any(e.startswith("G6") and "Medication" in e for e in errs)
+    monkeypatch.undo()
+    # only that exact line: other wording on the heading still counts as a Medication line
+    other = art["note_text"].replace(MEDICATION_LABEL, MEDICATION_LABEL.rstrip("."))
+    assert _unlabelled(other) == other
+    assert any(e.startswith("G6") and "Medication" in e for e in check(dict(art, note_text=other)))
+    # the label alone under Medication (no drug line after it) leaves an empty heading
+    assert _unlabelled(f"Medication: {MEDICATION_LABEL}\nFurther Investigation: CBC") == "Medication:\nFurther Investigation: CBC"
+
+
 def test_r1_4_pipeline_drops_model_line_for_a_pick_drug_drug(tmp_path):
     c = mk_consult(R4_LINES, roles={"0": "doctor", "1": "patient", "2": "unknown"})
     enc = empty_encounter(examination=[{"performed": "Throat", "finding": "red", "basis": "said", "source_turns": [2]}],
@@ -382,10 +437,19 @@ def test_r1_4_pipeline_drops_model_line_for_a_pick_drug_drug(tmp_path):
     note = lg["artifact"]["note_text"]
     assert lg["written"] and lg["final_errors"] == []
     assert "paracetamol" not in note.lower()
-    assert _split_sections(note)["Medication"] == ["amoxicillin 500 mg three times a day x for five days"]
-    assert lg["r1"]["r1_2_moved"] == 1 and lg["r1"]["r1_4_label_kept"] == 0
+    assert _split_sections(note)["Medication"] == [MEDICATION_LABEL, "amoxicillin 500 mg three times a day x for five days"]
+    assert lg["r1"]["r1_2_moved"] == 1 and lg["r1"]["r1_4_label_kept"] == 1
+    v01 = json.loads((tmp_path / c.uid / "artifact.v0.1.json").read_text())
+    assert MEDICATION_LABEL not in v01["note_text"] and len(v01["gp_extraction"]["medicines"]) == 1
     stage_b = [x for x in fake.calls if x["tag"].startswith("stageB")][0]["prompt"]
     assert "paracetamol" not in stage_b  # Stage B never sees the drug R1 moved
+    # B3: with the label skipped, C4 / FRX-C2 still line the Medication lines up with the entries and catch a kept-out name
+    art = copy.deepcopy(lg["artifact"])
+    art["provenance"].append(dict(item("ko1", "medicine", None, [ev(3, "doctor", "Not cetirizine.")], ["cetirizine"]), status="discussed_only"))
+    art["note_text"] = art["note_text"].replace("amoxicillin 500 mg three times a day x for five days",
+                                                "amoxicillin 500 mg three times a day x for five days, cetirizine 10 mg")
+    errs = check(art)
+    assert any(e.startswith("C4 ko1") for e in errs) and any(e.startswith("FRX-C2 ko1") for e in errs)
 
 
 # --- generated consults: OFF is the base, byte for byte; ON changes only Stage B's input -------------------------
@@ -466,8 +530,12 @@ def _run(rc, opts_cls, seed, out, **kw):
 N_GEN = 200
 
 
+LOG_VOLATILE = ("secs_stageA", "secs_stageB", "secs_total", "artifact")
+
+
 def test_r1_4_off_is_byte_identical_to_base(base_pipeline, tmp_path):
-    g1_rejects = 0
+    """FRX-R1b B4: OFF is the base: note, artifact, model calls, validation log and the write / reject decision."""
+    flips = written = g1_seen = 0
     for seed in range(N_GEN):
         base, base_calls = _run(base_pipeline.run_consult, base_pipeline.Options, seed, tmp_path / "base")
         off, off_calls = _run(run_consult, Options, seed, tmp_path / "off", notes_only=False)
@@ -475,13 +543,23 @@ def test_r1_4_off_is_byte_identical_to_base(base_pipeline, tmp_path):
         assert _art_key(off["artifact"]) == _art_key(base["artifact"]), seed
         assert off_calls == base_calls, seed
         assert "r1" not in off
-        assert [e for e in off["final_errors"] if not e.startswith("FRX-G1")] == base["final_errors"], seed
-        g1_rejects += off["written"] != base["written"]
-    print(f"\nR1-4 OFF oracle: {N_GEN} consults, note and artifact byte-identical; {g1_rejects} written->rejected by FRX-G1 only")
+        assert off["final_errors"] == base["final_errors"] and off["written"] == base["written"], seed
+        assert {k: v for k, v in off.items() if k not in LOG_VOLATILE} == {k: v for k, v in base.items() if k not in LOG_VOLATILE}, seed
+        for name in ("artifact.json", "artifact.v0.1.json", "artifact.rejected.json"):
+            b, o = tmp_path / "base" / f"synth-r1-{seed}" / name, tmp_path / "off" / f"synth-r1-{seed}" / name
+            assert b.exists() == o.exists(), (seed, name)
+            if b.exists():
+                assert _art_key(json.loads(o.read_text())) == _art_key(json.loads(b.read_text())), (seed, name)
+        flips += off["written"] != base["written"]
+        written += off["written"]
+        g1_seen += any(e.startswith("FRX-G1") for e in check(off["artifact"]))
+    print(f"\nR1-4 OFF oracle: {N_GEN} consults, note, artifact, log and write decision identical; written {written}; "
+          f"flips {flips}; FRX-G1 would fire on {g1_seen} (excluded OFF)")
+    assert flips == 0 and g1_seen  # the generated set does exercise FRX-G1
 
 
 def test_r1_4_on_changes_only_stage_b_input(base_pipeline, tmp_path):
-    same = differ = moved = 0
+    same = differ = moved = labels = written = 0
     for seed in range(N_GEN):
         _, base_calls = _run(base_pipeline.run_consult, base_pipeline.Options, seed, tmp_path / "base")
         on, on_calls = _run(run_consult, Options, seed, tmp_path / "on")
@@ -494,10 +572,19 @@ def test_r1_4_on_changes_only_stage_b_input(base_pipeline, tmp_path):
         differ += changed
         moved += r1["r1_2_moved"] + r1["r1_3_moved"]
         a = on["artifact"]
+        posted = bool(a["gp_extraction"].get("medicines"))
+        assert (f"Medication: {MEDICATION_LABEL}" in a["note_text"].split("\n")) is posted, seed  # B3: every posted drug, the label
+        assert r1["r1_4_label_kept"] == int(posted), seed
+        labels += r1["r1_4_label_kept"]
+        if on["written"]:
+            v01 = json.loads((tmp_path / "on" / f"synth-r1-{seed}" / "artifact.v0.1.json").read_text())
+            assert MEDICATION_LABEL not in v01["note_text"], seed
+        written += on["written"]
         for i, m in enumerate(a["gp_extraction"].get("medicines") or []):  # zero posted medicines without a doctor name span
             assert name_on_tape(m, next(p for p in a["provenance"] if p.get("json_pointer") == f"/medicines/{i}")), seed
-    print(f"\nR1-4 recorder: {N_GEN} consults; Stage A identical in all; Stage B input identical {same}, changed by R1 {differ}; drugs moved {moved}")
-    assert same and differ
+    print(f"\nR1-4 recorder: {N_GEN} consults; Stage A identical in all; Stage B input identical {same}, changed by R1 {differ}; drugs moved {moved}; "
+          f"r1_4_label_kept {labels}; written {written}")
+    assert same and differ and labels > 0
 
 
 # --- R1-5 -----------------------------------------------------------------------------------------------------
@@ -576,3 +663,31 @@ def test_apply_r1_notes_only_false_is_a_copy():
     art = hand_art(para=("patient", Q_PARA))
     out, c = apply_r1(art, None, notes_only=False)
     assert out == art and out is not art and c["notes_only"] is False
+
+
+# --- F2 (FRX-R1b clinical ruling): missing-value words withhold only a missing-value statement --------------------
+QUALIFIED = ["fever of unknown origin", "hypertension, unspecified", "pain of unclear aetiology"]
+F2_PATHS = [("presenting_complaints", "diagnoses", 0, "diagnosis_or_impression"), ("comorbidities", 0, "name"), ("examination",),
+            ("presenting_complaints", "symptoms"), ("medicines", 0, "instructions")]
+
+
+@pytest.mark.parametrize("text", QUALIFIED)
+@pytest.mark.parametrize("path", F2_PATHS, ids=lambda p: "/".join(map(str, p)))
+def test_f2_clinical_qualifier_posts_unchanged(path, text):
+    art = hand_art()
+    _put(art["gp_extraction"], path, text)
+    out, c = apply_r1(art)
+    assert _at(out["gp_extraction"], path) == text and c["r1_1_withheld"] == 0 and not withheld_items(out)
+    assert not [e for e in frx(out) if e.startswith("FRX-G1")]
+
+
+@pytest.mark.parametrize("text", ["not specified", "unknown", "Not specified.", "Unknown", "dose: not specified", "duration: unknown",
+                                  "after food; not specified", "after food, dose not specified"])
+@pytest.mark.parametrize("path", F2_PATHS, ids=lambda p: "/".join(map(str, p)))
+def test_f2_missing_value_statement_is_withheld(path, text):
+    art = hand_art()
+    _put(art["gp_extraction"], path, text)
+    out, c = apply_r1(art)
+    assert c["r1_1_withheld"] == 1 and len(withheld_items(out)) == 1
+    assert text not in json.dumps(out["gp_extraction"])  # the field, or its row, is gone whole
+    assert posted_hits(out["gp_extraction"]) == []

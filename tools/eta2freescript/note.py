@@ -410,8 +410,9 @@ def combination_groups(art: dict) -> list[tuple[str, list[int]]]:
 
 
 # --- notes_only (FreeScript R1-4) -----------------------------------------------------------------------------
-MEDICATION_LABEL = "Unconfirmed list, not a prescription; the treating doctor confirms each drug."
-"""The first line under Medication in notes_only mode (V, 16 Oct). pipeline keeps it only while the artifact still validates with it."""
+MEDICATION_LABEL = "Draft list, not a prescription; the treating doctor checks each drug."
+"""The first line under Medication in notes_only mode (V, 16 Oct; wording FRX-R1b B2). It lives in note_text only, never in
+gp_extraction: validate._unlabelled skips this exact line for the one-line-per-entry G6 / C4 / FRX-C2 and the v0.1 projection."""
 
 
 def medication_floor(note: str, gx: dict, flags: dict | None = None, banned_names: list[str] | None = None, groups: list | None = None,
