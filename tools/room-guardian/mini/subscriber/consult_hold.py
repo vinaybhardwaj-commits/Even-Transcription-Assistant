@@ -18,7 +18,16 @@ one off): capture_closed_counts_quiet (a non-capturing recorder, capture_open fa
 activity, zero_ratio < 0.98, in the last 2 min). The hourly windows signal is OFF by default (consult_windows_enabled) and may only force true.
 The DB sources are Neon reads with the read-only credential file the consult cutter uses (read by path, never printed), one thread and one 5 s timeout per source.
 Every SQL string, table, field and event name below is INFERRED (copied from lib/rooms-live/read.ts, tools/pulse-watch and extensions/pulse-presence/src/agent.js and
-lib/events.js; not run on the Mini)."""
+lib/events.js; not run on the Mini).
+
+consult_live (S3 / plan gap G1, published only behind the flag consult_live_publish, default false): the AFFIRMATIVE counterpart of the hold, for the Sentinel
+MIC_DEAD_WEBCAM trigger. live() -> {room: true|false} with only PRESENT rooms: true only when every machine mapped to the room has a fresh Presence heartbeat
+(<= max_age_s, as the hold) AND the room's newest POST-driven encounter event (the newest of the machines' newest POST rows, the query returns one per machine)
+is an encounter_open no older than OPEN_UNCLOSED_MAX_S and not in the future; false when that newest POST event is an encounter_close; a stale or unknown
+room (no heartbeat, no POST event in the window, an open older than OPEN_UNCLOSED_MAX_S, a future open, an unreadable ts, an unmapped room) is ABSENT from the
+map — never true. Any presence-source error makes every room absent, so the whole map degrades to {}; the consult_open hold keeps its fail-closed behaviour
+unchanged. The map is computed with the same refresh the hold uses; in background mode live() only reads the refresher's snapshot (the publish thread never
+blocks), and a snapshot older than snapshot_max_age_s gives an empty map."""
 import json, math, os, re, threading, time
 from datetime import datetime, timedelta, timezone
 
@@ -197,6 +206,8 @@ class ConsultHold:
         self.budget, self.snap_max_age = refresh_budget_s, snapshot_max_age_s
         self.background = background is True      # True: hold() only READS the last snapshot; a refresher thread computes it (never on the publish thread)
         self._snap = None                 # (out dict, computed_at) of the last completed computation
+        self._live = {}                   # room -> True/False of the last computation; a room absent here is unknown/stale (consult_live)
+        self._snap_live = None            # ({room: True/False}, computed_at) of the last completed computation, for live() in background mode
         self._thread, self._stop = None, threading.Event()
 
     # ---- source 2 feed
@@ -331,6 +342,28 @@ class ConsultHold:
                 reasons.append("windows_open")
         return (bool(reasons), reasons or ["clear"])
 
+    def _room_live(self, r, now):
+        """consult_live for one room: True, False, or None for ABSENT (stale / unknown / unmapped / unreadable — never true). Uses ONLY the presence source
+        (heartbeat + POST-driven events); the kiosk health line, the recorder session, the levels and the windows play no part (fable ruling for G1). A
+        multi-machine room is decided by its newest POST row across the machines (the query returns one newest POST event per machine)."""
+        keys, _rid, _slug = _entry(self.map.get(r))
+        if not keys:
+            return None                                  # unmapped: absent
+        if not self._item_ok("presence", keys, now):
+            return None                                  # presence down for this room (or its rows malformed): absent
+        pdata = self.data["presence"][0]
+        if not all(any(x[0] == k and _finite(x[1]) and now - x[1] <= self.max_age_s for x in pdata["hb"]) for k in keys):
+            return None                                  # a mapped machine with no fresh heartbeat: absent
+        posts = [x for x in pdata.get("post", []) if x[0] in keys and x[1] in ("encounter_open", "encounter_close") and _finite(x[2])]
+        if not posts:
+            return None                                  # no POST-driven event in the window: unknown, absent
+        event, ts = max(posts, key=lambda x: x[2])[1:]
+        if event == "encounter_close":
+            return False                                 # the newest POST-driven event is a close: known not in consult
+        if 0 <= now - ts <= OPEN_UNCLOSED_MAX_S:
+            return True                                  # the newest POST-driven event is an open inside the window (a future ts is never affirmed)
+        return None                                      # an open older than OPEN_UNCLOSED_MAX_S (or in the future): absent
+
     def _active(self, obj):
         """A health line shows activity unless it is digital silence. capture_open false is unknown (active) unless capture_closed_counts_quiet is on; capture_open true
         is quiet only with a finite zero_ratio in 0..1 that is >= SILENCE_ZERO_RATIO. Anything else (missing, non-bool, NaN, inf, out of range, str) is active."""
@@ -345,22 +378,34 @@ class ConsultHold:
         return True
 
     def compute(self, now=None):
-        """-> {room: bool}, every room in rooms: refresh the sources (cached 30 s from the refresh end), then decide each room. NEVER raises: any fault anywhere in the hold
-        path gives true for every room. One audit line per room whose hold or deciding signals changed; tracks the stuck-source case. This can take up to the refresh
-        budget, so in the live process it only ever runs on the refresher thread (background mode), never on the publish thread."""
+        """-> {room: bool}, every room in rooms: refresh the sources (cached 30 s from the refresh end), then decide each room. ALSO fills self._live
+        (consult_live: only present rooms) from the same presence read — a fault in the live decision drops that room from the map, never flips it.
+        NEVER raises: any fault anywhere in the hold path gives true for every room (and an empty consult_live map). One audit line per room whose hold or
+        deciding signals changed; tracks the stuck-source case. This can take up to the refresh budget, so in the live process it only ever runs on the
+        refresher thread (background mode), never on the publish thread."""
         try:
             now = self.clock() if now is None else now
             self._refresh(now)
-            out, why = {}, {}
+            out, why, live = {}, {}, {}
             for r in self.rooms:
                 try:
                     out[r], why[r] = self._room(r, now)
                 except Exception:         # noqa: BLE001 -- one room's fault holds that room
                     out[r], why[r] = True, ["fault"]
+                try:
+                    lv = self._room_live(r, now)
+                except Exception:         # noqa: BLE001 -- one room's live fault makes that room absent, never false
+                    lv = None
+                if lv is not None:
+                    live[r] = lv
+            if any(not self._fresh(n, now) or bool(self.item_bad.get(n)) for n in ("presence", "session", "levels", "windows") if self._needed(n)):
+                live = {}                # fable ruling (G1): ANY DB error takes the WHOLE consult_live map away; consult_open keeps its fail-closed hold above
+            self._live = live
             self._audit(out, why, now)
             self._track_down(any((not self._fresh(n, now)) or bool(self.item_bad.get(n)) for n in ("presence", "session", "levels", "windows") if self._needed(n)), now)
             return out
         except Exception:                 # noqa: BLE001
+            self._live = {}
             return {r: True for r in self.rooms}
 
     def hold(self, now=None):
@@ -380,6 +425,24 @@ class ConsultHold:
         except Exception:                 # noqa: BLE001
             return {r: True for r in self.rooms}
 
+    def live(self, now=None):
+        """-> {room: True|False} with only PRESENT rooms (consult_live): a stale, unknown or unmapped room is ABSENT, never true; any DB error gives an empty
+        map. NEVER raises, so the control line is always published. Synchronous (compute) unless background mode, where this only READS the refresher's
+        live snapshot (never blocks): no snapshot yet, or one older than snapshot_max_age_s, gives an empty map (absent = unknown = never true)."""
+        try:
+            now = self.clock() if now is None else now
+            if not self.background:
+                self.compute(now)
+                snap = (self._live, now)
+            else:
+                self.start()             # a no-op while the refresher thread is alive; restarts it if it died
+                snap = self._snap_live
+            if snap is None or not _finite(snap[1]) or now - snap[1] > self.snap_max_age:
+                return {}
+            return {r: v for r, v in snap[0].items() if v is True or v is False}
+        except Exception:                 # noqa: BLE001
+            return {}
+
     # ---- the background refresher
     def start(self):
         if self._stop.is_set():
@@ -398,8 +461,10 @@ class ConsultHold:
             try:
                 out = self.compute(self.clock())
                 self._snap = (out, self.clock())      # computed_at is the END of the computation
-            except BaseException:         # noqa: BLE001 -- the refresher never dies on a fault: every room is held until the next good round
+                self._snap_live = (dict(self._live), self._snap[1])
+            except BaseException:         # noqa: BLE001 -- the refresher never dies on a fault: every room is held, and consult_live absent, until the next good round
                 self._snap = ({r: True for r in self.rooms}, self.clock())
+                self._snap_live = ({}, self.clock())
             self._stop.wait(self.cache_s)
 
     def _needed(self, name):

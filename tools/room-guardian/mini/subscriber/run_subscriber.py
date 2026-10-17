@@ -49,8 +49,11 @@ def publish(room, msg):
 
 
 def check_rooms(rooms, flags):
-    """Startup check for rooms.json against the control contract; with consult_open_publish on, the worst-case payload includes the hold map. -> error string or None."""
-    return validate_rooms(rooms, consult_open=flags.get("consult_open_publish") is True)
+    """Startup check for rooms.json against the control contract; with consult_open_publish on, the worst-case payload includes the hold map, and with
+    consult_live_publish ALSO on (it only takes effect with the hold built) the consult_live map too. -> error string or None."""
+    open_on = flags.get("consult_open_publish") is True
+    return validate_rooms(rooms, consult_open=open_on,
+                          consult_live=open_on and flags.get("consult_live_publish") is True)
 
 
 def build_subscriber(cfg, rooms, flags, sink, home, clock=time.time, log_file=None, consult_sources=None):
@@ -67,7 +70,8 @@ def build_subscriber(cfg, rooms, flags, sink, home, clock=time.time, log_file=No
     import usb_verify
     verify = usb_verify.UsbVerify(sink, os.path.join(home, "data", "usb-verify-state.json"), clock, os.path.join(home, "logs", "usb-verify-audit.jsonl"))
     return Subscriber(os.path.join(home, "data"), os.path.join(home, "etc"), rooms, sink, clock=clock, quiet_after_s=cfg.get("quiet_after_s", 120), quiet_seed=sink.open_quiet_rooms(),
-                      consult=consult, start_day=start_day, usb_verify=verify, usb_missing_seed=sink.open_rooms("usb_device_missing"))
+                      consult=consult, start_day=start_day, usb_verify=verify, usb_missing_seed=sink.open_rooms("usb_device_missing"),
+                      consult_live=flags.get("consult_live_publish") is True)
 
 
 def housekeeping(s, logger=None):

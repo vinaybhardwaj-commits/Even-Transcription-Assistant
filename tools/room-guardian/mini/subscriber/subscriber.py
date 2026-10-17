@@ -163,11 +163,14 @@ def zero_ratio(obj):
         return None
     return float(v)
 CONTROL_TOPIC = "guardian/control"
-# FROZEN CONTRACT (see etc/README.md "Control topic contract"): the kiosk accepts only this exact form; anything else kills every kiosk.
-# Changing any of it needs a coordinated kiosk release (guardian-lead) FIRST. Regex is the kiosk's, verbatim from FR1-C1-CONTROL-CC-KICKOFF "## R7".
+# FROZEN CONTRACT (see etc/README.md "Control topic contract"): the kiosk accepts only these exact forms; anything else kills every kiosk.
+# Changing any of it needs a coordinated kiosk release (guardian-lead) FIRST. CONTROL_RE is the kiosk's, verbatim from FR1-C1-CONTROL-CC-KICKOFF "## R7".
 CONTROL_RE = re.compile(r'^\{"kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$')
 # consult_open form (FR1 2.4 d', contract CONTROL-CONSULT-OPEN-SHAPE-15OCT): sorted keys put consult_open first. Used only when the flag consult_open_publish is on.
 CONTROL_RE_V2 = re.compile(r'^\{"consult_open": \{("[a-z0-9_-]{1,64}": (true|false)(, "[a-z0-9_-]{1,64}": (true|false)){0,63})?\}, "kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$')
+# consult_live form (S3 / plan G1): sorted keys put consult_live before consult_open. Used ONLY when BOTH flags consult_open_publish and consult_live_publish are on;
+# the kiosk parser ships FIRST (release order), so consult_live_publish stays default false until every kiosk accepts form 3.
+CONTROL_RE_V3 = re.compile(r'^\{"consult_live": \{("[a-z0-9_-]{1,64}": (true|false)(, "[a-z0-9_-]{1,64}": (true|false)){0,63})?\}, "consult_open": \{("[a-z0-9_-]{1,64}": (true|false)(, "[a-z0-9_-]{1,64}": (true|false)){0,63})?\}, "kill": (true|false), "modes": \{("[a-z0-9_-]{1,64}": "(shadow|heal)"(, "[a-z0-9_-]{1,64}": "(shadow|heal)"){0,63})?\}, "ts": [1-9][0-9]{0,14}\}$')
 SLUG_RE = re.compile(r"[a-z0-9_-]{1,64}")
 # The contract limit is 4096 (kiosk R8: payload line <= 4096, file <= 4096+17); the Mini caps itself at 4000 as extra margin.
 CONTROL_MAX_BYTES, CONTROL_MAX_ROOMS = 4000, 64
@@ -175,20 +178,27 @@ CONTROL_MAX_BYTES, CONTROL_MAX_ROOMS = 4000, 64
 
 def canonical_control(payload):
     """The one serialisation the Mini may publish: json.dumps(payload, sort_keys=True) with the default separators. Raises ValueError (and so
-    nothing is published; kiosks go stale and kill) if the result is not exactly the frozen form, or is over 4000 bytes, or has a byte outside 0x20-0x7E."""
+    nothing is published; kiosks go stale and kill) if the result is not exactly the frozen form, or is over 4000 bytes, or has a byte outside 0x20-0x7E.
+    The form is chosen by the maps present: consult_live (form 3, needs consult_open too) > consult_open (form 2) > base (form 1)."""
     msg = json.dumps(payload, sort_keys=True)
     if len(msg.encode("ascii", "replace")) > CONTROL_MAX_BYTES:
         raise ValueError("control payload over 4000 bytes")
     if any(not (0x20 <= ord(ch) <= 0x7E) for ch in msg):
         raise ValueError("control payload has a byte outside 0x20-0x7E")
-    if not (CONTROL_RE_V2 if isinstance(payload, dict) and "consult_open" in payload else CONTROL_RE).fullmatch(msg):
+    if isinstance(payload, dict) and "consult_live" in payload:
+        fullmatch = CONTROL_RE_V3.fullmatch(msg) if "consult_open" in payload else None
+    elif isinstance(payload, dict) and "consult_open" in payload:
+        fullmatch = CONTROL_RE_V2.fullmatch(msg)
+    else:
+        fullmatch = CONTROL_RE.fullmatch(msg)
+    if not fullmatch:
         raise ValueError("control payload is not the canonical form")
     return msg
 
 
-def validate_rooms(rooms, consult_open=False):
-    """Startup check for rooms.json: every slug ^[a-z0-9_-]{1,64}$, at most 64 distinct rooms, and the worst-case payload (every mode shadow, 15-digit ts)
-    still within the contract (<= 4000 bytes). Returns an error string, or None."""
+def validate_rooms(rooms, consult_open=False, consult_live=False):
+    """Startup check for rooms.json: every slug ^[a-z0-9_-]{1,64}$, at most 64 distinct rooms, and the worst-case payload (every mode shadow, 15-digit ts,
+    plus the consult_open / consult_live maps for the flags that are on) still within the contract (<= 4000 bytes). Returns an error string, or None."""
     if not isinstance(rooms, list):                  # a bare string would iterate as one room per character
         return f"rooms must be a JSON list, got {type(rooms).__name__}"
     bad = [r for r in rooms if not isinstance(r, str) or not SLUG_RE.fullmatch(r)]
@@ -200,8 +210,10 @@ def validate_rooms(rooms, consult_open=False):
         return f"{len(rooms)} rooms; the control contract allows at most {CONTROL_MAX_ROOMS}"
     try:
         worst = {"kill": False, "modes": {r: "shadow" for r in rooms}, "ts": 10 ** 14}
-        if consult_open:
-            worst["consult_open"] = {r: False for r in rooms}      # "false" is the longer word
+        if consult_open or consult_live:
+            worst["consult_open"] = {r: False for r in rooms}      # "false" is the longer word; form 3 always carries consult_open too
+        if consult_live:
+            worst["consult_live"] = {r: False for r in rooms}
         canonical_control(worst)
     except ValueError as e:
         return f"worst-case control payload: {e}"
@@ -284,9 +296,11 @@ class RouterSink:
 
 
 class Subscriber:
-    def __init__(self, data_dir, control_dir, rooms, sink, clock=time.time, quiet_after_s=QUIET_AFTER_S, quiet_seed=(), consult=None, start_day=None, usb_verify=None, usb_missing_seed=()):
+    def __init__(self, data_dir, control_dir, rooms, sink, clock=time.time, quiet_after_s=QUIET_AFTER_S, quiet_seed=(), consult=None, start_day=None, usb_verify=None, usb_missing_seed=(), consult_live=False):
         self.data, self.ctl, self.rooms, self.sink, self.clock, self.quiet_after = data_dir, control_dir, list(rooms), sink, clock, quiet_after_s
         self.consult, self.start_day = consult, start_day     # FR1 2.4 d': both None (off) unless their flag is on
+        self.consult_live = consult_live is True       # flag consult_live_publish (default false): the consult_live map (form 3) joins the control line — only
+                                                       # meaningful with a consult hold built (consult_open_publish on); without one nothing changes
         self.usb_verify = usb_verify                          # the F2 Mini verify (always on once a healed_pending line arrives)
         self.usb_missing = set(usb_missing_seed) & set(self.rooms)   # rooms with an open usb_device_missing case: closed by a health line with usb_mic_present true
         self.last_health = {}                                 # room -> (receive time, obj) of the newest health line
@@ -500,6 +514,12 @@ class Subscriber:
                 snap["consult_open"] = {r: hold.get(r, True) is not False for r in self.rooms}
             except Exception:              # noqa: BLE001 -- the hold path may never take the control line down: every room is held
                 snap["consult_open"] = {r: True for r in self.rooms}
+            if self.consult_live:         # flag consult_live_publish (default false): affirmative map, only PRESENT rooms; any fault or DB error = absent rooms only
+                try:
+                    lv = self.consult.live(self.clock())
+                    snap["consult_live"] = {r: (lv[r] is True) for r in self.rooms if isinstance(lv.get(r), bool)}
+                except Exception:          # noqa: BLE001 -- never raises in ConsultHold; an empty map (all absent) is still published as `{}` (form 3 stays fixed)
+                    snap["consult_live"] = {}
         return snap
 
     def check_start_day(self):
