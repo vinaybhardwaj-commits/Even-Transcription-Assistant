@@ -2,6 +2,7 @@
  * tests/support/mcp-oauth-fake-store.ts — an in-memory stand-in for lib/mcp/oauth/store with the SAME atomic semantics (single-use claim, rotation claim).
  * The SQL itself is exercised by tests/unit/mcp-oauth-o2-pg.test.ts against a real Postgres when Docker is available.
  */
+import { REFRESH_FAMILY_MAX_AGE_S } from "@/lib/mcp/oauth/config";
 import type { ClientRow, CodeRow, PersonRow, TokenRow } from "@/lib/mcp/oauth/store";
 
 let clock = 0;
@@ -15,6 +16,7 @@ export const state = {
   granted: new Map<string, number>(), // email -> tick of the last (re)grant
   created: new Map<string, number>(), // token hash -> tick of creation
   codeCreated: new Map<string, number>(), // code hash -> tick of creation
+  familyBorn: new Map<string, number>(), // family id -> Date.now() of its first token (R2 F3); a test may backdate it
 };
 export function resetFakeStore(): void {
   for (const m of Object.values(state)) m.clear();
@@ -50,13 +52,15 @@ export const codeWasUsed = async (h: string) => Boolean(state.codes.get(h)?.used
 export const insertToken = async (t: { token_hash: string; kind: "access" | "refresh"; email: string; client_id: string; scopes: string[]; resource: string; family_id: string; ttl_s: number }) => {
   if (state.families.has(t.family_id)) return false;
   state.created.set(t.token_hash, tick());
+  if (!state.familyBorn.has(t.family_id)) state.familyBorn.set(t.family_id, Date.now());
   state.tokens.set(t.token_hash, { token_hash: t.token_hash, kind: t.kind, email: t.email, client_id: t.client_id, scopes: t.scopes, resource: t.resource, family_id: t.family_id, expires_at: "", revoked_at: null, rotated_to: null, exp: Date.now() + t.ttl_s * 1000 });
   return true;
 };
 export const familyRevoked = async (fam: string) => state.families.has(fam);
-export const getToken = async (h: string) => {
+export const getToken = async (h: string, familyMaxAgeS = REFRESH_FAMILY_MAX_AGE_S) => {
   const t = state.tokens.get(h);
-  return t ? { ...t, expired: t.exp <= Date.now(), family_revoked: state.families.has(t.family_id), predates_grant: predates(h, t.email) } : null;
+  const born = t ? state.familyBorn.get(t.family_id) : undefined;
+  return t ? { ...t, expired: t.exp <= Date.now(), family_revoked: state.families.has(t.family_id), predates_grant: predates(h, t.email), family_expired: born !== undefined && born <= Date.now() - familyMaxAgeS * 1000 } : null;
 };
 export const claimRefresh = async (oldHash: string, newHash: string) => {
   const t = state.tokens.get(oldHash);

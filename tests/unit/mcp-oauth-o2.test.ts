@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { NextRequest } from "next/server";
+import { NextRequest, type NextResponse } from "next/server";
 import { SignJWT, generateKeyPair, exportJWK, createLocalJWKSet, type KeyLike } from "jose";
 
 const audit: Array<{ text: string; values: unknown[] }> = [];
@@ -14,17 +14,18 @@ vi.mock("@/lib/mcp/oauth/store", async () => await import("../support/mcp-oauth-
 
 import * as fake from "../support/mcp-oauth-fake-store";
 import { GET as authorizeGet } from "@/app/api/oauth/authorize/route";
-import { GET as callbackGet } from "@/app/api/oauth/google/callback/route";
+import { GET as callbackGet, POST as callbackPost } from "@/app/api/oauth/google/callback/route";
 import { POST as tokenPost } from "@/app/api/oauth/token/route";
 import { POST as registerPost } from "@/app/api/oauth/register/route";
 import { resetRegisterLimitForTests } from "@/lib/mcp/oauth/register-limit";
 import { POST as revokePost } from "@/app/api/oauth/revoke/route";
 import { setJwksForTests } from "@/lib/mcp/oauth/google";
-import { isForbiddenAddress, setResolverForTests, setTransportForTests, type Resolved } from "@/lib/mcp/oauth/ssrf";
+import { isForbiddenAddress, resolvePublic, setResolverForTests, setTransportForTests, type Resolved } from "@/lib/mcp/oauth/ssrf";
+import { resolveClient, swallowedCountForTests } from "@/lib/mcp/oauth/clients";
 import { resetDeniedAuditForTests } from "@/lib/mcp/audit";
 import { resetOauthFlagWarningForTests, mcpOauthDomain, MCP_OAUTH_DOMAIN, CLAUDE_CALLBACK } from "@/lib/mcp/oauth/config";
 import { redirectMatches, redirectsEquivalent, isAllowedRedirect } from "@/lib/mcp/oauth/redirects";
-import { hashSecret, s256 } from "@/lib/mcp/oauth/crypto";
+import { hashSecret, randomToken, s256, signBlob } from "@/lib/mcp/oauth/crypto";
 
 const PEPPER = "p".repeat(32);
 const GCLIENT = "synthetic-google-client-id";
@@ -146,6 +147,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const form = (o: Record<string, string>) => new URLSearchParams(o).toString();
 // ─── helpers ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 const authUrl = (over: Record<string, string | null> = {}) => {
   const p: Record<string, string | null> = { response_type: "code", client_id: CIMD, redirect_uri: CLAUDE_CALLBACK, code_challenge: CHALLENGE, code_challenge_method: "S256", resource: RESOURCE, state: "st-1", ...over };
@@ -169,12 +171,25 @@ const callback = (cookie: string, params: Record<string, string>) => {
   for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
   return callbackGet(new NextRequest(u.toString(), { headers: cookie ? { cookie: `mcp_oauth_pending=${cookie}` } : {} }));
 };
-async function fullSignIn(over: Record<string, string | null> = {}) {
-  const s = await startSignIn(over);
-  const res = await callback(s.cookie, { state: s.gstate, code: "google-code-synthetic" });
-  return { res, to: loc(res) };
+/** R2 F2: the consent page the callback renders after Google, its re-signed cookie and its CSRF token. */
+async function consentOf(page: Response) {
+  const html = await page.text();
+  const cookie = (page as NextResponse).cookies.get("mcp_oauth_pending")?.value ?? "";
+  return { html, cookie, csrf: /name="csrf" value="([^"]+)"/.exec(html)?.[1] ?? "" };
 }
-const form = (o: Record<string, string>) => new URLSearchParams(o).toString();
+const consentPost = (cookie: string, fields: Record<string, string>, headers: Record<string, string> = {}) =>
+  callbackPost(new NextRequest("https://www.evenscribe.app/api/oauth/google/callback", {
+    method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", ...(cookie ? { cookie: `mcp_oauth_pending=${cookie}` } : {}), ...headers }, body: form(fields),
+  }));
+/** authorize, Google, then (when the callback renders the consent page) the person's decision. */
+async function fullSignIn(over: Record<string, string | null> = {}, decision: "allow" | "deny" = "allow") {
+  const s = await startSignIn(over);
+  const page = await callback(s.cookie, { state: s.gstate, code: "google-code-synthetic" });
+  if (page.status !== 200) return { res: page, to: loc(page), page };
+  const c = await consentOf(page);
+  const res = await consentPost(c.cookie, { csrf: c.csrf, decision }, { origin: "https://www.evenscribe.app" });
+  return { res, to: loc(res), page, consent: c };
+}
 const tokenReq = (o: Record<string, string>, ct = "application/x-www-form-urlencoded") =>
   new NextRequest("https://www.evenscribe.app/api/oauth/token", { method: "POST", headers: { "content-type": ct }, body: form(o) });
 const codeBody = (code: string, over: Record<string, string> = {}) => ({ grant_type: "authorization_code", code, client_id: CIMD, redirect_uri: CLAUDE_CALLBACK, code_verifier: VERIFIER, resource: RESOURCE, ...over });
@@ -328,9 +343,9 @@ describe("authorize", () => {
 
 // ─── callback ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 describe("google callback", () => {
-  it("success mints a one-time code and redirects with code, state and iss; the pending cookie is cleared; the code is stored hashed", async () => {
+  it("success (after Allow on the consent page) mints a one-time code and redirects with code, state and iss; the pending cookie is cleared; the code is stored hashed", async () => {
     const { res, to } = await fullSignIn();
-    expect(res.status).toBe(302);
+    expect(res.status).toBe(303);
     expect(to.origin + to.pathname).toBe(CLAUDE_CALLBACK);
     expect(to.searchParams.get("state")).toBe("st-1");
     expect(to.searchParams.get("iss")).toBe("https://www.evenscribe.app");
@@ -753,7 +768,8 @@ describe("FIX1 SHOULD-1: CIMD host is resolved and checked before the fetch, the
     }
     for (const a of ["not-an-ip", "", "999.1.1.1"]) expect(isForbiddenAddress(a), a).toBe(true);
     for (const c of [R.cgnat, R.b172, R.link]) for (const side of ["below", "above"] as const) expect(isForbiddenAddress(justOutside(c, side)), `${c} ${side}`).toBe(false);
-    for (const a of ["93.184.216.34", "8.8.8.8", "2606:4700:4700::1111", "::ffff:8.8.8.8", "64:ff9b::808:808"]) expect(isForbiddenAddress(a), a).toBe(false);
+    for (const a of ["93.184.216.34", "8.8.8.8", "2606:4700:4700::1111", "::ffff:8.8.8.8"]) expect(isForbiddenAddress(a), a).toBe(false);
+    expect(isForbiddenAddress("64:ff9b::808:808")).toBe(true); // R2 F4: NAT64 is outside 2000::/3, so IPv6 default-deny refuses it
   });
 
   const loop1 = hostInRange(R.loop, 1);
@@ -810,7 +826,7 @@ describe("FIX1 SHOULD-2: 127.0.0.1 completes the flow end to end through NextReq
     cimdDoc = { client_id: CIMD, redirect_uris: [CLAUDE_CALLBACK, "http://127.0.0.1:3118/callback"], token_endpoint_auth_method: "none" };
     const ru = "http://127.0.0.1:5123/callback";
     const { res: cb, to } = await fullSignIn({ redirect_uri: ru });
-    expect(cb.status).toBe(302);
+    expect(cb.status).toBe(303); // R2 F2: the code now leaves from the consent POST (303)
     expect(to.origin + to.pathname).toBe("http://localhost:5123/callback"); // what the route saw and stored (NextURL rewrite)
     const code = to.searchParams.get("code")!;
     const out = await tokenPost(tokenReq(codeBody(code, { redirect_uri: ru }))); // the client presents the original
@@ -859,5 +875,198 @@ describe("FIX1 MUST-1: route modules export only what Next allows", () => {
       import("@/app/.well-known/oauth-protected-resource/route"), import("@/app/.well-known/oauth-protected-resource/api/mcp/route"), import("@/app/.well-known/oauth-authorization-server/route"),
     ]);
     for (const m of mods) for (const k of Object.keys(m)) expect(allowed.has(k), k).toBe(true);
+  });
+});
+
+// ─── R2 (refute e4c1406f F1-F6) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+const grantedRows = () => audit.filter((a) => a.text.includes("mcp.oauth_granted"));
+async function consentPageFor(over: Record<string, string | null> = {}) {
+  const s = await startSignIn(over);
+  const page = await callback(s.cookie, { state: s.gstate, code: "google-code-synthetic" });
+  return { page, ...(await consentOf(page)) };
+}
+
+describe("R2 F2: consent step between Google and the code", () => {
+  it("after Google the callback renders a same-origin HTML page naming the client host and the redirect host; no code is minted and nothing redirects", async () => {
+    const { page, html, cookie, csrf } = await consentPageFor();
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    expect(page.headers.get("location")).toBeNull();
+    expect(page.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(page.headers.get("x-frame-options")).toBe("DENY");
+    expect(html).toContain('<dd data-consent="client">client.example.test</dd>');
+    expect(html).toContain('<dd data-consent="redirect-host">claude.ai</dd>');
+    expect(html).toContain('method="post" action="/api/oauth/google/callback"');
+    expect(html).toContain('value="allow"');
+    expect(html).toContain('value="deny"');
+    expect(csrf.length).toBeGreaterThanOrEqual(32);
+    expect(cookie).toBeTruthy();
+    expect(page.headers.get("set-cookie")).toMatch(/Path=\/api\/oauth\/google\/callback/);
+    expect(page.headers.get("set-cookie")).toMatch(/HttpOnly/i);
+    expect(fake.state.codes.size).toBe(0);
+    expect(grantedRows()).toHaveLength(0);
+  });
+
+  it("a DCR client is named by its client_name, escaped, with the loopback redirect host", async () => {
+    const reg = await registerPost(new NextRequest("https://www.evenscribe.app/api/oauth/register", { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.9" }, body: JSON.stringify({ redirect_uris: [LOOP], client_name: "Desk <b>Tool</b>" }) }));
+    const { client_id } = (await reg.json()) as { client_id: string };
+    fake.state.clients.get(client_id)!.client_name = 'Desk <b>Tool</b> & "x"'; // register already strips these; the page escapes anyway
+    const { html } = await consentPageFor({ client_id, redirect_uri: LOOP });
+    expect(html).toContain("Desk &lt;b&gt;Tool&lt;/b&gt; &amp; &quot;x&quot; (self-registered)");
+    expect(html).not.toContain("<b>");
+    expect(html).toContain('<dd data-consent="redirect-host">localhost:3118</dd>');
+  });
+
+  it("no code without POST Allow: the page alone, a POST with no decision, and a GET replay of the consent cookie all mint nothing", async () => {
+    const { cookie, csrf } = await consentPageFor();
+    expect((await consentPost(cookie, { csrf })).status).toBe(400);
+    const replay = await callback(cookie, { state: "x", code: "g" }); // the consent blob is not a pending blob
+    expect(replay.status).toBe(400);
+    expect(replay.headers.get("location")).toBeNull();
+    expect(fake.state.codes.size).toBe(0);
+  });
+
+  it("a forged POST is refused with a plain 400 that never redirects: no cookie, a wrong CSRF token, a foreign Origin, a pre-Google pending cookie, an expired consent cookie", async () => {
+    const { cookie, csrf } = await consentPageFor();
+    const s = await startSignIn();
+    const cases: Array<[string, Response]> = [
+      ["no cookie", await consentPost("", { csrf, decision: "allow" })],
+      ["wrong csrf", await consentPost(cookie, { csrf: "A".repeat(32), decision: "allow" })],
+      ["no csrf", await consentPost(cookie, { decision: "allow" })],
+      ["foreign origin", await consentPost(cookie, { csrf, decision: "allow" }, { origin: "https://evil.example.test" })],
+      ["pending cookie", await consentPost(s.cookie, { csrf, decision: "allow" })],
+      ["json body", await callbackPost(new NextRequest("https://www.evenscribe.app/api/oauth/google/callback", { method: "POST", headers: { "content-type": "application/json", cookie: `mcp_oauth_pending=${cookie}` }, body: JSON.stringify({ csrf, decision: "allow" }) }))],
+    ];
+    vi.useFakeTimers({ now: Date.now() + 6 * 60 * 1000, toFake: ["Date"] });
+    cases.push(["expired", await consentPost(cookie, { csrf, decision: "allow" })]);
+    vi.useRealTimers();
+    for (const [name, res] of cases) {
+      expect(res.status, name).toBe(400);
+      expect(res.headers.get("location"), name).toBeNull();
+      expect(res.headers.get("content-type"), name).toContain("text/html");
+    }
+    expect(fake.state.codes.size).toBe(0);
+    expect(grantedRows()).toHaveLength(0);
+    const reasons = refusalRows().map((r) => JSON.stringify(r.values));
+    expect(reasons.some((r) => r.includes("consent_missing"))).toBe(true);
+    expect(reasons.some((r) => r.includes("consent_csrf") && r.includes(`person:${ALICE}`))).toBe(true);
+    // the real page can still be answered after a forged attempt
+    expect(loc(await consentPost(cookie, { csrf, decision: "allow" })).searchParams.get("code")).toBeTruthy();
+  });
+
+  it("Deny: 303 back to the client with error=access_denied, state and iss; one mcp.oauth_refused row consent_denied; no code", async () => {
+    const { res, to } = await fullSignIn({}, "deny");
+    expect(res.status).toBe(303);
+    expect(to.origin + to.pathname).toBe(CLAUDE_CALLBACK);
+    expect(to.searchParams.get("error")).toBe("access_denied");
+    expect(to.searchParams.get("state")).toBe("st-1");
+    expect(to.searchParams.get("iss")).toBe("https://www.evenscribe.app");
+    expect(to.searchParams.get("code")).toBeNull();
+    expect(fake.state.codes.size).toBe(0);
+    const rows = refusalRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].values).toContain(`person:${ALICE}`);
+    expect(JSON.stringify(rows[0].values)).toContain("consent_denied");
+    expect(res.headers.get("set-cookie")).toMatch(/Max-Age=0/i);
+  });
+
+  it("Allow writes one mcp.oauth_granted row with the client host (CIMD) or the sha256 of the client_id (DCR) and the redirect host; never the code", async () => {
+    const { to } = await fullSignIn();
+    const code = to.searchParams.get("code")!;
+    expect(grantedRows()).toHaveLength(1);
+    expect(grantedRows()[0].values).toContain(`person:${ALICE}`);
+    const meta = JSON.parse(grantedRows()[0].values.find((v) => typeof v === "string" && v.startsWith("{")) as string);
+    expect(meta).toEqual({ ok: true, client_host: "client.example.test", redirect_host: "claude.ai" });
+    expect(JSON.stringify(audit)).not.toContain(code);
+    const reg = await registerPost(new NextRequest("https://www.evenscribe.app/api/oauth/register", { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.10" }, body: JSON.stringify({ redirect_uris: [CLAUDE_CALLBACK] }) }));
+    const { client_id } = (await reg.json()) as { client_id: string };
+    await fullSignIn({ client_id });
+    const meta2 = JSON.parse(grantedRows()[1].values.find((v) => typeof v === "string" && v.startsWith("{")) as string);
+    expect(meta2).toEqual({ ok: true, client_sha256: sha(client_id), redirect_host: "claude.ai" });
+  });
+
+  it("a person revoked between the page and Allow gets access_denied and no code", async () => {
+    const { cookie, csrf } = await consentPageFor();
+    fake.addPerson(ALICE, ["read"], "revoked");
+    const res = await consentPost(cookie, { csrf, decision: "allow" });
+    expect(loc(res).searchParams.get("error")).toBe("access_denied");
+    expect(fake.state.codes.size).toBe(0);
+  });
+
+  it("a consent blob signed for another purpose (pending) or with a forged body is refused", async () => {
+    const forged = signBlob("pending", { cid: CIMD, ru: CLAUDE_CALLBACK, cc: CHALLENGE, st: null, res: RESOURCE, email: ALICE, csrf: "c".repeat(32), exp: 9999999999 });
+    expect((await consentPost(forged, { csrf: "c".repeat(32), decision: "allow" })).status).toBe(400);
+    expect(fake.state.codes.size).toBe(0);
+  });
+});
+
+describe("R2 F3: absolute refresh-family lifetime of 30 days from the family's first token", () => {
+  it("a family younger than 30 d rotates; one whose first token is 30 d old is refused invalid_grant, revoked and audited", async () => {
+    const t = await tokens();
+    const ok = await tokenPost(tokenReq(refreshBody(t.refresh_token)));
+    expect(ok.status).toBe(200);
+    const next = (await ok.json()) as { refresh_token: string };
+    const fam = fake.state.tokens.get(hashSecret(next.refresh_token))!.family_id;
+    fake.state.familyBorn.set(fam, Date.now() - 30 * 24 * 3600 * 1000 - 1000);
+    audit.length = 0;
+    const res = await tokenPost(tokenReq(refreshBody(next.refresh_token)));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("invalid_grant");
+    expect(fake.state.families.has(fam)).toBe(true);
+    const rows = refusalRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].values).toContain(`person:${ALICE}`);
+    expect(JSON.stringify(rows[0].values)).toContain("family_expired");
+  });
+
+  it("R-REFRESH follow-up: a copied refresh token no longer extends access past the family's 30 d", async () => {
+    const raw = randomToken("esr_");
+    await fake.insertToken({ token_hash: hashSecret(raw), kind: "refresh", email: ALICE, client_id: CIMD, scopes: ["read"], resource: RESOURCE, family_id: "f_old", ttl_s: 3600 });
+    fake.state.familyBorn.set("f_old", Date.now() - 31 * 24 * 3600 * 1000);
+    expect((await tokenPost(tokenReq(refreshBody(raw)))).status).toBe(400);
+  });
+});
+
+describe("R2 F5: the DNS lookup shares the CIMD fetch's 5 s budget", () => {
+  it("resolvePublic gives up when the signal aborts, even if the resolver never answers", async () => {
+    setResolverForTests(() => new Promise<Resolved>(() => {}));
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 20);
+    const t0 = Date.now();
+    expect(await resolvePublic("hang.example.test", ac.signal)).toBeNull();
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it("resolveClient with a hanging resolver answers invalid_client_metadata within the 5 s budget and fetches nothing", async () => {
+    setResolverForTests(() => new Promise<Resolved>(() => {}));
+    const t0 = Date.now();
+    expect(await resolveClient(CIMD)).toEqual({ ok: false, reason: "invalid_client_metadata" });
+    const ms = Date.now() - t0;
+    expect(ms).toBeGreaterThanOrEqual(4900);
+    expect(ms).toBeLessThan(6500);
+    expect(fetchLog).not.toContain(CIMD);
+  }, 10_000);
+});
+
+describe("R2 F6: the pending_missing refusal is awaited", () => {
+  it("the refusal row is written before the 400 returns", async () => {
+    const res = await callback("", { state: "s", code: "c" });
+    expect(res.status).toBe(400);
+    expect(refusalRows()).toHaveLength(1);
+    expect(JSON.stringify(refusalRows()[0].values)).toContain("pending_missing");
+  });
+});
+
+describe("R2 F1: a failed best-effort client call is counted and logged, never silent", () => {
+  it("touchClient throwing is logged count-only (no client id, no URL)", async () => {
+    const store = await import("@/lib/mcp/oauth/store");
+    const spy = vi.spyOn(store, "touchClient").mockRejectedValue(new Error(`boom ${CIMD}`));
+    const before = swallowedCountForTests();
+    expect((await resolveClient(CIMD)).ok).toBe(true);
+    spy.mockRestore();
+    expect(swallowedCountForTests()).toBe(before + 1);
+    const line = logs.find((l) => l.includes("best-effort client side call failed"))!;
+    expect(line).toMatch(/count=\d+/);
+    expect(line).not.toContain("example.test");
   });
 });

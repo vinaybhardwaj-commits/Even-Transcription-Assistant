@@ -186,3 +186,33 @@ describe.skipIf(!HAVE)("LOW-7 on real postgres: a code minted before a re-grant 
     expect((await grant(body(after.raw))).status).toBe(200);
   });
 });
+
+describe.skipIf(!HAVE)("R2 F3 on real postgres: the refresh family ends 30 days after its FIRST token", () => {
+  it("family_expired reads min(created_at) over the family: a rotated chain inside 30 d works, the same chain whose first token is 30 d old is refused and tombstoned", async () => {
+    process.env.SCRIBE_MCP_OAUTH = "on";
+    process.env.MCP_OAUTH_TOKEN_PEPPER = "p".repeat(32);
+    pg.exec(`INSERT INTO mcp_person (email, scopes) VALUES ('aged@example.test', ARRAY['read']) ON CONFLICT DO NOTHING`);
+    const fam = "f_aged";
+    const first = randomToken("esr_");
+    await S.insertToken({ token_hash: hashSecret(first), kind: "refresh", email: "aged@example.test", client_id: CLIENT, scopes: ["read"], resource: RESOURCE, family_id: fam, ttl_s: 3600 });
+    const r1 = await grant({ grant_type: "refresh_token", refresh_token: first, client_id: CLIENT });
+    expect(r1.status).toBe(200);
+    const second = ((await r1.json()) as { refresh_token: string }).refresh_token;
+    expect((await S.getToken(hashSecret(second)))?.family_expired).toBe(false);
+    // backdate ONLY the family's first token: the newest refresh token is fresh, but the family is 30 d + 1 min old
+    await q`UPDATE mcp_oauth_token SET created_at = now() - interval '30 days 1 minute' WHERE token_hash = ${hashSecret(first)}`;
+    expect((await S.getToken(hashSecret(second)))?.family_expired).toBe(true);
+    expect((await S.getToken(hashSecret(second)))?.expired).toBe(false);
+    const r2 = await grant({ grant_type: "refresh_token", refresh_token: second, client_id: CLIENT });
+    expect(r2.status).toBe(400);
+    expect((await r2.json()).error).toBe("invalid_grant");
+    expect((await q<{ reason: string }>`SELECT reason FROM mcp_oauth_family WHERE family_id = ${fam}`)[0]?.reason).toBe("family_expired");
+    expect(await live(fam)).toBe(0);
+    // a family exactly inside the limit is not expired
+    const fam2 = "f_young";
+    const young = randomToken("esr_");
+    await S.insertToken({ token_hash: hashSecret(young), kind: "refresh", email: "aged@example.test", client_id: CLIENT, scopes: ["read"], resource: RESOURCE, family_id: fam2, ttl_s: 3600 });
+    await q`UPDATE mcp_oauth_token SET created_at = now() - interval '29 days 23 hours' WHERE family_id = ${fam2}`;
+    expect((await S.getToken(hashSecret(young)))?.family_expired).toBe(false);
+  });
+});

@@ -3,13 +3,14 @@
  * Issues opaque tokens (esp_ access 1 h, esr_ refresh 30 d) stored as sha256(pepper||token). esp_ tokens are NOT accepted at /api/mcp yet (slice O3).
  *
  * Code: claimed atomically (single use, 60 s). A replay revokes the family the first use created. PKCE S256, client_id, redirect_uri and resource must all match.
- * Refresh: rotated on every use. A reused rotated token revokes the whole family. A person no longer active revokes the family. Errors are RFC 6749 JSON, no-store.
+ * Refresh: rotated on every use, and refused (audited, family revoked) once the family's first token is 30 d old (R2 F3). A reused rotated token revokes the whole family. A person no longer active revokes the family. Errors are RFC 6749 JSON, no-store.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { ACCESS_TOKEN_TTL_S, CODE_TTL_S, REFRESH_TOKEN_TTL_S, mcpResourceUrl } from "@/lib/mcp/oauth/config";
 import { hashSecret, randomToken, s256, safeEqual, validVerifier } from "@/lib/mcp/oauth/crypto";
 import { jsonError, NO_STORE, oauthGate } from "@/lib/mcp/oauth/http";
 import { redirectsEquivalent } from "@/lib/mcp/oauth/redirects";
+import { auditOauthRefused } from "@/lib/mcp/audit";
 import { claimCode, claimRefresh, codeWasUsed, familyOfCode, familyRevoked, getPerson, getToken, insertToken, personGrantedSinceCode, revokeFamily } from "@/lib/mcp/oauth/store";
 
 export const runtime = "nodejs";
@@ -101,6 +102,11 @@ async function refreshGrant(f: URLSearchParams): Promise<NextResponse> {
     return jsonError(400, "invalid_grant");
   }
   if (tok.revoked_at || tok.expired || tok.family_revoked) return jsonError(400, "invalid_grant");
+  if (tok.family_expired) { // R2 F3: 30 d after the family's first token, however often it rotated
+    await revokeFamily(tok.family_id, "family_expired");
+    await auditOauthRefused(tok.email, "family_expired");
+    return jsonError(400, "invalid_grant");
+  }
   if (tok.predates_grant) { // created before the person's last (re)grant
     await revokeFamily(tok.family_id, "predates_grant");
     return jsonError(400, "invalid_grant");

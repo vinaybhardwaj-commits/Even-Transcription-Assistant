@@ -3,6 +3,7 @@
  * family_id of a code's tokens is "f_" + the first 32 hex of the code hash, so a replayed code can revoke exactly what it issued with no extra column.
  */
 import { sql } from "@/lib/db";
+import { REFRESH_FAMILY_MAX_AGE_S } from "./config";
 
 export type PersonRow = { email: string; scopes: string[]; status: "active" | "revoked"; granted_at?: string };
 export type ClientRow = { client_id: string; kind: "cimd" | "dcr"; redirect_uris: string[]; metadata_url: string | null; client_name: string | null; created_at: string };
@@ -89,13 +90,18 @@ export async function familyRevoked(familyId: string): Promise<boolean> {
   return rows.length > 0;
 }
 
-export async function getToken(tokenHash: string): Promise<(TokenRow & { expired: boolean; family_revoked: boolean; predates_grant: boolean }) | null> {
+/**
+ * The token row plus its verdict flags. family_expired (R2 F3): the family's FIRST token (min created_at over the family, indexed by family_id) is at least `familyMaxAgeS` old, so a refresh
+ * chain has an absolute end however often it rotates.
+ */
+export async function getToken(tokenHash: string, familyMaxAgeS: number = REFRESH_FAMILY_MAX_AGE_S): Promise<(TokenRow & { expired: boolean; family_revoked: boolean; predates_grant: boolean; family_expired: boolean }) | null> {
   const rows = (await sql`
     SELECT t.token_hash, t.kind, t.email, t.client_id, t.scopes, t.resource, t.family_id, t.expires_at, t.revoked_at, t.rotated_to, (t.expires_at <= now()) AS expired,
            EXISTS (SELECT 1 FROM mcp_oauth_family f WHERE f.family_id = t.family_id) AS family_revoked,
-           COALESCE(t.created_at < p.granted_at, false) AS predates_grant
+           COALESCE(t.created_at < p.granted_at, false) AS predates_grant,
+           COALESCE((SELECT min(f2.created_at) FROM mcp_oauth_token f2 WHERE f2.family_id = t.family_id) <= now() - (${familyMaxAgeS} * interval '1 second'), false) AS family_expired
     FROM mcp_oauth_token t LEFT JOIN mcp_person p ON p.email = t.email WHERE t.token_hash = ${tokenHash}
-  `) as Array<TokenRow & { expired: boolean; family_revoked: boolean; predates_grant: boolean }>;
+  `) as Array<TokenRow & { expired: boolean; family_revoked: boolean; predates_grant: boolean; family_expired: boolean }>;
   return rows[0] ?? null;
 }
 

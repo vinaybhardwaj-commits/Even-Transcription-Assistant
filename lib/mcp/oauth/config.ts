@@ -84,6 +84,11 @@ export const CIMD_TTL_MS = 24 * 3600 * 1000;
 export const CIMD_TIMEOUT_MS = 5000;
 export const CIMD_MAX_BYTES = 64 * 1024;
 export const PENDING_TTL_S = 600;
+/** R2 F2: the consent step. After Google, the pending cookie is re-signed under CONSENT_PURPOSE (a pre-Google blob cannot pass the POST, nor a consent blob the GET) and lives 5 min. */
+export const CONSENT_PURPOSE = "consent";
+export const CONSENT_TTL_S = 300;
+/** R2 F3: a refresh family is refused this long after its FIRST token (mcp_oauth_token.created_at), however often it rotates. */
+export const REFRESH_FAMILY_MAX_AGE_S = 30 * 24 * 3600;
 
 export const CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
 export const PENDING_COOKIE = "mcp_oauth_pending";

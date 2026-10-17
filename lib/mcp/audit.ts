@@ -200,5 +200,21 @@ export async function auditOauthRefused(subjectEmail: string | null, reason: str
   return true;
 }
 
+/**
+ * R2 F2: one audit row for a sign-in the person ALLOWED on the consent page: actor `person:<email>`, action `mcp.oauth_granted`, metadata the client host (a metadata-document client) or the
+ * sha256 of the client_id (a registered one) and the redirect host. Never a code, a token or a full URL. Not rate-limited; best-effort like every audit write, but awaited.
+ */
+export async function auditOauthGranted(email: string, client: { client_host: string } | { client_sha256: string }, redirectHost: string): Promise<void> {
+  const actor = /^[^\s@]{1,64}@[^\s@]{1,190}$/.test(email) ? `person:${email.toLowerCase()}` : "unknown";
+  try {
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+      VALUES ('system', ${actor}, 'mcp.oauth_granted', 'mcp_auth', 'oauth', ${JSON.stringify({ ok: true, ...client, redirect_host: redirectHost.slice(0, 260) })}::jsonb)
+    `;
+  } catch (e) {
+    console.warn("[mcp-audit] oauth-grant audit insert failed", String((e as Error)?.message ?? e).slice(0, 120));
+  }
+}
+
 /** test seam */
 export function resetDeniedAuditForTests(): void { deniedLast.clear(); refusedLast.clear(); personDeniedLast.clear(); }

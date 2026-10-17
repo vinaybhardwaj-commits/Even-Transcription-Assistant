@@ -32,12 +32,12 @@ export function htmlError(status: number, code: keyof typeof PAGE_MESSAGES): Nex
 }
 
 /** Redirect back to the (already trusted) client with error, state and iss (RFC 9207). */
-export function redirectError(redirectUri: string, error: string, state: string | null): NextResponse {
+export function redirectError(redirectUri: string, error: string, state: string | null, status: 302 | 303 = 302): NextResponse {
   const u = new URL(redirectUri);
   u.searchParams.set("error", error);
   if (state) u.searchParams.set("state", state);
   u.searchParams.set("iss", mcpIssuer());
-  return new NextResponse(null, { status: 302, headers: { location: u.toString(), ...NO_STORE } });
+  return new NextResponse(null, { status, headers: { location: u.toString(), ...NO_STORE } });
 }
 
 export function clientIp(req: Request): string {

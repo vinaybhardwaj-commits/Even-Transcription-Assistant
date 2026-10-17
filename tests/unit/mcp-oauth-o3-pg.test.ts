@@ -32,6 +32,9 @@ const call = (token: string, body: unknown, ip = "203.0.113.9") =>
 const tool = (name: string, args: Record<string, unknown> = {}, id = 1) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
 const result = async (res: Response) => (await res.json()).result.structuredContent as Record<string, any>;
 
+/** C4 B1: audit_log person rows are append-only (0171), so no DELETE. Each check takes a marker from the server clock and reads only rows written after it. */
+const mark = async () => (await q<{ t: string }>`SELECT clock_timestamp()::text AS t`)[0]!.t;
+
 let n = 0;
 async function mint(email: string, ttl_s = 3600): Promise<string> {
   const token = `esp_pg${++n}-${"y".repeat(32)}`;
@@ -72,10 +75,10 @@ describe.skipIf(!HAVE)("grant, mint, call, row, revoke, refuse on real postgres"
 
   it("a minted token calls the door: one audit_log row per call, actor_type person, the right shape, client_ip from the first hop", async () => {
     const t = await mint(ALICE);
-    await q`DELETE FROM audit_log WHERE actor_id = ${`person:${ALICE}`}`;
+    const since = await mark();
     expect((await call(t, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } }, "198.51.100.4, 192.0.2.1")).status).toBe(200);
     expect((await call(t, tool("scribe_help", { tool: "scribe_now" }), "198.51.100.4")).status).toBe(200);
-    const rows = await q`SELECT actor_type::text AS t, actor_id, action, target_type, target_id, metadata_json AS m, host(ip) AS ip FROM audit_log WHERE actor_id = ${`person:${ALICE}`} ORDER BY created_at, id`;
+    const rows = await q`SELECT actor_type::text AS t, actor_id, action, target_type, target_id, metadata_json AS m, host(ip) AS ip FROM audit_log WHERE actor_id = ${`person:${ALICE}`} AND created_at > ${since}::timestamptz ORDER BY created_at, id`;
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => [r.t, r.action, r.target_type, r.target_id])).toEqual([["person", "mcp.rpc", "mcp_method", "initialize"], ["person", "mcp.tools/call", "mcp_tool", "scribe_help"]]);
     for (const r of rows) {
@@ -149,10 +152,10 @@ describe.skipIf(!HAVE)("grant, mint, call, row, revoke, refuse on real postgres"
   it("MUST-1: a malformed X-Forwarded-For (1.2.3.999, deadbeef, ::::::, empty) gives 200, a row, and a NULL ip on real postgres", async () => {
     const t = await mint(ALICE);
     for (const xff of ["1.2.3.999", "deadbeef", "::::::", ""]) {
-      await q`DELETE FROM audit_log WHERE actor_id = ${`person:${ALICE}`}`;
+      const since = await mark();
       const res = await call(t, tool("scribe_help", { tool: "scribe_now" }), xff);
       expect(res.status, xff).toBe(200);
-      const rows = await q`SELECT host(ip) AS ip, metadata_json->>'client_ip' AS cip FROM audit_log WHERE actor_id = ${`person:${ALICE}`}`;
+      const rows = await q`SELECT host(ip) AS ip, metadata_json->>'client_ip' AS cip FROM audit_log WHERE actor_id = ${`person:${ALICE}`} AND created_at > ${since}::timestamptz`;
       expect(rows, xff).toHaveLength(1);
       expect(rows[0]).toMatchObject({ ip: null, cip: null });
     }
@@ -204,5 +207,10 @@ describe.skipIf(!HAVE)("grant, mint, call, row, revoke, refuse on real postgres"
     const res = await tokenPost(new NextRequest("https://www.evenscribe.app/api/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: raw, client_id: "https://client.example.test/meta.json" }).toString() }));
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("invalid_grant");
+  });
+
+  it("C4 B1: after the whole suite the person rows are still there and a DELETE of them is refused by 0171", async () => {
+    expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM audit_log WHERE actor_type::text = 'person'`)[0]!.n).toBeGreaterThan(0);
+    expect(() => pg.exec(`DELETE FROM audit_log WHERE actor_type::text = 'person'`)).toThrow(/audit_append_only/);
   });
 });

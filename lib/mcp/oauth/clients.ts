@@ -9,6 +9,16 @@ import { isAllowedRedirect } from "./redirects";
 import { fetchPinned, resolvePublic } from "./ssrf";
 import { getClient, upsertClient, touchClient } from "./store";
 
+/** F1 (refute e4c1406f): a failed best-effort side call (cancel a capped body, bump last_used_at) is counted and logged, never silent. Count only: no URL, no token, no client body. */
+let swallowed = 0;
+export function swallowedCountForTests(): number {
+  return swallowed;
+}
+function countSwallow(): void {
+  swallowed += 1;
+  console.warn(`mcp-oauth: best-effort client side call failed (count=${swallowed})`);
+}
+
 export type ResolvedClient = { client_id: string; redirect_uris: string[] };
 export type ClientResult = { ok: true; client: ResolvedClient } | { ok: false; reason: string };
 
@@ -40,7 +50,7 @@ async function readCapped(res: Response): Promise<string | null> {
     if (done) break;
     total += value.byteLength;
     if (total > CIMD_MAX_BYTES) {
-      await reader.cancel().catch(() => {});
+      await reader.cancel().catch(countSwallow);
       return null;
     }
     chunks.push(value);
@@ -51,9 +61,11 @@ async function readCapped(res: Response): Promise<string | null> {
 async function fetchCimd(url: URL): Promise<{ redirect_uris: string[]; client_name: string | null } | null> {
   try {
     // SSRF: resolve first, refuse a host with ANY forbidden address, then connect pinned to the checked address (lib/mcp/oauth/ssrf)
-    const addrs = await resolvePublic(url.hostname);
+    // F5: ONE 5 s budget for the lookup and the fetch together, so a slow authoritative DNS server cannot hold /authorize open
+    const signal = AbortSignal.timeout(CIMD_TIMEOUT_MS);
+    const addrs = await resolvePublic(url.hostname, signal);
     if (!addrs) return null;
-    const res = await fetchPinned(url, addrs[0]!, AbortSignal.timeout(CIMD_TIMEOUT_MS));
+    const res = await fetchPinned(url, addrs[0]!, signal);
     if (!res.ok) return null;
     const text = await readCapped(res);
     if (text === null) return null;
@@ -78,17 +90,17 @@ export async function resolveClient(clientId: string): Promise<ClientResult> {
     const url = cimdUrlOk(clientId);
     if (!url) return { ok: false, reason: "invalid_client" };
     if (cached && cached.kind === "cimd" && Date.now() - new Date(cached.created_at).getTime() < CIMD_TTL_MS) {
-      await touchClient(clientId).catch(() => {});
+      await touchClient(clientId).catch(countSwallow);
       return { ok: true, client: { client_id: clientId, redirect_uris: cached.redirect_uris } };
     }
     const doc = await fetchCimd(url);
     if (!doc) return { ok: false, reason: "invalid_client_metadata" };
     await upsertClient({ client_id: clientId, kind: "cimd", redirect_uris: doc.redirect_uris, metadata_url: clientId, client_name: doc.client_name });
-    await touchClient(clientId).catch(() => {});
+    await touchClient(clientId).catch(countSwallow);
     return { ok: true, client: { client_id: clientId, redirect_uris: doc.redirect_uris } };
   }
   if (cached && cached.kind === "dcr") {
-    await touchClient(clientId).catch(() => {});
+    await touchClient(clientId).catch(countSwallow);
     return { ok: true, client: { client_id: clientId, redirect_uris: cached.redirect_uris } };
   }
   return { ok: false, reason: "invalid_client" };
