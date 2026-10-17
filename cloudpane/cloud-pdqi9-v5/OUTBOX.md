@@ -14,3 +14,8 @@
 - v7 plan: docs/pdqi9/PDQI9-EVIDENCE-PLAN-v7.md (conforms to spec v7 A)
 - v7 notes: docs/pdqi9/V7-NOTES.md; closure table 7/7 rows closed or recorded; 3,612 -> 3,610 exact minimum noted; 2 open UNVERIFIED
 - v7 pushed to cloudpane/cloud-pdqi9-v5/v7, no PR; serving model claude-opus-5-5
+- 2026-10-17 v8 start: branch cloudpane/cloud-pdqi9-v5/v8 from v7 head 5a21638; inputs Fable design gate C1-C10 + affirmation fix; serving model claude-opus-5-5
+- v8 spec: docs/pdqi9/PDQI9-E-SPEC-v8.md (new A7: C1-C4,C6,C9 prereg items; C7 S2c rule, C8 pair + E_month formula, C10 read-back; A7.3 C5 audit >=300, 0 wrong-person; affirmation rule fixed; S-M 22, P-SYN 256)
+- v8 plan: docs/pdqi9/PDQI9-EVIDENCE-PLAN-v8.md (conforms to spec v8 A incl. A7)
+- v8 notes: docs/pdqi9/V8-NOTES.md; closure table C1-C10 + affirmation all closed (C9 partly owned by newcat-orch); 6 UNVERIFIED with owner
+- v8 pushed to cloudpane/cloud-pdqi9-v5/v8, no PR; serving model claude-opus-5-5
