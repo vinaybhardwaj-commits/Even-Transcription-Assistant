@@ -43,7 +43,7 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 
 ## Privacy sweep
 
-Twelve patterns were run over every file in this folder, including all {n_mut} mutants. A hit passes only if it is one of the allowed placeholders below; the sweep found {sweep.stdout.strip().splitlines()[-1].split(': ')[1]} unexplained hits.
+Twelve patterns were run over every file in this folder, including all {n_mut} mutants. A hit passes only if it is one of the allowed placeholders below. `data/SCOWL-LICENSE.txt` is not swept: it is the third-party word list's verbatim copyright notice, with its authors' names and contacts, which the licence requires; the sweep found {sweep.stdout.strip().splitlines()[-1].split(': ')[1]} unexplained hits.
 
 | Sweep | What it looks for | Hits | Explanation |
 |---|---|---|---|
@@ -57,8 +57,8 @@ Twelve patterns were run over every file in this folder, including all {n_mut} m
 | S8 | Aadhaar-shaped numbers | {c('S8 aadhaar')} | none |
 | S9 | URLs | {c('S9 url')} | only the schema's `$schema` (json-schema.org) and `$id` (a non-resolving namespace id) |
 | S10 | an honorific followed by a name | {c('S10 honorific')} | none |
-| S11 | real model and vendor names | {c('S11 real-model')} | none; the word list is kept by ETA |
-| S12 | internal agent, person and branch names | {c('S12 internal-name')} | none; the word list is kept by ETA |
+| S11 | real model and vendor names | {c('S11 real-model')} | none in prose; the two dictionary word lists (`data/scowl_words.json`, `data/english_words_min.json`) are not swept for S11/S12 because they hold ordinary English words; the word list is kept by ETA |
+| S12 | internal agent, person and branch names | {c('S12 internal-name')} | none in prose (dictionary word lists exempt, as for S11); the word list is kept by ETA |
 
 Speakers are `speaker_N`, rooms are `EXAMPLE-ROOM` and encounters are `EXAMPLE-ENC-N`.
 """

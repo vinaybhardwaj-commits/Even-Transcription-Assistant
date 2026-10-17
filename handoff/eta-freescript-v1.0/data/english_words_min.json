@@ -3,10 +3,11 @@
  "source": "data/common-english-words.json and data/clinical-english-words.json of the ETA repo (commit fd65cdc6), lowercased, minus any word of data/medicine_names_min.json",
  "removed_as_drug_names": [
   "acid",
+  "heroin",
   "vitamin"
  ],
  "use": "V18: the first content word after an order verb in Plan, Advice or Follow up must be one of these, or the mention is an unresolved medicine-like word.",
- "count": 8762,
+ "count": 8761,
  "words": [
   "abandon",
   "abandoned",
@@ -3669,7 +3670,6 @@
   "heritage",
   "hero",
   "heroes",
-  "heroin",
   "hers",
   "herself",
   "hes",

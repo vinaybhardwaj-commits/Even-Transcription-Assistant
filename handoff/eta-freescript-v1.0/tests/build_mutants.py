@@ -519,6 +519,58 @@ def r9_generic_only(a):
     rerender(a)
 
 
+
+# ---- fix round 3: R10-R14 ----
+def set_quote(a, sid, q):
+    span(a, sid)["quote_en"] = span(a, sid)["quote_native"] = q
+
+
+def r10(brand, generic, spoken=None, reasons=None, lasa=None):
+    def f(a):
+        p = prompt(a, "p1")
+        p["drug"].update(spoken=spoken or brand, brand_recognised=brand, generic=generic, components=[],
+                         base_molecule=V_base(generic) if generic else name_of(brand),
+                         lasa_risk=dict(pair_with=lasa, note="generic not resolved; confirm the molecule" if lasa else "not on the curated LASA list"))
+        p["attributes"] = B.attrs()
+        if reasons:
+            p["doctor_confirm_reason"] = reasons
+        rerender(a)
+    return f
+
+
+def V_base(g):
+    from validate_artifact import base_of
+    return base_of(g)
+
+
+def name_of(b):
+    from validate_artifact import base_of
+    return base_of(b)
+
+
+def r11_split(text, t0=None):
+    def f(a):
+        set_quote(a, "s10", "do HbA1c and fasting sugar tomorrow morning and do not")
+        set_quote(a, "s11", "skip meals")
+        if t0:
+            span(a, "s11")["t0"] = B.ts(t0)
+        set_word(a, 0, text)
+    return f
+
+
+def r11_rf(a):
+    set_quote(a, "s6", "and prednisolone once a day in the morning after breakfast for five days, and do not")
+    span(a, "s6")["t1"] = B.ts("03:39")
+
+
+def r14(quote, dose):
+    def f(a):
+        set_quote(a, "s8", quote)
+        prompt(a, "p2")["attributes"]["dose"] = B.att(dose, ["s8"])
+        rerender(a)
+    return f
+
+
 # name, base, mutation, expected verdict, rule that must be named on failure ("-" for pass)
 MUTANTS = [
     ("V0_bad_duration_unit", "ex3", m_bad_unit, "fail", "V0"),
@@ -685,6 +737,30 @@ MUTANTS = [
     ("R9_brand_shown_but_not_spoken", "ex2", lambda a: (prompt(a, "p1")["drug"].update(brand_recognised="Xyzal"), rerender(a)), "fail", "V14"),
     ("R9_unmapped_brand_shown_as_drug", "ex6", lambda a: (r6("unresolved generic", ["notes_only", "combination_unexpanded", "lasa"])(a), note_sub(a, "Pan-D — confirm generic", "Pan-D — confirm")), "fail", "V6"),
     ("R9_control_generic_only", "ex1", r9_generic_only, "pass", "-"),
+    ("R10_unattested_brand_given_generic", "ex1", r10("Calpol", "PARACETAMOL"), "fail", "V14"),
+    ("R10_unmapped_brand_inferred_generic", "ex1", r10("Zorvix", "PARACETAMOL"), "fail", "V14"),
+    ("R10_attested_brand_wrong_generic", "ex1", r10("Dolo 650", "IBUPROFEN"), "fail", "V14"),
+    ("R10_control_unmapped_brand_confirm_generic", "ex1", r10("Zorvix", None, reasons=["notes_only", "brand_unmapped", "lasa"], lasa="unresolved generic"), "pass", "-"),
+    ("R11_split_negator_dropped", "ex3", r11_split("Skip meals."), "fail", "V17"),
+    ("R11_red_flag_split_negator_dropped", "ex6", r11_rf, "fail", "V17"),
+    ("R11_control_split_negator_kept", "ex3", r11_split("Do not skip meals."), "pass", "-"),
+    ("R11_control_gap_over_two_seconds", "ex3", r11_split("Skip meals.", t0="04:13"), "pass", "-"),
+    ("R12_spelled_units_in_plan", "ex3", lambda a: plan3(a, "Zorvix five hundred milligrams at night."), "fail", "V18"),
+    ("R12_two_fifty_mg_in_follow_up", "ex1", lambda a: set_gx(a, "/follow_up/follow_up_instructions", "Return after the two fifty mg course."), "fail", "V18"),
+    ("R12_hindi_number_unit", "ex3", lambda a: plan3(a, "Raat ko ek goli."), "fail", "V18"),
+    ("R12_kannada_number_unit", "ex3", lambda a: plan3(a, "Ondu maatre at night."), "fail", "V18"),
+    ("R12_control_counts_without_units", "ex1", lambda a: set_gx(a, "/examination", "Pulse 62 per minute. Two episodes of vomiting. Chest clear."), "pass", "-"),
+    ("R13_brand_no_verb_thyronorm", "ex3", lambda a: plan3(a, "Thyronorm every morning."), "fail", "V18"),
+    ("R13_brand_with_generic_as_before", "ex3", lambda a: plan3(a, "Ecosprin aspirin as before."), "fail", "V18"),
+    ("R13_took_brand_in_symptoms", "ex1", lambda a: set_gx(a, "/presenting_complaints/symptoms", "Fever for 2 days with body ache. Took Pacimol at home."), "fail", "V18"),
+    ("R13_brand_course_in_plan", "ex2", lambda a: set_plan(a, "Symptomatic treatment. The Azee course is over. " + PL), "fail", "V18"),
+    ("R13_unlisted_brand_of_stopped_drug", "ex3", lambda a: plan3(a, "Glimisave at night."), "fail", "V18"),
+    ("R13_control_ordinary_plan", "ex3", lambda a: plan3(a, "Walk for thirty minutes every morning."), "pass", "-"),
+    ("R14_old_dose_shown_from_to", "ex3", r14("increase the metformin from 500 to 1000 twice a day after food", "500"), "fail", "V8"),
+    ("R14_new_dose_undecidable", "ex3", r14("take the metformin 1000 twice a day after food", "1000"), "fail", "V8"),
+    ("R14_make_it_mismatch", "ex3", r14("metformin, make it 750, not 1000, twice a day after food", "1000"), "fail", "V8"),
+    ("R14_control_from_to_new_dose", "ex3", r14("reduce the metformin from 1000 to 500 twice a day after food", "500"), "pass", "-"),
+    ("R14_control_number_words", "ex3", r14("metformin, make it five hundred, twice a day after food", "five hundred"), "pass", "-"),
 ]
 
 

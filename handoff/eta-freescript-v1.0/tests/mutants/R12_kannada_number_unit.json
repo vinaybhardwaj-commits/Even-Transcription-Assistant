@@ -1,0 +1,989 @@
+{
+  "schema_version": "eta.freescript.v1.0",
+  "artifact_id": "00000000-0000-4000-8000-000000000003",
+  "supersedes": null,
+  "created_at": "2026-10-15T10:30:00+05:30",
+  "emission": {
+    "state": "full",
+    "reasons": []
+  },
+  "policy": {
+    "medicine_policy": "notes_only",
+    "advice_budget": {
+      "items": 5,
+      "chars": 300
+    },
+    "inputs_mode": "current"
+  },
+  "generator": {
+    "name": "hand-authored-example",
+    "version": "1.0",
+    "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "prompt_sha256s": {
+      "stageA": "0000000000000000000000000000000000000000000000000000000000000000",
+      "stageB": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "models": [
+      {
+        "role": "stageA",
+        "served_model_id": "example-model-a-2026-10",
+        "provider": "example-provider",
+        "zdr": true
+      },
+      {
+        "role": "stageB",
+        "served_model_id": "example-model-b-2026-10",
+        "provider": "example-provider",
+        "zdr": true
+      }
+    ],
+    "temperature": 0,
+    "run_id": "EXAMPLE-RUN-3"
+  },
+  "encounter": {
+    "eta_encounter_id": "EXAMPLE-ENC-3",
+    "room": "EXAMPLE-ROOM",
+    "visit_date_ist": "2026-10-15",
+    "window_start": "2026-10-15T10:00:00+05:30",
+    "window_end": "2026-10-15T10:15:00+05:30",
+    "languages": [
+      "en",
+      "kn"
+    ],
+    "transcript": {
+      "segment_count": 19,
+      "diarised": true,
+      "english_source": "mt:example-mt-model",
+      "stt_engines": [
+        "example-stt-a"
+      ]
+    },
+    "doctor": {
+      "pulse_doctor_uid": null,
+      "specialty": "General Practitioner"
+    }
+  },
+  "pulse_link": {
+    "type_of_prescription": "HOSPITAL_GP",
+    "individual_uid": null,
+    "hospital_uid": null,
+    "consult_uid": null,
+    "prescription_uid": null,
+    "draft_exists": "unknown",
+    "link_status": "none",
+    "link_basis": null
+  },
+  "roster": [
+    {
+      "label": "speaker_0",
+      "talk_s": 450,
+      "role": "treating_doctor",
+      "role_votes": {
+        "role_track": "treating_doctor",
+        "clef": "treating_doctor",
+        "jev": "treating_doctor"
+      },
+      "three_of_three": true,
+      "armc": {
+        "state": "pass",
+        "cos": 0.84,
+        "margin_next_label": 0.21,
+        "margin_runner_up_centroid": 0.17,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": true,
+      "translator_of": null,
+      "order_capable": true
+    },
+    {
+      "label": "speaker_1",
+      "talk_s": 300,
+      "role": "patient",
+      "role_votes": {
+        "role_track": "patient",
+        "clef": "patient",
+        "jev": "patient"
+      },
+      "three_of_three": false,
+      "armc": {
+        "state": "fail",
+        "cos": 0.22,
+        "margin_next_label": null,
+        "margin_runner_up_centroid": null,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": false,
+      "translator_of": null,
+      "order_capable": false
+    }
+  ],
+  "spans": [
+    {
+      "span_id": "s1",
+      "segment_refs": [
+        "EXAMPLE-W3:1"
+      ],
+      "t0": "2026-10-15T10:00:30+05:30",
+      "t1": "2026-10-15T10:00:36+05:30",
+      "label": "speaker_1",
+      "lang": "kn",
+      "quote_native": "nanage aidu varshadinda sugar ide",
+      "quote_en": "I have sugar for five years",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s2",
+      "segment_refs": [
+        "EXAMPLE-W3:2"
+      ],
+      "t0": "2026-10-15T10:00:37+05:30",
+      "t1": "2026-10-15T10:00:40+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "diabetes for five years",
+      "quote_en": "diabetes for five years",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s3",
+      "segment_refs": [
+        "EXAMPLE-W3:3"
+      ],
+      "t0": "2026-10-15T10:00:40+05:30",
+      "t1": "2026-10-15T10:00:52+05:30",
+      "label": "speaker_1",
+      "lang": "kn",
+      "quote_native": "ondu vaaradinda beligge talesuttu, bevaru baruttade",
+      "quote_en": "for a week I feel giddy and sweat in the morning",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s4",
+      "segment_refs": [
+        "EXAMPLE-W3:4"
+      ],
+      "t0": "2026-10-15T10:00:53+05:30",
+      "t1": "2026-10-15T10:01:00+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "giddiness and sweating in the mornings for one week",
+      "quote_en": "giddiness and sweating in the mornings for one week",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s5",
+      "segment_refs": [
+        "EXAMPLE-W3:5"
+      ],
+      "t0": "2026-10-15T10:02:00+05:30",
+      "t1": "2026-10-15T10:02:15+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "BP 128 by 82, pulse 88, sugar 72",
+      "quote_en": "BP 128 by 82, pulse 88, sugar 72",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s6",
+      "segment_refs": [
+        "EXAMPLE-W3:6"
+      ],
+      "t0": "2026-10-15T10:03:00+05:30",
+      "t1": "2026-10-15T10:03:06+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "this could be low sugar from the glimepiride",
+      "quote_en": "this could be low sugar from the glimepiride",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s7",
+      "segment_refs": [
+        "EXAMPLE-W3:7"
+      ],
+      "t0": "2026-10-15T10:03:07+05:30",
+      "t1": "2026-10-15T10:03:15+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "stop the glimepiride from today",
+      "quote_en": "stop the glimepiride from today",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s8",
+      "segment_refs": [
+        "EXAMPLE-W3:8"
+      ],
+      "t0": "2026-10-15T10:03:16+05:30",
+      "t1": "2026-10-15T10:03:24+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "increase the metformin to 1000 twice a day after food",
+      "quote_en": "increase the metformin to 1000 twice a day after food",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s9",
+      "segment_refs": [
+        "EXAMPLE-W3:9"
+      ],
+      "t0": "2026-10-15T10:03:25+05:30",
+      "t1": "2026-10-15T10:03:30+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "keep glucose tablets with you, take one if you feel giddy",
+      "quote_en": "keep glucose tablets with you, take one if you feel giddy",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s10",
+      "segment_refs": [
+        "EXAMPLE-W3:10"
+      ],
+      "t0": "2026-10-15T10:04:00+05:30",
+      "t1": "2026-10-15T10:04:10+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "do HbA1c and fasting sugar tomorrow morning",
+      "quote_en": "do HbA1c and fasting sugar tomorrow morning",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s11",
+      "segment_refs": [
+        "EXAMPLE-W3:11"
+      ],
+      "t0": "2026-10-15T10:04:12+05:30",
+      "t1": "2026-10-15T10:04:20+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "don't skip meals",
+      "quote_en": "don't skip meals",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s12",
+      "segment_refs": [
+        "EXAMPLE-W3:12"
+      ],
+      "t0": "2026-10-15T10:04:30+05:30",
+      "t1": "2026-10-15T10:04:35+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "come back with the reports",
+      "quote_en": "come back with the reports",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s13",
+      "segment_refs": [
+        "EXAMPLE-W3:13"
+      ],
+      "t0": "2026-10-15T10:04:36+05:30",
+      "t1": "2026-10-15T10:04:40+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "we will recheck your sugars",
+      "quote_en": "we will recheck your sugars",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s14",
+      "segment_refs": [
+        "EXAMPLE-W3:14"
+      ],
+      "t0": "2026-10-15T10:04:41+05:30",
+      "t1": "2026-10-15T10:04:46+05:30",
+      "label": "speaker_1",
+      "lang": "en",
+      "quote_native": "I also take levothyroxine 50 every morning",
+      "quote_en": "I also take levothyroxine 50 every morning",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s15",
+      "segment_refs": [
+        "EXAMPLE-W3:15"
+      ],
+      "t0": "2026-10-15T10:04:47+05:30",
+      "t1": "2026-10-15T10:04:49+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "yes, continue that",
+      "quote_en": "yes, continue that",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    }
+  ],
+  "gp_extraction": {
+    "comorbidities": [
+      {
+        "name": "Type 2 Diabetes Mellitus",
+        "duration": {
+          "value": 5,
+          "unit": "YEARS"
+        },
+        "raw_name": "sugar",
+        "aliases": [
+          "T2DM",
+          "Diabetes mellitus type 2"
+        ]
+      }
+    ],
+    "presenting_complaints": {
+      "symptoms": "Giddiness and sweating in the mornings for 1 week.",
+      "diagnoses": [
+        {
+          "diagnosis_or_impression": "Hypoglycaemia",
+          "is_differential_diagnosis": true,
+          "raw_name": "low sugar",
+          "aliases": [
+            "Hypoglycemia"
+          ]
+        }
+      ]
+    },
+    "examination": "BP 128/82. Pulse 88. Random blood sugar 72 mg/dL.",
+    "plan_of_management": {
+      "management_plan": "Recheck sugars. Ondu maatre at night. Medication changes discussed: see the confirm list.",
+      "requires_surgery_or_procedure": false
+    },
+    "medicines": [],
+    "further_investigations": [
+      {
+        "name": "HbA1c",
+        "urgent": false,
+        "instruction": "",
+        "raw_name": "HbA1c",
+        "aliases": [
+          "Glycated haemoglobin"
+        ]
+      },
+      {
+        "name": "Fasting Blood Sugar",
+        "urgent": false,
+        "instruction": "fasting sample",
+        "raw_name": "fasting sugar",
+        "aliases": [
+          "FBS"
+        ]
+      }
+    ],
+    "follow_up": {
+      "followup_type": "FOLLOW_UP_WITH_REPORTS",
+      "follow_up_instructions": "Come back with the reports."
+    },
+    "general_advice": "Don't skip meals."
+  },
+  "confirm_prompts": [
+    {
+      "prompt_id": "p1",
+      "kind": "medicine",
+      "action": "stop",
+      "drug": {
+        "spoken": "glimepiride",
+        "brand_recognised": null,
+        "generic": "GLIMEPIRIDE",
+        "components": [],
+        "base_molecule": "glimepiride",
+        "form": "tablet",
+        "strength_heard": null,
+        "lasa_risk": {
+          "pair_with": null,
+          "note": "not on the curated LASA list"
+        }
+      },
+      "attributes": {
+        "strength": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "duration": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "instruction": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        }
+      },
+      "who_said": {
+        "label": "speaker_0",
+        "role": "treating_doctor"
+      },
+      "doctor_confirm_reason": [
+        "notes_only",
+        "stop_order"
+      ]
+    },
+    {
+      "prompt_id": "p2",
+      "kind": "medicine",
+      "action": "change_dose",
+      "drug": {
+        "spoken": "metformin",
+        "brand_recognised": null,
+        "generic": "METFORMIN",
+        "components": [],
+        "base_molecule": "metformin",
+        "form": "tablet",
+        "strength_heard": null,
+        "lasa_risk": {
+          "pair_with": null,
+          "note": "not on the curated LASA list"
+        }
+      },
+      "attributes": {
+        "strength": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "dose": {
+          "value": "1000",
+          "cited_spans": [
+            "s8"
+          ],
+          "support": "supported"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": "twice a day",
+          "cited_spans": [
+            "s8"
+          ],
+          "support": "supported"
+        },
+        "duration": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "instruction": {
+          "value": "after food",
+          "cited_spans": [
+            "s8"
+          ],
+          "support": "supported"
+        }
+      },
+      "who_said": {
+        "label": "speaker_0",
+        "role": "treating_doctor"
+      },
+      "doctor_confirm_reason": [
+        "notes_only"
+      ]
+    },
+    {
+      "prompt_id": "p3",
+      "kind": "medicine",
+      "action": "start",
+      "drug": {
+        "spoken": "glucose tablets",
+        "brand_recognised": null,
+        "generic": "GLUCOSE",
+        "components": [],
+        "base_molecule": "glucose",
+        "form": "tablet",
+        "strength_heard": null,
+        "lasa_risk": {
+          "pair_with": null,
+          "note": "not on the curated LASA list"
+        }
+      },
+      "attributes": {
+        "strength": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "dose": {
+          "value": "one",
+          "cited_spans": [
+            "s9"
+          ],
+          "support": "supported"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "duration": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "instruction": {
+          "value": "if you feel giddy",
+          "cited_spans": [
+            "s9"
+          ],
+          "support": "supported"
+        }
+      },
+      "who_said": {
+        "label": "speaker_0",
+        "role": "treating_doctor"
+      },
+      "doctor_confirm_reason": [
+        "notes_only"
+      ]
+    },
+    {
+      "prompt_id": "p4",
+      "kind": "medicine",
+      "action": "continue",
+      "drug": {
+        "spoken": "levothyroxine 50",
+        "brand_recognised": null,
+        "generic": "LEVOTHYROXINE",
+        "components": [],
+        "base_molecule": "levothyroxine",
+        "form": "tablet",
+        "strength_heard": "50",
+        "lasa_risk": {
+          "pair_with": null,
+          "note": "not on the curated LASA list"
+        }
+      },
+      "attributes": {
+        "strength": {
+          "value": "50",
+          "cited_spans": [
+            "s14",
+            "s15"
+          ],
+          "support": "affirmed_from_patient"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": "every morning",
+          "cited_spans": [
+            "s14",
+            "s15"
+          ],
+          "support": "affirmed_from_patient"
+        },
+        "duration": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "instruction": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        }
+      },
+      "who_said": {
+        "label": "speaker_1",
+        "role": "patient"
+      },
+      "doctor_confirm_reason": [
+        "notes_only",
+        "patient_reported",
+        "affirmed_from_patient"
+      ]
+    }
+  ],
+  "doctor_words": [
+    {
+      "instruction_id": "dw1",
+      "category": "diet",
+      "text_en": "Don't skip meals.",
+      "cited_spans": [
+        "s11"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 1,
+      "counselling": true
+    },
+    {
+      "instruction_id": "dw2",
+      "category": "follow_up",
+      "text_en": "Come back with the reports.",
+      "cited_spans": [
+        "s12"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 1,
+      "counselling": false
+    }
+  ],
+  "red_flags": [],
+  "provenance": [
+    {
+      "item_id": "e3-com",
+      "kind": "comorbidity",
+      "text": "T2DM 5 years",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s1",
+        "s2"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/comorbidities/0",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": [
+        "translation_uncertain"
+      ]
+    },
+    {
+      "item_id": "e3-sym",
+      "kind": "symptoms",
+      "text": "giddiness, sweating mornings 1 week",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s3",
+        "s4"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/presenting_complaints/symptoms",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e3-exam",
+      "kind": "examination",
+      "text": "BP 128/82, PR 88, RBS 72",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s5"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/examination",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e3-dx",
+      "kind": "diagnosis",
+      "text": "?hypoglycaemia",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s6"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/presenting_complaints/diagnoses/0",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e3-glim",
+      "kind": "medicine",
+      "text": "Glimepiride 1 mg",
+      "names": [
+        "glimepiride",
+        "Glimepiride 1",
+        "Amaryl"
+      ],
+      "status": "stopped",
+      "negated": true,
+      "support": "supported",
+      "cited_spans": [
+        "s7"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": "p1",
+      "withheld_reason": null,
+      "flags": [
+        "negation_cue_nearby"
+      ]
+    },
+    {
+      "item_id": "e3-met",
+      "kind": "medicine",
+      "text": "Metformin dose raised to 1000 BD",
+      "names": [
+        "metformin",
+        "Glycomet 500"
+      ],
+      "status": "continued",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s8"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": "p2",
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e3-thy",
+      "kind": "medicine",
+      "text": "levothyroxine raised by the patient; doctor said continue",
+      "names": [
+        "levothyroxine"
+      ],
+      "status": "continued",
+      "negated": false,
+      "support": "affirmed_from_patient",
+      "cited_spans": [
+        "s14",
+        "s15"
+      ],
+      "alignment": "aligned_llm",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": "p4",
+      "withheld_reason": null,
+      "flags": [
+        "affirmed_from_patient"
+      ]
+    },
+    {
+      "item_id": "e3-glu",
+      "kind": "medicine",
+      "text": "Glucose tablets when symptomatic",
+      "names": [
+        "glucose"
+      ],
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s9"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": "p3",
+      "withheld_reason": null,
+      "flags": [
+        "duration_unstated"
+      ]
+    },
+    {
+      "item_id": "e3-hba1c",
+      "kind": "investigation",
+      "text": "HbA1c",
+      "names": [
+        "HbA1c"
+      ],
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s10"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/further_investigations/0",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e3-fbs",
+      "kind": "investigation",
+      "text": "Fasting sugar",
+      "names": [
+        "Fasting Blood Sugar",
+        "FBS"
+      ],
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s10"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/further_investigations/1",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e3-plan",
+      "kind": "management_plan",
+      "text": "recheck; medication changes on the confirm list",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s13",
+        "s7"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/plan_of_management/management_plan",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e3-fu",
+      "kind": "follow_up",
+      "text": "review with reports",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s12"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/follow_up",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e3-adv",
+      "kind": "advice",
+      "text": "no skipped meals",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s11"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/general_advice",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    }
+  ],
+  "note_text": "Co-morbidities: Type 2 Diabetes Mellitus for 5 years\nPresenting Complaint: Giddiness and sweating in the mornings for 1 week.\nExamination: BP 128/82. Pulse 88. Random blood sugar 72 mg/dL.\nDiagnoses: ?Hypoglycaemia\nPlan of Management: Recheck sugars. Ondu maatre at night. Medication changes discussed: see the confirm list.\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nMETFORMIN 1000 — dose change discussed — confirm\nGLUCOSE — confirm\nLEVOTHYROXINE — confirm\nFurther Investigation: HbA1c\nFasting Blood Sugar\nFollow up: Come back with the reports.\nRefer to:\nGeneral Advice: Don't skip meals.",
+  "qa": {
+    "floors": {
+      "untaped_drugs": 0,
+      "invented_doses": 0,
+      "dose_precedence_errors": 0,
+      "clip_leakage": 0,
+      "placeholders": 0,
+      "red_flags_missing": 0,
+      "hallucinations_est": 0.0,
+      "validator_pass": true
+    },
+    "counts": {
+      "posted": 9,
+      "prompts": 4,
+      "withheld": 0,
+      "h_unattrib": 0,
+      "unaligned": 0,
+      "affirmed_from_patient": 1
+    },
+    "inputs": {
+      "mode": "current",
+      "role_votes_present": true,
+      "armc_gate": "on",
+      "case7": false
+    },
+    "models_served": [
+      "example-model-a-2026-10",
+      "example-model-b-2026-10"
+    ],
+    "render_template": "neutral-11h-v1"
+  }
+}

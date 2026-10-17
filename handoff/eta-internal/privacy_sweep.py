@@ -22,6 +22,9 @@ SWEEPS = {
 }
 
 
+DICTIONARIES = {"scowl_words.json", "english_words_min.json"}
+
+
 def main():
     hits, bad = collections.Counter(), 0
     for root, dirs, fs in os.walk(BUNDLE):
@@ -29,9 +32,13 @@ def main():
         for f in sorted(fs):
             p = os.path.join(root, f)
             t = open(p, encoding="utf-8").read()
+            if f == "SCOWL-LICENSE.txt":  # third-party licence: its authors' copyright notices must stay verbatim
+                continue
             if f == "HANDOFF-INDEX.md":  # its sha256 column is file hashes, not ids
                 t = re.sub(r"`[0-9a-f]{64}`", "`HASH`", t)
             for k, (rx, ok) in SWEEPS.items():
+                if k.startswith(("S11", "S12")) and f in DICTIONARIES:  # dictionary words, not names in prose
+                    continue
                 for m in re.finditer(rx, t):
                     hits[k] += 1
                     if not (ok and ok(m.group(0))):

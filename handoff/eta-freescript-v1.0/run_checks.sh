@@ -31,5 +31,8 @@ for f in tests/mutants/*.json; do cmp "$f" "$TMP/t/mutants/$(basename "$f")"; do
 [ "$(ls "$TMP/t/mutants" | wc -l)" -eq "$(ls tests/mutants | wc -l)" ]
 echo "identical: $(ls tests/mutants | wc -l) mutants + expected.tsv"
 
+echo "== 5. vocabulary coverage and false fails (7 examples, 20 clean notes)"
+python3 tests/vocab/check_vocab.py
+
 no_pycache "after checks"
 echo "ALL CHECKS PASSED"

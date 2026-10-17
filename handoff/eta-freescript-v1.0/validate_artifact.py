@@ -71,7 +71,20 @@ N1_SECTIONS = set(_N1["order_sections"])
 D4_FIELDS, D4_MISSING = set(_N1["d4_fields"]), set(_N1["d4_missing"])
 FILLER = re.compile(_N1["filler_line"])
 EN_WORDS = set(_data("english_words_min.json")["words"])
+_CV = _data("clinical_vocab_extra.json")
+_DD = _data("drug_denylist.json")
+DRUG_DENY, DRUG_STEMS = set(_DD["names"]), re.compile(_DD["stems_regex"])
+# scowl_words.json is filtered against the denylist when it is built; only the small lists are filtered here.
+VOCAB = {w for w in EN_WORDS | set(_CV["words"]) | set(_CV["clinical_terms_tokens"]) if w not in DRUG_DENY and not DRUG_STEMS.search(w)}
+VOCAB |= set(_data("scowl_words.json")["words"])
 _DP = _data("dose_patterns.json")
+_NUMW = _DP["number_words"]
+NUM_VALUE = dict(zip(_NUMW["en"][:20], range(20)))
+NUM_VALUE.update({w: 10 * (i + 3) for i, w in enumerate(["thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"])})
+NUM_VALUE.update({"twenty": 20, "half": 0.5, "quarter": 0.25})
+NUM_VALUE.update({w: v for v, ws in enumerate([[], ["ek", "ondu"], ["do", "eradu"], ["teen", "mooru"], ["char", "chaar", "naalku"],
+                  ["paanch", "panch", "aidu"], ["chhe", "aaru"], ["saat", "elu"], ["aath", "entu"], ["nau", "ombattu"], ["das", "hattu"]]) for w in ws})
+NUMBER_RX = _DP["number"]
 DOSE_RX = [(p["id"], re.compile(p["regex"].replace("{N}", _DP["number"])), p.get("history_exempt", False)) for p in _DP["patterns"]]
 HISTORY_PATHS = re.compile(_DP["history_paths"])
 ORDER_VERBS, SKIP_WORDS = set(_DP["order_verbs"]), set(_DP["skip_words"])
@@ -419,6 +432,69 @@ def dose_hits(text, history=False):
     return [pid for pid, rx, hist in DOSE_RX if not (history and hist) and rx.search(t)]
 
 
+def in_vocab(t):
+    """English or clinical vocabulary, allowing plain inflections (fluids, mildly, persists, sponging)."""
+    if t in VOCAB or t in QUALIFIERS:
+        return True
+    cands = []
+    for suf, add in (("ies", "y"), ("es", ""), ("s", ""), ("ly", ""), ("ing", ""), ("ing", "e"), ("ed", ""), ("ed", "e"), ("er", ""), ("est", "")):
+        if t.endswith(suf) and len(t) - len(suf) >= 3:
+            cands.append(t[:-len(suf)] + add)
+    return any(c in VOCAB for c in cands)
+
+
+def parse_number(s):
+    """'1000' -> 1000; 'five hundred' -> 500; 'two fifty' -> 250 (spoken Indian dosing); 'half' -> 0.5."""
+    s = fold(s).strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
+        return float(s)
+    if re.fullmatch(r"\d+/\d+", s):
+        a_, b_ = s.split("/")
+        return float(a_) / float(b_) if float(b_) else None
+    words = [w for w in re.split(r"[\s-]+", s) if w and w != "and"]
+    if not words or any(w not in NUM_VALUE and w not in ("hundred", "thousand") for w in words):
+        return None
+    total, cur = 0.0, 0.0
+    for k, w in enumerate(words):
+        if w == "hundred":
+            cur = (cur or 1) * 100
+        elif w == "thousand":
+            total += (cur or 1) * 1000
+            cur = 0
+        else:
+            v = NUM_VALUE[w]
+            if cur and cur < 10 and v >= 10 and k > 0 and words[k - 1] not in ("hundred", "thousand"):
+                cur = cur * 100 + v  # "two fifty" = 250
+            else:
+                cur += v
+    return total + cur
+
+
+_CHG = [re.compile(r"\bfrom\s+(?P<x>%s)\s*[a-z]*\s+to\s+(?P<y>%s)" % (NUMBER_RX, NUMBER_RX)),
+        re.compile(r"(?<![\w.])(?P<x>%s)\s*(?:mg|mcg|g|ml|units?)?\s+to\s+(?P<y>%s)" % (NUMBER_RX, NUMBER_RX)),
+        re.compile(r"\b(?:reduce|increase|decrease|raise|lower|cut|drop|bring|change|step|go|put)\w*\s+(?:[a-z]+\s+){0,4}?to\s+(?P<y>%s)" % NUMBER_RX),
+        re.compile(r"\bmake\s+it\s+(?P<y>%s)" % NUMBER_RX)]
+
+
+def change_dose_xy(quote):
+    """(old, new) dose numbers stated in a change_dose quote, or None when the quote does not say it."""
+    q = fold(quote)
+    for rx in _CHG:
+        m = rx.search(q)
+        if m:
+            x = parse_number(m.group("x")) if "x" in m.groupdict() and m.group("x") else None
+            return x, parse_number(m.group("y"))
+    return None
+
+
+def negator_tail(quote):
+    """The trailing negator words of a segment ('... and do not' -> 'do not'), or ''."""
+    w = _WORD.findall(_norm_ws(quote))
+    if w and (w[-1] in NEGATORS or w[-1].endswith(NEG_SUFFIX)):
+        return " ".join(w[-2:]) if len(w) >= 2 and w[-2] == "do" and w[-1] == "not" else w[-1]
+    return ""
+
+
 def unresolved_after_verbs(text):
     """Words that follow an order verb ('start X', 'take X') and are neither English nor clinical vocabulary."""
     a = [w for w in re.findall(r"[a-z]+", fold(text))]
@@ -428,7 +504,7 @@ def unresolved_after_verbs(text):
             for x in a[i + 1:i + 6]:
                 if x in SKIP_WORDS:
                     continue
-                if x not in EN_WORDS:
+                if not in_vocab(x):
                     out.append((w, x))
                 break
     return out
@@ -509,6 +585,21 @@ def check(a):
     def cap_td(sid):
         """An order may stand only on an order-capable span of the treating doctor's label."""
         return sid in spans and spans[sid]["order_capable"] and role_of(sid) == TD
+
+    def copy_quotes(cited):
+        """Cited quotes; when the same speaker's previous segment ends within 2.0 s on a negator, that negator is
+        joined in front, so a copy that leaves it out fails (R11)."""
+        out = []
+        for sid in cited:
+            if sid not in spans:
+                continue
+            s = spans[sid]
+            i = next(k for k, x in enumerate(order) if x["span_id"] == sid)
+            prev = next((x for x in reversed(order[:i]) if x["label"] == s["label"]), None)
+            tail = negator_tail(prev["quote_en"]) if prev else ""
+            gap = (parse_dt(s["t0"]) - parse_dt(prev["t1"])).total_seconds() if prev else 99
+            out.append((tail + " " + s["quote_en"]) if tail and gap <= 2.0 else s["quote_en"])
+        return out
 
     def names_in_turn(sid, keys):
         """The span, or an earlier span of the same speaker turn, names one of keys."""
@@ -637,7 +728,7 @@ def check(a):
     for pr in prompts:
         if pr["kind"] == "medicine" and notes_only and "notes_only" not in pr["doctor_confirm_reason"]:
             E("V7 %s: medicine prompt lacks the notes_only reason" % pr["prompt_id"])
-    med_names = list(_MN["generics"]) + [x for e in BRAND_MAP for x in [e["brand"], e["key"], e["generic"]] + e["components"]]
+    med_names = list(_MN["generics"]) + sorted(DRUG_DENY) + [x for e in BRAND_MAP for x in [e["brand"], e["key"], e["generic"]] + e["components"]]
     med_names += [" ".join(ph) for ph in SALT_PHRASES] + [x for pair in LASA_PAIRS for x in pair]
     med_names += [n for pr in prompts if pr.get("drug") for n in drug_names(pr["drug"])]
     med_names += [n for p in prov if p["kind"] == "medicine" for n in (p.get("names") or [])]
@@ -684,6 +775,16 @@ def check(a):
                     E("V8 %s.%s: value is not heard on an order-capable doctor span that names the drug" % (pr["prompt_id"], name))
             if at["support"] == "not_stated" and at["value"] is not None:
                 E("V8 %s.%s: value present but support=not_stated" % (pr["prompt_id"], name))
+        dz = pr["attributes"]["dose"]
+        if pr["action"] == "change_dose" and dz["support"] == "supported" and dz["value"] is not None:
+            v = parse_number((re.findall(NUMBER_RX, fold(dz["value"])) or [""])[0])
+            xys = [xy for xy in (change_dose_xy(spans[s]["quote_en"]) for s in dz["cited_spans"] if cap_td(s)) if xy and xy[1] is not None]
+            if not xys:
+                E("V8 %s.dose: the quote does not state the new dose (from X to Y / to Y / make it Y); the line must be 'dose — confirm'" % pr["prompt_id"])
+            elif any(x is not None and v == x for x, _ in xys):
+                E("V8 %s.dose: shows the old dose %s, not the new dose" % (pr["prompt_id"], dz["value"]))
+            elif all(v != y for _, y in xys):
+                E("V8 %s.dose: %s is not the new dose stated (%s)" % (pr["prompt_id"], dz["value"], xys[0][1]))
     for w in a["doctor_words"]:
         if not any(cap_td(s) for s in w["cited_spans"]):
             E("V8 %s: doctor_words cites no order-capable span of the treating doctor" % w["instruction_id"])
@@ -891,16 +992,25 @@ def check(a):
             ge = brand_entry(d["generic"])
             if ge and name_key(ge["generic"]) != name_key(d["generic"]):
                 E("V14 %s: the generic field holds the brand '%s', not a generic" % (pid, d["generic"]))
+        be = brand_entry(d["brand_recognised"]) if d["brand_recognised"] else None
+        if d["brand_recognised"]:
+            if be and be["status"] == "attested":
+                if d["generic"] != be["generic"] or (d["components"] and d["components"] != be["components"]):
+                    E("V14 %s: generic %s is not the attested generic %s of brand %s" % (pid, d["generic"], be["generic"], d["brand_recognised"]))
+            elif d["generic"] is not None:
+                E("V14 %s: brand %s has no attested brand-map entry, so its generic must be null (no inferred generic)" % (pid, d["brand_recognised"]))
+        elif d["generic"] and brand_entry(d["spoken"]):
+            E("V14 %s: spoken '%s' is a brand; it must be recorded as the brand, not hidden behind a generic" % (pid, d["spoken"]))
+        if d["generic"] is None and not {"combination_unexpanded", "brand_unmapped"} & set(pr["doctor_confirm_reason"]):
+            E("V14 %s: generic is null without combination_unexpanded or brand_unmapped" % pid)
         if d["brand_recognised"] and not ({name_key(d["brand_recognised"])} | ({e["key"]} if e else set())) & runs(d["spoken"]):
             E("V14 %s: brand '%s' is shown but the doctor did not say it (spoken '%s')" % (pid, d["brand_recognised"], d["spoken"]))
         if d["components"]:
             if not e or e["status"] != "attested" or e["components"] != d["components"]:
                 E("V14 %s: combination expanded without an attested entry in the curated map" % pid)
         elif e and e["components"] and e["status"] != "attested":
-            if d["generic"] is not None or "combination_unexpanded" not in pr["doctor_confirm_reason"]:
+            if d["generic"] is not None:
                 E("V14 %s: unattested combination brand must stay combination_unexpanded with no generic" % pid)
-        if d["generic"] is None and "combination_unexpanded" not in pr["doctor_confirm_reason"]:
-            E("V14 %s: generic is null without combination_unexpanded" % pid)
         if d["generic"] is None and (d["lasa_risk"]["pair_with"] is None or "lasa" not in pr["doctor_confirm_reason"]):
             E("V14 %s: generic is null, so the drug must carry lasa_risk and the lasa reason" % pid)
         mapped = [e["generic"]] + e["components"] if e else []
@@ -946,23 +1056,23 @@ def check(a):
 
     # V17 copied text: doctor_words, advice items and red flags are contiguous substrings of a cited quote, negators kept
     for w in a["doctor_words"]:
-        why = copied_from(w["text_en"], [spans[s]["quote_en"] for s in w["cited_spans"] if s in spans])
+        why = copied_from(w["text_en"], copy_quotes(w["cited_spans"]))
         if why:
             E("V17 %s: text_en %s" % (w["instruction_id"], why))
     for i, f in enumerate(rfs):
-        why = copied_from(f["text_en"], [spans[s]["quote_en"] for s in f["cited_spans"] if s in spans], whole_sentences=True)
+        why = copied_from(f["text_en"], copy_quotes(f["cited_spans"]), whole_sentences=True)
         if why:
             E("V17 red flag %d: %s" % (i, why))
         if not ACTION_WORDS & set(re.findall(r"[a-z]+", fold(f["text_en"]))):
             E("V17 red flag %d has no action clause (go, come, call, return ...)" % i)
-    adv_quotes = [spans[s]["quote_en"] for w in a["doctor_words"] if w["final_position"] and w["category"] in ADVICE_CATS
-                  for s in w["cited_spans"] if s in spans]
+    adv_quotes = [q for w in a["doctor_words"] if w["final_position"] and w["category"] in ADVICE_CATS for q in copy_quotes(w["cited_spans"])]
     for x in rest:
         why = copied_from(x.rstrip(";"), adv_quotes)
         if why:
             E("V17 advice item '%s': %s" % (x[:50], why))
 
     # V18 dose patterns and medicine-like mentions: no regimen text and no unresolved drug-like word in posted text
+    prompt_toks = {x for pr in prompts for n in ((drug_names(pr["drug"]) if pr.get("drug") else []) + [pr.get("name") or ""]) for x in alpha_toks(n)}
     for path, s in gx_strings:
         if path.startswith("/medicines/"):
             continue
@@ -970,6 +1080,11 @@ def check(a):
             E("V18 gp_extraction%s carries a dose pattern (%s) where no medicine may stand" % (path, pid))
         if notes_only and FORM_WORDS & set(re.findall(r"[a-z]+", fold(s))) - {"inhaler"}:
             E("V18 gp_extraction%s names a dosage form (tablet, syrup ...): a medicine-like mention" % path)
+        if notes_only:
+            cond = bool(CONDITION_PATHS.match(path))
+            for w in sorted({x for x in alpha_toks(s) if len(x) >= 3 and not in_vocab(x) and x not in prompt_toks
+                             and not (cond and qualified_by_condition(s, x))}):
+                E("V18 gp_extraction%s: '%s' is neither vocabulary nor a listed prompt's name (a possible unlisted drug)" % (path, w))
         if path in ("/plan_of_management/management_plan", "/general_advice", "/follow_up/follow_up_instructions"):
             for verb, word in unresolved_after_verbs(s):
                 E("V18 gp_extraction%s: '%s %s' is a medicine-like word that resolves to no listed prompt" % (path, verb, word))

@@ -1181,7 +1181,8 @@
               "combination_unexpanded",
               "patient_reported",
               "affirmed_from_patient",
-              "not_given"
+              "not_given",
+              "brand_unmapped"
             ]
           }
         }

@@ -1,6 +1,6 @@
 # HANDOFF-INDEX: eta.freescript.v1.0
 
-Bundle: `handoff/eta-freescript-v1.0/` (190 files including this index). Schema version `eta.freescript.v1.0`, superseding `eta.freescript.v0.1` (29 Sep). Built 17 Oct 2026, fix round 1. Every artifact in the bundle is invented; no real patient, doctor, room, encounter or Pulse id appears.
+Bundle: `handoff/eta-freescript-v1.0/` (222 files including this index). Schema version `eta.freescript.v1.0`, superseding `eta.freescript.v0.1` (29 Sep). Built 17 Oct 2026, fix round 1. Every artifact in the bundle is invented; no real patient, doctor, room, encounter or Pulse id appears.
 
 ## Files and sha256
 
@@ -8,20 +8,24 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 
 | File | Bytes | sha256 |
 |---|---|---|
-| README-FOR-PULSE.md | 19491 | `8c7d4efcf1dbfa5171af9a4ca7fbaaa11e9f7e2d3f9067681ed27fe398935438` |
-| CHANGELOG-v0.1-to-v1.0.md | 6531 | `2d05479ea4ad258e8b23ceaaf0ba073641c3ed26ccc4f766e8bbec19006c961a` |
-| eta-freescript-artifact.v1.0.schema.json | 41391 | `4622bca0513d959aaeacbb015200207278d67259e0dcf0dd0c2c5dcbc30829b8` |
-| validate_artifact.py | 51143 | `85761c7791b312ab577e8738cf867e4a930ca897557fb91ff08e7fa221eaefcb` |
-| run_checks.sh | 1521 | `65e6892e29e8ba4b427a2457dab5966c9feaef15bd232f8856c4d94d9e56ec5e` |
+| README-FOR-PULSE.md | 21195 | `07417ac3471c0c212b0aaa8b99939f817c06d1a755974deae21a28921e24953c` |
+| CHANGELOG-v0.1-to-v1.0.md | 6705 | `21027b9369472ab277b9c50eb70cd8d8d9c8e5d06077ffe37c177a5fc4cd0bfe` |
+| eta-freescript-artifact.v1.0.schema.json | 41423 | `b703a91f39f3419f3f239635885433ea6cec633ccdbf646f42d45557f49c41da` |
+| validate_artifact.py | 57704 | `e234c82e2e3facc6653c8c94efd9d60930536a67c90498c017c3d6d03116a4bb` |
+| run_checks.sh | 1635 | `8647aa12253378ad53a787d0746cda36c687012f64f70dda3ad626dbb4002b9e` |
+| data/SCOWL-LICENSE.txt | 22422 | `01214688ec0cee287e2cfd480f0948d21600edcccc128ed4d1d0e004357ff9ad` |
 | data/brand_generic_min.json | 5562 | `a28d4df0c9f669223e01a7666d0698c34d6cf8c78343e172b0ca7b254705cc78` |
+| data/clinical_vocab_extra.json | 10654 | `47a97e8f0ef24eae74f9145f2f5a01ca24cc8fd6239906760a10fd8b07855505` |
 | data/copy_rules.json | 762 | `62c05906874623e6f7a9c8f21676113648c637435fd8ee6c54fed4d5c83b451c` |
-| data/dose_patterns.json | 2672 | `2eef33dc08da3e45fd8916637615297515b4e0d9696b3dd008828b77244107fa` |
-| data/english_words_min.json | 113835 | `61440938ae9bcc8e056c23cb9c9888430f370293704adf9ae9059a3a14eb3747` |
+| data/dose_patterns.json | 4490 | `594f3dcb4f1ab518fb1181b4b695fb429de4a8602def0246c0c9066b9f8fff66` |
+| data/drug_denylist.json | 6746 | `d12875aab3843dc903295b6d92c3441f4d4dcaccef6ca5cbb373a3844c0c62f5` |
+| data/english_words_min.json | 113835 | `d7f62794e82a7a579e86cdbb7fa2ee01c7680f17a190d626b4ad7f5cdebad190` |
 | data/frx_n1_phrases.json | 3317 | `87782d85b998bfd3142670184d7ef3cc70554c78b0219a19c81429d8d0f1347f` |
 | data/lasa_pairs.json | 845 | `bc482d8242689f7d30ba64fb686f51a1f355406442ddefb3eaab9bbc81737c5a` |
 | data/medicine_names_min.json | 2510 | `7ef17d5a0bf6c54e2fcfa09ec94076ad78593477284c6b448667004f6ae38089` |
 | data/qualifier_words.json | 1594 | `657581f30e16125af4d37944ff08880681b0cfe67c46d1c9eb185e2f04e49a7d` |
 | data/salt_drugs.json | 658 | `7bd8aa76c9c6d5565fd6d7b1122d9526ba9130f4f1e82605e524a318c8cb9873` |
+| data/scowl_words.json | 3381936 | `93357555d2e9403bf5641d3615395a228d4de8816f55b1908b45ac6911be7681` |
 | examples/build_examples.py | 34627 | `a8d7e99b008c5b0b17319596544e15af286223e19f4d7befe7b60fb8f6d7483f` |
 | examples/ex1-fever-patient-own-drug.json | 16674 | `ba442288aa179318ee125d81f04de6612d310db47b95c5544e34858acd9f9d93` |
 | examples/ex2-negation-no-antibiotic-no-xray.json | 18185 | `93c3de13991cb5bdba550e5d9935bac6dcc19b35a165e7d1b3074a026771d214` |
@@ -30,8 +34,8 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 | examples/ex5-staff-voice-voiceprint-conflict.json | 14245 | `0f38d3dce7235eb3fb1b0a3d7cbdee4eba9db3fad8b4422d074dcecf4c6042fb` |
 | examples/ex6-combination-lasa-red-flag.json | 19687 | `3dc74fbfc35d1a4e261a449b9a1178cd318c4bf7ad18249fbf7368a97ab942bc` |
 | examples/ex7-withheld-no-role-track.json | 2614 | `29a3233e6c3641ac0dbae2da708d92f46fc321b5bba9110acecbef897bf5dbbd` |
-| tests/build_mutants.py | 36106 | `1e71575ec35489e073072a1345e6ec2bdd42133ddaf7169a9ac3ff85f6d9cbbf` |
-| tests/expected.tsv | 6493 | `e87f9bf684de5f4e2a36ff9b5f88a20293bf64bc1300cc6a33938a8f7f603c0a` |
+| tests/build_mutants.py | 40444 | `60d4fa5ac81bf03dc2133eb0d9726fba4ee25095f9d526e57fd83bdf03a55b0c` |
+| tests/expected.tsv | 7496 | `c0a35aa15eb5136523817f863f0cd85e78f6ed6122451eb904ce10a8a7718f0e` |
 | tests/mutants/M1_control_condition_named.json | 25415 | `be3994d0891ba3231da6512d2e096c426eda4c4d05c52062d4db2cdf57c31c69` |
 | tests/mutants/M1_heading_injection_line_break.json | 16738 | `87e8be5acc7c4d885c86cd488e13bb00af8b20ae3f0258cc3d21604acf45a808` |
 | tests/mutants/M1_held_drug_in_diagnosis.json | 25421 | `2b355fa5a7749b383e025a66701310e0e7fcc6a982ab60ac3ad451b956f48eb0` |
@@ -81,6 +85,30 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 | tests/mutants/M9_whole_value_not_known.json | 16606 | `0a283c0855a2522e370148044727b526085a88b12090d53698d54ad69d818b08` |
 | tests/mutants/M9_whole_value_pending.json | 16602 | `c75cc95649f4533cb4b2abbdc781df07190172c6a5b4fd576cfbe53223cf88ae` |
 | tests/mutants/M9_whole_value_unknown.json | 16602 | `fe323e950a68c6d1cd2a9e83917a9608c84a9c51a906e53a336b71f03082f9df` |
+| tests/mutants/R10_attested_brand_wrong_generic.json | 16504 | `5d37cb409f5a6e56a70b6236f3c168be24711e7d1b206ddeed0caa4bb0bf0a64` |
+| tests/mutants/R10_control_unmapped_brand_confirm_generic.json | 16556 | `0e6a3449ce9ead0b8050f99cb007640e90f8ad17fa72b39404a2e205758b9cd3` |
+| tests/mutants/R10_unattested_brand_given_generic.json | 16504 | `13b2152e2575cecb3f8d63296d81110a2eedd16f4fc55d516e5f602c8eb2906d` |
+| tests/mutants/R10_unmapped_brand_inferred_generic.json | 16504 | `40fbbfa12b6a49a0ed453feb6f237dc8968e5ce0602b782d84fb6026f893b0d2` |
+| tests/mutants/R11_control_gap_over_two_seconds.json | 25375 | `aafe298a7d1015db65440ebdb6ff785bac8067e600c8675f1a7998e5b6530c53` |
+| tests/mutants/R11_control_split_negator_kept.json | 25396 | `4ef41466bb0d093c82e7c11a3e9cafb323e8743b40c9ad28808632f2d8fa5d44` |
+| tests/mutants/R11_red_flag_split_negator_dropped.json | 19711 | `d6c13ef7a0e7a7a78b3e625b7edcf278703b349dad0bb6b80ad4d8372ce2dede` |
+| tests/mutants/R11_split_negator_dropped.json | 25375 | `eeafe80a14ae021197192345904336d73babd96f53beb25f9e8cc507bde0d741` |
+| tests/mutants/R12_control_counts_without_units.json | 16676 | `e11c59d8a93f2daea46b3b26c5bd8b1370af6877749a599a3c37fe936ddc334d` |
+| tests/mutants/R12_hindi_number_unit.json | 25417 | `648774bba8e64ee6e928a6797e91ddae793cd927c7e605280eaf683a3f89f723` |
+| tests/mutants/R12_kannada_number_unit.json | 25427 | `6e1cf137ffc4f0b0157a2abbd46244e814d99425753c3f301407d96394dafe04` |
+| tests/mutants/R12_spelled_units_in_plan.json | 25465 | `a24244c3035d5cfef1a159133a932bce94aece86f17234fa2b7b798143ae7f61` |
+| tests/mutants/R12_two_fifty_mg_in_follow_up.json | 16662 | `deadb1f5c616c0191157e75c9bace31d696ee36d77189ea8f3092a36e2658271` |
+| tests/mutants/R13_brand_course_in_plan.json | 18235 | `88cc0406bd9f015f34d6824f2841bb163b2a7cf72bb4517fa1e581f5cae77fd9` |
+| tests/mutants/R13_brand_no_verb_thyronorm.json | 25433 | `14082ec78165333376ca6f06f659e19f863f0fa43dab756f6c194a509e815e90` |
+| tests/mutants/R13_brand_with_generic_as_before.json | 25439 | `e1adbb482715318f3e06cd83ae738bda6abea41a1a1dc0783f9b221c858bcaf0` |
+| tests/mutants/R13_control_ordinary_plan.json | 25461 | `127a78d88e5b1cdff95d719400ea25f152228a1c6d01aede21807f98b59c4e42` |
+| tests/mutants/R13_took_brand_in_symptoms.json | 16718 | `12e242ca066d2dfe42f83ad65b84068efc0ef2d605135a806090ec8324985dd1` |
+| tests/mutants/R13_unlisted_brand_of_stopped_drug.json | 25423 | `44831a5362c7e01e8baf0557b6d354c8dec1e6f4f442f576354927a654673897` |
+| tests/mutants/R14_control_from_to_new_dose.json | 25395 | `f5ce5b5477e846d6d54a40fd32c380c3fdce9239c86e830d5882bd40651b82ec` |
+| tests/mutants/R14_control_number_words.json | 25403 | `ca562ab156d53be811434c81f8dfca2e24b91c3d5f7704916b04a73ee2863bef` |
+| tests/mutants/R14_make_it_mismatch.json | 25389 | `a196f8d86f959818ad95a8d41a6580afea836459d262538f46b82c643aeedd26` |
+| tests/mutants/R14_new_dose_undecidable.json | 25369 | `f14ee1b5114d30d293228ac649a3a058e8b40af3caafb0983f50bf14cab2454d` |
+| tests/mutants/R14_old_dose_shown_from_to.json | 25399 | `a091cc1ca86fd84cc51b250898f01e4f958155f1f84fe2b510a0032d647428c9` |
 | tests/mutants/R1_control_case_only.json | 16674 | `d53fe3f5836e0fe91f62a7edbeb00dc28643e56f8a70e2f504e18f2da40d3d76` |
 | tests/mutants/R1_control_contiguous_part.json | 17634 | `a821878622889b01aed2da21a097cb2de2cd02974429666cd1448c067e7b5415` |
 | tests/mutants/R1_negator_dropped.json | 25365 | `c38eaac7a58df8a9db557b20303cf308bd2d45fcadbf8c3348b896bad67ba9b4` |
@@ -196,7 +224,11 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 | tests/mutants/V9_plan_line_missing.json | 25279 | `b91ef13a8a6009fa29088746e4b9bab16a54519d40b7cad64a5598da9f2cc4a9` |
 | tests/mutants/V9_split_spelling_of_stopped_drug.json | 25433 | `a28d3fdd939406458b56441b50d1cc522a2e02f48f4d25e1564b4990a8c5a5f7` |
 | tests/mutants/V9_stopped_drug_named_in_plan.json | 25419 | `5567cd5d517b7b06bda831827f131a11303b0a3fe969caec150e578adb18598a` |
-| tests/run_mutants.py | 1399 | `5064a343b6570f3024c8110f005fdb0378115f365dc2705ceeb1da8c985aaf86` |
+| tests/run_mutants.py | 2071 | `1ad0f1dd6923c44c237993127a4332f5b80fc9b964b2354425221c38a3e3eca5` |
+| tests/vocab/check_vocab.py | 2018 | `4912024ffc7b9a7f67a1eddcdf8d7d01478716eeaba038ecb02b8660f92e456f` |
+| tests/vocab/clean_notes.json | 7811 | `f691fde32a76afcb616100931bd60f50bb4ac40efaff29bfad45d627f9076fba` |
+| tests/vocab/coverage_words.json | 1748 | `b372516a93806180eb3059438c16065a731a9fe751bc18e7579a1bc60a490703` |
+| tests/vocab/heldout_notes.json | 8095 | `8ad278d545d3d2262c2bf16f0fd8a4a79510ce0a709074bf0a7cdcbe64986934` |
 
 ## Excluded
 
@@ -212,21 +244,21 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 
 ## Privacy sweep
 
-Twelve patterns were run over every file in this folder, including all 164 mutants. A hit passes only if it is one of the allowed placeholders below; the sweep found 0 unexplained hits.
+Twelve patterns were run over every file in this folder, including all 188 mutants. A hit passes only if it is one of the allowed placeholders below. `data/SCOWL-LICENSE.txt` is not swept: it is the third-party word list's verbatim copyright notice, with its authors' names and contacts, which the licence requires; the sweep found 0 unexplained hits.
 
 | Sweep | What it looks for | Hits | Explanation |
 |---|---|---|---|
 | S1 | email addresses | 0 | none |
 | S2 | Indian phone numbers | 0 | none |
-| S3 | UUIDs | 171 | only the seven invented ids `00000000-0000-4000-8000-00000000000N` (N = 1 to 7), one per example and per mutant |
-| S4 | runs of 10+ digits | 686 | only all-zero runs: the zero UUID tails and the all-zero 64-digit placeholder hashes |
-| S5 | hex ids of 20+ characters | 513 | only the all-zero placeholder hashes (`code_sha256`, `prompt_sha256s`) |
+| S3 | UUIDs | 195 | only the seven invented ids `00000000-0000-4000-8000-00000000000N` (N = 1 to 7), one per example and per mutant |
+| S4 | runs of 10+ digits | 782 | only all-zero runs: the zero UUID tails and the all-zero 64-digit placeholder hashes |
+| S5 | hex ids of 20+ characters | 585 | only the all-zero placeholder hashes (`code_sha256`, `prompt_sha256s`) |
 | S6 | document-id shapes (mixed case and digits, 20 to 28 characters) | 0 | none |
 | S7 | `*_uid` fields with a value | 0 | none; every uid is null |
 | S8 | Aadhaar-shaped numbers | 0 | none |
 | S9 | URLs | 2 | only the schema's `$schema` (json-schema.org) and `$id` (a non-resolving namespace id) |
 | S10 | an honorific followed by a name | 0 | none |
-| S11 | real model and vendor names | 0 | none; the word list is kept by ETA |
-| S12 | internal agent, person and branch names | 0 | none; the word list is kept by ETA |
+| S11 | real model and vendor names | 0 | none in prose; the two dictionary word lists (`data/scowl_words.json`, `data/english_words_min.json`) are not swept for S11/S12 because they hold ordinary English words; the word list is kept by ETA |
+| S12 | internal agent, person and branch names | 0 | none in prose (dictionary word lists exempt, as for S11); the word list is kept by ETA |
 
 Speakers are `speaker_N`, rooms are `EXAMPLE-ROOM` and encounters are `EXAMPLE-ENC-N`.

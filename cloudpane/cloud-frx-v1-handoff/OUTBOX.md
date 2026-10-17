@@ -8,3 +8,4 @@
 2026-10-17 F3 fix round 2 on branch cloudpane/cloud-frx-v1-handoff/v3: R1-R8; V17 copied text, V18 dose patterns; mutants 159/159; examples 7/7; internal sweep 0 unexplained
 2026-10-17 F4 report cloudpane-reports/FRX-V1-FIX2-REPORT.md; fix commit 8bd7f503; pushing v3
 2026-10-17 F5 R9 generic-first addendum on v3: renderer+V6+V14+schema+README; mutants 164/164; index 189 files
+2026-10-17 F6 fix round 3 on branch cloudpane/cloud-frx-v1-handoff/v4: R10-R14; mutants 188/188; vocab false fails 0/7 + 0/20, held-out 3/10 and 2/10 (reported); index 221 files

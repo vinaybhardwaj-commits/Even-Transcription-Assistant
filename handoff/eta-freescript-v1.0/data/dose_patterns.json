@@ -1,11 +1,11 @@
 {
   "version": "1.0",
   "source": "ETA ruling R2 (fix round 2). Applied after NFKC to every gp_extraction string outside /medicines and every note line outside Medication.",
-  "number": "(?:\\d+(?:\\.\\d+)?|\\d+/\\d+|half|one|two|three|four|five|six|seven|eight|nine|ten)",
+  "number": "(?:\\d+(?:\\.\\d+)?|\\d+/\\d+|(?:seventeen|thirteen|fourteen|eighteen|nineteen|thousand|fifteen|sixteen|seventy|hundred|quarter|ombattu|eleven|twelve|twenty|thirty|eighty|ninety|paanch|naalku|three|seven|eight|forty|fifty|sixty|chaar|panch|eradu|mooru|hattu|zero|four|five|nine|half|teen|char|chhe|saat|aath|ondu|aidu|aaru|entu|one|two|six|ten|nau|das|elu|ek|do)(?:[\\s-]+(?:and\\s+)?(?:seventeen|thirteen|fourteen|eighteen|nineteen|thousand|fifteen|sixteen|seventy|hundred|quarter|ombattu|eleven|twelve|twenty|thirty|eighty|ninety|paanch|naalku|three|seven|eight|forty|fifty|sixty|chaar|panch|eradu|mooru|hattu|zero|four|five|nine|half|teen|char|chhe|saat|aath|ondu|aidu|aaru|entu|one|two|six|ten|nau|das|elu|ek|do))*)",
   "patterns": [
     {
       "id": "amount_unit",
-      "regex": "(?i)\\b{N}\\s*-?\\s*(?:mg|mcg|µg|ug|gm?|ml|iu|units?|tabs?|tablets?|caps?|capsules?|puffs?|drops?|sachets?)\\b(?!\\s*/)"
+      "regex": "(?i)\\b{N}(?:\\s+(?:a|an))?\\s*-?\\s*(?:mg|mcg|µg|ug|gm?|grams?|milligrams?|micrograms?|ml|millilitres?|milliliters?|iu|units?|tabs?|tablets?|caps?|capsules?|puffs?|drops?|sachets?|teaspoons?|tsp|tablespoons?|spoonfuls?|goli|goliyan|maatre|boond|hani)\\b(?!\\s*/)"
     },
     {
       "id": "frequency",
@@ -109,5 +109,68 @@
     "in",
     "by"
   ],
-  "word_frequency_note": "Word frequencies ('twice daily', 'three times a day') are not dose patterns: lifestyle advice uses them ('steam twice a day'). An unknown drug name with a word frequency and no order verb is a residual limit."
+  "word_frequency_note": "Word frequencies ('twice daily', 'three times a day') are not dose patterns: lifestyle advice uses them ('steam twice a day'). An unknown drug name with a word frequency and no order verb is a residual limit.",
+  "number_words": {
+    "en": [
+      "zero",
+      "one",
+      "two",
+      "three",
+      "four",
+      "five",
+      "six",
+      "seven",
+      "eight",
+      "nine",
+      "ten",
+      "eleven",
+      "twelve",
+      "thirteen",
+      "fourteen",
+      "fifteen",
+      "sixteen",
+      "seventeen",
+      "eighteen",
+      "nineteen",
+      "twenty",
+      "thirty",
+      "forty",
+      "fifty",
+      "sixty",
+      "seventy",
+      "eighty",
+      "ninety",
+      "hundred",
+      "thousand",
+      "half",
+      "quarter"
+    ],
+    "hi": [
+      "ek",
+      "do",
+      "teen",
+      "char",
+      "chaar",
+      "paanch",
+      "panch",
+      "chhe",
+      "saat",
+      "aath",
+      "nau",
+      "das"
+    ],
+    "kn": [
+      "ondu",
+      "eradu",
+      "mooru",
+      "naalku",
+      "aidu",
+      "aaru",
+      "elu",
+      "entu",
+      "ombattu",
+      "hattu"
+    ],
+    "note": "hi/kn: the P-SYN code-switch number words (ek, do, teen, paanch, aath; ondu, eradu, mooru, aidu, entu) and the rest of one to ten."
+  }
 }
