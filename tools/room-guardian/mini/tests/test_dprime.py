@@ -47,7 +47,7 @@ class Src:
                 raise v
             if name == "presence" and isinstance(v, list) and v and all(isinstance(x, tuple) and len(x) == 3 for x in v):
                 # shorthand (machine, heartbeat ts, encounter marker): a heartbeat row, plus an encounter_open when the marker is set
-                return {"hb": [(m, t) for m, t, _e in v], "enc": [(m, "encounter_open", t) for m, t, e in v if e], "post": []}
+                return {"hb": [(m, t, i) for i, (m, t, _e) in enumerate(v)], "enc": [(m, "encounter_open", t, i) for i, (m, t, e) in enumerate(v) if e], "post": []}
             if name == "presence" and isinstance(v, list) and not v:
                 return {"hb": [], "enc": [], "post": []}
             if name == "presence" and isinstance(v, dict) and "post" not in v and not self.strict:
@@ -357,9 +357,9 @@ class PgSources(unittest.TestCase):
 
     def test_sql_is_constant_with_bound_parameters(self):
         at = datetime.fromtimestamp(T - 3, timezone.utc)
-        self.rows = {ch.HB_SQL: [("M6", at)], ch.ENC_SQL: [("M6", "encounter_open", at)], ch.POST_SQL: [("M6", "encounter_open", at)]}
+        self.rows = {ch.HB_SQL: [("M6", at, 11)], ch.ENC_SQL: [("M6", "encounter_open", at, 12)], ch.POST_SQL: [("M6", "encounter_open", at, 12)]}
         out = ch.pg_sources(self.f)["presence"](T, ["M6"])
-        self.assertEqual(out, {"hb": [("M6", T - 3)], "enc": [("M6", "encounter_open", T - 3)], "post": [("M6", "encounter_open", T - 3)]})
+        self.assertEqual(out, {"hb": [("M6", T - 3, 11)], "enc": [("M6", "encounter_open", T - 3, 12)], "post": [("M6", "encounter_open", T - 3, 12)]})
         ex = [c for c in self.calls if c[0] == "execute" and not c[1].startswith("SET LOCAL")]; self.assertEqual([x[1] for x in ex], [ch.HB_SQL, ch.ENC_SQL, ch.POST_SQL]); self.assertEqual(ex[0][2][0], ["M6"])
         utc = timezone.utc                                                                           # I-1: the lookbacks are pinned (heartbeat 2 min, encounter events 4 h)
         self.assertEqual(ex[0][2][1], datetime.fromtimestamp(T - 120, utc)); self.assertEqual(ex[1][2][1], datetime.fromtimestamp(T - 4 * 3600, utc))
@@ -519,7 +519,7 @@ class StartDay(unittest.TestCase):
 
 class Round3(unittest.TestCase):
     def enc(self, *events, hb=(("M6", T - 5), ("M7", T - 5))):
-        return {"hb": list(hb), "enc": list(events)}
+        return {"hb": [(m, t, i) for i, (m, t) in enumerate(hb)], "enc": [(m, ev, t, i) for i, (m, ev, t) in enumerate(events)]}
 
     def hold(self, src, **kw):
         h, _, _ = mk(src, **kw); return h.hold()
@@ -595,13 +595,13 @@ class Round3(unittest.TestCase):
                 self.assertEqual(h.hold(), {"opd-6": False, "opd-7": False})
                 src.v[name] = bad; clock.adv(31)
                 for r in ROOMS: h.note_health(r, QUIET, clock())
-                if name != "presence": src.v["presence"] = {"hb": [("M6", clock() - 1), ("M7", clock() - 1)], "enc": []}
+                if name != "presence": src.v["presence"] = {"hb": [("M6", clock() - 1, 0), ("M7", clock() - 1, 1)], "enc": []}
                 else: src.v["session"] = set()
                 self.assertEqual(h.hold(clock()), {"opd-6": True, "opd-7": True})
-                src.v[name] = {"hb": [("M6", clock() + 29), ("M7", clock() + 29)], "enc": []} if name == "presence" else (set() if name == "session" else [])
+                src.v[name] = {"hb": [("M6", clock() + 29, 0), ("M7", clock() + 29, 1)], "enc": []} if name == "presence" else (set() if name == "session" else [])
                 clock.adv(31)
                 for r in ROOMS: h.note_health(r, QUIET, clock())
-                src.v["presence"] = {"hb": [("M6", clock() - 1), ("M7", clock() - 1)], "enc": []}
+                src.v["presence"] = {"hb": [("M6", clock() - 1, 0), ("M7", clock() - 1, 1)], "enc": []}
                 self.assertEqual(h.hold(clock()), {"opd-6": False, "opd-7": False})                  # and clears on the next good fetch
 
     def test_session_stale_after_a_good_fetch_is_true(self):                                         # S-b (mutant N9)
@@ -665,9 +665,9 @@ class Round3(unittest.TestCase):
         h2, _, _ = mk(PickyS()); self.assertEqual(h2.hold(), {"opd-6": False, "opd-7": True}); self.assertIn("session_down", h2.last["opd-7"][1])
 
     def test_a_malformed_row_for_one_machine_holds_that_room_only(self):
-        pres = {"hb": [("M6", T - 5), ("M7", T - 5), ("M7",)], "enc": [("M6", "encounter_close", T - 9), ("M7", "encounter_open")]}
+        pres = {"hb": [("M6", T - 5, 1), ("M7", T - 5, 2), ("M7",)], "enc": [("M6", "encounter_close", T - 9, 3), ("M7", "encounter_open")]}
         out = self.hold(Src(presence=pres)); self.assertEqual(out, {"opd-6": False, "opd-7": True})
-        pres = {"hb": [("M6", T - 5), ("M7", T - 5), 5, (), None], "enc": []}                       # rows with no readable machine are dropped, nothing breaks
+        pres = {"hb": [("M6", T - 5, 1), ("M7", T - 5, 2), 5, (), None], "enc": []}                 # rows with no readable machine are dropped, nothing breaks
         self.assertEqual(self.hold(Src(presence=pres)), {"opd-6": False, "opd-7": False})
         self.assertEqual(self.hold(Src(session={"b6", "b7", 5, None}, levels=[("b6", None), ("b7",), 3])), {"opd-6": False, "opd-7": True})    # b7's malformed level row holds only opd-7
 
@@ -689,7 +689,7 @@ class Round3(unittest.TestCase):
         self.assertEqual(h.hold(), {"opd-6": True, "opd-7": True}); self.assertIn("windows_down", h.last["opd-6"][1])
         src.v["windows"] = []; clock.adv(31)
         for r in ROOMS: h.note_health(r, QUIET, clock())
-        src.v["presence"] = {"hb": [("M6", clock() - 1), ("M7", clock() - 1)], "enc": []}
+        src.v["presence"] = {"hb": [("M6", clock() - 1, 0), ("M7", clock() - 1, 1)], "enc": []}
         self.assertEqual(h.hold(clock()), {"opd-6": False, "opd-7": False})                         # recovers on the next good read
         h.cache_s = 10 ** 9; h.data["windows"] = ([], clock() - 130)                                # stale after a good read, no refetch
         for r in ROOMS: h.note_health(r, QUIET, clock())
@@ -713,7 +713,8 @@ class Round3(unittest.TestCase):
 
 class Round4(unittest.TestCase):
     def enc(self, *events, post=(), hb=(("M6", T - 5), ("M7", T - 5), ("M7b", T - 5))):
-        return {"hb": list(hb), "enc": list(events), "post": list(post)}
+        return {"hb": [(m, t, i) for i, (m, t) in enumerate(hb)], "enc": [(m, ev, t, i) for i, (m, ev, t) in enumerate(events)],
+                "post": [(m, ev, t, i) for i, (m, ev, t) in enumerate(post)]}
 
     def hold(self, pres, rmap=MAP, **kw):
         h, _, _ = mk(Src(presence=pres), rmap=rmap, **kw); return h.hold()
@@ -766,7 +767,7 @@ class Round4(unittest.TestCase):
                 self.assertEqual(h.hold(), {"opd-6": False})
                 src.v[name] = RuntimeError("down"); clock.adv(31)
                 h.note_health("opd-6", QUIET, clock())
-                if name == "session": src.v["presence"] = {"hb": [("M6", clock() - 1)], "enc": []}
+                if name == "session": src.v["presence"] = {"hb": [("M6", clock() - 1, 0)], "enc": []}
                 else: src.v["session"] = set()
                 self.assertEqual(h.hold(clock()), {"opd-6": True})                                   # no per-room retry for one room: only the err flag holds it
 
@@ -794,7 +795,7 @@ class Round5(unittest.TestCase):
         self.assertEqual(q.replace("%s", "").count("%"), 0)                                            # no stray % that psycopg would read as a placeholder
         self.assertEqual(q.count("%s"), 2)
         # the refuter's repro at the hold level: the SQL returns the body-failed POST open as a POST event (encounter_id null, reason body_not_json); a URL close came later
-        pres = {"hb": [("M6", T - 5), ("M7", T - 5)], "enc": [("M6", "encounter_close", T - 480)], "post": [("M6", "encounter_open", T - 900)]}
+        pres = {"hb": [("M6", T - 5, 0), ("M7", T - 5, 1)], "enc": [("M6", "encounter_close", T - 480, 2)], "post": [("M6", "encounter_open", T - 900, 3)]}
         h, _, _ = mk(Src(presence=pres)); self.assertEqual(h.hold()["opd-6"], True)
         h, _, _ = mk(Src(presence=pres), post_open_overrides_url_close=False); self.assertEqual(h.hold()["opd-6"], False)
 

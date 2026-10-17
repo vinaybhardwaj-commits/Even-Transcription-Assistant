@@ -21,7 +21,7 @@ class Src:
 
 
 NOW = time.time()
-GOOD = {"presence": {"hb": [("MK1", NOW - 5)], "enc": [("MK1", "encounter_close", NOW - 400)], "post": []}, "session": set(), "levels": [], "windows": []}
+GOOD = {"presence": {"hb": [("MK1", NOW - 5, 1)], "enc": [("MK1", "encounter_close", NOW - 400, 2)], "post": []}, "session": set(), "levels": [], "windows": []}
 
 
 class Probe(unittest.TestCase):
@@ -43,7 +43,7 @@ class Probe(unittest.TestCase):
         self.assertEqual(out["errors"], [])
 
     def test_an_open_consult_and_an_open_session_show_in_the_reasons(self):
-        v = dict(GOOD, presence={"hb": [("MK1", NOW - 5)], "enc": [("MK1", "encounter_open", NOW - 30)], "post": [("MK1", "encounter_open", NOW - 30)]}, session={"rid6"},
+        v = dict(GOOD, presence={"hb": [("MK1", NOW - 5, 1)], "enc": [("MK1", "encounter_open", NOW - 30, 2)], "post": [("MK1", "encounter_open", NOW - 30, 2)]}, session={"rid6"},
                  levels=[("rid6", NOW - 10)])
         out = ch.probe(self.cfg(), sources=Src(**v), clock=lambda: NOW)["rooms"]["opd-6"]
         self.assertIn("presence_consulting", out["reasons"]); self.assertIn("session_open", out["reasons"]); self.assertIs(out["db_hold"], True)

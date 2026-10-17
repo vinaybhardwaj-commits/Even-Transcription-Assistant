@@ -43,14 +43,14 @@ class MergeKeepsPost(unittest.TestCase):                                        
         self.assertEqual(m["hb"], [("M6", 1), ("M7", 1)])
 
     def test_a_batched_fault_then_good_single_reads_still_reads_the_post_override(self):
-        pres = {"hb": [("M6", T - 5), ("M7", T - 5)], "enc": [("M6", "encounter_close", T - 480)], "post": [("M6", "encounter_open", T - 900)]}
+        pres = {"hb": [("M6", T - 5, 0), ("M7", T - 5, 1)], "enc": [("M6", "encounter_close", T - 480, 2)], "post": [("M6", "encounter_open", T - 900, 3)]}
         h, _, src = mk(self.Flaky(presence=pres)); out = h.hold()
         self.assertEqual(out, {"opd-6": True, "opd-7": False}); self.assertIn("presence_consulting", h.last["opd-6"][1])      # the refuter's repro: was False
         h, _, _ = mk(self.Flaky(presence=pres), post_open_overrides_url_close=False); self.assertEqual(h.hold(), {"opd-6": False, "opd-7": False})   # switch off: today's rule
         h, _, _ = mk(Src(presence=pres)); self.assertEqual(h.hold(), {"opd-6": True, "opd-7": False})                            # the batched path gives the same answer
 
     def test_a_reply_missing_a_batched_key_is_a_source_error(self):
-        src = Src(presence={"hb": [("M6", T - 5), ("M7", T - 5)], "enc": []}); src.strict = True
+        src = Src(presence={"hb": [("M6", T - 5, 0), ("M7", T - 5, 1)], "enc": []}); src.strict = True
         self.assertEqual(mk(src)[0].hold(), {"opd-6": True, "opd-7": True})                     # the batched reply has no `post`: down, true
         class OneShort(Src):
             def __getitem__(self, name):
@@ -58,7 +58,7 @@ class MergeKeepsPost(unittest.TestCase):                                        
                 def f(now, arg):
                     if name == "presence" and len(arg) > 1: raise RuntimeError("x")
                     if name == "presence" and "M7" in arg: return {"hb": [(a, T - 5) for a in arg], "enc": []}     # M7's single read comes back without `post`
-                    if name == "presence": return {"hb": [(a, T - 5) for a in arg], "enc": [], "post": []}
+                    if name == "presence": return {"hb": [(a, T - 5, 0) for a in arg], "enc": [], "post": []}
                     return inner(now, arg)
                 return f
         s2 = OneShort(); s2.strict = True; h, _, _ = mk(s2); self.assertEqual(h.hold(), {"opd-6": False, "opd-7": True})        # that item only: a source error for opd-7, nothing for opd-6

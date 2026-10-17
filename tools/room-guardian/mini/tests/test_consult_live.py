@@ -24,25 +24,26 @@ def iso(v):
     return datetime.fromtimestamp(v, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def presence(hb=(("M6", T - 5), ("M7", T - 5)), post=(), enc=()):
-    """A full presence source value (all three PRESENCE_KEYS): rows are (machine, event, ts_epoch) in the query's one-newest-row-per-machine shape."""
+def presence(hb=(("M6", T - 5, 0), ("M7", T - 5, 1)), post=(), enc=()):
+    """A full presence source value (all three PRESENCE_KEYS), one newest row per machine per query, each row carrying the server id:
+    hb (machine, ts_epoch, id), enc/post (machine, event, ts_epoch, id). The id — not the doctor-clock ts — is the newest across machines (refute I-2)."""
     return {"hb": list(hb), "enc": list(enc), "post": list(post)}
 
 
-def open_at(ts, m="M6"):
-    return [(m, "encounter_open", ts)]
+def open_at(ts, m="M6", i=10):
+    return [(m, "encounter_open", ts, i)]
 
 
-def close_at(ts, m="M6"):
-    return [(m, "encounter_close", ts)]
+def close_at(ts, m="M6", i=10):
+    return [(m, "encounter_close", ts, i)]
 
 
-def eopen_at(ts, m="M6"):
-    return [(m, "encounter_open", ts)]
+def eopen_at(ts, m="M6", i=10):
+    return [(m, "encounter_open", ts, i)]
 
 
-def eclose_at(ts, m="M6"):
-    return [(m, "encounter_close", ts)]
+def eclose_at(ts, m="M6", i=10):
+    return [(m, "encounter_close", ts, i)]
 
 
 def live3(src, **kw):
@@ -71,12 +72,12 @@ class SpecRuleTable(unittest.TestCase):
                          (True, "url_open", "medium", T - 30))
 
     def test_case_03_fresh_closes_are_false_high(self):
-        lv, hold, rec, _ = live3(Src(presence=presence(post=close_at(T - 30) + close_at(T - 30, "M7"))))
+        lv, hold, rec, _ = live3(Src(presence=presence(post=close_at(T - 30, "M6", 10) + close_at(T - 30, "M7", 11))))
         self.assertEqual(lv, {"opd-6": False, "opd-7": False})
         self.assertEqual(hold, {"opd-6": False, "opd-7": False})
         for r in ROOMS:
             self.assertEqual((rec[r]["consult_live"], rec[r]["source"], rec[r]["confidence"], rec[r]["event_ts"]), (False, "post_close", "high", T - 30))
-        lv, _, rec, _ = live3(Src(presence=presence(post=(), enc=eclose_at(T - 30) + eclose_at(T - 30, "M7"))))
+        lv, _, rec, _ = live3(Src(presence=presence(post=(), enc=eclose_at(T - 30, "M6", 10) + eclose_at(T - 30, "M7", 11))))
         self.assertEqual(lv, {"opd-6": False, "opd-7": False})
         for r in ROOMS:
             self.assertEqual((rec[r]["consult_live"], rec[r]["source"], rec[r]["confidence"]), (False, "url_close", "high"))
@@ -90,22 +91,38 @@ class SpecRuleTable(unittest.TestCase):
 
     def test_case_05_stale_121s_is_absent_and_120s_is_fresh(self):
         """MUTANT (a): a stale heartbeat returning false instead of absent must fail this test."""
-        lv, _, rec, _ = live3(Src(presence=presence(hb=(("M6", T - 121), ("M7", T - 5)), post=open_at(T - 30) + close_at(T - 30, "M7"))))
+        lv, _, rec, _ = live3(Src(presence=presence(hb=(("M6", T - 121, 0), ("M7", T - 5, 1)), post=open_at(T - 30, "M6", 10) + close_at(T - 30, "M7", 11))))
         self.assertEqual(lv, {"opd-7": False})                                          # opd-6 (hb 121 s old > 120 s) is ABSENT, not false
         self.assertEqual((rec["opd-6"]["consult_live"], rec["opd-6"]["source"], rec["opd-6"]["confidence"], rec["opd-6"]["hb_age_s"]),
                          (None, "presence_stale", None, T - (T - 121)))
-        lv, _, _, _ = live3(Src(presence=presence(hb=(("M6", T - 120), ("M7", T - 5)), post=open_at(T - 30))))
+        lv, _, _, _ = live3(Src(presence=presence(hb=(("M6", T - 120, 0), ("M7", T - 5, 1)), post=open_at(T - 30))))
         self.assertEqual(lv, {"opd-6": True, "opd-7": False})                           # exactly 120 s old: still fresh
 
     def test_case_06_two_machine_room_one_stale_is_absent(self):
         rmap = {"opd-7": {"machine": ["M7", "M7b"], "room_id": "b7", "slug": "s7"}}
-        lv, _, rec, _ = live3(Src(presence=presence(hb=(("M7", T - 5), ("M7b", T - 121)), post=open_at(T - 30, "M7"))), rooms=["opd-7"], rmap=rmap)
+        lv, _, rec, _ = live3(Src(presence=presence(hb=(("M7", T - 5, 0), ("M7b", T - 121, 1)), post=open_at(T - 30, "M7"))), rooms=["opd-7"], rmap=rmap)
         self.assertEqual(lv, {})                                                        # ALL machines must be fresh, else absent
         self.assertEqual((rec["opd-7"]["consult_live"], rec["opd-7"]["source"]), (None, "presence_stale"))
-        lv, _, rec, _ = live3(Src(presence=presence(hb=(("M7", T - 5), ("M7b", T - 5)), post=[("M7", "encounter_close", T - 100), ("M7b", "encounter_open", T - 50)])),
+        lv, _, rec, _ = live3(Src(presence=presence(hb=(("M7", T - 5, 0), ("M7b", T - 5, 1)), post=[("M7", "encounter_close", T - 100, 0), ("M7b", "encounter_open", T - 50, 1)])),
                               rooms=["opd-7"], rmap=rmap)
         self.assertEqual(lv, {"opd-7": True})                                           # the newest POST row across the machines decides
         self.assertEqual((rec["opd-7"]["source"], rec["opd-7"]["confidence"]), ("post_open", "high"))
+
+    def test_case_06b_newest_across_machines_is_by_server_id_not_ts(self):
+        """Spec review (3): with several machines the newest deciding row is the highest p.id (server insert order, refute I-2), NOT the max ts — a machine
+        whose clock runs fast must not read as the newest. A ts-based selection (the R2 code) must fail this test, on the POST side and the URL (enc) side."""
+        rmap = {"opd-7": {"machine": ["M7", "M6"], "room_id": "b7", "slug": "s7"}}
+        # M6's clock runs 50 s fast: its open (ts T-60) is OLDER than M7's close (ts T-10), but it was inserted later (id 200 > 100)
+        lv, _, rec, _ = live3(Src(presence=presence(hb=(("M7", T - 5, 0), ("M6", T - 5, 1)),
+                                                       post=[("M7", "encounter_close", T - 10, 100), ("M6", "encounter_open", T - 60, 200)])),
+                              rooms=["opd-7"], rmap=rmap)
+        self.assertEqual(lv, {"opd-7": True})
+        self.assertEqual((rec["opd-7"]["source"], rec["opd-7"]["event_ts"]), ("post_open", T - 60))
+        lv, _, rec, _ = live3(Src(presence=presence(hb=(("M7", T - 5, 0), ("M6", T - 5, 1)),
+                                                       enc=[("M7", "encounter_close", T - 10, 100), ("M6", "encounter_open", T - 60, 200)])),
+                              rooms=["opd-7"], rmap=rmap)
+        self.assertEqual(lv, {"opd-7": True})
+        self.assertEqual((rec["opd-7"]["source"], rec["opd-7"]["confidence"]), ("url_open", "medium"))
 
     def test_case_07_a_db_error_takes_the_whole_map(self):
         lv, hold, rec, _ = live3(Src(presence=RuntimeError("neon down")))
@@ -136,7 +153,7 @@ class SpecRuleTable(unittest.TestCase):
         self.assertEqual(len(open(p).read().splitlines()), 2)                           #ale still snapshot_stale: no new line (no change)
 
     def test_case_09_unmapped_and_malformed_are_absent_and_the_rest_still_works(self):
-        lv, _, rec, _ = live3(Src(presence=presence(post=open_at(T - 30) + open_at(T - 30, "M7"))), rmap={"opd-6": MAP["opd-6"]})
+        lv, _, rec, _ = live3(Src(presence=presence(post=open_at(T - 30, "M6", 10) + open_at(T - 30, "M7", 11))), rmap={"opd-6": MAP["opd-6"]})
         self.assertEqual(lv, {"opd-6": True})
         self.assertEqual((rec["opd-7"]["consult_live"], rec["opd-7"]["source"], rec["opd-7"]["room_id"]), (None, "unmapped", None))
         lv, _, rec, _ = live3(Src(presence=presence(post=open_at(T - 30))),
@@ -144,21 +161,48 @@ class SpecRuleTable(unittest.TestCase):
         self.assertEqual(lv, {"opd-6": True})                                           # a malformed entry is absent; the rest of the map still works
         self.assertEqual(rec["opd-7"]["source"], "unmapped")
 
+    def test_case_09b_a_machine_entry_without_a_room_id_or_a_wellformed_machine_is_unmapped(self):
+        """Spec review (2): an entry with a machine but no room_id is unmapped (as in the hold's no_mapping) — never a decision — and a machine list with a
+        non-string, an empty or a duplicate element is malformed. The R2 code decided post_open TRUE on the first three; the rest of the map still works."""
+        base = presence(post=open_at(T - 30, "M6", 10))
+        for name, entry in (("no room_id", {"machine": "M6"}),
+                            ("empty room_id", {"machine": "M6", "room_id": ""}),
+                            ("non-string machine element", {"machine": ["M6", 123], "room_id": "b7", "slug": "s7"}),
+                            ("empty-string machine element", {"machine": ["M6", ""], "room_id": "b7", "slug": "s7"}),
+                            ("duplicate machine element", {"machine": ["M6", "M6"], "room_id": "b7", "slug": "s7"}),
+                            ("machine not a string or list", {"machine": None, "room_id": "b7", "slug": "s7"})):
+            with self.subTest(name=name):
+                lv, _, rec, _ = live3(Src(presence=base), rmap={"opd-6": MAP["opd-6"], "opd-7": entry})
+                self.assertEqual(lv, {"opd-6": True})
+                self.assertEqual((rec["opd-7"]["consult_live"], rec["opd-7"]["source"]), (None, "unmapped"))
+        self.assertEqual(rec["opd-7"]["room_id"], "b7")                                 # the room_id is still named in the record when it has one
+
     def test_case_10_consul4_vs_consul4_2_is_exact_string_match(self):
         """MUTANT (b): a prefix (or normalised-loose) machine match must fail this test — it would cross-wire OPD 3 onto OPD 4's machine (the two differ
         only by the '-2' suffix)."""
         M, M2 = "EHRC-CONSUL4s-Mac-mini", "EHRC-CONSUL4s-Mac-mini-2"
         rmap = {"opd-3": {"machine": M, "room_id": "b3", "slug": "s3"}, "opd-4-ortho": {"machine": M2, "room_id": "b4", "slug": "s4"}}
-        lv, _, rec, _ = live3(Src(presence=presence(hb=((M, T - 5),), post=open_at(T - 30, M))), rooms=["opd-3", "opd-4-ortho"], rmap=rmap)
+        lv, _, rec, _ = live3(Src(presence=presence(hb=((M, T - 5, 0),), post=open_at(T - 30, M))), rooms=["opd-3", "opd-4-ortho"], rmap=rmap)
         self.assertEqual(lv, {"opd-3": True})                                           # M's fresh heartbeat and open decide opd-3 only
         self.assertEqual((rec["opd-3"]["source"], rec["opd-3"]["confidence"]), ("post_open", "high"))
         self.assertEqual((rec["opd-4-ortho"]["consult_live"], rec["opd-4-ortho"]["source"], rec["opd-4-ortho"]["hb_age_s"]),
                          (None, "presence_stale", None))                                # M2 itself has no fresh heartbeat: absent, never true
 
+    def test_case_13b_the_event_side_rows_also_match_the_machine_exactly(self):
+        """MUTANT (b, event side): a prefix machine match on the POST/ENC rows must fail this test — with BOTH machines fresh and only CONSUL4-2 open, a
+        prefix matcher wires OPD 3 onto OPD 4's open. Case 10 pins the heartbeat side; this pins the post/enc rows, where the cross-wiring actually lands."""
+        M, M2 = "EHRC-CONSUL4s-Mac-mini", "EHRC-CONSUL4s-Mac-mini-2"
+        rmap = {"opd-3": {"machine": M, "room_id": "b3", "slug": "s3"}, "opd-4-ortho": {"machine": M2, "room_id": "b4", "slug": "s4"}}
+        lv, _, rec, _ = live3(Src(presence=presence(hb=((M, T - 5, 0), (M2, T - 5, 1)), post=open_at(T - 30, M2))),
+                              rooms=["opd-3", "opd-4-ortho"], rmap=rmap)
+        self.assertEqual(lv, {"opd-3": False, "opd-4-ortho": True})                     # opd-3: both machines' hb fresh, but its own machine has NO event
+        self.assertEqual((rec["opd-3"]["consult_live"], rec["opd-3"]["source"], rec["opd-3"]["confidence"]), (False, "no_event", "medium"))
+        self.assertEqual(rec["opd-4-ortho"]["source"], "post_open")
+
     def test_case_11_an_open_4h_plus_1s_old_with_no_close_is_false_no_event(self):
         old = T - ch.OPEN_UNCLOSED_MAX_S - 1
-        lv, _, rec, _ = live3(Src(presence=presence(post=open_at(old, "M6") + open_at(old, "M7"),
-                                                     enc=[("M6", "encounter_open", old), ("M7", "encounter_open", old)])))
+        lv, _, rec, _ = live3(Src(presence=presence(post=open_at(old, "M6", 10) + open_at(old, "M7", 11),
+                                                      enc=[("M6", "encounter_open", old, 10), ("M7", "encounter_open", old, 11)])))
         self.assertEqual(lv, {"opd-6": False, "opd-7": False})                          # FALSE with source=no_event, not absent (fable fix (a))
         self.assertEqual((rec["opd-6"]["consult_live"], rec["opd-6"]["source"], rec["opd-6"]["confidence"], rec["opd-6"]["event_ts"]),
                          (False, "no_event", "medium", None))
@@ -204,7 +248,7 @@ class StatusRecordFile(unittest.TestCase):
     def test_one_line_per_room_per_change_and_the_line_shape(self):
         t = tempfile.TemporaryDirectory(); self.addCleanup(t.cleanup)
         p = os.path.join(t.name, "state", "consult_live.jsonl")
-        src = Src(presence=presence(post=open_at(T - 30, "M6") + open_at(T - 30, "M7")))
+        src = Src(presence=presence(post=open_at(T - 30, "M6", 10) + open_at(T - 30, "M7", 11)))
         clock = Clock(T)
         h = ch.ConsultHold(ROOMS, MAP, src, clock, live_state_path=p)
         h.compute(clock())
@@ -216,7 +260,7 @@ class StatusRecordFile(unittest.TestCase):
         self.assertEqual(sorted(by_room["b6"]), sorted(["room_id", "consult_live", "source", "ts", "event_ts", "hb_age_s", "confidence"]))
         clock.adv(30); h.compute(clock())                                               # a refresh with the same status: no new line
         self.assertEqual(len(open(p).read().splitlines()), 2)
-        src.v["presence"] = presence(post=close_at(T + 20, "M6") + close_at(T + 20, "M7"))
+        src.v["presence"] = presence(post=close_at(T + 20, "M6", 12) + close_at(T + 20, "M7", 13))
         clock.adv(30); h.compute(clock())
         lines = open(p).read().splitlines()
         self.assertEqual(len(lines), 4)                                                 # the change: one new line per room
@@ -269,7 +313,7 @@ class ControlLineFlags(unittest.TestCase):
         self.assertEqual(o["consult_live"], {}); self.assertEqual(o["consult_open"], {"opd-6": True, "opd-7": True})
 
     def test_false_values_reach_the_line_next_to_false_hold_values(self):
-        hold, _, _ = mk(Src(presence=presence(post=close_at(T - 30) + close_at(T - 30, "M7"))))
+        hold, _, _ = mk(Src(presence=presence(post=close_at(T - 30, "M6", 10) + close_at(T - 30, "M7", 11))))
         o = json.loads(self.sub(hold, consult_live=True).control_message())
         self.assertEqual(o["consult_live"], {"opd-6": False, "opd-7": False})
         self.assertEqual(o["consult_open"], {"opd-6": False, "opd-7": False})

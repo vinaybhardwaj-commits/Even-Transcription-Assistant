@@ -9,11 +9,17 @@
 - Files: `subscriber/consult_hold.py` (spec §2 rule table in `_room_live_rec`, record writer, 60 s bound, `heal_eligible`, build/probe), `tests/test_consult_live.py` (rewritten: 29 tests = spec §5 cases 1-13 incl. mutants a/b/c + control-line contract).
 - Wire unchanged: form 3, bools, sort_keys; flag-off byte-identical to base (golden strings); consult_open bytes unchanged (case 12, 20 scenarios).
 
+## FIX ROUND R3 (fable's ruling on bfd22d92; .bc/SPECREV-OPUS-R2.md — 2 MUST-fix + promoted SHOULD)
+- (1) T13b added: both machines fresh, only CONSUL4-2 has the open → opd-3 `false`/`no_event`, opd-4-ortho `post_open`. Event-side (post/enc) row matching is now pinned exact on machine (the hb side was already pinned by case 10; the cross-wiring lands on the event rows).
+- (2) `_live_map_entry()` (new, `_entry` unchanged): an entry with no room_id, or a machine list with a non-string/empty/duplicate element, is `unmapped` — absent, never a decision (matches the hold's no_mapping). Closes the R2 hole where a machine-but-no-room_id entry decided `post_open` TRUE.
+- (3) Newest row across a room's machines is by `p.id` (server insert order, refute I-2), not ts: `p.id` added to the SELECT of the EXISTING HB/ENC/POST_SQL (no new SQL, per spec); rows carry it end to end (pg_sources, `_clean` lengths 3/4/4, `_merge`); the hold's own decision is untouched.
+- New tests: case_06b (ts/id skew on POST and URL sides), case_09b (6 malformed-entry variants), case_13b (event-side cross-wire).
+
 ## Tests (exact summary lines)
 - Base (bffc52f7, temp worktree): `Ran 402 tests in 46.589s` / `OK (skipped=15)`.
-- Full mini suite (`tests/run.sh`: shellcheck + unittest): `Ran 431 tests in 51.252s` / `OK (skipped=15)`, exit 0. +29 vs base, 0 new failures, 0 new skips.
-- New file alone: `Ran 29 tests in 0.056s` / `OK`.
-- Mutants (spec §5.13; each applied, run, reverted — all killed): (a) stale-hb returns false: `FAILED (failures=3)`; (b) prefix machine match: `FAILED (failures=1)` — case 10, opd-4-ortho cross-wired to TRUE; (c) medium confidence heals: `FAILED (failures=1)` — case 13c.
+- R2 full mini suite (`tests/run.sh`: shellcheck + unittest): `Ran 431 tests in 51.252s` / `OK (skipped=15)`, exit 0.
+- R3 full mini suite: `Ran 434 tests in 43.954s` / `OK (skipped=15)`, exit 0. +3 vs R2, 0 new failures, 0 new skips.
+- Mutants (each applied, run, reverted — all killed): R2: stale-hb-returns-false `failures=3`; prefix match `failures=1` (case 10); medium-confidence-heals `failures=1` (case 13c). R3: ts-based selection `failures=1` (case_06b); prefix match on post/enc rows `failures=1` (case_13b); tolerant entry (R2 code) `failures=5` (case_09b subtests).
 - TS/swift/kiosk gates: not run (no such files touched).
 
 ## Assumptions

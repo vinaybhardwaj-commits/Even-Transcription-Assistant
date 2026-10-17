@@ -61,16 +61,18 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # INFERRED SQL (read-only session; %s are timestamptz / text[] parameters):
 # Presence heartbeat freshness: the newest ext event of each machine (heartbeat, idle, active, ...). DISTINCT ON, so no LIMIT can cut a machine's row (refute I-c).
 # "Newest" is by p.id (bigserial, server insert order, migration 0122), NOT p.ts: ts is the doctor machine's own clock (refute I-2). INFERRED that id is monotonic.
-HB_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.ts FROM pulse_presence_events p "
+# p.id is SELECTED (not just ordered by) so consult_live can pick the newest row ACROSS a room's machines by server insert order: the room's deciding row is the
+# highest id among all its machines' rows, never the max ts (a fast doctor clock must not read as newest, spec review 17 OCT (3)).
+HB_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.ts, p.id FROM pulse_presence_events p "
           "WHERE p.source = 'ext' AND p.machine = ANY(%s::text[]) AND p.ts > %s ORDER BY p.machine, p.id DESC")
 # The newest encounter_open / encounter_close of each machine (any source: the URL-driven and the POST-driven one both write these event names).
-ENC_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.event, p.ts FROM pulse_presence_events p "
+ENC_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.event, p.ts, p.id FROM pulse_presence_events p "
            "WHERE p.event IN ('encounter_open', 'encounter_close') AND p.machine = ANY(%s::text[]) AND p.ts > %s ORDER BY p.machine, p.id DESC")
 # The newest POST-driven encounter event of each machine: the extension writes encounter_id only on the consult start/close POST event (URL-driven ones carry null).
 # A consult start whose body did not parse carries no encounter_id but a reason 'body_<why>' (agent.js onCompleted, why from lib/body.js WHY: no_body, form_no_key,
 # raw_missing, raw_file_only, too_large, not_json, json_no_key, bad_uid), so that also counts as POST-driven. The match is token-wise, because reason can hold several
 # comma-separated tokens (e.g. 'absent_401,body_raw_missing'): the regex `(^|,)body_` matches a token that STARTS with body_, never 'nobody_x' or 'x_body_y'.
-POST_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.event, p.ts FROM pulse_presence_events p "
+POST_SQL = ("SELECT DISTINCT ON (p.machine) p.machine, p.event, p.ts, p.id FROM pulse_presence_events p "
             "WHERE p.event IN ('encounter_open', 'encounter_close') AND ((p.payload->>'encounter_id' IS NOT NULL AND p.payload->>'encounter_id' <> '') "
             "OR p.payload->>'reason' ~ '(^|,)body_') "
             "AND p.machine = ANY(%s::text[]) AND p.ts > %s ORDER BY p.machine, p.id DESC")
@@ -133,7 +135,8 @@ def _connect(path, timeout):
 
 def pg_sources(url_file=None, timeout=QUERY_TIMEOUT_S):
     """-> {"presence": f, "session": f, "levels": f, "windows": f}; each f(now, arg) returns plain Python data and raises on any fault.
-    presence(now, machine_keys) -> {"hb": [(machine, ts_epoch)], "enc": [(machine, event, ts_epoch)], "post": [(machine, event, ts_epoch)]}; session(now, room_ids) -> {room_id of an open session};
+    presence(now, machine_keys) -> {"hb": [(machine, ts_epoch, id)], "enc": [(machine, event, ts_epoch, id)], "post": [(machine, event, ts_epoch, id)]} (the id is the
+    server insert order, used by consult_live to pick the newest row across a room's machines); session(now, room_ids) -> {room_id of an open session};
     levels(now, room_ids) -> [(room_id, last_active_epoch|None)]; windows(now, None) -> [(room_slug, room_id, t_open_epoch, t_close_epoch|None)]."""
     path = url_file or DEFAULT_URL_FILE
     utc = timezone.utc
@@ -151,7 +154,7 @@ def pg_sources(url_file=None, timeout=QUERY_TIMEOUT_S):
         hb, enc, post = run((HB_SQL, (list(keys), datetime.fromtimestamp(now - MAX_AGE_S, utc))),
                             (ENC_SQL, (list(keys), datetime.fromtimestamp(now - ENC_LOOKBACK_S, utc))),
                             (POST_SQL, (list(keys), datetime.fromtimestamp(now - ENC_LOOKBACK_S, utc))))
-        return {"hb": [(r[0], _epoch(r[1])) for r in hb], "enc": [(r[0], r[1], _epoch(r[2])) for r in enc], "post": [(r[0], r[1], _epoch(r[2])) for r in post]}
+        return {"hb": [(r[0], _epoch(r[1]), r[2]) for r in hb], "enc": [(r[0], r[1], _epoch(r[2]), r[3]) for r in enc], "post": [(r[0], r[1], _epoch(r[2]), r[3]) for r in post]}
 
     def session(now, ids):
         (rows,) = run((SESSION_SQL, (list(ids), datetime.fromtimestamp(now - SESSION_LOOKBACK_S, utc))))
@@ -192,7 +195,7 @@ def _clean(name, v):
                 bad.add(x[0])
         return out
     if name == "presence":
-        return {"hb": rows(v["hb"], 2), "enc": rows(v["enc"], 3), "post": rows(v["post"], 3)}, bad
+        return {"hb": rows(v["hb"], 3), "enc": rows(v["enc"], 4), "post": rows(v["post"], 4)}, bad
     if name == "session":
         return {x for x in v if isinstance(x, str)}, bad
     if name == "levels":
@@ -210,6 +213,26 @@ def _entry(v):
     keys = [m] if isinstance(m, str) and m else [x for x in m if isinstance(x, str) and x] if isinstance(m, list) else []
     rid, slug = v.get("room_id"), v.get("slug")
     return (keys or None), (rid if isinstance(rid, str) and rid else None), (slug if isinstance(slug, str) and slug else None)
+
+
+def _live_map_entry(v):
+    """consult_live map entry -> (machine_keys, room_id), each None when the entry is unusable (spec review 17 OCT (2): malformed = absent). Stricter than the
+    hold's _entry — which tolerates the bare-string windows-slug form and silently drops non-string/empty machine list elements — because a live signal that
+    DECIDES on a malformed entry is a cross-wiring: the machine must be a non-empty string or a list of non-empty UNIQUE strings, and the room_id must be a
+    non-empty string (an entry with a machine but no room_id is unmapped, as in the hold's no_mapping). The hold's _entry is unchanged."""
+    if not isinstance(v, dict):
+        return None, None
+    rid = v.get("room_id")
+    if not (isinstance(rid, str) and rid):
+        return None, None
+    m = v.get("machine")
+    if isinstance(m, str):
+        return ([m] if m else None), rid
+    if isinstance(m, list):
+        if not m or any(not isinstance(x, str) or not x for x in m) or len(set(m)) != len(m):
+            return None, None
+        return list(m), rid
+    return None, None
 
 
 class ConsultHold:
@@ -387,12 +410,14 @@ class ConsultHold:
         close, a future open, and no event at all); null = ABSENT (unmapped / presence_stale / db_error), never true. Uses ONLY the presence source: the
         kiosk health line, the recorder session, the levels and the windows play no part. Machine match is EXACT string equality (CONSUL4 vs CONSUL4-2).
         With several machines ALL must have a fresh heartbeat; the newest deciding row across the room's machines (one newest per machine per query)
-        decides; a POST open survives a later URL close (post_override). A future ts is never affirmed."""
+        decides — the newest is the highest p.id (server insert order, refute I-2 / spec review (3)), NOT the max ts (a fast doctor clock is not the newest);
+        the entry must carry a well-formed machine and a non-empty room_id (spec review (2): malformed = absent). A POST open survives a later URL close
+        (post_override). A future ts is never affirmed."""
         if whole_fault:
             return self._absent_rec(r, "db_error")       # any DB error / timeout / stale source: the whole map is absent (source stamped per room)
-        keys, _rid, _slug = _entry(self.map.get(r))
-        if not keys:
-            return self._absent_rec(r, "unmapped")       # not mapped, or a malformed entry: absent; the other rooms are still decided
+        keys, _rid = _live_map_entry(self.map.get(r))
+        if not keys or not _rid:
+            return self._absent_rec(r, "unmapped")       # not mapped, or a malformed entry (incl. a machine with no room_id): absent; the other rooms are still decided
         if not self._item_ok("presence", keys, now):
             return self._absent_rec(r, "db_error")       # this room's presence read failed in the per-room retry
         pdata = self.data["presence"][0]
@@ -407,8 +432,8 @@ class ConsultHold:
                "hb_age_s": max(now - t for t in hb_ts.values()), "confidence": "medium"}
         posts = [x for x in pdata.get("post", []) if x[0] in keys and x[1] in ("encounter_open", "encounter_close") and _finite(x[2])]
         encs = [x for x in pdata.get("enc", []) if x[0] in keys and x[1] in ("encounter_open", "encounter_close") and _finite(x[2])]
-        lp = max(posts, key=lambda x: x[2], default=None)
-        le = max(encs, key=lambda x: x[2], default=None)
+        lp = max(posts, key=lambda x: x[3], default=None)   # highest id = server insert order (refute I-2), not the doctor-clock ts
+        le = max(encs, key=lambda x: x[3], default=None)
         if lp is not None and lp[1] == "encounter_open" and 0 <= now - lp[2] <= OPEN_UNCLOSED_MAX_S:
             rec.update(consult_live=True, source="post_open", confidence="high", event_ts=lp[2])
         elif lp is not None and lp[1] == "encounter_close":
