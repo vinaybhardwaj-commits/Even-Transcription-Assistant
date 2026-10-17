@@ -54,12 +54,12 @@ id = "env-secret-assign"
 description = "ENV-style assignment of a secret-named variable to a literal value"
 regex = '''(?m)^[ \t]*(?:export[ \t]+|ENV[ \t]+)?[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY|DATABASE_URL|DSN)[A-Z0-9_]*[ \t]*=[ \t]*\S{8,}'''
 keywords = ["secret", "token", "password", "passwd", "api_key", "private_key", "access_key", "database_url", "dsn"]
-# Reading from another variable or the process environment is not a literal.
+# Reading from another variable or the process environment, or building a regex, is not a literal secret.
 [[rules.allowlists]]
 description = "value is a reference, not a literal"
 regexTarget = "match"
 regexes = [
-  '''=[ \t]*["']?(?:\$\{?[A-Za-z_]|process\.env|os\.environ|os\.getenv|ENV\[|<[A-Za-z_ -]+>)''',
+  '''=[ \t]*["']?(?:\$\{?[A-Za-z_]|process\.env|os\.environ|os\.getenv|ENV\[|<[A-Za-z_ -]+>|re\.compile\(|(?:new[ \t]+)?RegExp\()''',
 ]
 
 [[rules]]
