@@ -9,3 +9,8 @@
 - v6 plan: docs/pdqi9/PDQI9-EVIDENCE-PLAN-v6.md (conforms to spec v6 A)
 - v6 notes: docs/pdqi9/V6-NOTES.md; R5 4/4 MUST + 5/5 SHOULD + margin ruling closed; 1 own call open (G13 LOO bar); 5 new UNVERIFIED
 - v6 pushed to cloudpane/cloud-pdqi9-v5/v6, no PR; serving model claude-opus-5-5
+- 2026-10-17 v7 start: branch cloudpane/cloud-pdqi9-v5/v7 from v6 head 03db79b; inputs delta refute (M1, S1, S2, A3 note) + 3 accepted calls; serving model claude-opus-5-5
+- v7 spec: docs/pdqi9/PDQI9-E-SPEC-v7.md (A4.1a.8 names 7 medicine attributes; S-M patient frequency/duration/route; T24-fail -> four-arm descriptive; A3.1 BCa over doctors, K_min 15, else exact + count + flag; exact minima 1,843/2,784/3,610/4,381; 3 calls recorded)
+- v7 plan: docs/pdqi9/PDQI9-EVIDENCE-PLAN-v7.md (conforms to spec v7 A)
+- v7 notes: docs/pdqi9/V7-NOTES.md; closure table 7/7 rows closed or recorded; 3,612 -> 3,610 exact minimum noted; 2 open UNVERIFIED
+- v7 pushed to cloudpane/cloud-pdqi9-v5/v7, no PR; serving model claude-opus-5-5
