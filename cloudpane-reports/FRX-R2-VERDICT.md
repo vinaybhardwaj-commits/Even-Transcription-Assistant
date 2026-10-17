@@ -60,6 +60,22 @@ LOW:
 - L3. Red-flag misses: "If he becomes drowsy, bring him to casualty immediately" (R1b misses it too), "If the pain is not better in two days, come back", and "If the fever continues, come back" (ruling 7 dropped `continues`).
 
 Mutants of my own on R2's changes (`mutants.py`, run against test_r2_fixes.py + test_r1_floors.py, -x):
-MUTANT_TABLE
+- Killed 5/12:
+  - X1 GUARD_ALIASES emptied: `test_d3_moved_drug_never_visible_in_600_runs`.
+  - X4 lone qualifier counts: `test_d5_qualifier_word_alone_goes_to_pick_drug[Calcium-…]`.
+  - X6 question check off: `test_l1_negated_and_non_clinical_never_fire`.
+  - X9 stored-note fallback off: `test_d3_stored_note_that_names_a_moved_drug_is_replaced`.
+  - X11 "d3" dropped from QUALIFIERS: `test_d5_qualifier_set_covers_the_ruling_words`.
+- SURVIVED 7/12 (412 passed under each). This is F8 below.
+  - X2 guard ignores owner names (r1_floors.py:441).
+  - X3 R1-2b single pass (:467).
+  - X5 `_NOT_A_NAME` filter off (:454).
+  - X7 red-flag cue not required (:572).
+  - X8 NEGATION "need not" dropped (:552).
+  - X10 pipeline keeps a note naming a moved drug, the reject removed (pipeline.py:195).
+  - X12 guard skips molecule brands (`BRANDS`).
+- F8 MED (test strength). Two survivors are safety paths:
+  - X10, the last-line reject of a note that still names a moved drug, is never exercised;
+  - X12 shows the BRANDS link is untested.
 
 Required to pass: F1, F2, F3, F6 and F7 to 0, F4 fixed, F5 fixed or ruled. Re-run `h3.py` and `h4.py` as the oracle.
