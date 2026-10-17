@@ -52,7 +52,13 @@ export function safeArgs(args: unknown): Record<string, unknown> {
 }
 
 /** S0.3 — why a call was not ok: the handler threw, or it answered `{error}` / `{degraded:true}`. */
-export type ErrKind = "throw" | "result_error" | null;
+export type ErrKind = "throw" | "result_error" | "refused" | null;
+
+/** OAUTH-O3: argument NAMES only (never values), sanitised and bounded, for the per-person row. */
+export function argKeys(args: unknown): string[] {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) return [];
+  return Object.keys(args as Record<string, unknown>).filter((k) => /^[A-Za-z0-9_]{1,40}$/.test(k)).slice(0, 30).sort();
+}
 
 export async function auditToolCall(input: {
   tool: string;
@@ -69,7 +75,14 @@ export async function auditToolCall(input: {
   variant?: string | null;
   /** S0.3 — 'throw' | 'result_error' | null (ok). Stored in metadata_json.err_kind. */
   errKind?: ErrKind;
-}): Promise<void> {
+  /**
+   * OAUTH-O3 — set ONLY for an OAuth person principal (spec §12). The row is then actor_type 'person', actor_id `person:<email>` (the `actor` above), and its metadata is
+   * {session_id (the token FAMILY id, never a token), arg_keys, args (SAFE_ARG_KEYS only), ok, err_kind, bytes_out, ms, client_ip}. `method` names a non-tools/call JSON-RPC method
+   * (initialize, tools/list, ...): the action is then mcp.rpc and the target is the method name, or "unknown" for a method outside the known list.
+   */
+  person?: { session_id: string; method?: string; bytes_out?: number | null };
+}): Promise<boolean> {
+  if (input.person) return auditPersonRow(input, input.person);
   const meta = { args: safeArgs(input.args), ok: input.ok, ms: input.ms, ...(input.variant ? { variant: input.variant } : {}), err_kind: input.errKind ?? null };
   try {
     await sql`
@@ -77,8 +90,43 @@ export async function auditToolCall(input: {
       VALUES ('system', ${mcpActorId(input.actor)}, 'mcp.tools/call', 'mcp_tool', ${input.tool},
               ${JSON.stringify(meta)}::jsonb, ${input.ip ?? null}::inet, ${input.userAgent ? input.userAgent.slice(0, 256) : null})
     `;
+    return true;
   } catch (e) {
     console.warn("[mcp-audit] audit_log insert failed (console fallback)", JSON.stringify({ tool: input.tool, ...meta, err: String((e as Error)?.message ?? e).slice(0, 160) }));
+    return false;
+  }
+}
+
+const KNOWN_METHOD = /^(initialize|ping|tools\/list|tools\/call|notifications\/[a-z_]{1,40}(\/[a-z_]{1,40})?|parse_error|invalid_request)$/;
+
+async function auditPersonRow(
+  input: { tool: string; args: unknown; ok: boolean; ms: number; ip?: string | null; userAgent?: string | null; actor?: string | null; variant?: string | null; errKind?: ErrKind },
+  person: { session_id: string; method?: string; bytes_out?: number | null },
+): Promise<boolean> {
+  const isCall = !person.method;
+  const meta = {
+    session_id: person.session_id,
+    arg_keys: argKeys(input.args),
+    args: safeArgs(input.args),
+    ok: input.ok,
+    err_kind: input.errKind ?? null,
+    bytes_out: person.bytes_out ?? null,
+    ms: input.ms,
+    client_ip: input.ip ?? null,
+    ...(input.variant ? { variant: input.variant } : {}),
+  };
+  // the target is never a client-chosen string: a registered tool name (the handler maps others to "unknown") or one of the known method names
+  const target = isCall ? input.tool : KNOWN_METHOD.test(person.method ?? "") ? (person.method as string) : "unknown";
+  try {
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json, ip, user_agent)
+      VALUES ('person', ${mcpActorId(input.actor)}, ${isCall ? "mcp.tools/call" : "mcp.rpc"}, ${isCall ? "mcp_tool" : "mcp_method"}, ${target},
+              ${JSON.stringify(meta)}::jsonb, ${input.ip ?? null}::inet, ${input.userAgent ? input.userAgent.slice(0, 256) : null})
+    `;
+    return true;
+  } catch (e) {
+    console.error("[mcp-audit] PERSON audit_log insert FAILED", JSON.stringify({ target, session_id: person.session_id })); // no error text: a driver error can echo row values
+    return false;
   }
 }
 
@@ -106,5 +154,67 @@ export async function auditDeniedCall(prefix: string, now: number = Date.now()):
   return true;
 }
 
+/**
+ * OAUTH-O3 (spec §12): a call with a revoked, expired, wrong-resource or inactive-person token. Action mcp.denied; actor `person:<email>` (actor_type 'person') because the token mapped to one.
+ * Reason code only in the metadata; never the token, its hash or a URL. At most one row per subject per minute (in memory per instance). Awaited by the caller, never void.
+ */
+const personDeniedLast = new Map<string, number>();
+export async function auditPersonDenied(email: string, reason: "expired" | "revoked" | "inactive" | "resource", now: number = Date.now()): Promise<boolean> {
+  const actor = `person:${email}`;
+  const last = personDeniedLast.get(actor);
+  if (last !== undefined && now - last < DENIED_AUDIT_EVERY_MS) return false;
+  personDeniedLast.set(actor, now);
+  if (personDeniedLast.size > 1000) for (const [k, t] of personDeniedLast) if (now - t >= DENIED_AUDIT_EVERY_MS) personDeniedLast.delete(k);
+  try {
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+      VALUES ('person', ${actor.slice(0, 261)}, 'mcp.denied', 'mcp_auth', 'bearer', ${JSON.stringify({ ok: false, err_kind: "denied", reason })}::jsonb)
+    `;
+  } catch (e) {
+    console.error("[mcp-audit] person-denied audit insert failed", String((e as Error)?.message ?? e).slice(0, 120));
+  }
+  return true;
+}
+
+/**
+ * OAUTH-O2 (spec §12): one audit row for a refused sign-in. actor `person:<email>` once the Google ID token has been validated, else `unknown`; action `mcp.oauth_refused`; metadata is the reason
+ * code only (never a token, a code, a Google token or an URL). At most one row per subject per minute (in memory per instance). Best-effort like every audit write.
+ */
+const refusedLast = new Map<string, number>();
+export async function auditOauthRefused(subjectEmail: string | null, reason: string, now: number = Date.now()): Promise<boolean> {
+  const email = subjectEmail && /^[^\s@]{1,64}@[^\s@]{1,190}$/.test(subjectEmail) ? subjectEmail.toLowerCase() : null;
+  const actor = email ? `person:${email}` : "unknown";
+  const code = /^[a-z0-9_]{1,40}$/.test(reason) ? reason : "other";
+  const last = refusedLast.get(actor);
+  if (last !== undefined && now - last < DENIED_AUDIT_EVERY_MS) return false;
+  refusedLast.set(actor, now);
+  if (refusedLast.size > 1000) for (const [k, t] of refusedLast) if (now - t >= DENIED_AUDIT_EVERY_MS) refusedLast.delete(k);
+  try {
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+      VALUES ('system', ${actor}, 'mcp.oauth_refused', 'mcp_auth', 'oauth', ${JSON.stringify({ ok: false, reason: code })}::jsonb)
+    `;
+  } catch (e) {
+    console.warn("[mcp-audit] oauth-refusal audit insert failed", String((e as Error)?.message ?? e).slice(0, 120));
+  }
+  return true;
+}
+
+/**
+ * R2 F2: one audit row for a sign-in the person ALLOWED on the consent page: actor `person:<email>`, action `mcp.oauth_granted`, metadata the client host (a metadata-document client) or the
+ * sha256 of the client_id (a registered one) and the redirect host. Never a code, a token or a full URL. Not rate-limited; best-effort like every audit write, but awaited.
+ */
+export async function auditOauthGranted(email: string, client: { client_host: string } | { client_sha256: string }, redirectHost: string): Promise<void> {
+  const actor = /^[^\s@]{1,64}@[^\s@]{1,190}$/.test(email) ? `person:${email.toLowerCase()}` : "unknown";
+  try {
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+      VALUES ('system', ${actor}, 'mcp.oauth_granted', 'mcp_auth', 'oauth', ${JSON.stringify({ ok: true, ...client, redirect_host: redirectHost.slice(0, 260) })}::jsonb)
+    `;
+  } catch (e) {
+    console.warn("[mcp-audit] oauth-grant audit insert failed", String((e as Error)?.message ?? e).slice(0, 120));
+  }
+}
+
 /** test seam */
-export function resetDeniedAuditForTests(): void { deniedLast.clear(); }
+export function resetDeniedAuditForTests(): void { deniedLast.clear(); refusedLast.clear(); personDeniedLast.clear(); }

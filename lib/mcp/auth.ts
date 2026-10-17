@@ -102,10 +102,12 @@ export type McpPrincipal = {
   scopes: ReadonlySet<McpScope>;
   rooms?: ReadonlySet<string>;
   tools?: ReadonlySet<string>;
+  /** OAUTH-O3: set only for an OAuth person principal. `token_id` is then `person:<email>`; session_id is the token's family id (never the token). */
+  person?: { email: string; session_id: string };
 };
 
 /** `denied` (key denylist only) is the first 8 hex of the denied token's hash, for the audit row; the response body never carries it. */
-export type McpAuthFailure = { status: 401 | 503; code: "unauthorized" | "mcp_token_not_configured"; denied?: string };
+export type McpAuthFailure = { status: 401 | 503; code: "unauthorized" | "mcp_token_not_configured" | "auth_unavailable"; denied?: string };
 
 const sha256Hex = (v: string): string => createHash("sha256").update(v).digest("hex");
 

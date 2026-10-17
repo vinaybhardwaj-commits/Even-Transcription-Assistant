@@ -22,12 +22,14 @@
  * args only; never payloads, never the request path or URL). Tool handlers are fail-safe
  * (degraded:true, not 500) — only auth is hard.
  */
+import { isIP } from "node:net";
 import { NextRequest, NextResponse } from "next/server";
 import type { McpAuthFailure, McpPrincipal } from "@/lib/mcp/auth";
 import { auditDeniedCall, auditToolCall, mcpActorId, type ErrKind } from "@/lib/mcp/audit";
 import type { McpTool, ToolArgs, ToolContext } from "@/lib/mcp/registry";
 import { ToolScopeError, ToolRoomError, ROOM_RESTRICTED_ALLOWED_TOOLS } from "@/lib/mcp/registry";
 import { CALLABLE_TOOLS } from "@/lib/mcp/surface";
+import { mcpChallengeHeader, oauthEnabled } from "@/lib/mcp/oauth/config";
 import { resolveProfile, toolsForProfile, type McpProfile } from "@/lib/mcp/profile";
 
 const SERVER_NAME = "even-scribe-mcp";
@@ -55,6 +57,9 @@ const rpcError = (id: JsonRpcId, code: number, message: string, data?: unknown):
 });
 const rpcResult = (id: JsonRpcId, result: unknown): JsonRpcResponse => ({ jsonrpc: "2.0", id, result });
 
+/** OAUTH-O3: what one JSON-RPC item did, filled by dispatch/callTool so a person principal's ONE audit row per item can be written in handleMcpRpc. */
+type CallInfo = { method?: string; tool?: string; args?: unknown; variant?: string | null; ok?: boolean; errKind?: ErrKind; bytes?: number; ms?: number };
+
 class HttpStatusError extends Error {
   constructor(public status: number, public rpc: JsonRpcResponse) {
     super(rpc.error?.message ?? "error");
@@ -75,8 +80,8 @@ function requestOrigin(req: NextRequest): string {
 function clientIp(req: NextRequest): string | null {
   const xff = req.headers.get("x-forwarded-for");
   const first = (xff ?? "").split(",")[0]?.trim() ?? "";
-  // Only pass something Postgres' inet will accept; otherwise null.
-  return /^(\d{1,3}\.){3}\d{1,3}$/.test(first) || /^[0-9a-f:]+$/i.test(first) ? first : null;
+  // Only a real IP address ever reaches the inet column (O3-FIX1 MUST-1): "1.2.3.999", "deadbeef" and ":::::" used to pass a loose regex and then fail the insert. A zone id (%eth0) is not inet either.
+  return first !== "" && !first.includes("%") && isIP(first) !== 0 ? first : null;
 }
 
 /**
@@ -92,54 +97,105 @@ export function mcpMethodNotAllowedResponse(): NextResponse {
 }
 
 /** The 401/503 the routes send on failed auth — one shape for header and path alike. */
-export function mcpAuthFailureResponse(failure: McpAuthFailure): NextResponse {
+export function mcpAuthFailureResponse(failure: McpAuthFailure, opts: { challenge?: boolean } = {}): NextResponse {
   if (failure.denied) void auditDeniedCall(failure.denied); // key denylist: one rate-limited audit row; the response below is the plain 401 (no ip or user agent: this function has no request)
-  return NextResponse.json(rpcError(null, -32000, failure.code), { status: failure.status, headers: NO_STORE });
+  // OAUTH-O1: only /api/mcp passes `challenge` (not /api/mcp/lab: lead ruling, FIX1), only a 401 carries it (denied and unknown alike: no oracle), and only with SCRIBE_MCP_OAUTH on. Body and status never change.
+  const headers: Record<string, string> = { ...NO_STORE };
+  if (opts.challenge && failure.status === 401 && oauthEnabled()) headers["www-authenticate"] = mcpChallengeHeader();
+  return NextResponse.json(rpcError(null, -32000, failure.code), { status: failure.status, headers });
 }
 
 /** Parse + dispatch one POST body for an ALREADY-AUTHORIZED principal. */
 export async function handleMcpRpc(req: NextRequest, principal: McpPrincipal, opts: { profile?: McpProfile } = {}): Promise<NextResponse> {
   // S3 — which tools/list this request gets. tools/call ignores it.
   const profile = resolveProfile(req, opts.profile);
+  const person = principal.person;
+  // OAUTH-O3 (spec §12, FIX1): a person principal writes EXACTLY ONE audit row per JSON-RPC item (or one for a body that does not parse), AWAITED BEFORE the response is sent (no after()).
+  // If the row cannot be written the client gets {code:-32003,"audit_unavailable"} instead of the result. A write tool's side effect has already run by then: that is logged loudly
+  // (tool + session_id only). A response that is already a refusal or an error stands: the refusal is not replaced by audit_unavailable (its failed row is still logged).
+  const auditItem = async (info: CallInfo, t0: number): Promise<boolean> => {
+    if (!person) return true;
+    const isCall = info.method === "tools/call" && typeof info.tool === "string";
+    const ok = await auditToolCall({
+      tool: info.tool ?? "", args: info.args, ok: info.ok ?? false, ms: info.ms ?? Date.now() - t0, ip: clientIp(req), userAgent: req.headers.get("user-agent"),
+      actor: principal.token_id, variant: info.variant ?? null, errKind: info.errKind ?? null,
+      person: { session_id: person.session_id, ...(isCall ? {} : { method: info.method ?? "invalid" }), bytes_out: info.bytes ?? null },
+    });
+    if (!ok) {
+      const scope = isCall ? TOOL_BY_NAME.get(info.tool ?? "")?.scope : undefined;
+      console.error(JSON.stringify({ mcp: "AUDIT_UNAVAILABLE", tool: isCall ? info.tool : null, method: isCall ? "tools/call" : info.method ?? null, session_id: person.session_id, side_effect_ran: Boolean(isCall && scope && scope !== "read") }));
+    }
+    return ok;
+  };
+  const auditDown = (id: JsonRpcId): JsonRpcResponse => rpcError(id, -32003, "audit_unavailable");
+  const bail = async (code: number, message: string, extra: Record<string, unknown> | undefined, method: string): Promise<NextResponse> => {
+    const res = NextResponse.json(rpcError(null, code, message, extra), { status: 200, headers: NO_STORE });
+    await auditItem({ method, ok: false, errKind: "refused" }, Date.now()); // a refusal stands even if its row fails (logged above)
+    return res;
+  };
   // 1. Parse.
   let raw: string;
   try {
     raw = await req.text();
   } catch {
-    return NextResponse.json(rpcError(null, -32700, "parse_error"), { status: 200, headers: NO_STORE });
+    return bail(-32700, "parse_error", undefined, "parse_error");
   }
   if (raw.length > MAX_BODY_BYTES) {
-    return NextResponse.json(rpcError(null, -32600, "invalid_request", { reason: "body_too_large" }), { status: 200, headers: NO_STORE });
+    return bail(-32600, "invalid_request", { reason: "body_too_large" }, "invalid_request");
   }
   let body: unknown;
   try {
     body = raw.length ? JSON.parse(raw) : null;
   } catch {
-    return NextResponse.json(rpcError(null, -32700, "parse_error"), { status: 200, headers: NO_STORE });
+    return bail(-32700, "parse_error", undefined, "parse_error");
   }
   if (body === null || typeof body !== "object") {
-    return NextResponse.json(rpcError(null, -32600, "invalid_request"), { status: 200, headers: NO_STORE });
+    return bail(-32600, "invalid_request", undefined, "invalid_request");
   }
 
   // 2. Dispatch (single or batch). Notifications (no id) produce no response.
   const requests: JsonRpcRequest[] = Array.isArray(body) ? (body as JsonRpcRequest[]) : [body as JsonRpcRequest];
   if (requests.length === 0) {
-    return NextResponse.json(rpcError(null, -32600, "invalid_request"), { status: 200, headers: NO_STORE });
+    return bail(-32600, "invalid_request", undefined, "invalid_request");
   }
   const responses: JsonRpcResponse[] = [];
   let httpStatus = 200;
+  let auditFailures = 0;
+  let replaced = 0;
   for (const r of requests) {
+    const info: CallInfo = {};
+    const t0 = Date.now();
+    let out: JsonRpcResponse | null = null;
     try {
-      const out = await dispatch(r, principal, req, profile);
-      if (out) responses.push(out);
+      out = await dispatch(r, principal, req, profile, info);
+      if (info.bytes === undefined && out) info.bytes = JSON.stringify(out).length;
+      if (info.ok === undefined) { info.ok = !out?.error; if (!info.ok) info.errKind = "refused"; }
     } catch (e) {
       if (e instanceof HttpStatusError) {
-        responses.push(e.rpc);
+        out = e.rpc;
         if (e.status > httpStatus) httpStatus = e.status;
+        info.ok = false;
+        info.errKind = "refused";
       } else {
-        responses.push(rpcError(idOf(r), -32603, "internal_error", { detail: String((e as Error)?.message ?? e).slice(0, 200) }));
+        out = rpcError(idOf(r), -32603, "internal_error", { detail: String((e as Error)?.message ?? e).slice(0, 200) });
+        info.ok = false;
+        info.errKind = "throw";
       }
     }
+    if (person) {
+      if (info.method === undefined) info.method = typeof r?.method === "string" ? r.method : "invalid";
+      const written = await auditItem(info, t0);
+      if (!written) {
+        auditFailures += 1;
+        if (!out?.error) { out = auditDown(idOf(r)); replaced += 1; } // data is never returned without its row
+      }
+    }
+    if (out) responses.push(out);
+  }
+  if (person && auditFailures > 0) {
+    // single call, or a batch in which every item came back as audit_unavailable: HTTP 503. A mixed batch stays 200 with the error on the items that failed.
+    if (replaced > 0 && (requests.length === 1 || replaced === responses.length)) httpStatus = Math.max(httpStatus, 503);
+    if (responses.length === 0) return NextResponse.json(auditDown(null), { status: 503, headers: NO_STORE }); // notification only: nothing to answer, but say the row failed
   }
   if (responses.length === 0) return new NextResponse(null, { status: 202, headers: { "cache-control": "no-store" } });
   const payload = Array.isArray(body) ? responses : responses[0];
@@ -155,7 +211,7 @@ function idOf(r: JsonRpcRequest): JsonRpcId {
   return typeof r?.id === "string" || typeof r?.id === "number" ? r.id : null;
 }
 
-async function dispatch(r: JsonRpcRequest, principal: McpPrincipal, req: NextRequest, profile: McpProfile): Promise<JsonRpcResponse | null> {
+async function dispatch(r: JsonRpcRequest, principal: McpPrincipal, req: NextRequest, profile: McpProfile, info: CallInfo): Promise<JsonRpcResponse | null> {
   const id = idOf(r);
   const isNotification = r?.id === undefined;
   if (typeof r !== "object" || r === null || r.jsonrpc !== "2.0" || typeof r.method !== "string") {
@@ -163,6 +219,7 @@ async function dispatch(r: JsonRpcRequest, principal: McpPrincipal, req: NextReq
     return rpcError(id, -32600, "invalid_request");
   }
   const method = r.method;
+  info.method = method;
   const params = (typeof r.params === "object" && r.params !== null ? r.params : {}) as Record<string, unknown>;
 
   if (method.startsWith("notifications/")) return null; // initialized, cancelled, progress — accepted, no reply
@@ -197,21 +254,23 @@ async function dispatch(r: JsonRpcRequest, principal: McpPrincipal, req: NextReq
         })),
       });
     case "tools/call":
-      return callTool(id, params, principal, req);
+      return callTool(id, params, principal, req, info);
     default:
       if (isNotification) return null;
       return rpcError(id, -32601, "method_not_found", { method });
   }
 }
 
-async function callTool(id: JsonRpcId, params: Record<string, unknown>, principal: McpPrincipal, req: NextRequest): Promise<JsonRpcResponse> {
+async function callTool(id: JsonRpcId, params: Record<string, unknown>, principal: McpPrincipal, req: NextRequest, info: CallInfo): Promise<JsonRpcResponse> {
   const name = typeof params.name === "string" ? params.name : "";
+  info.tool = TOOL_BY_NAME.has(name) ? name : "unknown"; // the row never carries a client-chosen string (O3-FIX1 LOW-2)
   if (!name) return rpcError(id, -32602, "invalid_params", { reason: "name_required" });
   const rawArgs = params.arguments;
   if (rawArgs !== undefined && (typeof rawArgs !== "object" || rawArgs === null || Array.isArray(rawArgs))) {
     return rpcError(id, -32602, "invalid_params", { reason: "arguments_must_be_object" });
   }
   const args = (rawArgs ?? {}) as ToolArgs;
+  info.args = args;
 
   const tool = TOOL_BY_NAME.get(name);
   if (!tool || !principal.scopes.has(tool.scope)) {
@@ -281,7 +340,8 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
   const errKind: ErrKind = isError ? "throw" : resultHasError ? "result_error" : null;
   const ok = !isError && !resultHasError;
   const variant = tool.memberFor?.(args) ?? null;
-  void auditToolCall({ tool: name, args, ok, ms, ip: clientIp(req), userAgent: req.headers.get("user-agent"), actor: principal.token_id, variant, errKind });
+  if (principal.person) Object.assign(info, { variant, ok, errKind, bytes: text.length, ms }); // handleMcpRpc writes the person's one row
+  else void auditToolCall({ tool: name, args, ok, ms, ip: clientIp(req), userAgent: req.headers.get("user-agent"), actor: principal.token_id, variant, errKind });
 
   // S0.4 — one structured line per tools/call for the log drain. Never args, never the request
   // path or key, never the user agent: the path-key door's URL is a secret.

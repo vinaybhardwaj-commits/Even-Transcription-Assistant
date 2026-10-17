@@ -16,6 +16,11 @@ export const READABLE_ACTIONS = [
   "install.channel_reported",
   "install.poll_write_failed",
   "mcp.tools/call",
+  "mcp.rpc",
+  "mcp.denied",
+  "mcp.oauth_refused",
+  "admin.person_grant",
+  "admin.person_revoke",
   "bench.command",
 ] as const;
 
@@ -25,6 +30,8 @@ const DEFAULT_WINDOW_MS = 24 * 60 * 60_000;
 
 export async function readRecentAudit(input: {
   action: string | null;
+  /** OAUTH-O3: exact match on actor_id (e.g. `person:<email>`), so "per user" is one call. */
+  actor?: string | null;
   since: string | null;
   limit: number;
 }): Promise<Record<string, unknown>> {
@@ -38,6 +45,7 @@ export async function readRecentAudit(input: {
       FROM audit_log
      WHERE action = ANY(${READABLE_ACTIONS as unknown as string[]})
        AND (${input.action}::text IS NULL OR action = ${input.action}::text)
+       AND (${input.actor ?? null}::text IS NULL OR actor_id = ${input.actor ?? null}::text)
        AND created_at >= ${since}::timestamptz
      ORDER BY created_at DESC
      LIMIT ${input.limit}
