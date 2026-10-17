@@ -437,10 +437,12 @@ HINDI_WORDS = {"pan", "paan", "dawa", "dawai", "goli", "chai", "dard", "bukhar",
                "haldi", "tulsi", "neem", "amla", "jeera", "ajwain", "saunf", "gud", "namak", "cheeni", "roti", "dal", "chawal",
                "subah", "shaam", "raat", "din", "abhi", "kal", "aaj", "thoda", "zyada", "bas", "theek", "accha", "haan", "nahi",
                "mat", "band", "masala", "gutka", "beedi", "desi", "ghee", "tel", "sona", "chandan", "shanti", "raja", "rani"}
-# Drug abbreviations an Indian OPD writes that no lexicon row carries ("PCM" is paracetamol). They only widen the scan.
+# Drug abbreviations and common OTC brands an Indian OPD writes that no lexicon row carries ("PCM" is paracetamol; Vicks and
+# Eno, R4 addendum 7). They only widen the scan.
 DRUG_ABBREVIATIONS = {"pcm"}
+OTC_BRANDS = {"vicks", "eno"}
 # Short brands that are everyday words (F6): such a brand posts only with its strength or a form word next to it on tape.
-SHORT_BRAND_SEED = {"pan", "mox", "dolo", "azee", "zinc"}
+SHORT_BRAND_SEED = {"pan", "mox", "dolo", "azee", "zinc", "sumo", "moov", "eno", "vicks"}  # + name-like OTC brands (addendum 7)
 # Clinical abbreviations and plain words that a lexicon row may carry but that are never a drug mention by themselves.
 _NOT_DRUG = {"sitz", "sunscreen", "saline", "bp", "hr", "rr", "spo", "cbc", "ecg", "ekg", "tsh", "esr", "crp", "lft", "kft", "rft", "rbs", "fbs", "ppbs",
              "usg", "mri", "ent", "opd", "ipd", "icu", "hba", "urine", "blood", "test", "day", "days", "week", "weeks", "month",
@@ -480,7 +482,8 @@ class _Vocab:
         # "heartburn", "ulcer" sit in lexicon rows as descriptions).
         cand = first | known | {t for t in later if _MOLECULE.search(t)}
         self.strong = ({t for t in cand if t.isalpha() and len(t) >= 3 and t not in self.plain and t not in invest
-                        and t not in _CLINICAL_WORDS and (t in known or not _CLINICAL.search(t))} | DRUG_ABBREVIATIONS)
+                        and t not in _CLINICAL_WORDS and (t in known or not _CLINICAL.search(t))} | DRUG_ABBREVIATIONS
+                       | OTC_BRANDS)
         self.everyday = SHORT_BRAND_SEED | {t for t in first if t.isalpha() and 3 <= len(t) <= 6 and t in self.plain - _NOT_DRUG}
         self.fuzzy: dict[str, set[str]] = {}
         for w in self.strong:
@@ -492,6 +495,8 @@ class _Vocab:
         """The strong drug word within one edit of `t` (6+ letters, `t` not a plain word): "paracetemol" -> paracetamol."""
         if len(t) < 6 or t in self.plain:
             return None
+        if any(t.endswith(x) and t[:-len(x)] in self.plain for x in ("s", "es", "ed", "d", "ing", "ly")):
+            return None  # an inflected plain word ("patches", "swelled") is not a misspelt drug
         cands = set()
         for d in {t} | {t[:i] + t[i + 1:] for i in range(len(t))}:
             cands |= self.fuzzy.get(d, set())
@@ -800,13 +805,35 @@ def _runs(text: str, lang: str = "en") -> set[str]:
     return set(re.findall(r"\d+", numerals(text or "", lang)))
 
 
+# R4 addendum 8: a spoken self-correction. A number said before the last cue and not again after it is retracted.
+CORRECTION = re.compile(r"\b(?:no,?\s+wait|wait,?\s+no|sorry|i\s+mean|make\s+it|actually|no,?\s+no|rather|scratch\s+that|"
+                        r"change\s+(?:it|that)\s+to|correction)\b", re.I)
+
+
+def retracted(text: str, lang: str = "en") -> set[str]:
+    """The digit runs `text` takes back: said before its last CORRECTION cue and not said after it ("from 500 to 1000, no
+    wait, keep 500" -> {"1000"}; "500, make it 1000" -> {"500"})."""
+    cues = list(CORRECTION.finditer(text or ""))
+    if not cues:
+        return set()
+    cut = cues[-1].end()
+    return _runs(text[:cues[-1].start()], lang) - _runs(text[cut:], lang)
+
+
 def dose_on_tape(m: dict, owner: dict | None) -> list[str]:
-    """R1-3. The dose fields of `m` holding a digit run (or English number word) that no evidence quote of its owner holds."""
+    """R1-3. The dose fields of `m` holding a digit run (or English number word) that no evidence quote of its owner holds, or
+    that a quote took back (retracted). Such a field is withheld whole and the drug goes to pick_drug: never the dose the
+    doctor corrected away (R4 addendum 8)."""
     have: set[str] = set()
+    gone: set[str] = set()
     for ev in (owner or {}).get("evidence") or []:
         if isinstance(ev, dict):
             have |= _runs(ev.get("quote_en") or "", "en") | _runs(ev.get("quote") or "", ev.get("lang") or "en")
-    return [f for f in DOSE_FIELDS_R1 if isinstance(m.get(f), str) and not _runs(m[f], "en") <= have]
+            gone |= retracted(ev.get("quote_en") or "", "en") | retracted(ev.get("quote") or "", ev.get("lang") or "en")
+    bad = [f for f in DOSE_FIELDS_R1 if isinstance(m.get(f), str)
+           and (not _runs(m[f], "en") <= have or _runs(m[f], "en") & gone)]
+    # the mapper can carry the strength in the name ("paracetamol 1000 mg"): a corrected-away number there moves the drug
+    return bad + [f for f in ("name", "raw_name") if isinstance(m.get(f), str) and _runs(m[f], "en") & gone]
 
 
 def r1_dose_floor(art: dict, c: dict) -> None:
@@ -816,7 +843,8 @@ def r1_dose_floor(art: dict, c: dict) -> None:
         bad = dose_on_tape(m, (_owners(art, f"/medicines/{i}") or [None])[0])
         if bad:
             for f in bad:
-                m.pop(f, None)  # the whole field, never the digit
+                if f not in ("name", "raw_name"):  # a name is never popped: the whole drug moves to pick_drug below
+                    m.pop(f, None)  # the whole field, never the digit
             c["r1_3_fields_removed"] += len(bad)
             move[i] = f"{_med_label(m)} (dose not on tape)"
     c["r1_3_moved"] += _to_pick_drug(art, move) if move else 0

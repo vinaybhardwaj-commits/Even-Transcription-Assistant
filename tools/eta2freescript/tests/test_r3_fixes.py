@@ -262,3 +262,88 @@ def test_r4_g5_y10_pipeline_rejects_a_note_that_still_names_an_unposted_drug(tmp
     llm = llm.replace("General Advice:", "General Advice: continue Azee as advised;", 1)
     lg = run_consult(c, FakeClient({"stageA": enc, "stageB": llm}), tmp_path, Options(notes_only=True))
     assert not lg["written"] and "FRX-R1 note_text names a drug that is not posted" in lg["final_errors"]
+
+
+# --- R4 addendum (newcat-orch review) ---------------------------------------------------------------------------------
+OTC = ["Benadryl", "Sumo", "Combiflam", "Crocin", "Disprin", "Volini", "Moov", "Vicks", "Zandu", "Digene", "Eno", "Gelusil"]
+
+
+@pytest.mark.parametrize("brand", OTC)
+def test_r4_7_otc_brand_is_found_and_withheld_unless_posted(brand):
+    assert drug_mentions(f"Take {brand} as advised") == [(brand.lower(),)]
+    art = hand_art(para=("patient", "Take paracetamol 500 mg twice a day."))  # nothing posted that Crocin could resolve to
+    art["gp_extraction"]["general_advice"] = f"Take {brand} as advised; Drink warm water"
+    out, c = apply_r1(art)
+    assert out["gp_extraction"]["general_advice"] == "Drink warm water" and c["r1_2b_withheld"] == 1
+
+
+def test_r4_7_a_brand_of_a_posted_drug_resolves():
+    assert unposted(hand_art(), "Take Crocin as advised") == []  # paracetamol is posted
+
+
+@pytest.mark.parametrize("brand", ["Sumo", "Moov", "Eno", "Vicks"])
+def test_r4_7_name_like_brand_needs_strength_or_form_to_post(brand):
+    assert not posts(brand, f"Take {brand} as advised.") and posts(brand, f"Take {brand} 100 mg twice a day.")
+
+
+SELF_CORRECTIONS = [  # (quote, strength the doctor ended on, strength corrected away)
+    ("Take paracetamol from 500 to 1000, no wait, keep 500, twice a day for 3 days.", "500 mg", "1000 mg"),
+    ("Take paracetamol 650 mg, sorry, 500 mg twice a day for 3 days.", "500 mg", "650 mg"),
+    ("Take paracetamol 250, I mean 500, twice a day for 3 days.", "500 mg", "250 mg"),
+    ("Take paracetamol 1000, make it 500, twice a day for 3 days.", "500 mg", "1000 mg"),
+    ("Take paracetamol 650, actually 500, twice a day for 3 days.", "500 mg", "650 mg"),
+    ("Take paracetamol 1000, no no, 500 twice a day for 3 days.", "500 mg", "1000 mg"),
+]
+
+
+@pytest.mark.parametrize("quote,final,gone", SELF_CORRECTIONS)
+def test_r4_8_self_correction_never_posts_the_corrected_dose(quote, final, gone):
+    for strength, stays in ((gone, False), (final, True)):
+        art = hand_art(para=("doctor", quote))
+        art["gp_extraction"]["medicines"][0]["strength"] = strength
+        out, _ = apply_r1(art)
+        posted = [m.get("strength") for m in out["gp_extraction"].get("medicines") or [] if m["raw_name"] == "paracetamol"]
+        assert posted == ([strength] if stays else []), (quote, strength)
+
+
+def test_r4_8_self_correction_end_to_end_never_posts_1000(tmp_path):
+    q = "Take paracetamol from 500 to 1000, no wait, keep 500, twice a day for three days."
+    for st in ("1000 mg", "500 mg"):
+        c = mk_consult([(0, 4, "0", "What is the problem?"), (5, 10, "1", "Fever for two days."), (11, 15, "0", q)],
+                       roles={"0": "doctor", "1": "patient"})
+        enc = empty_encounter(prescription=[_rx("paracetamol", 2, "twice a day", "3 days", st)])
+        lg = run_consult(c, FakeClient({"stageA": json.dumps(enc), "stageB": _note({})}), tmp_path / st[:3], Options(notes_only=True))
+        a = lg["artifact"]
+        assert "1000" not in json.dumps(a["gp_extraction"].get("medicines") or []) and "1000" not in a["note_text"]
+
+
+UNFAMILIAR = [("Plantar fasciitis", "Tender heel, plantar fascia"), ("Tenosynovitis", "Swelling over the tendon sheath"),
+              ("Pityriasis versicolor", "Hypopigmented scaly macules"), ("Bursitis", "Tender swelling over the olecranon"),
+              ("Costochondritis", "Tender costochondral junction"), ("De Quervain tenosynovitis", "Finkelstein test positive"),
+              ("Lichen planus", "Violaceous papules on wrists"), ("Keratosis pilaris", "Follicular papules on arms"),
+              ("Onychomycosis", "Thickened discoloured toenail"), ("Chondromalacia patellae", "Patellar grind test positive"),
+              ("Lateral epicondylitis", "Tender lateral epicondyle"), ("Intertrigo", "Erythema in skin folds"),
+              ("Pompholyx", "Vesicles on palms"), ("Molluscum contagiosum", "Umbilicated papules"), ("Vitiligo", "Depigmented patches"),
+              ("Paronychia", "Swollen nail fold"), ("Blepharitis", "Crusting of eyelid margins"), ("Chalazion", "Painless eyelid nodule"),
+              ("Dyshidrotic eczema", "Itchy vesicles on fingers"), ("Trigger finger", "Locking of the ring finger")]
+
+
+def test_r4_9_unfamiliar_clinical_words_never_reject_the_note(tmp_path):
+    written = kept = 0
+    for i, (dx, exam) in enumerate(UNFAMILIAR):
+        lines = [(0, 4, "0", "What is the problem?"), (5, 10, "1", "Pain for two weeks."), (11, 15, "0", f"{exam}."),
+                 (16, 22, "0", f"This is {dx.lower()}."), (23, 30, "0", "Take paracetamol 500 mg twice a day for three days.")]
+        c = mk_consult(lines, roles={"0": "doctor", "1": "patient"})
+        c.uid = f"synth-r4-u9-{i}"
+        enc = empty_encounter(examination=[{"performed": "Local", "finding": exam, "basis": "said", "source_turns": [2]}],
+                              diagnoses=[{"label": dx, "rank": "primary", "doctor_named": True, "status": "provisional", "basis": "said",
+                                          "source_turns": [3]}],
+                              prescription=[_rx("paracetamol", 4, "twice a day", "3 days")])
+        llm = _note({"Examination": exam, "Diagnoses": dx, "Medication": "paracetamol 500 mg twice a day x 3 days"})
+        lg = run_consult(c, FakeClient({"stageA": json.dumps(enc), "stageB": llm}), tmp_path, Options(notes_only=True))
+        a = lg["artifact"]
+        written += lg["written"] and bool(a["gp_extraction"].get("medicines"))
+        kept += dx.lower() in a["note_text"].lower() and exam.lower() in a["note_text"].lower()
+        assert drug_mentions(f"{dx}; {exam}") == [], dx
+    print(f"\nR4 addendum 9: 20 notes with unfamiliar clinical words: written with the Rx {written}/20, diagnosis and exam kept {kept}/20")
+    assert written == 20 and kept == 20
