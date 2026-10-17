@@ -148,9 +148,11 @@ async function originChromeSends(page: { body: string; headers: Headers }, dropR
     sock.close();
     return seen ?? "(no post)";
   } finally {
+    const exited = new Promise((r) => chrome.once("exit", r));
     chrome.kill("SIGKILL");
+    await exited;
     srv.close();
-    rmSync(dir, { recursive: true, force: true });
+    try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* temp profile; the OS reaps it */ }
   }
 }
 
@@ -315,5 +317,33 @@ describe("R2-P6: the pending_missing refusal row is written before the 400 retur
     const res = await callbackGet(new NextRequest(`${CB}?state=x&code=y`));
     expect(res.status).toBe(400);
     expect(written).toBe(true);
+  });
+});
+
+// ─── R2-P7: the original "verified" list after R2 ───────────────────────────────────────────────────────────────────────────────────────────────────
+describe("R2-P7: flag off, the new POST is a bare 404; Allow writes exactly one grant row and no secret", () => {
+  it("SCRIBE_MCP_OAUTH off: callback POST (valid-looking or not) is 404, empty body, no cookie, no audit row, nothing minted", async () => {
+    const c = await toConsent();
+    process.env.SCRIBE_MCP_OAUTH = "off";
+    audit.length = 0;
+    for (const res of [await post(c.cookie, new URLSearchParams({ csrf: c.csrf, decision: "allow" }).toString(), { origin: SITE }), await post("", "")]) {
+      expect(res.status).toBe(404);
+      expect(await res.text()).toBe("");
+      expect(res.headers.get("set-cookie")).toBeNull();
+    }
+    expect(audit).toHaveLength(0);
+    expect(fake.state.codes.size).toBe(0);
+  });
+  it("Allow: one mcp.oauth_granted row, actor person:<email>, client_host and redirect_host only; the code, csrf and cookie never appear in any audit value", async () => {
+    const c = await toConsent();
+    audit.length = 0;
+    const res = await post(c.cookie, new URLSearchParams({ csrf: c.csrf, decision: "allow" }).toString(), { origin: SITE });
+    const code = new URL(res.headers.get("location")!).searchParams.get("code")!;
+    const grants = audit.filter((r) => r.text.includes("mcp.oauth_granted"));
+    expect(grants).toHaveLength(1);
+    expect(grants[0]!.values[0]).toBe(`person:${ALICE}`);
+    expect(JSON.parse(String(grants[0]!.values[1]))).toEqual({ ok: true, client_host: "client.example.test", redirect_host: "claude.ai" });
+    const all = JSON.stringify(audit.map((r) => r.values));
+    for (const s of [code, c.csrf, c.cookie]) expect(all).not.toContain(s);
   });
 });
