@@ -28,7 +28,7 @@ EPS = 1e-9  # float slack for the new rule only; armc_old stays raw like merge_c
 KEYS = ["p_doctor", "p_patient", "p_attender", "p_staff"]
 ROLES = ["doctor", "patient", "attender", "staff"]
 KNOWN_ROLES = {"doctor", "patient", "attender", "staff", "translator", "other"}
-TRUE_ROLES = KNOWN_ROLES
+TRUE_ROLES = KNOWN_ROLES | {"other_clinician"}
 SEG_BLOCK_MS = 2000
 CLEF_SET = "timbre-role-v1"
 SCHEMA = "role_votes.v1"
@@ -289,15 +289,16 @@ def compute_consult(cin, cen, cid=None):
     else:
         mapping = {"status": "clean", "app_labels": {}, "reason": None}
     clean = mapping["status"] == "clean"
-    if any(r[2] not in KNOWN_ROLES for r in role_segments):
+    if any(r[2] not in KNOWN_ROLES and r[2] != "undecided" for r in role_segments):
         flags.append("unknown_role_word")
 
     stats = voiceprint_stats(cin.vecs, cen, cin.doctor_uid) if vp_ok else {}
     t_old = treating_old(cin.vecs, cen, cin.doctor_uid) if vp_ok else None
-    # F7: with other labels present, every label needs a vector or the next-label margin is not computable
+    # F7/G1: a label with speech but no vector disables arm (c) firing only. The independent voiceprint
+    # check (N1) still runs on every vectored label.
     incomplete = vp_ok and len(labels) > 1 and any(l not in cin.vecs for l in labels)
     if incomplete:
-        flags.append("next_label_margin_incomplete")
+        flags += ["next_label_margin_incomplete", "partial_voiceprint"]
 
     jev_rank = {lab: i + 1 for i, lab in enumerate(sorted(cin.jev_p, key=lambda l: (-cin.jev_p[l][0], l)))}
     out_labels, three, armc_new_l, v_label, routes = [], [], None, None, {}
@@ -306,7 +307,12 @@ def compute_consult(cin, cen, cid=None):
         rm = ms.get(lab, {})
         if rm:
             tot = sum(rm.values())
-            role, rms = sorted(rm.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+            ranked = sorted(rm.items(), key=lambda kv: (-kv[1], kv[0]))
+            role, rms = ranked[0]
+            if len(ranked) > 1 and ranked[1][1] == rms:  # G2: a tie is never doctor
+                role = "undecided"
+                if "role_tie" not in flags:
+                    flags.append("role_tie")
             r1 = {"role": role, "share": rms / tot, "status": "ok"}
         else:
             r1 = {"role": None, "share": None, "status": "absent"}
@@ -339,18 +345,19 @@ def compute_consult(cin, cen, cid=None):
         else:
             c, mnl, mrc = stats[lab]
             vp.update(logged_in_doctor_cos=c, margin_next_label=mnl, margin_runner_up_centroid=mrc)
-            match = clean and not incomplete and vp_match(c, mnl, mrc)
+            match = clean and vp_match(c, mnl, mrc)
             vp["status"] = "match" if match else ("abstain" if clean else "absent")
         # D2 (F1, F8): any non-"doctor" role at p >= 0.6 blocks; Clef and Jev use the max over every row of the label
         contr = []
-        if r1["role"] is not None and r1["role"] != "doctor" and r1["share"] >= SHARE_BLOCK:
+        if r1["role"] == "undecided" or (r1["role"] is not None and r1["role"] != "doctor" and r1["share"] >= SHARE_BLOCK):
             contr.append("role")
-        elif any(role != "doctor" and dur >= SEG_BLOCK_MS and p is not None and p >= P_BLOCK for dur, role, p in seg_roles.get(lab, [])):
+        # G3: a role row without p blocks on its word alone; with p it needs p >= 0.6
+        elif any(role != "doctor" and dur >= SEG_BLOCK_MS and (p is None or p >= P_BLOCK) for dur, role, p in seg_roles.get(lab, [])):
             contr.append("role")
         for name, p, nd in (("clef", cp, cin.clef_nd.get(lab, 0.0)), ("jev", jp, cin.jev_nd.get(lab, 0.0))):
             if max(max(p[1:]) if p else 0.0, nd) >= P_BLOCK:
                 contr.append(name)
-        armc_new = bool(match and not contr)
+        armc_new = bool(match and not contr and not incomplete)
         if match:
             v_label = lab
         if armc_new:
@@ -424,13 +431,15 @@ def make_private_dirs(path):
     """F3: create path and every missing parent at 0700 (explicit chmod, umask-proof). An existing directory
     at or below the first created level, or the leaf itself, must already be 0700-or-tighter, else PermissionError."""
     path = os.path.abspath(path)
+    if os.path.islink(path):
+        raise PermissionError("refusing a symlinked output directory")
     todo = []
     cur = path
     while not os.path.isdir(cur):
         todo.append(cur)
         cur = os.path.dirname(cur)
     if not todo and stat.S_IMODE(os.stat(path).st_mode) & 0o077:
-        raise PermissionError("existing directory is wider than 0700: " + path)
+        raise PermissionError("existing output directory is wider than 0700")
     for d in reversed(todo):
         os.mkdir(d, 0o700)
         os.chmod(d, 0o700)
@@ -446,8 +455,8 @@ def write_private(path, text, root=None):
     if rel != ".":
         for part in rel.split(os.sep):
             cur = os.path.join(cur, part)
-            make_private_dirs(cur)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            make_private_dirs(cur)  # G5: refuses a symlink at any level below the root
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as f:
@@ -501,7 +510,8 @@ def truth_counts(docs, truth):
                     yield_n += 1
                 else:
                     wrong[d["order_routes"][l["label"]]] += 1
-    return {"labels": n_lab, "unlabelled_labels": unl, "voiceprint_match_not_doctor": vp_wrong,
+    oc = sum(1 for d in docs for x in d["order_capable"] if truth.get((d["consult_id"], x)) == "other_clinician")
+    return {"labels": n_lab, "unlabelled_labels": unl, "order_capable_other_clinician": oc, "voiceprint_match_not_doctor": vp_wrong,
             "order_capable_not_doctor": dict(wrong, total=sum(wrong.values())), "order_capable_yield_on_true_doctor": yield_n}
 
 
@@ -546,7 +556,11 @@ def cmd_build(a):
         print(str(e), file=sys.stderr)
         return 2
     layout = json.load(open(a.layout)) if a.layout else {}
-    write_all(res, a.out_dir, layout)
+    try:
+        write_all(res, a.out_dir, layout)
+    except (OSError, ValueError) as e:  # G5: one line, no path, no traceback
+        print("error: refusing to write output (" + type(e).__name__ + "): " + str(e).split(":")[0][:80], file=sys.stderr)
+        return 2
     mp, dg = count_summary(res)
     print(json.dumps({"consults": len(res), "written": len(res), "mapping": mp, "degraded": dg}, sort_keys=True))
     return 0
@@ -573,7 +587,8 @@ def exit_report(docs, truth=None):
            "case7_consults": cnt(lambda d: d["case"] == 7),
            "mapping_ambiguous_consults": cnt(lambda d: d["mapping"]["status"] == "ambiguous"),
            "mapping_failed_consults": cnt(lambda d: d["mapping"]["status"] == "failed"),
-           "voiceprint_missing": cnt(lambda d: "voiceprint_missing" in d["degraded"])}
+           "voiceprint_missing": cnt(lambda d: "voiceprint_missing" in d["degraded"]),
+           "partial_voiceprint": cnt(lambda d: "partial_voiceprint" in d["case_flags"])}
     if truth is not None:
         rep["truth"] = truth_counts(docs, truth)
     return rep
@@ -590,13 +605,17 @@ def cmd_reproduce(a):
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
-    print(json.dumps(exit_report(docs, truth), sort_keys=True))
     if a.ids_out:
         ids = {"case7": [d["consult_id"] for d in docs if d["case"] == 7],
                "mapping_ambiguous": [d["consult_id"] for d in docs if d["mapping"]["status"] == "ambiguous"],
                "mapping_failed": [d["consult_id"] for d in docs if d["mapping"]["status"] == "failed"],
                "voiceprint_missing": [d["consult_id"] for d in docs if "voiceprint_missing" in d["degraded"]]}
-        write_private(a.ids_out, dumps(ids))
+        try:
+            write_private(a.ids_out, dumps(ids))
+        except OSError as e:
+            print("error: cannot write ids file (" + type(e).__name__ + "): " + str(e).split(":")[0][:80], file=sys.stderr)
+            return 2
+    print(json.dumps(exit_report(docs, truth), sort_keys=True))
     return 0
 
 

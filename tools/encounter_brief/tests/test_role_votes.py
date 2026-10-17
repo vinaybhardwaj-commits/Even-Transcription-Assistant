@@ -529,8 +529,8 @@ def test_f6_jev_tie_is_not_doctor():
 def test_f7_missing_vector_on_another_label_abstains():
     vecs = {"speaker_0": vec(0.9), "speaker_1": E[5]}  # speaker_2 has speech but no vector
     d = run(cin(vecs, roles=DOC_ROLES, jev=DOC_JEV, slot=None))
-    assert d["armc_new_label"] is None and d["voiceprint_match_label"] is None
-    assert "next_label_margin_incomplete" in d["case_flags"]
+    assert d["armc_new_label"] is None and d["voiceprint_match_label"] == "speaker_0"  # G1: N1 still runs
+    assert "next_label_margin_incomplete" in d["case_flags"] and "partial_voiceprint" in d["case_flags"]
     assert d["armc_old_label"] == "speaker_0"  # merge_c unchanged
 
 
@@ -551,7 +551,7 @@ def f8_roles(segs):
     return run(c)
 
 
-@pytest.mark.parametrize("dur,p,blocked", [(3000, 0.9, True), (2000, 0.6, True), (1999, 0.9, False), (3000, 0.59, False), (3000, None, False)])
+@pytest.mark.parametrize("dur,p,blocked", [(3000, 0.9, True), (2000, 0.6, True), (1999, 0.9, False), (3000, 0.59, False), (3000, None, True), (2000, None, True), (1999, None, False)])
 def test_f8_single_long_non_doctor_role_segment_blocks(dur, p, blocked):
     d = f8_roles([(0, 10000 - dur, "doctor", None), (10000 - dur, 10000, "nurse", p)])
     l0 = lab(d, "speaker_0")
@@ -659,3 +659,182 @@ def test_exit_report_lists_case7_and_ambiguous_separately(tmp_path, capsys):
     assert rep["case7_consults"] == 1 and rep["mapping_ambiguous_consults"] == 1 and "c7" not in out and "camb" not in out
     j = json.loads(ids.read_text())
     assert j["case7"] == ["c7"] and j["mapping_ambiguous"] == ["camb"]
+
+
+# ================================================================ fix round 2
+
+# ---- G1
+def test_g1_refuter_case_vectorless_label_does_not_hide_a_voiceprint_match():
+    # 3/3 on speaker_0, cos 0.9 on speaker_1, no vector on speaker_2
+    vecs = {"speaker_0": E[5], "speaker_1": vec(0.9)}
+    d = run(cin(vecs, roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"))
+    assert d["three_of_three"] == ["speaker_0"] and d["voiceprint_match_label"] == "speaker_1"
+    assert d["order_capable"] == [] and d["case"] == 5 and "doctor_conflict" in d["case_flags"]
+    assert "partial_voiceprint" in d["case_flags"] and d["armc_new_label"] is None
+
+
+def test_g1_vectorless_label_with_match_on_the_3of3_label_is_rule_a_only():
+    vecs = {"speaker_0": vec(0.9), "speaker_1": E[5]}  # speaker_2 has no vector
+    d = run(cin(vecs, roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"))
+    assert d["order_capable"] == ["speaker_0"] and d["case"] == 6 and d["armc_new_label"] is None
+    assert d["voiceprint_match_label"] == "speaker_0"
+
+
+def test_g1_vectorless_label_never_lets_arm_c_fire():
+    vecs = {"speaker_0": vec(0.9), "speaker_1": E[5]}
+    d = run(cin(vecs, roles=ALL_DOCTOR_ROLES, jev={k: p4(att=0.3, doc=0.4) for k in LABS}, slot=None))
+    assert d["armc_new_label"] is None and d["order_capable"] == [] and d["case"] == 2
+
+
+def test_g1_partial_voiceprint_is_counted_in_the_exit_report(tmp_path, capsys):
+    cons = {"c": cin({"speaker_0": E[5], "speaker_1": vec(0.9)}, roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0"),
+            "ok": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")}
+    flags = write_inputs(tmp_path, cons)
+    rv.main(["build"] + flags + ["--out-dir", str(tmp_path / "o")]); capsys.readouterr()
+    assert rv.main(["reproduce", "--in-dir", str(tmp_path / "o")]) == 0
+    assert json.loads(capsys.readouterr().out)["partial_voiceprint"] == 1
+
+
+# ---- G2
+@pytest.mark.parametrize("other", ["patient", "staff", "nurse"])
+def test_g2_doctor_tie_is_undecided_and_blocks(other):
+    c = cin(far_vecs(speaker_0=vec(0.9)), roles={k: v for k, v in DOC_ROLES.items() if k != "speaker_0"}, jev=DOC_JEV, slot="speaker_0")
+    c.role_segments += [(0, 1500, "doctor", None), (1500, 3000, other, None)]  # equal ms, each under the 2 s segment rule
+    d = run(c)
+    l0 = lab(d, "speaker_0")
+    assert l0["role_track"]["role"] == "undecided" and "role_tie" in d["case_flags"]
+    assert d["three_of_three"] == [] and l0["armc_new"] is False and l0["armc_contradiction"] == ["role"]
+    assert d["order_capable"] == []
+
+
+def test_g2_non_doctor_tie_also_blocks():
+    c = cin(far_vecs(speaker_0=vec(0.9)), roles={k: v for k, v in DOC_ROLES.items() if k != "speaker_0"}, jev=DOC_JEV, slot="speaker_1")
+    c.role_segments += [(0, 1500, "patient", None), (1500, 3000, "staff", None)]
+    assert lab(run(c), "speaker_0")["armc_contradiction"] == ["role"]
+
+
+def test_g2_strict_doctor_majority_is_still_doctor():
+    c = cin(far_vecs(), roles={k: v for k, v in DOC_ROLES.items() if k != "speaker_0"}, jev=DOC_JEV, slot="speaker_0")
+    c.role_segments += [(0, 1501, "doctor", None), (1501, 3000, "patient", None)]
+    assert lab(run(c), "speaker_0")["role_track"]["role"] == "doctor"
+
+
+# ---- G3 is covered by the F8 parametrisation (None-p rows at 2000 ms and 1999 ms); one direct check on a long doctor-free label
+def test_g3_word_alone_blocks_without_p():
+    d = f8_roles([(0, 8000, "doctor", None), (8000, 10000, "family", None)])
+    assert lab(d, "speaker_0")["armc_new"] is False and lab(d, "speaker_0")["armc_contradiction"] == ["role"]
+
+
+# ---- G4
+def test_g4_other_clinician_is_a_false_accept_never_yield(tmp_path, capsys):
+    cons = {"c": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")}  # 3/3 on speaker_0, no voiceprint match: case 6
+    flags = write_inputs(tmp_path, cons)
+    truth = truth_file(tmp_path, [("c", "speaker_0", "other_clinician"), ("c", "speaker_1", "patient"), ("c", "speaker_2", "attender")])
+    assert rv.main(["fa-check"] + flags + ["--truth", truth]) == 1
+    t = json.loads(capsys.readouterr().out)
+    assert t["order_capable_not_doctor"]["3of3"] == 1 and t["order_capable_yield_on_true_doctor"] == 0
+    assert t["order_capable_other_clinician"] == 1
+
+
+def test_g4_other_clinician_voiceprint_match_counts_as_wrong(tmp_path, capsys):
+    flags = write_inputs(tmp_path, {"c": cin(far_vecs(speaker_1=vec(0.9)), roles=DOC_ROLES, jev=DOC_JEV, slot=None)})
+    truth = truth_file(tmp_path, [("c", "speaker_1", "other_clinician")])
+    assert rv.main(["fa-check"] + flags + ["--truth", truth]) == 1
+    assert json.loads(capsys.readouterr().out)["voiceprint_match_not_doctor"] == 1
+
+
+def load_psyn():
+    sp = importlib.util.spec_from_file_location("psyn_truth", SRC.parent / "psyn_truth.py")
+    m = importlib.util.module_from_spec(sp)
+    sp.loader.exec_module(m)
+    return m
+
+
+def test_g4_psyn_mapping_script(tmp_path, capsys):
+    pt = load_psyn()
+    raw = [
+        {"consult_id": "c1", "label": "speaker_0", "role": "Doctor", "treating_doctor": True},
+        {"consult_id": "c1", "label": "speaker_1", "role": "doctor"},                 # a second doctor, not the treating one
+        {"consult_id": "c1", "label": "speaker_2", "role": "Resident"},
+        {"consult_id": "c1", "label": "speaker_3", "role": "other_clinician"},
+        {"consult_id": "c1", "label": "speaker_4", "role": "patient"},
+        {"consult_id": "c1", "label": "speaker_5", "role": "nurse"},
+        {"consult_id": "c1", "label": "speaker_6", "role": "relative"},
+        {"consult_id": "c1", "label": "speaker_7", "role": "interpreter"},
+        {"consult_id": "c1", "label": "speaker_8", "role": "mystery"},
+        {"consult_id": "c2", "label": "speaker_0", "role": "doctor"},                 # no treating flag: never doctor
+    ]
+    src, dst = tmp_path / "raw.jsonl", tmp_path / "truth.jsonl"
+    src.write_text("".join(json.dumps(r) + "\n" for r in raw))
+    assert pt.main(["--in", str(src), "--out", str(dst)]) == 0
+    out = capsys.readouterr().out
+    assert json.loads(out) == {"doctor": 1, "other_clinician": 4, "other_unknown_word": 1, "rows": 10}
+    assert "c1" not in out
+    rows = [json.loads(l) for l in dst.read_text().splitlines()]
+    got = {(r["consult_id"], r["label"]): r["true_role"] for r in rows}
+    assert [k for k, v in got.items() if v == "doctor"] == [("c1", "speaker_0")]
+    assert got[("c1", "speaker_1")] == "other_clinician" and got[("c2", "speaker_0")] == "other_clinician"
+    assert got[("c1", "speaker_5")] == "staff" and got[("c1", "speaker_6")] == "attender" and got[("c1", "speaker_7")] == "translator"
+    assert got[("c1", "speaker_8")] == "other"
+    assert stat.S_IMODE(os.stat(dst).st_mode) == 0o600
+    assert set(got.values()) <= rv.TRUE_ROLES
+    assert rv.load_truth(str(dst))[("c1", "speaker_2")] == "other_clinician"  # the output is accepted by fa-check
+
+
+def test_g4_psyn_mapping_refuses_contradictions(tmp_path, capsys):
+    pt = load_psyn()
+    src = tmp_path / "raw.jsonl"
+    for rows in ([{"consult_id": "c", "label": "a", "role": "doctor", "treating_doctor": True}, {"consult_id": "c", "label": "b", "role": "doctor", "treating_doctor": True}],
+                 [{"consult_id": "c", "label": "a", "role": "patient", "treating_doctor": True}]):
+        src.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        assert pt.main(["--in", str(src), "--out", str(tmp_path / "t.jsonl")]) == 2
+    assert not (tmp_path / "t.jsonl").exists()
+
+
+# ---- G5
+def test_g5_symlinked_consult_dir_is_refused(tmp_path, capsys):
+    flags = write_inputs(tmp_path, {"c": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")})
+    out, elsewhere = tmp_path / "o", tmp_path / "elsewhere"
+    out.mkdir(); os.chmod(out, 0o700)
+    elsewhere.mkdir()
+    os.symlink(elsewhere, out / "c")
+    assert rv.main(["build"] + flags + ["--out-dir", str(out)]) == 2
+    err = capsys.readouterr().err
+    assert list(elsewhere.iterdir()) == [] and "Traceback" not in err and len(err.strip().splitlines()) == 1 and "doc-uid" not in err
+
+
+def test_g5_symlinked_nested_layout_dir_and_file_are_refused(tmp_path, capsys):
+    flags = write_inputs(tmp_path, {"c": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")})
+    (tmp_path / "layout.json").write_text(json.dumps({"c": "x/y"}))
+    out, elsewhere = tmp_path / "o", tmp_path / "elsewhere"
+    (out / "x").mkdir(parents=True); os.chmod(out, 0o700); os.chmod(out / "x", 0o700)
+    elsewhere.mkdir()
+    os.symlink(elsewhere, out / "x" / "y")
+    assert rv.main(["build"] + flags + ["--out-dir", str(out), "--layout", str(tmp_path / "layout.json")]) == 2
+    assert list(elsewhere.iterdir()) == []
+    out2, victim = tmp_path / "o2", tmp_path / "victim.txt"
+    (out2 / "c").mkdir(parents=True); os.chmod(out2, 0o700); os.chmod(out2 / "c", 0o700)
+    victim.write_text("keep")
+    os.symlink(victim, out2 / "c" / "role_votes.v1.json")
+    assert rv.main(["build"] + flags + ["--out-dir", str(out2)]) == 2
+    assert victim.read_text() == "keep"
+
+
+def test_g5_ids_out_into_wide_directory_fails_in_one_line(tmp_path, capsys):
+    flags = write_inputs(tmp_path, {"c": cin(far_vecs(), uid=None, roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")})
+    rv.main(["build"] + flags + ["--out-dir", str(tmp_path / "o")]); capsys.readouterr()
+    wide = tmp_path / "opendir"
+    wide.mkdir(); os.chmod(wide, 0o755)
+    assert rv.main(["reproduce", "--in-dir", str(tmp_path / "o"), "--ids-out", str(wide / "ids.json")]) == 2
+    cap = capsys.readouterr()
+    assert cap.out == "" and "Traceback" not in cap.err and len(cap.err.strip().splitlines()) == 1
+    assert "doc-uid" not in cap.err and "opendir" not in cap.err and not (wide / "ids.json").exists()
+
+
+def test_g5_build_into_wide_out_dir_fails_in_one_line(tmp_path, capsys):
+    flags = write_inputs(tmp_path, {"c": cin(far_vecs(), roles=DOC_ROLES, jev=DOC_JEV, slot="speaker_0")})
+    out = tmp_path / "o"
+    out.mkdir(); os.chmod(out, 0o755)
+    assert rv.main(["build"] + flags + ["--out-dir", str(out)]) == 2
+    err = capsys.readouterr().err
+    assert "Traceback" not in err and len(err.strip().splitlines()) == 1
