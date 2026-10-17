@@ -283,8 +283,9 @@ def test_r1_2_name_in_doctor_quote_stays():
 
 
 @pytest.mark.parametrize("name,quote,stays", [
-    ("amoxicillin", "Start amoxil 500 mg three times a day for 5 days.", True),   # name longer than the spoken word
-    ("amoxil", "Start amoxicillin 500 mg three times a day for 5 days.", True),   # spoken word longer than the name
+    # R2 (fable ruling L2): the prefix fallback is gone; exact match on the normalised name or a listed alias only
+    ("amoxicillin", "Start amoxil 500 mg three times a day for 5 days.", False),  # was True under the R1 prefix rule
+    ("amoxil", "Start amoxicillin 500 mg three times a day for 5 days.", False),  # was True under the R1 prefix rule
     ("cetirizine", "Give CETIRIZINE, 500 mg, for 5 days three times a day.", True),
     ("metformin", "Start metronidazole 500 mg three times a day for 5 days.", False),  # metfo / metro
     ("amoxi", "Start amoxicillin 500 mg three times a day for 5 days.", False),   # 5 letters: no prefix fallback
