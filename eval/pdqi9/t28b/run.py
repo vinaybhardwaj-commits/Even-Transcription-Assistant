@@ -13,7 +13,7 @@ from collections import Counter
 from . import core, stats
 
 SIM_RHOS = [0.01, 0.05, 0.10]
-SIM_P = core.GATE_UPPER_MAX
+SIM_P = core.GATE_UPPER_MAX  # the coverage sim runs at the gate threshold
 INPUT_FLAGS = ("manifest", "centroids", "truth", "exclude")
 
 
@@ -23,12 +23,17 @@ def _pct(x: float) -> str:
 
 def _config(args) -> dict:
     """Run parameters that prereg freezes and score must repeat unchanged (H2)."""
-    return {"doctor_floor": args.doctor_floor, "sim_reps": args.sim_reps, "sim_boot_reps": args.sim_boot_reps,
+    return {"doctor_floor": args.doctor_floor, "sim_reps": args.sim_reps, "sim_p": SIM_P,
             "target_coverage": args.target_coverage, "rho_grid": SIM_RHOS}
 
 
 def _paths(args) -> dict:
     return {k: getattr(args, k) for k in INPUT_FLAGS}
+
+
+def _check_exclude(exclude: set, expected: int) -> None:
+    if len(exclude) != expected:
+        raise core.InputError(f"exclusion file holds {len(exclude)} unique normalised uids, expected {expected}")
 
 
 def _load(args):
@@ -49,9 +54,7 @@ def prereg(args, out=sys.stdout) -> dict:
     if os.path.exists(os.path.join(args.out_dir, "prereg.json")):
         raise core.InputError("prereg.json already exists in the output dir")
     cents, manifest, exclude, truth, loader = _load(args)
-    if len(exclude) != args.expect_exclude:
-        raise core.InputError(f"exclusion file holds {len(exclude)} unique normalised uids, "
-                              f"expected {args.expect_exclude}")
+    _check_exclude(exclude, args.expect_exclude)
     universe, nd, counts = core.build_universe(
         manifest, exclude, truth, loader, cents, one_label_pass=args.one_label_pass)
     print(f"manifest consults {counts['manifest']}; exclusion entries {counts['exclude_entries']} "
@@ -80,7 +83,7 @@ def prereg(args, out=sys.stdout) -> dict:
         "trial_list_sha256": core.sha256_file(tp), "nd_trial_list_sha256": core.sha256_file(np_),
         "inputs_sha256": core.input_hashes(_paths(args), manifest, core.VecsLoader(args.vecs)),
         "thresholds": core.thresholds(args.one_label_pass),
-        "expect_exclude": args.expect_exclude, "exclude_unmatched_count": counts["exclude_unmatched"],
+        "method": stats.METHOD, "expect_exclude": args.expect_exclude, "exclude_unmatched_count": counts["exclude_unmatched"],
         "config": _config(args), "code": core.code_identity(), "tree": core.git_dirty(), "counts": counts,
     }
     core.write_private(os.path.join(d, "prereg.json"), json.dumps(meta, indent=2, sort_keys=True) + "\n")
@@ -117,6 +120,10 @@ def _verify(args, meta_path_dir: str) -> dict:
         bad.append("code")
     if _config(args) != meta["config"]:
         bad.append("config")
+    if args.seed != meta["seed"]:
+        bad.append("seed")
+    if meta.get("method") != stats.METHOD:
+        bad.append("method")
     if core.sha256_file(os.path.join(d, "prereg_trials.jsonl")) != meta["trial_list_sha256"]:
         bad.append("trial_list")
     if core.sha256_file(os.path.join(d, "prereg_nd_trials.jsonl")) != meta["nd_trial_list_sha256"]:
@@ -124,6 +131,38 @@ def _verify(args, meta_path_dir: str) -> dict:
     if bad:
         raise core.InputError("MISMATCH " + ", ".join(bad))
     return meta
+
+
+# ---------------------------------------------------------------- census
+
+def _spread(xs: list[int]) -> str:
+    xs = sorted(xs)
+    return f"min {xs[0]} / median {xs[len(xs) // 2]} / max {xs[-1]}" if xs else "none"
+
+
+def census(args, out=sys.stdout) -> dict:
+    """Counts of true-speaker doctors who can form a cluster. Run before prereg; counts only."""
+    cents, manifest, exclude, truth, loader = _load(args)
+    _check_exclude(exclude, args.expect_exclude)
+    universe, nd, counts = core.build_universe(manifest, exclude, truth, loader, cents,
+                                               one_label_pass=args.one_label_pass)
+    consults, trials = Counter(), Counter()
+    for u in universe:
+        consults[u["doctor_uid"]] += 1
+        trials[u["doctor_uid"]] += len(u["impostors"])
+    qual = [d for d, c in consults.items() if c >= stats.MIN_TRIALS_PER_CLUSTER]
+    res = {"scored_consults": counts["consults_scored"], "doctors": len(consults), "qualifying_doctors": len(qual),
+           "floor": args.doctor_floor, "below_floor": len(qual) < args.doctor_floor}
+    print(f"census: manifest consults {counts['manifest']}; dropped as excluded {counts['dropped_excluded']}; "
+          f"no truth {counts['no_truth']}; no vectors {counts['no_vectors']}; scored consults "
+          f"{counts['consults_scored']}; truth by source {counts['truth_by_source']}", file=out)
+    print(f"distinct true-speaker doctors {len(consults)}; with >= {stats.MIN_TRIALS_PER_CLUSTER} truth-labelled "
+          f"consults {len(qual)} (floor {args.doctor_floor})", file=out)
+    print(f"qualifying doctors: consults {_spread([consults[d] for d in qual])}; potential T28b trials "
+          f"{_spread([trials[d] for d in qual])}, total {sum(trials[d] for d in qual)}; T28b-nd trials {len(nd)}", file=out)
+    if res["below_floor"]:
+        print(f"K below floor ({len(qual)} < {args.doctor_floor})", file=out)
+    return res
 
 
 # ---------------------------------------------------------------- score
@@ -150,9 +189,11 @@ def _test_block(trials: list[dict], key: str, reps: int, seed: int, floor) -> di
     return block
 
 
-def readout(summary: dict, fire_rate, per_month, dirty: bool = False) -> list[str]:
+def readout(summary: dict, fire_rate, per_month, dirty: bool = False, coverage: dict | None = None) -> list[str]:
     std, loo, nd = summary["T28b"], summary["T28b-LOO"], summary["T28b-nd"]
-    PASS = "DIRTY, no PASS" if dirty else "PASS"
+    blockers = (["DIRTY"] if dirty else []) + (
+        [f"COVERAGE {coverage['status']}"] if coverage and coverage["status"] != "ok" else [])
+    PASS = ", ".join(blockers) + ", no PASS" if blockers else "PASS"
 
     def point(name, b):
         if b["n"] == 0:
@@ -161,13 +202,16 @@ def readout(summary: dict, fire_rate, per_month, dirty: bool = False) -> list[st
         return f"S2c {name} point {_pct(b['point'])} <= 0.2%: {ok}"
 
     lines = [point("T28b", std), point("T28b-LOO", loo), point("T28b-nd", nd)]
+    if coverage and coverage["status"] != "ok":
+        lines.insert(0, f"COVERAGE {coverage['status']}: profile-likelihood coverage sim (target "
+                        f"{coverage['target']}) did not clear, no PASS can be issued")
     if dirty:
         lines.insert(0, "DIRTY: eval/pdqi9/t28b had uncommitted changes at prereg; no PASS can be issued")
     worse = None
     if loo["underpowered"] or nd["underpowered"]:
         info = ", ".join(f"{n} exact CP upper {_pct(b['exact_info_975'])} (info only)" if b["n"] else f"{n} no trials"
                          for n, b in (("T28b-LOO", loo), ("T28b-nd", nd)))
-        lines.append(f"S2c headline cluster-robust 97.5% upper <= 0.5%: UNDERPOWERED, no bootstrap bound, no PASS; {info}")
+        lines.append(f"S2c headline cluster-robust 97.5% upper <= 0.5%: UNDERPOWERED, no gating bound, no PASS; {info}")
     else:
         worse = max(loo["larger_upper_975"], nd["larger_upper_975"])
         ok = PASS if worse <= core.GATE_UPPER_MAX else "FAIL"
@@ -186,6 +230,24 @@ def readout(summary: dict, fire_rate, per_month, dirty: bool = False) -> list[st
     return lines
 
 
+def _coverage(scored, scored_nd, args) -> dict:
+    """Coverage of the gating bound at the data's K and trials per doctor (smallest gating clustering)."""
+    pools = [[n for n in Counter(ids).values() if n >= stats.MIN_TRIALS_PER_CLUSTER]
+             for rows in (scored, scored_nd) if rows for ids in _clusterings(rows).values()]
+    sizes = min(pools, key=len) if pools else []
+    K = len(sizes)
+    n_per = round(sum(sizes) / K) if K else 0
+    cov = {"method": stats.METHOD, "K": K, "n_per_cluster": n_per, "p": SIM_P, "target": args.target_coverage,
+           "sims": args.sim_reps, "table": []}
+    if args.sim_reps > 0 and K >= 2:
+        cov["table"] = stats.coverage_sim(p=SIM_P, K=K, n_per=n_per, rhos=SIM_RHOS, sims=args.sim_reps,
+                                          seed=args.seed)
+    cov["min_coverage"] = min((r["coverage"] for r in cov["table"]), default=None)
+    cov["status"] = ("not run" if not cov["table"]
+                     else "ok" if cov["min_coverage"] >= args.target_coverage else "below target")
+    return cov
+
+
 def score(args, out=sys.stdout) -> dict:
     core.prepare_out_dir(args.out_dir, must_exist=True)
     meta = _verify(args, args.out_dir)
@@ -198,23 +260,13 @@ def score(args, out=sys.stdout) -> dict:
         core.write_private(os.path.join(args.out_dir, name),
                            "".join(json.dumps(t, sort_keys=True) + "\n" for t in rows))
 
-    # R5: choose the doctor floor from the coverage simulation.
-    elig = [_eligible(ids) for rows in (scored, scored_nd) for ids in _clusterings(rows).values() if rows]
-    k_data = max(elig) if elig else 0  # best-case K bounds the candidate floors; each clustering is judged alone
-    n_per = max(stats.MIN_TRIALS_PER_CLUSTER, round(len(scored) / max(k_data, 1)))
-    if args.sim_reps > 0:
-        fl = stats.choose_floor(k_data=k_data, configured=args.doctor_floor, n_per=n_per, p=SIM_P,
-                                rhos=SIM_RHOS, sims=args.sim_reps, reps=args.sim_boot_reps, seed=args.seed,
-                                target=args.target_coverage)
-    else:
-        fl = {"configured_floor": args.doctor_floor, "chosen_floor": args.doctor_floor,
-              "status": "unverified (coverage sim disabled)", "k_data": k_data, "table": []}
-    floor = fl["chosen_floor"]
+    floor = args.doctor_floor
+    cov = _coverage(scored, scored_nd, args)
 
     summary = {
         "seed": args.seed, "trial_list_sha256": meta["trial_list_sha256"], "counts": meta["counts"],
         "exclude_unmatched_count": meta["exclude_unmatched_count"], "tree": meta["tree"], "config": meta["config"],
-        "floor": fl,
+        "method": meta["method"], "coverage": cov,
         "T28b": _test_block(scored, "fa_std", args.boot_reps, args.seed, floor),
         "T28b-LOO": _test_block(scored, "fa_loo", args.boot_reps, args.seed + 1, floor),
         "T28b-nd": _test_block(scored_nd, "fa", args.boot_reps, args.seed + 2, floor),
@@ -232,16 +284,20 @@ def score(args, out=sys.stdout) -> dict:
         for cname, cl in b["clusterings"].items():
             if cl["underpowered"]:
                 print(f"  cluster[{cname}]: UNDERPOWERED ({cl['clusters_ge_min_trials']} clusters >=50 trials, "
-                      f"floor {cl['floor']}); no bootstrap bound; exact CP upper {_pct(cl['exact_info_975'])} "
+                      f"floor {cl['floor']}); no gating bound; exact CP upper {_pct(cl['exact_info_975'])} "
                       f"(info only)", file=out)
             else:
+                rep_ = ", ".join(f"{n} {_pct(cl[k]) if cl[k] is not None else 'n/a'}"
+                                 for n, k in (("BCa", "bca_975"), ("boot-t", "boot_t_975")))
                 print(f"  cluster[{cname}]: clusters {cl['clusters']} (>=50 trials: {cl['clusters_ge_min_trials']}); "
-                      f"{cl['method']} 97.5% upper {_pct(cl['upper_975'])}; flags {cl['flags'] or 'none'}", file=out)
-    print(f"doctor floor: configured {fl['configured_floor']}, chosen {fl['chosen_floor'] or 'unattainable'} "
-          f"({fl['status']}); data K {fl['k_data']}", file=out)
-    for r in fl["table"]:
-        print(f"  coverage sim K {r['K']} rho {r['rho']}: {r['coverage']:.3f}", file=out)
-    for line in readout(summary, args.armc_fire_rate, args.consults_per_month, meta['tree']['dirty']):
+                      f"{cl['method']} 97.5% upper {_pct(cl['upper_975'])} (gating); p_hat {_pct(cl['p_hat'])}; "
+                      f"rho_at_upper {cl['rho_at_upper']}; reported only: {rep_}, exact CP "
+                      f"{_pct(cl['exact_info_975'])}; flags {cl['flags'] or 'none'}", file=out)
+    print(f"doctor floor {floor}; coverage sim ({stats.METHOD}, p {SIM_P}) at data K {cov['K']}, "
+          f"{cov['n_per_cluster']} trials per doctor, target {cov['target']}: {cov['status']}", file=out)
+    for r in cov["table"]:
+        print(f"  coverage rho {r['rho']}: {r['coverage']:.3f} ({r['sims']} sims)", file=out)
+    for line in readout(summary, args.armc_fire_rate, args.consults_per_month, meta['tree']['dirty'], cov):
         print(line, file=out)
     core.write_private(os.path.join(args.out_dir, "summary.json"),
                        json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -265,9 +321,18 @@ def parser() -> argparse.ArgumentParser:
         s.add_argument("--anchor", required=True,
                        help="file OUTSIDE the out dir holding the prereg.json sha256; prereg writes it, score verifies it")
         s.add_argument("--doctor-floor", type=int, default=stats.K_MIN_CLUSTERS)
-        s.add_argument("--sim-reps", type=int, default=200, help="coverage replicates per cell; 0 disables")
-        s.add_argument("--sim-boot-reps", type=int, default=500)
+        s.add_argument("--sim-reps", type=int, default=200, help="coverage sim replicates per rho; 0 = not run, which blocks PASS")
         s.add_argument("--target-coverage", type=float, default=0.90)
+
+    c = sub.add_parser("census", help="count doctors able to form a cluster (run before prereg; exit 3 if K < floor)")
+    c.add_argument("--manifest", required=True)
+    c.add_argument("--vecs")
+    c.add_argument("--centroids", required=True)
+    c.add_argument("--truth", required=True)
+    c.add_argument("--exclude", required=True)
+    c.add_argument("--expect-exclude", type=int, required=True)
+    c.add_argument("--one-label-pass", action="store_true")
+    c.add_argument("--doctor-floor", type=int, default=stats.K_MIN_CLUSTERS)
 
     a = sub.add_parser("prereg", help="register the trial set and hash all inputs (run first)")
     common(a)
@@ -281,7 +346,7 @@ def parser() -> argparse.ArgumentParser:
 
     b = sub.add_parser("score", help="verify every prereg hash, then score")
     common(b)
-    b.add_argument("--seed", type=int, required=True, help="bootstrap and simulation seed")
+    b.add_argument("--seed", type=int, required=True, help="must equal the prereg seed")
     b.add_argument("--boot-reps", type=int, default=10000)
     b.add_argument("--armc-fire-rate", type=float)
     b.add_argument("--consults-per-month", type=float)
@@ -291,7 +356,9 @@ def parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
     try:
-        (prereg if args.cmd == "prereg" else score)(args)
+        res = {"census": census, "prereg": prereg, "score": score}[args.cmd](args, out=sys.stdout)
+        if args.cmd == "census" and res["below_floor"]:
+            return 3
     except (core.InputError, core.InsufficientTrials, core.DisjointnessError) as e:
         print(f"ABORT {type(e).__name__}: {e}", file=sys.stderr)
         return 2

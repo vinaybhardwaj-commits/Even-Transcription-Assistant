@@ -328,57 +328,82 @@ def test_underpowered_readout_prints_no_pass_and_no_bound(tmp_path):
     assert "C8: not computed (UNDERPOWERED)" in text
 
 
-def test_powered_degenerate_uses_exact_bound():
+def test_powered_zero_events_is_flagged_and_uses_the_profile_bound():
     ids = [i % 20 for i in range(2000)]
     r = stats.cluster_bound(ids, [0] * 2000, reps=200, seed=1, floor=15)
-    assert r["flags"] == ["cluster_degenerate"] and r["method"] == "exact"
-    assert r["upper_975"] == pytest.approx(stats.exact_upper_one_sided(0, 2000))
+    assert r["flags"] == ["cluster_degenerate"] and r["method"] == stats.METHOD
+    assert r["upper_975"] == pytest.approx(stats.betabinom_profile_upper(np.full(20, 100), np.zeros(20))["upper"])
+    assert r["bca_975"] is None and r["boot_t_975"] is None  # reported-only columns need events
 
 
-def test_powered_nondegenerate_is_bca_and_all_trials_enter():
+def test_powered_nondegenerate_gates_on_profile_and_reports_bca_and_boot_t():
     ids = [i % 20 for i in range(2000)] + [99] * 3  # a tiny extra cluster still counts
     fa = [1 if i % 200 == 0 else 0 for i in range(2000)] + [0] * 3
     r = stats.cluster_bound(ids, fa, reps=500, seed=1, floor=15)
-    assert r["method"] == "bca" and r["n"] == 2003 and r["k"] == 10 and r["flags"] == []
+    assert r["method"] == stats.METHOD and r["n"] == 2003 and r["k"] == 10 and r["flags"] == []
+    assert r["bca_975"] is not None and r["boot_t_975"] is not None and r["upper_975"] > r["k"] / r["n"]
 
 
-# ---------------------------------------------------------------- R5 floor
+# ---------------------------------------------------------------- P2 coverage block
 
-def fake_sim(low_below):
-    def sim(*, p, K, n_per, rhos, sims, reps, seed):
-        return [{"rho": r, "coverage": 0.95 if K >= low_below else 0.80, "sims": sims} for r in rhos]
+def fake_sim(cov):
+    def sim(*, p, K, n_per, rhos, sims, seed, reps=500, method="profile"):
+        return [{"rho": r, "coverage": cov, "sims": sims} for r in rhos]
     return sim
 
 
-def test_floor_raised_in_steps_of_five(monkeypatch):
-    monkeypatch.setattr(stats, "coverage_sim", fake_sim(25))
-    r = stats.choose_floor(k_data=40, configured=15, n_per=60, p=0.005, rhos=[0.01, 0.05, 0.1],
-                           sims=10, reps=10, seed=1)
-    assert r["chosen_floor"] == 25 and r["status"] == "raised"
-    assert {x["K"] for x in r["table"]} >= {15, 20, 25, 40}
+def powered_world(tmp_path):
+    return make_world(tmp_path, n_consults=1200, n_docs=20)  # 60 consults per doctor: nd clusters reach 50 too
 
 
-def test_floor_unattainable(monkeypatch):
-    monkeypatch.setattr(stats, "coverage_sim", fake_sim(10 ** 6))
-    r = stats.choose_floor(k_data=40, configured=15, n_per=60, p=0.005, rhos=[0.05], sims=10, reps=10, seed=1)
-    assert r["chosen_floor"] is None and r["status"] == "floor unattainable"
+def test_coverage_block_records_data_k_and_trials_per_doctor(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats, "coverage_sim", fake_sim(0.95))
+    p = powered_world(tmp_path)
+    s, text = full(p, {"--min-trials": 100, "--target-trials": 3000}, {"--sim-reps": 7})
+    cov = json.loads((p / "out" / "summary.json").read_text())["coverage"]
+    assert cov["K"] == 20 and cov["n_per_cluster"] >= 50 and cov["status"] == "ok" and cov["target"] == 0.90
+    assert [r["rho"] for r in cov["table"]] == [0.01, 0.05, 0.10] and cov["sims"] == 7
+    assert "coverage rho 0.1: 0.950" in text and s["method"] == stats.METHOD
 
 
-def test_floor_unattainable_means_no_pass_in_score(tmp_path, monkeypatch):
-    monkeypatch.setattr(stats, "coverage_sim", fake_sim(10 ** 6))
-    p = make_world(tmp_path, n_consults=240, n_docs=20)
-    s, text = full(p, {"--min-trials": 100, "--target-trials": 2000}, {"--sim-reps": 5, "--sim-boot-reps": 10})
-    assert s["floor"]["chosen_floor"] is None and "unattainable" in text
-    assert next(l for l in text.splitlines() if l.startswith("S2c headline")).count("UNDERPOWERED") == 1
-    assert "floor" in json.loads((p / "out" / "summary.json").read_text())
+def test_coverage_below_target_blocks_pass_in_score(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "git_dirty", lambda *a, **k: {"dirty": False, "porcelain_lines": 0, "reason": "clean"})
+    monkeypatch.setattr(stats, "coverage_sim", fake_sim(0.85))
+    p = powered_world(tmp_path)
+    s, text = full(p, {"--min-trials": 100, "--target-trials": 3000}, {"--sim-reps": 7})
+    assert s["coverage"]["status"] == "below target"
+    assert "S2c T28b point 0.000% <= 0.2%: COVERAGE below target, no PASS" in text
+    assert ": PASS" not in text
 
 
-def test_coverage_table_in_summary_json(tmp_path, monkeypatch):
-    monkeypatch.setattr(stats, "coverage_sim", fake_sim(0))
-    p = make_world(tmp_path, n_consults=240, n_docs=20)
-    s, _ = full(p, {"--min-trials": 100, "--target-trials": 2000}, {"--sim-reps": 5, "--sim-boot-reps": 10})
-    sj = json.loads((p / "out" / "summary.json").read_text())
-    assert sj["floor"]["chosen_floor"] == 15 and sj["floor"]["table"]
+def test_coverage_not_run_blocks_pass(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "git_dirty", lambda *a, **k: {"dirty": False, "porcelain_lines": 0, "reason": "clean"})
+    p = powered_world(tmp_path)
+    s, text = full(p, {"--min-trials": 100, "--target-trials": 3000, "--sim-reps": 0})
+    assert s["coverage"]["status"] == "not run" and "COVERAGE not run, no PASS" in text
+
+
+def test_readout_coverage_blockers():
+    blk = lambda pt, up: {"point": pt, "n": 3000, "larger_upper_975": up, "underpowered": False,
+                          "exact_info_975": up, "clusterings": {"c": {"flags": []}}}
+    s = {"T28b": blk(0.0, 0.001), "T28b-LOO": blk(0.003, 0.004), "T28b-nd": blk(0.0, 0.002)}
+    ok = run.readout(s, None, None, coverage={"status": "ok", "target": 0.9})
+    assert "T28b point 0.000% <= 0.2%: PASS" in ok[0] and "= 0.400% <= 0.5%: PASS" in ok[3]
+    bad = run.readout(s, None, None, dirty=True, coverage={"status": "below target", "target": 0.9})
+    assert bad[0].startswith("DIRTY") and bad[1].startswith("COVERAGE below target")
+    assert "DIRTY, COVERAGE below target, no PASS" in bad[2]
+    assert "T28b-LOO point 0.300% <= 0.2%: FAIL" in "\n".join(bad)
+
+
+def test_clean_run_point_gates_pass_and_zero_event_headline_fails(tmp_path, monkeypatch):
+    """Finding: with zero events the profile bound (rho free to 0.5) is far above 0.5%, so the headline FAILs."""
+    monkeypatch.setattr(core, "git_dirty", lambda *a, **k: {"dirty": False, "porcelain_lines": 0, "reason": "clean"})
+    monkeypatch.setattr(stats, "coverage_sim", fake_sim(0.95))
+    p = powered_world(tmp_path)
+    s, text = full(p, {"--min-trials": 100, "--target-trials": 3000}, {"--sim-reps": 7})
+    assert "S2c T28b point 0.000% <= 0.2%: PASS" in text
+    assert s["T28b-LOO"]["larger_upper_975"] > core.GATE_UPPER_MAX
+    assert next(l for l in text.splitlines() if l.startswith("S2c headline")).endswith("FAIL")
 
 
 # ---------------------------------------------------------------- R6 prereg hashes
@@ -558,7 +583,7 @@ def test_exact_bounds_known_values():
 
 
 def test_bca_coverage_roughly_nominal():
-    sims = stats.coverage_sim(p=0.05, K=40, n_per=50, rhos=[0.0, 0.05], sims=300, reps=400, seed=11)
+    sims = stats.coverage_sim(p=0.05, K=40, n_per=50, rhos=[0.0, 0.05], sims=300, reps=400, seed=11, method="bca")
     for s in sims:
         assert 0.90 <= s["coverage"] <= 1.0, s
 
@@ -633,12 +658,11 @@ def test_expect_exclude_counts_unique_normalised_uids(tmp_path):
 def test_config_frozen_in_prereg(tmp_path):
     p = make_world(tmp_path)
     meta, _ = do_prereg(p, **{"--doctor-floor": 20, "--sim-reps": 0, "--target-coverage": 0.92})
-    assert meta["config"] == {"doctor_floor": 20, "sim_reps": 0, "sim_boot_reps": 500,
+    assert meta["config"] == {"doctor_floor": 20, "sim_reps": 0, "sim_p": 0.005,
                               "target_coverage": 0.92, "rho_grid": [0.01, 0.05, 0.10]}
 
 
-@pytest.mark.parametrize("flag,val", [("--doctor-floor", 25), ("--sim-reps", 7), ("--target-coverage", 0.8),
-                                      ("--sim-boot-reps", 11)])
+@pytest.mark.parametrize("flag,val", [("--doctor-floor", 25), ("--sim-reps", 7), ("--target-coverage", 0.8)])
 def test_score_refuses_changed_config(tmp_path, flag, val):
     p = make_world(tmp_path)
     do_prereg(p, **{"--sim-reps": 0})
@@ -738,20 +762,13 @@ def test_git_unavailable_counts_as_dirty(monkeypatch):
 def test_dirty_prereg_blocks_pass(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "git_dirty", lambda *a, **k: {"dirty": True, "porcelain_lines": 2,
                                                             "reason": "uncommitted changes"})
-    p = make_world(tmp_path, n_consults=240, n_docs=20)
-    meta, ptext = do_prereg(p, **{"--min-trials": 100, "--target-trials": 2000, "--sim-reps": 0})
+    monkeypatch.setattr(stats, "coverage_sim", fake_sim(0.95))
+    p = powered_world(tmp_path)
+    meta, ptext = do_prereg(p, **{"--min-trials": 100, "--target-trials": 3000, "--sim-reps": 7})
     assert meta["tree"]["dirty"] is True and "DIRTY" in ptext
-    s, text = do_score(p, **{"--sim-reps": 0})
-    assert "DIRTY" in text
+    s, text = do_score(p, **{"--sim-reps": 7})
     assert "S2c T28b point 0.000% <= 0.2%: DIRTY, no PASS" in text
     assert ": PASS" not in text
-
-
-def test_clean_prereg_can_pass(tmp_path, monkeypatch):
-    monkeypatch.setattr(core, "git_dirty", lambda *a, **k: {"dirty": False, "porcelain_lines": 0, "reason": "clean"})
-    p = make_world(tmp_path, n_consults=240, n_docs=20)
-    s, text = full(p, {"--min-trials": 100, "--target-trials": 2000, "--sim-reps": 0})
-    assert "S2c T28b point 0.000% <= 0.2%: PASS" in text and "DIRTY" not in text
 
 
 def test_readout_dirty_never_passes_but_fail_still_fails():
@@ -800,3 +817,189 @@ def test_non_covering_consults_add_no_truth_label_trial(tmp_path):
     p = make_world(tmp_path)
     meta, _ = do_prereg(p)
     assert meta["counts"]["covering_consults"] == 0 and meta["nd_trials"] == 60
+
+
+# ---------------------------------------------------------------- P1 beta-binomial profile bound
+
+import math
+
+
+def ref_ll(p, rho, n, f):
+    """Independent beta-binomial log-likelihood with math.lgamma (binomial coefficients dropped)."""
+    if rho == 0:
+        return sum(fi * math.log(p) + (ni - fi) * math.log1p(-p) for ni, fi in zip(n, f))
+    s = (1 - rho) / rho
+    a, b = p * s, (1 - p) * s
+    lb = lambda x, y: math.lgamma(x) + math.lgamma(y) - math.lgamma(x + y)
+    return sum(lb(fi + a, ni - fi + b) - lb(a, b) for ni, fi in zip(n, f))
+
+
+def ref_profile(p, n, f):
+    return max(ref_ll(p, float(r), n, f) for r in stats._RHO_GRID)
+
+
+def test_gammaln_matches_math_lgamma():
+    xs = np.array([1e-9, 1e-3, 0.1, 0.5, 1, 2.5, 7.9, 8, 10, 100, 1e4, 1e6, 2e6])
+    ref = np.array([math.lgamma(x) for x in xs])
+    assert np.max(np.abs(stats.gammaln(xs) - ref) / np.maximum(1, np.abs(ref))) < 1e-8
+
+
+def test_profile_loglik_matches_independent_reference():
+    n = np.array([300.0, 500, 120, 800, 60])
+    f = np.array([0.0, 2, 0, 1, 1])
+    for p in (0.0005, 0.003, 0.02):
+        got = stats._ll_over_rho(p, n, f, stats._RHO_GRID)
+        want = [ref_ll(p, float(r), n, f) for r in stats._RHO_GRID]
+        assert np.allclose(got, want, atol=1e-6, rtol=0)
+
+
+def test_upper_bound_is_the_profile_crossing_with_events():
+    n = np.full(20, 137.0)
+    f = np.array([0] * 14 + [1] * 3 + [0] * 3, dtype=float)
+    r = stats.betabinom_profile_upper(n, f)
+    ll_max = ref_profile(r["p_hat"], n, f)
+    for q in (0.9, 0.97, 1.03, 1.1):  # p_hat is a local maximum
+        assert ref_profile(r["p_hat"] * q, n, f) <= ll_max + 1e-6
+    assert ref_profile(r["upper"], n, f) == pytest.approx(ll_max - stats.CHI2_95_HALF, abs=2e-3)
+    assert ref_profile(r["upper"] * 1.02, n, f) < ll_max - stats.CHI2_95_HALF
+    assert 0 < r["p_hat"] < r["upper"] <= 1
+
+
+def test_zero_event_profile_bound_is_defined_and_tested():
+    n, f = np.full(15, 2000.0), np.zeros(15)
+    r = stats.betabinom_profile_upper(n, f)
+    assert r["p_hat"] == 0.0 and 0 < r["upper"] < 1
+    assert ref_profile(r["upper"], n, f) == pytest.approx(-stats.CHI2_95_HALF, abs=2e-3)
+    assert ref_profile(r["upper"] * 1.02, n, f) < -stats.CHI2_95_HALF
+    assert r["rho_at_upper"] == stats.RHO_MAX  # the zero-event bound is set by the rho = 0.5 edge
+    assert r["upper"] > 0.5 * stats.exact_upper_one_sided(0, 30000) and r["upper"] > 1.92 / 30000
+
+
+def test_bound_grows_with_events_and_with_concentration():
+    n = np.full(20, 500.0)
+    spread = np.array([1.0] * 6 + [0.0] * 14)
+    concentrated = np.array([6.0] + [0.0] * 19)
+    more = np.array([1.0] * 12 + [0.0] * 8)
+    u = lambda f: stats.betabinom_profile_upper(n, f)["upper"]
+    assert u(more) > u(spread) and u(concentrated) > u(spread)
+
+
+def test_rho_is_capped_at_half():
+    n, f = np.full(10, 100.0), np.array([100.0] + [0.0] * 9)  # extreme clustering
+    r = stats.betabinom_profile_upper(n, f)
+    assert r["rho_hat"] <= stats.RHO_MAX and r["upper"] <= 1
+
+
+@pytest.mark.parametrize("K", [20, 30])
+@pytest.mark.parametrize("rho", [0.0, 0.002])
+def test_recovery_of_true_rate_0_11_percent(K, rho):
+    rng = np.random.default_rng(100 + K)
+    p_true, n_per, reps = 0.0011, 2000, 60
+    hats, ups, covered = [], [], 0
+    for _ in range(reps):
+        if rho == 0:
+            p_i = np.full(K, p_true)
+        else:
+            p_i = rng.beta(p_true * (1 - rho) / rho, (1 - p_true) * (1 - rho) / rho, size=K)
+        r = stats.betabinom_profile_upper(np.full(K, n_per), rng.binomial(n_per, p_i))
+        hats.append(r["p_hat"])
+        ups.append(r["upper"])
+        covered += r["upper"] >= p_true
+    assert 0.0008 <= float(np.median(hats)) <= 0.0014
+    assert covered / reps >= 0.90
+    assert float(np.median(ups)) < core.GATE_UPPER_MAX  # informative at this scale
+
+
+def test_profile_coverage_at_k15_rho_010_with_2000_trials_per_doctor():
+    r = stats.coverage_sim(p=0.0011, K=15, n_per=2000, rhos=[0.10], sims=200, seed=5)[0]
+    assert r["coverage"] >= 0.94, r
+
+
+def test_boot_t_and_bca_are_reported_columns_not_the_gate():
+    ids = [i % 20 for i in range(4000)]
+    fa = [1 if i in (3, 41, 77, 1500, 2600) else 0 for i in range(4000)]
+    r = stats.cluster_bound(ids, fa, reps=400, seed=2, floor=15)
+    assert r["method"] == stats.METHOD
+    assert r["upper_975"] == pytest.approx(stats.betabinom_profile_upper(
+        np.full(20, 200), np.bincount([i % 20 for i, v in enumerate(fa) if v], minlength=20))["upper"])
+    assert r["bca_975"] != r["upper_975"] and r["boot_t_975"] != r["upper_975"]
+
+
+# ---------------------------------------------------------------- P3 seed lock and method
+
+def test_prereg_records_method_and_seed(tmp_path):
+    meta, _ = do_prereg(make_world(tmp_path))
+    assert meta["method"] == "betabinom_profile_v1" and meta["seed"] == 7
+
+
+def test_score_refuses_a_different_seed(tmp_path):
+    p = make_world(tmp_path)
+    do_prereg(p)
+    with pytest.raises(core.InputError, match="seed"):
+        do_score(p, **{"--seed": 8})
+    assert do_score(p)[0]["seed"] == 7  # the prereg seed still scores
+
+
+def test_score_refuses_a_changed_method(tmp_path):
+    p = make_world(tmp_path)
+    do_prereg(p)
+    out = p / "out" / "prereg.json"
+    meta = json.loads(out.read_text())
+    meta["method"] = "cluster_bca"
+    out.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    (p / "anchor.sha256").write_text(core.sha256_file(str(out)) + "  prereg.json\n")  # even a re-anchored edit
+    with pytest.raises(core.InputError, match="method"):
+        do_score(p)
+
+
+# ---------------------------------------------------------------- P4 census
+
+def cargv(p, **kw):
+    a = ["census", "--manifest", str(p / "manifest.jsonl"), "--vecs", str(p / "vecs.json"),
+         "--centroids", str(p / "centroids.json"), "--truth", str(p / "truth.jsonl"),
+         "--exclude", str(p / "exclude.txt"), "--expect-exclude", str(n_exclude(p))]
+    for k, v in kw.items():
+        a += [k] if v is True else [k, str(v)]
+    return a
+
+
+def test_census_below_floor_exits_3(tmp_path, capsys):
+    p = make_world(tmp_path, n_consults=240, n_docs=4)  # 4 doctors with 60 consults each
+    assert run.main(cargv(p)) == 3
+    out = capsys.readouterr().out
+    assert "K below floor (4 < 15)" in out
+    assert "with >= 50 truth-labelled consults 4" in out
+    assert "doc0" not in out and "c00" not in out
+
+
+def test_census_at_or_above_floor_exits_0_with_counts(tmp_path, capsys):
+    p = make_world(tmp_path, n_consults=240, n_docs=4)
+    assert run.main(cargv(p, **{"--doctor-floor": 4})) == 0
+    out = capsys.readouterr().out
+    assert "consults min 60 / median 60 / max 60" in out and "K below floor" not in out
+    assert "potential T28b trials min 180 / median 180 / max 180, total 720" in out  # 60 consults x 3 impostors x 4
+    assert "doc0" not in out and "c00" not in out
+
+
+def test_census_counts_only_doctors_with_50_consults(tmp_path, capsys):
+    p = make_world(tmp_path, n_consults=130, n_docs=3)  # 44, 43, 43 consults: none reaches 50
+    assert run.main(cargv(p, **{"--doctor-floor": 1})) == 3
+    assert "with >= 50 truth-labelled consults 0" in capsys.readouterr().out
+
+
+def test_census_respects_exclusion_and_expect_exclude(tmp_path, capsys):
+    p = make_world(tmp_path, n_consults=240, n_docs=4, exclude="\n".join(f"c{i:04d}" for i in range(0, 40, 4)) + "\n")
+    assert run.main(cargv(p, **{"--doctor-floor": 4})) == 0  # doc00 drops to 50 consults and still qualifies
+    assert "dropped as excluded 10" in capsys.readouterr().out
+    assert run.main(cargv(p, **{"--expect-exclude": 3, "--doctor-floor": 4})) == 2
+    assert "expected 3" in capsys.readouterr().err
+
+
+def test_census_requires_truth_and_expect_exclude():
+    for drop in ("--truth", "--expect-exclude"):
+        a = cargv(pathlib.Path("/x"))
+        i = a.index(drop)
+        del a[i:i + 2]
+        with pytest.raises(SystemExit) as ex:
+            run.parser().parse_args(a)
+        assert ex.value.code == 2

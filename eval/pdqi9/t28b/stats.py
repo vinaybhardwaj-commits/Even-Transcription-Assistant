@@ -130,12 +130,126 @@ def bca_upper(
     }
 
 
-def cluster_bound(cluster_ids: list, fa: list[int], *, reps: int, seed: int, floor: int | None) -> dict:
-    """Cluster-robust 97.5% upper bound for one clustering, with flags.
+# ---------------------------------------------------------------- beta-binomial profile likelihood
 
-    ALL trials enter the rate and the bootstrap. A clustering with fewer than `floor` clusters of at
-    least MIN_TRIALS_PER_CLUSTER trials (floor None = unattainable) is UNDERPOWERED: no bootstrap bound
-    is computed, and the exact Clopper-Pearson bound is returned for information only.
+METHOD = "betabinom_profile_v1"
+CHI2_95_HALF = 1.9207294103470620  # chi2.ppf(0.95, 1) / 2: the 0.95 two-sided profile, upper end = one-sided 97.5%
+RHO_MAX = 0.5
+_RHO_GRID = np.concatenate(([0.0], np.geomspace(1e-6, RHO_MAX, 60)))
+_HALF_LN_2PI = 0.5 * math.log(2.0 * math.pi)
+
+
+def gammaln(x):
+    """Vectorised log-gamma for x > 0: lnG(x) = lnG(x + 8) - ln(x (x+1) ... (x+7)), Stirling at x + 8."""
+    y = np.asarray(x, dtype=float)
+    prod = y.copy()
+    for j in range(1, 8):
+        prod = prod * (y + j)
+    w = y + 8.0
+    inv = 1.0 / w
+    inv2 = inv * inv
+    series = inv * (1.0 / 12.0 - inv2 * (1.0 / 360.0 - inv2 * (1.0 / 1260.0)))
+    return (w - 0.5) * np.log(w) - w + _HALF_LN_2PI + series - np.log(prod)
+
+
+def _ll_over_rho(p: float, n: np.ndarray, f: np.ndarray, rho: np.ndarray) -> np.ndarray:
+    """Beta-binomial log-likelihood (binomial coefficients dropped) at mean p for each rho. rho=0 is binomial."""
+    out = np.empty(len(rho))
+    pos = rho > 0
+    if pos.any():
+        r = rho[pos][:, None]
+        s = (1.0 - r) / r
+        a, b = p * s, (1.0 - p) * s
+        per_cluster = gammaln(f + a) + gammaln(n - f + b) - gammaln(n + s)
+        out[pos] = per_cluster.sum(axis=1) - len(n) * (gammaln(a) + gammaln(b) - gammaln(s))[:, 0]
+    if not pos.all():
+        out[~pos] = float((f * math.log(p) + (n - f) * math.log1p(-p)).sum())
+    return out
+
+
+def _profile(p: float, n, f) -> tuple[float, float]:
+    """(max over rho in [0, 0.5] of the log-likelihood at p, the rho that attains it)."""
+    ll = _ll_over_rho(min(max(p, 1e-300), 1.0 - 1e-12), n, f, _RHO_GRID)
+    i = int(np.argmax(ll))
+    return float(ll[i]), float(_RHO_GRID[i])
+
+
+def betabinom_profile_upper(n_i, f_i) -> dict:
+    """One-sided 97.5% upper bound for the pooled mean p: the largest p whose profile log-likelihood
+    is within chi2(1, 0.95)/2 of the maximum. Zero events are handled by the same profile (p_hat = 0)."""
+    n = np.asarray(n_i, dtype=float)
+    f = np.asarray(f_i, dtype=float)
+    F, N = float(f.sum()), float(n.sum())
+    if F == 0.0:
+        p_hat, ll_max, rho_hat = 0.0, 0.0, float("nan")
+    else:
+        p0 = min(max(F / N, 1e-9), 0.99)
+        grid = np.geomspace(p0 / 20.0, min(p0 * 20.0, 0.9999), 20)
+        vals = [_profile(g, n, f)[0] for g in grid]
+        i = int(np.argmax(vals))
+        lo, hi = grid[max(i - 1, 0)], grid[min(i + 1, len(grid) - 1)]
+        gr = (math.sqrt(5.0) - 1.0) / 2.0
+        c, d = hi - gr * (hi - lo), lo + gr * (hi - lo)
+        fc, fd = _profile(c, n, f)[0], _profile(d, n, f)[0]
+        for _ in range(40):
+            if fc > fd:
+                hi, d, fd = d, c, fc
+                c = hi - gr * (hi - lo)
+                fc = _profile(c, n, f)[0]
+            else:
+                lo, c, fc = c, d, fd
+                d = lo + gr * (hi - lo)
+                fd = _profile(d, n, f)[0]
+        p_hat = (lo + hi) / 2.0
+        ll_max, rho_hat = _profile(p_hat, n, f)
+    thr = ll_max - CHI2_95_HALF
+    lo, hi = p_hat, max(p_hat * 1.5, 1e-6)
+    cap = 1.0 - 1e-9
+    while _profile(hi, n, f)[0] >= thr:
+        lo = hi
+        if hi >= cap:
+            return {"upper": 1.0, "p_hat": p_hat, "rho_hat": rho_hat, "rho_at_upper": None, "ll_max": ll_max}
+        hi = min(hi * 2.0, cap)
+    for _ in range(40):
+        mid = (lo + hi) / 2.0
+        if _profile(mid, n, f)[0] >= thr:
+            lo = mid
+        else:
+            hi = mid
+    return {"upper": lo, "p_hat": p_hat, "rho_hat": rho_hat, "rho_at_upper": _profile(lo, n, f)[1],
+            "ll_max": ll_max}
+
+
+def boot_t_upper(n_i, f_i, *, reps: int, seed: int, conf: float = 0.975) -> float | None:
+    """Cluster bootstrap-t one-sided upper bound (reported only). None when the SE is zero (no events)."""
+    n_i = np.asarray(n_i, dtype=float)
+    f_i = np.asarray(f_i, dtype=float)
+    K = len(n_i)
+    if K < 2:
+        return None
+    N, F = n_i.sum(), f_i.sum()
+    theta = F / N
+    se_hat = math.sqrt(K / (K - 1.0) * float(((f_i - theta * n_i) ** 2).sum())) / N
+    if se_hat == 0.0:
+        return None
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, K, size=(reps, K))
+    fb, nb = f_i[idx], n_i[idx]
+    th = fb.sum(axis=1) / nb.sum(axis=1)
+    se = np.sqrt(K / (K - 1.0) * ((fb - th[:, None] * nb) ** 2).sum(axis=1)) / nb.sum(axis=1)
+    ok = se > 0
+    if not ok.any():
+        return None
+    t = (th[ok] - theta) / se[ok]
+    return float(theta - np.quantile(t, 1.0 - conf) * se_hat)
+
+
+def cluster_bound(cluster_ids: list, fa: list[int], *, reps: int, seed: int, floor: int | None) -> dict:
+    """Gating cluster-robust 97.5% upper bound for one clustering (beta-binomial profile likelihood).
+
+    ALL trials enter the rate. A clustering with fewer than `floor` clusters of at least
+    MIN_TRIALS_PER_CLUSTER trials (floor None) is UNDERPOWERED: no gating bound, and the exact
+    Clopper-Pearson bound is returned for information only. BCa and bootstrap-t are reported-only columns.
     """
     counts: dict = {}
     for c, f in zip(cluster_ids, fa):
@@ -149,62 +263,29 @@ def cluster_bound(cluster_ids: list, fa: list[int], *, reps: int, seed: int, flo
     eligible = int((n_i >= MIN_TRIALS_PER_CLUSTER).sum())
     out = {"clusters": len(keys), "clusters_ge_min_trials": eligible, "k": total_f, "n": total_n,
            "floor": floor, "exact_info_975": exact_upper_one_sided(total_f, total_n)}
-    flags = []
     if floor is None or eligible < max(floor, 2):
         out.update({"underpowered": True, "upper_975": None, "method": "none",
                     "flags": ["cluster_underpowered"]})
         return out
-    out["underpowered"] = False
-    if total_f == 0:
-        flags.append("cluster_degenerate")
-        out["upper_975"] = out["exact_info_975"]
-        out["method"] = "exact"
-    else:
-        r = bca_upper(n_i, f_i, reps=reps, seed=seed)
-        out.update({"upper_975": r["upper"], "z0": r["z0"], "accel": r["accel"], "method": "bca"})
-    out["flags"] = flags
+    prof = betabinom_profile_upper(n_i, f_i)
+    out.update({"underpowered": False, "upper_975": prof["upper"], "method": METHOD,
+                "p_hat": prof["p_hat"], "rho_hat": prof["rho_hat"], "rho_at_upper": prof["rho_at_upper"],
+                "bca_975": bca_upper(n_i, f_i, reps=reps, seed=seed)["upper"] if total_f else None,
+                "boot_t_975": boot_t_upper(n_i, f_i, reps=reps, seed=seed),
+                "flags": ["cluster_degenerate"] if total_f == 0 else []})
     return out
 
 
-def choose_floor(*, k_data: int, configured: int, n_per: int, p: float, rhos: list[float], sims: int,
-                 reps: int, seed: int, step: int = 5, target: float = 0.90) -> dict:
-    """Pick the doctor floor from the coverage simulation.
-
-    Simulates coverage at the data's K, at the configured floor and at each step of 5 above the
-    configured floor up to the data's K. The chosen floor is the smallest candidate (configured, +5, ...)
-    whose coverage is at least `target` at every rho; none means "floor unattainable".
-    """
-    cands = list(range(configured, k_data + 1, step))
-    ks = sorted(set(cands) | {k_data, configured})
-    table = []
-    cover: dict[int, float] = {}
-    for K in ks:
-        if K < 2:
-            continue
-        for r in coverage_sim(p=p, K=K, n_per=n_per, rhos=rhos, sims=sims, reps=reps, seed=seed + K):
-            table.append({"K": K, "rho": r["rho"], "coverage": r["coverage"], "sims": r["sims"]})
-            cover[K] = min(cover.get(K, 1.0), r["coverage"])
-    chosen = next((c for c in cands if cover.get(c, 0.0) >= target), None)
-    if k_data < configured:
-        chosen, status = configured, "data K below configured floor"
-    else:
-        status = "floor unattainable" if chosen is None else ("configured" if chosen == configured else "raised")
-    return {"configured_floor": configured, "chosen_floor": chosen, "status": status, "k_data": k_data,
-            "n_per_cluster": n_per, "p": p, "target_coverage": target, "table": table}
-
-
-def coverage_sim(
-    *, p: float, K: int, n_per: int, rhos: list[float], sims: int, reps: int, seed: int
-) -> list[dict]:
-    """Coverage of the one-sided 97.5% cluster bound under beta-binomial overdispersion.
-
-    rho is the intra-cluster correlation. Used only to report coverage.
-    """
+def coverage_sim(*, p: float, K: int, n_per: int, rhos: list[float], sims: int, seed: int,
+                 reps: int = 500, method: str = "profile") -> list[dict]:
+    """Coverage of the one-sided 97.5% bound under beta-binomial overdispersion (ICC rho), K doctors of
+    n_per trials each. method "profile" is the gating bound; "bca" is the reported-only one."""
     rng = np.random.default_rng(seed)
     results = []
+    n_i = np.full(K, n_per)
     for rho in rhos:
         covered = 0
-        for s in range(sims):
+        for _ in range(sims):
             if rho <= 0:
                 p_i = np.full(K, p)
             else:
@@ -212,8 +293,9 @@ def coverage_sim(
                 b = (1 - p) * (1 - rho) / rho
                 p_i = rng.beta(a, b, size=K)
             f_i = rng.binomial(n_per, p_i)
-            n_i = np.full(K, n_per)
-            if f_i.sum() == 0:
+            if method == "profile":
+                up = betabinom_profile_upper(n_i, f_i)["upper"]
+            elif f_i.sum() == 0:
                 up = exact_upper_one_sided(0, int(n_i.sum()))
             else:
                 up = bca_upper(n_i, f_i, reps=reps, seed=int(rng.integers(0, 2**31 - 1)))["upper"]
