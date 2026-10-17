@@ -2,7 +2,7 @@
 
 Serving model: claude-sonnet-5-5 (Sonnet 5.5).
 Branch: cloudpane/cloud-t28b-harness/build
-Commit: see `git log -1` on that branch (hash recorded in OUTBOX.md at push).
+Commit: 80678d4 (OUTBOX-only follow-up commit may sit on top)
 Tests: 27 passed, 0 failed (`python3 -m pytest eval/pdqi9/t28b/tests -q`, synthetic only). Smoke run: 600 synthetic consults, 30 doctors, 5,000 trials, 1.4 s with coverage sim.
 
 ## Layout
