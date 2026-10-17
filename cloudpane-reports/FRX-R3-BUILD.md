@@ -1,13 +1,9 @@
 # FRX-R3 build report: fable's R3 order on FRX-R2-VERDICT
 Handle cloud-frx-r2-build. Branch `cloudpane/cloud-frx-r2-build/r3`, from r2 `9c5d3dea` (base R1b `ea2818ee`). Code `1dc901e0`.
 Model serving this build: `claude-opus-5-5`. **Verdict: built; every gate line green; every order target met.**
-
 ## Design change (core: F1 + F2 + F7 + L2)
 The R2 blocklist is deleted (`guard_names`, `GUARD_ALIASES`, `moved_in_note`). R1-2b is now an **allowlist** (`r1_floors.py`):
-- `vocab()` reads `data/drug-lexicon.json`. Strong drug words come from three sources:
-  - each row's first word (the brand or the molecule);
-  - `medication_safety.GENERICS` / `BRANDS`;
-  - any later word with a molecule suffix.
+- `vocab()` reads `data/drug-lexicon.json`. Strong drug words: each row's first word (brand or molecule), `medication_safety.GENERICS` / `BRANDS`, and any later word with a molecule suffix.
 - It drops plain words: common-English, clinical-English, clinical terms and analytes, a Hindi-romanised list, instruction words and clinical-suffix words.
 - `drug_mentions` finds:
   - strong words;
@@ -20,7 +16,6 @@ The R2 blocklist is deleted (`guard_names`, `GUARD_ALIASES`, `moved_in_note`). R
 - `unposted()` keeps only the mentions that do not resolve to a posted, tape-supported medicine. A posted medicine resolves through its own names and molecules and through same-molecule brands. Every unresolved mention counts as a moved drug.
 - `r1_allowlist` withholds the whole field that names an unresolved drug: one `field_withheld` item, "(unconfirmed drug)", never characters.
 - `pipeline.py` scans the final note with `unposted_in_note`. If the note fails, the deterministic note is tried; if that fails too, the write is rejected (`FRX-R1 note_text names a drug that is not posted`).
-
 ## Before (R2 9c5d3dea) / after (R3 1dc901e0), on the refuter's own harness (verdict branch, unchanged)
 | Finding | Harness line | R2 | R3 |
 |---|---|---|---|
@@ -41,7 +36,6 @@ The R2 blocklist is deleted (`guard_names`, `GUARD_ALIASES`, `moved_in_note`). R
 | D1 | h1 OFF vs base 3cdb7c0b: note, artifact, calls, written, final_errors, log, files | 500/500 | **500/500** each |
 | Floors | h1 ON written: check() errs, posted_hits, printable_errors, brackets | 0 | **0** |
 | Recall | h1 doctor-confirmed drugs written | 313/413 | **413/413** |
-
 ## Per item, what changed
 - **F3** (`name_in_text(use=True)`): the match is refused in three cases:
   - the word before the name is in `PREFIXES` (hydroxy, methyl, levo, es, dex, des, nor, chlor);
@@ -62,7 +56,6 @@ The R2 blocklist is deleted (`guard_names`, `GUARD_ALIASES`, `moved_in_note`). R
   - "not better / improving";
   - "(it | fever | pain | vomiting | bleeding | swelling | symptoms) continues / persists".
   - NEGATION still guards all of them.
-
 ## Gate
 - FULL suite (Python 3.11.17, `-n 3`): **4058 passed, 2 skipped, 0 failed** in 1135.69s. It was 4009 at r2; +49 in `test_r3_fixes.py`.
   - One earlier run had 1 failure, `test_bundle_ingest::test_timeout_kills_the_whole_process_group`. That is a timing test in a file R3 does not touch. It ran while h1 loaded the CPU, and it passes alone and in the final run.
@@ -72,7 +65,6 @@ The R2 blocklist is deleted (`guard_names`, `GUARD_ALIASES`, `moved_in_note`). R
   - `test_r3_fixes.py` is new.
   - `test_r2_fixes.py`, R2's own file, is edited (flag 2).
   - `test_r1_floors.py` and the base test files are untouched since r2.
-
 ## Flags for fable
 1. F5 is met (0/500), but not by "always null". `prescribed` + null fails the schema, and a lone red-flag line needs an owner for FRX-A1.
 2. `test_r2_fixes.py` edits, all forced by the order:
