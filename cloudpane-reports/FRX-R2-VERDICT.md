@@ -17,7 +17,7 @@ Prior defects, re-run with my harness:
 - D5: the verdict's 7 cases post 0/7 (R1b 7/7). My 20 qualifier cases post 1/20 (R1b 12/20). The one is `Pan 40` on "Pan masala stop.", see F6. Legitimate base word on tape: 15/16 post, see L1.
 - L1: 10 negated or non-clinical sentences fire 0/10 (R1b 9/10). My 16 routine sentences fire 0/16 (R1b 0/16). True red flags fire 11/14 (R1b 12/14), see L3.
 - L2: the 16 dangerous pairs false-accept 0/16 (R1b 16/16). My 20 Indian OPD look-alike pairs, both directions, false-accept 0/40 (R1b 0/40). But see F3.
-- M2 / M5 (the prior verdict's mutants) on R2: MUTANT_M2M5_LINE.
+- M2 / M5 (the prior verdict's mutants) on R2: both KILLED by the builder's suite. M2 (4-letter prefix) fails `test_l2_look_alike_never_matches[hydroxychloroquine-…]`. M5 (coverage 0.5) fails `test_l6_m5_overlap_half_is_not_covered`. PASS.
 
 Safety floors on R2 ON, gen_consult seeds 1000-1499, 384 written: 0 posted medicines without a doctor name quote, 0 dose digits off tape, 0 check() errors (FRX-M4 dose precedence included), 0 posted_hits, 0 printable_errors, 0 bracket/placeholder in note_text. Clip: a doctor red-flag turn that the boundary quarantined is not carried (0).
 
@@ -78,4 +78,4 @@ Mutants of my own on R2's changes (`mutants.py`, run against test_r2_fixes.py + 
   - X10, the last-line reject of a note that still names a moved drug, is never exercised;
   - X12 shows the BRANDS link is untested.
 
-Required to pass: F1, F2, F3, F6 and F7 to 0, F4 fixed, F5 fixed or ruled. Re-run `h3.py` and `h4.py` as the oracle.
+Required to pass: F1, F2, F3, F6 and F7 to 0, F4 fixed, F5 fixed or ruled, and tests that kill X10 and X12. Re-run `h3.py` and `h4.py` as the oracle.

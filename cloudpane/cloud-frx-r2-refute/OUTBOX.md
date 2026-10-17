@@ -3,3 +3,4 @@
 - findings so far: F1 GEN-D3 83/232 visible; F3 split-spelling 6/6; F4 red flag lost; F5 116/500 rejected
 - draft verdict FAIL committed; mutants pending
 - mutants own 12: 5 killed, 7 survived; M2/M5 rerun pending
+- M2/M5 killed; FINAL verdict FAIL pushed: cloudpane-reports/FRX-R2-VERDICT.md
