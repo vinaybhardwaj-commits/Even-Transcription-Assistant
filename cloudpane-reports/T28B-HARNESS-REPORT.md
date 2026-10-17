@@ -8,14 +8,8 @@ Tests: 27 passed, 0 failed (`python3 -m pytest eval/pdqi9/t28b/tests -q`, synthe
 ## Layout
 `eval/pdqi9/t28b/`: `core.py` (arm c, truth, sampler, prereg, scoring), `stats.py` (Clopper-Pearson, cluster BCa, coverage sim), `run.py` (CLI, S2c readout, C8), `tests/test_t28b.py`. Deps: numpy, stdlib only. Import-ban test covers http, requests, socket, DB clients, subprocess.
 
-## Monday command (from repo root)
-```
-python3 -m eval.pdqi9.t28b --manifest MANIFEST.jsonl --vecs VECS.json --centroids CENTROIDS.json \
-  --exclude TUNING149.txt --out-dir OUTDIR --seed SEED --target-trials 100000 \
-  --armc-fire-rate RATE --consults-per-month N
-```
-Optional: `--truth truth.jsonl` ({consult_uid, label}; replaces arm (c) derivation), `--min-trials 2736`, `--boot-reps 10000`, `--sim-reps 200` (0 disables). Exit 2 on too few trials or a disjointness violation.
-Manifest rows: consult_uid, doctor_uid (true speaker), logged_in_doctor_uid, optional vectors_path (else --vecs).
+## Monday command
+SUPERSEDED by fix1: see T28B-FIX1-REPORT.md (two subcommands, `prereg` then `score`; --truth and --exclude required).
 
 ## Outputs (OUTDIR, all 0600)
 `prereg_trials.jsonl`, `prereg.json` (seed, sha256, counts), `prereg.sha256` written BEFORE scoring; scoring re-checks the sha. `trials_scored.jsonl` (per-trial audit, has uids). `summary.json` (counts and rates only). Stdout: counts only.

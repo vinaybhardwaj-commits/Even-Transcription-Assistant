@@ -130,10 +130,12 @@ def bca_upper(
     }
 
 
-def cluster_bound(cluster_ids: list, fa: list[int], *, reps: int, seed: int) -> dict:
+def cluster_bound(cluster_ids: list, fa: list[int], *, reps: int, seed: int, floor: int | None) -> dict:
     """Cluster-robust 97.5% upper bound for one clustering, with flags.
 
-    ALL trials enter the rate and the bootstrap; K_min only drives the flag.
+    ALL trials enter the rate and the bootstrap. A clustering with fewer than `floor` clusters of at
+    least MIN_TRIALS_PER_CLUSTER trials (floor None = unattainable) is UNDERPOWERED: no bootstrap bound
+    is computed, and the exact Clopper-Pearson bound is returned for information only.
     """
     counts: dict = {}
     for c, f in zip(cluster_ids, fa):
@@ -145,24 +147,50 @@ def cluster_bound(cluster_ids: list, fa: list[int], *, reps: int, seed: int) -> 
     f_i = np.array([counts[k][1] for k in keys])
     total_n, total_f = int(n_i.sum()), int(f_i.sum())
     eligible = int((n_i >= MIN_TRIALS_PER_CLUSTER).sum())
+    out = {"clusters": len(keys), "clusters_ge_min_trials": eligible, "k": total_f, "n": total_n,
+           "floor": floor, "exact_info_975": exact_upper_one_sided(total_f, total_n)}
     flags = []
-    if eligible < K_MIN_CLUSTERS:
-        flags.append("cluster_underpowered")
-    out = {
-        "clusters": len(keys),
-        "clusters_ge_min_trials": eligible,
-        "k": total_f,
-        "n": total_n,
-    }
+    if floor is None or eligible < max(floor, 2):
+        out.update({"underpowered": True, "upper_975": None, "method": "none",
+                    "flags": ["cluster_underpowered"]})
+        return out
+    out["underpowered"] = False
     if total_f == 0:
         flags.append("cluster_degenerate")
-        out["upper_975"] = exact_upper_one_sided(0, total_n)
+        out["upper_975"] = out["exact_info_975"]
         out["method"] = "exact"
     else:
         r = bca_upper(n_i, f_i, reps=reps, seed=seed)
         out.update({"upper_975": r["upper"], "z0": r["z0"], "accel": r["accel"], "method": "bca"})
     out["flags"] = flags
     return out
+
+
+def choose_floor(*, k_data: int, configured: int, n_per: int, p: float, rhos: list[float], sims: int,
+                 reps: int, seed: int, step: int = 5, target: float = 0.90) -> dict:
+    """Pick the doctor floor from the coverage simulation.
+
+    Simulates coverage at the data's K, at the configured floor and at each step of 5 above the
+    configured floor up to the data's K. The chosen floor is the smallest candidate (configured, +5, ...)
+    whose coverage is at least `target` at every rho; none means "floor unattainable".
+    """
+    cands = list(range(configured, k_data + 1, step))
+    ks = sorted(set(cands) | {k_data, configured})
+    table = []
+    cover: dict[int, float] = {}
+    for K in ks:
+        if K < 2:
+            continue
+        for r in coverage_sim(p=p, K=K, n_per=n_per, rhos=rhos, sims=sims, reps=reps, seed=seed + K):
+            table.append({"K": K, "rho": r["rho"], "coverage": r["coverage"], "sims": r["sims"]})
+            cover[K] = min(cover.get(K, 1.0), r["coverage"])
+    chosen = next((c for c in cands if cover.get(c, 0.0) >= target), None)
+    if k_data < configured:
+        chosen, status = configured, "data K below configured floor"
+    else:
+        status = "floor unattainable" if chosen is None else ("configured" if chosen == configured else "raised")
+    return {"configured_floor": configured, "chosen_floor": chosen, "status": status, "k_data": k_data,
+            "n_per_cluster": n_per, "p": p, "target_coverage": target, "table": table}
 
 
 def coverage_sim(
