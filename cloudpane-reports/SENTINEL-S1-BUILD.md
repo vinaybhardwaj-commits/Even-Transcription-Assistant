@@ -42,3 +42,12 @@
 Tests  5 failed | 3 passed (8)
 ```
 Restored; repair-copy suite back to `Tests  8 passed (8)`.
+
+## FIX (refute PASS-WITH-FIXES, SENTINEL-S1-VERDICT.md): tests only, no code change
+- F1 tests/unit/rooms-live-repair-copy.test.ts:57: RoomTile rendered with renderToStaticMarkup; muted TONOR markup contains "mute button on the mic", muted webcam markup does not (and contains the webcam USB line).
+- F2 tests/unit/rooms-live-repair-copy.test.ts:25: deviceClass("TONOR webcam") === "tonor".
+- M6 (RoomTile.tsx:46 stepsFor(row.state, row.device.kind) -> stepsFor(row.state)): `× F1 ... > a muted TONOR card says to press the mute button on the mic`, `AssertionError: expected '<section aria-label="OPD 3: Mic silen…' to contain 'mute button on the mic'`, `Tests  2 failed | 9 passed (11)`.
+- M2 (TONOR/webcam check order swapped in device-class.ts): `× ... > F2: a name matching both regexes is TONOR (the mute-button text wins)`, `AssertionError: expected 'webcam' to be 'tonor'`, `Tests  1 failed | 10 passed (11)`.
+- Both mutants restored (git checkout); diff after restore is the test file only.
+- vitest repair-copy + present + api: `Test Files  3 passed (3)`, `Tests  56 passed (56)`. tsc (typecheck and typecheck:tests) rc 0.
+- scrub.sh origin/main..HEAD: SCRUB_RC.

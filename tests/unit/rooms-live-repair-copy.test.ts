@@ -1,5 +1,10 @@
 /** Sentinel S1: the Rooms Live repair copy follows the room's device (room_install.expected_device_name), not always the webcam. */
 import { describe, it, expect } from "vitest";
+import React, { createElement } from "react";
+(globalThis as { React?: unknown }).React = React; // the .tsx compiles to React.createElement under vitest
+import { renderToStaticMarkup } from "react-dom/server";
+import { RoomTile } from "@/components/rooms-live/RoomTile";
+import type { RoomRow } from "@/lib/rooms-live/snapshot";
 import { STILL_NOT_WORKING, stepsFor } from "@/lib/rooms-live/present";
 import { deviceClass } from "@/lib/steward/device-class";
 
@@ -16,6 +21,9 @@ describe("device class from the expected device name", () => {
     expect(deviceClass("MacBook Air Microphone")).toBe("unknown");
     expect(deviceClass(null)).toBe("unknown");
     expect(deviceClass("")).toBe("unknown");
+  });
+  it("F2: a name matching both regexes is TONOR (the mute-button text wins)", () => {
+    expect(deviceClass("TONOR webcam")).toBe("tonor");
   });
 });
 
@@ -43,5 +51,22 @@ describe("repair copy by device", () => {
   });
   it("other states do not depend on the device", () => {
     for (const s of ["notrec", "off", "unknown", "listening", "quiet"] as const) expect(stepsFor(s, "tonor")).toEqual(stepsFor(s, "webcam"));
+  });
+});
+
+describe("F1: the card renders the device's repair line (RoomTile -> stepsFor(state, device.kind))", () => {
+  const base: RoomRow = {
+    room_id: "room_x", label: "OPD 3", doctor: null, doctor_known: true, state: "muted", state_since: null, detail_code: null,
+    level: { rms: 0, zero: 1, at: null, stale: false }, baseline_rms: 0.009, device: { name: null, missing: false }, session: { open: true, since: null, chunk_age_s: 30 },
+    steward: null, steward_line: null, steward_log: [], claim: null, ages_s: { listener: 1, heartbeat: 1, ext: 1 },
+  };
+  const tile = (kind: RoomRow["device"]["kind"]) => renderToStaticMarkup(createElement(RoomTile, { row: { ...base, device: { ...base.device, kind } }, nowMs: 0, eng: false, onOpen: () => {} }));
+  it("a muted TONOR card says to press the mute button on the mic", () => {
+    expect(tile("tonor")).toContain("mute button on the mic");
+  });
+  it("a muted webcam card does not", () => {
+    const m = tile("webcam");
+    expect(m).not.toContain("mute button on the mic");
+    expect(m).toContain("Check the webcam&#x27;s USB cable");
   });
 });
