@@ -97,7 +97,7 @@ def test_d3_posted_field_naming_a_moved_drug_is_withheld_whole():
     art["gp_extraction"]["follow_up"]["follow_up_instructions"] = "review if fever persists on PCM"
     out, c = apply_r1(art)
     gx = out["gp_extraction"]
-    assert "general_advice" not in gx and "follow_up_instructions" not in gx.get("follow_up", {})
+    assert gx["general_advice"] == "Drink warm water" and "follow_up_instructions" not in gx.get("follow_up", {})  # R4 G3: per item
     assert c["r1_2_moved"] == 1 and c["r1_2b_withheld"] == 2
     w = [p for p in out["provenance"] if "field_withheld" in p["flags"]]
     assert sorted(p["text"] for p in w) == ["follow_up withheld (unconfirmed drug)", "general_advice withheld (unconfirmed drug)"]

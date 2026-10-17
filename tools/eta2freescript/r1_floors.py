@@ -360,7 +360,9 @@ QUALIFIERS = {"acid", "sodium", "potassium", "calcium", "magnesium", "zinc", "ir
               "kid", "kids", "paediatric", "pediatric", "adult", "extra", "max", "fast", "new", "advance", "advanced", "lc",
               "mini", "total", "ultra", "strong"}
 # F3 (R3): a word before a name that makes it another molecule ("hydroxy chloroquine", "levo cetirizine", "es omeprazole").
-PREFIXES = {"hydroxy", "methyl", "levo", "es", "dex", "des", "nor", "chlor"}
+PREFIXES = {"hydroxy", "methyl", "levo", "es", "dex", "des", "nor", "chlor", "s", "r"}  # s / r: isomers ("s amlodipine", R4 G1)
+# Non-prescription products (R4 G4): a mention passes the scan, and they never post to the structured Rx.
+NON_RX = {"ors", "electral", "calamine"}
 # F4 (R3): a mention in a stop / avoid / negated clause is not a drug-use mention for posting.
 _NOT_USE = {"stop", "stopped", "stopping", "avoid", "avoided", "no", "not", "don", "dont", "never", "without", "allergic",
             "allergy", "nahi", "mat", "band", "discontinue", "withhold", "skip"}
@@ -440,7 +442,7 @@ DRUG_ABBREVIATIONS = {"pcm"}
 # Short brands that are everyday words (F6): such a brand posts only with its strength or a form word next to it on tape.
 SHORT_BRAND_SEED = {"pan", "mox", "dolo", "azee", "zinc"}
 # Clinical abbreviations and plain words that a lexicon row may carry but that are never a drug mention by themselves.
-_NOT_DRUG = {"bp", "hr", "rr", "spo", "cbc", "ecg", "ekg", "tsh", "esr", "crp", "lft", "kft", "rft", "rbs", "fbs", "ppbs",
+_NOT_DRUG = {"sitz", "sunscreen", "saline", "bp", "hr", "rr", "spo", "cbc", "ecg", "ekg", "tsh", "esr", "crp", "lft", "kft", "rft", "rbs", "fbs", "ppbs",
              "usg", "mri", "ent", "opd", "ipd", "icu", "hba", "urine", "blood", "test", "day", "days", "week", "weeks", "month",
              "dose", "doses", "once", "twice", "thrice", "daily", "night", "morning", "after", "before", "food", "sos", "bd",
              "tds", "qid", "hs", "stat", "doctor", "dr", "patient", "drug", "drugs", "medicine", "medicines", "other",
@@ -523,13 +525,15 @@ def _clauses(text: str) -> list[str]:
     return [x for x in re.split(r"[.;,!?\n]+", text or "") if x.strip()]
 
 
-def name_in_text(name: str, text: str, own: set[str] | None = None, use: bool = False) -> bool:
+def name_in_text(name: str, text: str, own: set[str] | None = None, use: bool = False, others: set[str] | None = None) -> bool:
     """`name` is said in `text`: every component phrase of name_phrases appears as whole, contiguous words (digits and unit /
     form words in the text skipped). Exact only: no prefix, no fuzzy spelling (fable ruling L2). With `use` (posting, R1-2)
     a phrase also must not be:
       - joined to the word before it into another drug, or follow a molecule prefix (PREFIXES: "hydroxy chloroquine",
         "methyl prednisolone", "levo cetirizine", "es omeprazole") (F3);
-      - followed by another drug word that is not this medicine's own (`own`): "amoxicillin clavulanate" (F3);
+      - followed by another drug word that is not this medicine's own (`own`): "amoxicillin clavulanate" (F3), with a joiner
+        between them skipped ("amoxicillin plus clavulanic acid", R4 G1) unless that drug is another medicine of this consult
+        (`others`: "paracetamol and ibuprofen" names two medicines);
       - in a stop / avoid / negated clause ("Stop pan masala", "avoid ibuprofen") (F4);
       - a short brand that is an everyday word (vocab().everyday: Pan, Mox, Dolo, Azee, Zinc ...) without its strength or a
         form word next to it on tape ("Pan 40", "tab Pan") (F6)."""
@@ -550,7 +554,12 @@ def name_in_text(name: str, text: str, own: set[str] | None = None, use: bool = 
                     continue
                 if use:
                     prev = seq[j - 1] if j else ""
-                    nxt = seq[j + n] if j + n < len(seq) else ""
+                    k = j + n
+                    while k < len(seq) and seq[k] in _JOIN:  # "+", "&" and "/" are "and" already (_alnum)
+                        k += 1
+                    nxt = seq[k] if k < len(seq) else ""
+                    if k > j + n and nxt in (others or set()):
+                        nxt = ""
                     if prev in PREFIXES or (prev and prev + ph[0] in v.strong):
                         continue
                     if nxt and (nxt in v.strong or ph[-1] + nxt in v.strong) and nxt not in (own or set()):
@@ -582,7 +591,7 @@ def _own_words(m: dict) -> set[str]:
     return {t for n in names for t in _toks(n) if t.isalpha()} | {"".join(t for t in _toks(n) if t.isalpha()) for n in names}
 
 
-def name_on_tape(m: dict, owner: dict | None) -> bool:
+def name_on_tape(m: dict, owner: dict | None, others: set[str] | None = None) -> bool:
     """R1-2. Medicine `m` stays posted only if BOTH:
       (a) its provenance owner (json_pointer /medicines/<i>) has evidence_state heard_in_room; and
       (b) at least one evidence entry with speaker == "doctor" has a quote_en or quote that says the drug's name, raw_name or
@@ -596,12 +605,14 @@ def name_on_tape(m: dict, owner: dict | None) -> bool:
     if not owner or owner.get("evidence_state") != "heard_in_room":
         return False
     names = [n for n in [m.get("name"), m.get("raw_name")] + list(m.get("aliases") or []) if isinstance(n, str) and n.strip()]
+    if names and all(set(t for ph in name_phrases(n) for t in ph) <= NON_RX for n in names if name_phrases(n)):
+        return False  # ORS, Electral, calamine: never in the structured Rx (R4 G4)
     own = _own_words(m)
     for ev in owner.get("evidence") or []:
         if not isinstance(ev, dict) or ev.get("speaker") != "doctor":
             continue
         for k in ("quote_en", "quote"):
-            if any(name_in_text(n, ev.get(k) or "", own, use=True) for n in names):
+            if any(name_in_text(n, ev.get(k) or "", own, use=True, others=(others or set()) - own) for n in names):
                 return True
     return False
 
@@ -640,14 +651,17 @@ def drug_mentions(text: str, known: list[str] | None = None) -> list[tuple[str, 
         seq = [t for t, k in raw if k in ("word", "gnum")]  # "vitamin D3" keeps its 3
         pos = [i for i, (t, k) in enumerate(raw) if k in ("word", "gnum")]
         near = lambda j: _adjacent(raw, pos[j] - 1) or _adjacent(raw, pos[j] + 1)
-        known_strong, known_weak, known_phr = set(), set(), []
+        seq_all = [t for t, k in raw if k != "num"]  # the form words kept, for a known name that carries one ("fever tablet")
+        known_strong, known_phr = set(), []
         for n in known or []:
             for t in _toks(n):
-                if t.isalpha() and len(t) >= 3 and t not in _NOT_A_NAME and t not in _FORM:
-                    (known_weak if t in v.plain else known_strong).add(t)
-            # a name made only of qualifiers ("calcium", "vitamin D3") is found by its whole phrase (F7)
-            phs = [tuple(t for x in _alnum(n) if not _STRENGTH.fullmatch(x) and x not in _FORM for t in _toks(x))]
-            known_phr += [p for p in phs if p and all(t in QUALIFIERS or t.isdigit() for t in p) and any(t.isalpha() for t in p)]
+                if t.isalpha() and len(t) >= 3 and t not in _NOT_A_NAME and t not in _FORM and t not in v.plain:
+                    known_strong.add(t)
+            # R4 G2: a known name counts bare, as its whole phrase ("Met", "Pause", "calcium", "vitamin D3", "B complex"); a
+            # name with a form word needs that word too ("fever tablet", "BP tablet"). The strength / form rule is for posting.
+            ph = tuple(t for x in _alnum(n) if not _STRENGTH.fullmatch(x) and x not in _FORM - _ADJ_FORM for t in _toks(x))
+            if ph and any(t.isalpha() for t in ph) and not set(t for t in ph if t not in _FORM) <= _NOT_A_NAME | NON_RX:
+                known_phr.append(ph)
         j = 0
         while j < len(seq):
             t = seq[j]
@@ -658,20 +672,23 @@ def drug_mentions(text: str, known: list[str] | None = None) -> list[tuple[str, 
             elif two and two in v.strong:
                 out.append((two,))
                 j += 1
+            elif two and t in v.strong and seq[j + 1] not in v.strong and v.fuzzy_hit(two):  # "para cetemol": a half is a word
+                out.append((v.fuzzy_hit(two),))
+                j += 1
             elif t in v.strong or t in known_strong:
                 out.append((t,))
             elif v.fuzzy_hit(t):
                 out.append((v.fuzzy_hit(t),))
-            elif (t in SHORT_BRAND_SEED or t in known_weak) and near(j):
+            elif t in SHORT_BRAND_SEED and near(j):
                 out.append((t,))
             j += 1
         for ph in known_phr:
             n = len(ph)
-            if any(tuple(seq[j:j + n]) == ph for j in range(len(seq) - n + 1)):
+            if any(tuple(seq_all[j:j + n]) == ph for j in range(len(seq_all) - n + 1)):
                 out.append(ph)
         out += [(m.group(1).lower() + m.group(2),) for m in _PX.finditer(line) if m.group(1).lower() not in _NOT_DRUG
                 and m.group(1).lower() not in v.plain]
-    return out
+    return [m for m in out if not set(m) <= NON_RX]
 
 
 def posted_words(art: dict) -> set[str]:
@@ -687,16 +704,63 @@ def posted_words(art: dict) -> set[str]:
     return out
 
 
+_ITEM = re.compile(r"(;\s*|\n|(?<=[.!?])\s+)")
+# R4 G3: a stop / avoid / do-not-take / allergy / reaction warning names a drug without prescribing it.
+_WARNING = re.compile(r"\b(?:stop|stopped|avoid|do\s*n[o']?t\s+(?:take|use|stop|give|repeat|skip)|never\s+(?:take|use|give)|"
+                      r"not\s+to\s+(?:take|use)|allerg\w*|had\s+(?:a\s+)?(?:rash|reaction)|reaction\s+to|discontinue\w*)\b", re.I)
+_USE = re.compile(r"\b(?:start|take|continue|give|prescribe|use)\b", re.I)
+
+
+def is_warning(item: str) -> bool:
+    """`item` is a warning about a drug, not a use of it: a _WARNING cue, and no use cue outside the warning itself ("Avoid
+    ibuprofen because of the ulcer", "Do not take amoxicillin again", "Stop metformin before the CT scan"; not "Stop
+    amlodipine and start telmisartan")."""
+    return bool(_WARNING.search(item)) and not _USE.search(_WARNING.sub(" ", item))
+
+
+def items(text: str) -> list[str]:
+    """`text` split into its items: on "; ", newlines and sentence ends."""
+    return [x for x in _ITEM.split(text or "")[::2] if x.strip()]
+
+
 def unposted(art: dict, text: str, known: list[str] | None = None) -> list[tuple[str, ...]]:
     """The drug mentions in `text` that do not resolve to a posted, tape-supported medicine (posted_words). Each one is
-    treated as a moved drug."""
+    treated as a moved drug. A warning item (is_warning) passes: it names a drug without prescribing it (R4 G3)."""
     pw = posted_words(art)
-    return [m for m in drug_mentions(text, known) if not set(m) <= pw]
+    return [m for it in items(text) if not is_warning(it) for m in drug_mentions(it, known) if not set(m) <= pw]
+
+
+def _withhold_items(art: dict, path: tuple, known: list[str], c: dict) -> bool:
+    """R4 G3: withhold only the items of the string at `path` that name an unresolved drug, keeping every other item and its
+    separator byte for byte. One field_withheld item per withheld item. False (nothing done) when every item goes, or the
+    string is a list row's required name: then the whole field is withheld as before."""
+    gx = art["gp_extraction"]
+    lp = next((k for k in LISTS if path[:len(k)] == k and len(path) > len(k)), None)
+    if lp is not None and (len(path) == len(lp) + 1 or path[len(lp) + 1] in LISTS[lp][1] or len(path) > len(lp) + 2):
+        return False
+    parts = _ITEM.split(_get(gx, path))
+    bad = [i for i in range(0, len(parts), 2) if parts[i].strip() and unposted(art, parts[i], known)]
+    keep = [i for i in range(0, len(parts), 2) if parts[i].strip() and i not in bad]
+    if not bad or not keep:
+        return False
+    out = "".join(parts[i] + (parts[i + 1] if i + 1 < len(parts) and i != keep[-1] else "") for i in keep)
+    _get(gx, path[:-1])[path[-1]] = out
+    if lp is not None:
+        kind, section, owner = LISTS[lp][0], lp[-1], (_owners(art, _ptr(lp + (path[len(lp)],))) or [None])[0]
+    else:
+        kind, ptr = SCALARS.get(path, (_TOP_KIND.get(str(path[0]), "management_plan"), None))
+        section = str(path[-1]) if path in SCALARS else str(path[0])
+        owner = (_owners(art, ptr) or [None])[0] if ptr else (_owners(art, "/" + str(path[0])) or [None])[0]
+    for _ in bad:
+        _withheld_item(art, kind, section, owner, "unconfirmed drug")
+        c["r1_2b_withheld"] += 1
+    return True
 
 
 def r1_allowlist(art: dict, c: dict, known: list[str] | None = None) -> None:
-    """R1-2b. Withhold, whole, every posted gp_extraction string with a drug mention that is not a posted medicine (as R1-1
-    does, flag field_withheld, "<section> withheld (unconfirmed drug)"). A medicine's own name fields always resolve to it."""
+    """R1-2b. Every posted gp_extraction string with a drug mention that is not a posted medicine: only the items that name it
+    are withheld (R4 G3, _withhold_items), or the whole field when every item does or it is a required name (as R1-1 does,
+    flag field_withheld, "<section> withheld (unconfirmed drug)"). A medicine's own name fields always resolve to it."""
     gx = art.get("gp_extraction")
     if not isinstance(gx, dict):
         return
@@ -714,13 +778,16 @@ def r1_allowlist(art: dict, c: dict, known: list[str] | None = None) -> None:
             hits.append(path)
 
     walk(gx, ())
+    hits = [h for h in hits if not _withhold_items(art, h, known, c)]
     if hits:
         r1_posted_fields(art, c, hits, "unconfirmed drug", "r1_2b")
 
 
 def r1_medicine_floor(art: dict, c: dict) -> None:
     meds = (art.get("gp_extraction") or {}).get("medicines") or []
-    move = {i: None for i, m in enumerate(meds) if not name_on_tape(m, (_owners(art, f"/medicines/{i}") or [None])[0])}
+    words = [_own_words(m) if isinstance(m, dict) else set() for m in meds]
+    move = {i: None for i, m in enumerate(meds) if not name_on_tape(m, (_owners(art, f"/medicines/{i}") or [None])[0],
+                                                                    set().union(*(w for x, w in enumerate(words) if x != i)))}
     c["r1_2_moved"] += _to_pick_drug(art, move) if move else 0
 
 

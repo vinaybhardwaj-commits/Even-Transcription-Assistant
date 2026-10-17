@@ -98,8 +98,8 @@ def test_f4_withheld_advice_does_not_hide_the_red_flag(tmp_path):
     lg = run_consult(c, FakeClient({"stageA": json.dumps(enc), "stageB": _note({"Examination": "Throat red"})}), tmp_path,
                      Options(notes_only=True))
     ga = lg["artifact"]["gp_extraction"].get("general_advice") or ""
-    assert lg["written"] and rf in ga and "ibuprofen" not in lg["artifact"]["note_text"].lower()
-    assert lg["r1"]["r1_2b_withheld"] >= 1 and lg["r1"]["r1_5_added"] == 1
+    assert lg["written"] and rf.rstrip(".") in ga and "Avoid ibuprofen because of the ulcer" in ga  # R4 G3: the warning stays
+    assert "ibuprofen" not in json.dumps(lg["artifact"]["gp_extraction"].get("medicines") or [])
 
 
 @pytest.mark.parametrize("name,quote", [("Pan 40", "Stop pan masala and tobacco, Pan 40 is not needed."),
@@ -109,11 +109,12 @@ def test_f4_stop_or_avoid_mention_does_not_post(name, quote):
     assert not posts(name, quote)
 
 
-def test_f4_stop_or_avoid_mention_still_withholds():
+def test_f4_stop_or_avoid_mention_stays_in_the_note():
+    """R3 withheld it ("still counts for withholding"); fable's R4 ruling G3 reverses that: a warning passes the scan."""
     art = hand_art(para=("patient", "Take paracetamol 500 mg twice a day."))
     art["gp_extraction"]["general_advice"] = "Avoid ibuprofen because of the ulcer"
     out, c = apply_r1(art)
-    assert "general_advice" not in out["gp_extraction"] and c["r1_2b_withheld"] == 1
+    assert out["gp_extraction"]["general_advice"] == "Avoid ibuprofen because of the ulcer" and c["r1_2b_withheld"] == 0
 
 
 # --- F5: the R1-5 item never claims /general_advice when an owner has it -------------------------------------------
@@ -187,3 +188,77 @@ def test_unposted_resolves_a_posted_drug_written_as_another_name():
     art = hand_art()  # paracetamol posted
     assert unposted(art, "Dolo SOS for fever; crocin if needed") == []
     assert picks(apply_r1(art)[0]) == []
+
+
+# --- R4 (fable's R4 order on FRX-R3-VERDICT) ---------------------------------------------------------------------------
+@pytest.mark.parametrize("name,quote", [("amlodipine", "Start s amlodipine 2.5 mg."), ("cetirizine", "Start r cetirizine 5 mg."),
+                                        ("amoxicillin", "Start amoxicillin plus clavulanic acid 625."),
+                                        ("amoxicillin", "Start amoxicillin + clavulanic acid 625."),
+                                        ("amoxicillin", "Start amoxicillin and clavulanic acid 625.")])
+def test_r4_g1_isomer_prefix_and_joined_partner_refuse(name, quote):
+    assert not posts(name, quote)
+
+
+def test_r4_g1_two_medicines_in_one_clause_both_post():
+    art = hand_art(para=("doctor", "Take paracetamol and amoxicillin, paracetamol 500 mg twice a day for 3 days."),
+                   amox=("doctor", "Start amoxicillin and paracetamol, amoxicillin 500 mg three times a day for 5 days."))
+    assert meds(apply_r1(art)[0])[:2] == ["paracetamol 500 mg", "amoxicillin 500 mg"]
+
+
+@pytest.mark.parametrize("brand", ["Met", "Pause"])
+def test_r4_g2_a_moved_plain_word_brand_counts_bare_in_the_scan(brand):
+    assert drug_mentions(f"continue {brand} as advised", [brand]) == [(brand.lower(),)]
+    assert not posts(brand, f"Continue {brand} as advised.")  # posting still needs its strength or form word next to it
+
+
+G3_WARNINGS = ["Do not take amoxicillin again; you had a rash with it.", "Avoid ibuprofen because of the stomach ulcer.",
+               "Stop metformin two days before the CT scan.", "Do not stop aspirin before the procedure."]
+
+
+@pytest.mark.parametrize("adv", G3_WARNINGS)
+def test_r4_g3_a_drug_warning_stays_and_never_posts(adv):
+    art = hand_art()
+    art["gp_extraction"]["general_advice"] = adv
+    out, _ = apply_r1(art)
+    assert out["gp_extraction"]["general_advice"] == adv
+    drug = re.search(r"amoxicillin|ibuprofen|metformin|aspirin", adv).group(0)
+    assert not posts(drug, adv)
+
+
+def test_r4_g3_only_the_item_naming_an_unposted_drug_is_withheld():
+    art = hand_art()
+    art["gp_extraction"]["general_advice"] = "Hypertensive on telmisartan, continue own medicines; Drink warm water. Rest at home"
+    out, c = apply_r1(art)
+    assert out["gp_extraction"]["general_advice"] == "Drink warm water. Rest at home" and c["r1_2b_withheld"] == 1
+    assert [p["text"] for p in out["provenance"] if "field_withheld" in p["flags"]] == ["general_advice withheld (unconfirmed drug)"]
+
+
+@pytest.mark.parametrize("text", ["Warm saline gargles", "Sitz bath twice a day", "Saline nasal drops", "Sunscreen when outdoors",
+                                  "ORS solution after each loose stool", "Electral powder in water", "Calamine lotion for itching"])
+def test_r4_g4_non_drug_and_non_prescription_words_pass_the_scan(text):
+    assert drug_mentions(text, ["ORS", "Electral", "calamine"]) == []
+
+
+def test_r4_g4_non_prescription_products_never_post():
+    assert not posts("ORS", "Take ORS 200 ml after each loose stool.") and not posts("Calamine lotion", "Apply calamine lotion twice.")
+
+
+def test_r4_g5_y6_a_split_misspelt_name_is_joined():
+    """Kills Y6 (two-word join off): neither half is a drug word; only the join, one edit from paracetamol, finds it."""
+    assert ("paracetamol",) in drug_mentions("continue parace temol as advised")
+    assert ("paracetamol",) in drug_mentions("continue para cetemol as advised")  # "para" is a lexicon word itself
+
+
+def test_r4_g5_y10_pipeline_rejects_a_note_that_still_names_an_unposted_drug(tmp_path, monkeypatch):
+    """Kills Y10 (the pipeline keeps the note): when the deterministic note also names an unposted drug, the write rejects."""
+    from tools.eta2freescript import pipeline
+    real = pipeline._fallback_note_ex
+
+    def names_azee(*a, **k):
+        text, rem = real(*a, **k)
+        return text.replace("General Advice:", "General Advice: continue Azee as advised;", 1), rem
+    monkeypatch.setattr(pipeline, "_fallback_note_ex", names_azee)
+    c, enc, llm = gen_consult(3)
+    llm = llm.replace("General Advice:", "General Advice: continue Azee as advised;", 1)
+    lg = run_consult(c, FakeClient({"stageA": enc, "stageB": llm}), tmp_path, Options(notes_only=True))
+    assert not lg["written"] and "FRX-R1 note_text names a drug that is not posted" in lg["final_errors"]
