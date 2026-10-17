@@ -8,7 +8,10 @@
  *       carry only source "helper", only for the device's OWN Mac and room; steward.result is allowed (the app reports ticket results here) and only touches that Mac's tickets.
  *       Any other event is rejected by name (wrong_source · machine_not_in_room · room_mismatch). An invalid Device token → 401.
  *       OR Authorization: Bearer <poller token>, checked as sha256(token) against KIOSK_HEALTH_POLLER_TOKEN_SHA256 (after the daemon token; path off when unset, blank or not 64 hex chars): the Mini mic-guard poller. It may post only kind "mic_guard" with source
- *       "mini_micguard_poller"; any other row is rejected by name (wrong_source · wrong_kind), never stored, and never reaches applyStewardResults. The poller token cannot read steward tickets.
+ *       "mini_micguard_poller", OR kind "sentinel" with source "mini_sentinel_forwarder" (Sentinel S6: the subscriber's forwarder posts the room-sentinel state; same credential, scoped by name); any other row is rejected by name (wrong_source · wrong_kind), never stored,
+ *       and never reaches applyStewardResults. The poller token cannot read steward tickets.
+ *       Sentinel rows are validated STRICTLY (lib/sentinel-ingest.ts: code in the 8-code set, mic_class webcam/tonor/unknown, mode shadow/heal, zr and peak in [0,1] or null, last_action/last_result word or null; every key required). A malformed sentinel payload rejects
+ *       the whole request with 400 { ok:false, error:"bad_sentinel" } — no item-level drop — because the single sender must never post an unknown code and must retry next tick.
  * Cross-source de-duplication (lib/kiosk-health-dedupe.ts): an event whose twin (same Mac, same kind, the OTHER source of the daemon/helper pair, ts within 2 s) is already stored AND not yet used by another event is not stored again (pairing is one-to-one, nearest first); it is counted in
  * `deduped` and recorded in kiosk_health_dedupe (migration 0154).
  * Idempotent on (machine, boot_id, seq): replays of a spooled batch insert nothing new and still answer 200.
@@ -26,6 +29,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { validateKioskHealthBatch, type KioskHealthRow } from "@/lib/kiosk-health-ingest";
 import { tokenOk, pollerTokenOk, POLLER_KIND, POLLER_SOURCE } from "@/lib/kiosk-health-auth";
+import { SENTINEL_KIND, SENTINEL_SOURCE, validateSentinelPayload } from "@/lib/sentinel-ingest";
 import { authenticateDevice, type DeviceRow } from "@/lib/fleet/device-auth";
 import { normalizeHostname } from "@/lib/encounter-windows/types";
 import { loadLedgerNear, loadStoredNear, recordDropped, splitTwins } from "@/lib/kiosk-health-dedupe";
@@ -125,6 +129,12 @@ export async function POST(req: NextRequest) {
   const v = validateKioskHealthBatch(body);
   if (v.error) return reply(400, { ok: false, error: v.error });
 
+  // Sentinel S6: a sentinel payload is validated strictly for EVERY auth path (the daemon path carries no kind restriction).
+  // One malformed sentinel row rejects the whole request: the forwarder must never post an unknown code, and a 400 makes it retry.
+  for (const r of v.rows) {
+    if (r.kind === SENTINEL_KIND && !validateSentinelPayload(r.payload)) return reply(400, { ok: false, error: "bad_sentinel" });
+  }
+
   const rejected = [...v.rejected];
   let rows = v.rows;
 
@@ -144,12 +154,13 @@ export async function POST(req: NextRequest) {
     rows = kept;
   }
 
-  // A poller-token post is confined to the poller's own kind and source; anything else is rejected by name and never stored.
+  // A poller-token post is confined to the poller's own kind and source, or the sentinel kind with the forwarder's source (Sentinel S6); anything else is rejected by name and never stored.
   if (pollerMode) {
     const kept: KioskHealthRow[] = [];
     for (const r of rows) {
       if (r.kind === POLLER_KIND && r.source === POLLER_SOURCE) kept.push(r);
-      else rejected.push({ index: -1, reason: r.source !== POLLER_SOURCE ? "wrong_source" : "wrong_kind" });
+      else if (r.kind === SENTINEL_KIND && r.source === SENTINEL_SOURCE) kept.push(r);
+      else rejected.push({ index: -1, reason: r.source !== POLLER_SOURCE && r.source !== SENTINEL_SOURCE ? "wrong_source" : "wrong_kind" });
     }
     rows = kept;
   }

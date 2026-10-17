@@ -55,8 +55,9 @@ def check_rooms(rooms, flags):
 
 def build_subscriber(cfg, rooms, flags, sink, home, clock=time.time, log_file=None, consult_sources=None):
     """The Subscriber exactly as the live process builds it: the consult hold (background refresher, off the publish thread) when its flag is on, start_day (background
-    sender) when its flag is on, the F2 USB verify always, and the usb_device_missing seed from the case store. Raises start_day.ConfigError (the caller refuses to start)."""
-    consult = start_day = None
+    sender) when its flag is on, the Sentinel forwarder (background poster) when its flag is on, the F2 USB verify always, and the usb_device_missing seed from the case
+    store. Raises start_day.ConfigError (the caller refuses to start)."""
+    consult = start_day = sentinel = None
     if flags.get("consult_open_publish") is True:    # FR1 2.4 d' flags: default off, so today's control bytes and behaviour are unchanged
         import consult_hold
         consult = consult_hold.build(flags, rooms, sink, home, clock, sources=consult_sources, background=True)
@@ -64,10 +65,13 @@ def build_subscriber(cfg, rooms, flags, sink, home, clock=time.time, log_file=No
     if flags.get("start_day_after_boot") is True:
         import start_day as start_day_mod
         start_day = start_day_mod.build(flags, sink, home, clock, log_file, background=True)
+    if flags.get("sentinel_forward") is True:        # Sentinel S6: default off, so today's behaviour (no network post from the subscriber) is unchanged
+        import sentinel_forward
+        sentinel = sentinel_forward.build(flags, home, clock, background=True)
     import usb_verify
     verify = usb_verify.UsbVerify(sink, os.path.join(home, "data", "usb-verify-state.json"), clock, os.path.join(home, "logs", "usb-verify-audit.jsonl"))
     return Subscriber(os.path.join(home, "data"), os.path.join(home, "etc"), rooms, sink, clock=clock, quiet_after_s=cfg.get("quiet_after_s", 120), quiet_seed=sink.open_quiet_rooms(),
-                      consult=consult, start_day=start_day, usb_verify=verify, usb_missing_seed=sink.open_rooms("usb_device_missing"))
+                      consult=consult, start_day=start_day, usb_verify=verify, usb_missing_seed=sink.open_rooms("usb_device_missing"), sentinel=sentinel)
 
 
 def housekeeping(s, logger=None):

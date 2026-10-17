@@ -68,7 +68,7 @@ describe("row shape", () => {
     expect(s.rooms.map((r) => r.room_id)).toEqual(ROOMS.map((r) => r.room_id));
     expect(s.rooms.map((r) => r.label)).toEqual(ROOMS.map((r) => r.label));
     const r = s.rooms[0]!;
-    expect(Object.keys(r).sort()).toEqual(["ages_s", "baseline_rms", "claim", "detail_code", "device", "doctor", "doctor_known", "label", "level", "room_id", "session", "state", "state_since", "steward", "steward_line", "steward_log"].sort());
+    expect(Object.keys(r).sort()).toEqual(["ages_s", "baseline_rms", "claim", "detail_code", "device", "doctor", "doctor_known", "label", "level", "room_id", "session", "sentinel", "state", "state_since", "steward", "steward_line", "steward_log"].sort());
     expect(Object.keys(r.level).sort()).toEqual(["at", "rms", "stale", "zero"]);
     expect(Object.keys(r.ages_s).sort()).toEqual(["heartbeat", "listener", "ext"].sort());
     expect(r.doctor).toEqual({ display: "Clinician T", activity: "Signed in" }); // F28: the occupant's name (page_name), not the ext event's display_name

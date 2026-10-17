@@ -284,9 +284,10 @@ class RouterSink:
 
 
 class Subscriber:
-    def __init__(self, data_dir, control_dir, rooms, sink, clock=time.time, quiet_after_s=QUIET_AFTER_S, quiet_seed=(), consult=None, start_day=None, usb_verify=None, usb_missing_seed=()):
+    def __init__(self, data_dir, control_dir, rooms, sink, clock=time.time, quiet_after_s=QUIET_AFTER_S, quiet_seed=(), consult=None, start_day=None, usb_verify=None, usb_missing_seed=(), sentinel=None):
         self.data, self.ctl, self.rooms, self.sink, self.clock, self.quiet_after = data_dir, control_dir, list(rooms), sink, clock, quiet_after_s
         self.consult, self.start_day = consult, start_day     # FR1 2.4 d': both None (off) unless their flag is on
+        self.sentinel = sentinel                              # Sentinel S6: the forwarder to /api/kiosk-health, None (off) unless the sentinel_forward flag is on
         self.usb_verify = usb_verify                          # the F2 Mini verify (always on once a healed_pending line arrives)
         self.usb_missing = set(usb_missing_seed) & set(self.rooms)   # rooms with an open usb_device_missing case: closed by a health line with usb_mic_present true
         self.last_health = {}                                 # room -> (receive time, obj) of the newest health line
@@ -341,6 +342,11 @@ class Subscriber:
             if self.consult is not None:
                 try:
                     self.consult.note_health(room, obj, now)
+                except Exception:          # noqa: BLE001
+                    pass
+            if self.sentinel is not None:
+                try:
+                    self.sentinel.on_health(room, obj, now)
                 except Exception:          # noqa: BLE001
                     pass
             zr = zero_ratio(obj)

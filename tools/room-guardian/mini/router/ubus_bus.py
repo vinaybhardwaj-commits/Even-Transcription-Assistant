@@ -25,7 +25,9 @@ def load_cfg(path=None):
            "capture_closed_counts_quiet": c.get("capture_closed_counts_quiet") is not False, "open_session_requires_levels": c.get("open_session_requires_levels") is not False, "consult_windows_enabled": c.get("consult_windows_enabled") is True, "post_open_overrides_url_close": c.get("post_open_overrides_url_close") is not False,   # fable 17:16: default true
            "consult_room_map": dict(c["consult_room_map"]) if isinstance(c.get("consult_room_map"), dict) else {},
            "consult_db_url_file": c.get("consult_db_url_file") if isinstance(c.get("consult_db_url_file"), str) else None,
-           "start_day_cmd": [str(a) for a in c["start_day_cmd"]] if isinstance(c.get("start_day_cmd"), list) else []}
+           "start_day_cmd": [str(a) for a in c["start_day_cmd"]] if isinstance(c.get("start_day_cmd"), list) else [],
+           # Sentinel S6 (default off; only a literal true turns the forwarder on)
+           "sentinel_forward": c.get("sentinel_forward") is True}
     stray = sorted(set(cfg["ackers"]) - set(cfg["to"]))
     if stray:    # gate C2: an acker who never receives the page cannot see the instruction to ack; refuse the whole config
         raise ValueError(f"router.json: ackers not in to: {', '.join(stray)}")

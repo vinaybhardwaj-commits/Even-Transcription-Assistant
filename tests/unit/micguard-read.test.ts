@@ -33,7 +33,7 @@ const SNAP = {
   coverage: null,
   steward_status: { state: "unavailable" },
   changes_today: [],
-  rooms: [{ room_id: "room_a", label: "A", state: "listening" }, { room_id: "room_b", label: "B", state: "quiet" }],
+  rooms: [{ room_id: "room_a", label: "A", state: "listening", sentinel: null }, { room_id: "room_b", label: "B", state: "quiet", sentinel: null }],
 };
 vi.mock("@/lib/rooms-live/snapshot", () => ({ getSnapshot: async () => SNAP }));
 
@@ -245,13 +245,15 @@ describe("GET /api/rooms-live/now — mic_guard is admin only", () => {
     expect((await res.json()).rooms.map((r: Row) => r.mic_guard)).toEqual([null, null]);
     warn.mockRestore();
   });
-  it.each([["staff"], ["open"]] as const)("%s: byte-identical to the pre-mic_guard response and no kiosk_health query is made", async (kind) => {
+  it.each([["staff"], ["open"]] as const)("%s: byte-identical body carrying the room rows' sentinel field (null where no row), never mic_guard; the route itself issues no kiosk_health query", async (kind) => {
     H.kind.value = kind;
     const { GET } = await import("@/app/api/rooms-live/now/route");
     const res = await GET(new Request("http://x/api/rooms-live/now"));
+    // the sentinel row comes from buildSnapshot (mocked here as already carrying it); the route adds nothing but coverage
     expect(await res.text()).toBe(JSON.stringify({ ...SNAP, coverage: null }));
     expect(res.headers.get("cache-control")).toBe("no-store");
-    expect(H.calls.some((c) => /kiosk_health_events/.test(c.text))).toBe(false);
+    expect(H.calls.some((c) => /kiosk_health_events/.test(c.text) && /'mic_guard'/.test(c.text))).toBe(false);
+    expect(H.calls.filter((c) => /kiosk_health_events/.test(c.text)).length).toBe(0);
   });
 });
 

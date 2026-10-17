@@ -1,6 +1,6 @@
 "use client";
 import type { CSSProperties } from "react";
-import { COLORS, ICON, NO_DOCTOR_PROBLEM_NOTE, WORD, showNoDoctorNote, BAR_TICK_FRACTION, barFraction, forMinutes, headline, isProblem, stepsFor } from "@/lib/rooms-live/present";
+import { COLORS, ICON, NO_DOCTOR_PROBLEM_NOTE, WORD, showNoDoctorNote, BAR_TICK_FRACTION, barFraction, forMinutes, headline, isProblem, sentinelCopy, stepsFor } from "@/lib/rooms-live/present";
 import { cardStyle, L4_FILL as L4_TEXT, type EscalationLevel } from "@/lib/rooms-live/escalation";
 import type { RoomRow } from "@/lib/rooms-live/snapshot";
 import { micGuardBadge } from "@/lib/micguard-read";
@@ -31,6 +31,18 @@ function MicPermBadge({ view }: { view: NonNullable<RoomRow["mic_guard"]> }) {
       <span data-testid="mic-perm-badge" data-tone={b.tone} title={b.title} style={{ ...style, display: "inline-block", borderRadius: 999, padding: "2px 10px", fontSize: 12, fontWeight: 700 }}>
         {b.text}
       </span>
+    </div>
+  );
+}
+
+/** Sentinel S6: display only. The room-sentinel code arrives from the Mini forwarder (kind "sentinel"); the line's words follow the
+ * room's device class (present.sentinelCopy). OK and stale render nothing (a sentinel that is not current is no data). */
+function SentinelLine({ row }: { row: RoomRow }) {
+  const text = row.sentinel ? sentinelCopy(row.sentinel.code, row.device.kind) : null;
+  if (!text) return null;
+  return (
+    <div data-testid="sentinel-line" data-code={row.sentinel!.code} data-mode={row.sentinel!.mode} title={`sentinel ${row.sentinel!.code}`} style={{ fontSize: 13, fontWeight: 600, background: "#FBE9D6", color: "#A84A06", borderRadius: 8, padding: "4px 8px" }}>
+      {text}
     </div>
   );
 }
@@ -71,6 +83,7 @@ export function RoomTile({ row, nowMs, eng, calm, level, durMs, canClaim, onClai
       <div style={{ fontSize: 16, fontWeight: 600, color: st ? fg : c.fg }}>{headline(row)}</div>
       {(problem || row.state === "unknown") && first ? <div style={{ fontSize: 15 }}>{first}</div> : null}
       {row.mic_guard ? <MicPermBadge view={row.mic_guard} /> : null}
+      {row.sentinel ? <SentinelLine row={row} /> : null}
       {row.steward_line ? <div data-testid="steward-line" style={{ fontSize: 13, color: sub }}>{row.steward_line.text}</div> : null}
       {showNoDoctorNote(row) ? <div style={{ fontSize: 14, color: sub }}>{NO_DOCTOR_PROBLEM_NOTE}</div> : null}
       {since && (esc || row.state_since !== null) ? <div style={{ fontSize: 13, color: sub, fontWeight: st?.boldFor ? 800 : 400 }}>{since}</div> : null}

@@ -28,15 +28,17 @@ describe("copy, exactly", () => {
     expect(WORD.unknown).toBe("Can't tell");
     expect(stepsFor("unknown")).toEqual(["No live sound reading from this room. Check the room computer is on."]);
   });
-  it("no 'mute button' / 'on mute' wording anywhere a member of staff can read it (copy, tiles, detail, legend, login), except the TONOR line (Sentinel S1: the TONOR TM20 has one)", async () => {
+  it("no 'mute button' / 'on mute' wording anywhere a member of staff can read it (copy, tiles, detail, legend, login), except the TONOR lines (Sentinel S1: the TONOR TM20 has one; S6: its sentinel line)", async () => {
     const { readFileSync, readdirSync } = await import("node:fs");
     const { join } = await import("node:path");
-    const { MUTED_STEP } = await import("@/lib/rooms-live/present");
+    const { MUTED_STEP, sentinelCopy } = await import("@/lib/rooms-live/present");
+    const TONOR_SENTINEL = sentinelCopy("MIC_MUTED_TONOR", "tonor")!;
     for (const f of ["lib/rooms-live/present.ts", ...readdirSync(join(process.cwd(), "components/rooms-live")).map((x) => `components/rooms-live/${x}`)]) {
-      const src = readFileSync(join(process.cwd(), f), "utf8").split(MUTED_STEP.tonor).join("");
+      const src = readFileSync(join(process.cwd(), f), "utf8").split(MUTED_STEP.tonor).join("").split(TONOR_SENTINEL).join("");
       expect(/mute button|on mute|press the mute|unmute/i.test(src), f).toBe(false);
     }
     expect(/mute button/i.test(MUTED_STEP.webcam + MUTED_STEP.unknown)).toBe(false);
+    expect(/mute button|press the mute/i.test(sentinelCopy("MIC_MUTED_TONOR", "webcam") + sentinelCopy("MIC_MUTED_TONOR", "unknown"))).toBe(false);
   });
   it("FIX-1 F5: staff-facing words — the degraded banner, the day-strip legend and its plain segment words; no snake_case reaches a tooltip", () => {
     expect(DEGRADED_NOTE).toBe("Some live readings are delayed. This screen may be a few minutes behind.");

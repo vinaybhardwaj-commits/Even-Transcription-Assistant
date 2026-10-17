@@ -42,6 +42,7 @@ import {
 import { STATUS_KEYS, statusFromRows } from "./steward-status";
 import { cardLine, isChange, lineOf, type StewardLine, type StewardStatus } from "./steward-lines";
 import type { MicGuardView } from "@/lib/micguard-read";
+import { readSentinel, type SentinelView } from "@/lib/sentinel-read";
 import { computeState, type LevelRow, type RoomStateName, type StateInput } from "./state";
 
 export type RoomRow = {
@@ -67,6 +68,8 @@ export type RoomRow = {
   ages_s: { listener: number | null; heartbeat: number | null; ext: number | null };
   /** mic-permission guard state (lib/micguard-read.ts). Present ONLY on the admin response of /api/rooms-live/now; absent for staff and open callers. null = no guard row in 24 h. */
   mic_guard?: MicGuardView | null;
+  /** Sentinel S6: room-sentinel state (lib/sentinel-read.ts, kind "sentinel" from the Mini forwarder). Present on every caller's response. null = no current data (no row in 24 h, a row over 600 s old, or a failed read). Display only. */
+  sentinel?: SentinelView | null;
 };
 /** v1.7 S3: a Steward action or alert (live or shadow) of today, tagged "Steward" */
 export type ChangeRow = StewardLine & { room_id: string; label: string; tag: "Steward" };
@@ -151,7 +154,7 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
   const ROOM_IDS = ROOMS.map((r) => r.room_id);
 
   const istDayStart = new Date(Math.floor((now + 19_800_000) / 86_400_000) * 86_400_000 - 19_800_000).toISOString();
-  const [lis, ins, ses, lev, ste, clm, scf, slog, sact] = await Promise.all([
+  const [lis, ins, ses, lev, ste, clm, scf, slog, sact, sen] = await Promise.all([
     safe("bench_listener", () => readListeners(deps.db, ROOM_IDS)),
     safe("room_install", () => readInstalls(deps.db, ROOM_IDS)),
     safe("bench_session", () => readSessions(deps.db, ROOM_IDS, asOf)),
@@ -161,6 +164,8 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
     safe("steward_config", () => readStewardConfig(deps.db, STATUS_KEYS)),
     safe("steward_decisions", () => readStewardLog(deps.db, ROOM_IDS, asOf)),
     safe("steward_decisions", () => readStewardActions(deps.db, ROOM_IDS, asOf, istDayStart)),
+    // Sentinel S6: the room-sentinel state per room. A failed read leaves every room at null (the tile shows nothing)
+    safe("sentinel", () => readSentinel(deps.db, ROOM_IDS, now)),
   ]);
   // v1.7: a failed or unreadable steward_config is "Steward status unavailable" on the page; the cards still render
   const stewardStatus: StewardStatus = scf.ok && scf.v ? statusFromRows(scf.v) : { state: "unavailable" };
@@ -290,6 +295,7 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
       steward_log: (logBy.get(def.room_id) ?? []).slice(0, 20).map(lineOf),
       claim: null,
       ages_s: { listener: r1(r.ages_s.listener), heartbeat: r1(r.ages_s.heartbeat), ext: r1(r.ages_s.ext) },
+      sentinel: sen.v ? (sen.v.byRoom[def.room_id] ?? null) : null,
     };
   });
   // claims: attach the open ones; the ONLY write of GET /now is the auto-clear of a claim whose room no longer needs anyone (once per room per minute, claims.ts)

@@ -4,6 +4,7 @@
 import type { RoomRow } from "./snapshot";
 import type { RoomStateName } from "./state";
 import type { DeviceClass } from "@/lib/steward/device-class";
+import { SENTINEL_CODES } from "@/lib/sentinel-ingest";
 
 export type Group = "attention" | "fine" | "nodoctor";
 export const PROBLEM_STATES: readonly RoomStateName[] = ["muted", "unplugged", "notrec", "off"];
@@ -86,6 +87,40 @@ export function stepsFor(state: RoomStateName, device: DeviceClass = "unknown"):
       return ["No live sound reading from this room. Check the room computer is on."];
     default:
       return [];
+  }
+}
+
+/**
+ * Sentinel S6: the one repair line for a room-sentinel code, following the room's device class (the S1 copy split: only the TONOR
+ * can be muted at the mic, only the webcams "die" on the coreaudiod signature). Display only — the tile shows this line and nothing
+ * actionable. null = nothing to show (OK, or a code word this screen does not know: it is never guessed).
+ */
+export function sentinelCopy(code: string, device: DeviceClass = "unknown"): string | null {
+  if (!(SENTINEL_CODES as readonly string[]).includes(code)) return null;
+  switch (code) {
+    case "OK":
+      return null;
+    case "MIC_MUTED_TONOR":
+      // the mic-control wording stays on the TONOR class alone (the S1 rule: staff-facing copy never names a control the room may not have)
+      return device === "tonor"
+        ? "Ask the doctor to unmute the TONOR mic."
+        : "The microphone is muted. Ask the doctor to check the microphone.";
+    case "MIC_DEAD_WEBCAM":
+      return device === "tonor"
+        ? "The microphone is not sending sound. The room computer is fixing it by itself; tell IT if it stays dark."
+        : "The webcam mic is not sending sound. The room computer is fixing it by itself; tell IT if it stays dark.";
+    case "DEVICE_MISSING":
+      return UNPLUGGED_STEP[device];
+    case "RECORDER_DOWN":
+      return "Not recording. It restarts by itself within 5 minutes.";
+    case "PRESENCE_DEAD":
+      return "Can't tell what the room computer is doing. Check it is switched on and its network cable is in.";
+    case "TAILNET_DOWN":
+      return "The room computer's network looks down. Check its network cable.";
+    case "MIC_PERM":
+      return "The room computer has lost microphone permission. Tell IT.";
+    default:
+      return null;
   }
 }
 

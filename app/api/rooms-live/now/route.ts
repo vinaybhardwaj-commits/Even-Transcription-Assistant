@@ -24,7 +24,8 @@ export async function GET(req: Request) {
   const coveragePromise = coverageOrNull({ timeoutMs: 2000 }); // JEV-COVERAGE JB-3: counts only, never throws, own 2 s bound; runs beside the snapshot; a null never enters `degraded` (room faults only)
   try {
     const [snapshot, coverage] = await Promise.all([getSnapshot({ db: sql, claims: realClaimsPort(sql as never) }), coveragePromise]);
-    if (who.kind !== "admin") return NextResponse.json({ ...snapshot, coverage }, { headers: NO_STORE }); // staff and open callers: byte-identical to before mic_guard existed
+    // Sentinel S6: each room row already carries its sentinel state (buildSnapshot attaches it for every caller; the staff-facing board is the point of the read)
+    if (who.kind !== "admin") return NextResponse.json({ ...snapshot, coverage }, { headers: NO_STORE }); // mic_guard stays admin-only
     // admin only: the mic-permission guard state per room. A failed read leaves every room at null (never a 500, never a degraded flag).
     const mg = await readMicGuard(sql as never, snapshot.rooms.map((r) => r.room_id));
     return NextResponse.json({ ...snapshot, rooms: snapshot.rooms.map((r) => ({ ...r, mic_guard: mg.byRoom[r.room_id] ?? null })), coverage }, { headers: NO_STORE });
