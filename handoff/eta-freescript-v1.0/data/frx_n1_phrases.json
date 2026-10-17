@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "source": "tools/eta2freescript/validate.py printable_errors (FRX-N1) and note.py FILLER (origin/cloudpane/cloud-frx-r2-build/r2 @ fd65cdc6). Copied as regexes; d4's token-window test is reduced to its two regexes (ASSUMPTION).",
+  "source": "tools/eta2freescript/validate.py printable_errors (FRX-N1) and note.py FILLER (ETA eta2freescript code at commit fd65cdc6). Copied as regexes; d4's token-window test is reduced to its two regexes (ASSUMPTION).",
   "order_sections": [
     "Follow up",
     "Further Investigation",

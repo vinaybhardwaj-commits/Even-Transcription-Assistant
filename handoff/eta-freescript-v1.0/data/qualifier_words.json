@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "source": "tools/eta2freescript/r1_floors.py QUALIFIERS (origin/cloudpane/cloud-frx-r2-build/r2 @ fd65cdc6), fable ruling D5",
+  "source": "tools/eta2freescript/r1_floors.py QUALIFIERS (ETA eta2freescript code at commit fd65cdc6), salt-word ruling D5",
   "rule": "A qualifier word never decides a name match on its own and is stripped to form base_molecule.",
   "words": [
     "acid",
