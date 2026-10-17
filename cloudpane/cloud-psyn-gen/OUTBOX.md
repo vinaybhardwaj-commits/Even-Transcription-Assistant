@@ -1,3 +1,4 @@
 - 2026-10-17 cloud-psyn-gen: branch cloudpane/cloud-psyn-gen/v1 created; spec v7 read (A2.1, A4.1, A4.1a, A4.1c, A4.4)
 - 2026-10-17 eval/pdqi9/psyn built: 252 scripts (S-E 54, S-N 54, S-C 12, S-R 30, S-D 20, S-A 10, S-V 54, S-M 18), dev 84 / test 168, 812 files per build
 - 2026-10-17 tests: 23 unittest PASS; validate DIR 0 errors; same seed byte-identical
+- 2026-10-17 report cloudpane-reports/PSYN-GEN-REPORT.md written; code commit eb08e73; pushed
