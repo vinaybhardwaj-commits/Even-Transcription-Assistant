@@ -27,7 +27,7 @@ Serving model: claude-opus-5-5. Branch `cloudpane/cloud-scribe-oauth-r2/r2` from
 - ETA_ALLOW_SKIP_E2E=1 run: not needed. With Docker up, no Docker guard failed, which is stronger proof than skipping them.
 - OAuth pg suites on PG16: o2-pg 10/10, o3-pg 14/14, audit-append-only-0171-pg 9/9.
 - OAuth unit suites: o2 90, o1, o3, o3-audit-order (147 together with o2), and refute-probes 11, all passed.
-- `bash scripts/steward/scrub.sh origin/scribe/oauth-person..HEAD` (gitleaks 8.30.1, checksum from steward-scrub.yml): see OUTBOX.
+- `bash scripts/steward/scrub.sh origin/scribe/oauth-person..HEAD` (gitleaks 8.30.1, checksum from steward-scrub.yml): rc 0.
 
 ## Adjacent (not actioned)
 - A3: `mcp.oauth_granted` is not in `READABLE_ACTIONS` (`lib/jobs/audit-read.ts:13`), so scribe_audit_recent cannot list grants yet. One line if Fable wants it.
