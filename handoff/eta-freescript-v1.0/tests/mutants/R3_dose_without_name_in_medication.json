@@ -595,7 +595,7 @@
       "flags": []
     }
   ],
-  "note_text": "Co-morbidities:\nPresenting Complaint: Fever for 2 days with body ache.\nExamination: Temperature 100.2 F. Throat mildly congested. Chest clear.\nDiagnoses: ?Acute viral fever\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\n650 — confirm\nFurther Investigation: Complete Blood Count\nFollow up: Come back if the fever lasts beyond 3 days.\nRefer to:\nGeneral Advice: Drink plenty of water and take rest.",
+  "note_text": "Co-morbidities:\nPresenting Complaint: Fever for 2 days with body ache.\nExamination: Temperature 100.2 F. Throat mildly congested. Chest clear.\nDiagnoses: ?Acute viral fever\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\n650 — confirm generic\nFurther Investigation: Complete Blood Count\nFollow up: Come back if the fever lasts beyond 3 days.\nRefer to:\nGeneral Advice: Drink plenty of water and take rest.",
   "qa": {
     "floors": {
       "untaped_drugs": 0,

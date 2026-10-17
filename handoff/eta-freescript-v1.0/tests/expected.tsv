@@ -158,3 +158,8 @@ R5_control_common_word_band	ex3	pass	-
 R6_null_generic_without_lasa_risk	ex6	fail	V14
 R6_null_generic_without_lasa_reason	ex6	fail	V14
 R6_control_null_generic_flagged	ex6	pass	-
+R9_brand_first_line	ex1	fail	V6
+R9_brand_in_generic_field	ex1	fail	V14
+R9_brand_shown_but_not_spoken	ex2	fail	V14
+R9_unmapped_brand_shown_as_drug	ex6	fail	V6
+R9_control_generic_only	ex1	pass	-

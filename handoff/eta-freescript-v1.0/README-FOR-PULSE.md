@@ -50,13 +50,14 @@ Pulse drops unknown keys, so the rest of the artifact can be ignored safely. The
 | `note_text` | The 11 headings. The validator renders the note from `gp_extraction` and `confirm_prompts` and requires `note_text` to match that rendering line for line (V5, V6). Absent when withheld (V15). |
 | `qa` | Safety floors, counts, the inputs used, the served model ids and the neutral render template id. |
 
-The Medication section of `note_text` looks like this:
+The Medication section of `note_text` names the GENERIC first, in capitals, with the brand the doctor said in brackets after it (IMC 2002 cl. 1.5). A combination reads `GENERIC1 + GENERIC2 (Brand)`. A generic said alone shows no brand. A brand that does not map to a generic is never shown as if it were the drug: its line reads `<brand as spoken> — confirm generic`, and it always carries a look-alike risk flag (V6, V14). It looks like this:
 
 ```
 Medication: Draft list, not a prescription; the treating doctor checks each drug.
 AMOXICILLIN + CLAVULANIC ACID (Augmentin 625 Duo) — confirm
 METFORMIN 1000 — dose change discussed — confirm
 PREDNISOLONE — confirm
+Pan-D — confirm generic
 ```
 
 A strength appears on a line only when the treating doctor stated it for that drug (V6, V8). A change_dose line shows only the new dose the doctor stated, never the old strength; without one it shows no number (V6).
@@ -72,7 +73,7 @@ A strength appears on a line only when the treating doctor stated it for that dr
 | V3 | A stopped, held or not-given order never appears in a `gp_extraction` list under any name ETA holds for it. |
 | V4 | Every posted item cites speech, or carries the `no_evidence` flag. |
 | V5 | `note_text` has the 11 FreeScript headings, once each, in order. |
-| V6 | `note_text` equals the rendering of `gp_extraction` and `confirm_prompts`, section by section and line by line. Medication holds only the draft line and one confirm line per start, continue or change_dose prompt. |
+| V6 | `note_text` equals the rendering of `gp_extraction` and `confirm_prompts`, section by section and line by line. Medication holds only the draft line and one confirm line per start, continue or change_dose prompt, each naming the GENERIC first with the brand in brackets, or ending `— confirm generic` when the generic is unresolved. |
 | V7 | Catches: a non-empty `gp_extraction.medicines` under `notes_only`; any `gp_extraction` string naming a medicine from the curated lists (generics, brand map, salt drugs, look-alike names) or from the artifact's own prompts and provenance, unless, inside a diagnosis or comorbidity, a condition word sits right next to that drug name ("insulin resistance", "metformin-induced"); a decided medicine with no prompt; a patient-only drug with a prompt. Does not catch: a medicine name that is in no curated list and not in the artifact itself, when it carries no dose and follows no order verb (see V18 for those). |
 | V8 | A posted order cites a span of the order-capable treating doctor that names it. A supported drug attribute is said by the order-capable treating doctor, in a span that names the drug or in the same turn. A patient-affirmed prompt, or a prompt from any other voice, never has a supported value. Advice and red flags are copied from the doctor's speech. |
 | V9 | Catches: a stopped, held or not-given order named in `note_text` or in any `gp_extraction` string, under its generic, brand, any brand of the same molecule, any combination component or `+` part, a split, dotted, hyphenated or spaced-out spelling, lookalike or accented letters, a close misspelling (similarity 0.85 or more for names of 6+ letters, one edit for names of 4-5 letters, never a common English word); and a missing `Medication changes discussed` line in Plan. Does not catch: an abbreviation or nickname that ETA does not hold for the drug (for example a shortened brand), or a misspelling further than those limits. Names of 3 letters or fewer match only exactly. |
@@ -80,7 +81,7 @@ A strength appears on a line only when the treating doctor stated it for that dr
 | V11 | No placeholder, bracket of any kind, data-structure text, "not stated"-only value (N/A, nil, unknown, pending and similar), "TBD", addressed-to-doctor phrase, invisible or control character, or line break in any posted string, drug field or `note_text`; no non-ASCII letter in any posted string, rendered drug field or `note_text`. |
 | V12 | Every cited span exists, lies inside the consult window, and is not at a quarantined consult boundary. |
 | V13 | The roster is consistent. At most one voice may order, and it must be the treating doctor, chosen by fixed rules. A voiceprint conflict means no voice may order. With the voiceprint gate off, the voiceprint never contributes. |
-| V14 | No drug name is matched on a salt or qualifier word alone ("acid reflux" never becomes folic acid; "potassium" alone never becomes potassium chloride). Combinations expand only when the curated map attests them. Every look-alike/sound-alike drug, whether named by generic or by brand, is flagged, and so is every drug whose generic is not resolved (a null generic is never silently allowed). |
+| V14 | No drug name is matched on a salt or qualifier word alone ("acid reflux" never becomes folic acid; "potassium" alone never becomes potassium chloride). Combinations expand only when the curated map attests them. Every look-alike/sound-alike drug, whether named by generic or by brand, is flagged, and so is every drug whose generic is not resolved (a null generic is never silently allowed). The generic field may not hold a brand name, and a brand is shown only when the doctor said it. |
 | V15 | A withheld artifact has a reason code, an empty `gp_extraction` and no `note_text`. |
 | V16 | Model ids are present and well-shaped (not empty, "default", "latest", "unknown" or similar), and `qa.models_served` matches `generator.models`. The validator checks the shape of model ids only. That they were read back from the calls is a generator guarantee (not checked by validator). |
 | V17 | Catches: an instruction, advice item or red flag that is not a contiguous, word-aligned copy of one of its cited quotes (only case, spacing and a final full stop may differ); a copy that leaves out a negation of that quote (not, no, never, don't, avoid, stop, without ...); a red flag that is not whole sentences of its quote or has no action word (go, come, call, return ...). Does not catch: a quote that was itself mis-transcribed. |
@@ -112,7 +113,7 @@ These are unchanged since v0.1, and none has been put to Pulse yet.
 - **Q8 Gating.** Which doctors and rooms are switched on, and who holds that list?
 - **Q10 Combination brands (new).** Will Pulse accept one note line for a combination brand with several components, such as `AMOXICILLIN + CLAVULANIC ACID (Augmentin 625 Duo) — confirm`?
 
-One question sits with ETA's clinical owner rather than Pulse: should the generic come first with the brand in brackets (IMC 2002), or the brand as spoken first? v1.0 defaults to generic first.
+Generic versus brand order is settled: ETA's clinical owner ruled generic first, with the brand as spoken in brackets (IMC 2002 cl. 1.5). The validator enforces it (V6, V14).
 
 ## Integration sketch
 

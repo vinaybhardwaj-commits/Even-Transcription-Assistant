@@ -241,3 +241,8 @@ Rulings applied: R1 copy rule (new V17), R2 dose-pattern guard and R3 medicine-l
 - **A37** Fuzzy held-name matching never treats a common English word as a misspelling, at any key length.
 - **A38** A null generic must carry `lasa_risk.pair_with` (for example "unresolved generic") and the `lasa` reason.
 - **A39** A condition word "sits next to" a drug name when it is the word directly before or after it, or "allergy/allergic to/of" precedes it. Every occurrence of the drug in the string must be so qualified.
+
+### Addendum R9 (17 Oct, final ruling: generic first)
+Every Medication line names the GENERIC first, in capitals, with the brand in brackets (IMC 2002 cl. 1.5); a combination reads `GENERIC1 + GENERIC2 (Brand)`; a generic said alone shows no brand; an unmapped brand (null generic) renders `<brand as spoken> — confirm generic` and keeps lasa_risk (R6). Enforced by the renderer and V6 (generic-first line check, confirm-generic tail), and V14 (the generic field may not hold a mapped brand; a brand is shown only when the spoken form names it). The schema descriptions of `Drug.generic`, `Drug.brand_recognised` and `ConfirmPrompt` say so. The clinical-owner question in the open questions is now answered and is kept in the README only as the stated rule.
+- **A40** "A brand is shown only when the doctor said it" is checked as: the brand's key, or its brand-map key, appears in the spoken form.
+- **A41** The ` — confirm generic` tail is exempt from FRX-N1 d2 exactly as ` — confirm` is.

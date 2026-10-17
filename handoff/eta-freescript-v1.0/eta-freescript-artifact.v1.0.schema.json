@@ -1013,7 +1013,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "The brand the doctor said, shown in brackets after the generic; null when the doctor said only a generic."
         },
         "generic": {
           "type": [
@@ -1021,7 +1022,7 @@
             "null"
           ],
           "pattern": "^[A-Z0-9][A-Z0-9 +\\-]*$",
-          "description": "UPPERCASE INN; null only for an unattested combination brand (combination_unexpanded)."
+          "description": "UPPERCASE INN, always named first (IMC 2002 cl. 1.5): Medication lines read 'GENERIC (Brand as spoken)', or 'GENERIC1 + GENERIC2 (Brand)' for a combination. Null only for an unmapped brand (combination_unexpanded), whose line reads '<brand as spoken> — confirm generic' and which must carry lasa_risk."
         },
         "components": {
           "type": "array",
@@ -1205,7 +1206,8 @@
             ]
           }
         }
-      ]
+      ],
+      "description": "A doctor-confirm prompt. A medicine prompt names the GENERIC first, the brand in brackets after it; it is never rendered as an order."
     },
     "DoctorWords": {
       "type": "object",

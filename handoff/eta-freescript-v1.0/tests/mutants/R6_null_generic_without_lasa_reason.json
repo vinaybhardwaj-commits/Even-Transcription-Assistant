@@ -673,7 +673,7 @@
       "flags": []
     }
   ],
-  "note_text": "Co-morbidities:\nPresenting Complaint: Breathlessness and wheeze for 3 days with yellow sputum.\nExamination: Bilateral wheeze. SpO2 95%. Temperature 99.8 F.\nDiagnoses: Acute exacerbation of asthma with lower respiratory tract infection\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nPan-D — confirm\nPREDNISOLONE — confirm\nFurther Investigation:\nFollow up: Come back in five days.\nRefer to:\nGeneral Advice: If your breathing gets worse or your lips turn blue, go to the emergency department at once. No steam for now, it can set off the wheeze. Avoid dust and smoke.",
+  "note_text": "Co-morbidities:\nPresenting Complaint: Breathlessness and wheeze for 3 days with yellow sputum.\nExamination: Bilateral wheeze. SpO2 95%. Temperature 99.8 F.\nDiagnoses: Acute exacerbation of asthma with lower respiratory tract infection\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nPan-D — confirm generic\nPREDNISOLONE — confirm\nFurther Investigation:\nFollow up: Come back in five days.\nRefer to:\nGeneral Advice: If your breathing gets worse or your lips turn blue, go to the emergency department at once. No steam for now, it can set off the wheeze. Avoid dust and smoke.",
   "qa": {
     "floors": {
       "untaped_drugs": 0,

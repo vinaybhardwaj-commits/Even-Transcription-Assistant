@@ -1,6 +1,6 @@
 # HANDOFF-INDEX: eta.freescript.v1.0
 
-Bundle: `handoff/eta-freescript-v1.0/` (185 files including this index). Schema version `eta.freescript.v1.0`, superseding `eta.freescript.v0.1` (29 Sep). Built 17 Oct 2026, fix round 1. Every artifact in the bundle is invented; no real patient, doctor, room, encounter or Pulse id appears.
+Bundle: `handoff/eta-freescript-v1.0/` (190 files including this index). Schema version `eta.freescript.v1.0`, superseding `eta.freescript.v0.1` (29 Sep). Built 17 Oct 2026, fix round 1. Every artifact in the bundle is invented; no real patient, doctor, room, encounter or Pulse id appears.
 
 ## Files and sha256
 
@@ -8,10 +8,10 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 
 | File | Bytes | sha256 |
 |---|---|---|
-| README-FOR-PULSE.md | 18875 | `82384c4e81bad9a268da3640cbff7391296a13c62082dce6f4ab9026d3145182` |
-| CHANGELOG-v0.1-to-v1.0.md | 6411 | `e9c8dda0a690426966bc2836140896e2beff9073ebab65739799fbf8468ad5e3` |
-| eta-freescript-artifact.v1.0.schema.json | 40882 | `19393362a365fb600563ff81edce52a3b7ce057876cb233a95fde0b45a06ed92` |
-| validate_artifact.py | 49632 | `bd12e1ed1e88b2ca8ace78c500e9a0d3e9bf798453a4933f8b271a52fefc8093` |
+| README-FOR-PULSE.md | 19491 | `8c7d4efcf1dbfa5171af9a4ca7fbaaa11e9f7e2d3f9067681ed27fe398935438` |
+| CHANGELOG-v0.1-to-v1.0.md | 6531 | `2d05479ea4ad258e8b23ceaaf0ba073641c3ed26ccc4f766e8bbec19006c961a` |
+| eta-freescript-artifact.v1.0.schema.json | 41391 | `4622bca0513d959aaeacbb015200207278d67259e0dcf0dd0c2c5dcbc30829b8` |
+| validate_artifact.py | 51143 | `85761c7791b312ab577e8738cf867e4a930ca897557fb91ff08e7fa221eaefcb` |
 | run_checks.sh | 1521 | `65e6892e29e8ba4b427a2457dab5966c9feaef15bd232f8856c4d94d9e56ec5e` |
 | data/brand_generic_min.json | 5562 | `a28d4df0c9f669223e01a7666d0698c34d6cf8c78343e172b0ca7b254705cc78` |
 | data/copy_rules.json | 762 | `62c05906874623e6f7a9c8f21676113648c637435fd8ee6c54fed4d5c83b451c` |
@@ -30,8 +30,8 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 | examples/ex5-staff-voice-voiceprint-conflict.json | 14245 | `0f38d3dce7235eb3fb1b0a3d7cbdee4eba9db3fad8b4422d074dcecf4c6042fb` |
 | examples/ex6-combination-lasa-red-flag.json | 19687 | `3dc74fbfc35d1a4e261a449b9a1178cd318c4bf7ad18249fbf7368a97ab942bc` |
 | examples/ex7-withheld-no-role-track.json | 2614 | `29a3233e6c3641ac0dbae2da708d92f46fc321b5bba9110acecbef897bf5dbbd` |
-| tests/build_mutants.py | 34993 | `e6544e7fb349c78c54129bebf6de0b0fc4678783423d60a0ee06920ae41b9e6d` |
-| tests/expected.tsv | 6300 | `6ac157f6b82e57cbbdfcfab896f3de680ece11f210a500da0422ca7688d6e55a` |
+| tests/build_mutants.py | 36106 | `1e71575ec35489e073072a1345e6ec2bdd42133ddaf7169a9ac3ff85f6d9cbbf` |
+| tests/expected.tsv | 6493 | `e87f9bf684de5f4e2a36ff9b5f88a20293bf64bc1300cc6a33938a8f7f603c0a` |
 | tests/mutants/M1_control_condition_named.json | 25415 | `be3994d0891ba3231da6512d2e096c426eda4c4d05c52062d4db2cdf57c31c69` |
 | tests/mutants/M1_heading_injection_line_break.json | 16738 | `87e8be5acc7c4d885c86cd488e13bb00af8b20ae3f0258cc3d21604acf45a808` |
 | tests/mutants/M1_held_drug_in_diagnosis.json | 25421 | `2b355fa5a7749b383e025a66701310e0e7fcc6a982ab60ac3ad451b956f48eb0` |
@@ -99,7 +99,7 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 | tests/mutants/R2_times_days_in_plan.json | 25417 | `a26f86d5864aaf820414c77c2cc14eb185521c3a944a745863a1b147c8e2c5fb` |
 | tests/mutants/R2_unknown_brand_dose_in_plan.json | 25429 | `a963ae3cd6459c52d995ae7fa2c7278e9d344ab64a215da9eab88de14ccb016d` |
 | tests/mutants/R3_control_plain_object.json | 25425 | `631d8bae969f1bbf6d774e411e2d3c954eb8297c020c7731f7de902dc20f9e42` |
-| tests/mutants/R3_dose_without_name_in_medication.json | 16521 | `6de847a2f64859e6d49f4689cc2459d41ae6dde3469dd40d6ce5e9e96d71dee0` |
+| tests/mutants/R3_dose_without_name_in_medication.json | 16529 | `a01abad2bab616e3d959fbd3815e8779c8c7342851f74c9ce99185901d75e8c9` |
 | tests/mutants/R3_unknown_name_in_advice.json | 26137 | `74e95adc4a117ef496fbd3246709e24e508c280cb93fbd5b2ef8b5162520f99c` |
 | tests/mutants/R3_unknown_name_in_plan.json | 25429 | `e3bc3c5b29b30054becc550804734787dfae3ab0508402526ebea9e571ab9851` |
 | tests/mutants/R4_change_dose_falls_back_to_strength.json | 25383 | `986ced3cbd3f18d489d62b9c8142bf6c19ddc2856d83c7fdde5b9236f3a7bb5a` |
@@ -109,9 +109,14 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 | tests/mutants/R5_control_common_word_solo.json | 25376 | `1279dee62d89e1a2106878382867a4ac4021617e508b2a5de583671b2aed85f8` |
 | tests/mutants/R5_edit1_combination_brand.json | 25414 | `b103fec4f38baaf852f410d9e4f197072fbf3c2dc5c040199181d44b59b87e2e` |
 | tests/mutants/R5_edit1_four_letter_brand.json | 25362 | `92b7c62a1a6fdb4045c14bd360ce6cfdb549c8034b92a605c936ba80e6cc7ab3` |
-| tests/mutants/R6_control_null_generic_flagged.json | 19372 | `a93cde0a94f7291cc93a5cb09b642c7c54490962cc6171582f85049a84a92054` |
-| tests/mutants/R6_null_generic_without_lasa_reason.json | 19356 | `652f7a2f10cff5f5242a72410bf8262c5acc00a40d000f4c3dbe742e321625f7` |
-| tests/mutants/R6_null_generic_without_lasa_risk.json | 19356 | `94430f9e368e428cbc1780a180b90455def2baa4551c85c5ee18293c072d47cc` |
+| tests/mutants/R6_control_null_generic_flagged.json | 19380 | `09feda8ed55f9a32304f6f0634fc202fbe720e848120c279a7482e55b0de1763` |
+| tests/mutants/R6_null_generic_without_lasa_reason.json | 19364 | `6e812a280b44d361eca3995e0c157ee2af67288032f0a05fdb33101442f39c5a` |
+| tests/mutants/R6_null_generic_without_lasa_risk.json | 19364 | `27657da0d4a8f0c57a66377cfe4d690e4253ce5047f1589e8b92920a40a5c073` |
+| tests/mutants/R9_brand_first_line.json | 16674 | `6a47ab15cf668ad458bd2feabd978fb2d20e31a21c4426d0c5857246aeca19d7` |
+| tests/mutants/R9_brand_in_generic_field.json | 16661 | `2ee1da7ea9d094db4feb99c51eddc8dad0e22d73d895eaeb5dba9a3f8419f3e9` |
+| tests/mutants/R9_brand_shown_but_not_spoken.json | 18196 | `41c93483ae0fbdcc5ea12176e86489d4972709183aa73f8fb130bd46526f497d` |
+| tests/mutants/R9_control_generic_only.json | 16682 | `6dbf88a4994ead7eef3d31f479cd880abed766bacb9f96c52f5de375b47781b1` |
+| tests/mutants/R9_unmapped_brand_shown_as_drug.json | 19372 | `a93cde0a94f7291cc93a5cb09b642c7c54490962cc6171582f85049a84a92054` |
 | tests/mutants/S1_brand_map_alias_held.json | 25369 | `01b909c85dae8d00a245b0964cdc5b935f848a606a3ce4489208f17034f84158` |
 | tests/mutants/S1_control_lookalike_word.json | 25431 | `4c2e0740dcfb245795ced2830a9483392b21e757455dd799251e43bc678e3477` |
 | tests/mutants/S1_fuzzy_misspelt_held.json | 25423 | `6ec2fb3cbb083418b856fb41d101d243328f016963f5b037168725107dfec85d` |
@@ -119,7 +124,7 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 | tests/mutants/S1_spaced_letters_held.json | 25445 | `a5b3e0a372ec0d8a730c486995a6dc4b39b6b1eea285b226310f53444ef758bc` |
 | tests/mutants/S2_posted_test_not_named_in_span.json | 16674 | `674a0541728076d591d03fb76be7ad253658a617b8fb6bd40ff4758e2478227e` |
 | tests/mutants/S3_semicolon_items_over_budget.json | 19955 | `93fc235fe5da44f957a179654cec387cca634044e72ebc2f61f60e12ff5ec02e` |
-| tests/mutants/S4_lasa_brand_generic_null.json | 19585 | `0ede273718521972a12f1a732897def5e5ab118c76bea6e8d4dc5780b0014f70` |
+| tests/mutants/S4_lasa_brand_generic_null.json | 19593 | `feb5887d0c53e1a2a5165d903173c657a27d843d2469c681a3b80f21431b407f` |
 | tests/mutants/S4_lasa_combination_unflagged.json | 19653 | `f0ce34615589abc03da217fb77b50b31e4c308f96e55668d75c7397b60a8a25a` |
 | tests/mutants/S5_model_id_default.json | 16642 | `6988d75ef7cd5f6dbd2257be0b2a6595b5ced97931eeda681ca7357c310b3617` |
 | tests/mutants/S5_model_id_empty.json | 16628 | `d7354a0103775eec35caef0dd26a6a4efd5b2a79cd98eb4341cd661c9ff08e1e` |
@@ -153,7 +158,7 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 | tests/mutants/V14_acid_reflux_matched_to_folic_acid.json | 16499 | `2d78b467e3206e8869c7345f5f52d49c90144a6f5e789ec980472a6a97640be8` |
 | tests/mutants/V14_base_molecule_wrong.json | 18181 | `0d4287a3421591c62d62d8f24637f14e93a4ede5fc34add934a3f02491dd7dfa` |
 | tests/mutants/V14_control_folic_acid_spoken.json | 16498 | `f57fca1848fcb0762c24236a02163f67f8658c07521da73acea31c4fee40faf4` |
-| tests/mutants/V14_control_unattested_combination_unexpanded.json | 19372 | `a93cde0a94f7291cc93a5cb09b642c7c54490962cc6171582f85049a84a92054` |
+| tests/mutants/V14_control_unattested_combination_unexpanded.json | 19380 | `09feda8ed55f9a32304f6f0634fc202fbe720e848120c279a7482e55b0de1763` |
 | tests/mutants/V14_lasa_unflagged.json | 19652 | `c7f6f8bb7d188322e0076caef3b333583ce1914125ef4bd04a761b99a8f50cfd` |
 | tests/mutants/V14_unattested_combination_expanded.json | 19441 | `5e0c61e87e74534b2afa6fe9395becebc3f292d4da2301542e16bc92031976da` |
 | tests/mutants/V15_full_without_note_text.json | 16151 | `ee5e7e0ed56cacc7444f9b4591e019844bc359708c98269d6489606b9942cf9b` |
@@ -207,15 +212,15 @@ This index cannot hash itself, so it is not listed. Verify with `sha256sum <file
 
 ## Privacy sweep
 
-Twelve patterns were run over every file in this folder, including all 159 mutants. A hit passes only if it is one of the allowed placeholders below; the sweep found 0 unexplained hits.
+Twelve patterns were run over every file in this folder, including all 164 mutants. A hit passes only if it is one of the allowed placeholders below; the sweep found 0 unexplained hits.
 
 | Sweep | What it looks for | Hits | Explanation |
 |---|---|---|---|
 | S1 | email addresses | 0 | none |
 | S2 | Indian phone numbers | 0 | none |
-| S3 | UUIDs | 166 | only the seven invented ids `00000000-0000-4000-8000-00000000000N` (N = 1 to 7), one per example and per mutant |
-| S4 | runs of 10+ digits | 666 | only all-zero runs: the zero UUID tails and the all-zero 64-digit placeholder hashes |
-| S5 | hex ids of 20+ characters | 498 | only the all-zero placeholder hashes (`code_sha256`, `prompt_sha256s`) |
+| S3 | UUIDs | 171 | only the seven invented ids `00000000-0000-4000-8000-00000000000N` (N = 1 to 7), one per example and per mutant |
+| S4 | runs of 10+ digits | 686 | only all-zero runs: the zero UUID tails and the all-zero 64-digit placeholder hashes |
+| S5 | hex ids of 20+ characters | 513 | only the all-zero placeholder hashes (`code_sha256`, `prompt_sha256s`) |
 | S6 | document-id shapes (mixed case and digits, 20 to 28 characters) | 0 | none |
 | S7 | `*_uid` fields with a value | 0 | none; every uid is null |
 | S8 | Aadhaar-shaped numbers | 0 | none |

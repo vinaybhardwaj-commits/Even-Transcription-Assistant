@@ -1,7 +1,7 @@
 # FRX-V1-FIX2-REPORT (cloud-frx-v1-handoff, fix round 2, 17 Oct 2026)
 
 Serving model: `claude-opus-5-5`.
-Branch `cloudpane/cloud-frx-v1-handoff/v3`, built from v2 (v1 and v2 left as they are; no main, no PR). Fix commit `8bd7f503`; this report is the next commit.
+Branch `cloudpane/cloud-frx-v1-handoff/v3`, built from v2 (v1 and v2 left as they are; no main, no PR). Fix commit `8bd7f503`; R9 addendum in the next commit, with this report.
 
 ## Checks
 - `handoff/eta-freescript-v1.0/run_checks.sh` exits 0. Examples are 7/7 valid. Mutants: 159/159 rows match `tests/expected.tsv`. Both builders are byte-identical on rebuild. There is no `__pycache__` before or after the run.
@@ -19,6 +19,12 @@ Branch `cloudpane/cloud-frx-v1-handoff/v3`, built from v2 (v1 and v2 left as the
 - **R7.** README rows V7, V9 and V10 now say "Catches … Does not catch …". V17 and V18 rows were added in the same form, and the count reads eighteen rules.
 - **R8.** run_checks.sh fails if any `__pycache__` exists, before or after the checks; none is in the bundle.
 - **A26.** The example generator folds curly quotes and accents to ASCII (`ascii_fold`) before validation.
+
+## R9 addendum (generic first, final ruling)
+- Renderer: `GENERIC (Brand as spoken)`, `GENERIC1 + GENERIC2 (Brand)`, generic alone with no brand, and `<brand as spoken> — confirm generic` for a null generic (lasa_risk still required by R6).
+- V6 checks that each Medication line names the GENERIC first and that an unresolved generic ends in `— confirm generic`. V14 rejects a brand in the generic field and a brand the doctor did not say. The schema descriptions and README state the rule; the README open question is replaced by the ruling.
+- Mutants: brand-first line (V6), brand in the generic field (V14), brand shown but not spoken (V14) and unmapped brand shown as the drug (V6) all fail; the generic-only control passes. Totals after R9: 164/164 rows match, `run_checks.sh` and the internal checks exit 0, and the index lists 189 files.
+- A40 "brand said" means the brand key, or its brand-map key, is in the spoken form. A41 The `— confirm generic` tail is exempt from FRX-N1 d2 like `— confirm`.
 
 ## New ASSUMPTIONs (full text in handoff/eta-internal/DESIGN-RATIONALE.md)
 - A31 One added final `.` or `!` is allowed; when an item cites several quotes, one quote that fully contains it with no negator left outside is enough.

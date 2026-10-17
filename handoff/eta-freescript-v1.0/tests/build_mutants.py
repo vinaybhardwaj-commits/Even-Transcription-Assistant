@@ -506,6 +506,19 @@ def r6(pair, reasons):
     return f
 
 
+
+# ---- fix round 2 addendum: R9 generic first ----
+def r9_brand_in_generic(a):
+    prompt(a, "p1")["drug"].update(generic="DOLO 650", base_molecule="dolo")
+    rerender(a)
+
+
+def r9_generic_only(a):
+    span(a, "s8")["quote_en"] = span(a, "s8")["quote_native"] = "take paracetamol 650 three times a day after food for three days, only if there is fever"
+    prompt(a, "p1")["drug"].update(spoken="paracetamol 650", brand_recognised=None)
+    rerender(a)
+
+
 # name, base, mutation, expected verdict, rule that must be named on failure ("-" for pass)
 MUTANTS = [
     ("V0_bad_duration_unit", "ex3", m_bad_unit, "fail", "V0"),
@@ -667,6 +680,11 @@ MUTANTS = [
     ("R6_null_generic_without_lasa_risk", "ex6", r6(None, ["notes_only", "combination_unexpanded", "lasa"]), "fail", "V14"),
     ("R6_null_generic_without_lasa_reason", "ex6", r6("unresolved generic", ["notes_only", "combination_unexpanded"]), "fail", "V14"),
     ("R6_control_null_generic_flagged", "ex6", r6("unresolved generic", ["notes_only", "combination_unexpanded", "lasa"]), "pass", "-"),
+    ("R9_brand_first_line", "ex1", lambda a: note_sub(a, "PARACETAMOL (Dolo 650) — confirm", "Dolo 650 (PARACETAMOL) — confirm"), "fail", "V6"),
+    ("R9_brand_in_generic_field", "ex1", r9_brand_in_generic, "fail", "V14"),
+    ("R9_brand_shown_but_not_spoken", "ex2", lambda a: (prompt(a, "p1")["drug"].update(brand_recognised="Xyzal"), rerender(a)), "fail", "V14"),
+    ("R9_unmapped_brand_shown_as_drug", "ex6", lambda a: (r6("unresolved generic", ["notes_only", "combination_unexpanded", "lasa"])(a), note_sub(a, "Pan-D — confirm generic", "Pan-D — confirm")), "fail", "V6"),
+    ("R9_control_generic_only", "ex1", r9_generic_only, "pass", "-"),
 ]
 
 

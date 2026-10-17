@@ -98,6 +98,7 @@ CONDITION_PATHS = re.compile(r"^/(presenting_complaints/diagnoses/\d+/(diagnosis
 DRAFT_LINE = "Draft list, not a prescription; the treating doctor checks each drug."
 PLAN_LINE = "Medication changes discussed: see the confirm list."
 CONFIRM_TAIL = " — confirm"
+GENERIC_TAIL = " — confirm generic"
 CHANGE_TAIL = " — dose change discussed"
 HELD_ACTIONS = {"stop", "hold", "not_given"}
 LISTED_ACTIONS = {"start", "continue", "change_dose"}
@@ -183,8 +184,10 @@ def shown_value(p):
 
 
 def med_line(p):
-    """One Medication line: GENERIC (Brand as spoken) supported-strength — confirm; change_dose adds
-    ' — dose change discussed' before ' — confirm'."""
+    """One Medication line, generic first (IMC 2002 cl. 1.5): GENERIC (Brand as spoken) supported-value — confirm;
+    a combination is GENERIC1 + GENERIC2 (Brand). A generic spoken alone shows no brand. An unmapped brand (generic
+    null) is never shown as if it were the drug: '<brand as spoken> — confirm generic'. change_dose adds
+    ' — dose change discussed' before the confirm tail."""
     d = p["drug"]
     parts = [d["generic"] or d["spoken"]]
     if d["brand_recognised"] and d["generic"]:
@@ -192,7 +195,7 @@ def med_line(p):
     s = shown_value(p)
     if s and not (d["brand_recognised"] and set(toks(s)) <= set(toks(d["brand_recognised"]))):
         parts.append(s)
-    return " ".join(parts) + (CHANGE_TAIL if p["action"] == "change_dose" else "") + CONFIRM_TAIL
+    return " ".join(parts) + (CHANGE_TAIL if p["action"] == "change_dose" else "") + (CONFIRM_TAIL if d["generic"] else GENERIC_TAIL)
 
 
 def render_sections(a):
@@ -609,6 +612,13 @@ def check(a):
         bad = [h for h in HEADINGS if got_s.get(h, []) != want_s[h]]
         for h in bad:
             E("V6 note %s lines %r differ from their source %r" % (h, got_s.get(h, [])[:4], want_s[h][:4]))
+        listed = [p for p in prompts if p["kind"] == "medicine" and p["action"] in LISTED_ACTIONS and p.get("drug")]
+        for p, line in zip(listed, got_s.get("Medication", [])[1:]):
+            d = p["drug"]
+            if d["generic"] and not line.startswith(d["generic"] + " ") and line != d["generic"] + CONFIRM_TAIL:
+                E("V6 %s: Medication line does not name the GENERIC first ('%s')" % (p["prompt_id"], line[:40]))
+            if not d["generic"] and not line.endswith(GENERIC_TAIL):
+                E("V6 %s: unmapped brand line must end '%s'" % (p["prompt_id"], GENERIC_TAIL.strip()))
         if not bad and note != render_note(a):
             E("V6 note_text differs from its rendering outside the section bodies")
 
@@ -750,8 +760,10 @@ def check(a):
                 is_med = h == "Medication"
                 if is_med and j == 0 and body == DRAFT_LINE:
                     continue
-                if is_med and body.endswith(CONFIRM_TAIL):
-                    body = body[:-len(CONFIRM_TAIL)]
+                for tail in (GENERIC_TAIL, CONFIRM_TAIL):
+                    if is_med and body.endswith(tail):
+                        body = body[:-len(tail)]
+                        break
                 t = body.strip()
                 if h == "Diagnoses" and t.startswith("?"):
                     t = t[1:]
@@ -875,6 +887,12 @@ def check(a):
             spoken = {r_ for r_ in runs(d["spoken"]) if r_ not in QUALIFIERS}
             if not (keys - {""} - QUALIFIERS) & spoken:
                 E("V14 %s: spoken '%s' shares no non-qualifier word with %s" % (pid, d["spoken"], d["generic"]))
+        if d["generic"]:
+            ge = brand_entry(d["generic"])
+            if ge and name_key(ge["generic"]) != name_key(d["generic"]):
+                E("V14 %s: the generic field holds the brand '%s', not a generic" % (pid, d["generic"]))
+        if d["brand_recognised"] and not ({name_key(d["brand_recognised"])} | ({e["key"]} if e else set())) & runs(d["spoken"]):
+            E("V14 %s: brand '%s' is shown but the doctor did not say it (spoken '%s')" % (pid, d["brand_recognised"], d["spoken"]))
         if d["components"]:
             if not e or e["status"] != "attested" or e["components"] != d["components"]:
                 E("V14 %s: combination expanded without an attested entry in the curated map" % pid)
