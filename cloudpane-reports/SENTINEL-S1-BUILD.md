@@ -50,4 +50,4 @@ Restored; repair-copy suite back to `Tests  8 passed (8)`.
 - M2 (TONOR/webcam check order swapped in device-class.ts): `× ... > F2: a name matching both regexes is TONOR (the mute-button text wins)`, `AssertionError: expected 'webcam' to be 'tonor'`, `Tests  1 failed | 10 passed (11)`.
 - Both mutants restored (git checkout); diff after restore is the test file only.
 - vitest repair-copy + present + api: `Test Files  3 passed (3)`, `Tests  56 passed (56)`. tsc (typecheck and typecheck:tests) rc 0.
-- scrub.sh origin/main..HEAD: SCRUB_RC.
+- scrub.sh origin/main..HEAD: rc 0.
