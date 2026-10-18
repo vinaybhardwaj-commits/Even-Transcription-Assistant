@@ -11,6 +11,7 @@ import { codeRoute, identityEnforced, EMAIL_CODE_MAX_ATTEMPTS, EMAIL_CODE_TTL_S,
 import { emailCodeHash, codeEntryPage, newEmailCode, sendEmailCode } from "@/lib/mcp/oauth/email";
 import { emailStartLimited } from "@/lib/mcp/oauth/email-limit";
 import { originOk, readForm, readPending } from "@/lib/mcp/oauth/flow";
+import { blacklistGuard } from "@/lib/mcp/oauth/blacklist-guard";
 import { clientIp, htmlError, oauthGate } from "@/lib/mcp/oauth/http";
 import { countRecentEmailCodes, deleteEmailCode, getPerson, insertEmailCode } from "@/lib/mcp/oauth/store";
 import { identityStatus, selfApproved } from "@/lib/mcp/identity";
@@ -31,6 +32,8 @@ async function defer(work: () => Promise<void>): Promise<void> {
 export async function POST(req: NextRequest) {
   const blocked = oauthGate({ email: true });
   if (blocked) return blocked.status === 404 ? blocked : htmlError(503, "server_error");
+  const unguarded = await blacklistGuard();
+  if (unguarded) return unguarded;
 
   const pending = readPending(req);
   if (!pending) {

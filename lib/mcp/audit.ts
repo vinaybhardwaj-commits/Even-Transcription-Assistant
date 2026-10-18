@@ -193,6 +193,12 @@ export async function auditDeniedCall(prefix: string, now: number = Date.now()):
  * OAUTH-O3 (spec §12): a call with a revoked, expired, wrong-resource or inactive-person token. Action mcp.denied; actor `person:<email>` (actor_type 'person') because the token mapped to one.
  * Reason code only in the metadata; never the token, its hash or a URL. At most one row per subject per minute (in memory per instance). Awaited by the caller, never void.
  */
+/** Past 1000 entries, drops the aged ones, but KEEPS any that still carry a suppressed count (the next row of that key reports it, R5 ADV10); past 10000 even those go (memory bound). */
+function sweepAged(m: Map<string, { t: number; suppressed: number }>, now: number): void {
+  if (m.size <= 1000) return;
+  const hard = m.size > 10_000;
+  for (const [k, v] of m) if (now - v.t >= DENIED_AUDIT_EVERY_MS && (hard || v.suppressed === 0)) m.delete(k);
+}
 const personDeniedLast = new Map<string, { t: number; suppressed: number }>();
 export async function auditPersonDenied(email: string, reason: "expired" | "revoked" | "inactive" | "resource", now: number = Date.now()): Promise<boolean> {
   const actor = `person:${email}`;
@@ -200,7 +206,7 @@ export async function auditPersonDenied(email: string, reason: "expired" | "revo
   if (last !== undefined && now - last.t < DENIED_AUDIT_EVERY_MS) { last.suppressed += 1; return false; } // counted into the next row
   const suppressed = last?.suppressed ?? 0;
   personDeniedLast.set(actor, { t: now, suppressed: 0 });
-  if (personDeniedLast.size > 1000) for (const [k, v] of personDeniedLast) if (now - v.t >= DENIED_AUDIT_EVERY_MS) personDeniedLast.delete(k);
+  sweepAged(personDeniedLast, now);
   try {
     await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
@@ -226,7 +232,7 @@ export async function auditOauthRefused(subjectEmail: string | null, reason: str
   if (last !== undefined && now - last.t < DENIED_AUDIT_EVERY_MS) { last.suppressed += 1; return false; } // not written, but COUNTED into the next row of this key
   const suppressed = last?.suppressed ?? 0;
   refusedLast.set(key, { t: now, suppressed: 0 });
-  if (refusedLast.size > 1000) for (const [k, v] of refusedLast) if (now - v.t >= DENIED_AUDIT_EVERY_MS) refusedLast.delete(k);
+  sweepAged(refusedLast, now);
   try {
     await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)

@@ -96,10 +96,10 @@ describe.skipIf(!HAVE)("migration 0170 (identity, keys, owner seclog) on postgre
     pg.exec(up);
     pg.exec(up);
     const has = async (t: string) => (await q<{ n: number }>`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_name = ${t}`)[0]!.n === 1;
-    expect([await has("mcp_identity"), await has("mcp_key"), await has("mcp_owner_seclog")]).toEqual([true, true, true]);
+    expect([await has("mcp_identity"), await has("mcp_key"), await has("mcp_owner_seclog"), await has("mcp_oauth_email_lock")]).toEqual([true, true, true, true]);
     // run the rollback inside a savepoint-free scratch: it must run cleanly, then the up file must recreate everything
     pg.exec(readFileSync("db/rollbacks/0170_mcp_oauth.down.sql", "utf8"));
-    expect([await has("mcp_identity"), await has("mcp_key"), await has("mcp_owner_seclog"), await has("mcp_person")]).toEqual([false, false, false, false]);
+    expect([await has("mcp_identity"), await has("mcp_key"), await has("mcp_owner_seclog"), await has("mcp_person"), await has("mcp_oauth_email_lock")]).toEqual([false, false, false, false, false]); // R5 M14: the address-lock table goes too
     pg.exec(up);
     expect([await has("mcp_identity"), await has("mcp_key"), await has("mcp_owner_seclog")]).toEqual([true, true, true]);
     // the rollback dropped the data too: re-seed what the rest of this file relies on
@@ -858,5 +858,130 @@ describe.skipIf(!HAVE)("R4: N3, the cross-flow lock, counted sign-in refusals", 
     expect(await auditOauthRefused(a, "code_wrong", now + 61_000)).toBe(true);
     const rows = await q`SELECT metadata_json FROM audit_log WHERE action = 'mcp.oauth_refused' AND actor_id = ${`person:${a}`} AND created_at > ${t}::timestamptz ORDER BY created_at, id`;
     expect(rows.map((r) => [r.metadata_json.reason, r.metadata_json.suppressed ?? 0])).toEqual([["code_wrong", 0], ["rate_limited", 0], ["code_wrong", 4]]);
+  });
+});
+
+describe.skipIf(!HAVE)("R5: blacklist-file revokes the person too, writes the marker, the identity-on guard, 16 Oct source rows, counts kept", () => {
+  const files = async (list: string[]) => {
+    const { writeFileSync, mkdtempSync, chmodSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const f = `${mkdtempSync(`${tmpdir()}/bl5-`)}/list.json`;
+    writeFileSync(f, JSON.stringify(list));
+    chmodSync(f, 0o600);
+    return f;
+  };
+
+  it("ADV4: with SCRIBE_MCP_IDENTITY OFF a blacklisted address is no longer a qualifying person (start refuses it: status revoked), and its OAuth tokens and families are dead", async () => {
+    const { applyBlacklistFile } = await import("@/lib/mcp/blacklist-file");
+    const e = "adv4.listed@example.test";
+    const keep = "adv4.keep@example.test";
+    for (const a of [e, keep]) await S.grantPerson(a, ["read"], "test");
+    await S.insertToken({ email: e, client_id: "c", scopes: ["read"], resource: "res", family_id: "f_adv4", token_hash: "adv4-t1", kind: "access", ttl_s: 3600 });
+    const saved = process.env.SCRIBE_MCP_IDENTITY;
+    process.env.SCRIBE_MCP_IDENTITY = "off";
+    try {
+      expect((await S.getPerson(e))!.status).toBe("active");
+      expect(await applyBlacklistFile("test", await files([e]))).toBe(1);
+      expect((await S.getPerson(e))!.status).toBe("revoked"); // the start route's `person.status !== "active"` branch: no code is minted, none is mailed
+      expect((await S.getPerson(keep))!.status).toBe("active");
+      expect((await q`SELECT revoked_at FROM mcp_oauth_token WHERE token_hash = 'adv4-t1'`)[0]!.revoked_at).not.toBeNull();
+      expect(await q`SELECT 1 FROM mcp_oauth_family WHERE family_id = 'f_adv4'`).toHaveLength(1);
+      expect(await q`SELECT 1 FROM mcp_oauth_email_code WHERE email = ${e}`).toHaveLength(0);
+    } finally { if (saved === undefined) delete process.env.SCRIBE_MCP_IDENTITY; else process.env.SCRIBE_MCP_IDENTITY = saved; }
+  });
+
+  it("the CLI path writes one marker row (sha256 of the file, count, time) holding no address; the guard is 503 without a row and carries on with one (identity on); identity off never asks", async () => {
+    const { applyBlacklistFile, blacklistApplied } = await import("@/lib/mcp/blacklist-file");
+    const { blacklistGuard, resetBlacklistGuardLogForTests } = await import("@/lib/mcp/oauth/blacklist-guard");
+    pg.exec(`DELETE FROM mcp_blacklist_applied`);
+    expect(await blacklistApplied()).toBe(false);
+    process.env.SCRIBE_MCP_IDENTITY = "on";
+    resetBlacklistGuardLogForTests();
+    const t = await mark();
+    const refused = await blacklistGuard();
+    expect(refused!.status).toBe(503);
+    expect((await q`SELECT metadata_json FROM audit_log WHERE action = 'mcp.oauth_refused' AND created_at > ${t}::timestamptz`).map((r) => r.metadata_json.reason)).toContain("blacklist_not_applied");
+    const f = await files(["marker.one@example.test", "marker.two@example.test"]);
+    expect(await applyBlacklistFile("test", f)).toBe(2);
+    const rows = await q`SELECT file_sha256, address_count, applied_at FROM mcp_blacklist_applied`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.address_count).toBe(2);
+    expect(rows[0]!.file_sha256).toBe(createHash("sha256").update(readFileSync(f)).digest("hex"));
+    expect(JSON.stringify(rows)).not.toContain("marker.");
+    expect(await blacklistGuard()).toBeNull();
+    pg.exec(`DELETE FROM mcp_blacklist_applied`);
+    process.env.SCRIBE_MCP_IDENTITY = "off";
+    expect(await blacklistGuard()).toBeNull(); // flag off: no check
+    process.env.SCRIBE_MCP_IDENTITY = "on";
+  });
+
+  it("0173 up twice is idempotent, and its rollback drops the marker table (and its version row)", async () => {
+    const up = readFileSync("db/migrations/0173_mcp_blacklist_applied.sql", "utf8");
+    pg.exec(up);
+    pg.exec(up);
+    const has = async () => (await q<{ n: number }>`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_name = 'mcp_blacklist_applied'`)[0]!.n === 1;
+    expect(await has()).toBe(true);
+    pg.exec(readFileSync("db/rollbacks/0173_mcp_blacklist_applied.down.sql", "utf8"));
+    expect(await has()).toBe(false);
+    expect(await q`SELECT 1 FROM schema_migrations WHERE version = 173`).toHaveLength(0);
+    pg.exec(up);
+    expect(await has()).toBe(true);
+  });
+
+  it("revocationAddresses16Oct: revoked persons and fully key-revoked addresses of 16 Oct IST; not other days, not a rotation (live key remains), not active persons", async () => {
+    const { revocationAddresses16Oct } = await import("@/lib/mcp/blacklist-file");
+    const mkPerson = (e: string, revokedAt: string | null) => pg.exec(`INSERT INTO mcp_person (email, scopes, status, revoked_at) VALUES ('${e}', ARRAY['read'], '${revokedAt ? "revoked" : "active"}', ${revokedAt ? `'${revokedAt}'` : "NULL"}) ON CONFLICT (email) DO UPDATE SET status = EXCLUDED.status, revoked_at = EXCLUDED.revoked_at`);
+    mkPerson("r16.in@example.test", "2026-10-16T05:00:00+05:30");
+    mkPerson("r16.edge.start@example.test", "2026-10-16T00:00:00+05:30");
+    mkPerson("r16.before@example.test", "2026-10-15T23:59:00+05:30");
+    mkPerson("r16.after@example.test", "2026-10-17T00:00:00+05:30");
+    mkPerson("r16.active@example.test", null);
+    const keyOnly = await ID.issueKey("r16.keyonly@example.test", "read", "test");
+    const rotated = await ID.issueKey("r16.rotated@example.test", "read", "test");
+    await ID.rotateKey(rotated.key_id, "test");
+    pg.exec(`UPDATE mcp_key SET revoked_at = '2026-10-16T12:00:00+05:30' WHERE key_id = '${keyOnly.key_id}' OR (email = 'r16.rotated@example.test' AND revoked_at IS NOT NULL)`);
+    const got = (await revocationAddresses16Oct()).filter((e) => e.startsWith("r16.")).sort();
+    expect(got).toEqual(["r16.edge.start@example.test", "r16.in@example.test", "r16.keyonly@example.test"]);
+  });
+
+  it("M7: the person-denied suppressed count is written into the next row", async () => {
+    const { auditPersonDenied } = await import("@/lib/mcp/audit");
+    resetDeniedAuditForTests();
+    const t = await mark();
+    const now = Date.now();
+    const pd = "m7.person@example.test";
+    expect(await auditPersonDenied(pd, "revoked", now)).toBe(true);
+    for (let i = 1; i <= 3; i += 1) expect(await auditPersonDenied(pd, "revoked", now + i * 1000)).toBe(false);
+    expect(await auditPersonDenied(pd, "revoked", now + 61_000)).toBe(true);
+    const rows = await q`SELECT metadata_json FROM audit_log WHERE action = 'mcp.denied' AND actor_id = ${`person:${pd}`} AND created_at > ${t}::timestamptz ORDER BY created_at, id`;
+    expect(rows.map((r) => r.metadata_json.suppressed ?? 0)).toEqual([0, 3]);
+  });
+
+  it("ADV10: a suppressed count survives the 1000-entry sweep of the sign-in refusal map", async () => {
+    const { auditOauthRefused } = await import("@/lib/mcp/audit");
+    resetDeniedAuditForTests();
+    const t = await mark();
+    const now = Date.now();
+    const x = "adv10.swept@example.test";
+    await auditOauthRefused(x, "code_wrong", now);
+    await auditOauthRefused(x, "code_wrong", now + 1000); // suppressed 1
+    for (let i = 0; i < 1001; i += 1) await auditOauthRefused(`adv10.f${i}@example.test`, "code_wrong", now + 61_000);
+    await auditOauthRefused(x, "code_wrong", now + 62_000);
+    const rx = await q`SELECT metadata_json FROM audit_log WHERE action = 'mcp.oauth_refused' AND actor_id = ${`person:${x}`} AND created_at > ${t}::timestamptz`;
+    expect(rx.length + rx.reduce((a, row) => a + (row.metadata_json.suppressed ?? 0), 0)).toBe(3);
+  });
+
+  it("ADV10: the same for the person-denied map", async () => {
+    const { auditPersonDenied } = await import("@/lib/mcp/audit");
+    resetDeniedAuditForTests();
+    const t = await mark();
+    const now = Date.now();
+    const y = "adv10.swept2@example.test";
+    await auditPersonDenied(y, "revoked", now);
+    await auditPersonDenied(y, "revoked", now + 1000); // suppressed 1
+    for (let i = 0; i < 1001; i += 1) await auditPersonDenied(`adv10.g${i}@example.test`, "revoked", now + 61_000);
+    await auditPersonDenied(y, "revoked", now + 62_000);
+    const ry = await q`SELECT metadata_json FROM audit_log WHERE action = 'mcp.denied' AND actor_id = ${`person:${y}`} AND created_at > ${t}::timestamptz`;
+    expect(ry.length + ry.reduce((a, row) => a + (row.metadata_json.suppressed ?? 0), 0)).toBe(3);
   });
 });

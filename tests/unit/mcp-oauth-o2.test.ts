@@ -8,7 +8,13 @@ import { createHash } from "node:crypto";
 import { NextRequest } from "next/server";
 
 const audit: Array<{ text: string; values: unknown[] }> = [];
-vi.mock("@/lib/db", () => ({ sql: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => { audit.push({ text: strings.join("?"), values }); return []; }) }));
+const MARK = vi.hoisted(() => ({ applied: true, dbDown: false })); // R5: the blacklist-applied marker row the identity-on guard looks for
+vi.mock("@/lib/db", () => ({ sql: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+  const text = strings.join("?");
+  if (text.includes("mcp_blacklist_applied")) { if (MARK.dbDown) throw new Error("db down"); return MARK.applied ? [{ x: 1 }] : []; }
+  audit.push({ text, values });
+  return [];
+}) }));
 vi.mock("@/lib/mcp/oauth/store", async () => await import("../support/mcp-oauth-fake-store"));
 // the identity tables are exercised for real in mcp-identity-audit-pg.test.ts; here they are a switchboard
 const IDM = vi.hoisted(() => ({ status: "active" as string | null, self: false, keyId: "k_alice" as string | null, live: true }));
@@ -1448,6 +1454,52 @@ describe("SCRIBE_MCP_CODE_ROUTE", () => {
     delete process.env.SCRIBE_MCP_OAUTH_APPROVER;
     expect((await start(s.cookie, ALICE)).status).toBe(503);
     expect(mailed).toHaveLength(0);
+  });
+});
+
+describe("R5: with SCRIBE_MCP_IDENTITY on, start and verify refuse (503, counted, logged once) until a blacklist-applied marker row exists", () => {
+  const bare = (route: "start" | "verify") => new NextRequest(`https://www.evenscribe.app/api/oauth/email/${route}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", origin: "https://www.evenscribe.app" }, body: "email=x" });
+  const refusals = () => audit.filter((a) => a.text.includes("mcp.oauth_refused") && JSON.stringify(a.values).includes("blacklist_not_applied"));
+  afterEach(() => { MARK.applied = true; MARK.dbDown = false; });
+
+  it("no marker: both routes are 503 and nothing is mailed; a full start with a real pending cookie mails no code", async () => {
+    process.env.SCRIBE_MCP_IDENTITY = "on";
+    const s = await startSignIn();
+    MARK.applied = false;
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { resetBlacklistGuardLogForTests } = await import("@/lib/mcp/oauth/blacklist-guard");
+    resetBlacklistGuardLogForTests();
+    expect((await start(s.cookie, ALICE)).status).toBe(503);
+    expect((await verify(s.cookie, "123456")).status).toBe(503);
+    expect((await startPost(bare("start"))).status).toBe(503);
+    expect((await verifyPost(bare("verify"))).status).toBe(503);
+    expect(mailed).toHaveLength(0);
+    expect(refusals().length).toBeGreaterThan(0); // counted (rate-limited rows carry the suppressed count)
+    expect(err.mock.calls.filter((c) => String(c[0]).includes("no blacklist-applied marker"))).toHaveLength(1); // logged once
+    expect(JSON.stringify([err.mock.calls, audit.map((a) => a.values)])).not.toContain(ALICE);
+    err.mockRestore();
+  });
+
+  it("a database error reading the marker is a refusal, never an accept", async () => {
+    process.env.SCRIBE_MCP_IDENTITY = "on";
+    const s = await startSignIn();
+    MARK.dbDown = true;
+    expect((await start(s.cookie, ALICE)).status).toBe(503);
+    expect(mailed).toHaveLength(0);
+  });
+
+  it("marker present: the routes carry on (a code is mailed). Identity off: no check at all, even with no marker", async () => {
+    process.env.SCRIBE_MCP_IDENTITY = "on";
+    const s = await startSignIn();
+    expect((await start(s.cookie, ALICE)).status).toBe(200);
+    expect(mailed).not.toHaveLength(0);
+    mailed.length = 0;
+    process.env.SCRIBE_MCP_IDENTITY = "off";
+    MARK.applied = false;
+    const s2 = await startSignIn();
+    expect((await start(s2.cookie, ALICE)).status).toBe(200);
+    expect(mailed).not.toHaveLength(0);
+    expect(audit.filter((a) => a.text.includes("mcp_blacklist_applied"))).toHaveLength(0);
   });
 });
 
