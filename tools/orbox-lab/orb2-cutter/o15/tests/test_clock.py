@@ -61,6 +61,49 @@ def test_check_fails_when_trimmed(run_cut, capsys, tmp_path):
     m["media_sha256"] = C.sha(fl); m["sources"][0]["byte_offset_end"] -= 200; json.dump(m, open(d + "/manifest.json", "w"))   # only the clock check can object now
     assert check(ist_date(ws)) == 1; out = capsys.readouterr().out; assert "FAIL" in out and "BAD" in out and "sha256_match True" in out
 
+def rows_of(*pairs): return [dict(wall_ns=w, samples=n, byte_offset=2 * n) for w, n in pairs]
+
 def test_two_rows_use_endpoints():
-    R = [dict(wall_ns=10 ** 18 + i * 10 ** 9, samples=16000 * i, byte_offset=32000 * i) for i in range(3)]
-    ck = C.clock_of(R, [r["wall_ns"] for r in R], 10 ** 9, 2 * 10 ** 9, 0); assert ck is None or ck["method"] in ("idx_endpoints", "idx_least_squares")
+    rate = 16000 * (1 + 6e-6); R = rows_of(*[(10 ** 18 + i * 1000 * 10 ** 9, round(i * 1000 * rate)) for i in range(5)]); W = [r["wall_ns"] for r in R]
+    ck = C.clock_of(R, W, 1e9 + 500, 1e9 + 2500, R[1]["byte_offset"])      # window holds exactly rows 1 and 2
+    assert ck["method"] == "idx_endpoints" and len(ck["anchors"]) == 2 and abs(ck["samples_per_wall_s"] - rate) < 1e-3
+
+def test_same_wall_ns_gives_null_clock():
+    R = rows_of((10 ** 18, 0), (10 ** 18, 16000)); assert C.clock_of(R, [r["wall_ns"] for r in R], 1e9 - 1, 1e9 + 1, 0) is None
+    R = rows_of(*[(10 ** 18, 16000 * i) for i in range(5)]); assert C.clock_of(R, [r["wall_ns"] for r in R], 1e9 - 1, 1e9 + 1, 0) is None
+
+# ---- fast checks: jittered idx with irregular chunks, a stub flac that carries only the STREAMINFO frame count
+def jittered(ppm, hours, seed):
+    import random; rnd = random.Random(seed); rate = 16000 * (1 + ppm * 1e-6); R = []; n = 0; end = (hours * 3600 + 1200) * 16000
+    while n <= end:
+        R.append(dict(wall_ns=T0 * 10 ** 9 + round(n / rate * 1e9) + rnd.randint(-150_000, 150_000), samples=n, byte_offset=2 * n, rms=0.0)); n += rnd.randint(4000, 12000)
+    return R, [r["wall_ns"] for r in R]
+
+def stub_package(tmp, monkeypatch, R, W, ws, we, trim=0):
+    out = tmp / "cases"; d = out / "CASE-SYN-1"; (d / "media").mkdir(parents=True); (d / "tracks").mkdir()
+    b0, b1 = C.byte_at(R, W, ws), C.byte_at(R, W, we); frames = (b1 - b0) // 2 - trim
+    info = (4096).to_bytes(2, "big") * 2 + bytes(6) + ((16000 << 44) | (0 << 41) | (15 << 36) | frames).to_bytes(8, "big") + bytes(16)
+    (d / "media" / "room_orb2.flac").write_bytes(b"fLaC" + bytes([0x80, 0, 0, 34]) + info)
+    (d / "tracks" / "activity.jsonl").write_text(json.dumps(dict(t_rel_ms=0, t_abs="x")) + "\n"); (d / "meta.json").write_text("{}")
+    m = dict(case_id="CASE-SYN-1", ot_room="OT-2", rule_version=C.RULE, booked_start_ist=C.iso(ws, C.IST), sources=[dict(byte_offset_start=b0, byte_offset_end=b1)], gaps=[], provisional=False,
+             media_sha256=C.sha(str(d / "media" / "room_orb2.flac")), clock=C.clock_of(R, W, ws, we, b0), window_start_utc=C.iso(ws, C.UTC), window_end_utc=C.iso(we, C.UTC))
+    json.dump(m, open(d / "manifest.json", "w")); monkeypatch.setattr(C, "OUT", str(out)); monkeypatch.setattr(C, "ffdur", lambda p: frames / 16000)
+    return m
+
+@pytest.mark.parametrize("hours", [1, 3])
+@pytest.mark.parametrize("ppm", [6.0, -6.0])
+def test_jittered_correct_passes_and_short_fails(tmp_path, monkeypatch, capsys, hours, ppm):
+    R, W = jittered(ppm, hours, seed=hours * 100 + int(ppm)); ws, we = T0 + 600, T0 + 600 + hours * 3600
+    m = stub_package(tmp_path, monkeypatch, R, W, ws, we); assert abs(m["clock"]["ppm_vs_wall"] - ppm) < 0.1
+    assert check(ist_date(ws)) == 0; assert "ok" in capsys.readouterr().out
+    import shutil; shutil.rmtree(tmp_path / "cases"); stub_package(tmp_path, monkeypatch, R, W, ws, we, trim=100)
+    assert check(ist_date(ws)) == 1; assert "BAD" in capsys.readouterr().out
+
+def test_fractional_window_end_passes(tmp_path, monkeypatch):
+    R, W = jittered(6.0, 1, seed=7); ws = T0 + 600; we = ws + 3600.6
+    m = stub_package(tmp_path, monkeypatch, R, W, ws, we); assert m["clock"]["window_end_ns"] - m["clock"]["window_start_ns"] == 3600_600_000_000 and check(ist_date(ws)) == 0
+
+def test_null_clock_and_absent_clock_messages(tmp_path, monkeypatch, capsys):
+    R, W = jittered(6.0, 1, seed=8); ws, we = T0 + 600, T0 + 4200; stub_package(tmp_path, monkeypatch, R, W, ws, we); mp = str(tmp_path / "cases/CASE-SYN-1/manifest.json"); m = json.load(open(mp))
+    m["clock"] = None; json.dump(m, open(mp, "w")); assert check(ist_date(ws)) == 0; assert "clock null (fewer than 2 idx rows in window)" in capsys.readouterr().out
+    del m["clock"]; json.dump(m, open(mp, "w")); assert check(ist_date(ws)) == 0; assert "clock block absent (pre-v2.3 package, not checked)" in capsys.readouterr().out

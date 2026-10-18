@@ -38,7 +38,7 @@
 #    samples_per_wall_s = least-squares slope of sample index on wall time over the anchors; ppm_vs_wall = (that/16000 - 1) x 1e6, 2 dp; anchors = [sample_index_in_flac, wall_ns]
 #    from idx rows inside the window, one per 60 s (nearest row) plus the first and last row; sample_index = (byte_offset - byte_offset_start) / 2. method idx_least_squares
 #    (idx_endpoints when only two rows exist). Map a sample to wall time through the anchors, never window_start + n/16000. `check` compares flac frames (read from the
-#    FLAC STREAMINFO) with window x samples_per_wall_s and fails beyond 2 frames per started hour of window.
+#    FLAC STREAMINFO) with window x samples_per_wall_s and fails beyond 8 + 2 x hours frames; the window is the exact window_start_ns/window_end_ns stored in the clock block.
 #  runs_considered: every run overlapping the segment; start/end original, clipped_start/clipped_end in the segment, length_min = original length,
 #    in_chain true for every run that supplies the onset or belongs to the offset chain.
 import sys, os, json, bisect, hashlib, subprocess, statistics, argparse, csv, shutil, math, collections, datetime as dt
@@ -112,10 +112,11 @@ def clock_of(R, W, ws, we, b0):   # v2.3: sample-index <-> wall_ns anchors from 
         j = bisect.bisect_left(W, t, lo, hi) - lo; idxs.add(min(range(max(j - 1, 0), min(j + 1, len(rows) - 1) + 1), key=lambda k: abs(rows[k]["wall_ns"] - t))); t += 60 * 10 ** 9
     anchors = [[(rows[k]["byte_offset"] - b0) // 2, rows[k]["wall_ns"]] for k in sorted(idxs)]
     xs = [(w - anchors[0][1]) / 1e9 for _, w in anchors]; ys = [n - anchors[0][0] for n, _ in anchors]
-    if len(anchors) > 2:
-        mx, my = sum(xs) / len(xs), sum(ys) / len(ys); sps = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs); method = "idx_least_squares"
+    mx, my = sum(xs) / len(xs), sum(ys) / len(ys); sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx == 0: return None      # every anchor shares one wall_ns: no rate
+    if len(anchors) > 2: sps = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx; method = "idx_least_squares"
     else: sps = ys[-1] / xs[-1]; method = "idx_endpoints"
-    return dict(samples_per_wall_s=sps, ppm_vs_wall=round((sps / 16000 - 1) * 1e6, 2), anchors=anchors, method=method)
+    return dict(samples_per_wall_s=sps, ppm_vs_wall=round((sps / 16000 - 1) * 1e6, 2), window_start_ns=int(round(ws * 1e9)), window_end_ns=int(round(we * 1e9)), anchors=anchors, method=method)
 def byte_at(R, W, t):   # (wall, byte) pairs from idx, linear interpolation, even-aligned
     i = bisect.bisect_right(W, int(t * 1e9)) - 1; i = max(0, min(i, len(R) - 2)); a, b = R[i], R[i + 1]
     f = (t * 1e9 - a["wall_ns"]) / max(b["wall_ns"] - a["wall_ns"], 1); f = min(max(f, 0.0), 1.0)
@@ -367,9 +368,10 @@ def cmd_check(a):
         found += 1; d = f"{OUT}/{cid}"; s = m["sources"][0]; exp = (s["byte_offset_end"] - s["byte_offset_start"]) / BPS
         shaok = sha(d + "/media/room_orb2.flac") == m["media_sha256"]; dur = ffdur(d + "/media/room_orb2.flac")
         rows = [json.loads(l) for l in open(d + "/tracks/activity.jsonl")]; tabs = all("t_abs" in r and "t_rel_ms" in r for r in rows); meta = os.path.exists(d + "/meta.json")
-        ck = m.get("clock"); frames = flac_frames(d + "/media/room_orb2.flac"); win = utc_ep(m["window_end_utc"]) - utc_ep(m["window_start_utc"])
-        if ck: want = win * ck["samples_per_wall_s"]; tol = 2 * math.ceil(win / 3600); ckok = abs(frames - want) <= tol; cks = "clock_frames %d window*sps %.1f diff %.1f tol %d %s" % (frames, want, frames - want, tol, "ok" if ckok else "BAD")
-        else: ckok = True; cks = "clock_frames %d clock block absent (pre-v2.3 package, not checked)" % frames
+        frames = flac_frames(d + "/media/room_orb2.flac")
+        if m.get("clock"):
+            ck = m["clock"]; win = (ck["window_end_ns"] - ck["window_start_ns"]) / 1e9; want = win * ck["samples_per_wall_s"]; tol = 8 + 2 * win / 3600; ckok = abs(frames - want) <= tol; cks = "clock_frames %d window*sps %.1f diff %.1f tol %.1f %s" % (frames, want, frames - want, tol, "ok" if ckok else "BAD")
+        else: ckok = True; cks = "clock_frames %d %s" % (frames, "clock null (fewer than 2 idx rows in window)" if "clock" in m else "clock block absent (pre-v2.3 package, not checked)")
         ok = shaok and abs(dur - exp) <= 0.1 and tabs and meta and ckok
         bad += not ok
         print(cid, "PASS" if ok else "FAIL", "sha256_match", shaok, "flac_s %.2f" % dur, "bytes/32000 %.2f" % exp, "activity_rows", len(rows), "t_abs_all", tabs, "meta.json", meta, cks, "gaps", len(m["gaps"]), "provisional", m["provisional"])
