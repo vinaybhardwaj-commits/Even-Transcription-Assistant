@@ -6,7 +6,7 @@ Differences from the C4 template (5574b09), each forced by what the pinned pipe 
   * `sub -c -k`: clean output, stay subscribed across publisher disconnects (a kiosk publishes with one ssh per message).
   * each reader reconnects after 5 s; the control snapshot goes to `/<room>/guardian/control` (admin pub), one topic per room.
   * rooms come from etc/rooms.json; case alerts go to the router over ubus (router.json); the kill switch is etc/kill-switch."""
-import concurrent.futures, json, os, queue, subprocess, sys, threading, time
+import concurrent.futures, json, os, queue, signal, subprocess, sys, threading, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(HERE, "..", "router"))
 import alert_router, ubus_bus
@@ -45,8 +45,19 @@ def reader(room, stream, q):
         time.sleep(5)
 
 
-def publish(room, msg):
-    subprocess.run([PIPE_SSH, KEY, "pub", "-c", "-b=false", f"/{room}/guardian/control"], input=msg + "\n", text=True, timeout=15, stderr=LOG)
+def publish(room, msg, timeout=15):
+    """Own process group (start_new_session), so a timeout kills the whole group: a hang before pipe-ssh.sh's exec (its tailscale/head pipeline) leaves no orphan.
+    Same argv, input and 15 s timeout as before; a timeout still raises subprocess.TimeoutExpired."""
+    p = subprocess.Popen([PIPE_SSH, KEY, "pub", "-c", "-b=false", f"/{room}/guardian/control"], stdin=subprocess.PIPE, text=True, stderr=LOG, start_new_session=True)
+    try:
+        p.communicate(msg + "\n", timeout=timeout)
+    except BaseException:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        p.communicate()
+        raise
 
 
 def publish_round(rooms, make_msg, pub=None, logger=None, workers=PUBLISH_WORKERS, round_s=PUBLISH_ROUND_S):

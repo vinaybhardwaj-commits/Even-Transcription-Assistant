@@ -1,5 +1,5 @@
 """FR1 stream byte cap + bounded concurrent control publish. Stdlib unittest. Nothing here prints line content."""
-import json, os, sys, tempfile, threading, time, unittest
+import json, os, subprocess, sys, tempfile, threading, time, unittest
 from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "subscriber")); sys.path.insert(0, os.path.join(HERE, "..", "router"))
@@ -51,6 +51,22 @@ class CapTests(unittest.TestCase):
                 self.assertIsNone(stored(e, "r1", "health"))
                 e.sub.on_line("kiosk/r1/health", conv('{"k":"' + "é" * 1995 + '"}'))   # 3990 + 8 = 3998 bytes: stored
                 self.assertIsNotNone(stored(e, "r1", "health"))
+
+    def test_bytes_crlf_at_the_cap_is_stored_as_body_plus_lf(self):
+        for stream in sb.STREAMS:
+            with self.subTest(stream=stream):
+                e = CAEnv(); e.sub.on_line(f"kiosk/r1/{stream}", line(CAP).encode() + b"\r\n")        # 4000 bytes + CRLF: not oversize
+                self.assertEqual(stored(e, "r1", stream), (line(CAP) + "\n").encode())
+                e = CAEnv(); e.sub.on_line(f"kiosk/r1/{stream}", line(100).encode() + b"\r\n")       # CRLF folded to LF, as text mode did
+                self.assertEqual(stored(e, "r1", stream), (line(100) + "\n").encode())
+                e = CAEnv(); e.sub.on_line(f"kiosk/r1/{stream}", line(CAP + 1).encode() + b"\r\n")
+                self.assertIsNone(stored(e, "r1", stream))
+
+    def test_str_path_excludes_the_newline_from_the_cap(self):
+        e = CAEnv(); e.sub.on_line("kiosk/r1/health", line(CAP) + "\n")
+        self.assertEqual(stored(e, "r1", "health"), (line(CAP) + "\n").encode())
+        e = CAEnv(); e.sub.on_line("kiosk/r1/health", line(CAP) + "\r\n")          # CRLF is not counted either (the str path stores it as main did: only the LF is stripped)
+        self.assertIsNotNone(stored(e, "r1", "health"))
 
     def test_audit_has_reason_bytes_ts_and_no_content(self):
         e = CAEnv()
@@ -121,6 +137,29 @@ class CapTests(unittest.TestCase):
         self.assertNotIn("text=True)", src[src.index("def reader"):src.index("def publish(")])
 
 
+class ConsultStartTests(unittest.TestCase):
+    def test_start_from_8_threads_makes_exactly_one_refresher(self):
+        import consult_hold as ch
+        from test_dprime import mk
+        h, _c, _s = mk(); made = []
+        real = threading.Thread
+        class SlowThread(real):                                    # widens the check-then-start window so an unlocked start() races reliably
+            def __init__(self, *a, **kw):
+                time.sleep(0.05); super().__init__(*a, **kw)
+                if kw.get("name") == "consult-hold-refresher": made.append(self)     # (threading.Thread is global: ignore other code's threads)
+        h._loop = lambda: h._stop.wait(5)
+        bar = threading.Barrier(8)
+        def go(): bar.wait(); h.start()
+        with mock.patch.object(ch.threading, "Thread", SlowThread):
+            ts = [real(target=go) for _ in range(8)]
+            for t in ts: t.start()
+            for t in ts: t.join()
+        try:
+            self.assertEqual(len(made), 1)
+        finally:
+            h.stop()
+
+
 class PublishTests(unittest.TestCase):
     ROOMS = [f"room{i}" for i in range(9)]
 
@@ -171,6 +210,17 @@ class PublishTests(unittest.TestCase):
         rs.publish_round([f"r{i}" for i in range(20)], lambda: "M", pub=pub, logger=lambda m: None, round_s=10)
         self.assertEqual(peak[0], 8)
 
+    def test_no_queued_room_publishes_after_the_round_returns(self):
+        started, release = [], threading.Event()
+        def pub(r, m):
+            started.append(r); release.wait(5)
+        rooms = [f"q{i}" for i in range(12)]
+        logs = []
+        rs.publish_round(rooms, lambda: "M", pub=pub, logger=logs.append, workers=8, round_s=0.3)
+        n = len(started); release.set(); time.sleep(0.5)
+        self.assertEqual(n, 8); self.assertEqual(len(started), 8)           # the 4 queued rooms never ran, even after the hung 8 were released
+        self.assertEqual(len(logs), 12)
+
     def test_message_taken_per_room_in_the_worker(self):
         n = [0]
         def mk(): n[0] += 1; return f"M{n[0]}"
@@ -179,17 +229,33 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(sorted(got), sorted(f"M{i}" for i in range(1, 10)))
 
     def test_golden_control_bytes_unchanged_vs_main(self):
-        """Main's loop: publish(r, s.control_message()) -> subprocess.run(..., input=msg + "\\n", timeout=15). Same argv, same bytes, same timeout."""
+        """Main's loop: publish(r, s.control_message()) -> subprocess.run(argv, input=msg + "\\n", text=True, timeout=15, stderr=LOG). Same argv, bytes, timeout; the child now has its own session."""
         e = CAEnv(); calls = []
-        def fake_run(argv, **kw): calls.append((argv, kw))
+        class FakeP:
+            pid = 0
+            def __init__(self, argv, **kw): self.argv, self.kw = argv, kw
+            def communicate(self, input=None, timeout=None): calls.append((self.argv, self.kw, input, timeout)); return ("", "")
         golden = sb.canonical_control({"kill": True, "modes": {"r1": "shadow", "r2": "shadow"}, "ts": int(T0)})
-        with mock.patch.object(rs.subprocess, "run", fake_run):
+        with mock.patch.object(rs.subprocess, "Popen", FakeP):
             ok = rs.publish_round(["r1", "r2"], e.sub.control_message, logger=lambda m: None)
         self.assertEqual(sorted(ok), ["r1", "r2"]); self.assertEqual(len(calls), 2)
-        for argv, kw in calls:
-            self.assertEqual(kw["input"], golden + "\n"); self.assertEqual(kw["timeout"], 15); self.assertTrue(kw["text"])
+        for argv, kw, inp, tmo in calls:
+            self.assertEqual(inp, golden + "\n"); self.assertEqual(tmo, 15); self.assertTrue(kw["text"]); self.assertIs(kw["start_new_session"], True)
             self.assertEqual(argv[1:5], [rs.KEY, "pub", "-c", "-b=false"])
-        self.assertEqual(sorted(a[-1] for a, _ in calls), ["/r1/guardian/control", "/r2/guardian/control"])
+        self.assertEqual(sorted(a[-1] for a, *_ in calls), ["/r1/guardian/control", "/r2/guardian/control"])
+
+    def test_timeout_before_exec_leaves_no_orphans(self):
+        tag = "61.%d" % (os.getpid() % 1000 + 100)            # a sleep argument unique to this run
+        d = tempfile.mkdtemp(); stub = os.path.join(d, "pipe-ssh.sh")
+        open(stub, "w").write(f"#!/bin/sh\nsleep {tag} &\nsleep {tag}\n"); os.chmod(stub, 0o755)   # hangs in a pipeline BEFORE any exec, with a grandchild
+        def alive(): return subprocess.run(["pgrep", "-f", f"sleep {tag}"], capture_output=True).returncode == 0
+        try:
+            with mock.patch.object(rs, "PIPE_SSH", stub):
+                with self.assertRaises(subprocess.TimeoutExpired): rs.publish("r1", "M", timeout=1)
+            time.sleep(0.3)
+            self.assertFalse(alive())
+        finally:
+            subprocess.run(["pkill", "-f", f"sleep {tag}"], capture_output=True)
 
     def test_main_loop_period_unchanged_and_uses_publish_round(self):
         src = open(os.path.join(HERE, "..", "subscriber", "run_subscriber.py")).read(); main = src[src.index("def main():"):]

@@ -198,6 +198,7 @@ class ConsultHold:
         self.background = background is True      # True: hold() only READS the last snapshot; a refresher thread computes it (never on the publish thread)
         self._snap = None                 # (out dict, computed_at) of the last completed computation
         self._thread, self._stop = None, threading.Event()
+        self._start_lock = threading.Lock()                # start() is called from several publish threads at once: exactly one refresher
 
     # ---- source 2 feed
     def note_health(self, room, obj, now=None):
@@ -382,13 +383,14 @@ class ConsultHold:
 
     # ---- the background refresher
     def start(self):
-        if self._stop.is_set():
-            return
-        t = self._thread
-        if t is not None and t.is_alive():
-            return
-        self._thread = threading.Thread(target=self._loop, name="consult-hold-refresher", daemon=True)
-        self._thread.start()
+        with self._start_lock:
+            if self._stop.is_set():
+                return
+            t = self._thread
+            if t is not None and t.is_alive():
+                return
+            self._thread = threading.Thread(target=self._loop, name="consult-hold-refresher", daemon=True)
+            self._thread.start()
 
     def stop(self):
         self._stop.set()
