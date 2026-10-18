@@ -415,6 +415,20 @@ export async function lastChunkByRoom(roomIds: readonly string[]): Promise<Array
 }
 
 /**
+ * ORDER SILENT-SESSION R2 — every OPEN recording session of every enabled room, whatever day it started, with its newest piece (primary or backup, any age). METADATA ONLY: ids and two
+ * timestamps. Read by lib/alerts/ops-sweep.ts. Not limited to the sweep's clinic ROOMS list: an OT room and ORB2 have sessions too. Scratch rooms are filtered by the caller.
+ */
+export async function openRecordingSessions(): Promise<Array<{ id: string; room_id: string; started_at: unknown; last_chunk_at: unknown }>> {
+  return (await sql`
+    SELECT s.id, s.room_id, s.started_at,
+           (SELECT max(c.created_at) FROM bench_chunk c WHERE c.session_id = s.id) AS last_chunk_at
+      FROM bench_session s
+      JOIN room r ON r.id = s.room_id
+     WHERE s.status = 'recording' AND r.disabled_at IS NULL
+  `) as Array<{ id: string; room_id: string; started_at: unknown; last_chunk_at: unknown }>;
+}
+
+/**
  * FR1-A (guardian/consult-alert) — the OLDEST still-open consult window start per roster room: t_close IS NULL, opened within the last 90 minutes and not in the future (audio has been expected since the oldest open window). METADATA ONLY: a room id and one timestamp,
  * no doctor, no consult key. Read by lib/alerts/ops-sweep.ts, which asks "is a consult open and is audio arriving", never "who". Rides eta_encounter_windows (room_id, t_open).
  */
