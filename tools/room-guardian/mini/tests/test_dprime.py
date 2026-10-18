@@ -370,6 +370,34 @@ class PgSources(unittest.TestCase):
         for q in (ch.HB_SQL, ch.ENC_SQL, ch.POST_SQL, ch.SESSION_SQL, ch.LEVEL_SQL, ch.WIN_SQL):
             self.assertIn("%s", q); self.assertNotIn("{", q)
 
+    def test_a_presence_query_that_stops_selecting_p_id_is_caught(self):                                  # R4 item 3 (brief bc-s3m-R4)
+        """The live decision picks the newest row across a room's machines by p.id, so every presence SELECT must carry it, last. The fake cursor here
+        keys on the SELECTED COLUMNS (it projects a per-column value map through the query's select list), not on the SQL string: drop p.id from
+        POST_SQL — or reorder the columns — and the row comes back without (or with misplaced) elements and the mapping fails, as it would against a
+        real database."""
+        vals = {"p.machine": "M6", "p.event": "encounter_open", "p.ts": datetime.fromtimestamp(T - 3, timezone.utc), "p.id": 42}
+        class Conn:
+            def execute(self, sql, params=None): self.sql = sql; return self
+            def transaction(self):
+                conn = self
+                class Tx:
+                    def __enter__(s): return conn
+                    def __exit__(s, *a): return False
+                return Tx()
+            def fetchall(self):
+                m = re.match(r"SELECT (?:DISTINCT ON \(p\.machine\) )?(.*?) FROM pulse_presence_events", self.sql)
+                return [tuple(vals[c] for c in [x.strip() for x in m.group(1).split(",")])]
+            def close(self): pass
+        class Fake:
+            @staticmethod
+            def connect(url, **kw): return Conn()
+        saved = sys.modules.get("psycopg"); sys.modules["psycopg"] = Fake
+        try:
+            out = ch.pg_sources(self.f)["presence"](T, ["M6"])
+        finally:
+            sys.modules.__setitem__("psycopg", saved) if saved else sys.modules.pop("psycopg", None)
+        self.assertEqual(out, {"hb": [("M6", T - 3, 42)], "enc": [("M6", "encounter_open", T - 3, 42)], "post": [("M6", "encounter_open", T - 3, 42)]})
+
     def test_a_missing_credential_file_is_a_source_error_not_a_crash(self):
         h = ch.ConsultHold(ROOMS, MAP, ch.pg_sources("/nonexistent/db.url"), Clock(T))
         for r in ROOMS: h.note_health(r, QUIET, T)

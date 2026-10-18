@@ -22,6 +22,10 @@
 - Mutants (each applied, run, reverted — all killed): R2: stale-hb-returns-false `failures=3`; prefix match `failures=1` (case 10); medium-confidence-heals `failures=1` (case 13c). R3: ts-based selection `failures=1` (case_06b); prefix match on post/enc rows `failures=1` (case_13b); tolerant entry (R2 code) `failures=5` (case_09b subtests).
 - TS/swift/kiosk gates: not run (no such files touched).
 
+## FIX ROUND R4 (fable 18 Oct; tests only, .bc/bc-s3m-R4.md — Opus refute PASS-WITH-FIXES on 361298c3)
+- case_13b2: enc-side twin of 13b (both machines fresh, only -2 has a URL open -> opd-3 false/no_event) — kills the surviving enc-prefix mutant. R4-2 pins POST close then a later URL open = false/post_close/high (fail-safe; spec to be confirmed by newcat-orch). R4-3: a PgSources fake cursor keyed on the SELECTED COLUMNS, so dropping or reordering p.id in any presence SELECT fails the test.
+- R4 suite: `Ran 437 tests in 102.209s` / `OK (skipped=15)`, exit 0. +3 tests vs R3; each new test kills exactly one mutant (enc-prefix -> 13b2; URL-open-wins -> R4-2; p.id dropped from POST_SQL -> R4-3 error).
+
 ## Assumptions
 - Case 12 "20 recorded snapshots": no recorded corpus exists in the repo, so 20 synthetic snapshots (room counts 1-5, kill on/off, mixed hold values); flag-off line == base serialisation byte for byte, flag-on line carries the same consult_open substring.
 - The status file is written whenever the hold is built (consult_open_publish on) regardless of the wire flag — required by the spec's rollout step (3) "status file only, no wire".
