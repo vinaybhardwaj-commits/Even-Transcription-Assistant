@@ -259,65 +259,139 @@ extension BuddyConsultController {
   // MARK: - Shadow + unusable config (F4)
 
   @Test func shadowWithUnusableConfigHasZeroWindowsZeroPostsAndNoTapFile_WellFormed0644() async throws {
-    // A well-formed config file readable by others (0644) is unusable: the controller detects this and does not start a runner.
-    let c = try BuddyL2Tests.consult(flags: BuddyL2Tests.shadow, runner: false)
-    defer { c.controller.shutdown() }
-    defer { try? FileManager.default.removeItem(at: c.root) }
-    let configURL = c.root.appendingPathComponent(BuddyRunnerConfig.fileName)
-    try Data(#"{"base":"http://c4:43124","key":"KEY-SECRET-1"}"#.utf8).write(to: configURL)
+    // A well-formed config file readable by others (0644) is unusable: the production plan refuses it, no runner starts.
+    let server = try FakeRunnerServer()
+    defer { server.stop() }
+    server.respond(path: "/runner/v1/token", status: 200, body: #"{"token":"brt-f4","expires_in":900}"#)
+    server.respond(path: "/runner/v1/flags", status: 200, body: #"{"window":false,"live":true,"reason_code":"fleet_off"}"#)
+    server.respond(path: "/runner/v1/chunks", status: 200, body: #"{"seq":0}"#)
+    let root = R4Fixture.temporaryRoot()
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configURL = root.appendingPathComponent(BuddyRunnerConfig.fileName)
+    try Data(#"{"base":"http://127.0.0.1:\#(server.port)","key":"KEY-SECRET-1"}"#.utf8).write(to: configURL)
     chmod(configURL.path, 0o644)
-    #expect(BuddyRunnerConfig.status(root: c.root) == .unusable, "the file is 0644 so unusable")
-    #expect(c.controller.consultStarted(opaqueID: "opq_f4a", buddyOff: false, window: false, live: true) == .noWindow)
-    c.h.tape.growSeconds(26)
+    #expect(BuddyRunnerConfig.status(root: root) == .unusable, "the file is 0644 so unusable")
+    let logs = LockedList<String>()
+    let presenter = BuddyL1Tests.SpyPresenter()
+    let state = BuddyStateBox()
+    state.set(.init(recording: true, micState: "authorized", pcmURL: nil, segmentID: nil))
+    let plan = BuddyConsultController.filePlan(root: root, log: { logs.append($0) })
+    let controller = BuddyConsultController(
+      root: root, state: state, presenter: presenter, log: { logs.append($0) }, makeToken: { String(repeating: "c", count: 64) },
+      runnerPlan: plan)
+    defer { controller.shutdown() }
+    #expect(controller.consultStarted(opaqueID: "opq_f4a", buddyOff: false, window: false, live: true) == .noWindow)
     try await Task.sleep(nanoseconds: 300_000_000)
-    #expect(c.presenter.all.isEmpty, "0 windows")
-    #expect(c.h.transport.posted.isEmpty && c.h.transport.flagPollCount == 0, "0 POSTs, 0 polls")
-    #expect(!c.controller.isLive, "nothing is open, so nothing to close")
-    #expect(BuddyL1Tests.tapFile(c.root) == nil, "no tap file")
-    let counted = c.logs.all.filter { $0.hasPrefix(Self.noConfigPrefix) }
-    #expect(counted == ["\(Self.noConfigPrefix)1 (opaque_id opq_f4a)"], "exactly one counted line, config unusable so treated as absent: \(c.logs.all)")
-    _ = c.controller.consultEnded(opaqueID: "opq_f4a")
+    #expect(presenter.all.isEmpty, "0 windows")
+    #expect(server.requests.filter { $0.line.hasPrefix("POST /runner/v1/chunks") }.isEmpty, "0 chunk POSTs to the real server")
+    #expect(!controller.isLive, "nothing is open, so nothing to close")
+    #expect(BuddyL1Tests.tapFile(root) == nil, "no tap file")
+    let counted = logs.all.filter { $0.hasPrefix(Self.noConfigPrefix) }
+    #expect(counted == ["\(Self.noConfigPrefix)1 (opaque_id opq_f4a)"], "exactly one counted line: \(logs.all)")
+    #expect(logs.all.contains { $0.contains("readable by others") }, "the production load path logged the refusal: \(logs.all)")
+    _ = controller.consultEnded(opaqueID: "opq_f4a")
   }
 
   @Test func shadowWithUnusableConfigHasZeroWindowsZeroPostsAndNoTapFile_Unparseable0600() async throws {
-    // A 0600 file with unparseable JSON is unusable: the controller detects this and does not start a runner.
-    let c = try BuddyL2Tests.consult(flags: BuddyL2Tests.shadow, runner: false)
-    defer { c.controller.shutdown() }
-    defer { try? FileManager.default.removeItem(at: c.root) }
-    let configURL = c.root.appendingPathComponent(BuddyRunnerConfig.fileName)
+    // A 0600 file with unparseable JSON is unusable: the production plan refuses it, no runner starts.
+    let server = try FakeRunnerServer()
+    defer { server.stop() }
+    server.respond(path: "/runner/v1/token", status: 200, body: #"{"token":"brt-f4","expires_in":900}"#)
+    server.respond(path: "/runner/v1/flags", status: 200, body: #"{"window":false,"live":true,"reason_code":"fleet_off"}"#)
+    server.respond(path: "/runner/v1/chunks", status: 200, body: #"{"seq":0}"#)
+    let root = R4Fixture.temporaryRoot()
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configURL = root.appendingPathComponent(BuddyRunnerConfig.fileName)
     try Data("not json".utf8).write(to: configURL)
     chmod(configURL.path, 0o600)
-    #expect(BuddyRunnerConfig.status(root: c.root) == .unusable, "the file is 0600 but unparseable")
-    #expect(c.controller.consultStarted(opaqueID: "opq_f4b", buddyOff: false, window: false, live: true) == .noWindow)
-    c.h.tape.growSeconds(26)
+    #expect(BuddyRunnerConfig.status(root: root) == .unusable, "the file is 0600 but unparseable")
+    let logs = LockedList<String>()
+    let presenter = BuddyL1Tests.SpyPresenter()
+    let state = BuddyStateBox()
+    state.set(.init(recording: true, micState: "authorized", pcmURL: nil, segmentID: nil))
+    let plan = BuddyConsultController.filePlan(root: root, log: { logs.append($0) })
+    let controller = BuddyConsultController(
+      root: root, state: state, presenter: presenter, log: { logs.append($0) }, makeToken: { String(repeating: "c", count: 64) },
+      runnerPlan: plan)
+    defer { controller.shutdown() }
+    #expect(controller.consultStarted(opaqueID: "opq_f4b", buddyOff: false, window: false, live: true) == .noWindow)
     try await Task.sleep(nanoseconds: 300_000_000)
-    #expect(c.presenter.all.isEmpty, "0 windows")
-    #expect(c.h.transport.posted.isEmpty && c.h.transport.flagPollCount == 0, "0 POSTs, 0 polls")
-    #expect(!c.controller.isLive, "nothing is open, so nothing to close")
-    #expect(BuddyL1Tests.tapFile(c.root) == nil, "no tap file")
-    let counted = c.logs.all.filter { $0.hasPrefix(Self.noConfigPrefix) }
-    #expect(counted == ["\(Self.noConfigPrefix)1 (opaque_id opq_f4b)"], "exactly one counted line, config unusable so treated as absent: \(c.logs.all)")
-    _ = c.controller.consultEnded(opaqueID: "opq_f4b")
+    #expect(presenter.all.isEmpty, "0 windows")
+    #expect(server.requests.filter { $0.line.hasPrefix("POST /runner/v1/chunks") }.isEmpty, "0 chunk POSTs to the real server")
+    #expect(!controller.isLive, "nothing is open, so nothing to close")
+    #expect(BuddyL1Tests.tapFile(root) == nil, "no tap file")
+    let counted = logs.all.filter { $0.hasPrefix(Self.noConfigPrefix) }
+    #expect(counted == ["\(Self.noConfigPrefix)1 (opaque_id opq_f4b)"], "exactly one counted line: \(logs.all)")
+    #expect(logs.all.contains { $0.contains("not usable") }, "the production load path logged the refusal: \(logs.all)")
+    _ = controller.consultEnded(opaqueID: "opq_f4b")
   }
 
   @Test func shadowWithUnusableConfigHasZeroWindowsZeroPostsAndNoTapFile_TruncatedJSON0600() async throws {
-    // A 0600 file with truncated JSON is unusable: the controller detects this and does not start a runner.
-    let c = try BuddyL2Tests.consult(flags: BuddyL2Tests.shadow, runner: false)
-    defer { c.controller.shutdown() }
-    defer { try? FileManager.default.removeItem(at: c.root) }
-    let configURL = c.root.appendingPathComponent(BuddyRunnerConfig.fileName)
-    try Data(#"{"base":"http://c4:43124","key":"KEY-SECR"#.utf8).write(to: configURL)
+    // A 0600 file with truncated JSON is unusable: the production plan refuses it, no runner starts.
+    let server = try FakeRunnerServer()
+    defer { server.stop() }
+    server.respond(path: "/runner/v1/token", status: 200, body: #"{"token":"brt-f4","expires_in":900}"#)
+    server.respond(path: "/runner/v1/flags", status: 200, body: #"{"window":false,"live":true,"reason_code":"fleet_off"}"#)
+    server.respond(path: "/runner/v1/chunks", status: 200, body: #"{"seq":0}"#)
+    let root = R4Fixture.temporaryRoot()
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configURL = root.appendingPathComponent(BuddyRunnerConfig.fileName)
+    try Data(#"{"base":"http://127.0.0.1:\#(server.port)","key":"KEY-SECR"#.utf8).write(to: configURL)
     chmod(configURL.path, 0o600)
-    #expect(BuddyRunnerConfig.status(root: c.root) == .unusable, "the file is 0600 but truncated/unparseable")
-    #expect(c.controller.consultStarted(opaqueID: "opq_f4c", buddyOff: false, window: false, live: true) == .noWindow)
-    c.h.tape.growSeconds(26)
+    #expect(BuddyRunnerConfig.status(root: root) == .unusable, "the file is 0600 but truncated/unparseable")
+    let logs = LockedList<String>()
+    let presenter = BuddyL1Tests.SpyPresenter()
+    let state = BuddyStateBox()
+    state.set(.init(recording: true, micState: "authorized", pcmURL: nil, segmentID: nil))
+    let plan = BuddyConsultController.filePlan(root: root, log: { logs.append($0) })
+    let controller = BuddyConsultController(
+      root: root, state: state, presenter: presenter, log: { logs.append($0) }, makeToken: { String(repeating: "c", count: 64) },
+      runnerPlan: plan)
+    defer { controller.shutdown() }
+    #expect(controller.consultStarted(opaqueID: "opq_f4c", buddyOff: false, window: false, live: true) == .noWindow)
     try await Task.sleep(nanoseconds: 300_000_000)
-    #expect(c.presenter.all.isEmpty, "0 windows")
-    #expect(c.h.transport.posted.isEmpty && c.h.transport.flagPollCount == 0, "0 POSTs, 0 polls")
-    #expect(!c.controller.isLive, "nothing is open, so nothing to close")
-    #expect(BuddyL1Tests.tapFile(c.root) == nil, "no tap file")
-    let counted = c.logs.all.filter { $0.hasPrefix(Self.noConfigPrefix) }
-    #expect(counted == ["\(Self.noConfigPrefix)1 (opaque_id opq_f4c)"], "exactly one counted line, config unusable so treated as absent: \(c.logs.all)")
-    _ = c.controller.consultEnded(opaqueID: "opq_f4c")
+    #expect(presenter.all.isEmpty, "0 windows")
+    #expect(server.requests.filter { $0.line.hasPrefix("POST /runner/v1/chunks") }.isEmpty, "0 chunk POSTs to the real server")
+    #expect(!controller.isLive, "nothing is open, so nothing to close")
+    #expect(BuddyL1Tests.tapFile(root) == nil, "no tap file")
+    let counted = logs.all.filter { $0.hasPrefix(Self.noConfigPrefix) }
+    #expect(counted == ["\(Self.noConfigPrefix)1 (opaque_id opq_f4c)"], "exactly one counted line: \(logs.all)")
+    #expect(logs.all.contains { $0.contains("not usable") }, "the production load path logged the refusal: \(logs.all)")
+    _ = controller.consultEnded(opaqueID: "opq_f4c")
+  }
+
+  @Test func shadowWithUsable0600ConfigStartsARunnerAndPosts_PositiveControl() async throws {
+    // A well-formed 0600 file with the production plan starts a runner. At minimum it polls flags. Proves the path is live.
+    let server = try FakeRunnerServer()
+    defer { server.stop() }
+    server.respond(path: "/runner/v1/token", status: 200, body: #"{"token":"brt-f4","expires_in":900}"#)
+    server.respond(path: "/runner/v1/flags", status: 200, body: #"{"window":false,"live":true,"reason_code":"fleet_off"}"#)
+    server.respond(path: "/runner/v1/chunks", status: 200, body: #"{"seq":0}"#)
+    let root = R4Fixture.temporaryRoot()
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configURL = root.appendingPathComponent(BuddyRunnerConfig.fileName)
+    try Data(#"{"base":"http://127.0.0.1:\#(server.port)","key":"KEY-SECRET-1"}"#.utf8).write(to: configURL)
+    chmod(configURL.path, 0o600)
+    #expect(BuddyRunnerConfig.status(root: root) == .ok, "the file is 0600 and well-formed: usable")
+    let logs = LockedList<String>()
+    let presenter = BuddyL1Tests.SpyPresenter()
+    let state = BuddyStateBox()
+    state.set(.init(recording: true, micState: "authorized", pcmURL: nil, segmentID: nil))
+    let plan = BuddyConsultController.filePlan(root: root, log: { logs.append($0) })
+    let controller = BuddyConsultController(
+      root: root, state: state, presenter: presenter, log: { logs.append($0) }, makeToken: { String(repeating: "c", count: 64) },
+      runnerPlan: plan)
+    defer { controller.shutdown() }
+    _ = controller.consultStarted(opaqueID: "opq_f4d", buddyOff: false, window: false, live: true)
+    try await R4Fixture.waitUntil { server.requests.contains { $0.line.hasPrefix("GET /runner/v1/flags") } }
+    #expect(presenter.all.isEmpty, "0 windows (shadow)")
+    #expect(server.requests.contains { $0.line.hasPrefix("POST /runner/v1/token") }, "at least token request")
+    #expect(server.requests.contains { $0.line.hasPrefix("GET /runner/v1/flags") }, "at least one flag poll")
+    #expect(controller.isLive, "a runner is open")
+    _ = controller.consultEnded(opaqueID: "opq_f4d")
   }
 }
