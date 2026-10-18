@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ORB2 case cutter, binding rule v2.2 (ORDERS-O15, on v2.1 of ORDERS-O7 + lead ruling 23:05). Stdlib + /usr/bin/ffmpeg only. Self-contained.
+# ORB2 case cutter, binding rule v2.2, tool v2.3 (ORDERS-O24 adds the clock block; the cut rule is unchanged) (ORDERS-O15, on v2.1 of ORDERS-O7 + lead ruling 23:05). Stdlib + /usr/bin/ffmpeg only. Self-contained.
 # Usage: cutter_v2.py cut   --date YYYY-MM-DD --room OT-2 --bookings <csv> [--dry-run] [--idx <idx.jsonl>] [--workdir DIR]
 #                          [--status-file F] [--cursor-file F] [--trash-dir DIR]   (the last three are for local tests; on orb2 leave them out)
 #        cutter_v2.py check --date YYYY-MM-DD --room OT-2
@@ -34,10 +34,15 @@
 #  room_uid in meta.json comes from the bookings column ot__ot_room_uid when the CSV has it, else null.
 #  window = [onset-15 min, offset+15 min] clipped to the segment. Provisional: window_end+15 min after tape end, or last case with segment end = tape end
 #    and chain end within the last 20 min of tape.
+#  clock (v2.3, manifest): the ORB2 capture clock drifts against the NTP wall clock in tape.idx (about +6 ppm), so a flac holds a little more than window x 16000 frames.
+#    samples_per_wall_s = least-squares slope of sample index on wall time over the anchors; ppm_vs_wall = (that/16000 - 1) x 1e6, 2 dp; anchors = [sample_index_in_flac, wall_ns]
+#    from idx rows inside the window, one per 60 s (nearest row) plus the first and last row; sample_index = (byte_offset - byte_offset_start) / 2. method idx_least_squares
+#    (idx_endpoints when only two rows exist). Map a sample to wall time through the anchors, never window_start + n/16000. `check` compares flac frames (read from the
+#    FLAC STREAMINFO) with window x samples_per_wall_s and fails beyond 2 frames per started hour of window.
 #  runs_considered: every run overlapping the segment; start/end original, clipped_start/clipped_end in the segment, length_min = original length,
 #    in_chain true for every run that supplies the onset or belongs to the offset chain.
 import sys, os, json, bisect, hashlib, subprocess, statistics, argparse, csv, shutil, math, collections, datetime as dt
-VERSION = "o15-cutter-v2.2"; RULE = "v2.2"
+VERSION = "o15-cutter-v2.3"; RULE = "v2.2"
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30)); UTC = dt.timezone.utc
 TAPE = "/var/lib/room-recorder/tape/tape.pcm"; IDX = "/var/lib/room-recorder/tape/tape.idx"; STATUS = "/var/lib/room-recorder/status.json"; CURSOR = "/var/lib/room-recorder/cursor.json"
 OUT = "/var/lib/orbox-cases/cases"; DAYS = "/var/lib/orbox-cases/days"; BPS = 32000
@@ -58,6 +63,12 @@ def ffdur(p):
     return int(h) * 3600 + int(m_) * 60 + float(s_)
 def overlap(a0, a1, b0, b1): return max(0.0, min(a1, b1) - max(a0, b0))
 def fail(msg): sys.exit("FAIL: " + msg)
+def flac_frames(p):   # exact sample count from the FLAC STREAMINFO block (36 bits after rate, channels, bit depth)
+    with open(p, "rb") as f: h = f.read(26)
+    if h[:4] != b"fLaC" or (h[4] & 0x7F) != 0: fail("not a FLAC with STREAMINFO first: " + p)
+    n = int.from_bytes(h[18:26], "big") & ((1 << 36) - 1)
+    if not n: fail("FLAC STREAMINFO holds no sample count: " + p)
+    return n
 # ---- inputs
 def load_bookings(path, date, room):
     rows = []; uids = {}
@@ -93,6 +104,18 @@ def gaps_of(R):
         dw = (b["wall_ns"] - a["wall_ns"]) / 1e9; db = b["byte_offset"] - a["byte_offset"]
         if dw > 2.0 or db != 2 * (b["samples"] - a["samples"]): g.append(dict(wall_start=a["wall_ns"] / 1e9, wall_end=b["wall_ns"] / 1e9, byte_offset=a["byte_offset"], duration_s=round(dw, 3)))
     return g
+def clock_of(R, W, ws, we, b0):   # v2.3: sample-index <-> wall_ns anchors from the idx rows inside the window; None when fewer than 2 rows
+    lo, hi = bisect.bisect_left(W, int(ws * 1e9)), bisect.bisect_right(W, int(we * 1e9)); rows = R[lo:hi]
+    if len(rows) < 2: return None
+    idxs = {0, len(rows) - 1}; t = rows[0]["wall_ns"] + 60 * 10 ** 9
+    while t < rows[-1]["wall_ns"]:
+        j = bisect.bisect_left(W, t, lo, hi) - lo; idxs.add(min(range(max(j - 1, 0), min(j + 1, len(rows) - 1) + 1), key=lambda k: abs(rows[k]["wall_ns"] - t))); t += 60 * 10 ** 9
+    anchors = [[(rows[k]["byte_offset"] - b0) // 2, rows[k]["wall_ns"]] for k in sorted(idxs)]
+    xs = [(w - anchors[0][1]) / 1e9 for _, w in anchors]; ys = [n - anchors[0][0] for n, _ in anchors]
+    if len(anchors) > 2:
+        mx, my = sum(xs) / len(xs), sum(ys) / len(ys); sps = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs); method = "idx_least_squares"
+    else: sps = ys[-1] / xs[-1]; method = "idx_endpoints"
+    return dict(samples_per_wall_s=sps, ppm_vs_wall=round((sps / 16000 - 1) * 1e6, 2), anchors=anchors, method=method)
 def byte_at(R, W, t):   # (wall, byte) pairs from idx, linear interpolation, even-aligned
     i = bisect.bisect_right(W, int(t * 1e9)) - 1; i = max(0, min(i, len(R) - 2)); a, b = R[i], R[i + 1]
     f = (t * 1e9 - a["wall_ns"]) / max(b["wall_ns"] - a["wall_ns"], 1); f = min(max(f, 0.0), 1.0)
@@ -287,6 +310,7 @@ def write_package(p, R, W, room, source_name, room_uid, self_sha):
         for r in p["bin_rows"]: f.write(json.dumps(dict(t_rel_ms=int(round((r["bin_start"] - p["t0"]) * 1000)), t_abs=iso_ms(r["bin_start"]), rms_median=r["rms_median"], active=bool(r["active"]))) + "\n")
     open(d + "/tracks/transcript.jsonl", "w").close()
     rates = collections.Counter(r.get("input_sample_rate") for r in R[bisect.bisect_left(W, int(p["window_start"] * 1e9)):bisect.bisect_right(W, int(p["window_end"] * 1e9))] if r.get("input_sample_rate")).most_common(1)
+    clock = clock_of(R, W, p["window_start"], p["window_end"], b0)
     tz2 = lambda e: dict(ist=iso(e, IST), utc=iso(e, UTC))
     gaps = [dict(start_utc=iso(g["wall_start"], UTC), end_utc=iso(g["wall_end"], UTC), start_ist=iso(g["wall_start"], IST), end_ist=iso(g["wall_end"], IST), duration_s=g["duration_s"], byte_offset=g["byte_offset"]) for g in p["gaps"]]
     bd = lambda b: dict(tz2(b["t"]), min_density=b["min_density"], stretch_ist=[iso(b["stretch"][0], IST), iso(b["stretch"][1], IST)]) if b else None
@@ -299,7 +323,7 @@ def write_package(p, R, W, room, source_name, room_uid, self_sha):
              provisional=p["provisional"], provisional_reason=p["provisional_reason"],
              activity=dict(onset_ist=p["onset"] and iso(p["onset"], IST), offset_ist=p["offset"] and iso(p["offset"], IST),
                            rule="v2.2: 30 s bins >30% rms>0.01; runs bridge <=10 min, drop <3 min; 5-min density; onset = first streak of 3 blocks d>=0.3 inside a run, else weak fallback on the longest run >=15 min near the slot with a block d>=0.5; offset = last block d>=0.3 in the chain (gap <=20 min); within the segment", runs_considered=p["runs_considered"]),
-             sources=[dict(id="orb2_room", path="media/room_orb2.flac", sample_rate=16000, channels=1, capture_input_sample_rate=rates[0][0] if rates else None, byte_offset_start=b0, byte_offset_end=b1, clock="wall_ns from tape.idx, NTP-synced", clock_offset_ms=0)],
+             sources=[dict(id="orb2_room", path="media/room_orb2.flac", sample_rate=16000, channels=1, capture_input_sample_rate=rates[0][0] if rates else None, byte_offset_start=b0, byte_offset_end=b1, clock="wall_ns from tape.idx, NTP-synced", clock_offset_ms=0)], clock=clock,
              gaps=gaps, notes=p["notes"], media_sha256=sha(flac), plan_key=plan_key(p), cutter=dict(version=VERSION, sha256=self_sha))
     meta = dict(case_id=cid, ot_room=room, room_uid=room_uid, booked_start=tz2(p["booked_start"]), booked_end=tz2(p["booked_end"]), team_roles=[], asa=None,
                 times=dict(wheel_in=None, incision=None, closure=None, wheel_out=None), simulated=False, source="metasurfer bookings CSV " + source_name)
@@ -343,9 +367,12 @@ def cmd_check(a):
         found += 1; d = f"{OUT}/{cid}"; s = m["sources"][0]; exp = (s["byte_offset_end"] - s["byte_offset_start"]) / BPS
         shaok = sha(d + "/media/room_orb2.flac") == m["media_sha256"]; dur = ffdur(d + "/media/room_orb2.flac")
         rows = [json.loads(l) for l in open(d + "/tracks/activity.jsonl")]; tabs = all("t_abs" in r and "t_rel_ms" in r for r in rows); meta = os.path.exists(d + "/meta.json")
-        ok = shaok and abs(dur - exp) <= 0.1 and tabs and meta
+        ck = m.get("clock"); frames = flac_frames(d + "/media/room_orb2.flac"); win = utc_ep(m["window_end_utc"]) - utc_ep(m["window_start_utc"])
+        if ck: want = win * ck["samples_per_wall_s"]; tol = 2 * math.ceil(win / 3600); ckok = abs(frames - want) <= tol; cks = "clock_frames %d window*sps %.1f diff %.1f tol %d %s" % (frames, want, frames - want, tol, "ok" if ckok else "BAD")
+        else: ckok = True; cks = "clock_frames %d clock block absent (pre-v2.3 package, not checked)" % frames
+        ok = shaok and abs(dur - exp) <= 0.1 and tabs and meta and ckok
         bad += not ok
-        print(cid, "PASS" if ok else "FAIL", "sha256_match", shaok, "flac_s %.2f" % dur, "bytes/32000 %.2f" % exp, "activity_rows", len(rows), "t_abs_all", tabs, "meta.json", meta, "gaps", len(m["gaps"]), "provisional", m["provisional"])
+        print(cid, "PASS" if ok else "FAIL", "sha256_match", shaok, "flac_s %.2f" % dur, "bytes/32000 %.2f" % exp, "activity_rows", len(rows), "t_abs_all", tabs, "meta.json", meta, cks, "gaps", len(m["gaps"]), "provisional", m["provisional"])
     if not found: fail("no v2 packages for %s %s" % (a.room, a.date))
     sys.exit(1 if bad else 0)
 if __name__ == "__main__":
