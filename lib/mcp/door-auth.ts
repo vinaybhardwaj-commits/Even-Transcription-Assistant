@@ -16,7 +16,7 @@ import { approverEmail, identityEnforced, ownerActors } from "@/lib/mcp/oauth/co
 import { authenticateMcp, type McpAuthResult } from "@/lib/mcp/oauth/person-auth";
 import { identityStatus, sessionKeyOk, keyRefusal, lookupKey, refusalForStatus, sha256Hex } from "@/lib/mcp/identity";
 
-export type DoorName = "header" | "lab" | "path" | "path-lab";
+export type DoorName = "header" | "lab" | "path" | "path-lab" | "diarize";
 
 const unauthorized: McpAuthFailure = { status: 401, code: "unauthorized" };
 const unavailable: McpAuthResult = { ok: false, failure: { status: 503, code: "auth_unavailable" } };

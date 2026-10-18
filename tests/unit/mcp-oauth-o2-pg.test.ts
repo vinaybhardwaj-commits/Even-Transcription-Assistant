@@ -239,7 +239,7 @@ describe.skipIf(!HAVE)("email sign-in codes on real postgres (amended 0170: mcp_
 
   it("the table has the ordered columns and both indexes; the migration applied twice without error", async () => {
     const cols = (await q<{ column_name: string }>`SELECT column_name FROM information_schema.columns WHERE table_name = 'mcp_oauth_email_code' ORDER BY ordinal_position`).map((c) => c.column_name);
-    expect(cols).toEqual(["id", "pending_id", "email", "code_hash", "expires_at", "attempts", "used_at", "created_at"]);
+    expect(cols).toEqual(["id", "pending_id", "email", "code_hash", "expires_at", "attempts", "used_at", "created_at", "last_attempt_at"]);
     const idx = (await q<{ indexname: string }>`SELECT indexname FROM pg_indexes WHERE tablename = 'mcp_oauth_email_code'`).map((i) => i.indexname);
     expect(idx).toEqual(expect.arrayContaining(["mcp_oauth_email_code_pending_idx", "mcp_oauth_email_code_email_idx"]));
     expect((await q`SELECT count(*)::int AS n FROM schema_migrations WHERE version = 170`)[0]).toEqual({ n: 1 });

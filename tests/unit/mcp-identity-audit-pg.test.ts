@@ -393,8 +393,10 @@ describe.skipIf(!HAVE)("views, digest, V-only gate", () => {
     expect(text).not.toContain(APPROVER);
   });
 
-  it("the digest cron: 401 without the secret or the cron header; with it, it mails the approver only (Resend stub) and purges the seclog", async () => {
+  it("the digest cron: 401 without the secret, and the x-vercel-cron header alone is NOT enough; with it, it mails the approver only (Resend stub) and purges the seclog", async () => {
     expect((await digestGet(new NextRequest("https://www.evenscribe.app/api/admin/mcp-digest"))).status).toBe(401);
+    expect((await digestGet(new NextRequest("https://www.evenscribe.app/api/admin/mcp-digest", { headers: { "x-vercel-cron": "1" } }))).status).toBe(401);
+    expect((await digestGet(new NextRequest("https://www.evenscribe.app/api/admin/mcp-digest", { headers: { authorization: "Bearer wrong" } }))).status).toBe(401);
     process.env.RESEND_API_KEY = "re_synthetic";
     process.env.RESEND_FROM_EMAIL = "noreply@example.test";
     const sent: Array<{ to: string[]; subject: string; text: string }> = [];
@@ -449,7 +451,7 @@ describe.skipIf(!HAVE)("approver-routed code: the 5-try / 15-minute address lock
     for (let i = 0; i < 5; i += 1) expect(await S.takeEmailAttempt("p1", 5)).not.toBeNull();
     expect(await S.takeEmailAttempt("p1", 5)).toBeNull(); // the flow is dead
     expect(await mk("p2")).toBeNull(); // a new flow for the same address is locked out
-    pg.exec(`UPDATE mcp_oauth_email_code SET created_at = now() - interval '16 minutes' WHERE email = '${e}'`);
+    pg.exec(`UPDATE mcp_oauth_email_code SET created_at = now() - interval '16 minutes', last_attempt_at = now() - interval '16 minutes' WHERE email = '${e}'`);
     expect(await mk("p3")).not.toBeNull(); // 15 minutes later it opens again
     expect(await S.takeEmailAttempt("p3", 5)).not.toBeNull();
   });
@@ -590,6 +592,193 @@ describe.skipIf(!HAVE)("self_after_approval: V approves an address once", () => 
       expect(await ID.selfApproved("selfapp2@example.test")).toBe(false);
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+});
+
+// ─── R3 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+describe.skipIf(!HAVE)("R3 F1: the governance audit is V's alone (scribe_audit_recent, scribe_usage)", () => {
+  const recent = async (key: string, args: Record<string, unknown> = {}) => ((await (await header(key, tool("scribe_audit_recent", { since: "2020-01-01T00:00:00Z", limit: 200, ...args }))).json()).result.structuredContent as { rows: Array<Row> });
+  const personRowsOf = (r: { rows: Array<Row> }) => r.rows.filter((x) => String(x.actor).startsWith("person:"));
+
+  it("a read user cannot read another user's rows (by actor filter or by listing), and sees its OWN rows with the subject ids stripped", async () => {
+    await header(carolKey, tool("scribe_catalog", { action: "explorer_link", consult_uid: "CAROLCONSULT77" }));
+    await header(aliceKey, tool("scribe_catalog", { action: "explorer_link", consult_uid: "ALICECONSULT88" }));
+    const byActor = await recent(aliceKey, { actor: `person:${CAROL}` });
+    expect(byActor.rows).toHaveLength(0);
+    const listing = await recent(aliceKey, { action: "mcp.tools/call" });
+    const people = personRowsOf(listing);
+    expect(people.length).toBeGreaterThan(0);
+    expect(new Set(people.map((x) => x.actor))).toEqual(new Set([`person:${ALICE}`]));
+    const flat = JSON.stringify(listing);
+    expect(flat).not.toContain("CAROLCONSULT77");
+    expect(flat).not.toContain("ALICECONSULT88"); // her own subject ids are stripped too
+    expect(people.every((x) => !("subject" in (x.metadata as Row)))).toBe(true);
+    expect(flat).not.toContain(CAROL);
+  });
+
+  it("an ADMIN-scope non-owner is no different: it cannot see Alice's rows or consult ids", async () => {
+    const r = await recent(carolKey, { action: "mcp.tools/call" });
+    expect(new Set(personRowsOf(r).map((x) => x.actor))).toEqual(new Set([`person:${CAROL}`]));
+    expect(JSON.stringify(r)).not.toContain("ALICECONSULT88");
+    expect((await recent(carolKey, { actor: `person:${ALICE}` })).rows).toHaveLength(0);
+  });
+
+  it("the owner (V) sees every user's rows, subject ids included", async () => {
+    const r = await recent(V_TOKEN, { action: "mcp.tools/call" });
+    const actors = new Set(personRowsOf(r).map((x) => x.actor));
+    expect(actors.has(`person:${ALICE}`) && actors.has(`person:${CAROL}`)).toBe(true);
+    const flat = JSON.stringify(r);
+    expect(flat).toContain("CAROLCONSULT77");
+    expect(flat).toContain("ALICECONSULT88");
+    expect((await recent(V_TOKEN, { actor: `person:${CAROL}` })).rows.length).toBeGreaterThan(0);
+  });
+
+  it("scribe_usage: a non-owner sees no other person's address or count; V sees them all", async () => {
+    const usage = async (key: string) => (await (await header(key, tool("scribe_usage", { since_hours: 48 }))).json()).result.structuredContent as { per_actor: Array<{ actor: string; calls: number }>; per_tool: Array<{ actors: string[] }> };
+    const a = await usage(aliceKey);
+    expect(a.per_actor.filter((x) => x.actor.startsWith("person:")).map((x) => x.actor)).toEqual([`person:${ALICE}`]);
+    expect(JSON.stringify(a)).not.toContain(CAROL);
+    const c = await usage(carolKey); // admin scope, still not V
+    expect(JSON.stringify(c)).not.toContain(ALICE);
+    const v = await usage(V_TOKEN);
+    const vp = v.per_actor.map((x) => x.actor);
+    expect(vp).toEqual(expect.arrayContaining([`person:${ALICE}`, `person:${CAROL}`]));
+  });
+});
+
+describe.skipIf(!HAVE)("R3 F2: /api/diarize-segments is a fifth audited door", () => {
+  const get = async (key: string | null, qs = "window_id=bw_nosuchwindow1") => {
+    const { GET } = await import("@/app/api/diarize-segments/route");
+    return GET(new NextRequest(`https://www.evenscribe.app/api/diarize-segments?${qs}`, { headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), "x-forwarded-for": "203.0.113.9" } }));
+  };
+
+  it("a key revoked in mcp_key is refused 401 (it used to get through), with a refusal row on door diarize", async () => {
+    const k = await ID.issueKey("diar1@example.test", "read", "test");
+    await ID.revokeKey(k.key_id);
+    const t = await mark();
+    expect((await get(k.key)).status).toBe(401);
+    expect((await rowsSince(t))[0]).toMatchObject({ action: "mcp.refused", actor_id: "person:diar1@example.test" });
+    expect((await rowsSince(t))[0]!.metadata_json).toMatchObject({ door: "diarize", reason: "revoked_key" });
+    expect((await get("unknown-key-xyz")).status).toBe(401);
+  });
+
+  it("a live per-user key: one audit_log row (email, key_id, door diarize, tool diarize_segments, window id only), whatever the lookup answered", async () => {
+    const t = await mark();
+    const res = await get(aliceKey);
+    expect(res.status).not.toBe(401);
+    expect(res.status).not.toBe(503);
+    const rows = await rowsSince(t);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actor_id: `person:${ALICE}`, target_id: "diarize_segments" });
+    expect(rows[0]!.metadata_json).toMatchObject({ email: ALICE, key_id: aliceKeyId, door: "diarize" });
+    expect(rows[0]!.metadata_json.subject).toEqual({ window_id: "bw_nosuchwindow1" });
+  });
+
+  it("fail closed: when the audit insert fails the data is withheld (503 audit_unavailable)", async () => {
+    H.failAudit = true;
+    const res = await get(aliceKey);
+    H.failAudit = false;
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false, error: "audit_unavailable" });
+  });
+
+  it("V's own key: seclog only, no audit_log row; flag off: no identity check and no row", async () => {
+    const t = await mark();
+    expect((await get(V_TOKEN)).status).not.toBe(401);
+    expect(await rowsSince(t)).toHaveLength(0);
+    expect((await q`SELECT tool FROM mcp_owner_seclog WHERE ts > ${t}::timestamptz`)).toEqual([{ tool: "diarize_segments" }]);
+    process.env.SCRIBE_MCP_IDENTITY = "off";
+    try {
+      const t2 = await mark();
+      expect((await get(DAVE_TOKEN)).status).not.toBe(401); // an env token works with no mcp_key row, as before
+      expect(await rowsSince(t2)).toHaveLength(0);
+    } finally {
+      process.env.SCRIBE_MCP_IDENTITY = "on";
+    }
+  });
+});
+
+describe.skipIf(!HAVE)("R3 A4: every refusal is audited; throttled ones are counted", () => {
+  it("the same dead key on a second door within 10 s still leaves a row on that door (no reset between doors)", async () => {
+    const k = await ID.issueKey("a4@example.test", "read", "test");
+    await ID.revokeKey(k.key_id);
+    resetDeniedAuditForTests();
+    const t = await mark();
+    for (const d of ["header", "lab", "path", "path-lab"] as const) expect((await door[d](k.key, tool("scribe_now"))).status).toBe(401);
+    const rows = await rowsSince(t);
+    expect(rows.map((r) => r.target_id).sort()).toEqual(["header", "lab", "path", "path-lab"]);
+  });
+
+  it("a flood on one door writes one row per 10 s and the next row carries the suppressed count", async () => {
+    const { auditIdentityRefused } = await import("@/lib/mcp/audit");
+    resetDeniedAuditForTests();
+    const t = await mark();
+    const now = Date.now();
+    await auditIdentityRefused({ hash8: "deadbeef" }, "unknown_key", "header", now);
+    for (let i = 0; i < 3; i += 1) expect(await auditIdentityRefused({ hash8: "deadbeef" }, "unknown_key", "header", now + 1000 * (i + 1))).toBe(false);
+    expect(await auditIdentityRefused({ hash8: "deadbeef" }, "unknown_key", "header", now + 11_000)).toBe(true);
+    const rows = await rowsSince(t);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.metadata_json.suppressed).toBeUndefined();
+    expect(rows[1]!.metadata_json.suppressed).toBe(3);
+  });
+});
+
+describe.skipIf(!HAVE)("R3 F3: the address lock runs 15 minutes from the 5th failed try", () => {
+  it("4 tries early in a code's life and the 5th at minute 9: still locked 6.5 minutes later (15.5 min after the code was created), open only 15 minutes after the 5th", async () => {
+    const e = "lock9@example.test";
+    const mk = (pid: string) => S.insertEmailCode({ pending_id: pid, email: e, code_hash: "h", ttl_s: 600, max_per_email: 50, window_s: 900, max_attempts: 5 });
+    expect(await mk("m1")).not.toBeNull();
+    for (let i = 0; i < 4; i += 1) expect(await S.takeEmailAttempt("m1", 5)).not.toBeNull();
+    pg.exec(`UPDATE mcp_oauth_email_code SET created_at = now() - interval '9 minutes', last_attempt_at = now() - interval '9 minutes' WHERE email = '${e}'`);
+    expect(await S.takeEmailAttempt("m1", 5)).not.toBeNull(); // the 5th, now (minute 9 of the code)
+    // 6.5 minutes after the 5th: the code is 15.5 minutes old, the OLD created_at anchor would have opened the lock here
+    pg.exec(`UPDATE mcp_oauth_email_code SET created_at = created_at - interval '6.5 minutes', last_attempt_at = last_attempt_at - interval '6.5 minutes' WHERE email = '${e}'`);
+    expect(await mk("m2")).toBeNull();
+    // 14 minutes after the 5th: still locked; 16 minutes: open
+    pg.exec(`UPDATE mcp_oauth_email_code SET last_attempt_at = last_attempt_at - interval '7.5 minutes' WHERE email = '${e}'`);
+    expect(await mk("m3")).toBeNull();
+    pg.exec(`UPDATE mcp_oauth_email_code SET last_attempt_at = last_attempt_at - interval '2 minutes' WHERE email = '${e}'`);
+    expect(await mk("m4")).not.toBeNull();
+  });
+});
+
+describe.skipIf(!HAVE)("R3 F4 and M13", () => {
+  const CO = ["even", "in"].join("."); // the company domain the migration matches, built so no address literal sits in the file
+  it("the 16 Oct revocations migrate as BLACKLISTED by the migration itself (active, revoked and absent-from-identity cases), their keys are revoked, and nobody else is touched", async () => {
+    pg.exec(`INSERT INTO mcp_person (email, scopes, status) VALUES ('bhavesh.test@${CO}', ARRAY['read'], 'active'), ('chandan.test@${CO}', ARRAY['read'], 'revoked'), ('carol.test@${CO}', ARRAY['read'], 'active'), ('bhavesh.test@example.test', ARRAY['read'], 'active')`);
+    pg.exec(`INSERT INTO mcp_identity (email, status) VALUES ('chandan.test@${CO}', 'active') ON CONFLICT DO NOTHING`);
+    pg.exec(`INSERT INTO mcp_key (key_id, email, scope, key_hash) VALUES ('k_bh', 'chandan.test@${CO}', 'read', '${"b".repeat(64)}')`);
+    const mig = readFileSync("db/migrations/0170_mcp_oauth.sql", "utf8");
+    pg.exec(mig);
+    pg.exec(mig); // idempotent
+    const st = Object.fromEntries((await q<{ email: string; status: string }>`SELECT email, status FROM mcp_identity WHERE email LIKE '%.test@%'`).map((r) => [r.email, r.status]));
+    expect(st[`bhavesh.test@${CO}`]).toBe("blacklisted");
+    expect(st[`chandan.test@${CO}`]).toBe("blacklisted");
+    expect(st[`carol.test@${CO}`]).toBe("active");
+    expect(st["bhavesh.test@example.test"]).toBe("active"); // another domain: not matched
+    expect((await q`SELECT revoked_at FROM mcp_key WHERE key_id = 'k_bh'`)[0]!.revoked_at).not.toBeNull();
+    expect((await q`SELECT status FROM mcp_person WHERE email = ${`bhavesh.test@${CO}`}`)[0]!.status).toBe("revoked");
+    await expect(ID.issueKey(`bhavesh.test@${CO}`, "read", "test")).rejects.toThrow("blacklisted");
+  });
+
+  it("M13: an admin-scope env-map token (actor admin:…) linked to a non-V address is a USER: an audit_log row, not the seclog", async () => {
+    const adminTok = "e".repeat(24);
+    process.env.SCRIBE_MCP_TOKENS_ADMIN = JSON.stringify({ [sha(adminTok)]: { actor: "admin:ops", scopes: ["read", "admin"] } });
+    try {
+      expect(await ID.linkExistingKey(sha(adminTok), "opsadmin@example.test", "admin", "seed")).toHaveProperty("key_id");
+      const t = await mark();
+      expect((await header(adminTok, tool("scribe_now"))).status).toBe(200);
+      const rows = await rowsSince(t);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ actor_type: "person", actor_id: "person:opsadmin@example.test" });
+      expect(await q`SELECT 1 FROM mcp_owner_seclog WHERE ts > ${t}::timestamptz`).toHaveLength(0);
+      // and it is not treated as V by the audit tools either
+      const r = (await (await header(adminTok, tool("scribe_audit_recent", { action: "mcp.tools/call", since: "2020-01-01T00:00:00Z" }))).json()).result.structuredContent as { rows: Array<Row> };
+      expect(new Set(r.rows.filter((x) => String(x.actor).startsWith("person:")).map((x) => x.actor))).toEqual(new Set(["person:opsadmin@example.test"]));
+    } finally {
+      delete process.env.SCRIBE_MCP_TOKENS_ADMIN;
     }
   });
 });

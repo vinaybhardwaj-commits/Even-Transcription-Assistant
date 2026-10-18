@@ -29,7 +29,7 @@ import { auditDeniedCall, auditToolCall, logOwnerCall, mcpActorId, type ErrKind 
 import type { McpTool, ToolArgs, ToolContext } from "@/lib/mcp/registry";
 import { ToolScopeError, ToolRoomError, ROOM_RESTRICTED_ALLOWED_TOOLS } from "@/lib/mcp/registry";
 import { CALLABLE_TOOLS } from "@/lib/mcp/surface";
-import { mcpChallengeHeader, oauthEnabled } from "@/lib/mcp/oauth/config";
+import { mcpChallengeHeader, oauthEnabled, ownerActors } from "@/lib/mcp/oauth/config";
 import { resolveProfile, toolsForProfile, type McpProfile } from "@/lib/mcp/profile";
 
 const SERVER_NAME = "even-scribe-mcp";
@@ -308,6 +308,8 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
   const ctx: ToolContext = {
     origin: requestOrigin(req),
     actor: mcpActorId(principal.token_id),
+    owner: Boolean(principal.owner) || ownerActors().has(principal.token_id),
+    email: principal.identity?.email ?? principal.person?.email ?? null,
     scopes: principal.scopes,
     rooms: principal.rooms,
   };

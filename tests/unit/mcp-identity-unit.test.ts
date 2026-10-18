@@ -16,6 +16,12 @@ describe("subjectIds: ids and dates only", () => {
     expect(subjectIds({ consult_uid: "C-123_x", room_slug: "opd-1-xqj7", ist_date: "2026-10-17", start: 5, q: "free text", note_text: "X" })).toEqual({ consult_uid: "C-123_x", room_slug: "opd-1-xqj7", ist_date: "2026-10-17", start: 5 });
     expect(subjectIds({ consult_uid: "Mrs Sharma", encounter_id: { a: 1 }, visit_id: "a".repeat(129), since: NaN })).toEqual({});
     expect(subjectIds(null)).toEqual({});
+  });
+
+  it("A6: a name-shaped single token does not pass; each key needs its own id shape", () => {
+    expect(subjectIds({ consult_uid: "ShanthiRamesh", room_slug: "Ramesh", room: "kumar", room_id: "Sharma", encounter_id: "Ramesh", visit_id: "vis_x", session_id: "Priya", window_id: "bw_short", ist_date: "Tuesday", since: "yesterday", start: "ramesh" })).toEqual({});
+    expect(subjectIds({ consult_uid: "C4721ABC", room_id: "room_abc", room_slug: "cardiology-opd-gh4a", encounter_id: "enc_a1b2c3d4", visit_id: "vis_a1b2c3d4", session_id: "bs_a1b2c3d4", window_id: "bw_a1b2c3d4", since: "2026-10-17T10:00:00Z" }))
+      .toEqual({ consult_uid: "C4721ABC", room_id: "room_abc", room_slug: "cardiology-opd-gh4a", encounter_id: "enc_a1b2c3d4", visit_id: "vis_a1b2c3d4", session_id: "bs_a1b2c3d4", window_id: "bw_a1b2c3d4", since: "2026-10-17T10:00:00Z" });
     expect(subjectIds([1])).toEqual({});
   });
 });

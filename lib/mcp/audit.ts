@@ -52,8 +52,17 @@ export function safeArgs(args: unknown): Record<string, unknown> {
 }
 
 // SPEC 18 Oct: a per-user audit row names the SUBJECT of a call by id only: consult_uid, room, date range, encounter/visit/session ids. Never an argument value beyond these, never text.
-const SUBJECT_KEYS = ["consult_uid", "room_id", "room_slug", "room", "ist_date", "since", "start", "end", "encounter_id", "visit_id", "session_id"] as const;
-const ID_SHAPE = /^[A-Za-z0-9_.:+-]{1,128}$/;
+// R3 A6: each key has its OWN strict pattern. A value that merely has no spaces (a name, a word) does not pass: prefixed ids need their prefix, a uid needs a digit, a slug ends in its 4-char token.
+const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*-[a-z0-9]{4}$/;
+const DATE = /^\d{4}-\d{2}-\d{2}(?:T[0-9:.]{1,16}(?:Z|[+-]\d{2}:\d{2})?)?$/;
+const SUBJECT_PATTERN: Record<string, RegExp> = {
+  consult_uid: /^(?=.*\d)[A-Za-z0-9_-]{6,64}$/,
+  room_id: /^[a-z]{2,6}_[A-Za-z0-9]{3,40}$/,
+  room_slug: SLUG, room: SLUG,
+  ist_date: DATE, since: DATE,
+  encounter_id: /^enc_[A-Za-z0-9]{6,40}$/, visit_id: /^vis_[A-Za-z0-9]{6,40}$/, session_id: /^bs_[A-Za-z0-9]{6,40}$/, window_id: /^bw_[A-Za-z0-9]{6,40}$/,
+};
+const SUBJECT_KEYS = [...Object.keys(SUBJECT_PATTERN), "start", "end"] as const;
 
 /** Subject ids of a call: a fixed key list, values that look like ids (no spaces, no free text) or finite numbers. Anything else is dropped. */
 export function subjectIds(args: unknown): Record<string, string | number> {
@@ -62,8 +71,8 @@ export function subjectIds(args: unknown): Record<string, string | number> {
   const out: Record<string, string | number> = {};
   for (const k of SUBJECT_KEYS) {
     const v = a[k];
-    if (typeof v === "string" && ID_SHAPE.test(v)) out[k] = v;
-    else if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+    if (typeof v === "string" && v.length <= 128 && (SUBJECT_PATTERN[k]?.test(v) ?? DATE.test(v))) out[k] = v; // start/end: a date, or (below) a number
+    else if (typeof v === "number" && Number.isFinite(v) && (k === "start" || k === "end")) out[k] = v;
   }
   return out;
 }
@@ -258,21 +267,26 @@ export async function logOwnerCall(keyId: string, tool: string, outcome: "ok" | 
   }
 }
 
-const identityRefusedLast = new Map<string, number>();
+const identityRefusedLast = new Map<string, { t: number; suppressed: number }>();
 /**
  * A call (or sign-in) whose key resolved to no active email: audit_log row action mcp.refused, actor `person:<email>` when the key is known to an address, else `unknown:<first 8 hex of the key hash>`.
- * Reason code, door and key id only. At most one row per subject per 10 s (in memory per instance) so a looping client cannot flood the table. Awaited; the caller refuses either way.
+ * Reason code, door and key id only. At most one row per subject, reason and door per 10 s (in memory per instance) so a looping client cannot flood the table; the refusals dropped in between are COUNTED into the next row as `suppressed`. Awaited; the caller refuses either way.
  */
 export async function auditIdentityRefused(subject: { email?: string | null; key_id?: string | null; hash8?: string | null }, reason: string, door: string, now: number = Date.now()): Promise<boolean> {
   const actor = subject.email ? `person:${subject.email}`.slice(0, 261) : `unknown:${(subject.hash8 ?? "").slice(0, 8)}`;
-  const last = identityRefusedLast.get(actor + reason);
-  if (last !== undefined && now - last < 10_000) return false;
-  identityRefusedLast.set(actor + reason, now);
-  if (identityRefusedLast.size > 1000) for (const [k, t] of identityRefusedLast) if (now - t >= 10_000) identityRefusedLast.delete(k);
+  const key = `${actor}|${reason}|${door}`; // per DOOR: the same dead key on a second door is its own row (R3 A4)
+  const last = identityRefusedLast.get(key);
+  if (last !== undefined && now - last.t < 10_000) {
+    last.suppressed += 1; // counted, and written into the next row of this key
+    return false;
+  }
+  const suppressed = last?.suppressed ?? 0;
+  identityRefusedLast.set(key, { t: now, suppressed: 0 });
+  if (identityRefusedLast.size > 1000) for (const [k, v] of identityRefusedLast) if (now - v.t >= 10_000) identityRefusedLast.delete(k);
   try {
     await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
-      VALUES ('person', ${actor}, 'mcp.refused', 'mcp_auth', ${door.slice(0, 32)}, ${JSON.stringify({ ok: false, outcome: "refused", err_kind: "refused", reason, door, ...(subject.key_id ? { key_id: subject.key_id } : {}), ...(subject.email ? { email: subject.email } : {}) })}::jsonb)
+      VALUES ('person', ${actor}, 'mcp.refused', 'mcp_auth', ${door.slice(0, 32)}, ${JSON.stringify({ ok: false, outcome: "refused", err_kind: "refused", reason, door, ...(suppressed > 0 ? { suppressed } : {}), ...(subject.key_id ? { key_id: subject.key_id } : {}), ...(subject.email ? { email: subject.email } : {}) })}::jsonb)
     `;
     return true;
   } catch {

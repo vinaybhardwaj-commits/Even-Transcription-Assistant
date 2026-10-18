@@ -26,6 +26,15 @@ export const READABLE_ACTIONS = [
 
 export const AUDIT_ACTIONS_HINT = `Limited to ${READABLE_ACTIONS.join(", ")}.`;
 
+/** A non-owner's own rows keep their shape but lose the subject ids (consult uid, room, dates). */
+function stripSubject(m: unknown): unknown {
+  if (m && typeof m === "object" && !Array.isArray(m) && "subject" in m) {
+    const { subject: _s, ...rest } = m as Record<string, unknown>;
+    return rest;
+  }
+  return m;
+}
+
 const DEFAULT_WINDOW_MS = 24 * 60 * 60_000;
 
 export async function readRecentAudit(input: {
@@ -34,10 +43,14 @@ export async function readRecentAudit(input: {
   actor?: string | null;
   since: string | null;
   limit: number;
+  /** R3 F1: who is asking. Not the owner = only your own person rows, subject ids stripped. */
+  viewer?: { owner: boolean; email: string | null };
 }): Promise<Record<string, unknown>> {
   if (input.action && !(READABLE_ACTIONS as readonly string[]).includes(input.action)) {
     return { rows: [], error: "action_not_readable", action: input.action, allowed: READABLE_ACTIONS };
   }
+  const owner = input.viewer?.owner === true;
+  const own = input.viewer?.email ? `person:${input.viewer.email}` : null;
   const since = input.since ?? new Date(Date.now() - DEFAULT_WINDOW_MS).toISOString();
   const rows = (await sql`
     SELECT action, actor_type, actor_id, target_type, target_id, metadata_json,
@@ -47,6 +60,7 @@ export async function readRecentAudit(input: {
        AND (${input.action}::text IS NULL OR action = ${input.action}::text)
        AND (${input.actor ?? null}::text IS NULL OR actor_id = ${input.actor ?? null}::text)
        AND created_at >= ${since}::timestamptz
+       AND (${owner}::boolean OR (actor_id NOT LIKE 'person:%' AND actor_id NOT LIKE 'unknown:%') OR actor_id = ${own}::text)
      ORDER BY created_at DESC
      LIMIT ${input.limit}
   `) as Array<Record<string, unknown>>;
@@ -59,7 +73,7 @@ export async function readRecentAudit(input: {
       actor_type: r.actor_type,
       target_type: r.target_type,
       target_id: r.target_id,
-      metadata: r.metadata_json,
+      metadata: owner ? r.metadata_json : stripSubject(r.metadata_json),
       created_at: r.created_at,
     })),
   };

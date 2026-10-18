@@ -8,7 +8,7 @@
  * file for PUBLISHED_TOOLS, so a static import back would be a cycle.
  */
 import { sql } from "@/lib/db";
-import { argInt, argStr, failSafe, type McpTool, type ToolArgs } from "../registry";
+import { argInt, argStr, failSafe, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 import { jevHealth } from "@/lib/jev/worker/health";
 
 type Surface = typeof import("../surface");
@@ -154,12 +154,15 @@ const usage: McpTool = {
     },
     additionalProperties: false,
   },
-  handler: async (args: ToolArgs) => {
+  handler: async (args: ToolArgs, ctx: ToolContext) => {
     const hours = argInt(args, "since_hours", USAGE_DEFAULT_HOURS, 1, USAGE_MAX_HOURS);
     const tool = argStr(args, "tool", 128);
     const include = argStr(args, "include", 16);
     if (include !== null && include !== "jev") return { ok: false, error: "include_invalid", since_hours: hours, total: 0, per_tool: [], per_actor: [] };
     return failSafe({ since_hours: hours, total: 0, per_tool: [] as unknown[], per_actor: [] as unknown[] }, async () => {
+      // R3 F1: only V sees per-person rows (emails, their counts); anyone else sees the non-person actors and their OWN person rows.
+      const owner = ctx.owner === true;
+      const own = ctx.email ? `person:${ctx.email}` : null;
       // Bound parameters only. `tool` is passed as NULL or text; ::text keeps the NULL typed.
       const [perTool, perActor, totalRows] = await Promise.all([
         sql`
@@ -175,6 +178,7 @@ const usage: McpTool = {
            WHERE action = 'mcp.tools/call'
              AND created_at >= now() - make_interval(hours => ${hours}::int)
              AND (${tool}::text IS NULL OR target_id = ${tool}::text)
+             AND (${owner}::boolean OR actor_id NOT LIKE 'person:%' OR actor_id = ${own}::text)
            GROUP BY target_id, COALESCE(metadata_json->>'variant', '')
            ORDER BY count(*) DESC, target_id ASC
            LIMIT ${USAGE_MAX_ROWS}::int
@@ -185,6 +189,7 @@ const usage: McpTool = {
            WHERE action = 'mcp.tools/call'
              AND created_at >= now() - make_interval(hours => ${hours}::int)
              AND (${tool}::text IS NULL OR target_id = ${tool}::text)
+             AND (${owner}::boolean OR actor_id NOT LIKE 'person:%' OR actor_id = ${own}::text)
            GROUP BY actor_id
            ORDER BY count(*) DESC, actor_id ASC
            LIMIT ${USAGE_MAX_ROWS}::int
@@ -195,6 +200,7 @@ const usage: McpTool = {
            WHERE action = 'mcp.tools/call'
              AND created_at >= now() - make_interval(hours => ${hours}::int)
              AND (${tool}::text IS NULL OR target_id = ${tool}::text)
+             AND (${owner}::boolean OR actor_id NOT LIKE 'person:%' OR actor_id = ${own}::text)
         `,
       ]);
       return {

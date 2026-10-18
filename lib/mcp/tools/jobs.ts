@@ -239,7 +239,7 @@ const auditRecent: McpTool = {
     },
     additionalProperties: false,
   },
-  handler: async (args: ToolArgs) =>
+  handler: async (args: ToolArgs, ctx: ToolContext) =>
     failSafe({ rows: [] as unknown[] }, async () => {
       const since = argStr(args, "since", 40);
       // a filter that cannot be applied must not silently widen to every actor
@@ -249,6 +249,7 @@ const auditRecent: McpTool = {
         actor: argStr(args, "actor", 261),
         since: since && Number.isFinite(Date.parse(since)) ? new Date(Date.parse(since)).toISOString() : null,
         limit: argInt(args, "limit", 50, 1, 200),
+        viewer: { owner: ctx.owner === true, email: ctx.email ?? null },
       });
     }),
 };

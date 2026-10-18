@@ -112,10 +112,22 @@ ON CONFLICT DO NOTHING;
 -- ADDENDUM 1 (18 Oct): a session is bound to the key it signed in with (key_id on the code and on every token of the family; checked on every call, so revoking the key or the email kills the session at once),
 -- and V approves an address once for the self_after_approval code route (code_self_approved_at; cleared when the identity is revoked or blacklisted).
 ALTER TABLE mcp_oauth_code  ADD COLUMN IF NOT EXISTS key_id text;
+-- R3 F3: the 15-minute address lock is anchored on the time of the last wrong try (stamped on every try), not on when the code was created.
+ALTER TABLE mcp_oauth_email_code ADD COLUMN IF NOT EXISTS last_attempt_at timestamptz;
 ALTER TABLE mcp_oauth_token ADD COLUMN IF NOT EXISTS key_id text;
 ALTER TABLE mcp_identity ADD COLUMN IF NOT EXISTS code_self_approved_at timestamptz;
 ALTER TABLE mcp_identity ADD COLUMN IF NOT EXISTS code_self_approved_by text;
 CREATE INDEX IF NOT EXISTS mcp_oauth_token_key_idx ON mcp_oauth_token (key_id);
+
+-- R3 F4: the two 16 Oct 2026 revocations (Bhavesh, Chandan) are BLACKLISTED by the migration itself, not by a seed file. This repo holds no address for either (names only), so the match is the
+-- allowlist/identity rows whose local part STARTS WITH the first name on the company domain; any such row becomes blacklisted (an upsert that overrides revoked/active), and its keys are stamped revoked.
+-- No row is invented: if neither person is in mcp_person or mcp_identity yet, nothing matches and scripts/mcp-keys.ts blacklist <email> (or `seed`) must add the exact address - reported UNVERIFIED.
+INSERT INTO mcp_identity (email, status, created_by)
+SELECT email, 'blacklisted', 'migration-0170-16oct' FROM mcp_person WHERE email ~ '^(bhavesh|chandan)[^@]*@even\.in$'
+ON CONFLICT (email) DO UPDATE SET status = 'blacklisted';
+UPDATE mcp_identity SET status = 'blacklisted' WHERE email ~ '^(bhavesh|chandan)[^@]*@even\.in$' AND status <> 'blacklisted';
+UPDATE mcp_key SET revoked_at = now() WHERE revoked_at IS NULL AND email IN (SELECT email FROM mcp_identity WHERE status = 'blacklisted');
+UPDATE mcp_person SET status = 'revoked', revoked_at = COALESCE(revoked_at, now()) WHERE email IN (SELECT email FROM mcp_identity WHERE status = 'blacklisted') AND status = 'active';
 
 -- OWNER SECURITY LOG: V's own calls and nothing more. ts, key_id, tool, outcome. NO subject ids, NO args, NO email. Excluded from audit_log, the governance view and the digest; read only at /admin/mcp-seclog.
 -- UPDATE and TRUNCATE are refused; DELETE is allowed only for a row older than 30 days (the retention purge).

@@ -1335,6 +1335,25 @@ describe("approver-routed email code", () => {
     expect(mailed[before]!.to).toBe("approver@example.test");
   });
 
+  it("R3 F3: the lock is anchored on the 5th try: tries spread to minute 9 of a code keep the address locked until 15 minutes after that try", async () => {
+    const s = await startSignIn();
+    await start(s.cookie, ALICE);
+    const right = lastCode();
+    const wrong = right === "000000" ? "000001" : "000000";
+    for (let i = 0; i < 4; i++) await verify(s.cookie, wrong);
+    fake.emailClock.offsetMs = 9 * 60_000;
+    await verify(s.cookie, wrong); // the 5th try, minute 9 (the code has 1 minute of life left)
+    const before = mailed.length;
+    fake.emailClock.offsetMs = 15.5 * 60_000; // 6.5 min after the 5th; the code is 15.5 min old, so a created_at anchor would be open now
+    resetEmailLimitForTests();
+    await start((await startSignIn()).cookie, ALICE);
+    expect(mailed).toHaveLength(before);
+    fake.emailClock.offsetMs = 24.1 * 60_000 + 1000; // just over 15 min after the 5th
+    resetEmailLimitForTests();
+    await start((await startSignIn()).cookie, ALICE);
+    expect(mailed).toHaveLength(before + 1);
+  });
+
   it("SCRIBE_MCP_IDENTITY on: an allowlisted person with no active mcp_identity gets the identical page, no mail and a no_identity refusal row", async () => {
     process.env.SCRIBE_MCP_IDENTITY = "on";
     IDM.status = null; // no identity row
