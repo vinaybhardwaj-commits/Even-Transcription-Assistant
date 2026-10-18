@@ -297,7 +297,7 @@ class RunSubscriberWiring(unittest.TestCase):                                   
     def test_main_uses_these_pieces(self):
         src = open(os.path.join(HERE, "..", "subscriber", "run_subscriber.py")).read()
         main = src[src.index("def main():"):]
-        for call in ("check_rooms(rooms, flags)", "build_subscriber(cfg, rooms, flags, sink, HOME, time.time, LOG)", "housekeeping(s, log)", "s.control_message()"):
+        for call in ("check_rooms(rooms, flags)", "build_subscriber(cfg, rooms, flags, sink, HOME, time.time, LOG)", "housekeeping(s, log)", "publish_round(rooms, s.control_message)"):
             self.assertIn(call, main)
         for gone in ("s.check_usb_verify()", "s.check_start_day()", "validate_rooms("):
             self.assertNotIn(gone, main)                                                        # no inline copy left that a mutation could break unseen

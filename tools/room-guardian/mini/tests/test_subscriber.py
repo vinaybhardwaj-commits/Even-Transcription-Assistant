@@ -399,7 +399,7 @@ class CAInvalidTests(unittest.TestCase):
         self.assertEqual(e.router.store.list_open(), [])
 
     def test_malformed_lines_are_logged_capped_and_json_quoted(self):
-        e = CAEnv(); e.heal(None, raw="not json"); e.heal(None, raw="y" * 5000)
+        e = CAEnv(); e.heal(None, raw="not json"); e.heal(None, raw="y" * 3000)
         p = os.path.join(e.sub.data, "2026-10-13", "r1.heal-invalid.jsonl")
         rows = [json.loads(l) for l in open(p).read().splitlines()]
         self.assertEqual([r["raw"][:8] for r in rows], ["not json", "yyyyyyyy"]); self.assertEqual(len(rows[1]["raw"]), sb.RAW_CAP)

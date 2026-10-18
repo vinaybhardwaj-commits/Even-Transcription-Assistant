@@ -6,7 +6,7 @@ Differences from the C4 template (5574b09), each forced by what the pinned pipe 
   * `sub -c -k`: clean output, stay subscribed across publisher disconnects (a kiosk publishes with one ssh per message).
   * each reader reconnects after 5 s; the control snapshot goes to `/<room>/guardian/control` (admin pub), one topic per room.
   * rooms come from etc/rooms.json; case alerts go to the router over ubus (router.json); the kill switch is etc/kill-switch."""
-import json, os, queue, subprocess, sys, threading, time
+import concurrent.futures, json, os, queue, subprocess, sys, threading, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(HERE, "..", "router"))
 import alert_router, ubus_bus
@@ -15,6 +15,7 @@ from subscriber import Subscriber, RouterSink, STREAMS, validate_rooms
 HOME = os.environ.get("GUARDIAN_HOME", os.path.expanduser("~/oc/fleet-access/guardian"))
 PIPE_SSH = os.path.join(HOME, "scripts", "pipe-ssh.sh")
 KEY = os.path.join(HOME, "keys", "subscriber")
+PUBLISH_WORKERS, PUBLISH_ROUND_S = 8, 25         # one control round: at most 8 rooms at once, the whole round capped at 25 s (each publish keeps its own 15 s timeout)
 
 
 def _open_log():
@@ -35,7 +36,7 @@ def reader(room, stream, q):
     topic = f"kiosk/{room}/{stream}"
     while True:
         try:
-            p = subprocess.Popen([PIPE_SSH, KEY, "sub", "-c", "-k", f"/{room}/{topic}"], stdout=subprocess.PIPE, stderr=LOG, text=True)
+            p = subprocess.Popen([PIPE_SSH, KEY, "sub", "-c", "-k", f"/{room}/{topic}"], stdout=subprocess.PIPE, stderr=LOG)      # bytes: on_line measures the STREAM_MAX_BYTES cap before it decodes
             for line in p.stdout:
                 q.put((topic, line))
             p.wait()
@@ -46,6 +47,26 @@ def reader(room, stream, q):
 
 def publish(room, msg):
     subprocess.run([PIPE_SSH, KEY, "pub", "-c", "-b=false", f"/{room}/guardian/control"], input=msg + "\n", text=True, timeout=15, stderr=LOG)
+
+
+def publish_round(rooms, make_msg, pub=None, logger=None, workers=PUBLISH_WORKERS, round_s=PUBLISH_ROUND_S):
+    """Publish the control line to every room concurrently, bounded by round_s. make_msg() is called in the worker, so the ts is taken per room at its own publish.
+    A room that fails or is still unfinished at the cap gets one log line; the others are unaffected. -> the rooms that published."""
+    pub, logger = pub or publish, logger or log
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ctl-pub")
+    futs = {pool.submit(lambda r=r: pub(r, make_msg())): r for r in rooms}
+    done, pending = concurrent.futures.wait(futs, timeout=round_s)
+    ok = []
+    for f in done:
+        try:
+            f.result(); ok.append(futs[f])
+        except Exception as e:
+            logger(f"control publish {futs[f]} failed: {e.__class__.__name__}")
+    for f in pending:
+        f.cancel()
+        logger(f"control publish {futs[f]} timed out (round cap {round_s}s)")
+    pool.shutdown(wait=False, cancel_futures=True)       # never wait on a hung pipe; subprocess.run's own timeout reaps the child
+    return ok
 
 
 def check_rooms(rooms, flags):
@@ -129,11 +150,7 @@ def main():
         housekeeping(s, log)
         now = time.time()
         if now - last_ctl >= cfg.get("control_publish_s", 30):
-            for r in rooms:
-                try:
-                    publish(r, s.control_message())     # ts is taken per room, at the moment of this publish
-                except Exception as e:
-                    log(f"control publish {r} failed: {e.__class__.__name__}")
+            publish_round(rooms, s.control_message)     # ts is taken per room, at the moment of this publish
             last_ctl = now
         if now - last_prune >= 3600:
             log(f"pruned {s.prune()}"); last_prune = now

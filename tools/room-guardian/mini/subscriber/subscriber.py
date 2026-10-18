@@ -38,6 +38,8 @@ OPEN_RESULTS = ("failed", "escalated")                            # a kind line 
 INBOX_RESULTS = ("healed", "failed", "escalated")                 # and is queued for the gating INBOX on these, whatever the action (never would_do)
 ZERO_RATIO_OK = 0.05
 RAW_CAP = 2000
+STREAM_MAX_BYTES = 4000                                          # a kiosk-stream line longer than this (raw bytes, before decode, newline excluded) is never stored
+OVERSIZE_AUDIT_S = 600                                           # one oversize audit line per room per stream per 10 min
 # FR1 2.4 d' (guardian-lead): the kiosk sends NO `kind` on its USB lines; they are keyed on layer + action + reason + result (outside the strict coreaudio scope).
 USB_LAYER = "usb"
 USB_ESCALATIONS = {"usb_reboot_failed": "usb_reboot_failed", "usb_power_off_recurring": "usb_power_off_recurring", "usb_device_missing": "usb_device_missing"}
@@ -294,6 +296,7 @@ class Subscriber:
         os.makedirs(data_dir, exist_ok=True)
         t0 = clock()
         self.last_seen = {r: t0 for r in self.rooms}
+        self._oversize_at = {}                             # (room, stream) -> time of the last oversize audit line
         self.ok_streak = {}                                # room -> consecutive health lines with zero_ratio < ZERO_RATIO_OK
         self.quiet = set(quiet_seed) & set(self.rooms)   # rooms whose guardian_quiet case is still open (R3): a restart must not forget them
 
@@ -303,6 +306,18 @@ class Subscriber:
         if not pt:
             return False
         room, stream = pt
+        if isinstance(raw, (bytes, bytearray)):          # the live reader hands raw bytes: the cap is measured here, BEFORE decode
+            nbytes = len(bytes(raw).rstrip(b"\r\n"))
+            if nbytes <= STREAM_MAX_BYTES:
+                try:
+                    raw = bytes(raw).decode("utf-8").replace("\r\n", "\n")     # what text-mode (universal newlines) gave the reader before
+                except UnicodeDecodeError:
+                    return False                         # undecodable: not stored (the text-mode reader used to die and reconnect on it)
+        else:
+            nbytes = len(str(raw).rstrip("\r\n").encode("utf-8", "surrogatepass"))
+        if nbytes > STREAM_MAX_BYTES:
+            self._audit_oversize(room, stream, nbytes)   # opens no case, never raises, never any line content
+            return False
         try:
             obj, dup = loads_dupcheck(raw)
         except (TypeError, ValueError):
@@ -355,6 +370,20 @@ class Subscriber:
                 self.quiet.discard(room)
                 self.sink.guardian_recovered(room, now)
         return True
+
+    def _audit_oversize(self, room, stream, nbytes):
+        try:
+            now = self.clock()
+            key = (room, stream)
+            if now - self._oversize_at.get(key, -OVERSIZE_AUDIT_S) < OVERSIZE_AUDIT_S:
+                return
+            d = os.path.join(self.data, datetime.fromtimestamp(now, IST).strftime("%Y-%m-%d"))
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, f"{room}.{stream}-invalid.jsonl"), "a") as f:
+                f.write(json.dumps({"ts": int(now), "reason": "oversize", "bytes": nbytes}) + "\n")
+            self._oversize_at[key] = now
+        except Exception:                      # noqa: BLE001 -- an audit fault must never reach the ingest loop
+            pass
 
     def _log_invalid_heal(self, room, raw):
         now = self.clock()
