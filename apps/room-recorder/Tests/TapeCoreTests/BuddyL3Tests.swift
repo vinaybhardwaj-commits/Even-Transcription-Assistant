@@ -255,4 +255,69 @@ extension BuddyConsultController {
       #expect(line.hasPrefix("buddy runner: ") || line.hasPrefix("encounter buddy: "), "\(line)")
     }
   }
+
+  // MARK: - Shadow + unusable config (F4)
+
+  @Test func shadowWithUnusableConfigHasZeroWindowsZeroPostsAndNoTapFile_WellFormed0644() async throws {
+    // A well-formed config file readable by others (0644) is unusable: the controller detects this and does not start a runner.
+    let c = try BuddyL2Tests.consult(flags: BuddyL2Tests.shadow, runner: false)
+    defer { c.controller.shutdown() }
+    defer { try? FileManager.default.removeItem(at: c.root) }
+    let configURL = c.root.appendingPathComponent(BuddyRunnerConfig.fileName)
+    try Data(#"{"base":"http://c4:43124","key":"KEY-SECRET-1"}"#.utf8).write(to: configURL)
+    chmod(configURL.path, 0o644)
+    #expect(BuddyRunnerConfig.status(root: c.root) == .unusable, "the file is 0644 so unusable")
+    #expect(c.controller.consultStarted(opaqueID: "opq_f4a", buddyOff: false, window: false, live: true) == .noWindow)
+    c.h.tape.growSeconds(26)
+    try await Task.sleep(nanoseconds: 300_000_000)
+    #expect(c.presenter.all.isEmpty, "0 windows")
+    #expect(c.h.transport.posted.isEmpty && c.h.transport.flagPollCount == 0, "0 POSTs, 0 polls")
+    #expect(!c.controller.isLive, "nothing is open, so nothing to close")
+    #expect(BuddyL1Tests.tapFile(c.root) == nil, "no tap file")
+    let counted = c.logs.all.filter { $0.hasPrefix(Self.noConfigPrefix) }
+    #expect(counted == ["\(Self.noConfigPrefix)1 (opaque_id opq_f4a)"], "exactly one counted line, config unusable so treated as absent: \(c.logs.all)")
+    _ = c.controller.consultEnded(opaqueID: "opq_f4a")
+  }
+
+  @Test func shadowWithUnusableConfigHasZeroWindowsZeroPostsAndNoTapFile_Unparseable0600() async throws {
+    // A 0600 file with unparseable JSON is unusable: the controller detects this and does not start a runner.
+    let c = try BuddyL2Tests.consult(flags: BuddyL2Tests.shadow, runner: false)
+    defer { c.controller.shutdown() }
+    defer { try? FileManager.default.removeItem(at: c.root) }
+    let configURL = c.root.appendingPathComponent(BuddyRunnerConfig.fileName)
+    try Data("not json".utf8).write(to: configURL)
+    chmod(configURL.path, 0o600)
+    #expect(BuddyRunnerConfig.status(root: c.root) == .unusable, "the file is 0600 but unparseable")
+    #expect(c.controller.consultStarted(opaqueID: "opq_f4b", buddyOff: false, window: false, live: true) == .noWindow)
+    c.h.tape.growSeconds(26)
+    try await Task.sleep(nanoseconds: 300_000_000)
+    #expect(c.presenter.all.isEmpty, "0 windows")
+    #expect(c.h.transport.posted.isEmpty && c.h.transport.flagPollCount == 0, "0 POSTs, 0 polls")
+    #expect(!c.controller.isLive, "nothing is open, so nothing to close")
+    #expect(BuddyL1Tests.tapFile(c.root) == nil, "no tap file")
+    let counted = c.logs.all.filter { $0.hasPrefix(Self.noConfigPrefix) }
+    #expect(counted == ["\(Self.noConfigPrefix)1 (opaque_id opq_f4b)"], "exactly one counted line, config unusable so treated as absent: \(c.logs.all)")
+    _ = c.controller.consultEnded(opaqueID: "opq_f4b")
+  }
+
+  @Test func shadowWithUnusableConfigHasZeroWindowsZeroPostsAndNoTapFile_TruncatedJSON0600() async throws {
+    // A 0600 file with truncated JSON is unusable: the controller detects this and does not start a runner.
+    let c = try BuddyL2Tests.consult(flags: BuddyL2Tests.shadow, runner: false)
+    defer { c.controller.shutdown() }
+    defer { try? FileManager.default.removeItem(at: c.root) }
+    let configURL = c.root.appendingPathComponent(BuddyRunnerConfig.fileName)
+    try Data(#"{"base":"http://c4:43124","key":"KEY-SECR"#.utf8).write(to: configURL)
+    chmod(configURL.path, 0o600)
+    #expect(BuddyRunnerConfig.status(root: c.root) == .unusable, "the file is 0600 but truncated/unparseable")
+    #expect(c.controller.consultStarted(opaqueID: "opq_f4c", buddyOff: false, window: false, live: true) == .noWindow)
+    c.h.tape.growSeconds(26)
+    try await Task.sleep(nanoseconds: 300_000_000)
+    #expect(c.presenter.all.isEmpty, "0 windows")
+    #expect(c.h.transport.posted.isEmpty && c.h.transport.flagPollCount == 0, "0 POSTs, 0 polls")
+    #expect(!c.controller.isLive, "nothing is open, so nothing to close")
+    #expect(BuddyL1Tests.tapFile(c.root) == nil, "no tap file")
+    let counted = c.logs.all.filter { $0.hasPrefix(Self.noConfigPrefix) }
+    #expect(counted == ["\(Self.noConfigPrefix)1 (opaque_id opq_f4c)"], "exactly one counted line, config unusable so treated as absent: \(c.logs.all)")
+    _ = c.controller.consultEnded(opaqueID: "opq_f4c")
+  }
 }
