@@ -45,7 +45,7 @@ export function catalogRejection(e) {
   if (!isObj(e) || e.code !== "tool_error") return e;
   let env = e.result;
   if (isObj(env) && !("error" in env) && ("structuredContent" in env || "content" in env || "payload" in env)) env = unwrap(env);
-  if (isObj(env) && typeof env.error === "string" && CATALOG_CODES.has(env.error)) return { ...e, code: env.error, message: str(env.message) || str(env.detail) || e.message };
+  if (isObj(env) && typeof env.error === "string" && CATALOG_CODES.has(env.error)) return { ...e, code: env.error, message: str(env.message) || str(env.detail) || e.message, ...(env.error === "no_clip" ? { sealed: str(env.sealed) } : {}) };
   return e;
 }
 
@@ -78,6 +78,7 @@ export function makeCall(mcp, hooks = {}) {
           continue;
         }
         if (rebuilds > 0) done();
+        if (isObj(e) && e.code === "catalog_unavailable" && REBUILD_ACTIONS.has(args && args.action)) throw e;   // N22: the rebuild retries are the budget; the generic retry does not stack on them
         if (!(e && e.retryable === true) || budget.retries <= 0) throw e;
         budget.retries--;
         await wait(budget, Math.min(num(e.retryAfterMs) ?? 500, 3000) * (0.5 + Math.random()));

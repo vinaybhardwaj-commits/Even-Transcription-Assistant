@@ -4,7 +4,7 @@
 import { buildDays, listFor } from "./days.js";
 import { buildPulseLink } from "./pulse.js";
 import { makeCall, makeCtx, settle, withCtx } from "./mcp-call.js";
-import { arr, datesBetween, firstGap, get, isObj, num, sealedReason, str, stateOfStatus } from "./util.js";
+import { arr, datesBetween, firstGap, get, isObj, num, sealTokenOf, sealedReason, str, stateOfStatus } from "./util.js";
 import { c4Of, c4Token, guardC4, jevSetsIn } from "./c4.js";
 import { MIN_DATE } from "./types.js";
 
@@ -47,14 +47,14 @@ export function normRow(r) {
   if (!isObj(r) || !str(r.consult_uid)) return null;
   const stages = {};
   if (isObj(r.stages)) for (const [k, v] of Object.entries(r.stages)) stages[k] = normStage(v);
-  const clip = isObj(r.clip) ? { r2_key: str(r.clip.r2_key), r2_status: str(r.clip.r2_status), signature_sha256: str(r.clip.signature_sha256), audio_sha256: str(r.clip.audio_sha256), bytes: num(r.clip.bytes), minutes: num(r.clip.minutes) } : null;
+  const clip = isObj(r.clip) ? { r2_key: str(r.clip.r2_key), r2_status: str(r.clip.r2_status), signature_sha256: str(r.clip.signature_sha256), audio_sha256: str(r.clip.audio_sha256), bytes: num(r.clip.bytes), minutes: num(r.clip.minutes), sealed: sealTokenOf({ sealed: r.clip.sealed }) } : null;
   const tOpen = num(r.t_open), tClose = num(r.t_close);
   const layers = isObj(r.layers) ? Object.fromEntries(["stt", "translate", "diar_sarvam", "diar_nemotron", "role", "parts"].map(k => [k, normLayerRef(r.layers[k])])) : null;
   const idn = isObj(r.identity) ? r.identity : {};
   const rxUid = str(r.prescription_uid) || str(idn.prescription_uid) || str(get(r, "prescription", "prescription_uid"));
   return {
     consult_uid: r.consult_uid, ist_date: str(r.ist_date), doctor_uid: str(r.doctor_uid), room_id: str(r.room_id), t_open: tOpen, t_close: tClose,
-    source: r.source === "cutter" || r.source === "caa" ? r.source : null, clip, layers,
+    sealed: sealTokenOf(r), source: r.source === "cutter" || r.source === "caa" ? r.source : null, clip, layers,
     layers_present: [...new Set(arr(r.layers_present).filter(x => typeof x === "string").map(x => LAYER_TO_PANEL[x]).filter(Boolean))],
     tracks_present: [...new Set(arr(r.layers_present).filter(x => typeof x === "string" && TRACK.test(x)))],   // the raw track names (ledger "track present" hint); layers_present above is the panel mapping
     freescript: isObj(r.freescript) ? { artifact_id: idStr(r.freescript.artifact_id), state: str(r.freescript.state), rejection_reason: str(r.freescript.rejection_reason) || str(r.freescript.reason) } : null,
@@ -98,13 +98,12 @@ function decodeBase64(s) {
 
 /** @param caps {{mcp:any, includeText?:boolean, includeIdentity?:boolean, now?:()=>number}} */
 /** sha256 of the assembled clip against the catalog's audio_sha256 (chunk answer if it carries one, else the row's clip.audio_sha256). Never throws; never blocks playback. */
-async function checksumOf(parts, expected) {
+async function checksumOf(blob, expected) {
   const want = typeof expected === "string" && /^[0-9a-f]{64}$/i.test(expected.trim()) ? expected.trim().toLowerCase() : null;
   if (!want) return { state: "no_catalog_checksum" };   // the catalog has no hash for this clip (audio_sha256 null)
   try {
-    const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0;
-    for (const p of parts) { all.set(p, o); o += p.length; }
-    const d = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", all));
+    await new Promise(res => setTimeout(res, 0));   // N28: after getAudio has returned and the player exists
+    const d = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
     const got = [...d].map(b => b.toString(16).padStart(2, "0")).join("");
     return { state: got === want ? "match" : "mismatch" };
   } catch { return { state: "digest_failed" }; }   // N19: a failed digest is never reported as "no catalog checksum"
@@ -120,6 +119,7 @@ export function createCatalogImpl(caps = {}) {
   const noteClip = n => { clipHash.set(n.consult_uid, n.clip && n.clip.audio_sha256); if (!n.clip || !n.clip.r2_key) noClip.set(n.consult_uid, { sealed: sealedReason(n) }); else noClip.delete(n.consult_uid); };
   const clipHash = new Map();   // consult_uid -> clip.audio_sha256 from the catalog row (the sha256 of the stored FLAC); signature_sha256 hashes the cut-signature JSON and is never compared
   let identityOk = caps.includeIdentity === false ? false : null;   // null = not tried yet, true = names arrive, false = refused (no admin scope) or unavailable
+  let patientAdmin = null;                                         // false once a patient lookup was refused for want of an admin key: a revisit makes no call
   let chunkSupport = null;                                         // null = unknown, true/false after the feature check
   const features = { clipKnown: true, hasRxFilter: true, hasRxMaxDays: RX_WINDOW_DAYS, specialtyFilter: false, names: true, rxContent: false, note: "specialty arrives with a later catalog" };
 
@@ -275,7 +275,7 @@ export function createCatalogImpl(caps = {}) {
     listPatient: withCtx(async (ctx, q) => {
       const id = q && q.individual_uid;
       if (typeof id !== "string" || !/^[\x21-\x7e]{1,128}$/.test(id)) throw { code: "bad_args", message: "not a valid patient id", retryable: false };
-      if (identityOk === false) throw { code: "needs_admin", message: "Patient lookup needs an admin key", retryable: false };
+      if (identityOk === false || patientAdmin === false) throw { code: "needs_admin", message: "Patient lookup needs an admin key", retryable: false };
       const to = new Date(now()).toISOString().slice(0, 10), back = new Date(now() - 91 * 86400000).toISOString().slice(0, 10), from = back < MIN_DATE ? MIN_DATE : back;
       const rows = [], ids = new Set(), seen = new Set(); let cursor = null, truncated = false, storedAt = null;
       try {
@@ -292,7 +292,7 @@ export function createCatalogImpl(caps = {}) {
         }
       } catch (e) {
         // the runtime's exact admin-scope refusal shape is UNVERIFIED: any scope/admin wording, or the codes that mean "not allowed", is "needs an admin key"
-        if (isObj(e) && e.code !== "cancelled" && (["identity_unavailable", "not_granted", "blocked_by_policy"].includes(e.code) || /admin|scope_or_tool_unavailable|needed/i.test(String(e.message || "")))) throw { code: "needs_admin", message: "Patient lookup needs an admin key", retryable: false };
+        if (isObj(e) && e.code !== "cancelled" && (["admin_required", "scope_or_tool_unavailable", "identity_unavailable", "not_granted", "blocked_by_policy"].includes(e.code) || /admin|scope_or_tool_unavailable|identity_unavailable/i.test(String(e.message || "")))) { patientAdmin = false; throw { code: "needs_admin", message: "Patient lookup needs an admin key", retryable: false }; }
         throw e;
       }
       rows.sort((a, b) => (a.ist_date === b.ist_date ? (a.t_open ?? 0) - (b.t_open ?? 0) : a.ist_date < b.ist_date ? -1 : 1));
@@ -309,12 +309,14 @@ export function createCatalogImpl(caps = {}) {
       const L = Object.fromEntries(LAYER_KEYS.map(k => [k, layerOf(raw, k)]));
       const tr = transcriptOf(L.transcript, row);
       if (tr.status !== L.transcript) L.transcript = tr.status;
-      const rubrics = rubricsOf(L.rubric), jl = jevLayerOf(L.jev), jev = jl.decisions;
-      const c4 = c4Of({ layer: isObj(raw.catalog_c4) ? raw.catalog_c4 : null, row: get(data, "row") });
+      // S17: a C4 or jev derivation that throws degrades that layer only (bad_shape); the consult still renders
+      const rubrics = rubricsOf(L.rubric), jev0 = (() => { try { return jevLayerOf(L.jev); } catch { return { decisions: null, sets: null, bad: true }; } })(), jl = jev0, jev = jl.decisions;
+      let c4; try { c4 = c4Of({ layer: isObj(raw.catalog_c4) ? raw.catalog_c4 : null, row: get(data, "row") }); } catch { c4 = { state: "error", code: "bad_shape", data: null }; }
       // C4 jev sets: the jev layer's own (origin catalog_c4) first, else the C4 column; the jev_decision rows stay a separate table
-      const c4Jev = c4.state === "ok" && isObj(c4.data) && "jev" in c4.data ? jevSetsIn(c4.data.jev) : null;
+      let c4Jev = null, c4JevThrew = false;
+      try { c4Jev = c4.state === "ok" && isObj(c4.data) && "jev" in c4.data ? jevSetsIn(c4.data.jev) : null; } catch { c4JevThrew = true; }
       const jevSets = jl.sets !== null ? jl.sets : c4Jev;
-      const jevBad = jl.bad || (c4.state === "ok" && isObj(c4.data) && c4.data.jev !== null && c4.data.jev !== undefined && c4Jev === null && jl.sets === null);
+      const jevBad = jl.bad || c4JevThrew || (c4.state === "ok" && isObj(c4.data) && c4.data.jev !== null && c4.data.jev !== undefined && c4Jev === null && jl.sets === null);
       const layerStatus = Object.fromEntries(LAYER_KEYS.filter(k => k !== "identity").map(k => [k, { status: L[k].status, source: L[k].source, code: L[k].code }]));
       const idd = L.identity.status === "ok" && isObj(L.identity.data) && !("present" in L.identity.data) ? L.identity.data : null;
       const rxd = L.rx.status === "ok" && isObj(L.rx.data) ? L.rx.data : null;
@@ -399,8 +401,9 @@ export function createCatalogImpl(caps = {}) {
       } finally { settle(ctx); }
       if (offset !== total) throw { code: "bad_chunk", message: "the audio was incomplete", retryable: false };
       const blob = new Blob(parts, { type });
+      parts.length = 0;   // N28: the chunks are in the Blob; drop them so the peak stays near 2x the clip
       // N19: the player comes first; the digest resolves later. checksum is a Promise of {state: match | mismatch | no_catalog_checksum | digest_failed}
-      return { ok: true, data: { blob, bytes: total, minutes: null, audio_sha256: sig, contentType: type, checksum: checksumOf(parts, sig), partialShown: partialSent }, storedAt: null };
+      return { ok: true, data: { blob, bytes: total, minutes: null, audio_sha256: sig, contentType: type, checksum: checksumOf(blob, sig), partialShown: partialSent }, storedAt: null };
     },
     async getAudioUrl() { return null; },   // no URL ever: the page plays from a Blob it assembled
   };

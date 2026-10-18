@@ -90,7 +90,7 @@ export function mountApp(root, ctx) {
   function render() {
     let p;
     try { p = parseAnchor(location.hash.replace(/^#/, "")); } catch { p = { kind: "unknown" }; }
-    if (p.kind === "layer" && S.view === "detail" && jumpTo(p.n)) return;   // an in-page jump is not a route: the consult stays as it is
+    if (p.kind === "layer" && S.view === "detail") { jumpTo(p.n); return; }   // N25: out of range stays on the consult
     leave();
     S.notice = p.kind === "unknown";
     let t = "overview";
@@ -362,11 +362,11 @@ export function mountApp(root, ctx) {
       if (r.data.blob) {
         const full = URL.createObjectURL(r.data.blob);
         if (audio && partialUrl) {   // swap the source, keeping position and play state
-          const el = audio, t = el.currentTime, playing = !el.paused, old = partialUrl;
+          const el = audio, started = el.readyState >= 1, t = el.currentTime, playing = !el.paused, old = partialUrl;   // N24: before loadedmetadata the first listener still owns the opening position
           objUrl = full; partialUrl = null; loadedFrac = 1;
           el.addEventListener("loadedmetadata", () => {
-            const target = pendingSeek !== null ? pendingSeek : t;
-            try { el.currentTime = target; } catch { /* not seekable */ }
+            const target = pendingSeek !== null ? pendingSeek : started ? t : null;
+            if (target !== null) { try { el.currentTime = target; } catch { /* not seekable */ } }
             if (pendingSeek !== null || playing) { const p = el.play(); if (p && p.catch) p.catch(() => {}); }
             pendingSeek = null; seekNote.textContent = "";
           }, { once: true });

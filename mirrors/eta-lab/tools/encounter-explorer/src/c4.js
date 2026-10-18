@@ -40,7 +40,8 @@ export function c4Of({ layer, row }) {
   return { state: "absent", code: null, data: null };
 }
 
-const isoOf = v => (typeof v === "string" && v ? v : num(v) !== null ? new Date(v).toISOString() : null);
+// null unless the value is a parseable ISO string or a number inside the Date range (new Date(1e20).toISOString() throws)
+const isoOf = v => (typeof v === "string" ? (v && Number.isFinite(Date.parse(v)) ? v : null) : num(v) !== null && Math.abs(v) <= 8.64e15 ? new Date(v).toISOString() : null);
 function c4SetRow(x) {
   if (!isObj(x)) return null;
   const st = str(x.state);

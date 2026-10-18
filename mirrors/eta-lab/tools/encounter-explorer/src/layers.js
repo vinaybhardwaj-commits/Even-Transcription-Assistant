@@ -110,6 +110,8 @@ function renderAudio(c, env) {
       h("div", { class: "row", id: "who-row" }, h("span", { class: "k", text: "Who" }), nt ? h("span", { class: "v" }, "see the speaker table below ", mockBadge()) : h("span", { class: "v" }, slotChip("notbuilt"), " comes from layer 9 (voice ID)")),
       nt ? whoTable(nt) : null);
   }
+  // N20: a consult with no clip is missing/no_clip at the head and in the jump chip (the synchronous check the player uses), whatever the transcript says
+  if (env.clipKnown && (!c.clip || !c.clip.r2_key)) return { state: "missing", reason: "no_clip", segs, node: h("div", {}, env.audioNode, timeline, role) };
   return { state: lines ? "present" : "missing", reason: lines ? null : layerReason(c, "transcript"), segs, node: h("div", {}, env.audioNode, timeline, role) };
 }
 function whoTable(nt) {
@@ -237,7 +239,7 @@ function renderJev(c) {
     blocks.push(h("div", { class: "src-head" }, h("b", { text: "Question sets" }), " ", srcBadge("C4")),
       h("div", { class: "scroll" }, h("table", { id: "jev-sets" }, th(["Set", "Sha", "Band", "Label", "Model", "At (IST)", "State"]),
         h("tbody", {}, sets.map(s => h("tr", {}, h("td", {}, tok(s.set_id)), h("td", {}, tok(sha8(s.set_sha))), h("td", {}, tok(s.band)), h("td", {}, tok(s.label)), h("td", {}, tok(s.model)),
-          h("td", { class: "mono", text: s.at ? istStamp(s.at) : "–" }), h("td", {}, s.state ? tok(s.state) : "—")))))));
+          h("td", { class: "mono", text: s.at ? istStamp(s.at) : "—" }), h("td", {}, s.state ? tok(s.state) : "—")))))));
   }
   if (parts) blocks.push(h("h3", { text: "Jev parts" }), scroll(h("table", {}, th(["Part", "From–to", "Score", "Confidence", "Source"]),
     h("tbody", {}, parts.map(p => h("tr", {}, h("td", { text: p.part }), h("td", { text: (p.t0 === null ? "–" : fmtClock(p.t0)) + "–" + (p.t1 === null ? "–" : fmtClock(p.t1)) }), h("td", { text: p.score === null ? "–" : String(p.score) }), h("td", { text: p.confidence === null ? "–" : String(p.confidence) }), h("td", { text: p.source || "–" })))))));

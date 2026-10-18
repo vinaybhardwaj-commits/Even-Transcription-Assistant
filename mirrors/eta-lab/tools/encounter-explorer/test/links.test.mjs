@@ -26,7 +26,7 @@ const REJECT = {
   "non-hex characters": ["d-646f63zz~2026-10-05", "p-494e44xx", "d-646F633A31~2026-10-05".replace("F", "g")],
   "a #d- with a missing ~date": ["d-646f633a3140782e79", "d-646f633a3140782e79~"],
   "a date before 2026-09-09": ["d-646f633a3140782e79~2026-09-08", "d-646f633a3140782e79~2026-01-01"],
-  "an invalid date": ["d-646f633a3140782e79~2026-13-40", "d-646f633a3140782e79~2026-02-30", "d-646f633a3140782e79~20261005", "d-646f633a3140782e79~nope"],
+  "an invalid date": ["d-646f633a3140782e79~2026-13-40", "d-646f633a3140782e79~2026-02-30", "d-646f633a3140782e79~2026-09-31", "d-646f633a3140782e79~2026-11-31", "d-646f633a3140782e79~2027-02-29", "d-646f633a3140782e79~2026-04-31", "d-646f633a3140782e79~2028-02-30", "d-646f633a3140782e79~20261005", "d-646f633a3140782e79~nope"],
   "an empty id": ["d-~2026-10-05", "p-", "c-"],
   "a consult uid failing the pattern": ["c-abc", "c-" + "x".repeat(65), "c-a/b/c/d/e/f", "c-has space1", "c-uid.dot.1"],
 };
@@ -40,8 +40,28 @@ for (const [name, tokens] of Object.entries(REJECT)) {
   });
 }
 
+// B3: the floor check hides an overflow date that is BEFORE 2026-09-09 (2026-02-30 is rejected by the floor alone), so the vectors that prove the calendar check are on or after the floor
+test("B3: a calendar-overflow date is not a date (on or after the floor, where only the calendar check can reject it)", () => {
+  const hex = "646f633a3140782e79";
+  for (const d of ["2026-09-31", "2026-11-31", "2027-02-29", "2026-06-31", "2027-02-30", "2026-10-32"]) {
+    assert.deepEqual(parseAnchor("d-" + hex + "~" + d), { kind: "unknown" }, d);
+    assert.equal(explorerAnchor({ doctor_uid: AT_ID, date: d }), null, d);
+  }
+  // clamp first, then validate: an invalid date before the floor is null, not clamped to 2026-09-09
+  for (const d of ["2026-02-30", "2025-02-29", "2026-04-31"]) assert.equal(explorerAnchor({ doctor_uid: AT_ID, date: d }), null, "invalid before the floor: " + d);
+  assert.equal(explorerAnchor({ doctor_uid: AT_ID, date: "2026-01-01" }), "#d-646f633a3140782e79~2026-09-09", "a VALID date before the floor is still clamped");
+});
+
+test("B3: real calendar days still pass, including a leap day and month ends", () => {
+  const hex = "646f633a3140782e79";
+  for (const d of ["2028-02-29", "2026-09-30", "2026-10-31", "2026-12-31", "2027-02-28"]) {
+    assert.deepEqual(parseAnchor("d-" + hex + "~" + d), { kind: "doctor", doctor_uid: AT_ID, date: d }, d);
+    assert.equal(explorerAnchor({ doctor_uid: AT_ID, date: d }), "#d-" + hex + "~" + d, d);
+  }
+});
+
 test("explorerAnchor makes no link from invalid input (no throw)", () => {
-  for (const bad of [{ consult_uid: "abc" }, { consult_uid: "x".repeat(65) }, { doctor_uid: "", date: "2026-10-05" }, { doctor_uid: "d", date: "2026-13-40" }, { doctor_uid: "d", date: "nope" }, { individual_uid: "" }, {}, null, undefined, 5]) assert.equal(explorerAnchor(bad), null, JSON.stringify(bad));
+  for (const bad of [{ consult_uid: "abc" }, { consult_uid: "x".repeat(65) }, { doctor_uid: "", date: "2026-10-05" }, { doctor_uid: "d", date: "2026-13-40" }, { doctor_uid: "d", date: "2026-11-31" }, { doctor_uid: "d", date: "2027-02-29" }, { doctor_uid: "d", date: "2026-09-31" }, { doctor_uid: "d", date: "nope" }, { individual_uid: "" }, {}, null, undefined, 5]) assert.equal(explorerAnchor(bad), null, JSON.stringify(bad));
 });
 
 test("the page routes an unknown anchor to the overview with the notice (source check; the browser check drives it)", async () => {

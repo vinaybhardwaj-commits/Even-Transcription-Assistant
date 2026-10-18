@@ -879,7 +879,7 @@ async function flowDeepLinks({ page, tag, check, overflow }) {
   check(tag, sp.length >= 1 && sp.every(x => x.ind === CAT_FULL.individual_uid && x.id === true), "the patient list uses the individual_uid filter with identity");
   await overflow("deep link patient");
   // an anchor that does not parse: overview + one line, no throw
-  for (const bad of ["consult=" + CAT_FULL.consult_uid, "doctor=x&date=2026-10-13", "c-x", "d-zz~2026-10-13", "d-61~2026-13-40", "p-zz", "garbage", "layer-"]) {
+  for (const bad of ["consult=" + CAT_FULL.consult_uid, "doctor=x&date=2026-10-13", "c-x", "d-zz~2026-10-13", "d-61~2026-13-40", "d-61~2026-09-31", "d-61~2027-02-29", "p-zz", "garbage", "layer-"]) {
     await go(bad);
     await page.waitForSelector("table.grid, .na.err", { timeout: 15000 });
     check(tag, (await page.locator("#link-notice").textContent().catch(() => "")) === "Link not recognised." && (await page.locator("#f-from").count()) === 1, "unparseable anchor #" + bad + " -> overview with 'Link not recognised.'");
