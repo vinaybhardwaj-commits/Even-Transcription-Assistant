@@ -1,6 +1,10 @@
 -- Down-migration for 0170_mcp_oauth.sql. RUN BY HAND ONLY (lives in db/rollbacks/ because the runner applies every NNNN_*.sql in db/migrations/).
--- Drops the six OAuth tables and their indexes. Every issued token and code is lost (people sign in again); the allowlist is lost too, so keep a copy of mcp_person first.
+-- Drops the OAuth tables, the identity and key tables and the owner security log (keep copies of mcp_person, mcp_identity and mcp_key first) and their indexes. Every issued token and code is lost (people sign in again); the allowlist is lost too, so keep a copy of mcp_person first.
 BEGIN;
+DROP TABLE IF EXISTS mcp_owner_seclog;
+DROP FUNCTION IF EXISTS mcp_owner_seclog_guard();
+DROP TABLE IF EXISTS mcp_key;
+DROP TABLE IF EXISTS mcp_identity;
 DROP TABLE IF EXISTS mcp_oauth_email_code;
 DROP TABLE IF EXISTS mcp_oauth_family;
 DROP TABLE IF EXISTS mcp_oauth_token;

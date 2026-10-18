@@ -1,5 +1,5 @@
 -- =====================================================================
--- Migration 0170 — MCP OAuth (slice O2): allowlist, clients, one-time codes, tokens, email sign-in codes.
+-- Migration 0170 — MCP OAuth (slice O2): allowlist, clients, one-time codes, tokens, email sign-in codes; own login + per-user audit (18 Oct: key-to-email identity, owner security log).
 -- Number 0170 reserved by gating-lead.
 -- Spec: SPEC-SCRIBE-MCP-OAUTH-PER-PERSON-16OCT.md §5. Nothing here is read by /api/mcp yet (that is slice O3).
 --
@@ -82,6 +82,58 @@ CREATE TABLE IF NOT EXISTS mcp_oauth_email_code (
   used_at     timestamptz,
   created_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- OWN LOGIN + PER-USER AUDIT (Fable spec 18 Oct 2026; amends this still-unmerged migration, no new number).
+-- mcp_identity: one row per person who may hold a key. status active | revoked | blacklisted. A blacklisted address is never re-issued a key by the CLI or /admin/mcp-keys; only V editing the row can undo it.
+-- mcp_key: one key -> exactly one email. key_hash = plain sha256 hex of the key (the same form as the SCRIBE_MCP_TOKENS maps), never the key. scope read | admin. Rotation sets rotated_from and revokes the old key.
+CREATE TABLE IF NOT EXISTS mcp_identity (
+  email       text PRIMARY KEY CONSTRAINT mcp_identity_email_lower_chk CHECK (email = lower(email)),
+  status      text NOT NULL DEFAULT 'active' CONSTRAINT mcp_identity_status_chk CHECK (status IN ('active', 'revoked', 'blacklisted')),
+  created_by  text,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS mcp_key (
+  key_id        text PRIMARY KEY,
+  email         text NOT NULL REFERENCES mcp_identity (email),
+  scope         text NOT NULL CONSTRAINT mcp_key_scope_chk CHECK (scope IN ('read', 'admin')),
+  key_hash      text NOT NULL UNIQUE CONSTRAINT mcp_key_hash_chk CHECK (key_hash ~ '^[0-9a-f]{64}$'),
+  issued_at     timestamptz NOT NULL DEFAULT now(),
+  rotated_from  text,
+  revoked_at    timestamptz
+);
+CREATE INDEX IF NOT EXISTS mcp_key_email_idx ON mcp_key (email);
+
+-- Existing allowlisted people become identities (no key is seeded here: a key's hash lives only in the Vercel token maps, which SQL cannot read; scripts/mcp-keys.ts seed-env links them from a mapping file V supplies).
+INSERT INTO mcp_identity (email, status, created_by)
+SELECT email, CASE WHEN status = 'active' THEN 'active' ELSE 'revoked' END, 'migration-0170' FROM mcp_person
+ON CONFLICT DO NOTHING;
+
+-- OWNER SECURITY LOG: V's own calls and nothing more. ts, key_id, tool, outcome. NO subject ids, NO args, NO email. Excluded from audit_log, the governance view and the digest; read only at /admin/mcp-seclog.
+-- UPDATE and TRUNCATE are refused; DELETE is allowed only for a row older than 30 days (the retention purge).
+CREATE TABLE IF NOT EXISTS mcp_owner_seclog (
+  id       bigserial PRIMARY KEY,
+  ts       timestamptz NOT NULL DEFAULT now(),
+  key_id   text NOT NULL,
+  tool     text NOT NULL,
+  outcome  text NOT NULL CONSTRAINT mcp_owner_seclog_outcome_chk CHECK (outcome IN ('ok', 'error', 'refused'))
+);
+CREATE INDEX IF NOT EXISTS mcp_owner_seclog_ts_idx ON mcp_owner_seclog (ts);
+
+CREATE OR REPLACE FUNCTION mcp_owner_seclog_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.ts < now() - interval '30 days' THEN
+      RETURN OLD;
+    END IF;
+  END IF;
+  RAISE EXCEPTION 'seclog_append_only' USING ERRCODE = '42501';
+END
+$$;
+DROP TRIGGER IF EXISTS mcp_owner_seclog_row ON mcp_owner_seclog;
+CREATE TRIGGER mcp_owner_seclog_row BEFORE UPDATE OR DELETE ON mcp_owner_seclog FOR EACH ROW EXECUTE FUNCTION mcp_owner_seclog_guard();
+DROP TRIGGER IF EXISTS mcp_owner_seclog_trunc ON mcp_owner_seclog;
+CREATE TRIGGER mcp_owner_seclog_trunc BEFORE TRUNCATE ON mcp_owner_seclog FOR EACH STATEMENT EXECUTE FUNCTION mcp_owner_seclog_guard();
 
 CREATE INDEX IF NOT EXISTS mcp_oauth_token_email_idx   ON mcp_oauth_token (email);
 CREATE INDEX IF NOT EXISTS mcp_oauth_token_family_idx  ON mcp_oauth_token (family_id);

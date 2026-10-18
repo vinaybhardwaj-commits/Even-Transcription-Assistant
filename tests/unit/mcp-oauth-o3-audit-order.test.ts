@@ -102,7 +102,7 @@ describe("a failing insert: the client gets audit_unavailable, not data", () => 
     expect((await res.json()).error.message).toBe("audit_unavailable");
     const line = logs.find((l) => l.includes("AUDIT_UNAVAILABLE"));
     expect(line).toBeDefined();
-    expect(JSON.parse(line!)).toEqual({ mcp: "AUDIT_UNAVAILABLE", tool: "scribe_job_cancel", method: "tools/call", session_id: SESSION, side_effect_ran: true });
+    expect(JSON.parse(line!)).toEqual({ mcp: "AUDIT_UNAVAILABLE", tool: "scribe_job_cancel", method: "tools/call", door: null, session_id: SESSION, side_effect_ran: true });
     const all = logs.join("\n");
     expect(all).not.toContain("job_value_one");
     expect(all).not.toContain("secret-looking value xyz"); // the driver's error text never reaches a log line

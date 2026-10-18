@@ -45,6 +45,7 @@ beforeEach(() => {
   process.env.MCP_OAUTH_TOKEN_PEPPER = "p".repeat(32);
   process.env.RESEND_API_KEY = "re_synthetic";
   process.env.RESEND_FROM_EMAIL = "noreply@example.test";
+  process.env.SCRIBE_MCP_OAUTH_APPROVER = "approver@example.test";
   resetMail();
   process.env.SCRIBE_MCP_OAUTH_DOMAIN_TEST = "example.test";
   // a public address for the CIMD host, written as IPv4-mapped hex so no dotted literal sits in this file

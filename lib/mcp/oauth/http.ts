@@ -1,15 +1,15 @@
 /** lib/mcp/oauth/http.ts — O2: the flag/pepper/Resend gates and the response shapes shared by the five OAuth routes. */
 import { NextResponse } from "next/server";
-import { mcpIssuer, oauthEnabled } from "./config";
+import { approverEmail, mcpIssuer, oauthEnabled } from "./config";
 import { resendConfigured } from "./email";
 import { pepper } from "./crypto";
 
 export const NO_STORE = { "cache-control": "no-store", pragma: "no-cache" };
 
-/** Flag off = 404 (empty). Pepper missing (or Resend env, when `email`) = 503 server_error. Otherwise null: carry on. */
+/** Flag off = 404 (empty). Pepper missing (or Resend env or SCRIBE_MCP_OAUTH_APPROVER, when `email`) = 503 server_error. Otherwise null: carry on. */
 export function oauthGate(opts: { email?: boolean } = {}): NextResponse | null {
   if (!oauthEnabled()) return new NextResponse(null, { status: 404 });
-  if (!pepper() || (opts.email && !resendConfigured())) return jsonError(503, "server_error");
+  if (!pepper() || (opts.email && (!resendConfigured() || !approverEmail()))) return jsonError(503, "server_error"); // no approver = nowhere to send a code: refused, never mailed to the requester
   return null;
 }
 

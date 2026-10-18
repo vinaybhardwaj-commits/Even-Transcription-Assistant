@@ -4,7 +4,7 @@
  * `X-Scribe-Profile: operator` or `?profile=operator` still wins over this path flag.
  */
 import { NextRequest } from "next/server";
-import { checkMcpBearer } from "@/lib/mcp/auth";
+import { authenticateDoor } from "@/lib/mcp/door-auth";
 import { optionsResponse } from "@/lib/mcp/doors";
 import { handleMcpRpc, mcpAuthFailureResponse, mcpMethodNotAllowedResponse } from "@/lib/mcp/handler";
 
@@ -21,7 +21,7 @@ export async function OPTIONS() {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = checkMcpBearer(req);
+  const auth = await authenticateDoor(req, "lab");
   if (!auth.ok) return mcpAuthFailureResponse(auth.failure);
   return handleMcpRpc(req, auth.principal, { profile: "lab" });
 }

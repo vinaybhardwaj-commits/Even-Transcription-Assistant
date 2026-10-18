@@ -82,7 +82,7 @@ describe.skipIf(!HAVE)("grant, mint, call, row, revoke, refuse on real postgres"
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => [r.t, r.action, r.target_type, r.target_id])).toEqual([["person", "mcp.rpc", "mcp_method", "initialize"], ["person", "mcp.tools/call", "mcp_tool", "scribe_help"]]);
     for (const r of rows) {
-      expect(Object.keys(r.m).sort()).toEqual(["args", "arg_keys", "bytes_out", "client_ip", "err_kind", "ms", "ok", "session_id"].sort());
+      expect(Object.keys(r.m).sort()).toEqual(["arg_keys", "bytes_out", "client_ip", "err_kind", "ms", "ok", "outcome", "session_id", "subject"].sort());
       expect(r.m.session_id).toMatch(/^f_pgfamily/);
       expect(r.m.client_ip).toBe("198.51.100.4");
       expect(r.ip).toBe("198.51.100.4");

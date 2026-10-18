@@ -31,6 +31,7 @@ beforeEach(() => {
   process.env.MCP_OAUTH_TOKEN_PEPPER = "p".repeat(32);
   process.env.RESEND_API_KEY = "re_synthetic";
   process.env.RESEND_FROM_EMAIL = "noreply@example.test";
+  process.env.SCRIBE_MCP_OAUTH_APPROVER = "approver@example.test";
   resetMail();
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => (await resendFetch(input, init)) ?? new Response("{}", { status: 404 })));
 });

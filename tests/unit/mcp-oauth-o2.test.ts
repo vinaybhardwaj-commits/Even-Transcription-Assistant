@@ -94,6 +94,7 @@ beforeEach(() => {
   process.env.MCP_OAUTH_TOKEN_PEPPER = PEPPER;
   process.env.RESEND_API_KEY = RESEND_KEY;
   process.env.RESEND_FROM_EMAIL = "noreply@example.test";
+  process.env.SCRIBE_MCP_OAUTH_APPROVER = "approver@example.test";
   process.env.SCRIBE_MCP_OAUTH_DOMAIN_TEST = DOMAIN;
   delete process.env.SCRIBE_MCP_RESOURCE_URL;
   delete process.env.SCRIBE_MCP_OAUTH_ISSUER;
@@ -336,14 +337,15 @@ describe("email sign-in", () => {
     expect(refusalRows()).toHaveLength(0);
   });
 
-  it("the mail is the exact text from the order, to the allowlisted address only, from RESEND_FROM_EMAIL; the code is 6 digits and is stored only as sha256(pepper || pending_id || code)", async () => {
+  it("the mail goes to the APPROVER only (never the requester), naming the requester,  from RESEND_FROM_EMAIL; the code is 6 digits and is stored only as sha256(pepper || pending_id || code)", async () => {
     const s = await startSignIn();
     await start(s.cookie, ALICE);
     expect(mailed).toHaveLength(1);
-    expect(mailed[0]).toMatchObject({ to: ALICE, from: "noreply@example.test", subject: "Your EvenScribe sign-in code" });
+    expect(mailed[0]).toMatchObject({ to: "approver@example.test", from: "noreply@example.test", subject: "EvenScribe MCP sign-in code (approval needed)" });
+    expect(mailed.some((m) => m.to === ALICE)).toBe(false);
     const code = lastCode();
     expect(code).toMatch(/^\d{6}$/);
-    expect(mailed[0].text).toBe(`Your EvenScribe sign-in code: ${code}. It expires in 10 minutes. If you did not ask for this, ignore it.`);
+    expect(mailed[0].text).toBe(`${ALICE} is signing in to the EvenScribe MCP connector. The sign-in code: ${code}. It expires in 10 minutes and works once. Pass it on only if you expect this request; otherwise ignore it.`);
     const [row] = [...fake.state.emailCodes.values()];
     const pid = JSON.parse(Buffer.from(s.cookie.split(".")[0], "base64url").toString()).pid as string;
     expect(row.code_hash).toBe(hashSecret(pid + code));
@@ -356,13 +358,14 @@ describe("email sign-in", () => {
     const s = await startSignIn();
     await start(s.cookie, `  ${ALICE[0].toUpperCase() + ALICE.slice(1).toUpperCase()}  `);
     expect(mailed).toHaveLength(1);
-    expect(mailed[0].to).toBe(ALICE);
+    expect(mailed[0].to).toBe("approver@example.test");
+    expect(mailed[0].text.startsWith(`${ALICE} `)).toBe(true); // the requester, normalised, is named in the approver's mail
   });
 
   it("non-allowlisted, non-even.in, revoked and malformed addresses get byte-identical pages and status to a qualifying one, and send no mail", async () => {
     fake.addPerson(BOB, ["read"], "revoked");
     const pages: Array<[string, number, string]> = [];
-    for (const email of [ALICE, "carol@example.test", "alice@other.example.test", BOB, "not-an-email", "", "a@b@example.test", `${"x".repeat(300)}@example.test`]) {
+    for (const email of [ALICE, "carol@example.test", "alice@example.test.invalid", BOB, "not-an-email", "", "a@b@example.test", `${"x".repeat(300)}@example.test`]) {
       const s = await startSignIn();
       const before = mailed.length;
       const r = await start(s.cookie, email);
@@ -377,7 +380,7 @@ describe("email sign-in", () => {
 
   it("refusals write one mcp.oauth_refused row each: wrong_domain (unknown actor), not_allowlisted and revoked (the address)", async () => {
     fake.addPerson(BOB, ["read"], "revoked");
-    for (const email of ["alice@other.example.test", "carol@example.test", BOB]) await start((await startSignIn()).cookie, email);
+    for (const email of ["alice@example.test.invalid", "carol@example.test", BOB]) await start((await startSignIn()).cookie, email);
     const rows = refusalRows().map((r) => JSON.stringify(r.values));
     expect(rows).toHaveLength(3);
     expect(rows[0]).toContain("wrong_domain"); expect(rows[0]).toContain("unknown");
@@ -1281,5 +1284,74 @@ describe("R2 F1: a failed best-effort client call is counted and logged, never s
     const line = logs.find((l) => l.includes("best-effort client side call failed"))!;
     expect(line).toMatch(/count=\d+/);
     expect(line).not.toContain("example.test");
+  });
+});
+
+// ─── spec 18 Oct 2026: approver-routed code, address lock, identity gate, sign-in alert ─────────────────────────────────────────────────────────────
+describe("approver-routed email code", () => {
+  it("every code goes to the APPROVER and to nobody else; the requester is named in the body and never receives a mail", async () => {
+    await consentPageFor({}, ALICE);
+    expect(mailed).toHaveLength(1);
+    expect(mailed.map((m) => m.to)).toEqual(["approver@example.test"]);
+    expect(mailed[0].text).toContain(ALICE);
+    expect(mailed.some((m) => m.to === ALICE)).toBe(false);
+  });
+
+  it("flag on WITHOUT the approver env: authorize-time email steps answer 503 server_error, nothing is stored, nothing is mailed to anyone", async () => {
+    const s = await startSignIn();
+    delete process.env.SCRIBE_MCP_OAUTH_APPROVER;
+    const r = await start(s.cookie, ALICE);
+    expect(r.status).toBe(503);
+    expect(await r.text()).toContain("server_error");
+    expect(mailed).toHaveLength(0);
+    expect(fake.state.emailCodes.size).toBe(0);
+    expect((await verify(s.cookie, "123456")).status).toBe(503);
+    process.env.SCRIBE_MCP_OAUTH_APPROVER = "not an address";
+    expect((await start(s.cookie, ALICE)).status).toBe(503); // a malformed approver is no approver
+    expect(mailed).toHaveLength(0);
+  });
+
+  it("5 wrong tries lock the ADDRESS for 15 minutes: a brand-new sign-in for the same address gets the same page and NO mail; 16 minutes later a code is sent again", async () => {
+    const s = await startSignIn();
+    await start(s.cookie, ALICE);
+    const right = lastCode();
+    const wrong = right === "000000" ? "000001" : "000000";
+    for (let i = 0; i < 5; i++) await verify(s.cookie, wrong);
+    resetEmailLimitForTests();
+    const s2 = await startSignIn();
+    const before = mailed.length;
+    const r = await start(s2.cookie, ALICE);
+    expect(r.status).toBe(200);
+    expect(mailed).toHaveLength(before); // locked: no code issued
+    fake.emailClock.offsetMs = 16 * 60_000;
+    resetEmailLimitForTests();
+    const s3 = await startSignIn();
+    await start(s3.cookie, ALICE);
+    expect(mailed).toHaveLength(before + 1);
+    expect(mailed[before]!.to).toBe("approver@example.test");
+  });
+
+  it("SCRIBE_MCP_IDENTITY on: an allowlisted person with no active mcp_identity gets the identical page, no mail and a no_identity refusal row", async () => {
+    process.env.SCRIBE_MCP_IDENTITY = "on"; // the mocked sql returns no identity row
+    const s = await startSignIn();
+    const r = await start(s.cookie, ALICE);
+    expect(r.status).toBe(200);
+    expect(mailed).toHaveLength(0);
+    expect(JSON.stringify(audit.filter((a) => a.text.includes("mcp.oauth_refused")).map((a) => a.values))).toContain("no_identity");
+  });
+
+  it("an Allow by a non-V person mails V a sign-in alert (address and client host only); V's own sign-in does not", async () => {
+    const r = await fullSignIn({}, "allow", ALICE);
+    expect(r.res.status).toBe(303);
+    const alerts = mailed.filter((m) => m.subject === "EvenScribe MCP: sign-in");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.to).toBe("approver@example.test");
+    expect(alerts[0]!.text).toContain(ALICE);
+    expect(alerts[0]!.text).not.toMatch(/code|csrf|token/i);
+    fake.addPerson("approver@example.test");
+    resetEmailLimitForTests();
+    mailed.length = 0;
+    await fullSignIn({}, "allow", "approver@example.test");
+    expect(mailed.filter((m) => m.subject === "EvenScribe MCP: sign-in")).toHaveLength(0);
   });
 });

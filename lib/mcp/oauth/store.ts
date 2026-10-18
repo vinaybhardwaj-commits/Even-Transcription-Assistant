@@ -3,7 +3,7 @@
  * family_id of a code's tokens is "f_" + the first 32 hex of the code hash, so a replayed code can revoke exactly what it issued with no extra column.
  */
 import { sql } from "@/lib/db";
-import { REFRESH_FAMILY_MAX_AGE_S } from "./config";
+import { EMAIL_LOCK_S, REFRESH_FAMILY_MAX_AGE_S } from "./config";
 
 export type PersonRow = { email: string; scopes: string[]; status: "active" | "revoked"; granted_at?: string };
 export type ClientRow = { client_id: string; kind: "cimd" | "dcr"; redirect_uris: string[]; metadata_url: string | null; client_name: string | null; created_at: string };
@@ -50,14 +50,16 @@ export async function insertCode(c: { code_hash: string; client_id: string; emai
 
 /**
  * Inserts a code row UNLESS the address already has `maxPerEmail` rows in the last `windowS` seconds, or this pending flow has already burned `maxAttempts` wrong tries (it is dead).
- * One statement, so the rate limit holds across instances. Returns the new row id, or null when refused (the caller answers identically either way).
+ * ADDRESS LOCK: when the address has burned `maxAttempts` wrong tries in the last `lock_s` (15 min) across ANY pending flow, nothing is issued. One statement, so the rate limit holds across instances. Returns the new row id, or null when refused (the caller answers identically either way).
  */
-export async function insertEmailCode(c: { pending_id: string; email: string; code_hash: string; ttl_s: number; max_per_email: number; window_s: number; max_attempts: number }): Promise<string | null> {
+export async function insertEmailCode(c: { pending_id: string; email: string; code_hash: string; ttl_s: number; lock_s?: number; max_per_email: number; window_s: number; max_attempts: number }): Promise<string | null> {
+  const lockS = c.lock_s ?? EMAIL_LOCK_S;
   const rows = (await sql`
     INSERT INTO mcp_oauth_email_code (pending_id, email, code_hash, expires_at)
     SELECT ${c.pending_id}, ${c.email}, ${c.code_hash}, now() + (${c.ttl_s} * interval '1 second')
     WHERE (SELECT count(*) FROM mcp_oauth_email_code WHERE email = ${c.email} AND created_at > now() - (${c.window_s} * interval '1 second')) < ${c.max_per_email}
       AND (SELECT COALESCE(sum(attempts), 0) FROM mcp_oauth_email_code WHERE pending_id = ${c.pending_id}) < ${c.max_attempts}
+      AND (SELECT COALESCE(sum(attempts), 0) FROM mcp_oauth_email_code WHERE email = ${c.email} AND created_at > now() - (${lockS} * interval '1 second')) < ${c.max_attempts}
     RETURNING id
   `) as Array<{ id: string | number }>;
   return rows[0] ? String(rows[0].id) : null;
@@ -79,7 +81,7 @@ export async function deleteEmailCode(id: string): Promise<void> {
  * across the WHOLE pending flow (so asking for a new code never resets the budget). The increment happens BEFORE the compare, atomically, so parallel guesses cannot exceed the cap.
  * Null = nothing to try: expired, used, none issued, or the flow is dead.
  */
-export async function takeEmailAttempt(pendingId: string, maxAttempts: number): Promise<{ id: string; email: string; code_hash: string } | null> {
+export async function takeEmailAttempt(pendingId: string, maxAttempts: number, lockS: number = EMAIL_LOCK_S): Promise<{ id: string; email: string; code_hash: string } | null> {
   const rows = (await sql`
     UPDATE mcp_oauth_email_code SET attempts = attempts + 1
     WHERE id = (
@@ -89,6 +91,7 @@ export async function takeEmailAttempt(pendingId: string, maxAttempts: number): 
     )
       AND attempts < ${maxAttempts}
       AND (SELECT COALESCE(sum(attempts), 0) FROM mcp_oauth_email_code WHERE pending_id = ${pendingId}) < ${maxAttempts}
+      AND (SELECT COALESCE(sum(x.attempts), 0) FROM mcp_oauth_email_code x WHERE x.email = mcp_oauth_email_code.email AND x.created_at > now() - (${lockS} * interval '1 second')) < ${maxAttempts}
     RETURNING id, email, code_hash
   `) as Array<{ id: string | number; email: string; code_hash: string }>;
   const r = rows[0];

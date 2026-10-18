@@ -1,11 +1,11 @@
 /**
  * lib/mcp/oauth/email.ts — the identity step of the authorization server (V ruling 18 Oct 2026: no Google): a one-time code mailed through Resend.
- * The code is a 6-digit crypto-RNG number, stored only as sha256(pepper || pending_id || code), never logged, never in a URL, never in a response.
+ * The code is a 6-digit crypto-RNG number mailed to the approver only, stored only as sha256(pepper || pending_id || code), never logged, never in a URL, never in a response.
  * Resend is called with plain fetch like the rest of EvenScribe (no shared helper exists); RESEND_API_KEY and RESEND_FROM_EMAIL are the existing prod env.
  */
 import { randomInt } from "node:crypto";
 import { NextResponse } from "next/server";
-import { RESEND_API_KEY_ENV, RESEND_FROM_ENV, EMAIL_CODE_TTL_S, EMAIL_PATH } from "./config";
+import { RESEND_API_KEY_ENV, RESEND_FROM_ENV, EMAIL_CODE_TTL_S, EMAIL_PATH, approverEmail } from "./config";
 import { hashSecret } from "./crypto";
 import { NO_STORE } from "./http";
 
@@ -18,16 +18,23 @@ export const newEmailCode = (): string => String(randomInt(0, 1_000_000)).padSta
 /** sha256(pepper || pending_id || code), hex. A code is only valid for the pending flow it was issued to. */
 export const emailCodeHash = (pendingId: string, code: string): string => hashSecret(pendingId + code);
 
-export const EMAIL_SUBJECT = "Your EvenScribe sign-in code";
-export const emailBody = (code: string): string => `Your EvenScribe sign-in code: ${code}. It expires in ${EMAIL_CODE_TTL_S / 60} minutes. If you did not ask for this, ignore it.`;
+export const EMAIL_SUBJECT = "EvenScribe MCP sign-in code (approval needed)";
+/** The code goes to the APPROVER, never to the requester (spec 18 Oct). The requester's address is named so V knows whom to pass it to. */
+export const emailBody = (code: string, requester: string): string =>
+  `${requester} is signing in to the EvenScribe MCP connector. The sign-in code: ${code}. It expires in ${EMAIL_CODE_TTL_S / 60} minutes and works once. Pass it on only if you expect this request; otherwise ignore it.`;
 
-/** True when Resend accepted the message. Any failure is false, logged count-only with the status (never the address, the code or the body). */
-export async function sendEmailCode(to: string, code: string): Promise<boolean> {
+/**
+ * True when Resend accepted the message. Any failure is false, logged count-only with the status (never the address, the code or the body).
+ * The recipient is ALWAYS the approver (SCRIBE_MCP_OAUTH_APPROVER); there is no parameter to send a code anywhere else. No approver configured = false, nothing is sent.
+ */
+export async function sendEmailCode(requester: string, code: string): Promise<boolean> {
+  const to = approverEmail();
+  if (!to) return false;
   try {
     const r = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { Authorization: `Bearer ${process.env[RESEND_API_KEY_ENV] ?? ""}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: process.env[RESEND_FROM_ENV], to: [to], subject: EMAIL_SUBJECT, text: emailBody(code) }),
+      body: JSON.stringify({ from: process.env[RESEND_FROM_ENV], to: [to], subject: EMAIL_SUBJECT, text: emailBody(code, requester) }),
       cache: "no-store",
       signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
     });

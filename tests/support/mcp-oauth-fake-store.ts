@@ -113,8 +113,9 @@ let emailSeq = 0;
 /** a test may move time: rows are aged by subtracting from `created` and `exp` through this offset */
 export const emailClock = { offsetMs: 0 };
 const nowE = (): number => Date.now() + emailClock.offsetMs;
-export const insertEmailCode = async (c: { pending_id: string; email: string; code_hash: string; ttl_s: number; max_per_email: number; window_s: number; max_attempts: number }) => {
+export const insertEmailCode = async (c: { pending_id: string; email: string; code_hash: string; ttl_s: number; lock_s?: number; max_per_email: number; window_s: number; max_attempts: number }) => {
   const rows = [...state.emailCodes.values()];
+  if (rows.filter((r) => r.email === c.email && r.created > nowE() - (c.lock_s ?? 900) * 1000).reduce((a, r) => a + r.attempts, 0) >= c.max_attempts) return null; // the 15 min address lock
   if (rows.filter((r) => r.email === c.email && r.created > nowE() - c.window_s * 1000).length >= c.max_per_email) return null;
   if (rows.filter((r) => r.pending_id === c.pending_id).reduce((a, r) => a + r.attempts, 0) >= c.max_attempts) return null;
   const id = String(++emailSeq);
@@ -123,10 +124,11 @@ export const insertEmailCode = async (c: { pending_id: string; email: string; co
 };
 export const countRecentEmailCodes = async (email: string, windowS: number) => [...state.emailCodes.values()].filter((r) => r.email === email && r.created > nowE() - windowS * 1000).length;
 export const deleteEmailCode = async (id: string) => { state.emailCodes.delete(id); };
-export const takeEmailAttempt = async (pendingId: string, max: number) => {
+export const takeEmailAttempt = async (pendingId: string, max: number, lockS = 900) => {
   const mine = [...state.emailCodes.values()].filter((r) => r.pending_id === pendingId);
   const live = mine.filter((r) => !r.used && r.exp > nowE() && r.attempts < max).sort((a, b) => b.seq - a.seq)[0];
   if (!live || mine.reduce((a, r) => a + r.attempts, 0) >= max) return null;
+  if ([...state.emailCodes.values()].filter((r) => r.email === live.email && r.created > nowE() - lockS * 1000).reduce((a, r) => a + r.attempts, 0) >= max) return null;
   live.attempts += 1;
   return { id: live.id, email: live.email, code_hash: live.code_hash };
 };

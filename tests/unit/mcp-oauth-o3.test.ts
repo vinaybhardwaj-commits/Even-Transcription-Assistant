@@ -261,7 +261,7 @@ describe("per-user audit: exactly one row per call", () => {
       expect(r.action).toBe("mcp.tools/call");
       expect(r.target_type).toBe("mcp_tool");
       expect(r.target).toBe("scribe_help");
-      expect(Object.keys(r.meta).sort()).toEqual(["args", "arg_keys", "bytes_out", "client_ip", "err_kind", "ms", "ok", "session_id"].sort());
+      expect(Object.keys(r.meta).sort()).toEqual(["arg_keys", "bytes_out", "client_ip", "err_kind", "ms", "ok", "outcome", "session_id", "subject"].sort());
       expect(r.meta.ok).toBe(true);
       expect(r.meta.err_kind).toBeNull();
       expect(r.meta.arg_keys).toEqual(["tool"]);
@@ -314,11 +314,12 @@ describe("per-user audit: exactly one row per call", () => {
     expect(parsed()[0].meta.ok).toBe(false);
   });
 
-  it("only argument NAMES and SAFE_ARG_KEYS ids reach the row: no free text, no token, no url", async () => {
+  it("only argument NAMES and subject ids reach the row: no free text, no token, no url", async () => {
     const a = await mint(ALICE);
     await run(tool("scribe_help", { tool: "scribe_now", q: "patient free text here", room_id: "room_abc", url: "https://secret.example.test/x?sig=1", note: "NOTE-BODY" }), a.token);
     const row = parsed()[0];
-    expect(row.meta.args).toEqual({ room_id: "room_abc", q_len: "patient free text here".length });
+    expect(row.meta.subject).toEqual({ room_id: "room_abc" }); // spec 18 Oct: ids only; the free-text length and every other value are gone
+    expect(row.meta.args).toBeUndefined();
     expect(row.meta.arg_keys).toEqual(["note", "q", "room_id", "tool", "url"]);
     const dump = JSON.stringify(captured) + JSON.stringify(logs);
     for (const bad of ["patient free text here", "NOTE-BODY", "secret.example.test", "sig=1", a.token, hashSecret(a.token), PEPPER]) expect(dump, bad).not.toContain(bad);

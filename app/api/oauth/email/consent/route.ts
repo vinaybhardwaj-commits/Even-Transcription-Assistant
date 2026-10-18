@@ -6,13 +6,15 @@
  * nothing and sends the person back to the client with error=access_denied, so the client can restart instead of dead-ending on an error page.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { CODE_TTL_S, CONSENT_PURPOSE, PENDING_COOKIE, mcpIssuer } from "@/lib/mcp/oauth/config";
+import { CODE_TTL_S, CONSENT_PURPOSE, PENDING_COOKIE, approverEmail, identityEnforced, mcpIssuer } from "@/lib/mcp/oauth/config";
 import { hashSecret, randomId, safeEqual, verifyBlob } from "@/lib/mcp/oauth/crypto";
 import { describeClient, type Consent } from "@/lib/mcp/oauth/consent";
 import { done, readForm } from "@/lib/mcp/oauth/flow";
 import { htmlError, NO_STORE, oauthGate, redirectError } from "@/lib/mcp/oauth/http";
 import { burnConsent, getPerson, insertCode } from "@/lib/mcp/oauth/store";
 import { auditOauthGranted, auditOauthRefused } from "@/lib/mcp/audit";
+import { identityStatus } from "@/lib/mcp/identity";
+import { alertSignIn } from "@/lib/mcp/notify";
 
 
 export const runtime = "nodejs";
@@ -59,13 +61,22 @@ export async function POST(req: NextRequest) {
       await auditOauthRefused(consent.email, person ? "revoked" : "not_allowlisted");
       return done(redirectError(consent.ru, "access_denied", consent.st, 303));
     }
+    if (identityEnforced()) {
+      const ident = await identityStatus(person.email);
+      if (ident !== "active") {
+        await auditOauthRefused(consent.email, ident ?? "no_identity");
+        return done(redirectError(consent.ru, "access_denied", consent.st, 303));
+      }
+    }
     const raw = randomId(32);
     await insertCode({
       code_hash: hashSecret(raw), client_id: consent.cid, email: consent.email, code_challenge: consent.cc,
       redirect_uri: consent.ru, resource: consent.res, scopes: person.scopes, ttl_s: CODE_TTL_S,
     });
     const u = new URL(consent.ru);
-    await auditOauthGranted(consent.email, (await describeClient(consent.cid)).audit, u.host);
+    const who = await describeClient(consent.cid);
+    await auditOauthGranted(consent.email, who.audit, u.host);
+    if (consent.email !== approverEmail()) await alertSignIn(consent.email, u.host); // every non-V sign-in is mailed to V at once (best-effort)
     u.searchParams.set("code", raw);
     if (consent.st) u.searchParams.set("state", consent.st);
     u.searchParams.set("iss", mcpIssuer());

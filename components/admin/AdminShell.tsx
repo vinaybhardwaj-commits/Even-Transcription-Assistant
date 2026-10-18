@@ -51,7 +51,10 @@ export type AdminNavKey =
   | "bench"
   | "rooms"
   | "rooms-live"
-  | "jev";
+  | "jev"
+  | "mcp-audit"
+  | "mcp-seclog"
+  | "mcp-keys";
 
 type NavItem = {
   key: AdminNavKey;
@@ -73,6 +76,9 @@ const NAV: NavItem[] = [
   { key: "rooms", label: "Rooms", href: "/admin/rooms", icon: "▦", section: "observe" },
   { key: "rooms-live", label: "Rooms Live", href: "/rooms-live", icon: "▣", section: "observe" },
   { key: "jev", label: "Jev", href: "/admin/jev", icon: "◇", section: "observe" },
+  { key: "mcp-audit", label: "MCP audit", href: "/admin/mcp-audit", icon: "◆", section: "observe" },
+  { key: "mcp-seclog", label: "MCP seclog", href: "/admin/mcp-seclog", icon: "◆", section: "observe" },
+  { key: "mcp-keys", label: "MCP keys", href: "/admin/mcp-keys", icon: "◆", section: "configure" },
   { key: "admins",     label: "Admins",     href: "/admin/admins",   icon: "◑", section: "configure" },
   { key: "system-map", label: "System map", href: "/admin/system-map", icon: "▦", section: "configure" },
   { key: "settings",   label: "Settings",   href: "/admin/settings", icon: "◧", section: "configure" },

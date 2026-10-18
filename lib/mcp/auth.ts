@@ -104,6 +104,12 @@ export type McpPrincipal = {
   tools?: ReadonlySet<string>;
   /** OAUTH-O3: set only for an OAuth person principal. `token_id` is then `person:<email>`; session_id is the token's family id (never the token). */
   person?: { email: string; session_id: string };
+  /** Plain sha256 hex of the presented static key (never the key): the join to mcp_key. Absent for an OAuth person principal. */
+  key_hash?: string;
+  /** SCRIBE_MCP_IDENTITY on, set by lib/mcp/door-auth: who this key (or session) resolved to. A principal carrying `identity` gets one fail-closed audit_log row per call. */
+  identity?: { email: string; key_id: string; door: string };
+  /** SCRIBE_MCP_IDENTITY on: this principal is V's. Its calls write ONLY mcp_owner_seclog (ts, key_id, tool, outcome). */
+  owner?: { key_id: string; door: string };
 };
 
 /** `denied` (key denylist only) is the first 8 hex of the denied token's hash, for the audit row; the response body never carries it. */
@@ -422,13 +428,13 @@ export function checkMcpBearer(req: Request): { ok: true; principal: McpPrincipa
 
   // §2.3 — the map first. Hash lookup: no comparison, so no timing signal from the map's size.
   const hit = map[presentedHash];
-  if (hit) return { ok: true, principal: { token_id: hit.actor, scopes: hit.scopes, rooms: hit.rooms, tools: hit.tools } };
+  if (hit) return { ok: true, principal: { token_id: hit.actor, scopes: hit.scopes, rooms: hit.rooms, tools: hit.tools, key_hash: presentedHash } };
 
   // Fallback: the original single token, unchanged — all three scopes, every room, actor operator-v1.
   if (single) {
     const a = createHash("sha256").update(presented).digest();
     const b = createHash("sha256").update(single).digest();
-    if (timingSafeEqual(a, b)) return { ok: true, principal: { token_id: MCP_TOKEN_ID, scopes: new Set(ALL_SCOPES) } };
+    if (timingSafeEqual(a, b)) return { ok: true, principal: { token_id: MCP_TOKEN_ID, scopes: new Set(ALL_SCOPES), key_hash: presentedHash } };
   }
   return { ok: false, failure: { status: 401, code: "unauthorized" } };
 }

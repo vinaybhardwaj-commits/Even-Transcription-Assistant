@@ -101,3 +101,32 @@ export const EMAIL_CODE_MAX_ATTEMPTS = 5;
 export const EMAIL_RATE_WINDOW_S = 900;
 export const EMAIL_RATE_PER_EMAIL = 3;
 export const EMAIL_RATE_PER_IP = 10;
+
+// ─── own login + per-user audit (Fable spec 18 Oct 2026) ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** V's address. The ONLY recipient of an email sign-in code, of the daily digest and of the key/sign-in alerts; also "V" for the /admin/mcp-* views and the owner exemption of a signed-in person. */
+export const MCP_OAUTH_APPROVER_ENV = "SCRIBE_MCP_OAUTH_APPROVER";
+/** Comma list of token actors (the `actor` of a token-map entry, or operator-v1) that are V's own keys. Their calls write ONLY to mcp_owner_seclog. */
+export const MCP_OWNER_ACTORS_ENV = "SCRIBE_MCP_OWNER_ACTORS";
+/** SCRIBE_MCP_IDENTITY: "on" makes every key resolve to exactly one active email and every non-owner call write a fail-closed audit row. Off = the pre-18-Oct behaviour. */
+export const MCP_IDENTITY_FLAG_ENV = "SCRIBE_MCP_IDENTITY";
+/** 5 wrong tries lock the ADDRESS (not just the pending flow) for 15 minutes. */
+export const EMAIL_LOCK_S = 900;
+/** The owner security log keeps 30 days. */
+export const SECLOG_RETENTION_DAYS = 30;
+
+const EMAIL_SHAPE = /^[^\s@,;<>"]{1,64}@[^\s@,;<>"]{1,190}$/;
+
+/** The approver address, lowercased, or null when unset or not an address. */
+export function approverEmail(): string | null {
+  const v = process.env[MCP_OAUTH_APPROVER_ENV]?.trim().toLowerCase();
+  return v && EMAIL_SHAPE.test(v) ? v : null;
+}
+
+export function ownerActors(): ReadonlySet<string> {
+  return new Set((process.env[MCP_OWNER_ACTORS_ENV] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+}
+
+export function identityEnforced(): boolean {
+  return process.env[MCP_IDENTITY_FLAG_ENV]?.trim().toLowerCase() === "on";
+}

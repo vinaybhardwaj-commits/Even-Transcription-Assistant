@@ -1,18 +1,19 @@
 /**
  * POST /api/oauth/email/start — the first half of the identity step. 404 while SCRIBE_MCP_OAUTH is off; 503 without the pepper or Resend.
  * Needs the signed pending cookie from /authorize. The address is lowercased and trimmed; it qualifies only when it ends @<domain> (even.in) AND has an ACTIVE mcp_person row.
- * Only then a 6-digit code is stored (sha256(pepper || pending_id || code), 10 min) and mailed. The response is the SAME page, status and headers for a qualifying address, a non-qualifying
+ * Only then a 6-digit code is stored (sha256(pepper || pending_id || code), 10 min) and mailed to the APPROVER (SCRIBE_MCP_OAUTH_APPROVER), never to the requester; with SCRIBE_MCP_IDENTITY on the address must also hold an ACTIVE mcp_identity. The response is the SAME page, status and headers for a qualifying address, a non-qualifying
  * one, a rate-limited one and a failed send: nothing tells the caller which. Refusals write one mcp.oauth_refused row (wrong_domain / not_allowlisted / revoked / rate_limited / resend_failed).
  * TIMING: the send is deferred with next/server after() (Resend latency is off the response path); the one extra database round trip of the qualifying path is mirrored by a read for the others.
  * A failed send deletes the code row and writes the audit row; the page cannot change after the fact (a different page for a qualifying address would be the enumeration oracle).
  */
 import { after, NextRequest } from "next/server";
-import { EMAIL_CODE_MAX_ATTEMPTS, EMAIL_CODE_TTL_S, EMAIL_RATE_PER_EMAIL, EMAIL_RATE_WINDOW_S, mcpOauthDomain } from "@/lib/mcp/oauth/config";
+import { identityEnforced, EMAIL_CODE_MAX_ATTEMPTS, EMAIL_CODE_TTL_S, EMAIL_RATE_PER_EMAIL, EMAIL_RATE_WINDOW_S, EMAIL_LOCK_S, mcpOauthDomain } from "@/lib/mcp/oauth/config";
 import { emailCodeHash, codeEntryPage, newEmailCode, sendEmailCode } from "@/lib/mcp/oauth/email";
 import { emailStartLimited } from "@/lib/mcp/oauth/email-limit";
 import { originOk, readForm, readPending } from "@/lib/mcp/oauth/flow";
 import { clientIp, htmlError, oauthGate } from "@/lib/mcp/oauth/http";
 import { countRecentEmailCodes, deleteEmailCode, getPerson, insertEmailCode } from "@/lib/mcp/oauth/store";
+import { identityStatus } from "@/lib/mcp/identity";
 import { auditOauthRefused } from "@/lib/mcp/audit";
 
 export const runtime = "nodejs";
@@ -58,10 +59,17 @@ export async function POST(req: NextRequest) {
       await auditOauthRefused(email, person ? "revoked" : "not_allowlisted");
       return codeEntryPage();
     }
+    if (identityEnforced()) {
+      const ident = await identityStatus(person.email);
+      if (ident !== "active") {
+        await auditOauthRefused(person.email, ident === null ? "no_identity" : ident);
+        return codeEntryPage();
+      }
+    }
     const code = newEmailCode();
     const id = await insertEmailCode({
       pending_id: pending.pid, email: person.email, code_hash: emailCodeHash(pending.pid, code),
-      ttl_s: EMAIL_CODE_TTL_S, max_per_email: EMAIL_RATE_PER_EMAIL, window_s: EMAIL_RATE_WINDOW_S, max_attempts: EMAIL_CODE_MAX_ATTEMPTS,
+      ttl_s: EMAIL_CODE_TTL_S, lock_s: EMAIL_LOCK_S, max_per_email: EMAIL_RATE_PER_EMAIL, window_s: EMAIL_RATE_WINDOW_S, max_attempts: EMAIL_CODE_MAX_ATTEMPTS,
     });
     if (!id) {
       await auditOauthRefused(person.email, "rate_limited");

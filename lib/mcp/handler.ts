@@ -25,7 +25,7 @@
 import { isIP } from "node:net";
 import { NextRequest, NextResponse } from "next/server";
 import type { McpAuthFailure, McpPrincipal } from "@/lib/mcp/auth";
-import { auditDeniedCall, auditToolCall, mcpActorId, type ErrKind } from "@/lib/mcp/audit";
+import { auditDeniedCall, auditToolCall, logOwnerCall, mcpActorId, type ErrKind } from "@/lib/mcp/audit";
 import type { McpTool, ToolArgs, ToolContext } from "@/lib/mcp/registry";
 import { ToolScopeError, ToolRoomError, ROOM_RESTRICTED_ALLOWED_TOOLS } from "@/lib/mcp/registry";
 import { CALLABLE_TOOLS } from "@/lib/mcp/surface";
@@ -110,20 +110,29 @@ export async function handleMcpRpc(req: NextRequest, principal: McpPrincipal, op
   // S3 — which tools/list this request gets. tools/call ignores it.
   const profile = resolveProfile(req, opts.profile);
   const person = principal.person;
+  // SPEC 18 Oct (SCRIBE_MCP_IDENTITY on): `identity` = a resolved non-V caller on ANY door (static key, issued key or OAuth session), `owner` = V. Both get the awaited, fail-closed per-item path below;
+  // the difference is the row: a user writes audit_log (email, key_id, door, tool, subject ids), V writes ONLY mcp_owner_seclog (ts, key_id, tool, outcome) and a failed seclog write never refuses V.
+  const user = principal.identity;
+  const owner = principal.owner;
+  const tracked = Boolean(person || user || owner);
   // OAUTH-O3 (spec §12, FIX1): a person principal writes EXACTLY ONE audit row per JSON-RPC item (or one for a body that does not parse), AWAITED BEFORE the response is sent (no after()).
   // If the row cannot be written the client gets {code:-32003,"audit_unavailable"} instead of the result. A write tool's side effect has already run by then: that is logged loudly
   // (tool + session_id only). A response that is already a refusal or an error stands: the refusal is not replaced by audit_unavailable (its failed row is still logged).
   const auditItem = async (info: CallInfo, t0: number): Promise<boolean> => {
-    if (!person) return true;
+    if (!tracked) return true;
     const isCall = info.method === "tools/call" && typeof info.tool === "string";
+    if (owner) {
+      await logOwnerCall(owner.key_id, isCall ? (info.tool as string) : info.method ?? "invalid", info.ok ? "ok" : info.errKind === "refused" ? "refused" : "error");
+      return true;
+    }
     const ok = await auditToolCall({
       tool: info.tool ?? "", args: info.args, ok: info.ok ?? false, ms: info.ms ?? Date.now() - t0, ip: clientIp(req), userAgent: req.headers.get("user-agent"),
-      actor: principal.token_id, variant: info.variant ?? null, errKind: info.errKind ?? null,
-      person: { session_id: person.session_id, ...(isCall ? {} : { method: info.method ?? "invalid" }), bytes_out: info.bytes ?? null },
+      actor: user ? `person:${user.email}` : principal.token_id, variant: info.variant ?? null, errKind: info.errKind ?? null,
+      person: { session_id: person?.session_id ?? null, ...(isCall ? {} : { method: info.method ?? "invalid" }), bytes_out: info.bytes ?? null, ...(user ? { email: user.email, key_id: user.key_id, door: user.door } : {}) },
     });
     if (!ok) {
       const scope = isCall ? TOOL_BY_NAME.get(info.tool ?? "")?.scope : undefined;
-      console.error(JSON.stringify({ mcp: "AUDIT_UNAVAILABLE", tool: isCall ? info.tool : null, method: isCall ? "tools/call" : info.method ?? null, session_id: person.session_id, side_effect_ran: Boolean(isCall && scope && scope !== "read") }));
+      console.error(JSON.stringify({ mcp: "AUDIT_UNAVAILABLE", tool: isCall ? info.tool : null, method: isCall ? "tools/call" : info.method ?? null, door: user?.door ?? null, session_id: person?.session_id ?? null, side_effect_ran: Boolean(isCall && scope && scope !== "read") }));
     }
     return ok;
   };
@@ -182,7 +191,7 @@ export async function handleMcpRpc(req: NextRequest, principal: McpPrincipal, op
         info.errKind = "throw";
       }
     }
-    if (person) {
+    if (tracked) {
       if (info.method === undefined) info.method = typeof r?.method === "string" ? r.method : "invalid";
       const written = await auditItem(info, t0);
       if (!written) {
@@ -192,7 +201,7 @@ export async function handleMcpRpc(req: NextRequest, principal: McpPrincipal, op
     }
     if (out) responses.push(out);
   }
-  if (person && auditFailures > 0) {
+  if (tracked && auditFailures > 0) {
     // single call, or a batch in which every item came back as audit_unavailable: HTTP 503. A mixed batch stays 200 with the error on the items that failed.
     if (replaced > 0 && (requests.length === 1 || replaced === responses.length)) httpStatus = Math.max(httpStatus, 503);
     if (responses.length === 0) return NextResponse.json(auditDown(null), { status: 503, headers: NO_STORE }); // notification only: nothing to answer, but say the row failed
@@ -340,7 +349,7 @@ async function callTool(id: JsonRpcId, params: Record<string, unknown>, principa
   const errKind: ErrKind = isError ? "throw" : resultHasError ? "result_error" : null;
   const ok = !isError && !resultHasError;
   const variant = tool.memberFor?.(args) ?? null;
-  if (principal.person) Object.assign(info, { variant, ok, errKind, bytes: text.length, ms }); // handleMcpRpc writes the person's one row
+  if (principal.person || principal.identity || principal.owner) Object.assign(info, { variant, ok, errKind, bytes: text.length, ms }); // handleMcpRpc writes the one row (a user's audit_log row, or V's seclog row)
   else void auditToolCall({ tool: name, args, ok, ms, ip: clientIp(req), userAgent: req.headers.get("user-agent"), actor: principal.token_id, variant, errKind });
 
   // S0.4 — one structured line per tools/call for the log drain. Never args, never the request
