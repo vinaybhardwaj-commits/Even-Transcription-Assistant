@@ -332,7 +332,7 @@ class ReplayAndAudit(unittest.TestCase):
                 if "absent_night" in body: self.assertEqual(sub2.canary.state["r1"], {"opened": {}, "absent_night": "20261016"})   # the valid absent_night survives
 
     def test_nb_a_non_json_canary_line_gets_one_audit_line_and_is_not_stored(self):
-        for raw in ("not json", "{broken", "1" * 5000, ""):
+        for raw in ("not json", "{broken", ""):          # (the 5000-digit integer is now over STREAM_MAX_BYTES: an oversize audit row, see test_stream_cap)
             with self.subTest(raw[:12]):
                 e = Env(); self.assertFalse(e.canary(None, raw=raw)); self.assertEqual(e.stored(), []); self.assertEqual(e.kinds(), [])
                 inv = e.invalid(); self.assertEqual([i["why"] for i in inv], ["not_json"]); self.assertEqual(set(inv[0]), {"ts", "room", "why"})
