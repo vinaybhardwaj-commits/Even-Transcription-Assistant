@@ -1,15 +1,15 @@
-/** lib/mcp/oauth/http.ts — O2: the flag/pepper/Google gates and the response shapes shared by the five OAuth routes. */
+/** lib/mcp/oauth/http.ts — O2: the flag/pepper/Resend gates and the response shapes shared by the five OAuth routes. */
 import { NextResponse } from "next/server";
 import { mcpIssuer, oauthEnabled } from "./config";
-import { googleConfigured } from "./google";
+import { resendConfigured } from "./email";
 import { pepper } from "./crypto";
 
 export const NO_STORE = { "cache-control": "no-store", pragma: "no-cache" };
 
-/** Flag off = 404 (empty). Pepper missing (or Google env, when `google`) = 503 server_error. Otherwise null: carry on. */
-export function oauthGate(opts: { google?: boolean } = {}): NextResponse | null {
+/** Flag off = 404 (empty). Pepper missing (or Resend env, when `email`) = 503 server_error. Otherwise null: carry on. */
+export function oauthGate(opts: { email?: boolean } = {}): NextResponse | null {
   if (!oauthEnabled()) return new NextResponse(null, { status: 404 });
-  if (!pepper() || (opts.google && !googleConfigured())) return jsonError(503, "server_error");
+  if (!pepper() || (opts.email && !resendConfigured())) return jsonError(503, "server_error");
   return null;
 }
 

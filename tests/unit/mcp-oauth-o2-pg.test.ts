@@ -232,3 +232,55 @@ describe.skipIf(!HAVE)("R3 on real postgres: a consent page is burned exactly on
     expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM schema_migrations WHERE version = 172`)[0]!.n).toBe(1);
   });
 });
+
+describe.skipIf(!HAVE)("email sign-in codes on real postgres (amended 0170: mcp_oauth_email_code)", () => {
+  const base = { ttl_s: 600, max_per_email: 3, window_s: 900, max_attempts: 5 };
+  const ins = (pending_id: string, email: string, code_hash = "h") => S.insertEmailCode({ pending_id, email, code_hash, ...base });
+
+  it("the table has the ordered columns and both indexes; the migration applied twice without error", async () => {
+    const cols = (await q<{ column_name: string }>`SELECT column_name FROM information_schema.columns WHERE table_name = 'mcp_oauth_email_code' ORDER BY ordinal_position`).map((c) => c.column_name);
+    expect(cols).toEqual(["id", "pending_id", "email", "code_hash", "expires_at", "attempts", "used_at", "created_at"]);
+    const idx = (await q<{ indexname: string }>`SELECT indexname FROM pg_indexes WHERE tablename = 'mcp_oauth_email_code'`).map((i) => i.indexname);
+    expect(idx).toEqual(expect.arrayContaining(["mcp_oauth_email_code_pending_idx", "mcp_oauth_email_code_email_idx"]));
+    expect((await q`SELECT count(*)::int AS n FROM schema_migrations WHERE version = 170`)[0]).toEqual({ n: 1 });
+  });
+
+  it("per address: 3 codes in the window, the 4th is refused; another address is unaffected", async () => {
+    for (let i = 0; i < 3; i++) expect(await ins(`pa${i}`, "rate@example.test")).not.toBeNull();
+    expect(await ins("pa3", "rate@example.test")).toBeNull();
+    expect(await ins("pa4", "other@example.test")).not.toBeNull();
+    expect(await S.countRecentEmailCodes("rate@example.test", 900)).toBe(3);
+  });
+
+  it("takeEmailAttempt: spends one try on the newest live code; the 5th wrong try is the last; the flow is then dead for every code; consume is single use", async () => {
+    const id1 = (await ins("pb", "att@example.test", "old"))!;
+    const id2 = (await ins("pb", "att@example.test", "new"))!;
+    const first = await S.takeEmailAttempt("pb", 5);
+    expect(first).toMatchObject({ id: id2, code_hash: "new", email: "att@example.test" }); // the newest wins
+    for (let i = 0; i < 4; i++) expect(await S.takeEmailAttempt("pb", 5)).not.toBeNull();
+    expect(await S.takeEmailAttempt("pb", 5)).toBeNull(); // 5 spent across the flow
+    expect(await ins("pb", "att2@example.test")).toBeNull(); // and no new code is issued into a dead flow
+    expect(id1).not.toBe(id2);
+    const idc = (await ins("pc", "cons@example.test"))!;
+    const wins = await Promise.all([S.consumeEmailCode(idc), S.consumeEmailCode(idc), S.consumeEmailCode(idc)]);
+    expect(wins.filter(Boolean)).toHaveLength(1);
+    expect(await S.takeEmailAttempt("pc", 5)).toBeNull(); // used
+  });
+
+  it("parallel guesses cannot exceed the per-row cap (x12 concurrent takes on a fresh flow: at most 5 rows returned)", async () => {
+    await ins("pd", "par@example.test");
+    const rs = await Promise.all(Array.from({ length: 12 }, () => S.takeEmailAttempt("pd", 5)));
+    expect(rs.filter(Boolean).length).toBeLessThanOrEqual(5);
+    expect((await q<{ attempts: number }>`SELECT attempts FROM mcp_oauth_email_code WHERE pending_id = 'pd'`)[0]!.attempts).toBeLessThanOrEqual(5);
+  });
+
+  it("an expired code is not offered; a code of another pending flow is not offered; deleteEmailCode removes the row", async () => {
+    await S.insertEmailCode({ pending_id: "pe", email: "exp@example.test", code_hash: "x", ...base, ttl_s: -1 });
+    expect(await S.takeEmailAttempt("pe", 5)).toBeNull();
+    const id = (await ins("pf", "del@example.test"))!;
+    expect(await S.takeEmailAttempt("pg-other", 5)).toBeNull();
+    await S.deleteEmailCode(id);
+    expect(await S.takeEmailAttempt("pf", 5)).toBeNull();
+    expect(await S.countRecentEmailCodes("del@example.test", 900)).toBe(0);
+  });
+});

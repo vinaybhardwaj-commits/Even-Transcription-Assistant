@@ -177,8 +177,8 @@ export async function auditPersonDenied(email: string, reason: "expired" | "revo
 }
 
 /**
- * OAUTH-O2 (spec §12): one audit row for a refused sign-in. actor `person:<email>` once the Google ID token has been validated, else `unknown`; action `mcp.oauth_refused`; metadata is the reason
- * code only (never a token, a code, a Google token or an URL). At most one row per subject per minute (in memory per instance). Best-effort like every audit write.
+ * OAUTH-O2 (spec §12): one audit row for a refused sign-in. actor `person:<email>` when the address is a real even.in one (or the email-code row names it), else `unknown`; action `mcp.oauth_refused`; metadata is the reason
+ * code only (never a token, a code, an emailed sign-in code or an URL). At most one row per subject per minute (in memory per instance). Best-effort like every audit write.
  */
 const refusedLast = new Map<string, number>();
 export async function auditOauthRefused(subjectEmail: string | null, reason: string, now: number = Date.now()): Promise<boolean> {

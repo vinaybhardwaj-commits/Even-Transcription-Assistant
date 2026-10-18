@@ -1,5 +1,5 @@
 -- =====================================================================
--- Migration 0170 — MCP OAuth (slice O2): allowlist, clients, one-time codes, tokens.
+-- Migration 0170 — MCP OAuth (slice O2): allowlist, clients, one-time codes, tokens, email sign-in codes.
 -- Number 0170 reserved by gating-lead.
 -- Spec: SPEC-SCRIBE-MCP-OAUTH-PER-PERSON-16OCT.md §5. Nothing here is read by /api/mcp yet (that is slice O3).
 --
@@ -70,9 +70,24 @@ CREATE TABLE IF NOT EXISTS mcp_oauth_family (
   reason      text
 );
 
+-- EMAIL SIGN-IN CODE (V ruling 18 Oct 2026: no Google). One row per mailed 6-digit code. code_hash = sha256(MCP_OAUTH_TOKEN_PEPPER || pending_id || code): the code itself is never stored, and a code only
+-- matches the pending flow it was issued to. attempts counts tries on this row; used_at makes it single use; expires_at is 10 minutes after creation. No data is seeded.
+CREATE TABLE IF NOT EXISTS mcp_oauth_email_code (
+  id          bigserial PRIMARY KEY,
+  pending_id  text NOT NULL,
+  email       text NOT NULL,
+  code_hash   text NOT NULL,
+  expires_at  timestamptz NOT NULL,
+  attempts    integer NOT NULL DEFAULT 0,
+  used_at     timestamptz,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS mcp_oauth_token_email_idx   ON mcp_oauth_token (email);
 CREATE INDEX IF NOT EXISTS mcp_oauth_token_family_idx  ON mcp_oauth_token (family_id);
 CREATE INDEX IF NOT EXISTS mcp_oauth_code_expires_idx  ON mcp_oauth_code (expires_at);
+CREATE INDEX IF NOT EXISTS mcp_oauth_email_code_pending_idx ON mcp_oauth_email_code (pending_id);
+CREATE INDEX IF NOT EXISTS mcp_oauth_email_code_email_idx   ON mcp_oauth_email_code (email, created_at);
 
 INSERT INTO schema_migrations (version, name)
 VALUES (170, '0170_mcp_oauth')

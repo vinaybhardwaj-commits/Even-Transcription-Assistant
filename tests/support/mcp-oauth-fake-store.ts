@@ -17,10 +17,12 @@ export const state = {
   created: new Map<string, number>(), // token hash -> tick of creation
   codeCreated: new Map<string, number>(), // code hash -> tick of creation
   burned: new Set<string>(), // R3: consent csrf hashes already used
+  emailCodes: new Map<string, { id: string; pending_id: string; email: string; code_hash: string; attempts: number; used: boolean; exp: number; created: number; seq: number }>(),
   familyBorn: new Map<string, number>(), // family id -> Date.now() of its first token (R2 F3); a test may backdate it
 };
 export function resetFakeStore(): void {
   for (const m of Object.values(state)) m.clear();
+  emailClock.offsetMs = 0;
 }
 export const addPerson = (email: string, scopes = ["read", "invoke", "write", "admin"], status: "active" | "revoked" = "active"): void => {
   const old = state.people.get(email);
@@ -104,4 +106,33 @@ export const revokePerson = async (email: string, _by: string) => {
   const fams = new Set([...state.tokens.values()].filter((t) => t.email === email).map((t) => t.family_id));
   for (const f of fams) state.families.add(f);
   return { person_found: Boolean(p), was_active: wasActive, tokens_revoked: n, families_tombstoned: fams.size };
+};
+
+// ─── email codes ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+let emailSeq = 0;
+/** a test may move time: rows are aged by subtracting from `created` and `exp` through this offset */
+export const emailClock = { offsetMs: 0 };
+const nowE = (): number => Date.now() + emailClock.offsetMs;
+export const insertEmailCode = async (c: { pending_id: string; email: string; code_hash: string; ttl_s: number; max_per_email: number; window_s: number; max_attempts: number }) => {
+  const rows = [...state.emailCodes.values()];
+  if (rows.filter((r) => r.email === c.email && r.created > nowE() - c.window_s * 1000).length >= c.max_per_email) return null;
+  if (rows.filter((r) => r.pending_id === c.pending_id).reduce((a, r) => a + r.attempts, 0) >= c.max_attempts) return null;
+  const id = String(++emailSeq);
+  state.emailCodes.set(id, { id, pending_id: c.pending_id, email: c.email, code_hash: c.code_hash, attempts: 0, used: false, exp: nowE() + c.ttl_s * 1000, created: nowE(), seq: emailSeq });
+  return id;
+};
+export const countRecentEmailCodes = async (email: string, windowS: number) => [...state.emailCodes.values()].filter((r) => r.email === email && r.created > nowE() - windowS * 1000).length;
+export const deleteEmailCode = async (id: string) => { state.emailCodes.delete(id); };
+export const takeEmailAttempt = async (pendingId: string, max: number) => {
+  const mine = [...state.emailCodes.values()].filter((r) => r.pending_id === pendingId);
+  const live = mine.filter((r) => !r.used && r.exp > nowE() && r.attempts < max).sort((a, b) => b.seq - a.seq)[0];
+  if (!live || mine.reduce((a, r) => a + r.attempts, 0) >= max) return null;
+  live.attempts += 1;
+  return { id: live.id, email: live.email, code_hash: live.code_hash };
+};
+export const consumeEmailCode = async (id: string) => {
+  const r = state.emailCodes.get(id);
+  if (!r || r.used) return false;
+  r.used = true;
+  return true;
 };

@@ -3,12 +3,13 @@
  *
  * Order: response_type, client_id, redirect_uri (errors up to here are a plain HTML page: the return address is not yet trusted), then code_challenge (S256 only), resource,
  * state (errors redirect with error, state and iss). On success the pending request is stored in a SIGNED HttpOnly Secure SameSite=Lax cookie (HMAC key derived from the pepper,
- * path-scoped to the Google callback, 10 min) and the browser goes to Google. No database row, no token, no Google secret in the URL.
+ * path-scoped to /api/oauth/email, 10 min, carrying a random pending id) and the page "enter your even.in email" is rendered. The identity step is a one-time email code
+ * (email/start, email/verify), then the consent page (email/consent). No database row, no token, no secret in the URL.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { PENDING_COOKIE, PENDING_PURPOSE, PENDING_TTL_S, mcpResourceUrl } from "@/lib/mcp/oauth/config";
-import { randomId, s256, signBlob, validChallenge } from "@/lib/mcp/oauth/crypto";
-import { googleAuthUrl } from "@/lib/mcp/oauth/google";
+import { EMAIL_PATH, PENDING_COOKIE, PENDING_PURPOSE, PENDING_TTL_S, mcpResourceUrl } from "@/lib/mcp/oauth/config";
+import { randomId, signBlob, validChallenge } from "@/lib/mcp/oauth/crypto";
+import { emailEntryPage } from "@/lib/mcp/oauth/email";
 import { htmlError, NO_STORE, oauthGate, redirectError } from "@/lib/mcp/oauth/http";
 import { resolveClient } from "@/lib/mcp/oauth/clients";
 import { redirectMatches } from "@/lib/mcp/oauth/redirects";
@@ -17,7 +18,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
-  const blocked = oauthGate({ google: true });
+  const blocked = oauthGate({ email: true });
   if (blocked) return blocked.status === 404 ? blocked : htmlError(503, "server_error");
 
   const q = req.nextUrl.searchParams; // NOTE: NextRequest rewrites a loopback IP inside a query value to localhost (seen in tests, Next NextURL); redirectMatches is unit-tested on the IP form directly
@@ -42,14 +43,11 @@ export async function GET(req: NextRequest) {
   if (q.get("code_challenge_method") !== "S256" || !validChallenge(challenge)) return redirectError(redirectUri, "invalid_request", state);
   if (q.get("resource") !== mcpResourceUrl()) return redirectError(redirectUri, "invalid_target", state);
 
-  const verifier = randomId(48);
-  const gState = randomId(24);
-  const nonce = randomId(24);
   const pending = signBlob(PENDING_PURPOSE, {
     cid: clientId, ru: redirectUri, cc: challenge, st: state, res: mcpResourceUrl(),
-    gs: gState, nonce, gv: verifier, exp: Math.floor(Date.now() / 1000) + PENDING_TTL_S,
+    pid: randomId(24), exp: Math.floor(Date.now() / 1000) + PENDING_TTL_S,
   });
-  const res = new NextResponse(null, { status: 302, headers: { location: googleAuthUrl({ state: gState, nonce, challenge: s256(verifier) }), ...NO_STORE } });
-  res.cookies.set(PENDING_COOKIE, pending, { httpOnly: true, secure: true, sameSite: "lax", path: "/api/oauth/google/callback", maxAge: PENDING_TTL_S });
+  const res = emailEntryPage();
+  res.cookies.set(PENDING_COOKIE, pending, { httpOnly: true, secure: true, sameSite: "lax", path: EMAIL_PATH, maxAge: PENDING_TTL_S });
   return res;
 }

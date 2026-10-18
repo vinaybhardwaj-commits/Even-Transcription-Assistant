@@ -5,15 +5,14 @@
  */
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { SignJWT, generateKeyPair, exportJWK, createLocalJWKSet, type KeyLike } from "jose";
 
 vi.mock("@/lib/db", () => ({ sql: vi.fn(async () => []) }));
 vi.mock("@/lib/mcp/oauth/store", async () => await import("../support/mcp-oauth-fake-store"));
 
 import * as fake from "../support/mcp-oauth-fake-store";
+import { resetEmailLimitForTests } from "@/lib/mcp/oauth/email-limit";
 import { GET as authorizeGet } from "@/app/api/oauth/authorize/route";
-import { GET as callbackGet } from "@/app/api/oauth/google/callback/route";
-import { setJwksForTests } from "@/lib/mcp/oauth/google";
+import { resendFetch, resetMail, toConsentFrom } from "../support/mcp-oauth-email-flow";
 import { POST as tokenPost } from "@/app/api/oauth/token/route";
 import { POST as registerPost } from "@/app/api/oauth/register/route";
 import { resetRegisterLimitForTests } from "@/lib/mcp/oauth/register-limit";
@@ -24,25 +23,19 @@ import { hashSecret, randomToken, s256 } from "@/lib/mcp/oauth/crypto";
 const RESOURCE = "https://www.evenscribe.app/api/mcp";
 const ALICE = "alice@example.test";
 const ENV = { ...process.env };
-let privateKey: KeyLike;
-let jwks: ReturnType<typeof createLocalJWKSet>;
-beforeAll(async () => {
-  const kp = await generateKeyPair("RS256");
-  privateKey = kp.privateKey;
-  jwks = createLocalJWKSet({ keys: [{ ...(await exportJWK(kp.publicKey)), kid: "k1", alg: "RS256", use: "sig" }] });
-});
-
 beforeEach(() => {
   fake.resetFakeStore();
+  resetEmailLimitForTests();
   resetRegisterLimitForTests();
   process.env.SCRIBE_MCP_OAUTH = "on";
   process.env.MCP_OAUTH_TOKEN_PEPPER = "p".repeat(32);
-  process.env.GOOGLE_OAUTH_CLIENT_ID = "synthetic-google-client-id";
-  process.env.GOOGLE_OAUTH_CLIENT_SECRET = "q".repeat(24);
+  process.env.RESEND_API_KEY = "re_synthetic";
+  process.env.RESEND_FROM_EMAIL = "noreply@example.test";
+  resetMail();
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => (await resendFetch(input, init)) ?? new Response("{}", { status: 404 })));
 });
 afterEach(() => {
   process.env = { ...ENV };
-  setJwksForTests(null);
   vi.unstubAllGlobals();
 });
 
@@ -67,7 +60,7 @@ describe("R-SSRF (fixed by R2 F4): IPv6 forms that embed or alias IPv4, and non-
 });
 
 describe("R-CONSENT (fixed by R2 F2): an authorize URL built by someone else reaches a same-origin page naming the client before any code exists", () => {
-  it("DCR client with the claude.ai callback: authorize goes to Google, and the callback then renders the HTML consent step with no code", async () => {
+  it("DCR client with the claude.ai callback: authorize asks for the email, and after the emailed code verify renders the HTML consent step with no auth code", async () => {
     process.env.SCRIBE_MCP_OAUTH_DOMAIN_TEST = "example.test";
     fake.addPerson(ALICE);
     const reg = await registerPost(new NextRequest("https://www.evenscribe.app/api/oauth/register", { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.9" }, body: JSON.stringify({ redirect_uris: [CLAUDE_CALLBACK], client_name: "anything" }) }));
@@ -75,22 +68,12 @@ describe("R-CONSENT (fixed by R2 F2): an authorize URL built by someone else rea
     const { client_id } = (await reg.json()) as { client_id: string };
     const q = new URLSearchParams({ response_type: "code", client_id, redirect_uri: CLAUDE_CALLBACK, code_challenge: s256("a".repeat(43)), code_challenge_method: "S256", resource: RESOURCE, state: "attacker-session-state" });
     const res = await authorizeGet(new NextRequest(`https://www.evenscribe.app/api/oauth/authorize?${q}`));
-    expect(res.status).toBe(302);
-    const g = new URL(res.headers.get("location")!);
-    expect(g.host).toBe("accounts.google.com");
+    expect(res.status).toBe(200); // the "enter your email" page, not a redirect to anyone
     const cookie = res.cookies.get("mcp_oauth_pending")!.value;
-    setJwksForTests(jwks);
-    const idToken = await new SignJWT({ email: ALICE, email_verified: true, hd: "example.test", nonce: g.searchParams.get("nonce")! }).setProtectedHeader({ alg: "RS256", kid: "k1" })
-      .setIssuer("https://accounts.google.com").setAudience("synthetic-google-client-id").setSubject("sub-1").setIssuedAt().setExpirationTime("5m").sign(privateKey);
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id_token: idToken }), { status: 200 })));
-    const cb = new URL("https://www.evenscribe.app/api/oauth/google/callback");
-    cb.searchParams.set("state", g.searchParams.get("state")!);
-    cb.searchParams.set("code", "google-code-synthetic");
-    const page = await callbackGet(new NextRequest(cb.toString(), { headers: { cookie: `mcp_oauth_pending=${cookie}` } }));
+    const { page, html } = await toConsentFrom(cookie, ALICE);
     expect(page.status).toBe(200);
     expect(page.headers.get("content-type")).toContain("text/html");
     expect(page.headers.get("location")).toBeNull();
-    const html = await page.text();
     expect(html).toContain("anything (self-registered)");
     expect(html).toContain('<dd data-consent="redirect-host">claude.ai</dd>');
     expect(fake.state.codes.size).toBe(0);

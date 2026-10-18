@@ -46,6 +46,61 @@ export async function insertCode(c: { code_hash: string; client_id: string; emai
   `;
 }
 
+// ─── email codes (migration 0170, mcp_oauth_email_code): hashes only, never the code ─────────────────────────────────────────────────────────────
+
+/**
+ * Inserts a code row UNLESS the address already has `maxPerEmail` rows in the last `windowS` seconds, or this pending flow has already burned `maxAttempts` wrong tries (it is dead).
+ * One statement, so the rate limit holds across instances. Returns the new row id, or null when refused (the caller answers identically either way).
+ */
+export async function insertEmailCode(c: { pending_id: string; email: string; code_hash: string; ttl_s: number; max_per_email: number; window_s: number; max_attempts: number }): Promise<string | null> {
+  const rows = (await sql`
+    INSERT INTO mcp_oauth_email_code (pending_id, email, code_hash, expires_at)
+    SELECT ${c.pending_id}, ${c.email}, ${c.code_hash}, now() + (${c.ttl_s} * interval '1 second')
+    WHERE (SELECT count(*) FROM mcp_oauth_email_code WHERE email = ${c.email} AND created_at > now() - (${c.window_s} * interval '1 second')) < ${c.max_per_email}
+      AND (SELECT COALESCE(sum(attempts), 0) FROM mcp_oauth_email_code WHERE pending_id = ${c.pending_id}) < ${c.max_attempts}
+    RETURNING id
+  `) as Array<{ id: string | number }>;
+  return rows[0] ? String(rows[0].id) : null;
+}
+
+/** The same read-side query the qualifying path pays for, run for a non-qualifying address so the two paths cost the same. Returns the count. */
+export async function countRecentEmailCodes(email: string, windowS: number): Promise<number> {
+  const rows = (await sql`SELECT count(*)::int AS n FROM mcp_oauth_email_code WHERE email = ${email} AND created_at > now() - (${windowS} * interval '1 second')`) as Array<{ n: number }>;
+  return rows[0]?.n ?? 0;
+}
+
+/** The code could not be sent: the row is not kept. */
+export async function deleteEmailCode(id: string): Promise<void> {
+  await sql`DELETE FROM mcp_oauth_email_code WHERE id = ${id}`;
+}
+
+/**
+ * Spends one attempt on the newest live code of this pending flow and returns it. Live = unused, unexpired, fewer than `maxAttempts` tries on the row, and fewer than `maxAttempts` tries
+ * across the WHOLE pending flow (so asking for a new code never resets the budget). The increment happens BEFORE the compare, atomically, so parallel guesses cannot exceed the cap.
+ * Null = nothing to try: expired, used, none issued, or the flow is dead.
+ */
+export async function takeEmailAttempt(pendingId: string, maxAttempts: number): Promise<{ id: string; email: string; code_hash: string } | null> {
+  const rows = (await sql`
+    UPDATE mcp_oauth_email_code SET attempts = attempts + 1
+    WHERE id = (
+      SELECT id FROM mcp_oauth_email_code
+      WHERE pending_id = ${pendingId} AND used_at IS NULL AND expires_at > now() AND attempts < ${maxAttempts}
+      ORDER BY created_at DESC, id DESC LIMIT 1
+    )
+      AND attempts < ${maxAttempts}
+      AND (SELECT COALESCE(sum(attempts), 0) FROM mcp_oauth_email_code WHERE pending_id = ${pendingId}) < ${maxAttempts}
+    RETURNING id, email, code_hash
+  `) as Array<{ id: string | number; email: string; code_hash: string }>;
+  const r = rows[0];
+  return r ? { id: String(r.id), email: r.email, code_hash: r.code_hash } : null;
+}
+
+/** Atomic single-use claim of a verified code. True only for the first caller. */
+export async function consumeEmailCode(id: string): Promise<boolean> {
+  const rows = (await sql`UPDATE mcp_oauth_email_code SET used_at = now() WHERE id = ${id} AND used_at IS NULL RETURNING id`) as unknown[];
+  return rows.length > 0;
+}
+
 /** R3: atomic single-use claim of a consent page (migration 0172). True only for the FIRST Allow or Deny that presents this CSRF hash; every replay gets false. */
 export async function burnConsent(csrfHash: string): Promise<boolean> {
   const rows = (await sql`

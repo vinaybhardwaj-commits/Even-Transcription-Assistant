@@ -11,17 +11,16 @@ import { createServer, get as httpGet } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NextRequest, type NextResponse } from "next/server";
-import { SignJWT, generateKeyPair, exportJWK, createLocalJWKSet, type KeyLike } from "jose";
 
 const audit: Array<{ text: string; values: unknown[] }> = [];
 vi.mock("@/lib/db", () => ({ sql: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => { audit.push({ text: strings.join("?"), values }); return []; }) }));
 vi.mock("@/lib/mcp/oauth/store", async () => await import("../support/mcp-oauth-fake-store"));
 
 import * as fake from "../support/mcp-oauth-fake-store";
+import { resetEmailLimitForTests } from "@/lib/mcp/oauth/email-limit";
 import { GET as authorizeGet } from "@/app/api/oauth/authorize/route";
-import { GET as callbackGet, POST as callbackPost } from "@/app/api/oauth/google/callback/route";
+import { CONSENT_URL, consentPost as consentRoutePost, resendFetch, resetMail, toConsentFrom, verify } from "../support/mcp-oauth-email-flow";
 import { POST as tokenPost } from "@/app/api/oauth/token/route";
-import { setJwksForTests } from "@/lib/mcp/oauth/google";
 import { isForbiddenAddress, resolvePublic, setResolverForTests, setTransportForTests } from "@/lib/mcp/oauth/ssrf";
 import { resetDeniedAuditForTests } from "@/lib/mcp/audit";
 import { CLAUDE_CALLBACK } from "@/lib/mcp/oauth/config";
@@ -29,72 +28,54 @@ import { hashSecret, randomToken, s256 } from "@/lib/mcp/oauth/crypto";
 
 const RESOURCE = "https://www.evenscribe.app/api/mcp";
 const SITE = "https://www.evenscribe.app";
-const CB = `${SITE}/api/oauth/google/callback`;
+const CB = CONSENT_URL;
 const CIMD = "https://client.example.test/oauth/meta.json";
 const ALICE = "alice@example.test";
 const VERIFIER = "v".repeat(43);
 const ENV = { ...process.env };
 const DAY = 24 * 3600 * 1000;
 
-let privateKey: KeyLike;
-let jwks: ReturnType<typeof createLocalJWKSet>;
-beforeAll(async () => {
-  const kp = await generateKeyPair("RS256");
-  privateKey = kp.privateKey;
-  jwks = createLocalJWKSet({ keys: [{ ...(await exportJWK(kp.publicKey)), kid: "k1", alg: "RS256", use: "sig" }] });
-});
-
-let nonce = "";
 beforeEach(() => {
   fake.resetFakeStore();
+  resetEmailLimitForTests();
   fake.addPerson(ALICE);
   audit.length = 0;
   resetDeniedAuditForTests();
   process.env.SCRIBE_MCP_OAUTH = "on";
   process.env.MCP_OAUTH_TOKEN_PEPPER = "p".repeat(32);
-  process.env.GOOGLE_OAUTH_CLIENT_ID = "synthetic-google-client-id";
-  process.env.GOOGLE_OAUTH_CLIENT_SECRET = "q".repeat(24);
+  process.env.RESEND_API_KEY = "re_synthetic";
+  process.env.RESEND_FROM_EMAIL = "noreply@example.test";
+  resetMail();
   process.env.SCRIBE_MCP_OAUTH_DOMAIN_TEST = "example.test";
-  setJwksForTests(jwks);
   // a public address for the CIMD host, written as IPv4-mapped hex so no dotted literal sits in this file
   setResolverForTests(async () => [{ address: "::ffff:5db8:d822", family: 6 }]);
   setTransportForTests(async (url, _pinned, signal) => fetch(url.toString(), { signal }));
-  vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
+    const mail = resendFetch(input, init);
+    if (mail) return mail;
     if (url === CIMD) return new Response(JSON.stringify({ client_id: CIMD, client_name: "Synthetic", redirect_uris: [CLAUDE_CALLBACK] }), { status: 200 });
-    if (url === "https://oauth2.googleapis.com/token") {
-      const id = await new SignJWT({ email: ALICE, email_verified: true, hd: "example.test", nonce }).setProtectedHeader({ alg: "RS256", kid: "k1" })
-        .setIssuer("https://accounts.google.com").setAudience("synthetic-google-client-id").setSubject("sub-1").setIssuedAt().setExpirationTime("5m").sign(privateKey);
-      return new Response(JSON.stringify({ id_token: id }), { status: 200 });
-    }
     throw new Error(`unexpected fetch ${url}`);
   }));
 });
 afterEach(() => {
   process.env = { ...ENV };
-  setJwksForTests(null);
   setResolverForTests(null);
   setTransportForTests(null);
   vi.unstubAllGlobals();
 });
 
-/** authorize, then Google: returns the consent page response, its re-signed cookie and its CSRF token. */
+/** authorize, the emailed code, verify: returns the consent page response, its re-signed cookie and its CSRF token. */
 async function toConsent() {
   const q = new URLSearchParams({ response_type: "code", client_id: CIMD, redirect_uri: CLAUDE_CALLBACK, code_challenge: s256(VERIFIER), code_challenge_method: "S256", resource: RESOURCE, state: "st-9" });
   const a = await authorizeGet(new NextRequest(`${SITE}/api/oauth/authorize?${q}`));
-  expect(a.status).toBe(302);
-  const g = new URL(a.headers.get("location")!);
-  nonce = g.searchParams.get("nonce")!;
-  const u = new URL(CB);
-  u.searchParams.set("state", g.searchParams.get("state")!);
-  u.searchParams.set("code", "google-code-synthetic");
-  const page = (await callbackGet(new NextRequest(u.toString(), { headers: { cookie: `mcp_oauth_pending=${a.cookies.get("mcp_oauth_pending")!.value}` } }))) as NextResponse;
-  expect(page.status).toBe(200);
-  const html = await page.text();
-  return { page, html, cookie: page.cookies.get("mcp_oauth_pending")!.value, csrf: /name="csrf" value="([^"]+)"/.exec(html)![1]! };
+  expect(a.status).toBe(200);
+  const c = await toConsentFrom(a.cookies.get("mcp_oauth_pending")!.value, ALICE);
+  expect(c.page.status).toBe(200);
+  return c;
 }
 const post = (cookie: string, body: string, headers: Record<string, string> = {}) =>
-  callbackPost(new NextRequest(CB, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", cookie: `mcp_oauth_pending=${cookie}`, ...headers }, body }));
+  consentRoutePost(cookie, Object.fromEntries(new URLSearchParams(body)), headers);
 const refusals = () => audit.filter((r) => r.text.includes("mcp.oauth_refused"));
 
 // ─── R2-P1: what a real browser sends with the consent form ─────────────────────────────────────────────────────────────────────────────────────────
@@ -140,7 +121,7 @@ async function originChromeSends(page: { body: string; headers: Headers }, dropR
     await send("Page.enable");
     const loaded = () => new Promise<void>((r) => { const on = (ev: MessageEvent) => { if (JSON.parse(String(ev.data)).method === "Page.loadEventFired") { sock.removeEventListener("message", on); r(); } }; sock.addEventListener("message", on); });
     let l = loaded();
-    await send("Page.navigate", { url: `http://127.0.0.1:${port}/api/oauth/google/callback?state=s&code=c` });
+    await send("Page.navigate", { url: `http://127.0.0.1:${port}/api/oauth/email/verify` });
     await l;
     l = loaded();
     await send("Runtime.evaluate", { expression: `document.querySelector('button[value="allow"]').click()` });
@@ -156,10 +137,10 @@ async function originChromeSends(page: { body: string; headers: Headers }, dropR
   }
 }
 
-describe.skipIf(!existsSync(CHROME))("R2-P1 (finding 1, fixed in R3): the consent page's Referrer-Policy is same-origin, so Chromium sends the page origin and Allow mints", () => {
+describe.skipIf(!existsSync(CHROME))("R2-P1 (finding 1, fixed in R3): the consent page's Referrer-Policy is strict-origin, so Chromium sends the page origin and Allow mints", () => {
   it("real Chromium clicking Allow on the real page sends the page's own origin (not null); the real POST with that same-origin Origin is 303 with code, state and iss", async () => {
     const c = await toConsent();
-    expect(c.page.headers.get("referrer-policy")).toBe("same-origin");
+    expect(c.page.headers.get("referrer-policy")).toBe("strict-origin");
     const origin = await originChromeSends({ body: c.html, headers: c.page.headers }, false);
     expect(origin).not.toBe("null");
     expect(origin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
@@ -175,16 +156,6 @@ describe.skipIf(!existsSync(CHROME))("R2-P1 (finding 1, fixed in R3): the consen
     expect(JSON.stringify(refusals().map((r) => r.values))).not.toContain("consent_csrf");
   }, 60_000);
 
-  it("the Origin check is kept: Origin null (what no-referrer produced) is still refused with a 400 consent_csrf and no code", async () => {
-    const c = await toConsent();
-    audit.length = 0;
-    const res = await post(c.cookie, new URLSearchParams({ csrf: c.csrf, decision: "allow" }).toString(), { origin: "null" });
-    expect(res.status).toBe(400);
-    expect(res.headers.get("location")).toBeNull();
-    expect(fake.state.codes.size).toBe(0);
-    expect(JSON.stringify(refusals().map((r) => r.values))).toContain("consent_csrf");
-  });
-
   it("control: the same page WITHOUT the Referrer-Policy header gives the page's own origin, and the POST then mints (303 with code, state, iss)", async () => {
     const c = await toConsent();
     const origin = await originChromeSends({ body: c.html, headers: c.page.headers }, true);
@@ -196,6 +167,18 @@ describe.skipIf(!existsSync(CHROME))("R2-P1 (finding 1, fixed in R3): the consen
     expect(to.searchParams.get("code")).toBeTruthy();
     expect(to.searchParams.get("iss")).toBeTruthy();
   }, 60_000);
+});
+
+describe("R2-P1 (null Origin): runs without Chromium", () => {
+  it("the Origin check is kept: Origin null (what no-referrer produced) is still refused with a 400 consent_csrf and no code", async () => {
+    const c = await toConsent();
+    audit.length = 0;
+    const res = await post(c.cookie, new URLSearchParams({ csrf: c.csrf, decision: "allow" }).toString(), { origin: "null" });
+    expect(res.status).toBe(400);
+    expect(res.headers.get("location")).toBeNull();
+    expect(fake.state.codes.size).toBe(0);
+    expect(JSON.stringify(refusals().map((r) => r.values))).toContain("consent_csrf");
+  });
 });
 
 // ─── R2-P2: consent step, independent of the builder's tests ────────────────────────────────────────────────────────────────────────────────────────
@@ -224,9 +207,9 @@ describe("R2-P2: consent step bindings (verified, plus finding 2)", () => {
     expect(fake.state.codes.size).toBe(0);
   });
 
-  it("the consent blob cannot pass the GET and the pre-Google blob cannot pass the POST (purpose binding)", async () => {
+  it("the consent blob cannot pass verify and the pre-code blob cannot pass the consent POST (purpose binding)", async () => {
     const c = await toConsent();
-    const g = await callbackGet(new NextRequest(`${CB}?state=x&code=y`, { headers: { cookie: `mcp_oauth_pending=${c.cookie}` } }));
+    const g = await verify(c.cookie, "123456");
     expect(g.status).toBe(400);
     expect(g.headers.get("location")).toBeNull();
     const q = new URLSearchParams({ response_type: "code", client_id: CIMD, redirect_uri: CLAUDE_CALLBACK, code_challenge: s256(VERIFIER), code_challenge_method: "S256", resource: RESOURCE, state: "s" });
@@ -248,14 +231,15 @@ describe("R2-P2: consent step bindings (verified, plus finding 2)", () => {
     const body = new URLSearchParams({ csrf: c.csrf, decision: "allow" }).toString();
     const r1 = await post(c.cookie, body, { origin: SITE });
     const r2 = await post(c.cookie, body, { origin: SITE });
-    expect([r1.status, r2.status]).toEqual([303, 400]);
-    expect(r2.headers.get("location")).toBeNull();
+    expect([r1.status, r2.status]).toEqual([303, 303]);
+    expect(new URL(r2.headers.get("location")!).searchParams.get("error")).toBe("access_denied"); // R3 fold-in: the client can restart
+    expect(new URL(r2.headers.get("location")!).searchParams.get("code")).toBeNull();
     expect(fake.state.codes.size).toBe(1);
     const d = await toConsent();
     expect((await post(d.cookie, new URLSearchParams({ csrf: d.csrf, decision: "deny" }).toString(), { origin: SITE })).status).toBe(303);
     const again = await post(d.cookie, new URLSearchParams({ csrf: d.csrf, decision: "allow" }).toString(), { origin: SITE });
-    expect(again.status).toBe(400);
-    expect(again.headers.get("location")).toBeNull();
+    expect(again.status).toBe(303);
+    expect(new URL(again.headers.get("location")!).searchParams.get("code")).toBeNull();
     expect(fake.state.codes.size).toBe(1);
     expect(JSON.stringify(refusals().map((r) => r.values))).toContain("consent_replay");
   });
@@ -333,7 +317,7 @@ describe("R2-P6: the pending_missing refusal row is written before the 400 retur
     const { sql } = await import("@/lib/db");
     let written = false;
     (sql as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => { await new Promise((r) => setTimeout(r, 20)); written = true; return []; });
-    const res = await callbackGet(new NextRequest(`${CB}?state=x&code=y`));
+    const res = await verify("", "123456");
     expect(res.status).toBe(400);
     expect(written).toBe(true);
   });

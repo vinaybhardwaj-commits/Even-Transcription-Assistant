@@ -1,6 +1,6 @@
 /**
- * lib/mcp/oauth/consent.ts — R2 F2 (RFC 9700 §4.5, MCP security best practice on consent): the same-origin page shown AFTER Google sign-in succeeds and BEFORE any code is minted.
- * It names the client (the metadata-document host, or the registered client_name) and the host the code would go to, and offers Allow and Deny as a POST back to the callback.
+ * lib/mcp/oauth/consent.ts — R2 F2 (RFC 9700 §4.5, MCP security best practice on consent): the same-origin page shown AFTER the email code is verified and BEFORE any code is minted.
+ * It names the client (the metadata-document host, or the registered client_name) and the host the code would go to, and offers Allow and Deny as a POST to email/consent.
  * The POST is bound to the signed consent cookie (HttpOnly, SameSite=Lax, path-scoped) AND a CSRF token that lives both in that cookie and in the form. Every value shown is escaped.
  */
 import { createHash } from "node:crypto";
@@ -35,7 +35,7 @@ export function consentPage(p: { clientLabel: string; redirectHost: string; emai
   return new NextResponse(html, {
     status: 200,
     headers: {
-      "content-type": "text/html; charset=utf-8", ...NO_STORE, "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "same-origin", // R3: no-referrer makes the browser send Origin: null on the POST, which the Origin check refuses
+      "content-type": "text/html; charset=utf-8", ...NO_STORE, "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "strict-origin", // R3: no-referrer makes the browser send Origin: null on the POST, which the Origin check refuses; strict-origin sends the origin alone, never a full URL
       // no form-action: browsers apply it to the redirect after the POST, which would block the hop back to the client
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
     },

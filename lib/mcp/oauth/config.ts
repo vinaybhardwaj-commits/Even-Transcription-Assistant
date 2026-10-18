@@ -62,7 +62,7 @@ export function mcpChallengeHeader(): string {
 
 // ─── O2: the authorization server ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The one Workspace domain that may sign in (V ruling, 16 Oct). */
+/** The one email domain that may sign in (V ruling, 16 Oct). */
 export const MCP_OAUTH_DOMAIN = "even.in";
 /** Test-only override of the domain. Honoured ONLY when NODE_ENV is "test"; in production it is ignored. */
 export const MCP_OAUTH_DOMAIN_TEST_ENV = "SCRIBE_MCP_OAUTH_DOMAIN_TEST";
@@ -73,9 +73,9 @@ export const mcpOauthDomain = (): string => {
 
 /** Secret, read-only. Peppers every stored hash. Absent or short = every OAuth endpoint answers 503 server_error. */
 export const MCP_OAUTH_PEPPER_ENV = "MCP_OAUTH_TOKEN_PEPPER";
-/** Secrets, read-only. Needed by authorize and the Google callback only. */
-export const GOOGLE_CLIENT_ID_ENV = "GOOGLE_OAUTH_CLIENT_ID";
-export const GOOGLE_CLIENT_SECRET_ENV = "GOOGLE_OAUTH_CLIENT_SECRET";
+/** Secrets, read-only (the same two the rest of EvenScribe already uses for Resend). Needed by authorize, email/start and email/verify only. */
+export const RESEND_API_KEY_ENV = "RESEND_API_KEY";
+export const RESEND_FROM_ENV = "RESEND_FROM_EMAIL";
 
 export const ACCESS_TOKEN_TTL_S = 3600;
 export const REFRESH_TOKEN_TTL_S = 30 * 24 * 3600;
@@ -84,7 +84,7 @@ export const CIMD_TTL_MS = 24 * 3600 * 1000;
 export const CIMD_TIMEOUT_MS = 5000;
 export const CIMD_MAX_BYTES = 64 * 1024;
 export const PENDING_TTL_S = 600;
-/** R2 F2: the consent step. After Google, the pending cookie is re-signed under CONSENT_PURPOSE (a pre-Google blob cannot pass the POST, nor a consent blob the GET) and lives 5 min. */
+/** R2 F2: the consent step. After the email code, the pending cookie is re-signed under CONSENT_PURPOSE (a pre-code blob cannot pass the consent POST) and lives 5 min. */
 export const CONSENT_PURPOSE = "consent";
 export const CONSENT_TTL_S = 300;
 /** R2 F3: a refresh family is refused this long after its FIRST token (mcp_oauth_token.created_at), however often it rotates. */
@@ -93,3 +93,11 @@ export const REFRESH_FAMILY_MAX_AGE_S = 30 * 24 * 3600;
 export const CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback";
 export const PENDING_COOKIE = "mcp_oauth_pending";
 export const PENDING_PURPOSE = "pending";
+/** The sign-in pages. The pending/consent cookie is path-scoped to this prefix, so it reaches email/start, email/verify and email/consent and nothing else. */
+export const EMAIL_PATH = "/api/oauth/email";
+/** Email-code sign-in (V ruling 18 Oct: no Google). A 6-digit code, 10 min, 5 wrong tries per pending flow, 3 codes per address and 10 starts per IP in 15 min. */
+export const EMAIL_CODE_TTL_S = 600;
+export const EMAIL_CODE_MAX_ATTEMPTS = 5;
+export const EMAIL_RATE_WINDOW_S = 900;
+export const EMAIL_RATE_PER_EMAIL = 3;
+export const EMAIL_RATE_PER_IP = 10;

@@ -1,25 +1,31 @@
 /**
- * OAUTH-O2 — the authorization server: authorize, Google callback, token, register, revoke. Drives the REAL route modules.
- * No live Google (the token exchange is a fetch stub; the JWKS is a locally generated key), no live CIMD fetch (fetch stub), an in-memory store, a fake audit table.
+ * OAUTH-O2 — the authorization server: authorize, email code (start, verify), consent, token, register, revoke. Drives the REAL route modules.
+ * No live Resend (a fetch stub records the mail), no live CIMD fetch (fetch stub), an in-memory store, a fake audit table.
  * Synthetic addresses at example.test only; synthetic secrets only.
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { NextRequest, type NextResponse } from "next/server";
-import { SignJWT, generateKeyPair, exportJWK, createLocalJWKSet, type KeyLike } from "jose";
+import { NextRequest } from "next/server";
 
 const audit: Array<{ text: string; values: unknown[] }> = [];
 vi.mock("@/lib/db", () => ({ sql: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => { audit.push({ text: strings.join("?"), values }); return []; }) }));
 vi.mock("@/lib/mcp/oauth/store", async () => await import("../support/mcp-oauth-fake-store"));
+// after(): captured when `deferMode.capture` (to prove the send is off the response path); otherwise it throws, as it does outside a request scope, and the route runs the work inline.
+const deferred: Array<() => unknown> = [];
+const deferMode = { capture: false };
+vi.mock("next/server", async (orig) => ({ ...(await orig<typeof import("next/server")>()), after: (fn: () => unknown) => { if (!deferMode.capture) throw new Error("outside a request scope"); deferred.push(fn); } }));
 
 import * as fake from "../support/mcp-oauth-fake-store";
 import { GET as authorizeGet } from "@/app/api/oauth/authorize/route";
-import { GET as callbackGet, POST as callbackPost } from "@/app/api/oauth/google/callback/route";
+import { POST as startPost } from "@/app/api/oauth/email/start/route";
+import { POST as verifyPost } from "@/app/api/oauth/email/verify/route";
+import { POST as consentRoutePost } from "@/app/api/oauth/email/consent/route";
+import { CONSENT_URL, consentOf as consentOfPage, consentPost, lastCode, mailed, resend, resendFetch, resetMail, start, verify } from "../support/mcp-oauth-email-flow";
+import { resetEmailLimitForTests } from "@/lib/mcp/oauth/email-limit";
 import { POST as tokenPost } from "@/app/api/oauth/token/route";
 import { POST as registerPost } from "@/app/api/oauth/register/route";
 import { resetRegisterLimitForTests } from "@/lib/mcp/oauth/register-limit";
 import { POST as revokePost } from "@/app/api/oauth/revoke/route";
-import { setJwksForTests } from "@/lib/mcp/oauth/google";
 import { isForbiddenAddress, resolvePublic, setResolverForTests, setTransportForTests, type Resolved } from "@/lib/mcp/oauth/ssrf";
 import { resolveClient, swallowedCountForTests } from "@/lib/mcp/oauth/clients";
 import { resetDeniedAuditForTests } from "@/lib/mcp/audit";
@@ -28,8 +34,7 @@ import { redirectMatches, redirectsEquivalent, isAllowedRedirect } from "@/lib/m
 import { hashSecret, randomToken, s256, signBlob } from "@/lib/mcp/oauth/crypto";
 
 const PEPPER = "p".repeat(32);
-const GCLIENT = "synthetic-google-client-id";
-const GSECRET = "q".repeat(24);
+const RESEND_KEY = "re_" + "q".repeat(24);
 const DOMAIN = "example.test";
 const RESOURCE = "https://www.evenscribe.app/api/mcp";
 const CIMD = "https://client.example.test/oauth/meta.json";
@@ -60,35 +65,12 @@ export const justOutside = (cidr: string, side: "below" | "above"): string => (s
 const hexMapped = (v4: string, prefix: string): string => { const n = v4n(v4); return `${prefix}${(n >>> 16).toString(16)}:${(n & 0xffff).toString(16)}`; };
 const R = { zero: "0.0.0.0/8", ten: "10.0.0.0/8", cgnat: "100.64.0.0/10", loop: "127.0.0.0/8", link: "169.254.0.0/16", b172: "172.16.0.0/12", b192: "192.168.0.0/16", multicast: "224.0.0.0/4", reserved: "240.0.0.0/4", ula: "fc00::/7", ulaFd: "fd00::/8", ll6: "fe80::/10", mc6: "ff00::/8" } as const;
 
-let privateKey: KeyLike;
-let jwks: ReturnType<typeof createLocalJWKSet>;
-beforeAll(async () => {
-  const kp = await generateKeyPair("RS256");
-  privateKey = kp.privateKey;
-  const jwk = await exportJWK(kp.publicKey);
-  jwks = createLocalJWKSet({ keys: [{ ...jwk, kid: "k1", alg: "RS256", use: "sig" }] });
-});
-
-type Claims = { email?: string; hd?: string | null; email_verified?: boolean; aud?: string; iss?: string; nonce?: string | null; expSeconds?: number };
-let claims: Claims;
 let cimdDoc: unknown;
 let cimdMode: "ok" | "hang" | "big" | "status";
 let fetchLog: string[];
-let googleOk: boolean;
 let resolverAnswer: Resolved;
 let pinnedTo: string[];
 
-async function idToken(nonce: string): Promise<string> {
-  const c = claims;
-  const jwt = new SignJWT({
-    email: c.email ?? ALICE, email_verified: c.email_verified ?? true,
-    ...(c.hd === null ? {} : { hd: c.hd ?? DOMAIN }), ...(c.nonce === null ? {} : { nonce: c.nonce ?? nonce }),
-  }).setProtectedHeader({ alg: "RS256", kid: "k1" }).setIssuer(c.iss ?? "https://accounts.google.com").setAudience(c.aud ?? GCLIENT).setSubject("sub-1").setIssuedAt();
-  jwt.setExpirationTime(c.expSeconds ?? Math.floor(Date.now() / 1000) + 300);
-  return jwt.sign(privateKey);
-}
-
-let lastNonce = "";
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
@@ -99,10 +81,8 @@ function installFetch() {
       if (cimdMode === "big") return new Response(JSON.stringify({ client_id: CIMD, redirect_uris: [CLAUDE_CALLBACK], pad: "x".repeat(70_000) }), { status: 200 });
       return new Response(JSON.stringify(cimdDoc), { status: 200, headers: { "content-type": "application/json" } });
     }
-    if (url === "https://oauth2.googleapis.com/token") {
-      if (!googleOk) return new Response("{}", { status: 400 });
-      return new Response(JSON.stringify({ id_token: await idToken(lastNonce), access_token: "google-access-synthetic" }), { status: 200 });
-    }
+    const mail = resendFetch(input, init);
+    if (mail) return mail;
     throw new Error("unexpected fetch");
   }));
 }
@@ -112,8 +92,8 @@ let logs: string[];
 beforeEach(() => {
   process.env.SCRIBE_MCP_OAUTH = "on";
   process.env.MCP_OAUTH_TOKEN_PEPPER = PEPPER;
-  process.env.GOOGLE_OAUTH_CLIENT_ID = GCLIENT;
-  process.env.GOOGLE_OAUTH_CLIENT_SECRET = GSECRET;
+  process.env.RESEND_API_KEY = RESEND_KEY;
+  process.env.RESEND_FROM_EMAIL = "noreply@example.test";
   process.env.SCRIBE_MCP_OAUTH_DOMAIN_TEST = DOMAIN;
   delete process.env.SCRIBE_MCP_RESOURCE_URL;
   delete process.env.SCRIBE_MCP_OAUTH_ISSUER;
@@ -123,12 +103,13 @@ beforeEach(() => {
   resetDeniedAuditForTests();
   resetOauthFlagWarningForTests();
   resetRegisterLimitForTests();
-  setJwksForTests(jwks);
-  claims = {};
+  resetEmailLimitForTests();
+  resetMail();
+  deferred.length = 0;
+  deferMode.capture = false;
   cimdDoc = { client_id: CIMD, client_name: "Synthetic Client", redirect_uris: [CLAUDE_CALLBACK, LOOP], token_endpoint_auth_method: "none" };
   cimdMode = "ok";
   fetchLog = [];
-  googleOk = true;
   logs = [];
   for (const m of ["log", "warn", "error", "info"] as const) vi.spyOn(console, m).mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
   installFetch();
@@ -142,7 +123,6 @@ afterEach(() => {
   process.env = { ...ENV };
   setResolverForTests(null);
   setTransportForTests(null);
-  setJwksForTests(null);
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -158,33 +138,29 @@ const authUrl = (over: Record<string, string | null> = {}) => {
 const authorize = (over: Record<string, string | null> = {}) => authorizeGet(new NextRequest(authUrl(over)));
 const loc = (r: Response) => new URL(r.headers.get("location") ?? "https://none.invalid/");
 
+/** authorize: the "enter your email" page and the pending cookie. */
 async function startSignIn(over: Record<string, string | null> = {}) {
   const res = await authorize(over);
-  expect(res.status).toBe(302);
-  const g = loc(res);
-  lastNonce = g.searchParams.get("nonce") ?? "";
+  expect(res.status).toBe(200);
   const cookie = res.cookies.get("mcp_oauth_pending")?.value ?? "";
-  return { res, g, cookie, gstate: g.searchParams.get("state") ?? "" };
+  return { res, cookie };
 }
-const callback = (cookie: string, params: Record<string, string>) => {
-  const u = new URL("https://www.evenscribe.app/api/oauth/google/callback");
-  for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
-  return callbackGet(new NextRequest(u.toString(), { headers: cookie ? { cookie: `mcp_oauth_pending=${cookie}` } : {} }));
-};
-/** R2 F2: the consent page the callback renders after Google, its re-signed cookie and its CSRF token. */
-async function consentOf(page: Response) {
-  const html = await page.text();
-  const cookie = (page as NextResponse).cookies.get("mcp_oauth_pending")?.value ?? "";
-  return { html, cookie, csrf: /name="csrf" value="([^"]+)"/.exec(html)?.[1] ?? "" };
-}
-const consentPost = (cookie: string, fields: Record<string, string>, headers: Record<string, string> = {}) =>
-  callbackPost(new NextRequest("https://www.evenscribe.app/api/oauth/google/callback", {
-    method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", ...(cookie ? { cookie: `mcp_oauth_pending=${cookie}` } : {}), ...headers }, body: form(fields),
-  }));
-/** authorize, Google, then (when the callback renders the consent page) the person's decision. */
-async function fullSignIn(over: Record<string, string | null> = {}, decision: "allow" | "deny" = "allow") {
+const consentOf = consentOfPage;
+/** start + the mailed code + verify: the consent page (or whatever verify answered). */
+async function consentPageFor(over: Record<string, string | null> = {}, email = ALICE) {
   const s = await startSignIn(over);
-  const page = await callback(s.cookie, { state: s.gstate, code: "google-code-synthetic" });
+  expect((await start(s.cookie, email)).status).toBe(200);
+  expect(mailed).not.toHaveLength(0);
+  const page = await verify(s.cookie, lastCode());
+  return { s, ...(await consentOf(page)) };
+}
+/** authorize, email, code, then (when verify renders the consent page) the person's decision. */
+async function fullSignIn(over: Record<string, string | null> = {}, decision: "allow" | "deny" = "allow", email = ALICE) {
+  const s = await startSignIn(over);
+  const before = mailed.length;
+  const st = await start(s.cookie, email);
+  if (mailed.length === before) return { res: st, to: new URL("https://none.invalid/"), page: st };
+  const page = await verify(s.cookie, lastCode());
   if (page.status !== 200) return { res: page, to: loc(page), page };
   const c = await consentOf(page);
   const res = await consentPost(c.cookie, { csrf: c.csrf, decision }, { origin: "https://www.evenscribe.app" });
@@ -194,6 +170,8 @@ const tokenReq = (o: Record<string, string>, ct = "application/x-www-form-urlenc
   new NextRequest("https://www.evenscribe.app/api/oauth/token", { method: "POST", headers: { "content-type": ct }, body: form(o) });
 const codeBody = (code: string, over: Record<string, string> = {}) => ({ grant_type: "authorization_code", code, client_id: CIMD, redirect_uri: CLAUDE_CALLBACK, code_verifier: VERIFIER, resource: RESOURCE, ...over });
 async function getCode(over: Record<string, string | null> = {}) {
+  fake.state.emailCodes.clear(); // each call is a separate person-visit: keep the 3-per-15-min address limit and the per-IP limit out of the way
+  resetEmailLimitForTests();
   const { to } = await fullSignIn(over);
   expect(to.searchParams.get("code")).toBeTruthy();
   return to.searchParams.get("code") as string;
@@ -204,25 +182,24 @@ async function tokens() {
   return (await res.json()) as { access_token: string; refresh_token: string; token_type: string; expires_in: number; scope: string };
 }
 const refreshBody = (rt: string, over: Record<string, string> = {}) => ({ grant_type: "refresh_token", refresh_token: rt, client_id: CIMD, ...over });
+const lastCodeOf = (text: string): string => /sign-in code: (\d{6})\./.exec(text)?.[1] ?? "";
 const refusalRows = () => audit.filter((a) => a.text.includes("mcp.oauth_refused"));
 
 // ─── authorize ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 describe("authorize", () => {
-  it("success: 302 to Google with PKCE, nonce, state, hd as a hint; a signed HttpOnly Secure SameSite=Lax cookie; no store", async () => {
-    const { res, g, cookie } = await startSignIn();
-    expect(g.origin + g.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth");
-    expect(g.searchParams.get("client_id")).toBe(GCLIENT);
-    expect(g.searchParams.get("redirect_uri")).toBe("https://www.evenscribe.app/api/oauth/google/callback");
-    expect(g.searchParams.get("scope")).toBe("openid email profile");
-    expect(g.searchParams.get("code_challenge_method")).toBe("S256");
-    expect(g.searchParams.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(g.searchParams.get("hd")).toBe(DOMAIN);
-    expect(g.searchParams.get("nonce")).toBeTruthy();
+  it("success: 200 with the enter-your-email page; a signed HttpOnly Secure SameSite=Lax cookie scoped to /api/oauth/email; nothing stored, no redirect", async () => {
+    const { res, cookie } = await startSignIn();
+    const html = await res.text();
+    expect(res.headers.get("location")).toBeNull();
+    expect(html).toContain("enter your even.in email");
+    expect(html).toContain('method="post" action="/api/oauth/email/start"');
     expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("referrer-policy")).toBe("strict-origin");
     const sc = res.headers.get("set-cookie") ?? "";
-    expect(sc).toMatch(/HttpOnly/i); expect(sc).toMatch(/Secure/i); expect(sc).toMatch(/SameSite=lax/i); expect(sc).toMatch(/Path=\/api\/oauth\/google\/callback/);
+    expect(sc).toMatch(/HttpOnly/i); expect(sc).toMatch(/Secure/i); expect(sc).toMatch(/SameSite=lax/i); expect(sc).toMatch(/Path=\/api\/oauth\/email(;|$)/);
     expect(cookie).toContain(".");
-    expect(g.toString()).not.toContain(GSECRET);
+    expect(fake.state.codes.size + fake.state.emailCodes.size).toBe(0);
+    expect(mailed).toHaveLength(0);
   });
 
   it("pre-trust refusals are a plain HTML page, never a redirect: bad response_type, unknown client, unregistered redirect_uri", async () => {
@@ -273,7 +250,7 @@ describe("authorize", () => {
   });
 
   it("loopback: the port is ignored (any port on the registered host), the path and host are not", async () => {
-    for (const ru of ["http://localhost:3118/callback", "http://localhost:54321/callback", "http://localhost/callback"]) expect((await authorize({ redirect_uri: ru })).status).toBe(302);
+    for (const ru of ["http://localhost:3118/callback", "http://localhost:54321/callback", "http://localhost/callback"]) expect((await authorize({ redirect_uri: ru })).status).toBe(200);
     // localhost, 127.0.0.1 and [::1] are ONE loopback class (O2-FIX1): any presented loopback URI matches any registered loopback entry
     expect(redirectMatches(["http://localhost:3118/callback"], "http://127.0.0.1:9/callback")).toBe(true);
     expect(redirectMatches(["http://127.0.0.1:3118/callback"], "http://[::1]:9/callback")).toBe(true);
@@ -336,13 +313,13 @@ describe("authorize", () => {
   it("a DCR id we issued works; one we did not is refused", async () => {
     const reg = await registerPost(new NextRequest("https://www.evenscribe.app/api/oauth/register", { method: "POST", body: JSON.stringify({ redirect_uris: [CLAUDE_CALLBACK] }) }));
     const { client_id } = await reg.json();
-    expect((await authorize({ client_id })).status).toBe(302);
+    expect((await authorize({ client_id })).status).toBe(200);
     expect((await authorize({ client_id: "dcr_forged" })).status).toBe(400);
   });
 });
 
 // ─── callback ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-describe("google callback", () => {
+describe("email sign-in", () => {
   it("success (after Allow on the consent page) mints a one-time code and redirects with code, state and iss; the pending cookie is cleared; the code is stored hashed", async () => {
     const { res, to } = await fullSignIn();
     expect(res.status).toBe(303);
@@ -359,98 +336,253 @@ describe("google callback", () => {
     expect(refusalRows()).toHaveLength(0);
   });
 
-  it("mixed-case Google email is lowercased before the allowlist lookup", async () => {
-    claims = { email: ALICE[0].toUpperCase() + ALICE.slice(1) };
-    const { to } = await fullSignIn();
-    expect(to.searchParams.get("code")).toBeTruthy();
+  it("the mail is the exact text from the order, to the allowlisted address only, from RESEND_FROM_EMAIL; the code is 6 digits and is stored only as sha256(pepper || pending_id || code)", async () => {
+    const s = await startSignIn();
+    await start(s.cookie, ALICE);
+    expect(mailed).toHaveLength(1);
+    expect(mailed[0]).toMatchObject({ to: ALICE, from: "noreply@example.test", subject: "Your EvenScribe sign-in code" });
+    const code = lastCode();
+    expect(code).toMatch(/^\d{6}$/);
+    expect(mailed[0].text).toBe(`Your EvenScribe sign-in code: ${code}. It expires in 10 minutes. If you did not ask for this, ignore it.`);
+    const [row] = [...fake.state.emailCodes.values()];
+    const pid = JSON.parse(Buffer.from(s.cookie.split(".")[0], "base64url").toString()).pid as string;
+    expect(row.code_hash).toBe(hashSecret(pid + code));
+    expect(row.code_hash).not.toContain(code);
+    expect(row.attempts).toBe(0);
+    expect(row.exp - row.created).toBe(600_000);
   });
 
-  const refusals: Array<[string, Claims, string, string | null]> = [
-    ["wrong hd", { hd: "other.example.test" }, "wrong_domain", `person:${ALICE}`],
-    ["no hd (a consumer account)", { hd: null }, "wrong_domain", `person:${ALICE}`],
-    ["email_verified false", { email_verified: false }, "email_unverified", `person:${ALICE}`],
-    ["not on the allowlist", { email: "carol@example.test" }, "not_allowlisted", "person:carol@example.test"],
-    ["wrong audience", { aud: "someone-elses-client" }, "id_token_invalid", "unknown"],
-    ["wrong issuer", { iss: "https://evil.example.test" }, "id_token_invalid", "unknown"],
-    ["expired", { expSeconds: Math.floor(Date.now() / 1000) - 600 }, "id_token_invalid", "unknown"],
-    ["wrong nonce", { nonce: "not-the-nonce" }, "nonce_mismatch", "unknown"],
-    ["no nonce", { nonce: null }, "nonce_mismatch", "unknown"],
-  ];
-  for (const [name, c, reason, actor] of refusals) {
-    it(`${name}: redirected with access_denied, no code, and exactly one refusal audit row (${reason})`, async () => {
-      claims = c;
-      const { to } = await fullSignIn();
-      expect(to.searchParams.get("error")).toBe("access_denied");
-      expect(to.searchParams.get("code")).toBeNull();
-      expect(to.searchParams.get("state")).toBe("st-1");
-      expect(to.searchParams.get("iss")).toBe("https://www.evenscribe.app");
-      expect(fake.state.codes.size).toBe(0);
-      const rows = refusalRows();
-      expect(rows).toHaveLength(1);
-      expect(rows[0].values).toContain(actor);
-      expect(JSON.stringify(rows[0].values)).toContain(reason);
-    });
-  }
+  it("the address is trimmed and lowercased before the allowlist lookup", async () => {
+    const s = await startSignIn();
+    await start(s.cookie, `  ${ALICE[0].toUpperCase() + ALICE.slice(1).toUpperCase()}  `);
+    expect(mailed).toHaveLength(1);
+    expect(mailed[0].to).toBe(ALICE);
+  });
 
-  it("a revoked person is refused and logged", async () => {
+  it("non-allowlisted, non-even.in, revoked and malformed addresses get byte-identical pages and status to a qualifying one, and send no mail", async () => {
     fake.addPerson(BOB, ["read"], "revoked");
-    claims = { email: BOB };
-    const { to } = await fullSignIn();
-    expect(to.searchParams.get("error")).toBe("access_denied");
-    expect(refusalRows()).toHaveLength(1);
-    expect(JSON.stringify(refusalRows()[0].values)).toContain("revoked");
+    const pages: Array<[string, number, string]> = [];
+    for (const email of [ALICE, "carol@example.test", "alice@other.example.test", BOB, "not-an-email", "", "a@b@example.test", `${"x".repeat(300)}@example.test`]) {
+      const s = await startSignIn();
+      const before = mailed.length;
+      const r = await start(s.cookie, email);
+      pages.push([email.slice(0, 12), r.status, await r.text()]);
+      if (email !== ALICE) expect(mailed.length, email).toBe(before);
+    }
+    expect(mailed).toHaveLength(1);
+    for (const [e, st, html] of pages) { expect(st, e).toBe(pages[0][1]); expect(html, e).toBe(pages[0][2]); }
+    expect(pages[0][2]).toContain("If that address is allowed, a code is on its way");
+    expect(fake.state.emailCodes.size).toBe(1);
   });
 
-  it("a token signed by a key that is not in Google's key set is refused", async () => {
-    const other = await generateKeyPair("RS256");
+  it("refusals write one mcp.oauth_refused row each: wrong_domain (unknown actor), not_allowlisted and revoked (the address)", async () => {
+    fake.addPerson(BOB, ["read"], "revoked");
+    for (const email of ["alice@other.example.test", "carol@example.test", BOB]) await start((await startSignIn()).cookie, email);
+    const rows = refusalRows().map((r) => JSON.stringify(r.values));
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toContain("wrong_domain"); expect(rows[0]).toContain("unknown");
+    expect(rows[1]).toContain("not_allowlisted"); expect(rows[1]).toContain("person:carol@example.test");
+    expect(rows[2]).toContain("revoked"); expect(rows[2]).toContain(`person:${BOB}`);
+  });
+
+  it("TIMING: the Resend call is deferred with after(): start returns before the send runs, and the send still happens", async () => {
+    deferMode.capture = true;
+    resend.mode = "hang"; // a Resend that never answers cannot hold the response
     const s = await startSignIn();
-    const bad = await new SignJWT({ email: ALICE, email_verified: true, hd: DOMAIN, nonce: lastNonce }).setProtectedHeader({ alg: "RS256", kid: "k1" }).setIssuer("https://accounts.google.com").setAudience(GCLIENT).setExpirationTime("5m").sign(other.privateKey);
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id_token: bad }), { status: 200 })));
-    const res = await callback(s.cookie, { state: s.gstate, code: "g" });
-    expect(loc(res).searchParams.get("error")).toBe("access_denied");
+    const r = await start(s.cookie, ALICE);
+    expect(r.status).toBe(200);
+    expect(deferred).toHaveLength(1);
+    expect(mailed).toHaveLength(0);
+    resend.mode = "ok";
+    await deferred[0]();
+    expect(mailed).toHaveLength(1);
+    // a non-qualifying address defers nothing
+    deferred.length = 0;
+    await start((await startSignIn()).cookie, "carol@example.test");
+    expect(deferred).toHaveLength(0);
+  });
+
+  it("correct code -> consent page (not a redirect, no auth code yet) -> Allow -> the token works", async () => {
+    const c = await consentPageFor();
+    expect(c.page.status).toBe(200);
+    expect(c.html).toContain("Allow access to EvenScribe?");
     expect(fake.state.codes.size).toBe(0);
+    const res = await consentPost(c.cookie, { csrf: c.csrf, decision: "allow" }, { origin: "https://www.evenscribe.app" });
+    const code = loc(res).searchParams.get("code")!;
+    const t = await tokenPost(tokenReq(codeBody(code)));
+    expect(t.status).toBe(200);
+    expect(((await t.json()) as { access_token: string }).access_token.startsWith("esp_")).toBe(true);
   });
 
-  it("the refusal audit is rate-limited per subject per minute", async () => {
-    claims = { hd: "other.example.test" };
-    await fullSignIn();
-    await fullSignIn();
-    expect(refusalRows()).toHaveLength(1);
-    claims = { hd: "other.example.test", email: "dave@example.test" };
-    await fullSignIn();
-    expect(refusalRows()).toHaveLength(2);
-  });
-
-  it("Google refusing the exchange, a declined consent and a state mismatch all deny with a logged reason and no code", async () => {
-    googleOk = false;
-    expect(loc((await fullSignIn()).res).searchParams.get("error")).toBe("access_denied");
-    googleOk = true;
-    resetDeniedAuditForTests();
+  it("a wrong code is refused with the same form again, no consent page and no cookie change", async () => {
     const s = await startSignIn();
-    expect(loc(await callback(s.cookie, { state: s.gstate, error: "access_denied" })).searchParams.get("error")).toBe("access_denied");
-    resetDeniedAuditForTests();
-    const s2 = await startSignIn();
-    expect(loc(await callback(s2.cookie, { state: "forged-state", code: "g" })).searchParams.get("error")).toBe("access_denied");
+    await start(s.cookie, ALICE);
+    const wrong = lastCode() === "000000" ? "000001" : "000000";
+    const r = await verify(s.cookie, wrong);
+    expect(r.status).toBe(400);
+    expect(await r.text()).toContain("That code was not right");
+    expect(r.headers.get("set-cookie")).toBeNull();
+    expect(JSON.stringify(refusalRows().map((x) => x.values))).toContain("code_wrong");
+    expect((await verify(s.cookie, lastCode())).status).toBe(200); // the real code still works
+  });
+
+  it("5 wrong attempts kill the pending flow: the 6th, even with the RIGHT code, is refused, and so is a freshly mailed code", async () => {
+    const s = await startSignIn();
+    await start(s.cookie, ALICE);
+    const right = lastCode();
+    const wrong = right === "000000" ? "000001" : "000000";
+    for (let i = 0; i < 5; i++) expect((await verify(s.cookie, wrong)).status).toBe(400);
+    const dead = await verify(s.cookie, right);
+    expect(dead.status).toBe(400);
+    expect(dead.headers.get("location")).toBeNull();
+    expect(await dead.text()).toContain("code_unavailable");
+    expect(dead.headers.get("set-cookie")).toMatch(/Max-Age=0/i);
     expect(fake.state.codes.size).toBe(0);
+    // asking for a new code does not reset the budget
+    await start(s.cookie, ALICE);
+    expect(mailed).toHaveLength(1);
+    expect((await verify(s.cookie, right)).status).toBe(400);
+  });
+
+  it("wrong tries on code 1 are not forgiven by mailing code 2 within the same pending flow", async () => {
+    const s = await startSignIn();
+    await start(s.cookie, ALICE);
+    const wrong = lastCode() === "000000" ? "000001" : "000000";
+    for (let i = 0; i < 3; i++) await verify(s.cookie, wrong);
+    await start(s.cookie, ALICE);
+    expect(mailed).toHaveLength(2);
+    const code2 = lastCode();
+    const wrong2 = code2 === "000000" ? "000001" : "000000";
+    expect((await verify(s.cookie, wrong2)).status).toBe(400); // 4th
+    expect((await verify(s.cookie, wrong2)).status).toBe(400); // 5th
+    expect((await verify(s.cookie, code2)).status).toBe(400);  // dead
+  });
+
+  it("an expired code is refused (10 min)", async () => {
+    const s = await startSignIn();
+    await start(s.cookie, ALICE);
+    fake.emailClock.offsetMs = 10 * 60 * 1000 + 1000;
+    const r = await verify(s.cookie, lastCode());
+    expect(r.status).toBe(400);
+    expect(fake.state.codes.size).toBe(0);
+    expect(JSON.stringify(refusalRows().map((x) => x.values))).toContain("code_unavailable");
+  });
+
+  it("a code is single use: after a successful verify the same code (with the old pending cookie) is refused", async () => {
+    const s = await startSignIn();
+    await start(s.cookie, ALICE);
+    const code = lastCode();
+    expect((await verify(s.cookie, code)).status).toBe(200);
+    expect((await verify(s.cookie, code)).status).toBe(400);
+  });
+
+  it("a code from another pending session is rejected: it fails on a second flow even for the same address, and that second flow cannot read the first's row", async () => {
+    const a = await startSignIn();
+    await start(a.cookie, ALICE);
+    const codeA = lastCode();
+    const b = await startSignIn();
+    // B never asked for a code: nothing to try
+    expect((await verify(b.cookie, codeA)).status).toBe(400);
+    await start(b.cookie, ALICE);
+    const codeB = lastCode();
+    if (codeA !== codeB) expect((await verify(b.cookie, codeA)).status).toBe(400); // (equal digits are a legitimate 1-in-a-million match for B)
+    expect((await verify(b.cookie, codeB)).status).toBe(200);
+    expect((await verify(a.cookie, codeA)).status).toBe(200);
+  });
+
+  it("verify without a pending cookie, with a tampered one, with a consent-purpose one, a foreign Origin, a malformed code or a JSON body never redirects and spends no attempt", async () => {
+    const s = await startSignIn();
+    await start(s.cookie, ALICE);
+    const tampered = s.cookie.slice(0, -2) + (s.cookie.endsWith("AA") ? "BB" : "AA");
+    const code = lastCode();
+    for (const [name, r] of [
+      ["none", await verify("", code)], ["tampered", await verify(tampered, code)],
+      ["origin", await verify(s.cookie, code, { origin: "https://evil.example.test" })], ["origin null", await verify(s.cookie, code, { origin: "null" })],
+      ["short", await verify(s.cookie, "12345")], ["letters", await verify(s.cookie, "abcdef")],
+      ["json", await verifyPost(new NextRequest("https://www.evenscribe.app/api/oauth/email/verify", { method: "POST", headers: { "content-type": "application/json", cookie: `mcp_oauth_pending=${s.cookie}` }, body: JSON.stringify({ code }) }))],
+    ] as Array<[string, Response]>) {
+      expect(r.status, name).toBe(400);
+      expect(r.headers.get("location"), name).toBeNull();
+    }
+    expect([...fake.state.emailCodes.values()][0].attempts).toBe(0);
+    expect((await verify(s.cookie, code)).status).toBe(200);
+  });
+
+  it("start without a valid pending cookie, with a foreign Origin or a JSON body is a plain 400 and mails nothing", async () => {
+    const s = await startSignIn();
+    for (const r of [
+      await start("", ALICE), await start(s.cookie.slice(0, -3) + "xyz", ALICE), await start(s.cookie, ALICE, { origin: "https://evil.example.test" }),
+      await startPost(new NextRequest("https://www.evenscribe.app/api/oauth/email/start", { method: "POST", headers: { "content-type": "application/json", cookie: `mcp_oauth_pending=${s.cookie}` }, body: JSON.stringify({ email: ALICE }) })),
+    ]) { expect(r.status).toBe(400); expect(r.headers.get("location")).toBeNull(); }
+    expect(mailed).toHaveLength(0);
+  });
+
+  it("rate limit per address: 3 codes in 15 min, the 4th gets the same page and no mail; after 15 min it works again", async () => {
+    const pages: string[] = [];
+    for (let i = 0; i < 4; i++) pages.push(await (await start((await startSignIn()).cookie, ALICE)).text());
+    expect(mailed).toHaveLength(3);
+    expect(new Set(pages).size).toBe(1);
+    expect(JSON.stringify(refusalRows().map((x) => x.values))).toContain("rate_limited");
+    fake.emailClock.offsetMs = 15 * 60 * 1000 + 1000;
+    await start((await startSignIn()).cookie, ALICE);
+    expect(mailed).toHaveLength(4);
+  });
+
+  it("rate limit per IP: 10 starts in 15 min whatever the address, the 11th gets the same page and no mail; another IP is unaffected", async () => {
+    for (let i = 0; i < 10; i++) { fake.addPerson(`p${i}@example.test`); await start((await startSignIn()).cookie, `p${i}@example.test`, { "x-forwarded-for": "203.0.113.5" }); }
+    expect(mailed).toHaveLength(10);
+    fake.addPerson("p10@example.test");
+    const r = await start((await startSignIn()).cookie, "p10@example.test", { "x-forwarded-for": "203.0.113.5" });
+    expect(r.status).toBe(200);
+    expect(mailed).toHaveLength(10);
+    await start((await startSignIn()).cookie, "p10@example.test", { "x-forwarded-for": "203.0.113.6" });
+    expect(mailed).toHaveLength(11);
+  });
+
+  it("Resend down: the page is the same, the code row is not kept, one resend_failed audit row, and nothing can be verified", async () => {
+    resend.mode = "down";
+    const s = await startSignIn();
+    const r = await start(s.cookie, ALICE);
+    const good = await (await start((await startSignIn()).cookie, "carol@example.test")).text();
+    expect(r.status).toBe(200);
+    expect(await r.text()).toBe(good);
+    expect(fake.state.emailCodes.size).toBe(0);
+    expect(JSON.stringify(refusalRows().map((x) => x.values))).toContain("resend_failed");
+    expect((await verify(s.cookie, "123456")).status).toBe(400);
+    expect(logs.join("\n")).not.toContain(ALICE);
+  });
+
+  it("the attacker-link case: the consent page names the client and the redirect host, and Allow mints a code ONLY for that client and that redirect", async () => {
+    const reg = await registerPost(new NextRequest("https://www.evenscribe.app/api/oauth/register", { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.20" }, body: JSON.stringify({ redirect_uris: [LOOP], client_name: "Totally Legit Tool" }) }));
+    const { client_id } = (await reg.json()) as { client_id: string };
+    const c = await consentPageFor({ client_id, redirect_uri: LOOP });
+    expect(c.html).toContain("Totally Legit Tool (self-registered)");
+    expect(c.html).toContain('<dd data-consent="redirect-host">localhost:3118</dd>');
+    expect(fake.state.codes.size).toBe(0); // email + code alone mint nothing
+    const res = await consentPost(c.cookie, { csrf: c.csrf, decision: "allow", client_id: CIMD, redirect_uri: CLAUDE_CALLBACK }, { origin: "https://www.evenscribe.app" });
+    const to = loc(res);
+    expect(to.origin + to.pathname).toBe(LOOP);
+    const row = fake.state.codes.get(hashSecret(to.searchParams.get("code")!))!;
+    expect([row.client_id, row.redirect_uri]).toEqual([client_id, LOOP]);
   });
 
   it("no cookie, a tampered cookie and an expired cookie never redirect: plain HTML 400", async () => {
     const s = await startSignIn();
     const tampered = s.cookie.slice(0, -2) + (s.cookie.endsWith("AA") ? "BB" : "AA");
-    const forgedBody = Buffer.from(JSON.stringify({ cid: CIMD, ru: "https://evil.example.test/cb", cc: CHALLENGE, st: null, res: RESOURCE, gs: "x", nonce: "n", gv: "v", exp: 9999999999 })).toString("base64url");
+    const forgedBody = Buffer.from(JSON.stringify({ cid: CIMD, ru: "https://evil.example.test/cb", cc: CHALLENGE, st: null, res: RESOURCE, pid: "x", exp: 9999999999 })).toString("base64url");
     for (const c of ["", tampered, `${forgedBody}.${s.cookie.split(".")[1]}`]) {
-      const res = await callback(c, { state: s.gstate, code: "g" });
+      const res = await start(c, ALICE);
       expect(res.status).toBe(400);
       expect(res.headers.get("location")).toBeNull();
     }
     vi.useFakeTimers({ now: Date.now() + 11 * 60 * 1000, toFake: ["Date"] });
-    const res = await callback(s.cookie, { state: s.gstate, code: "g" });
+    const res = await start(s.cookie, ALICE);
     vi.useRealTimers();
     expect(res.status).toBe(400);
+    expect(mailed).toHaveLength(0);
   });
 });
 
-// ─── token ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 describe("token: authorization_code", () => {
   it("issues esp_ and esr_ tokens, 1 h, Bearer, scope string, no-store; only hashes are stored", async () => {
     const t = await tokens();
@@ -672,10 +804,12 @@ describe("revoke", () => {
 });
 
 // ─── gates ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-describe("flag off, missing pepper, missing Google env", () => {
+describe("flag off, missing pepper, missing Resend env", () => {
   const all = async () => [
     await authorize(),
-    await callback("x", { state: "s", code: "c" }),
+    await start("x", ALICE),
+    await verify("x", "123456"),
+    await consentPost("x", {}),
     await tokenPost(tokenReq(codeBody("c"))),
     await registerPost(reg({ redirect_uris: [CLAUDE_CALLBACK] })),
     await revokePost(new NextRequest("https://www.evenscribe.app/api/oauth/revoke", { method: "POST", body: "token=x" })),
@@ -696,21 +830,25 @@ describe("flag off, missing pepper, missing Google env", () => {
       if (p === undefined) delete process.env.MCP_OAUTH_TOKEN_PEPPER; else process.env.MCP_OAUTH_TOKEN_PEPPER = p;
       const rs = await all();
       for (const r of rs) expect(r.status).toBe(503);
-      expect((await rs[2].json()).error).toBe("server_error");
+      expect((await rs[4].json()).error).toBe("server_error");
       expect((await rs[0].text())).toContain("server_error");
     }
     expect(fake.state.codes.size + fake.state.tokens.size + fake.state.clients.size).toBe(0);
     expect(fetchLog).toEqual([]);
   });
 
-  it("no Google client id or secret: authorize and the callback are 503; token, register and revoke still work", async () => {
-    delete process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+  it("no Resend key or from-address: authorize, email/start and email/verify are 503; consent, token, register and revoke still work", async () => {
+    delete process.env.RESEND_API_KEY;
     expect((await authorize()).status).toBe(503);
-    expect((await callback("x", { state: "s", code: "c" })).status).toBe(503);
+    expect((await start("x", ALICE)).status).toBe(503);
+    expect((await verify("x", "123456")).status).toBe(503);
+    expect((await consentPost("x", {})).status).toBe(400);
     expect((await registerPost(reg({ redirect_uris: [CLAUDE_CALLBACK] }))).status).toBe(201);
     expect((await tokenPost(tokenReq(codeBody("c")))).status).toBe(400);
-    delete process.env.GOOGLE_OAUTH_CLIENT_ID;
+    process.env.RESEND_API_KEY = RESEND_KEY;
+    delete process.env.RESEND_FROM_EMAIL;
     expect((await authorize()).status).toBe(503);
+    expect(mailed).toHaveLength(0);
   });
 });
 
@@ -727,17 +865,22 @@ describe("hygiene", () => {
     vi.unstubAllEnvs();
   });
 
-  it("no token, code, pepper, Google secret or Google token appears in any log line or audit row across a full flow plus refusals", async () => {
+  it("no token, code, pepper, Resend key, emailed code or verifier appears in any log line or audit row across a full flow plus refusals", async () => {
     const t = await tokens();
+    const sent = mailed.map((m) => lastCodeOf(m.text));
     await tokenPost(tokenReq(refreshBody(t.refresh_token)));
     await tokenPost(tokenReq(refreshBody(t.refresh_token))); // reuse
-    claims = { hd: "other.example.test" };
-    await fullSignIn();
-    googleOk = false;
+    await fullSignIn({}, "allow", "carol@example.test");
+    resend.mode = "down";
     resetDeniedAuditForTests();
     await fullSignIn();
+    resend.mode = "ok";
+    const s = await startSignIn();
+    await start(s.cookie, ALICE);
+    sent.push(lastCode());
+    await verify(s.cookie, "000000");
     const everything = JSON.stringify(logs) + JSON.stringify(audit);
-    for (const secret of [t.access_token, t.refresh_token, PEPPER, GSECRET, "google-access-synthetic", "google-code-synthetic", VERIFIER, sha(t.refresh_token)]) expect(everything).not.toContain(secret);
+    for (const secret of [t.access_token, t.refresh_token, PEPPER, RESEND_KEY, VERIFIER, sha(t.refresh_token), ...sent.filter(Boolean)]) expect(everything).not.toContain(secret);
     expect(refusalRows().length).toBeGreaterThan(0);
     for (const row of refusalRows()) expect(JSON.stringify(row.values)).not.toMatch(/esp_|esr_|eyJ/);
   });
@@ -808,7 +951,7 @@ describe("FIX1 SHOULD-1: CIMD host is resolved and checked before the fetch, the
     expect(pinnedTo).toEqual([]);
     resolverAnswer = [{ address: "2606:4700:4700::1111", family: 6 }, { address: "93.184.216.34", family: 4 }];
     setResolverForTests(async () => resolverAnswer);
-    expect((await authorize()).status).toBe(302);
+    expect((await authorize()).status).toBe(200);
     expect(pinnedTo).toEqual(["2606:4700:4700::1111"]);
   });
 
@@ -816,7 +959,7 @@ describe("FIX1 SHOULD-1: CIMD host is resolved and checked before the fetch, the
     await authorize();
     pinnedTo.length = 0;
     resolverAnswer = [{ address: hostInRange(R.loop, 1), family: 4 }]; // would be refused if resolved again
-    expect((await authorize()).status).toBe(302);
+    expect((await authorize()).status).toBe(200);
     expect(pinnedTo).toEqual([]);
   });
 });
@@ -870,7 +1013,7 @@ describe("FIX1 MUST-1: route modules export only what Next allows", () => {
   it("every OAuth and well-known route file exports only GET/POST/OPTIONS and runtime/dynamic/maxDuration", async () => {
     const allowed = new Set(["GET", "POST", "OPTIONS", "runtime", "dynamic", "maxDuration"]);
     const mods = await Promise.all([
-      import("@/app/api/oauth/authorize/route"), import("@/app/api/oauth/google/callback/route"), import("@/app/api/oauth/token/route"),
+      import("@/app/api/oauth/authorize/route"), import("@/app/api/oauth/email/start/route"), import("@/app/api/oauth/email/verify/route"), import("@/app/api/oauth/email/consent/route"), import("@/app/api/oauth/token/route"),
       import("@/app/api/oauth/register/route"), import("@/app/api/oauth/revoke/route"),
       import("@/app/.well-known/oauth-protected-resource/route"), import("@/app/.well-known/oauth-protected-resource/api/mcp/route"), import("@/app/.well-known/oauth-authorization-server/route"),
     ]);
@@ -880,29 +1023,23 @@ describe("FIX1 MUST-1: route modules export only what Next allows", () => {
 
 // ─── R2 (refute e4c1406f F1-F6) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 const grantedRows = () => audit.filter((a) => a.text.includes("mcp.oauth_granted"));
-async function consentPageFor(over: Record<string, string | null> = {}) {
-  const s = await startSignIn(over);
-  const page = await callback(s.cookie, { state: s.gstate, code: "google-code-synthetic" });
-  return { page, ...(await consentOf(page)) };
-}
-
-describe("R2 F2: consent step between Google and the code", () => {
-  it("after Google the callback renders a same-origin HTML page naming the client host and the redirect host; no code is minted and nothing redirects", async () => {
+describe("R2 F2: consent step between the email code and the auth code", () => {
+  it("after the email code verify renders a same-origin HTML page naming the client host and the redirect host; no code is minted and nothing redirects", async () => {
     const { page, html, cookie, csrf } = await consentPageFor();
     expect(page.status).toBe(200);
     expect(page.headers.get("content-type")).toContain("text/html");
     expect(page.headers.get("location")).toBeNull();
     expect(page.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     expect(page.headers.get("x-frame-options")).toBe("DENY");
-    expect(page.headers.get("referrer-policy")).toBe("same-origin"); // R3: no-referrer made browsers send Origin: null on the POST
+    expect(page.headers.get("referrer-policy")).toBe("strict-origin"); // R3: no-referrer made browsers send Origin: null on the POST
     expect(html).toContain('<dd data-consent="client">client.example.test</dd>');
     expect(html).toContain('<dd data-consent="redirect-host">claude.ai</dd>');
-    expect(html).toContain('method="post" action="/api/oauth/google/callback"');
+    expect(html).toContain('method="post" action="/api/oauth/email/consent"');
     expect(html).toContain('value="allow"');
     expect(html).toContain('value="deny"');
     expect(csrf.length).toBeGreaterThanOrEqual(32);
     expect(cookie).toBeTruthy();
-    expect(page.headers.get("set-cookie")).toMatch(/Path=\/api\/oauth\/google\/callback/);
+    expect(page.headers.get("set-cookie")).toMatch(/Path=\/api\/oauth\/email(;|$)/);
     expect(page.headers.get("set-cookie")).toMatch(/HttpOnly/i);
     expect(fake.state.codes.size).toBe(0);
     expect(grantedRows()).toHaveLength(0);
@@ -921,13 +1058,13 @@ describe("R2 F2: consent step between Google and the code", () => {
   it("no code without POST Allow: the page alone, a POST with no decision, and a GET replay of the consent cookie all mint nothing", async () => {
     const { cookie, csrf } = await consentPageFor();
     expect((await consentPost(cookie, { csrf })).status).toBe(400);
-    const replay = await callback(cookie, { state: "x", code: "g" }); // the consent blob is not a pending blob
+    const replay = await verify(cookie, "123456"); // the consent blob is not a pending blob
     expect(replay.status).toBe(400);
     expect(replay.headers.get("location")).toBeNull();
     expect(fake.state.codes.size).toBe(0);
   });
 
-  it("a forged POST is refused with a plain 400 that never redirects: no cookie, a wrong CSRF token, a foreign Origin, a pre-Google pending cookie, an expired consent cookie", async () => {
+  it("a forged POST is refused with a plain 400 that never redirects: no cookie, a wrong CSRF token, a foreign Origin, a pre-code pending cookie, an expired consent cookie", async () => {
     const { cookie, csrf } = await consentPageFor();
     const s = await startSignIn();
     const cases: Array<[string, Response]> = [
@@ -936,7 +1073,7 @@ describe("R2 F2: consent step between Google and the code", () => {
       ["no csrf", await consentPost(cookie, { decision: "allow" })],
       ["foreign origin", await consentPost(cookie, { csrf, decision: "allow" }, { origin: "https://evil.example.test" })],
       ["pending cookie", await consentPost(s.cookie, { csrf, decision: "allow" })],
-      ["json body", await callbackPost(new NextRequest("https://www.evenscribe.app/api/oauth/google/callback", { method: "POST", headers: { "content-type": "application/json", cookie: `mcp_oauth_pending=${cookie}` }, body: JSON.stringify({ csrf, decision: "allow" }) }))],
+      ["json body", await consentRoutePost(new NextRequest(CONSENT_URL, { method: "POST", headers: { "content-type": "application/json", cookie: `mcp_oauth_pending=${cookie}` }, body: JSON.stringify({ csrf, decision: "allow" }) }))],
     ];
     vi.useFakeTimers({ now: Date.now() + 6 * 60 * 1000, toFake: ["Date"] });
     cases.push(["expired", await consentPost(cookie, { csrf, decision: "allow" })]);
@@ -1002,19 +1139,24 @@ describe("R2 F2: consent step between Google and the code", () => {
 });
 
 describe("R3: the consent page answers once", () => {
-  it("a replayed Allow, a double click and Deny-then-Allow mint nothing after the first answer; the burn stores a hash, never the csrf", async () => {
+  const errOf = (r: Response) => { const u = loc(r); return { status: r.status, error: u.searchParams.get("error"), code: u.searchParams.get("code"), state: u.searchParams.get("state"), iss: u.searchParams.get("iss"), origin: u.origin + u.pathname }; };
+
+  it("a replayed Allow, a double click and Deny-then-Allow mint nothing after the first answer; the replay is a 303 access_denied back to the client (state, iss); the burn stores a hash, never the csrf", async () => {
     const { cookie, csrf } = await consentPageFor();
     const body = { csrf, decision: "allow" };
     const [a, b] = await Promise.all([consentPost(cookie, body), consentPost(cookie, body)]);
-    expect([a.status, b.status].sort()).toEqual([303, 400]);
+    expect([a.status, b.status]).toEqual([303, 303]);
+    const outs = [errOf(a), errOf(b)];
+    expect(outs.filter((o) => o.code).length).toBe(1);
+    const denied = outs.find((o) => !o.code)!;
+    expect(denied).toEqual({ status: 303, error: "access_denied", code: null, state: "st-1", iss: "https://www.evenscribe.app", origin: CLAUDE_CALLBACK });
     expect(fake.state.codes.size).toBe(1);
     expect(grantedRows()).toHaveLength(1);
     expect([...fake.state.burned].some((h) => h.includes(csrf))).toBe(false);
     const d = await consentPageFor();
     expect((await consentPost(d.cookie, { csrf: d.csrf, decision: "deny" })).status).toBe(303);
     const late = await consentPost(d.cookie, { csrf: d.csrf, decision: "allow" });
-    expect(late.status).toBe(400);
-    expect(late.headers.get("location")).toBeNull();
+    expect(errOf(late)).toMatchObject({ status: 303, error: "access_denied", code: null, state: "st-1" });
     expect(fake.state.codes.size).toBe(1);
   });
 
@@ -1024,6 +1166,50 @@ describe("R3: the consent page answers once", () => {
     expect((await consentPost(cookie, { csrf })).status).toBe(400);
     expect(fake.state.burned.size).toBe(0);
     expect(loc(await consentPost(cookie, { csrf, decision: "allow" })).searchParams.get("code")).toBeTruthy();
+  });
+
+  it("R3X-3: a burn that throws fails closed: 303 server_error, no code, no grant row", async () => {
+    const c = await consentPageFor();
+    (fake.state.burned as unknown as { has: () => boolean }).has = () => { throw new Error("db down"); };
+    audit.length = 0;
+    const res = await consentPost(c.cookie, { csrf: c.csrf, decision: "allow" }, { origin: "https://www.evenscribe.app" });
+    delete (fake.state.burned as unknown as { has?: unknown }).has;
+    expect(errOf(res)).toMatchObject({ status: 303, error: "server_error", code: null });
+    expect(fake.state.codes.size).toBe(0);
+    expect(grantedRows()).toHaveLength(0);
+  });
+
+  it("R3X-4: a foreign Origin and a string \"null\" Origin are 400 and burn nothing; the real Allow afterwards still mints", async () => {
+    const c = await consentPageFor();
+    const p = (origin: string) => consentPost(c.cookie, { csrf: c.csrf, decision: "allow" }, { origin });
+    expect((await p("https://evil.example.test")).status).toBe(400);
+    expect((await p("null")).status).toBe(400);
+    expect(fake.state.burned.size).toBe(0);
+    expect(fake.state.codes.size).toBe(0);
+    const ok = await p("https://www.evenscribe.app");
+    expect(ok.status).toBe(303);
+    expect(loc(ok).searchParams.get("code")).toBeTruthy();
+  });
+
+  it("R3X-4: the burn key is peppered: hashSecret('consent:'+csrf), not the csrf and not a plain sha256", async () => {
+    const c = await consentPageFor();
+    await consentPost(c.cookie, { csrf: c.csrf, decision: "deny" }, { origin: "https://www.evenscribe.app" });
+    const [h] = [...fake.state.burned];
+    expect(h).toBe(hashSecret(`consent:${c.csrf}`));
+    expect(h).not.toBe(sha(`consent:${c.csrf}`));
+    expect(h).not.toContain(c.csrf);
+  });
+
+  it("R3X-5: the consent_replay row is written before the response returns (a write that resolves on a later macrotask is inside the response)", async () => {
+    const c = await consentPageFor();
+    const go = () => consentPost(c.cookie, { csrf: c.csrf, decision: "allow" }, { origin: "https://www.evenscribe.app" });
+    expect((await go()).status).toBe(303);
+    const { sql } = await import("@/lib/db");
+    let written = false;
+    (sql as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => { await new Promise((r) => setTimeout(r, 20)); written = true; return []; });
+    const res = await go();
+    expect(errOf(res).error).toBe("access_denied");
+    expect(written).toBe(true);
   });
 });
 
@@ -1077,7 +1263,7 @@ describe("R2 F5: the DNS lookup shares the CIMD fetch's 5 s budget", () => {
 
 describe("R2 F6: the pending_missing refusal is awaited", () => {
   it("the refusal row is written before the 400 returns", async () => {
-    const res = await callback("", { state: "s", code: "c" });
+    const res = await verify("", "123456");
     expect(res.status).toBe(400);
     expect(refusalRows()).toHaveLength(1);
     expect(JSON.stringify(refusalRows()[0].values)).toContain("pending_missing");
