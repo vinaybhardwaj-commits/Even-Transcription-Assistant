@@ -284,7 +284,7 @@ extension BuddyConsultController {
     #expect(controller.consultStarted(opaqueID: "opq_f4a", buddyOff: false, window: false, live: true) == .noWindow)
     try await Task.sleep(nanoseconds: 300_000_000)
     #expect(presenter.all.isEmpty, "0 windows")
-    #expect(server.requests.filter { $0.line.hasPrefix("POST /runner/v1/chunks") }.isEmpty, "0 chunk POSTs to the real server")
+    #expect(server.requests.isEmpty, "0 requests (no token, no polls, no chunks)")
     #expect(!controller.isLive, "nothing is open, so nothing to close")
     #expect(BuddyL1Tests.tapFile(root) == nil, "no tap file")
     let counted = logs.all.filter { $0.hasPrefix(Self.noConfigPrefix) }
@@ -319,7 +319,7 @@ extension BuddyConsultController {
     #expect(controller.consultStarted(opaqueID: "opq_f4b", buddyOff: false, window: false, live: true) == .noWindow)
     try await Task.sleep(nanoseconds: 300_000_000)
     #expect(presenter.all.isEmpty, "0 windows")
-    #expect(server.requests.filter { $0.line.hasPrefix("POST /runner/v1/chunks") }.isEmpty, "0 chunk POSTs to the real server")
+    #expect(server.requests.isEmpty, "0 requests (no token, no polls, no chunks)")
     #expect(!controller.isLive, "nothing is open, so nothing to close")
     #expect(BuddyL1Tests.tapFile(root) == nil, "no tap file")
     let counted = logs.all.filter { $0.hasPrefix(Self.noConfigPrefix) }
@@ -354,7 +354,7 @@ extension BuddyConsultController {
     #expect(controller.consultStarted(opaqueID: "opq_f4c", buddyOff: false, window: false, live: true) == .noWindow)
     try await Task.sleep(nanoseconds: 300_000_000)
     #expect(presenter.all.isEmpty, "0 windows")
-    #expect(server.requests.filter { $0.line.hasPrefix("POST /runner/v1/chunks") }.isEmpty, "0 chunk POSTs to the real server")
+    #expect(server.requests.isEmpty, "0 requests (no token, no polls, no chunks)")
     #expect(!controller.isLive, "nothing is open, so nothing to close")
     #expect(BuddyL1Tests.tapFile(root) == nil, "no tap file")
     let counted = logs.all.filter { $0.hasPrefix(Self.noConfigPrefix) }
@@ -363,7 +363,7 @@ extension BuddyConsultController {
     _ = controller.consultEnded(opaqueID: "opq_f4c")
   }
 
-  @Test func shadowWithUsable0600ConfigStartsARunnerAndPosts_PositiveControl() async throws {
+  @Test func shadowWithUsable0600ConfigStartsARunner_PositiveControl() async throws {
     // A well-formed 0600 file with the production plan starts a runner. At minimum it polls flags. Proves the path is live.
     let server = try FakeRunnerServer()
     defer { server.stop() }
@@ -396,18 +396,64 @@ extension BuddyConsultController {
   }
 
   @Test func engineReportsUnusableConfigInInstallPollField_WellFormed0644() async throws {
-    // The engine's install-poll fields include buddy_runner_config=unusable for a 0644 file.
+    // The engine's own install-poll includes buddy_runner_config=unusable for a 0644 file in its room root.
+    actor CapturingRemote {
+      let captured = LockedList<InstallPollFields?>()
+      nonisolated init() {}
+      func pollCommands(
+        tabID: String, previousPollAt: String?, recordingSessionID: String?, paused: Bool,
+        primaryLevels: BenchLevelPair?, install: InstallPollFields?
+      ) async throws -> CommandPollResponse {
+        captured.append(install)
+        return try JSONDecoder().decode(
+          CommandPollResponse.self,
+          from: Data("{\"ok\":true,\"room_id\":\"room_1\",\"superseded\":false,\"assigned_channel\":null,\"commands\":[]}".utf8))
+      }
+      func reportSession(id: String, start: String, ended: String?, captureURL: URL?, captureFormat: R4CaptureFormat?) async throws -> CommandPollResponse {
+        try await pollCommands(tabID: "", previousPollAt: nil, recordingSessionID: id, paused: false, primaryLevels: nil, install: nil)
+      }
+      func patchSession(id: String, action: BenchSessionAction, notes: String?) async throws -> BenchOKResponse {
+        try JSONDecoder().decode(BenchOKResponse.self, from: Data(#"{"ok":true}"#.utf8))
+      }
+      func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?) async throws -> CommandAcknowledgement {
+        R4Remote.acknowledgement(commandID, ok)
+      }
+      func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?, audioInput: AudioInputAcknowledgement?) async throws -> CommandAcknowledgement {
+        R4Remote.acknowledgement(commandID, ok)
+      }
+      func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?, audioInput: AudioInputAcknowledgement?, verb: OperatorVerbAcknowledgement?) async throws -> CommandAcknowledgement {
+        R4Remote.acknowledgement(commandID, ok)
+      }
+      func markConsult(sessionID: String?, at: String) async throws -> ConsultMarkResponse { throw CancellationError() }
+      func uploadImmutablePiece(_ piece: BenchPiece, bytes: Data) async throws -> ImmutablePieceUploadResult { .alreadyVerified }
+    }
     let root = R4Fixture.temporaryRoot()
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try RoomPersistence(root: root).saveConfiguration(try R4Fixture.configuration())
     defer { try? FileManager.default.removeItem(at: root) }
     let configURL = root.appendingPathComponent(BuddyRunnerConfig.fileName)
     try Data(#"{"base":"http://c4:43124","key":"KEY-SECRET-1"}"#.utf8).write(to: configURL)
     chmod(configURL.path, 0o644)
     #expect(BuddyRunnerConfig.status(root: root) == .unusable, "the file is 0644 so unusable")
-    let facts = R4AudioInputs.standard().facts(forUID: "device-a")
-    var fields = InstallPollFields(installID: "install_x", facts: facts, tapeAdvancing: false)
-    fields.buddyRunnerConfig = BuddyRunnerConfig.status(root: root).rawValue
-    let items = Dictionary(uniqueKeysWithValues: fields.queryItems().map { ($0.name, $0.value ?? "") })
-    #expect(items["buddy_runner_config"] == "unusable", "the field reports unusable: \(items)")
+    let remote = CapturingRemote()
+    let launcher = BuddyL1Tests.BurstLauncher(pcm: BuddyL1Tests.fixturePCM)
+    let encoder = BuddyL1Tests.EchoEncoder()
+    let logs = LockedList<String>()
+    let audio = R4AudioInputs.standard()
+    let engine = try await RoomEngine.load(
+      rootURL: root, enrolmentReader: R4Fixture.enrolled, remoteFactory: { _ in remote },
+      captureLauncher: launcher, pieceRunner: encoder, updaterFactory: { _, _, _ in nil },
+      log: { logs.append($0) }, audioInputs: audio, inputReadyWait: .disabled,
+      machineFacts: { uid in audio.facts(forUID: uid) })
+    let task = Task { try await engine.run() }
+    try await R4Fixture.waitUntil { await remote.captured.all.count >= 1 }
+    task.cancel()
+    try await task.value
+    let all = await remote.captured.all
+    guard let fields = all.first, let captured = fields else {
+      Issue.record("no install fields captured")
+      return
+    }
+    let items = Dictionary(uniqueKeysWithValues: captured.queryItems().map { ($0.name, $0.value ?? "") })
+    #expect(items["buddy_runner_config"] == "unusable", "the engine's own poll reports unusable: \(items)")
   }
 }
