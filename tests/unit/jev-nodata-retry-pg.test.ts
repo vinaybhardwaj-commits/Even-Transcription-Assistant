@@ -128,7 +128,7 @@ suite("JEV no_data marker retry", () => {
     expect(await allTranscribedConsults(50, { sha: SHA, mode: "live" })).toEqual(["cx_s@ma"]);
   });
 
-  it("pass 2 (backfill) honours the same rule: its consults are older than 48 h (FIX1 F3), so a no_data marker there is terminal, cooldown or not", async () => {
+  it("pass 2 (backfill) honours the same rule: a no_data marker is terminal only when the uid's NEWEST t_close is past 48 h (FIX2), cooldown or not", async () => {
     win("cx_old@ma", "u_old", 10); await marker("cx_old@ma");
     process.env.JEV_CONSULT_BACKFILL_SINCE = new Date(Date.now() + 5.5 * 3_600_000 - 12 * 86_400_000).toISOString().slice(0, 10);
     expect(await allTranscribedConsults(50, ctx)).toEqual([]);
@@ -143,6 +143,30 @@ suite("JEV no_data marker retry", () => {
     expect(await selectTranscribedConsultsBefore(50, lo, hi, [], SHA, "shadow", "consult")).toEqual(["cx_old3@ma"]);      // only the undecided one: the read_refused and the aged no_data are terminal
     expect(await selectTranscribedConsults(50, 7, SHA, "shadow", "consult")).toEqual([]);
   });
+  it("C1: a real answered row whose evidence is SQL NULL is decided: never re-offered, and a no_data re-mark neither rewrites nor adds rows", async () => {
+    win("cx_n@ma", "u_n"); win("cx_n2@ma", "u_n2", 10);
+    await answered("cx_n@ma"); await answered("cx_n2@ma");
+    pg.exec("UPDATE jev_decision SET evidence = NULL WHERE subject_id IN ('cx_n@ma', 'cx_n2@ma')");
+    const nulls = (await pg.sql`SELECT subject_id FROM jev_decision WHERE evidence IS NULL AND outcome = 'answered'`) as Array<{ subject_id: string }>;
+    expect(nulls).toHaveLength(14);      // proves NULL was exercised, not {}
+    const lo = new Date(Date.now() - 13 * 86_400_000).toISOString(), hi = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    for (const mins of [5, 600]) {      // inside and outside the 30 min cooldown
+      age("cx_n@ma", mins); age("cx_n2@ma", mins);
+      expect(await selectTranscribedConsults(50, 7, SHA, "shadow", "consult")).toEqual([]);
+      expect(await selectTranscribedConsultsBefore(50, lo, hi, [], SHA, "shadow", "consult")).toEqual([]);      // pass 2
+      expect(await allTranscribedConsults(50, ctx)).toEqual([]);
+    }
+    const before = (await pg.sql`SELECT id, created_at FROM jev_decision ORDER BY id` as Array<{ id: string; created_at: string }>).map((x) => `${x.id}@${x.created_at}`);
+    expect(await marker("cx_n@ma")).toBe(0);
+    expect(await marker("cx_n2@ma")).toBe(0);
+    const after = (await pg.sql`SELECT id, created_at, outcome, evidence FROM jev_decision ORDER BY id` as Array<{ id: string; created_at: string; outcome: string; evidence: unknown }>);
+    expect(after.map((x) => `${x.id}@${x.created_at}`)).toEqual(before);      // same rows, none rewritten or added
+    expect(after).toHaveLength(14);
+    expect(after.every((x) => x.outcome === "answered" && x.evidence === null)).toBe(true);
+    const mk = (await pg.sql`SELECT 1 FROM jev_decision WHERE evidence->>'no_state' = 'no_data'`) as unknown[];
+    expect(mk).toHaveLength(0);
+  });
+
   // FIX1: through pendingSubjects (the sweeper's and jev-ask's pick), not just the selects
   const def = { use: "consult_rubric", setId: "pitch-detect", subjectType: CONSULT_SUBJECT_TYPE, eligible: (l: number, c?: { sha: string; mode: string }) => allTranscribedConsults(l, c), build: async () => null } as unknown as JevUseDef;
   const bulk = (prefix: string, count: number, daysAgo: number) => {
