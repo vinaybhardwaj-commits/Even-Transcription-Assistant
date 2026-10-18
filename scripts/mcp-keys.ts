@@ -9,12 +9,14 @@
  *   npx tsx scripts/mcp-keys.ts revoke-identity <email>      every key of the address stops working
  *   npx tsx scripts/mcp-keys.ts blacklist <email>            as revoke-identity, and the address can never be issued a key again from here
  *   npx tsx scripts/mcp-keys.ts activate <email>             a REVOKED identity only; a blacklist is lifted by V editing mcp_identity
+ *   npx tsx scripts/mcp-keys.ts blacklist-file               blacklists the EXACT addresses in the private file named by SCRIBE_MCP_BLACKLIST_FILE (JSON array, mode 0600, outside the repo)
  *   npx tsx scripts/mcp-keys.ts seed <file.json>             links EXISTING tokens (by sha256) to owners: {"keys":[{"sha256":"<hex>","email":"..","scope":"read|admin"}],"blacklist":["email",..]}
  *
  * Prints ids, addresses and counts. Mails V (SCRIBE_MCP_OAUTH_APPROVER, through Resend) on issue and revoke when RESEND_* are set in the environment.
  */
 import { readFileSync } from "node:fs";
 import { activateIdentity, issueKey, linkExistingKey, listIdentities, listKeys, revokeKey, rotateKey, setIdentityStatus, type KeyScope } from "../lib/mcp/identity";
+import { applyBlacklistFile } from "../lib/mcp/blacklist-file";
 import { alertIdentityChanged, alertKeyIssued, alertKeyRevoked } from "../lib/mcp/notify";
 
 const BY = "cli";
@@ -53,6 +55,11 @@ async function main(argv: string[]): Promise<number> {
       await setIdentityStatus(a ?? "", status, BY);
       await alertIdentityChanged((a ?? "").trim().toLowerCase(), status, BY);
       console.log(`${a} -> ${status}`);
+      return 0;
+    }
+    case "blacklist-file": {
+      const n = await applyBlacklistFile(BY);
+      console.log(`blacklisted=${n}`);
       return 0;
     }
     case "activate":

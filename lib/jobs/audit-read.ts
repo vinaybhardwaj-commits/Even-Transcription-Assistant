@@ -60,7 +60,7 @@ export async function readRecentAudit(input: {
        AND (${input.action}::text IS NULL OR action = ${input.action}::text)
        AND (${input.actor ?? null}::text IS NULL OR actor_id = ${input.actor ?? null}::text)
        AND created_at >= ${since}::timestamptz
-       AND (${owner}::boolean OR (actor_id NOT LIKE 'person:%' AND actor_id NOT LIKE 'unknown:%') OR actor_id = ${own}::text)
+       AND (${owner}::boolean OR (actor_id NOT LIKE 'person:%' AND actor_id NOT LIKE 'unknown:%' AND action NOT LIKE 'admin.person%') OR actor_id = ${own}::text)
      ORDER BY created_at DESC
      LIMIT ${input.limit}
   `) as Array<Record<string, unknown>>;

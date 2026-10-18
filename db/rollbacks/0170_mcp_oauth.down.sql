@@ -5,6 +5,7 @@ DROP TABLE IF EXISTS mcp_owner_seclog;
 DROP FUNCTION IF EXISTS mcp_owner_seclog_guard();
 DROP TABLE IF EXISTS mcp_key;
 DROP TABLE IF EXISTS mcp_identity;
+DROP TABLE IF EXISTS mcp_oauth_email_lock;
 DROP TABLE IF EXISTS mcp_oauth_email_code;
 DROP TABLE IF EXISTS mcp_oauth_family;
 DROP TABLE IF EXISTS mcp_oauth_token;

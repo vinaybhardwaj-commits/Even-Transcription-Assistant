@@ -18,10 +18,18 @@ describe("subjectIds: ids and dates only", () => {
     expect(subjectIds(null)).toEqual({});
   });
 
+  it("A6: a real window id, built as lib/bench-window.ts builds it, passes; so do bench sessions and encounter ids; a name-shaped window id does not", () => {
+    const session = "bs_k3j9x2m4q8";
+    const win = `bw_${session.replace(/^bs_/, "")}_${1760700000000}_room`.slice(0, 128);
+    expect(subjectIds({ window_id: win, session_id: session, encounter_id: "enc_k3j9x2m4q8" })).toEqual({ window_id: win, session_id: session, encounter_id: "enc_k3j9x2m4q8" });
+    expect(subjectIds({ window_id: "bw_ShanthiRamesh" })).toEqual({});
+    expect(subjectIds({ window_id: "bw_ramesh_kumar" })).toEqual({});
+  });
+
   it("A6: a name-shaped single token does not pass; each key needs its own id shape", () => {
     expect(subjectIds({ consult_uid: "ShanthiRamesh", room_slug: "Ramesh", room: "kumar", room_id: "Sharma", encounter_id: "Ramesh", visit_id: "vis_x", session_id: "Priya", window_id: "bw_short", ist_date: "Tuesday", since: "yesterday", start: "ramesh" })).toEqual({});
-    expect(subjectIds({ consult_uid: "C4721ABC", room_id: "room_abc", room_slug: "cardiology-opd-gh4a", encounter_id: "enc_a1b2c3d4", visit_id: "vis_a1b2c3d4", session_id: "bs_a1b2c3d4", window_id: "bw_a1b2c3d4", since: "2026-10-17T10:00:00Z" }))
-      .toEqual({ consult_uid: "C4721ABC", room_id: "room_abc", room_slug: "cardiology-opd-gh4a", encounter_id: "enc_a1b2c3d4", visit_id: "vis_a1b2c3d4", session_id: "bs_a1b2c3d4", window_id: "bw_a1b2c3d4", since: "2026-10-17T10:00:00Z" });
+    expect(subjectIds({ consult_uid: "C4721ABC", room_id: "room_abc", room_slug: "cardiology-opd-gh4a", encounter_id: "enc_a1b2c3d4", visit_id: "vis_a1b2c3d4", session_id: "bs_a1b2c3d4", window_id: "bw_a1b2c3d4_1760700000000_room", since: "2026-10-17T10:00:00Z" }))
+      .toEqual({ consult_uid: "C4721ABC", room_id: "room_abc", room_slug: "cardiology-opd-gh4a", encounter_id: "enc_a1b2c3d4", visit_id: "vis_a1b2c3d4", session_id: "bs_a1b2c3d4", window_id: "bw_a1b2c3d4_1760700000000_room", since: "2026-10-17T10:00:00Z" });
     expect(subjectIds([1])).toEqual({});
   });
 });

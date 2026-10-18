@@ -1354,6 +1354,33 @@ describe("approver-routed email code", () => {
     expect(mailed).toHaveLength(before + 1);
   });
 
+  it("R4 F3 / N2: 4 wrong tries on flow A, the 5th on flow B 13 minutes later: 3 minutes after that (flow A aged out) start, verify and resend are ALL still refused", async () => {
+    const sA = await startSignIn();
+    await start(sA.cookie, ALICE);
+    const wrong = lastCode() === "000000" ? "000001" : "000000";
+    for (let i = 0; i < 4; i++) await verify(sA.cookie, wrong);
+    fake.emailClock.offsetMs = 13 * 60_000;
+    resetEmailLimitForTests();
+    const sB = await startSignIn();
+    await start(sB.cookie, ALICE);
+    const rightB = lastCode();
+    const wrongB = rightB === "000000" ? "000001" : "000000";
+    await verify(sB.cookie, wrongB); // the 5th try across the address
+    const mails = mailed.length;
+    fake.emailClock.offsetMs = 16 * 60_000; // 3 min after the 5th; flow A's tries are 16 min old
+    resetEmailLimitForTests();
+    await start((await startSignIn()).cookie, ALICE); // start
+    await start(sB.cookie, ALICE); // resend inside flow B
+    expect(mailed).toHaveLength(mails);
+    const v = await verify(sB.cookie, rightB); // verify with the RIGHT code of flow B
+    expect(v.status).toBe(400);
+    expect(await v.text()).toContain("code_unavailable");
+    fake.emailClock.offsetMs = 29 * 60_000; // 16 min after the 5th: open
+    resetEmailLimitForTests();
+    await start((await startSignIn()).cookie, ALICE);
+    expect(mailed).toHaveLength(mails + 1);
+  });
+
   it("SCRIBE_MCP_IDENTITY on: an allowlisted person with no active mcp_identity gets the identical page, no mail and a no_identity refusal row", async () => {
     process.env.SCRIBE_MCP_IDENTITY = "on";
     IDM.status = null; // no identity row

@@ -60,6 +60,7 @@ export async function insertEmailCode(c: { pending_id: string; email: string; co
     WHERE (SELECT count(*) FROM mcp_oauth_email_code WHERE email = ${c.email} AND created_at > now() - (${c.window_s} * interval '1 second')) < ${c.max_per_email}
       AND (SELECT COALESCE(sum(attempts), 0) FROM mcp_oauth_email_code WHERE pending_id = ${c.pending_id}) < ${c.max_attempts}
       AND (SELECT COALESCE(sum(attempts), 0) FROM mcp_oauth_email_code WHERE email = ${c.email} AND last_attempt_at > now() - (${lockS} * interval '1 second')) < ${c.max_attempts}
+      AND NOT EXISTS (SELECT 1 FROM mcp_oauth_email_lock l WHERE l.email = ${c.email} AND l.locked_until > now())
     RETURNING id
   `) as Array<{ id: string | number }>;
   return rows[0] ? String(rows[0].id) : null;
@@ -92,9 +93,19 @@ export async function takeEmailAttempt(pendingId: string, maxAttempts: number, l
       AND attempts < ${maxAttempts}
       AND (SELECT COALESCE(sum(attempts), 0) FROM mcp_oauth_email_code WHERE pending_id = ${pendingId}) < ${maxAttempts}
       AND (SELECT COALESCE(sum(x.attempts), 0) FROM mcp_oauth_email_code x WHERE x.email = mcp_oauth_email_code.email AND x.last_attempt_at > now() - (${lockS} * interval '1 second')) < ${maxAttempts}
+      AND NOT EXISTS (SELECT 1 FROM mcp_oauth_email_lock l WHERE l.email = mcp_oauth_email_code.email AND l.locked_until > now())
     RETURNING id, email, code_hash
   `) as Array<{ id: string | number; email: string; code_hash: string }>;
   const r = rows[0];
+  if (r) {
+    // R4 F3: the try that makes 5 across the address (any flow, any code) starts the 15-minute lock FROM THIS MOMENT; later tries and codes are refused until locked_until, so an older flow ageing out cannot reopen it.
+    await sql`
+      INSERT INTO mcp_oauth_email_lock (email, locked_until)
+      SELECT ${r.email}, now() + (${lockS} * interval '1 second')
+       WHERE (SELECT COALESCE(sum(attempts), 0) FROM mcp_oauth_email_code WHERE email = ${r.email} AND last_attempt_at > now() - (${lockS} * interval '1 second')) >= ${maxAttempts}
+      ON CONFLICT (email) DO UPDATE SET locked_until = GREATEST(mcp_oauth_email_lock.locked_until, EXCLUDED.locked_until)
+    `;
+  }
   return r ? { id: String(r.id), email: r.email, code_hash: r.code_hash } : null;
 }
 

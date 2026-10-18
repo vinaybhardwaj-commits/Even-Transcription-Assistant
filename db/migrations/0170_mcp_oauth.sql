@@ -119,15 +119,14 @@ ALTER TABLE mcp_identity ADD COLUMN IF NOT EXISTS code_self_approved_at timestam
 ALTER TABLE mcp_identity ADD COLUMN IF NOT EXISTS code_self_approved_by text;
 CREATE INDEX IF NOT EXISTS mcp_oauth_token_key_idx ON mcp_oauth_token (key_id);
 
--- R3 F4: the two 16 Oct 2026 revocations (Bhavesh, Chandan) are BLACKLISTED by the migration itself, not by a seed file. This repo holds no address for either (names only), so the match is the
--- allowlist/identity rows whose local part STARTS WITH the first name on the company domain; any such row becomes blacklisted (an upsert that overrides revoked/active), and its keys are stamped revoked.
--- No row is invented: if neither person is in mcp_person or mcp_identity yet, nothing matches and scripts/mcp-keys.ts blacklist <email> (or `seed`) must add the exact address - reported UNVERIFIED.
-INSERT INTO mcp_identity (email, status, created_by)
-SELECT email, 'blacklisted', 'migration-0170-16oct' FROM mcp_person WHERE email ~ '^(bhavesh|chandan)[^@]*@even\.in$'
-ON CONFLICT (email) DO UPDATE SET status = 'blacklisted';
-UPDATE mcp_identity SET status = 'blacklisted' WHERE email ~ '^(bhavesh|chandan)[^@]*@even\.in$' AND status <> 'blacklisted';
-UPDATE mcp_key SET revoked_at = now() WHERE revoked_at IS NULL AND email IN (SELECT email FROM mcp_identity WHERE status = 'blacklisted');
-UPDATE mcp_person SET status = 'revoked', revoked_at = COALESCE(revoked_at, now()) WHERE email IN (SELECT email FROM mcp_identity WHERE status = 'blacklisted') AND status = 'active';
+-- R4: NO person is matched by name or pattern here, and no name is written in this file. The 16 Oct 2026 revocations are blacklisted from a private, out-of-repo seed file by
+-- `scripts/mcp-keys.ts blacklist-file` (exact addresses, file 0600, path in SCRIBE_MCP_BLACKLIST_FILE). Until that has run, the two are NOT blacklisted: the migration alone does not do it.
+
+-- R4 F3: one row per address while it is locked after 5 wrong tries, whichever flow made them: locked_until = the time of the 5th try + 15 min. start, verify and resend all refuse while it is in the future.
+CREATE TABLE IF NOT EXISTS mcp_oauth_email_lock (
+  email         text PRIMARY KEY,
+  locked_until  timestamptz NOT NULL
+);
 
 -- OWNER SECURITY LOG: V's own calls and nothing more. ts, key_id, tool, outcome. NO subject ids, NO args, NO email. Excluded from audit_log, the governance view and the digest; read only at /admin/mcp-seclog.
 -- UPDATE and TRUNCATE are refused; DELETE is allowed only for a row older than 30 days (the retention purge).

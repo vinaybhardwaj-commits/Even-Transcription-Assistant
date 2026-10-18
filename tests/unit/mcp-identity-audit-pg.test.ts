@@ -452,6 +452,7 @@ describe.skipIf(!HAVE)("approver-routed code: the 5-try / 15-minute address lock
     expect(await S.takeEmailAttempt("p1", 5)).toBeNull(); // the flow is dead
     expect(await mk("p2")).toBeNull(); // a new flow for the same address is locked out
     pg.exec(`UPDATE mcp_oauth_email_code SET created_at = now() - interval '16 minutes', last_attempt_at = now() - interval '16 minutes' WHERE email = '${e}'`);
+    pg.exec(`UPDATE mcp_oauth_email_lock SET locked_until = now() - interval '1 minute' WHERE email = '${e}'`); // 15 min after the 5th try, the lock has run out
     expect(await mk("p3")).not.toBeNull(); // 15 minutes later it opens again
     expect(await S.takeEmailAttempt("p3", 5)).not.toBeNull();
   });
@@ -648,6 +649,7 @@ describe.skipIf(!HAVE)("R3 F1: the governance audit is V's alone (scribe_audit_r
 });
 
 describe.skipIf(!HAVE)("R3 F2: /api/diarize-segments is a fifth audited door", () => {
+  const REAL_WIN = `bw_${"bs_a1b2c3d4e5f6".replace(/^bs_/, "")}_${1760700000000}_room`;
   const get = async (key: string | null, qs = "window_id=bw_nosuchwindow1") => {
     const { GET } = await import("@/app/api/diarize-segments/route");
     return GET(new NextRequest(`https://www.evenscribe.app/api/diarize-segments?${qs}`, { headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), "x-forwarded-for": "203.0.113.9" } }));
@@ -665,14 +667,24 @@ describe.skipIf(!HAVE)("R3 F2: /api/diarize-segments is a fifth audited door", (
 
   it("a live per-user key: one audit_log row (email, key_id, door diarize, tool diarize_segments, window id only), whatever the lookup answered", async () => {
     const t = await mark();
-    const res = await get(aliceKey);
+    const res = await get(aliceKey, `window_id=${REAL_WIN}`);
     expect(res.status).not.toBe(401);
     expect(res.status).not.toBe(503);
     const rows = await rowsSince(t);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ actor_id: `person:${ALICE}`, target_id: "diarize_segments" });
     expect(rows[0]!.metadata_json).toMatchObject({ email: ALICE, key_id: aliceKeyId, door: "diarize" });
-    expect(rows[0]!.metadata_json.subject).toEqual({ window_id: "bw_nosuchwindow1" });
+    expect(rows[0]!.metadata_json.subject).toEqual({ window_id: REAL_WIN });
+  });
+
+  it("A6: a REAL-format window id (bw_<session>_<start_ms>_<mic>, built as lib/bench-window does) reaches the subject; a name-shaped one does not", async () => {
+    const real = `bw_${"bs_a1b2c3d4e5f6".replace(/^bs_/, "")}_${1760700000000}_room`.slice(0, 128);
+    const t = await mark();
+    await get(aliceKey, `window_id=${real}`);
+    await get(aliceKey, "window_id=ShanthiRamesh");
+    const rows = await rowsSince(t);
+    expect(rows[0]!.metadata_json.subject).toEqual({ window_id: real });
+    expect(rows[1]!.metadata_json.subject).toEqual({});
   });
 
   it("fail closed: when the audit insert fails the data is withheld (503 audit_unavailable)", async () => {
@@ -740,27 +752,44 @@ describe.skipIf(!HAVE)("R3 F3: the address lock runs 15 minutes from the 5th fai
     pg.exec(`UPDATE mcp_oauth_email_code SET last_attempt_at = last_attempt_at - interval '7.5 minutes' WHERE email = '${e}'`);
     expect(await mk("m3")).toBeNull();
     pg.exec(`UPDATE mcp_oauth_email_code SET last_attempt_at = last_attempt_at - interval '2 minutes' WHERE email = '${e}'`);
+    pg.exec(`UPDATE mcp_oauth_email_lock SET locked_until = now() - interval '1 minute' WHERE email = '${e}'`);
     expect(await mk("m4")).not.toBeNull();
   });
 });
 
 describe.skipIf(!HAVE)("R3 F4 and M13", () => {
   const CO = ["even", "in"].join("."); // the company domain the migration matches, built so no address literal sits in the file
-  it("the 16 Oct revocations migrate as BLACKLISTED by the migration itself (active, revoked and absent-from-identity cases), their keys are revoked, and nobody else is touched", async () => {
-    pg.exec(`INSERT INTO mcp_person (email, scopes, status) VALUES ('bhavesh.test@${CO}', ARRAY['read'], 'active'), ('chandan.test@${CO}', ARRAY['read'], 'revoked'), ('carol.test@${CO}', ARRAY['read'], 'active'), ('bhavesh.test@example.test', ARRAY['read'], 'active')`);
-    pg.exec(`INSERT INTO mcp_identity (email, status) VALUES ('chandan.test@${CO}', 'active') ON CONFLICT DO NOTHING`);
-    pg.exec(`INSERT INTO mcp_key (key_id, email, scope, key_hash) VALUES ('k_bh', 'chandan.test@${CO}', 'read', '${"b".repeat(64)}')`);
+  it("R4 F4: the migration matches NO person by name or pattern: near-names stay active on a fresh apply (and on a re-apply), and the file holds no blacklist upsert from mcp_person", async () => {
+    pg.exec(`INSERT INTO mcp_person (email, scopes, status) VALUES ('ravina.near@example.test', ARRAY['read'], 'active'), ('ravi.near@example.test', ARRAY['read'], 'active')`);
+    pg.exec(`INSERT INTO mcp_identity (email, status) VALUES ('ravina.near@example.test', 'active'), ('ravi.near@example.test', 'active') ON CONFLICT DO NOTHING`);
     const mig = readFileSync("db/migrations/0170_mcp_oauth.sql", "utf8");
     pg.exec(mig);
-    pg.exec(mig); // idempotent
-    const st = Object.fromEntries((await q<{ email: string; status: string }>`SELECT email, status FROM mcp_identity WHERE email LIKE '%.test@%'`).map((r) => [r.email, r.status]));
-    expect(st[`bhavesh.test@${CO}`]).toBe("blacklisted");
-    expect(st[`chandan.test@${CO}`]).toBe("blacklisted");
-    expect(st[`carol.test@${CO}`]).toBe("active");
-    expect(st["bhavesh.test@example.test"]).toBe("active"); // another domain: not matched
-    expect((await q`SELECT revoked_at FROM mcp_key WHERE key_id = 'k_bh'`)[0]!.revoked_at).not.toBeNull();
-    expect((await q`SELECT status FROM mcp_person WHERE email = ${`bhavesh.test@${CO}`}`)[0]!.status).toBe("revoked");
-    await expect(ID.issueKey(`bhavesh.test@${CO}`, "read", "test")).rejects.toThrow("blacklisted");
+    pg.exec(mig);
+    expect((await q`SELECT status FROM mcp_identity WHERE email LIKE '%.near@%' ORDER BY email`).map((r) => r.status)).toEqual(["active", "active"]);
+    expect(mig).not.toMatch(/~\s*'\^\(/); // no regex over addresses
+    expect(mig).not.toMatch(/SET status = 'blacklisted'/); // nothing in the migration blacklists anybody
+    expect(await q`SELECT 1 FROM mcp_identity WHERE status = 'blacklisted' AND created_by LIKE 'migration%'`).toHaveLength(0);
+  });
+
+  it("R4 F4: blacklist-file blacklists EXACTLY the listed addresses (their keys revoked, sessions killed); a near-name next to a listed address is untouched", async () => {
+    const { applyBlacklistFile } = await import("@/lib/mcp/blacklist-file");
+    const { writeFileSync, mkdtempSync, chmodSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(`${tmpdir()}/bl-`);
+    const listed = "exact.one@example.test";
+    const near = "exact.one2@example.test";
+    const k1 = await ID.issueKey(listed, "read", "test");
+    const k2 = await ID.issueKey(near, "read", "test");
+    const f = `${dir}/list.json`;
+    writeFileSync(f, JSON.stringify([listed, "never.seen@example.test"]));
+    chmodSync(f, 0o600);
+    expect(await applyBlacklistFile("test", f)).toBe(2);
+    expect((await q`SELECT status FROM mcp_identity WHERE email = ${listed}`)[0]!.status).toBe("blacklisted");
+    expect((await q`SELECT status FROM mcp_identity WHERE email = 'never.seen@example.test'`)[0]!.status).toBe("blacklisted"); // an address with no row yet is blacklisted too: never a no-op
+    expect((await q`SELECT status FROM mcp_identity WHERE email = ${near}`)[0]!.status).toBe("active");
+    expect((await header(k1.key, tool("scribe_now"))).status).toBe(401);
+    expect((await header(k2.key, tool("scribe_now"))).status).toBe(200);
+    await expect(ID.issueKey(listed, "read", "test")).rejects.toThrow("blacklisted");
   });
 
   it("M13: an admin-scope env-map token (actor admin:…) linked to a non-V address is a USER: an audit_log row, not the seclog", async () => {
@@ -780,5 +809,54 @@ describe.skipIf(!HAVE)("R3 F4 and M13", () => {
     } finally {
       delete process.env.SCRIBE_MCP_TOKENS_ADMIN;
     }
+  });
+});
+
+describe.skipIf(!HAVE)("R4: N3, the cross-flow lock, counted sign-in refusals", () => {
+  it("N3: admin.person_grant / revoke rows (they name another person's address) are V's alone; a read key and an admin non-owner do not see them", async () => {
+    pg.exec(`INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id) VALUES ('admin', 'mcp:admin:gating', 'admin.person_grant', 'mcp_person', 'granted.person@example.test'), ('admin', 'mcp:admin:gating', 'admin.person_revoke', 'mcp_person', 'revoked.person@example.test')`);
+    const rec = async (key: string) => JSON.stringify(((await (await header(key, tool("scribe_audit_recent", { since: "2020-01-01T00:00:00Z", limit: 200 }))).json()).result.structuredContent as { rows: unknown[] }).rows);
+    for (const k of [aliceKey, carolKey]) {
+      const flat = await rec(k);
+      expect(flat).not.toContain("granted.person@example.test");
+      expect(flat).not.toContain("revoked.person@example.test");
+    }
+    const v = await rec(V_TOKEN);
+    expect(v).toContain("granted.person@example.test");
+    expect(v).toContain("revoked.person@example.test");
+  });
+
+  it("F3 / N2: 4 wrong tries on one flow, the 5th on ANOTHER flow 13 minutes later: the address stays locked until 15 minutes after the 5th, for start, verify AND resend", async () => {
+    const e = "xflow@example.test";
+    const mk = (pid: string) => S.insertEmailCode({ pending_id: pid, email: e, code_hash: "h", ttl_s: 600, max_per_email: 50, window_s: 900, max_attempts: 5 });
+    expect(await mk("f1")).not.toBeNull();
+    for (let i = 0; i < 4; i += 1) expect(await S.takeEmailAttempt("f1", 5)).not.toBeNull();
+    pg.exec(`UPDATE mcp_oauth_email_code SET created_at = now() - interval '13 minutes', last_attempt_at = now() - interval '13 minutes' WHERE pending_id = 'f1'`);
+    expect(await mk("f2")).not.toBeNull(); // 4 burned, not yet 5: a new flow is allowed
+    expect(await S.takeEmailAttempt("f2", 5)).not.toBeNull(); // the 5th try, on the second flow
+    // 3 minutes later flow 1 has aged out of the 15-minute window; the lock must not have
+    pg.exec(`UPDATE mcp_oauth_email_code SET last_attempt_at = last_attempt_at - interval '3 minutes', created_at = created_at - interval '3 minutes' WHERE email = '${e}'`);
+    pg.exec(`UPDATE mcp_oauth_email_lock SET locked_until = locked_until - interval '3 minutes' WHERE email = '${e}'`);
+    expect(await mk("f3")).toBeNull(); // start
+    expect(await mk("f2")).toBeNull(); // resend inside the same pending flow
+    expect(await S.takeEmailAttempt("f2", 5)).toBeNull(); // verify
+    expect(await S.takeEmailAttempt("f1", 5)).toBeNull();
+    pg.exec(`UPDATE mcp_oauth_email_lock SET locked_until = now() - interval '1 second' WHERE email = '${e}'`);
+    pg.exec(`UPDATE mcp_oauth_email_code SET last_attempt_at = now() - interval '16 minutes' WHERE email = '${e}'`);
+    expect(await mk("f4")).not.toBeNull(); // open again
+  });
+
+  it("every sign-in refusal is a row or a counted suppression: 5 refusals in 61 s give 2 rows, the second says suppressed 4 (and a different reason is its own row)", async () => {
+    const { auditOauthRefused } = await import("@/lib/mcp/audit");
+    resetDeniedAuditForTests();
+    const t = await mark();
+    const now = Date.now();
+    const a = `count.me@example.test`;
+    expect(await auditOauthRefused(a, "code_wrong", now)).toBe(true);
+    for (let i = 1; i <= 4; i += 1) expect(await auditOauthRefused(a, "code_wrong", now + i * 1000)).toBe(false);
+    expect(await auditOauthRefused(a, "rate_limited", now + 5000)).toBe(true);
+    expect(await auditOauthRefused(a, "code_wrong", now + 61_000)).toBe(true);
+    const rows = await q`SELECT metadata_json FROM audit_log WHERE action = 'mcp.oauth_refused' AND actor_id = ${`person:${a}`} AND created_at > ${t}::timestamptz ORDER BY created_at, id`;
+    expect(rows.map((r) => [r.metadata_json.reason, r.metadata_json.suppressed ?? 0])).toEqual([["code_wrong", 0], ["rate_limited", 0], ["code_wrong", 4]]);
   });
 });

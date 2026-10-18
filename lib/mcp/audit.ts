@@ -60,7 +60,9 @@ const SUBJECT_PATTERN: Record<string, RegExp> = {
   room_id: /^[a-z]{2,6}_[A-Za-z0-9]{3,40}$/,
   room_slug: SLUG, room: SLUG,
   ist_date: DATE, since: DATE,
-  encounter_id: /^enc_[A-Za-z0-9]{6,40}$/, visit_id: /^vis_[A-Za-z0-9]{6,40}$/, session_id: /^bs_[A-Za-z0-9]{6,40}$/, window_id: /^bw_[A-Za-z0-9]{6,40}$/,
+  encounter_id: /^enc_[A-Za-z0-9]{6,40}$/, visit_id: /^vis_[A-Za-z0-9]{6,40}$/, session_id: /^bs_[A-Za-z0-9_-]{4,60}$/,
+  // the REAL window id (lib/bench-window.ts): bw_<session suffix>_<start_ms>_<source_mic>, cut to 128. A name has no `_<13 digit ms>_<mic>` tail.
+  window_id: /^bw_[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*_\d{10,14}_[A-Za-z0-9-]{1,24}$/,
 };
 const SUBJECT_KEYS = [...Object.keys(SUBJECT_PATTERN), "start", "end"] as const;
 
@@ -191,17 +193,18 @@ export async function auditDeniedCall(prefix: string, now: number = Date.now()):
  * OAUTH-O3 (spec §12): a call with a revoked, expired, wrong-resource or inactive-person token. Action mcp.denied; actor `person:<email>` (actor_type 'person') because the token mapped to one.
  * Reason code only in the metadata; never the token, its hash or a URL. At most one row per subject per minute (in memory per instance). Awaited by the caller, never void.
  */
-const personDeniedLast = new Map<string, number>();
+const personDeniedLast = new Map<string, { t: number; suppressed: number }>();
 export async function auditPersonDenied(email: string, reason: "expired" | "revoked" | "inactive" | "resource", now: number = Date.now()): Promise<boolean> {
   const actor = `person:${email}`;
   const last = personDeniedLast.get(actor);
-  if (last !== undefined && now - last < DENIED_AUDIT_EVERY_MS) return false;
-  personDeniedLast.set(actor, now);
-  if (personDeniedLast.size > 1000) for (const [k, t] of personDeniedLast) if (now - t >= DENIED_AUDIT_EVERY_MS) personDeniedLast.delete(k);
+  if (last !== undefined && now - last.t < DENIED_AUDIT_EVERY_MS) { last.suppressed += 1; return false; } // counted into the next row
+  const suppressed = last?.suppressed ?? 0;
+  personDeniedLast.set(actor, { t: now, suppressed: 0 });
+  if (personDeniedLast.size > 1000) for (const [k, v] of personDeniedLast) if (now - v.t >= DENIED_AUDIT_EVERY_MS) personDeniedLast.delete(k);
   try {
     await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
-      VALUES ('person', ${actor.slice(0, 261)}, 'mcp.denied', 'mcp_auth', 'bearer', ${JSON.stringify({ ok: false, err_kind: "denied", reason })}::jsonb)
+      VALUES ('person', ${actor.slice(0, 261)}, 'mcp.denied', 'mcp_auth', 'bearer', ${JSON.stringify({ ok: false, err_kind: "denied", reason, ...(suppressed > 0 ? { suppressed } : {}) })}::jsonb)
     `;
   } catch (e) {
     console.error("[mcp-audit] person-denied audit insert failed", String((e as Error)?.message ?? e).slice(0, 120));
@@ -211,21 +214,23 @@ export async function auditPersonDenied(email: string, reason: "expired" | "revo
 
 /**
  * OAUTH-O2 (spec §12): one audit row for a refused sign-in. actor `person:<email>` when the address is a real even.in one (or the email-code row names it), else `unknown`; action `mcp.oauth_refused`; metadata is the reason
- * code only (never a token, a code, an emailed sign-in code or an URL). At most one row per subject per minute (in memory per instance). Best-effort like every audit write.
+ * code only (never a token, a code, an emailed sign-in code or an URL). At most one row per subject and reason per minute (in memory per instance); the refusals dropped in between are COUNTED into the next row as `suppressed`. Best-effort like every audit write.
  */
-const refusedLast = new Map<string, number>();
+const refusedLast = new Map<string, { t: number; suppressed: number }>();
 export async function auditOauthRefused(subjectEmail: string | null, reason: string, now: number = Date.now()): Promise<boolean> {
   const email = subjectEmail && /^[^\s@]{1,64}@[^\s@]{1,190}$/.test(subjectEmail) ? subjectEmail.toLowerCase() : null;
   const actor = email ? `person:${email}` : "unknown";
   const code = /^[a-z0-9_]{1,40}$/.test(reason) ? reason : "other";
-  const last = refusedLast.get(actor);
-  if (last !== undefined && now - last < DENIED_AUDIT_EVERY_MS) return false;
-  refusedLast.set(actor, now);
-  if (refusedLast.size > 1000) for (const [k, t] of refusedLast) if (now - t >= DENIED_AUDIT_EVERY_MS) refusedLast.delete(k);
+  const key = `${actor}|${code}`; // a different reason is its own row (R4)
+  const last = refusedLast.get(key);
+  if (last !== undefined && now - last.t < DENIED_AUDIT_EVERY_MS) { last.suppressed += 1; return false; } // not written, but COUNTED into the next row of this key
+  const suppressed = last?.suppressed ?? 0;
+  refusedLast.set(key, { t: now, suppressed: 0 });
+  if (refusedLast.size > 1000) for (const [k, v] of refusedLast) if (now - v.t >= DENIED_AUDIT_EVERY_MS) refusedLast.delete(k);
   try {
     await sql`
       INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
-      VALUES ('system', ${actor}, 'mcp.oauth_refused', 'mcp_auth', 'oauth', ${JSON.stringify({ ok: false, reason: code })}::jsonb)
+      VALUES ('system', ${actor}, 'mcp.oauth_refused', 'mcp_auth', 'oauth', ${JSON.stringify({ ok: false, reason: code, ...(suppressed > 0 ? { suppressed } : {}) })}::jsonb)
     `;
   } catch (e) {
     console.warn("[mcp-audit] oauth-refusal audit insert failed", String((e as Error)?.message ?? e).slice(0, 120));
