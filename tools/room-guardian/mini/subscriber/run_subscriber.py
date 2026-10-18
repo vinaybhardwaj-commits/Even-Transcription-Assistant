@@ -47,7 +47,9 @@ def reader(room, stream, q):
 
 def publish(room, msg, timeout=15):
     """Own process group (start_new_session), so a timeout kills the whole group: a hang before pipe-ssh.sh's exec (its tailscale/head pipeline) leaves no orphan.
-    Same argv, input and 15 s timeout as before; a timeout still raises subprocess.TimeoutExpired."""
+    Same argv, input and 15 s timeout as before; a timeout still raises subprocess.TimeoutExpired.
+    Known limitation (accepted): the child is in a new session, so if the subscriber itself is killed mid-publish (launchd stop or restart), a process-group kill of the
+    job does not reach up to 8 in-flight pipe-ssh.sh children; once exec'd each is bounded by ssh's ConnectTimeout/ServerAliveInterval, a pre-exec hang would outlive us."""
     p = subprocess.Popen([PIPE_SSH, KEY, "pub", "-c", "-b=false", f"/{room}/guardian/control"], stdin=subprocess.PIPE, text=True, stderr=LOG, start_new_session=True)
     try:
         p.communicate(msg + "\n", timeout=timeout)

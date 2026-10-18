@@ -251,7 +251,9 @@ class PublishTests(unittest.TestCase):
         def alive(): return subprocess.run(["pgrep", "-f", f"sleep {tag}"], capture_output=True).returncode == 0
         try:
             with mock.patch.object(rs, "PIPE_SSH", stub):
+                t0 = time.monotonic()
                 with self.assertRaises(subprocess.TimeoutExpired): rs.publish("r1", "M", timeout=1)
+                self.assertLess(time.monotonic() - t0, 10)         # the group is killed at the timeout; without it communicate() would wait out the stub's ~60 s sleep
             time.sleep(0.3)
             self.assertFalse(alive())
         finally:
