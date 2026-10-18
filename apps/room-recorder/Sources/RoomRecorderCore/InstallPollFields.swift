@@ -67,6 +67,9 @@ public struct InstallPollFields: Equatable, Sendable {
   /// 0.1.25. "ok" or "lost", whether the configured device is attached. Additive: the server
   /// ignores an unknown key until the release that reads it.
   public var deviceState: String?
+  /// 0.1.41 (Encounter Buddy L1, Fable A1-C7). How many attached displays can show the Buddy transcript. An integer and
+  /// nothing about them: no names, serials or resolutions. Nil when the count could not be read.
+  public var displaysCount: Int?
 
   // ─── RELEASE R4 (D4) ──────────────────────────────────────────────────────────────────────
   /// The input volume, 0–1, of the device this app records from (`deviceUID`). Nil when that
@@ -112,6 +115,9 @@ public struct InstallPollFields: Equatable, Sendable {
   public var helperUpdateStep: String?
   public var helperUpdateVersion: String?
   public var helperUpdateResult: String?
+  /// 0.1.43. `ok`, `absent` or `unusable`: the state of `buddy-runner.json` in the room root, so fleet can count rooms
+  /// after a key is placed. A word and nothing else (never the path, the base or the key). Nil when not measured.
+  public var buddyRunnerConfig: String?
 
   public init(
     installID: String,
@@ -143,8 +149,10 @@ public struct InstallPollFields: Equatable, Sendable {
     selectedInputUID: String? = nil,
     levelSeq: Int64? = nil,
     levelAt: String? = nil,
-    deviceState: String? = nil
+    deviceState: String? = nil,
+    displaysCount: Int? = nil
   ) {
+    self.displaysCount = displaysCount
     self.selectedInputUID = selectedInputUID
     self.levelSeq = levelSeq
     self.levelAt = levelAt
@@ -230,7 +238,8 @@ public struct InstallPollFields: Equatable, Sendable {
       selectedInputUID: facts.inputDeviceUID,
       levelSeq: levelSeq,
       levelAt: levelAt,
-      deviceState: facts.deviceState
+      deviceState: facts.deviceState,
+      displaysCount: facts.displaysCount
     )
   }
 
@@ -315,6 +324,14 @@ public struct InstallPollFields: Equatable, Sendable {
     // Beside `input_device_name`, about the same device. The volume in four decimals, dropped
     // when outside 0–1 like `peak`; settable as `"true"`/`"false"`, absent when not measured.
     add("input_volume", Self.unitString(inputVolume))
+    // 0.1.43. Only the three words the server will learn to count; anything else is not sent.
+    if let buddyRunnerConfig, BuddyRunnerConfig.Status(rawValue: buddyRunnerConfig) != nil {
+      items.append(URLQueryItem(name: "buddy_runner_config", value: buddyRunnerConfig))
+    }
+    // 0.1.41. A whole number of displays, dropped when negative; absent when not measured.
+    if let displaysCount, displaysCount >= 0 {
+      items.append(URLQueryItem(name: "displays_count", value: String(displaysCount)))
+    }
     if let inputVolumeSettable {
       items.append(
         URLQueryItem(name: "input_volume_settable", value: inputVolumeSettable ? "true" : "false"))

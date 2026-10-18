@@ -128,7 +128,7 @@ public enum RoomCommandDecider {
     case .endDay:
       return phase == .recording || phase == .paused || phase == .failed
         ? .end : .refuse("no_active_session")
-    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .selfTest, .unknown:
+    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .selfTest, .consultStarted, .consultEnded, .unknown:
       // Not a day-lifecycle command. `RoomEngine.handle` dispatches these before it asks here
       // (R4, Tier 1 §3); a caller that asks anyway is refused rather than handed a phase decision.
       return .refuse("unsupported_kind")
@@ -557,6 +557,9 @@ public actor RoomEngine {
   private var fleetRestartForced = false
   /// Tier 1 §3. The PCM reader behind `clip_count` and `silence_ms`, for the running plain capture.
   private var pcmMeter: PCMTailMeter?
+  /// 0.1.41. Encounter Buddy L1: nil until the resident app attaches it.
+  private var buddy: BuddyConsultController?
+  private let buddyState = BuddyStateBox()
   /// Tier 1 §3. A locked channel's refusal of an assignment is said once, not every 1.5 s.
   private var channelLockLogged = false
   private var residentCaptureOwner: (any RoomResidentCaptureOwning)?
@@ -613,6 +616,7 @@ public actor RoomEngine {
   /// The clock the watchdog and the recovery start read. A test sets it.
   var recoveryClock: @Sendable () -> Date = { Date() }
   var stallWatchdog = CaptureStallWatchdog()
+  var zeroWatchdog = CoreAudioZeroWatchdog()
   private var stallGrowth = TapeGrowthProbe()
   /// True from a stall until the tape grows again. status.json says `capture_stalled` meanwhile.
   private var captureStalledNow = false
@@ -1526,6 +1530,8 @@ public actor RoomEngine {
           fields.helperUpdateStep = helper?.updateStep
           fields.helperUpdateVersion = helper?.updateVersion
           fields.helperUpdateResult = helper?.updateResult
+          // 0.1.43. One word about buddy-runner.json (ok, absent or unusable), read now; never the path or contents.
+          fields.buddyRunnerConfig = BuddyRunnerConfig.status(root: persistence.root).rawValue
           return fields
         }
         let response = try await remote.pollCommands(
@@ -1693,6 +1699,8 @@ public actor RoomEngine {
       }
     }
 
+    // 0.1.41. No window or tap outlives the loop.
+    buddy?.shutdown()
     // §13.3 step 7. THE FIRST THING CHECKED AFTER THE LOOP, and before anything that could block.
     // A swap script is already running with this bundle's path in its hands; the only correct
     // remaining action is to stop touching the disk and let the process exit 64.
@@ -1944,6 +1952,13 @@ public actor RoomEngine {
     case .checkUpdateNow, .reportDiag, .restartEngine, .selfTest:
       // Tier 1 §3. Like set_audio_input: not the day, not journaled, decided once and remembered.
       await handleOperatorVerb(command)
+      return
+    case .consultStarted, .consultEnded:
+      // 0.1.41, Encounter Buddy L1. Like set_audio_input: not the day, not journaled, decided once and remembered.
+      // It reads the recorder and never changes it.
+      let result = applyBuddy(command)
+      completedCommands[command.id] = result
+      await acknowledge(command, result: result)
       return
     case .unknown(let raw):
       // R4-D2. Refused by name and never fatal: the commands beside it still run.
@@ -2528,7 +2543,8 @@ public actor RoomEngine {
     case .pauseDay: return .pauseDay
     case .resumeDay: return .resumeDay
     case .endDay: return .endDay
-    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .selfTest, .unknown: return nil
+    case .setAudioInput, .checkUpdateNow, .reportDiag, .restartEngine, .selfTest, .consultStarted, .consultEnded, .unknown:
+      return nil
     }
   }
 
@@ -2642,7 +2658,7 @@ public actor RoomEngine {
   )? {
     switch (kind, success) {
     case (.setAudioInput, _), (.checkUpdateNow, _), (.reportDiag, _), (.restartEngine, _),
-      (.selfTest, _), (.unknown, _):
+      (.selfTest, _), (.consultStarted, _), (.consultEnded, _), (.unknown, _):
       return nil
     case (.startDay, true):
       return (.startAckReady, .startAckObserved, .startAckOutcomeUnobservable)
@@ -3644,6 +3660,7 @@ public actor RoomEngine {
       let reread = audioInputs.inputVolume(uid: targetUID)
       applied.appliedInputVolume = reread?.value.map { ($0 * 10_000).rounded() / 10_000 }
       applied.inputVolumeSettable = reread?.settable
+      RoomInputVolumeStore(root: persistence.root).remember(volume, forUID: targetUID)
       log("input volume on \(targetUID) set by the desk")
     } else {
       applied.inputVolumeSettable = audioInputs.inputVolume(uid: configuration.deviceUID)?.settable
@@ -3740,16 +3757,19 @@ public actor RoomEngine {
   /// kiosk-health stream carries as a changed `recorder.status`. Plain capture path only; the resident archive lane
   /// has no `tape.pcm` to watch and is off on every Mac.
   private func watchCaptureProgress() async {
+    publishBuddyState()
     let now = recoveryClock()
     guard residentCaptureOwner == nil, phase == .recording, let segment = capture, segment.process.isRunning else {
       stallGrowth.reset()
       _ = stallWatchdog.observe(recording: false, advanced: false, now: now)
+      _ = zeroWatchdog.observe(zeroRatio: nil, recording: false, now: now)
       if captureStalledNow && phase != .recording {
         captureStalledNow = false
       }
       return
     }
     let advanced = stallGrowth.advanced(pcm: segment.pcmURL)
+    watchForCoreAudioZeros(segment, now: now)
     if advanced, captureStalledNow {
       captureStalledNow = false
       lastError = nil
@@ -4057,6 +4077,7 @@ public actor RoomEngine {
     let segmentID = "seg_\(UUID().uuidString.lowercased())"
     let directory = sessionDirectory.appendingPathComponent(segmentID, isDirectory: true)
     try createPrivateDirectory(directory)
+    reapplyInputVolume()
     let indexURL = directory.appendingPathComponent("tape.idx")
     let process = try captureLauncher.launch(
       executable: URL(fileURLWithPath: configuration.tapewriterPath),
@@ -4443,6 +4464,130 @@ public actor RoomEngine {
 
   private var hasActiveCapture: Bool {
     residentCaptureOwner?.isActive ?? (capture?.process.isRunning == true)
+  }
+
+  // MARK: - 0.1.41: FU-RR0140-VOL and ADDENDUM 2
+
+  /// FU-RR0140-VOL. Every device open puts the room's stored input volume back (1.0 when none is stored), where the
+  /// device lets us, and logs the value before and after. A harmless extra: the 15 Oct near-silence was CoreAudio state,
+  /// not volume (see `CoreAudioZeroWatchdog`). A device with no settable volume, or one that does not answer, is left
+  /// exactly as found.
+  private func reapplyInputVolume() {
+    let uid = configuration.deviceUID
+    guard let before = audioInputs.inputVolume(uid: uid) else {
+      log("input volume on open: device did not answer; left as found")
+      return
+    }
+    guard before.settable else {
+      log("input volume on open: \(Self.volumeText(before.value)) not settable; left as found")
+      return
+    }
+    let target = RoomInputVolumeStore(root: persistence.root).value(forUID: uid)
+    // FIX1: set only when the value differs. CoreAudio reports a Float32, so equal means within a hair, not bit-equal.
+    if let current = before.value, abs(current - target) < Self.volumeEpsilon {
+      log("input volume on open: no change, before \(Self.volumeText(before.value)), stored \(Self.volumeText(target))")
+      return
+    }
+    do {
+      try audioInputs.setInputVolume(uid: uid, value: target)
+      let after = audioInputs.inputVolume(uid: uid)?.value
+      log("input volume on open: before \(Self.volumeText(before.value)), after \(Self.volumeText(after)), stored \(Self.volumeText(target))")
+    } catch {
+      log("input volume on open: before \(Self.volumeText(before.value)), set failed (\(bounded(error, limit: 80)))")
+    }
+  }
+
+  static let volumeEpsilon = 0.0005
+
+  static func volumeText(_ value: Double?) -> String {
+    value.map { String(format: "%.3f", $0) } ?? "unreadable"
+  }
+
+  /// ADDENDUM 2. Called from `watchCaptureProgress` with a running plain capture. Names the exact-zero pattern once per
+  /// episode when the microphone is authorised and the configured device is attached: then it is not a permission or
+  /// a missing device, and the Guardian can restart coreaudiod.
+  private func watchForCoreAudioZeros(_ segment: Segment, now: Date) {
+    let zeroRatio = refreshedIndexTail(for: segment).lastZeroRatio
+    guard zeroWatchdog.observe(zeroRatio: zeroRatio, recording: true, now: now) else { return }
+    guard micStateProvider() == "authorized",
+      Self.inputReadiness(devices: audioInputs.inputDevices(), uid: configuration.deviceUID) == .ready
+    else { return }
+    lastEvent = (CoreAudioZeroWatchdog.eventName, now)
+    log("\(CoreAudioZeroWatchdog.eventName): exact zeros for \(Int(CoreAudioZeroWatchdog.zeroSeconds)) s with the microphone authorised and the device attached")
+    try? saveStatus()
+  }
+
+  // MARK: - 0.1.41: Encounter Buddy L1
+
+  /// The resident app turns Encounter Buddy on once, after `load`. Without it (a test, an unbundled build) the two
+  /// consult commands are acknowledged `buddy_unavailable` and nothing else happens.
+  public func attachBuddy(presenter: any BuddyWindowPresenting) {
+    attachBuddy(presenter: presenter, runnerPlan: BuddyConsultController.filePlan(root: persistence.root, log: log))
+  }
+
+  /// 0.1.42. `runnerPlan` decides per consult whether a runner exists (the app: `buddy-runner.json`; a test: a fake).
+  func attachBuddy(presenter: any BuddyWindowPresenting, runnerPlan: @escaping BuddyRunnerPlan) {
+    // A token file left by a process that died mid-consult names a port nobody listens on any more.
+    try? FileManager.default.removeItem(at: persistence.root.appendingPathComponent(BuddyConsultController.tapFileName))
+    buddy = BuddyConsultController(
+      root: persistence.root, state: buddyState, presenter: presenter, log: log, runnerPlan: runnerPlan)
+  }
+
+  /// Test seam: a controller built by the test, so it can see the presenter and the token file.
+  func attachBuddy(controller: BuddyConsultController) { buddy = controller }
+
+  private func applyBuddy(_ command: BenchCommand) -> CommandResult {
+    guard let buddy else { return CommandResult(ok: false, sessionID: nil, error: "buddy_unavailable") }
+    var opaqueID: String?
+    var off = false
+    // 0.1.43. Strict booleans: only a JSON `true` counts. Absent, null, a string "true" or false mean no window / not live.
+    var window = false
+    var live = false
+    if case .object(let arguments) = command.args {
+      if case .some(.string(let value)) = arguments["opaque_id"] { opaqueID = value }
+      if case .some(.bool(true)) = arguments["window"] { window = true }
+      if case .some(.bool(true)) = arguments["live"] { live = true }
+      // INFERRED field name (newcat has not named it): `buddy_off: true` is the per-room / per-doctor kill switch.
+      if case .some(.bool(true)) = arguments["buddy_off"] { off = true }
+    }
+    switch command.kind {
+    case .consultStarted:
+      guard let opaqueID else { return CommandResult(ok: false, sessionID: nil, error: "bad_args") }
+      publishBuddyState(force: true)
+      switch buddy.consultStarted(opaqueID: opaqueID, buddyOff: off, window: window, live: live) {
+      case .opened, .alreadyOpen, .off, .noWindow:
+        return CommandResult(ok: true, sessionID: nil, error: nil)
+      case .badID:
+        return CommandResult(ok: false, sessionID: nil, error: "bad_args")
+      case .tapUnavailable:
+        return CommandResult(ok: false, sessionID: nil, error: "tap_unavailable")
+      case .closed, .nothingOpen:
+        return CommandResult(ok: true, sessionID: nil, error: nil)
+      }
+    default:
+      _ = buddy.consultEnded(opaqueID: opaqueID)
+      return CommandResult(ok: true, sessionID: nil, error: nil)
+    }
+  }
+
+  /// What the page and the tap may know, refreshed on the engine's own loop while a consult is live. Reads the
+  /// microphone permission and the device table; changes neither.
+  private func publishBuddyState(force: Bool = false) {
+    guard let buddy, force || buddy.isLive else { return }
+    let mic = micStateProvider()
+    // `recording` and `mic_state` are separate facts (Fable A2-C4): a denied mic or a missing device never reads as
+    // "recording" and never hides it either.
+    let micReported =
+      mic == "authorized"
+        && Self.inputReadiness(devices: audioInputs.inputDevices(), uid: configuration.deviceUID) == .notReady
+        ? "input_device_not_ready" : mic
+    let running = residentCaptureOwner == nil && capture?.process.isRunning == true
+    buddyState.set(
+      BuddyStateBox.Snapshot(
+        recording: phase == .recording,
+        micState: micReported,
+        pcmURL: running ? capture?.pcmURL : nil,
+        segmentID: running ? capture?.id : nil))
   }
 
   private func saveStatus(preferred: RoomRecorderStatus.State? = nil) throws {

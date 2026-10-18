@@ -228,6 +228,8 @@ private enum RoomRecorderCLI {
             // 0.1.25: auto-start at clinic open is OPT-IN per Mac (an `auto-start-on` file beside
             // config.json). Absent, this build behaves exactly as 0.1.24 does.
             if RoomAutoStartMarker(root: root).optedIn() { await engine.enableAutoStart() }
+            // 0.1.41. Encounter Buddy L1: the recorder's own window and tap, opened only by a consult_started command.
+            await engine.attachBuddy(presenter: BuddyWindowPresenter())
             // 0.1.30. The outbound command client; a no-op unless config.json turns it on.
             FleetBootstrap.start(configuration: configuration, root: root, engine: engine, log: { message in
               FileHandle.standardError.write(Data("room-recorder: \(message)\n".utf8))

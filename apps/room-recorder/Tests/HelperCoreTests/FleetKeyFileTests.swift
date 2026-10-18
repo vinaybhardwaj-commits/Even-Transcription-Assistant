@@ -36,7 +36,7 @@ private func mode(_ url: URL) -> UInt16 {
   ) -> FileFleetKeyStore {
     let reads = self.reads, lines = self.lines
     return FileFleetKeyStore(
-      root: root, keychainReader: { reads.bump(); return try reader() }, deadline: deadline, uid: uid, log: { lines.add($0) })
+      root: root, keychainReader: { reads.bump(); return try reader() }, deadline: deadline, uid: uid, currentDeviceID: { nil }, log: { lines.add($0) })
   }
   func gone() { try? FileManager.default.removeItem(at: root) }
 
@@ -84,7 +84,7 @@ private func mode(_ url: URL) -> UInt16 {
   @Test func anItemOnlyAPersonCanOpenGivesANewKeyAndSaysSo() throws {
     for status in [errSecInteractionNotAllowed, errSecAuthFailed, errSecInteractionRequired] {
       let root = try tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
-      let s = FileFleetKeyStore(root: root, keychainReader: { throw FleetKeychainError.read(status) }, log: { _ in })
+      let s = FileFleetKeyStore(root: root, keychainReader: { throw FleetKeychainError.read(status) }, currentDeviceID: { nil }, log: { _ in })
       #expect(try s.loadWithOrigin().origin == .rotated(reason: String(status)))
       #expect(mode(s.url) == 0o600)
     }
@@ -140,7 +140,7 @@ private func mode(_ url: URL) -> UInt16 {
     #expect(json["origin"] as? String == "rotated")
     #expect(json["replaces_device_id"] as? String == "dev_aaaaaaaaaaaaaaaaaaaaaaaa")
     // A later process reads it back without the keychain: same key, same record.
-    let again = try FileFleetKeyStore(root: root, keychainReader: { Issue.record("keychain read"); throw FleetKeychainError.read(-1) }, log: { _ in }).loadWithOrigin()
+    let again = try FileFleetKeyStore(root: root, keychainReader: { Issue.record("keychain read"); throw FleetKeychainError.read(-1) }, currentDeviceID: { nil }, log: { _ in }).loadWithOrigin()
     #expect(again.origin == .existing && again.replacesDeviceID == "dev_aaaaaaaaaaaaaaaaaaaaaaaa")
     #expect(again.key.publicKeyBase64 == load.key.publicKeyBase64)
   }
@@ -436,6 +436,28 @@ final class CountingFailingKeys: FleetKeyStore, @unchecked Sendable {
     task.cancel(); await task.value
     #expect(state.load().deviceID == newID && state.load().stoppedReason == nil)
     #expect(transport.paths.filter { $0 == "/api/fleet/poll" }.count >= 2, "it polls as the new device")
+  }
+
+  /// 0.1.41 FU-RR0140-1(b). The flag meant "the server is waiting for an operator re-key". Once a register succeeds that
+  /// is no longer true, so it is cleared; a refused register before that keeps it.
+  @Test func aSuccessfulRegisterClearsTheRotationWait() async throws {
+    let newID = "dev_bbbbbbbbbbbbbbbbbbbbbbbb"
+    let rekey = Rekey()
+    let transport = FakeTransport { _ in
+      rekey.accepting
+        ? FleetResponse(status: 201, body: Data("{\"ok\":true,\"device_id\":\"\(newID)\"}".utf8))
+        : FleetResponse(status: 409, body: Data("{\"error\":\"KEY_CONFLICT\"}".utf8))
+    }
+    let store = MemoryState()
+    var initial = FleetState(); initial.installID = "inst_1"; store.save(initial)
+    let fleet = client(
+      keys: OriginKeys(.rotated(reason: "-25308")), store: store, transport: transport, log: LogLines(), sleeps: TaskBox())
+    _ = await fleet.registerIfNeeded()
+    #expect(await fleet.afterRotation, "a refused register after a rotation keeps the wait")
+    rekey.accept()
+    _ = await fleet.registerIfNeeded()
+    #expect(store.load().deviceID == newID)
+    #expect(await fleet.afterRotation == false, "cleared by the successful register")
   }
 
   @Test func theRefusedLineIsAtMostOncePerHourCarriesOnlyTheFingerprintAndTheWaitIsJittered() async throws {

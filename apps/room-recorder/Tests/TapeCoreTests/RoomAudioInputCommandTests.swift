@@ -541,6 +541,11 @@ final class R4AudioInputs: RoomAudioInputControlling, @unchecked Sendable {
 
   var volumeSets: [(uid: String, value: Double)] { lock.withLock { sets } }
 
+  /// Moves the device's volume as macOS or a person would, without it counting as a set by the app.
+  func setVolume(_ value: Double, uid: String) {
+    lock.withLock { controls[uid]?.volume = value }
+  }
+
   func facts(forUID uid: String?) -> MachineFacts {
     let reading = uid.flatMap { inputVolume(uid: $0) }
     return MachineFacts(

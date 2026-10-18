@@ -334,7 +334,7 @@ public actor FleetClient {
 
   /// True once this process knows the key is not the one the device registered with. A 409 at register is then the
   /// server waiting for an operator re-key, not a verdict on this install.
-  private var afterRotation = false
+  private(set) var afterRotation = false
 
   /// The key is not the one this device registered with: forget the device id so the next pass registers a new one.
   /// Two sources, both honoured: this load's origin (a key made just now) and the store's DURABLE record of the id it
@@ -388,6 +388,9 @@ public actor FleetClient {
         state.deviceID = id
         persist()
         backoff.success()
+        // 0.1.41 FU-RR0140-1(b). The key and the device id agree again, so a LATER 409 is a verdict on this install and
+        // no longer the server waiting for an operator re-key.
+        afterRotation = false
         if let note = rotation {
           log("fleet key: keychain item unreadable (\(note.reason)), registered as new device \(id.dropFirst(4).prefix(8)); old device \(note.oldDevice) needs retiring")
           rotation = nil

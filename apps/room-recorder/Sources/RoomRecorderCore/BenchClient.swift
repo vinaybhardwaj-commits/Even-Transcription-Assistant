@@ -192,6 +192,11 @@ public enum BenchCommandKind: RawRepresentable, Codable, Hashable, Sendable {
   /// 0.1.25. The acoustic self-test: play the pinned stimulus pack, record it through the room's
   /// mic into a separate segment. Refused while a session is open.
   case selfTest
+  /// 0.1.41 (Encounter Buddy L1). A consult began: open the recorder's own window and serve the tap. Never starts or
+  /// stops recording. `args`: `opaque_id` (required), `buddy_off` (the kill switch, optional bool), and (0.1.43) `window` and `live`, each true only for a JSON `true`.
+  case consultStarted
+  /// 0.1.41. The consult ended: close the window and stop the tap.
+  case consultEnded
   case unknown(String)
 
   public init(rawValue: String) {
@@ -205,6 +210,8 @@ public enum BenchCommandKind: RawRepresentable, Codable, Hashable, Sendable {
     case "report_diag": self = .reportDiag
     case "restart_engine": self = .restartEngine
     case "self_test": self = .selfTest
+    case "consult_started": self = .consultStarted
+    case "consult_ended": self = .consultEnded
     default: self = .unknown(rawValue)
     }
   }
@@ -220,6 +227,8 @@ public enum BenchCommandKind: RawRepresentable, Codable, Hashable, Sendable {
     case .reportDiag: return "report_diag"
     case .restartEngine: return "restart_engine"
     case .selfTest: return "self_test"
+    case .consultStarted: return "consult_started"
+    case .consultEnded: return "consult_ended"
     case .unknown(let raw): return raw
     }
   }

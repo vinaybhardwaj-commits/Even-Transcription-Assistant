@@ -166,3 +166,57 @@ public enum HelperProbe {
     return cleaned.isEmpty ? fallback : cleaned
   }
 }
+
+/// 0.1.41 (ADDENDUM 2). Exact zeros from an attached, authorised microphone are a CoreAudio state problem, not a
+/// volume or a permission one: on 15 Oct a `coreaudiod` restart cured OPD 6 and OPD 7 in two minutes with the recorders
+/// untouched. This only DECIDES that the pattern is present; the engine logs `capture_zero_coreaudio_suspect` once per
+/// episode so the Guardian / fleet self-heal ladder can act. It restarts nothing.
+public struct CoreAudioZeroWatchdog: Sendable, Equatable {
+  /// Exact zeros for this long, in checkpoint windows, before the pattern is named.
+  public static let zeroSeconds: TimeInterval = 120
+  public static let eventName = "capture_zero_coreaudio_suspect"
+
+  private var zeroSince: Date?
+  private var flagged = false
+
+  public init() {}
+
+  /// `zeroRatio`: the latest checkpoint window's share of exactly-zero samples (nil = not measured).
+  /// Returns true ONCE per episode, when the zeros have lasted `zeroSeconds`. Any window with a non-zero sample, or a
+  /// reading that is not a measurement, ends the episode and re-arms the watchdog.
+  public mutating func observe(zeroRatio: Double?, recording: Bool, now: Date) -> Bool {
+    guard recording, let zeroRatio, zeroRatio >= 0.9999 else {
+      zeroSince = nil
+      flagged = false
+      return false
+    }
+    let since = zeroSince ?? now
+    zeroSince = since
+    guard !flagged, now.timeIntervalSince(since) >= Self.zeroSeconds else { return false }
+    flagged = true
+    return true
+  }
+}
+
+/// 0.1.41 (FU-RR0140-VOL). The input volume this room's device should hold, re-applied on every device open.
+/// `input-volume.json` beside config.json: `{"uid": <device>, "value": 0...1}`. Written by a `set_audio_input` that set a
+/// volume; absent or for another device means the default, 1.0.
+struct RoomInputVolumeStore {
+  static let fileName = "input-volume.json"
+  static let defaultValue = 1.0
+  let root: URL
+
+  func value(forUID uid: String) -> Double {
+    guard let data = try? Data(contentsOf: root.appendingPathComponent(Self.fileName)),
+      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      object["uid"] as? String == uid, let value = object["value"] as? Double, value.isFinite
+    else { return Self.defaultValue }
+    return min(max(value, 0), 1)
+  }
+
+  func remember(_ value: Double, forUID uid: String) {
+    let body: [String: Any] = ["uid": uid, "value": min(max(value, 0), 1)]
+    guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+    try? data.write(to: root.appendingPathComponent(Self.fileName), options: .atomic)
+  }
+}
