@@ -7,7 +7,8 @@ export const num = v => (typeof v === "number" && Number.isFinite(v) ? v : null)
 export const arr = v => (Array.isArray(v) ? v : []);
 export const get = (o, ...path) => { let c = o; for (const k of path) { if (c === null || c === undefined) return null; c = c[k]; } return c === undefined ? null : c; };
 
-export const isDate = s => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s + "T00:00:00Z"));
+// a round trip rejects calendar overflow (Date.parse rolls 2026-09-31 forward to 10-01)
+export const isDate = s => { if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false; const t = Date.parse(s + "T00:00:00Z"); return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === s; };
 
 /** Clamp a range to the floor. Returns null when nothing is left. */
 export function clampRange(from, to) {
@@ -83,3 +84,13 @@ export function uidOfUnitKey(k) { return typeof k === "string" ? k.split("@")[0]
 
 /** Three states: "yes", "no", or "unknown" (the catalog has not joined prescription data for this consult: has_prescription null and no id). Never "no" for unknown. */
 export const rxState = c => (hasRx(c) ? "yes" : c.has_prescription === null ? "unknown" : "no");
+
+/** The reason token of the sealed stage (e.g. final_no_session), or null: why a consult has no clip. */
+const SEAL_TOKEN = /^[a-z_:]{1,64}$/;
+/** The catalog's seal-reason token off a raw row: row.sealed, else clip.sealed (server sealReasonOf). Anything else is null. */
+export const sealTokenOf = r => { const t = r && typeof r === "object" ? [r.sealed, r.clip && r.clip.sealed].find(x => typeof x === "string" && SEAL_TOKEN.test(x)) : null; return t || null; };
+/** Why a consult has no clip: row.sealed, then clip.sealed, then the sealed stage's reason. Shown as-is (e.g. skipped:final_no_session). */
+export const sealedReason = c => {
+  const t = sealTokenOf(c); if (t) return t;
+  const r = c && c.stages && c.stages.sealed && c.stages.sealed.reason; return typeof r === "string" && /^[A-Za-z0-9_.:-]{1,60}$/.test(r) ? r : null;
+};

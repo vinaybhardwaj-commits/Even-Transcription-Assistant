@@ -135,3 +135,36 @@ table.items td.num{width:2ch;padding-right:8px}
   table.list tr.row-click:hover td{background:none}table.list tr.row-click:hover{background:var(--surface-2)}
   table.list .c-rx{order:6}table.list .c-rx::before{content:attr(data-label);color:var(--ink-2)}
 }
+
+/* inspection page: the 11 fixed layer slots */
+.slot{scroll-margin-top:8px}
+.slot-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-bottom:8px}
+.slot-head h2{margin:0;flex:1 1 200px}
+.slot-title{font-size:15px;margin:0 0 6px;font-weight:650}
+.jump{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.jump-chip{text-decoration:none;color:inherit}
+.jump-chip b{font-weight:650}
+.tok{font-family:var(--mono);font-size:12px;background:var(--surface-2);color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:0 5px;overflow-wrap:anywhere}
+table .tok{white-space:nowrap;overflow-wrap:normal}   /* a token in a table stays whole; the table scrolls inside its own container */
+.chip .tok{background:transparent;border-color:currentColor;color:inherit}
+.mock-badge{margin-left:6px}
+.src-head{margin:10px 0 4px;font-size:13px}
+.timeline{position:relative;height:34px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:8px 0 4px}
+.seg{position:absolute;top:4px;bottom:4px;min-width:3px;border:0;border-radius:3px;padding:0;background:var(--mute)}
+.seg.out{opacity:.45}
+.seg.now{outline:2px solid var(--focus);outline-offset:1px;z-index:2}
+.seg.r-doctor,.legend.roles i.r-doctor{background:var(--accent)}
+.seg.r-patient,.legend.roles i.r-patient{background:var(--ok)}
+.seg.r-attendant,.legend.roles i.r-attendant{background:var(--warn)}
+.seg.r-other,.legend.roles i.r-other{background:var(--mute)}
+.seg.r-unknown,.legend.roles i.r-unknown{background:var(--line)}
+.legend.roles i{width:14px;height:10px;border-radius:2px;border:0}
+.kv-rows .row{display:grid;grid-template-columns:150px minmax(0,1fr);gap:4px 12px;padding:4px 0;border-bottom:1px solid var(--line);align-items:baseline}
+.kv-rows .k{color:var(--ink-2);font-size:13px}
+.kv-rows .v{display:flex;flex-wrap:wrap;gap:4px;align-items:center;min-width:0}
+.lane{margin-top:10px}
+.lane-head{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;margin-bottom:4px}
+.ro-banner{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn);border-radius:8px;padding:8px 12px;margin-bottom:12px}
+.ro-banner span{flex:1 1 240px}
+.notice{margin:0 0 10px}
+@media (max-width:600px){.kv-rows .row{grid-template-columns:minmax(0,1fr)}}

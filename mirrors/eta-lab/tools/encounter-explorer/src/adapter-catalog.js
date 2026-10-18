@@ -4,14 +4,18 @@
 import { buildDays, listFor } from "./days.js";
 import { buildPulseLink } from "./pulse.js";
 import { makeCall, makeCtx, settle, withCtx } from "./mcp-call.js";
-import { arr, datesBetween, firstGap, get, isObj, num, str, stateOfStatus } from "./util.js";
+import { arr, datesBetween, firstGap, get, isObj, num, sealTokenOf, sealedReason, str, stateOfStatus } from "./util.js";
+import { c4Of, c4Token, guardC4, jevSetsIn } from "./c4.js";
+import { MIN_DATE } from "./types.js";
 
 export const CATALOG_TOOLS = ["scribe_catalog"];
 export const CATALOG_ACTIONS = ["search", "get", "clip_audio_chunk"];
 const TOOL = "scribe_catalog";
 const CAT_LIMIT = 200, CAT_MAX_PAGES = 40, ROWS_TTL = 60000;
 const PULSE_PREFIX = "https://pulse.even.in/";
-const CHUNK = 524288, MAX_AUDIO_BYTES = 64 * 1048576, MAX_CHUNKS = 128, RX_WINDOW_DAYS = 31;
+// Audio limits (Fable V11, 16 Oct): the whole clip is held as one Blob, so the cap is a byte count, and the chunk cap follows from it.
+const CHUNK = 524288, MAX_AUDIO_BYTES = 256 * 1048576, PARTIAL_BYTES = 8 * 1048576, RX_WINDOW_DAYS = 31;
+export const audioLimits = (maxBytes = MAX_AUDIO_BYTES) => ({ chunk: CHUNK, maxBytes, maxChunks: Math.ceil(maxBytes / CHUNK), partialBytes: PARTIAL_BYTES });
 const CATALOG_UID = /^[A-Za-z0-9_-]{6,64}$/;
 export const validCatalogUid = u => typeof u === "string" && CATALOG_UID.test(u);
 const LAYER_KEYS = ["transcript", "parts", "freescript", "rubric", "jev", "identity", "cdmss", "rx"];
@@ -21,10 +25,18 @@ const LAYER_TO_PANEL = { stt: "transcript", translate: "transcript", role: "tran
 /** Catalog stage state words -> the chip states. Unknown words are "pending", never "done". */
 export function catalogState(s) {
   const k = typeof s === "string" ? s.toLowerCase() : "";
-  if (["missing", "absent", "none"].includes(k)) return "missing";
+  if (["missing", "absent", "none", "skipped"].includes(k)) return "missing";
   if (["na", "n/a", "not_available", "unknown"].includes(k)) return "na";
   return stateOfStatus(s);
 }
+/** A stage is {state, reason} or a bare state word; "skipped" and "skipped:<reason>" are a missing step with that reason (the sealed stage of a consult with no clip). */
+const SKIPPED = /^skipped(?::(.+))?$/i;
+function normStage(v) {
+  const raw = isObj(v) ? v.state : v, reason = isObj(v) ? str(v.reason) : null, m = typeof raw === "string" ? SKIPPED.exec(raw) : null;
+  if (m) return { state: "missing", reason: reason || (m[1] ? m[1].slice(0, 60) : null) };
+  return { state: catalogState(raw), reason };
+}
+const TRACK = /^[a-z0-9_.-]{1,40}$/;
 const idStr = v => str(v) ?? (num(v) !== null ? String(v) : null);   // freescript artifact_id is the run id, a number
 const sourceStr = v => (Array.isArray(v) ? v.filter(x => typeof x === "string" && x).join("; ") || null : str(v));   // layers.*.source is an array of strings
 
@@ -34,17 +46,21 @@ function normLayerRef(v) { return isObj(v) ? { r2_key: str(v.r2_key), status: st
 export function normRow(r) {
   if (!isObj(r) || !str(r.consult_uid)) return null;
   const stages = {};
-  if (isObj(r.stages)) for (const [k, v] of Object.entries(r.stages)) stages[k] = isObj(v) ? { state: catalogState(v.state), reason: str(v.reason) } : { state: catalogState(v), reason: null };
-  const clip = isObj(r.clip) ? { r2_key: str(r.clip.r2_key), r2_status: str(r.clip.r2_status), signature_sha256: str(r.clip.signature_sha256), audio_sha256: str(r.clip.audio_sha256), bytes: num(r.clip.bytes), minutes: num(r.clip.minutes) } : null;
+  if (isObj(r.stages)) for (const [k, v] of Object.entries(r.stages)) stages[k] = normStage(v);
+  const clip = isObj(r.clip) ? { r2_key: str(r.clip.r2_key), r2_status: str(r.clip.r2_status), signature_sha256: str(r.clip.signature_sha256), audio_sha256: str(r.clip.audio_sha256), bytes: num(r.clip.bytes), minutes: num(r.clip.minutes), sealed: sealTokenOf({ sealed: r.clip.sealed }) } : null;
   const tOpen = num(r.t_open), tClose = num(r.t_close);
   const layers = isObj(r.layers) ? Object.fromEntries(["stt", "translate", "diar_sarvam", "diar_nemotron", "role", "parts"].map(k => [k, normLayerRef(r.layers[k])])) : null;
   const idn = isObj(r.identity) ? r.identity : {};
   const rxUid = str(r.prescription_uid) || str(idn.prescription_uid) || str(get(r, "prescription", "prescription_uid"));
   return {
     consult_uid: r.consult_uid, ist_date: str(r.ist_date), doctor_uid: str(r.doctor_uid), room_id: str(r.room_id), t_open: tOpen, t_close: tClose,
-    source: r.source === "cutter" || r.source === "caa" ? r.source : null, clip, layers,
+    sealed: sealTokenOf(r), source: r.source === "cutter" || r.source === "caa" ? r.source : null, clip, layers,
     layers_present: [...new Set(arr(r.layers_present).filter(x => typeof x === "string").map(x => LAYER_TO_PANEL[x]).filter(Boolean))],
-    freescript: isObj(r.freescript) ? { artifact_id: idStr(r.freescript.artifact_id), state: str(r.freescript.state) } : null,
+    tracks_present: [...new Set(arr(r.layers_present).filter(x => typeof x === "string" && TRACK.test(x)))],   // the raw track names (ledger "track present" hint); layers_present above is the panel mapping
+    freescript: isObj(r.freescript) ? { artifact_id: idStr(r.freescript.artifact_id), state: str(r.freescript.state), rejection_reason: str(r.freescript.rejection_reason) || str(r.freescript.reason) } : null,
+    // C4 (admin only, all optional): the key is absent for a non-admin caller; a value can be null; c4_error marks a failed read
+    ...("catalog_c4" in r ? { catalog_c4: isObj(r.catalog_c4) ? guardC4(r.catalog_c4) : null } : {}),
+    c4_error: r.c4_error === true,
     stages, first_gap: str(r.first_gap) || firstGap(stages),
     allowance: isObj(r.allowance) ? { earned_min: num(r.allowance.earned_min), spent_min: num(r.allowance.spent_min) } : null,
     prescription: rxUid ? { prescription_uid: rxUid, presc_state: str(idn.presc_state) || str(get(r, "prescription", "presc_state")) } : null,
@@ -82,26 +98,30 @@ function decodeBase64(s) {
 
 /** @param caps {{mcp:any, includeText?:boolean, includeIdentity?:boolean, now?:()=>number}} */
 /** sha256 of the assembled clip against the catalog's audio_sha256 (chunk answer if it carries one, else the row's clip.audio_sha256). Never throws; never blocks playback. */
-async function checksumOf(parts, expected) {
+async function checksumOf(blob, expected) {
   const want = typeof expected === "string" && /^[0-9a-f]{64}$/i.test(expected.trim()) ? expected.trim().toLowerCase() : null;
-  if (!want) return { state: "no_catalog_checksum" };
+  if (!want) return { state: "no_catalog_checksum" };   // the catalog has no hash for this clip (audio_sha256 null)
   try {
-    const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0;
-    for (const p of parts) { all.set(p, o); o += p.length; }
-    const d = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", all));
+    await new Promise(res => setTimeout(res, 0));   // N28: after getAudio has returned and the player exists
+    const d = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
     const got = [...d].map(b => b.toString(16).padStart(2, "0")).join("");
     return { state: got === want ? "match" : "mismatch" };
-  } catch { return { state: "no_catalog_checksum", note: "digest unavailable" }; }
+  } catch { return { state: "digest_failed" }; }   // N19: a failed digest is never reported as "no catalog checksum"
 }
 
 export function createCatalogImpl(caps = {}) {
   const { mcp } = caps, includeText = caps.includeText !== false, now = caps.now || (() => Date.now());
-  const call = makeCall(mcp);
+  let retryListener = null;   // the UI's "Catalog is refreshing, retrying…" line; search and get only (mcp-call)
+  const call = makeCall(mcp, { retryDelaysMs: caps.retryDelaysMs, random: caps.random, onRetry: info => { if (retryListener) retryListener(info); } });
+  const lim = audioLimits(caps.maxAudioBytes || MAX_AUDIO_BYTES);
   const rowsCache = new Map();
+  const noClip = new Map();     // consult_uid -> {sealed} when the catalog row has no clip (clip null or r2_key null): no audio call is ever made for it
+  const noteClip = n => { clipHash.set(n.consult_uid, n.clip && n.clip.audio_sha256); if (!n.clip || !n.clip.r2_key) noClip.set(n.consult_uid, { sealed: sealedReason(n) }); else noClip.delete(n.consult_uid); };
   const clipHash = new Map();   // consult_uid -> clip.audio_sha256 from the catalog row (the sha256 of the stored FLAC); signature_sha256 hashes the cut-signature JSON and is never compared
   let identityOk = caps.includeIdentity === false ? false : null;   // null = not tried yet, true = names arrive, false = refused (no admin scope) or unavailable
+  let patientAdmin = null;                                         // false once a patient lookup was refused for want of an admin key: a revisit makes no call
   let chunkSupport = null;                                         // null = unknown, true/false after the feature check
-  const features = { hasRxFilter: true, hasRxMaxDays: RX_WINDOW_DAYS, specialtyFilter: false, names: true, rxContent: false, note: "specialty arrives with a later catalog" };
+  const features = { clipKnown: true, hasRxFilter: true, hasRxMaxDays: RX_WINDOW_DAYS, specialtyFilter: false, names: true, rxContent: false, note: "specialty arrives with a later catalog" };
 
   const withIdentity = (args, plain) => (identityOk === false || plain ? args : { ...args, include_identity: true });
   /** One catalog call that falls back, once, to a plain read when the identity join or the has-prescription filter is refused. */
@@ -111,7 +131,7 @@ export function createCatalogImpl(caps = {}) {
     catch (e) {
       // Any non-retryable rejection of a call that carried include_identity: try once without it (never rely on the message text; the runtime's
       // refusal shape is unverified). Identity goes off only if the plain read then works; if it fails too, that error is the real one.
-      if (withId && isObj(e) && e.code !== "cancelled" && e.retryable !== true) {
+      if (withId && isObj(e) && e.code !== "cancelled" && e.code !== "catalog_unavailable" && e.retryable !== true) {   // a rebuilding catalog says nothing about the identity join: mcp-call already retried it
         const r = await callWithFallback(args, refresh, ctx, state, true);
         identityOk = false; features.names = false; state.identityDegraded = true;
         return r;   // has_prescription is read scope: the filter still works without the identity join
@@ -131,7 +151,7 @@ export function createCatalogImpl(caps = {}) {
       const args = { action: "search", from: q.from, to: q.to, limit: CAT_LIMIT }; if (q.room) args.room = q.room; if (q.hasRx && features.hasRxFilter) args.has_prescription = true; if (cursor !== null) args.cursor = cursor;
       const { data, storedAt: s } = await callWithFallback(args, refresh, ctx, st);
       if (s !== null) storedAt = storedAt === null ? s : Math.min(storedAt, s);
-      for (const r of arr(get(data, "rows"))) { const n = normRow(r); if (n) clipHash.set(n.consult_uid, n.clip && n.clip.audio_sha256); if (n && !ids.has(n.consult_uid)) { ids.add(n.consult_uid); rows.push(n); } }
+      for (const r of arr(get(data, "rows"))) { const n = normRow(r); if (n) noteClip(n); if (n && !ids.has(n.consult_uid)) { ids.add(n.consult_uid); rows.push(n); } }
       total = num(get(data, "total_matched")) ?? total; generatedAt = str(get(data, "catalog_generated_at")) || generatedAt; blind = Math.max(blind, num(get(data, "n_blind_excluded")) || 0);
       identityRows = num(get(data, "identity_rows")) ?? identityRows; defaultWindow = defaultWindow || get(data, "default_window") === true;
       if (get(data, "identity_error") === true) st.identityDegraded = true;
@@ -199,10 +219,23 @@ export function createCatalogImpl(caps = {}) {
     id: str(r.rubric_id) || "rubric", version: str(r.version), status: str(r.status),
     score: isObj(r.score) ? r.score : num(r.score) !== null ? { score: r.score } : null, findings: str(r.verdict) ? [r.verdict] : [], createdAt: str(r.created_at) })));
 
-  const jevOf = L => (L.status !== "ok" ? null : arr(L.data).filter(isObj).map(d => {
+  const decisionRows = data => arr(data).filter(isObj).map(d => {
     const { p, kind } = jevProbability(d), a = d.answer;
-    return { question: str(d.question_id) || "?", answer: a === null || a === undefined ? null : String(typeof a === "object" ? JSON.stringify(a) : a), probability: p, probabilityKind: kind, mock: d.mock === true, createdAt: str(d.created_at), raw: d };
-  }));
+    // mode/shadow only when the row carries one (never invented)
+    const mode = str(d.mode) || (d.shadow === true ? "shadow" : null);
+    return { question: str(d.question_id) || "?", answer: a === null || a === undefined ? null : String(typeof a === "object" ? JSON.stringify(a) : a), probability: p, probabilityKind: kind, mock: d.mock === true, createdAt: str(d.created_at), mode: mode && mode.length <= 30 ? mode : null, raw: d };
+  });
+  /**
+   * layers.jev has two shapes. An ARRAY is the jev_decision rows. After catalog-12, an admin get() with no jev_decision rows but C4 jev answers
+   * {origin:"catalog_c4", sets:{sets:[...]}} (the list is at data.sets.sets; a flat data.sets array is tolerated). Anything else is bad_shape, never a throw.
+   * -> {decisions: rows|null, sets: set rows|null, bad: bool}
+   */
+  function jevLayerOf(L) {
+    if (L.status !== "ok") return { decisions: null, sets: null, bad: false };
+    if (Array.isArray(L.data)) return { decisions: decisionRows(L.data), sets: null, bad: false };
+    if (isObj(L.data) && L.data.origin === "catalog_c4") { const sets = jevSetsIn(L.data.sets); return { decisions: null, sets, bad: sets === null }; }
+    return { decisions: null, sets: null, bad: true };
+  }
 
   const latest = rows => rows.map(r => r.createdAt).filter(Boolean).sort().at(-1) || null;
   /** N14: a ledger row carries a time only when its layer has one of its own; the catalog build time is not a step time. */
@@ -221,6 +254,7 @@ export function createCatalogImpl(caps = {}) {
 
   return {
     features,
+    setRetryListener(fn) { retryListener = typeof fn === "function" ? fn : null; },
     async defaultRange() { const t = new Date(now()).toISOString().slice(0, 10); return { from: new Date(now() - 29 * 86400000).toISOString().slice(0, 10), to: t }; },
 
     listDays: withCtx(async (ctx, q) => {
@@ -237,17 +271,52 @@ export function createCatalogImpl(caps = {}) {
       return { ok: true, data: listFor(r.rows, doctorId, date), storedAt: r.storedAt };
     }),
 
+    /** All consults of one patient (admin only: the individual_uid filter). Window: the last 91 days from the floor, because a search spans at most 92. */
+    listPatient: withCtx(async (ctx, q) => {
+      const id = q && q.individual_uid;
+      if (typeof id !== "string" || !/^[\x21-\x7e]{1,128}$/.test(id)) throw { code: "bad_args", message: "not a valid patient id", retryable: false };
+      if (identityOk === false || patientAdmin === false) throw { code: "needs_admin", message: "Patient lookup needs an admin key", retryable: false };
+      const to = new Date(now()).toISOString().slice(0, 10), back = new Date(now() - 91 * 86400000).toISOString().slice(0, 10), from = back < MIN_DATE ? MIN_DATE : back;
+      const rows = [], ids = new Set(), seen = new Set(); let cursor = null, truncated = false, storedAt = null;
+      try {
+        for (let p = 0; ; p++) {
+          if (p >= CAT_MAX_PAGES) { truncated = true; break; }
+          const args = { action: "search", from, to, limit: CAT_LIMIT, individual_uid: id, include_identity: true }; if (cursor !== null) args.cursor = cursor;
+          const { data, storedAt: s } = await call(TOOL, args, false, ctx);
+          if (s !== null) storedAt = storedAt === null ? s : Math.min(storedAt, s);
+          for (const r of arr(get(data, "rows"))) { const n = normRow(r); if (n) noteClip(n); if (n && !ids.has(n.consult_uid)) { ids.add(n.consult_uid); rows.push(n); } }
+          const nc = get(data, "next_cursor");
+          if (nc === null || nc === undefined || nc === "") break;
+          if (nc === cursor || seen.has(nc)) { truncated = true; break; }
+          seen.add(nc); cursor = nc;
+        }
+      } catch (e) {
+        // the runtime's exact admin-scope refusal shape is UNVERIFIED: any scope/admin wording, or the codes that mean "not allowed", is "needs an admin key"
+        if (isObj(e) && e.code !== "cancelled" && (["admin_required", "scope_or_tool_unavailable", "identity_unavailable", "not_granted", "blocked_by_policy"].includes(e.code) || /admin|scope_or_tool_unavailable|identity_unavailable/i.test(String(e.message || "")))) { patientAdmin = false; throw { code: "needs_admin", message: "Patient lookup needs an admin key", retryable: false }; }
+        throw e;
+      }
+      rows.sort((a, b) => (a.ist_date === b.ist_date ? (a.t_open ?? 0) - (b.t_open ?? 0) : a.ist_date < b.ist_date ? -1 : 1));
+      return { ok: true, data: { rows, truncated, from, to }, storedAt };
+    }),
+
     getConsult: withCtx(async (ctx, uid) => {
       if (!validCatalogUid(uid)) throw { code: "not_found", message: "not a valid consult uid", retryable: false };
       const { data, storedAt, st } = await getRaw(uid, ctx);
       const row = normRow(get(data, "row"));
-      if (row) clipHash.set(row.consult_uid, row.clip && row.clip.audio_sha256);
+      if (row) noteClip(row);
       if (!row) throw { code: "not_found", message: "the catalog returned no row", retryable: false };
       const raw = isObj(get(data, "layers")) ? data.layers : {};
       const L = Object.fromEntries(LAYER_KEYS.map(k => [k, layerOf(raw, k)]));
       const tr = transcriptOf(L.transcript, row);
       if (tr.status !== L.transcript) L.transcript = tr.status;
-      const rubrics = rubricsOf(L.rubric), jev = jevOf(L.jev);
+      // S17: a C4 or jev derivation that throws degrades that layer only (bad_shape); the consult still renders
+      const rubrics = rubricsOf(L.rubric), jev0 = (() => { try { return jevLayerOf(L.jev); } catch { return { decisions: null, sets: null, bad: true }; } })(), jl = jev0, jev = jl.decisions;
+      let c4; try { c4 = c4Of({ layer: isObj(raw.catalog_c4) ? raw.catalog_c4 : null, row: get(data, "row") }); } catch { c4 = { state: "error", code: "bad_shape", data: null }; }
+      // C4 jev sets: the jev layer's own (origin catalog_c4) first, else the C4 column; the jev_decision rows stay a separate table
+      let c4Jev = null, c4JevThrew = false;
+      try { c4Jev = c4.state === "ok" && isObj(c4.data) && "jev" in c4.data ? jevSetsIn(c4.data.jev) : null; } catch { c4JevThrew = true; }
+      const jevSets = jl.sets !== null ? jl.sets : c4Jev;
+      const jevBad = jl.bad || c4JevThrew || (c4.state === "ok" && isObj(c4.data) && c4.data.jev !== null && c4.data.jev !== undefined && c4Jev === null && jl.sets === null);
       const layerStatus = Object.fromEntries(LAYER_KEYS.filter(k => k !== "identity").map(k => [k, { status: L[k].status, source: L[k].source, code: L[k].code }]));
       const idd = L.identity.status === "ok" && isObj(L.identity.data) && !("present" in L.identity.data) ? L.identity.data : null;
       const rxd = L.rx.status === "ok" && isObj(L.rx.data) ? L.rx.data : null;
@@ -261,7 +330,7 @@ export function createCatalogImpl(caps = {}) {
         stages: { ...row.stages }, first_gap: row.first_gap, layerStatus, transcript: tr.lines, transcriptMeta: tr.meta, ledger: ledgerOf(row, layerStatus, times),
         note: noteOf(L.freescript),
         pdqi: rubrics.find(r => /pdqi/i.test(r.id)) || null, rubrics: rubrics.filter(r => !/pdqi/i.test(r.id)),
-        jev, jevError: null,
+        jev, jevError: null, c4, jevSets, jevBad,
         cdmss: L.cdmss.status === "ok" && Array.isArray(L.cdmss.data) ? L.cdmss.data.filter(isObj).map(f => ({ severity: str(f.severity), finding: str(f.finding) || "finding", detail: str(f.detail) })) : null,
         parts: L.parts.status === "ok" ? arr(L.parts.data).filter(isObj).map(p => ({ part: str(p.part) || "?", t0: num(p.t0_ms) === null ? null : p.t0_ms / 1000, t1: num(p.t1_ms) === null ? null : p.t1_ms / 1000, score: num(p.score), confidence: num(p.confidence), source: str(p.source) })) : null,
         partsClamped: L.parts.nClamped,
@@ -294,12 +363,14 @@ export function createCatalogImpl(caps = {}) {
      */
     async getAudio(uid, opts = {}) {
       if (!validCatalogUid(uid)) throw { code: "not_found", message: "not a valid consult uid", retryable: false };
+      // a consult whose row has no clip: no call at all (the server would answer no_clip too)
+      if (noClip.has(uid)) throw { code: "no_clip", message: "this consult has no audio clip", sealed: noClip.get(uid).sealed, retryable: false };
       if ((await this.audioSupported()) === false) throw { code: "audio_unsupported", message: "this catalog build has no audio action", retryable: false };
-      const ctx = makeCtx(), parts = []; let offset = 0, total = null, type = null, sig = null;
+      const ctx = makeCtx(opts.signal), parts = []; let offset = 0, total = null, type = null, sig = null, partialSent = false;
       try {
         for (let i = 0; ; i++) {
           if (opts.signal && opts.signal.aborted) throw { code: "cancelled", message: "audio load cancelled", retryable: false };
-          if (i >= MAX_CHUNKS) throw { code: "audio_too_large", message: "audio needs too many chunks", retryable: false };
+          if (i >= lim.maxChunks) throw { code: "audio_too_large", message: "audio needs too many chunks", retryable: false };
           let res;
           try { res = await call(TOOL, { action: "clip_audio_chunk", consult_uid: uid, offset, length: CHUNK }, false, ctx, { cache: false, signal: opts.signal }); }
           catch (e) {
@@ -314,17 +385,25 @@ export function createCatalogImpl(caps = {}) {
           if (tot === null || tot <= 0 || len === null || len <= 0 || typeof b64 !== "string" || num(get(d, "offset")) !== offset) throw { code: "bad_chunk", message: "the audio chunk was malformed", retryable: false };
           if (total !== null && tot !== total) throw { code: "bad_chunk", message: "the audio size changed while loading", retryable: false };
           total = tot;
-          if (total > MAX_AUDIO_BYTES) throw { code: "audio_too_large", message: "the clip is larger than the page will load (" + Math.round(total / 1048576) + " MB)", retryable: false };
+          if (total > lim.maxBytes) throw { code: "audio_too_large", message: "This clip is " + Math.round(total / 1048576) + " MB, longer than this page loads (limit " + Math.round(lim.maxBytes / 1048576) + " MB)", retryable: false };
           const bytes = decodeBase64(b64);
           if (len > CHUNK || bytes.length !== len) throw { code: "bad_chunk", message: "the audio chunk length did not match", retryable: false };
           parts.push(bytes); offset += len;
           if (opts.onProgress) { try { opts.onProgress({ loaded: offset, total }); } catch { /* progress is cosmetic */ } }
-          if (get(d, "done") === true || offset >= total) break;
+          const done = get(d, "done") === true || offset >= total;
+          // progressive start: after the first 8 MiB the page can play a truncated prefix while the rest arrives (a cut-off FLAC plays up to its end)
+          if (!done && !partialSent && opts.onPartial && offset >= lim.partialBytes) {
+            partialSent = true;
+            try { opts.onPartial({ blob: new Blob(parts, { type }), loaded: offset, total, contentType: type }); } catch { /* the player is the caller's */ }
+          }
+          if (done) break;
         }
       } finally { settle(ctx); }
       if (offset !== total) throw { code: "bad_chunk", message: "the audio was incomplete", retryable: false };
       const blob = new Blob(parts, { type });
-      return { ok: true, data: { blob, bytes: total, minutes: null, audio_sha256: sig, contentType: type, checksum: await checksumOf(parts, sig) }, storedAt: null };
+      parts.length = 0;   // N28: the chunks are in the Blob; drop them so the peak stays near 2x the clip
+      // N19: the player comes first; the digest resolves later. checksum is a Promise of {state: match | mismatch | no_catalog_checksum | digest_failed}
+      return { ok: true, data: { blob, bytes: total, minutes: null, audio_sha256: sig, contentType: type, checksum: checksumOf(blob, sig), partialShown: partialSent }, storedAt: null };
     },
     async getAudioUrl() { return null; },   // no URL ever: the page plays from a Blob it assembled
   };

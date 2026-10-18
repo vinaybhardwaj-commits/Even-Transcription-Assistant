@@ -33,7 +33,8 @@ test("dataset: catalog field names, plausible and varied pipeline state", () => 
     for (const k of ["consult_uid", "ist_date", "doctor_uid", "room_id", "t_open", "t_close", "source", "clip", "layers", "freescript", "stages", "first_gap", "allowance", "prescription", "doctor_name", "patient_name", "individual_uid", "prescription_uid", "catalog_version", "generated_at"]) assert.ok(k in c, c.consult_uid + " missing " + k);
     assert.ok(["cutter", "caa"].includes(c.source));
     assert.equal(c.catalog_version, 1);
-    for (const k of ["r2_key", "r2_status", "signature_sha256", "audio_sha256", "bytes", "minutes"]) assert.ok(k in c.clip, k);
+    if (c.clip === null) { assert.ok(c.stages.sealed && c.stages.sealed.reason, "a consult with no clip says why in its sealed stage"); assert.equal(c.transcript, null); }
+    else for (const k of ["r2_key", "r2_status", "signature_sha256", "audio_sha256", "bytes", "minutes"]) assert.ok(k in c.clip, k);
     assert.equal(typeof c.first_gap === "string" || c.first_gap === null, true);
     assert.ok(c.t_close > c.t_open);
   }

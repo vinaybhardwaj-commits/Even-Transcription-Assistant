@@ -85,6 +85,59 @@ function transcriptFor(doc, lang, dur) {
   return lines;
 }
 
+// M4a additions use a SECOND, stateless generator keyed by (consult number, purpose), so the seeded sequence above is untouched and every value that existed before stays as it was.
+const mix = (a, b) => { let t = Math.imul((a + 0x9e3779b9) | 0, 0x85ebca6b) ^ Math.imul((b + 0x7f4a7c15) | 0, 0xc2b2ae35); t ^= t >>> 15; t = Math.imul(t, 0x27d4eb2f); t ^= t >>> 13; t = Math.imul(t, 0x165667b1); t ^= t >>> 16; return (t >>> 0) / 2 ** 32; };
+// a 64-hex stand-in digest: every 4th character is a letter and every 8th a 9, so no scanner rule (digit run, base32 run) can match it
+const fakeSha = (n, k) => { let h8 = ""; for (let i = 0; i < 8; i++) h8 += Math.floor(mix(n, k * 8 + i) * 2 ** 32).toString(16).padStart(8, "0"); return h8.split("").map((ch, i) => (i % 8 === 7 ? "9" : i % 8 === 3 ? "f" : ch)).join(""); };
+const SEALED_REASONS = ["final_no_session", "no_session", "silent_audio", "deferred_long"];
+const BOUNDARY = ["caa_cut+pqm", "caa_cut", "cutter_cut+url_clear"], CLOSE_REASON = ["pqm", "url_clear", "endConsult", "idle_timeout", "next_open", "cap_90m", null];
+const TOPICS = ["history", "examination", "diagnosis", "investigations", "medication", "counselling", "follow_up"];
+const ROLE_SRC = ["llm-roles", "text-judge", "caa-labels"];
+const r2 = x => Math.round(x * 100) / 100;
+
+/** The C4 columns (catalog_c4) and the narrative-lead v0 shapes (turns, voice_id, topics), synthetic. Returns fields to merge into the consult. */
+function m4aExtras(n, uid, doc, t_open, t_close, transcript, hasJev, jevFail) {
+  const X = k => mix(n, k), pickX = (a, k) => a[Math.floor(X(k) * a.length)];
+  const out = {};
+  // C4 state by consult number: 0 absent key (non-admin), 1 failed read, 2 every column null, 3-6 data (4: no presence row, 5: no clef, 6: no jev)
+  const v = transcript ? n % 7 : (n % 2 ? 0 : 2);
+  const iso = off => new Date(t_close + off * 1000).toISOString();
+  if (v === 1) out.c4_error = true;
+  else if (v === 2) out.catalog_c4 = { jev: null, clef_affect: null, presence: null };
+  else if (v >= 3) {
+    const c4 = {};
+    c4.jev = v === 6 || jevFail ? null : { sets: [
+      { set_id: "syn_set_followup", set_sha: fakeSha(n, 1), band: pickX(["band_a", "band_b", "band_c", null], 2), label: pickX(["label_pass", "label_review", null], 3), model: "syn-jev-model", at: iso(400), state: "current" },
+      { set_id: "syn_set_followup", set_sha: fakeSha(n, 4), band: null, label: null, model: "syn-jev-model-old", at: iso(-86400), state: "retired" },
+      ...(X(5) < 0.4 ? [{ set_id: "syn_set_safety", set_sha: fakeSha(n, 6), band: pickX(["band_a", "band_b"], 7), label: "label_pass", model: "syn-jev-model", at: iso(410) }] : []),
+    ] };
+    c4.clef_affect = v === 5 ? null : { lanes: [
+      { lane: "clef", scores: { calm: r2(X(8)), tense: r2(X(9)), warm: r2(X(10)) }, model_rev: "syn_rev_3", at: iso(500) },
+      { lane: "timbre", scores: { arousal: r2(X(11)), valence: r2(X(12)) }, model_rev: "syn_rev_1", at: iso(505) },
+    ] };
+    c4.presence = v === 4 ? null : { encounter_open: t_open + Math.round((X(13) - 0.5) * 20000), encounter_close: t_close + Math.round((X(14) - 0.3) * 40000), boundary_source: pickX(BOUNDARY, 15), close_reason: pickX(CLOSE_REASON, 16) };
+    out.catalog_c4 = c4;
+  }
+  // narrative v0 (mockup only), every other consult that has a transcript
+  if (transcript && n % 2 === 0) {
+    const spk = r => (r === "doctor" ? "S1" : r === "patient" ? "S2" : "S3");
+    const turns = transcript.map((l, i) => ({ i, t0_ms: t_open + l.t0 * 1000, t1_ms: t_open + l.t1 * 1000, spk: spk(l.role), role: l.role, role_source: pickX(ROLE_SRC, 20 + i), role_conf: r2(0.6 + X(40 + i) * 0.39),
+      who: l.role === "doctor" ? { pulse_doctor_uid8: doc.uid, source: "voiceprint", set: X(60 + i) < 0.7 ? "pulse_room" : "enrolment", cosine: r2(0.7 + X(80 + i) * 0.25), decision: "suggest" } : null, diar_source: "sarvam" }));
+    const dur = Math.max(...transcript.map(l => l.t1));
+    const bounds = [0, 0.2, 0.45, 0.7, 1].map(f => Math.round(f * dur));
+    const segs = ["history", "examination", pickX(["diagnosis", "investigations"], 90), pickX(["medication", "counselling", "follow_up"], 91)].map((topic, i) => ({ t0_ms: t_open + bounds[i] * 1000, t1_ms: t_open + bounds[i + 1] * 1000, topic, conf: r2(0.55 + X(100 + i) * 0.4), speakers: ["S1", "S2"], source: i % 2 ? "jev" : "haiku" }));
+    out.narrative = {
+      turns: { consult_uid: uid, version: "turns.fuse@0", t0_ms: t_open, t1_ms: t_close, turns },
+      voice_id: { consult_uid: uid, version: "voiceid.pulse_room@0", mode: pickX(["dark", "suggest"], 110), expected: { pulse_doctor_uid8: doc.uid, source: "pulse" },
+        speakers: [{ spk: "S1", speech_s: Math.round(dur * 0.4), best: { pulse_doctor_uid8: doc.uid, centroid_id: "syn_cent01", centroid_gen: 3, set: "pulse_room", cosine: r2(0.72 + X(111) * 0.2) }, runner_up: { pulse_doctor_uid8: "syn_doc_other", cosine: r2(0.4 + X(112) * 0.2) }, margin: r2(0.1 + X(113) * 0.2), threshold: 0.7, decision: "suggest", abstain_reason: null },
+          { spk: "S2", speech_s: Math.round(dur * 0.35), best: { pulse_doctor_uid8: "syn_doc_other", centroid_id: "syn_cent02", centroid_gen: 1, set: "enrolment", cosine: r2(0.3 + X(114) * 0.2) }, runner_up: null, margin: 0.05, threshold: 0.7, decision: "abstain", abstain_reason: "low_cos" }],
+        early: { t_ms_to_first_match: 12000 + Math.round(X(115) * 8000), pulse_doctor_uid8: doc.uid, cosine: r2(0.7 + X(116) * 0.2) }, model: { embedder: "ecapa@syn_rev", dim: 192 } },
+      topics: { consult_uid: uid, version: "topics.haiku@0", taxonomy: "narr-topics@0", segments: segs },
+    };
+  }
+  return out;
+}
+
 const consults = [];
 let seq = 0;
 for (const date of DATES) {
@@ -146,9 +199,13 @@ for (const date of DATES) {
       if (rubrics.length) headline.push({ label: "rubrics", value: rubrics.filter(r => r.score.pass).length + "/" + rubrics.length });
       const minutes = Math.round(len / 6) / 10;
       const layer = (ok, extra) => (ok ? { r2_key: "syn/layers/" + uid + "/" + extra, status: "ok" } : null);
+      const x = m4aExtras(seq, uid, doc, t_open, t_close, transcript, jev !== null, !!jevFail);
+      // some clipped-only consults have no clip at all (the room was not recording): clip null and a sealed stage that says why
+      const noClip = lv === 0 && !sttFail && mix(seq, 7) < 0.5;
+      if (noClip) stages.sealed = { state: "missing", reason: SEALED_REASONS[Math.floor(mix(seq, 8) * SEALED_REASONS.length)] };
       consults.push({
         consult_uid: uid, ist_date: date, doctor_uid: doc.uid, room_id: doc.room, t_open, t_close, source: chance(0.7) ? "cutter" : "caa",
-        clip: { r2_key: "syn/clips/" + uid + ".opus", r2_status: "ok", signature_sha256: "syn_sig_" + uid, audio_sha256: null, bytes: Math.round(len * 3200), minutes },
+        clip: noClip ? null : { r2_key: "syn/clips/" + uid + ".opus", r2_status: "ok", signature_sha256: "syn_sig_" + uid, audio_sha256: null, bytes: Math.round(len * 3200), minutes },
         layers: { stt: layer(hasT, "stt"), translate: layer(hasT, "translate"), diar_sarvam: layer(lv >= 2 && !diarFail, "diar_sarvam"), diar_nemotron: null, role: layer(lv >= 2 && !diarFail, "role"), parts: layer(lv >= 4 && !jevFail, "parts") },
         freescript: lv >= 3 ? { artifact_id: "syn_art_" + uid, state: "stored" } : null,
         stages, first_gap, allowance: { earned_min: Math.round(minutes * 1.5 * 10) / 10, spent_min: Math.round(minutes * 10) / 10 },
@@ -157,6 +214,8 @@ for (const date of DATES) {
         catalog_version: 1, generated_at: new Date(base).toISOString(),
         specialty: sp, headline, lengthSec: len,
         transcript, ledger, note, pdqi, rubrics, jev, cdmss, rx,
+        tracks_present: ["stt", "translate", "diar_sarvam", "role", "parts"].filter(k => (layer(true, k) && { stt: hasT, translate: hasT, diar_sarvam: lv >= 2 && !diarFail, role: lv >= 2 && !diarFail, parts: lv >= 4 && !jevFail })[k]),
+        ...x,
       });
     }
   }

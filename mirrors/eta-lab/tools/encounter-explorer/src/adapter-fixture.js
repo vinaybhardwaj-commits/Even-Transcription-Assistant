@@ -2,9 +2,10 @@
 import { buildDays, listFor } from "./days.js";
 import { buildPulseLink } from "./pulse.js";
 import { audioPlan, synthWav } from "./audio-synth.js";
-import { clampRange } from "./util.js";
+import { clampRange, isObj } from "./util.js";
+import { c4Of, guardC4, jevSetsIn } from "./c4.js";
 
-const DETAIL_KEYS = ["transcript", "ledger", "note", "pdqi", "rubrics", "jev", "cdmss", "rx"];
+const DETAIL_KEYS = ["transcript", "ledger", "note", "pdqi", "rubrics", "jev", "cdmss", "rx", "catalog_c4", "narrative"];
 
 /** @param data {{defaultRange?:{from:string,to:string}, consults:any[]}} */
 export function createFixtureImpl(data) {
@@ -15,6 +16,7 @@ export function createFixtureImpl(data) {
   const summaries = consults.map(c => { const s = { ...c }; for (const k of DETAIL_KEYS) delete s[k]; return s; });
   const inRange = (c, r) => c.ist_date >= r.from && c.ist_date <= r.to;
   return {
+    features: { clipKnown: true },
     async defaultRange() { return (data && data.defaultRange) || null; },
     async listDays(q) {
       const r = clampRange(q.from, q.to);
@@ -24,7 +26,14 @@ export function createFixtureImpl(data) {
     async getConsult(uid) {
       const c = consults.find(x => x.consult_uid === uid);
       if (!c) throw { code: "not_found", message: "no such consult", retryable: false };
-      return { ok: true, data: { ...JSON.parse(JSON.stringify(c)), audioSynthetic: true }, storedAt: null };
+      // the same C4 fields the catalog adapter derives (state, jev sets); narrative (turns / voice_id / topics, draft shape v0) exists in the mockup only
+      const c4 = c4Of({ row: { ...("catalog_c4" in c ? { catalog_c4: guardC4(c.catalog_c4) } : {}), c4_error: c.c4_error === true } });
+      const jevSets = c4.state === "ok" && isObj(c4.data) && "jev" in c4.data ? jevSetsIn(c4.data.jev) : null;
+      return { ok: true, data: { ...JSON.parse(JSON.stringify(c)), audioSynthetic: true, c4, jevSets, jevBad: false }, storedAt: null };
+    },
+    async listPatient({ individual_uid }) {
+      const rows = summaries.filter(c => c.individual_uid === individual_uid).sort((a, b) => (a.ist_date === b.ist_date ? (a.t_open ?? 0) - (b.t_open ?? 0) : a.ist_date < b.ist_date ? -1 : 1));
+      return { ok: true, data: { rows, truncated: false, from: "2026-09-09", to: "2026-10-13" }, storedAt: null };
     },
     async getAudioUrl(uid) {
       const c = consults.find(x => x.consult_uid === uid);

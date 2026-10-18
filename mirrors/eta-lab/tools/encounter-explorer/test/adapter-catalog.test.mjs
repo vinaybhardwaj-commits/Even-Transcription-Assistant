@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createAdapter } from "../src/adapter.js";
-import { createCatalogImpl, CATALOG_TOOLS, CATALOG_ACTIONS, normRow, jevProbability, validCatalogUid, catalogState } from "../src/adapter-catalog.js";
+import { createCatalogImpl, audioLimits, CATALOG_TOOLS, CATALOG_ACTIONS, normRow, jevProbability, validCatalogUid, catalogState } from "../src/adapter-catalog.js";
 import { hasRx } from "../src/util.js";
 import { makeMockCatalog } from "./mock-catalog.mjs";
 import { mockupData } from "./helpers.mjs";
@@ -343,7 +343,8 @@ test("audio: sequential chunks assemble into one Blob with the bytes in order, p
   assert.ok(chunks.every(c => Object.keys(c.args).sort().join() === "action,consult_uid,length,offset" && c.args.length === 524288), "Fable C4: chunks are at most 512 KiB");
   assert.ok(chunks.every(c => c.options && c.options.cache === false), "chunks bypass the page cache");
   assert.match(r.data.audio_sha256, /^[0-9a-f]{64}$/);
-  assert.equal(r.data.checksum.state, "match");
+  assert.ok(r.data.checksum instanceof Promise, "N19: the digest is not awaited before the player can be built");
+  assert.equal((await r.data.checksum).state, "match");
 });
 
 test("audio: a default-size clip is a single chunk; clip_audio_url is never called", async () => {
@@ -374,7 +375,7 @@ test("audio: abortable between and during chunks", async () => {
 test("M2e: the assembled clip's sha256 is compared with row.clip.audio_sha256 (a chunk audio_sha256 wins if present); signature_sha256 is never used; never blocks playback", async () => {
   const bytes = Uint8Array.from({ length: 1500 }, (_, i) => (i * 7) & 255);
   const mk2 = o => createAdapter(createCatalogImpl({ mcp: makeMockCatalog(C, { clipBytes: () => bytes, maxChunk: 500, ...o }) }));
-  const via = async (o, getFirst = true) => { const a = mk2(o); if (getFirst) await a.getConsult(FULL.consult_uid); const r = await a.getAudio(FULL.consult_uid); assert.equal(r.ok, true); assert.equal(r.data.blob.size, 1500); return r.data.checksum.state; };
+  const via = async (o, getFirst = true) => { const a = mk2(o); if (getFirst) await a.getConsult(FULL.consult_uid); const r = await a.getAudio(FULL.consult_uid); assert.equal(r.ok, true); assert.equal(r.data.blob.size, 1500); return (await r.data.checksum).state; };
   assert.equal(await via({ chunkHash: null }), "match", "row hash from get");
   assert.equal(await via({ chunkHash: null, rowHash: "0".repeat(64) }), "mismatch");
   assert.equal(await via({ chunkHash: null, rowHash: null }), "no_catalog_checksum");
@@ -384,7 +385,7 @@ test("M2e: the assembled clip's sha256 is compared with row.clip.audio_sha256 (a
   assert.equal(await via({ chunkHash: "0".repeat(64), rowHash: null }), "mismatch");
   // signature_sha256 (the cut-signature hash) must never be the comparison value, even when it is the only 64-hex value around
   const r = await mk2({ chunkHash: null, rowHash: null }).getAudio(FULL.consult_uid);
-  assert.equal(r.data.checksum.state, "no_catalog_checksum");
+  assert.equal((await r.data.checksum).state, "no_catalog_checksum");
   assert.equal(r.data.signature_sha256, undefined);
 });
 
@@ -401,15 +402,25 @@ test("audio: bad_range, read_failed and clip_not_found are real errors (never th
   }
 });
 
-test("audio: a size cap (the first chunk reports the total) and a chunk cap bound the work", async () => {
-  const big = makeMockCatalog(C, { totalBytes: 65 * 1048576, clipBytes: () => new Uint8Array(1048576).fill(1) });
-  const r = await createAdapter(createCatalogImpl({ mcp: big })).getAudio(FULL.consult_uid);
-  assert.deepEqual([r.ok, r.code], [false, "audio_too_large"]);
-  assert.equal(big.calls.filter(c => c.args.action === "clip_audio_chunk").length, 1, "stopped after the first chunk");
-  const tiny = makeMockCatalog(C, { clipBytes: () => new Uint8Array(200).fill(1), maxChunk: 1 });
-  const r2 = await createAdapter(createCatalogImpl({ mcp: tiny })).getAudio(FULL.consult_uid);
-  assert.deepEqual([r2.ok, r2.code], [false, "audio_too_large"]);
-  assert.ok(tiny.calls.filter(c => c.args.action === "clip_audio_chunk").length <= 128);
+test("audio: the byte cap is one constant and the chunk cap follows from it (Fable V11: 256 MiB, 512 chunks; tested at 64 MiB too)", async () => {
+  assert.deepEqual([audioLimits().maxBytes, audioLimits().maxChunks, audioLimits().chunk], [256 * 1048576, 512, 524288]);
+  assert.deepEqual([audioLimits(64 * 1048576).maxBytes, audioLimits(64 * 1048576).maxChunks], [64 * 1048576, 128]);
+  const big = (total, caps = {}) => { const mcp = makeMockCatalog(C, { totalBytes: total, clipBytes: () => new Uint8Array(1048576).fill(1) }); return { mcp, a: createAdapter(createCatalogImpl({ mcp, ...caps })) }; };
+  const MiB = 1048576;
+  for (const [cap, caps] of [[256, {}], [64, { maxAudioBytes: 64 * MiB }]]) {
+    // exactly at the cap: the first chunk is accepted (we stop it ourselves); one byte over: refused after the first chunk, with the size and the limit in the message
+    const ok = big(cap * MiB, caps), ac = new AbortController();
+    const r = await ok.a.getAudio(FULL.consult_uid, { signal: ac.signal, onProgress: p => { assert.equal(p.total, cap * MiB); ac.abort(); } });
+    assert.deepEqual([r.ok, r.code], [false, "cancelled"], cap + " MiB is accepted (only our abort stopped it)");
+    const over = big(cap * MiB + 1, caps), r2 = await over.a.getAudio(FULL.consult_uid);
+    assert.deepEqual([r2.ok, r2.code], [false, "audio_too_large"]);
+    assert.match(r2.message, new RegExp("longer than this page loads \\(limit " + cap + " MB\\)"));
+    assert.equal(over.mcp.calls.filter(c => c.args.action === "clip_audio_chunk").length, 1, "stopped after the first chunk");
+  }
+  const tiny = makeMockCatalog(C, { clipBytes: () => new Uint8Array(700).fill(1), maxChunk: 1 });
+  const r3 = await createAdapter(createCatalogImpl({ mcp: tiny })).getAudio(FULL.consult_uid);
+  assert.deepEqual([r3.ok, r3.code], [false, "audio_too_large"]);
+  assert.equal(tiny.calls.filter(c => c.args.action === "clip_audio_chunk").length, 512, "the chunk cap is 512 at the default");
 });
 
 test("audio feature check: the first call answering bad_args or rejecting also means 'not available yet'", async () => {

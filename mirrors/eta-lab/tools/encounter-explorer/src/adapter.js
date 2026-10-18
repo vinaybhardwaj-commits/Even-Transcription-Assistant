@@ -4,7 +4,7 @@ import { clampRange, isDate } from "./util.js";
 
 export function normErr(e) {
   const o = e && typeof e === "object" ? e : {};
-  return { ok: false, code: typeof o.code === "string" ? o.code : "unknown", message: typeof o.message === "string" ? o.message : String(e), retryable: !!o.retryable };
+  return { ok: false, code: typeof o.code === "string" ? o.code : "unknown", message: typeof o.message === "string" ? o.message : String(e), retryable: !!o.retryable, ...(typeof o.sealed === "string" ? { sealed: o.sealed } : {}) };
 }
 const guard = fn => async (...a) => { try { return await fn(...a); } catch (e) { return normErr(e); } };
 const ok = (data, storedAt = null) => ({ ok: true, data, storedAt });
@@ -25,7 +25,12 @@ export function createAdapter(impl) {
       if (!q.doctorId || !isDate(q.date) || q.date < MIN_DATE) return ok([]);
       return guard(impl.listConsults)(q);
     },
-    async getConsult(uid) { return typeof uid === "string" && uid ? guard(impl.getConsult)(uid) : normErr({ code: "bad_request", message: "no consult uid" }); },
+    async getConsult(uid, opts) { return typeof uid === "string" && uid ? guard(impl.getConsult)(uid, opts) : normErr({ code: "bad_request", message: "no consult uid" }); },
+    /** Admin only: every consult of one patient. A source without the lookup answers needs_admin. opts {signal}. */
+    async listPatient(q, opts) {
+      if (typeof impl.listPatient !== "function") return normErr({ code: "needs_admin", message: "Patient lookup needs an admin key" });
+      return guard(impl.listPatient)({ ...q, ...(opts || {}) });
+    },
     async getAudioUrl(uid, opts) { try { return (await impl.getAudioUrl(uid, opts)) || null; } catch { return null; } },
     /** Result {url | blob, bytes, minutes}: why the audio is missing is part of the answer. opts: {signal, onProgress}. */
     async getAudio(uid, opts) {
