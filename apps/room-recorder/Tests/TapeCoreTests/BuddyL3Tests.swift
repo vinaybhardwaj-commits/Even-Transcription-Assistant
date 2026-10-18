@@ -397,36 +397,6 @@ extension BuddyConsultController {
 
   @Test func engineReportsUnusableConfigInInstallPollField_WellFormed0644() async throws {
     // The engine's own install-poll includes buddy_runner_config=unusable for a 0644 file in its room root.
-    actor CapturingRemote {
-      let captured = LockedList<InstallPollFields?>()
-      nonisolated init() {}
-      func pollCommands(
-        tabID: String, previousPollAt: String?, recordingSessionID: String?, paused: Bool,
-        primaryLevels: BenchLevelPair?, install: InstallPollFields?
-      ) async throws -> CommandPollResponse {
-        captured.append(install)
-        return try JSONDecoder().decode(
-          CommandPollResponse.self,
-          from: Data("{\"ok\":true,\"room_id\":\"room_1\",\"superseded\":false,\"assigned_channel\":null,\"commands\":[]}".utf8))
-      }
-      func reportSession(id: String, start: String, ended: String?, captureURL: URL?, captureFormat: R4CaptureFormat?) async throws -> CommandPollResponse {
-        try await pollCommands(tabID: "", previousPollAt: nil, recordingSessionID: id, paused: false, primaryLevels: nil, install: nil)
-      }
-      func patchSession(id: String, action: BenchSessionAction, notes: String?) async throws -> BenchOKResponse {
-        try JSONDecoder().decode(BenchOKResponse.self, from: Data(#"{"ok":true}"#.utf8))
-      }
-      func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?) async throws -> CommandAcknowledgement {
-        R4Remote.acknowledgement(commandID, ok)
-      }
-      func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?, audioInput: AudioInputAcknowledgement?) async throws -> CommandAcknowledgement {
-        R4Remote.acknowledgement(commandID, ok)
-      }
-      func acknowledge(commandID: String, ok: Bool, sessionID: String?, error: String?, audioInput: AudioInputAcknowledgement?, verb: OperatorVerbAcknowledgement?) async throws -> CommandAcknowledgement {
-        R4Remote.acknowledgement(commandID, ok)
-      }
-      func markConsult(sessionID: String?, at: String) async throws -> ConsultMarkResponse { throw CancellationError() }
-      func uploadImmutablePiece(_ piece: BenchPiece, bytes: Data) async throws -> ImmutablePieceUploadResult { .alreadyVerified }
-    }
     let root = R4Fixture.temporaryRoot()
     try RoomPersistence(root: root).saveConfiguration(try R4Fixture.configuration())
     defer { try? FileManager.default.removeItem(at: root) }
@@ -434,7 +404,7 @@ extension BuddyConsultController {
     try Data(#"{"base":"http://c4:43124","key":"KEY-SECRET-1"}"#.utf8).write(to: configURL)
     chmod(configURL.path, 0o644)
     #expect(BuddyRunnerConfig.status(root: root) == .unusable, "the file is 0644 so unusable")
-    let remote = CapturingRemote()
+    let remote = BuddyL1Tests.PushRemote()
     let launcher = BuddyL1Tests.BurstLauncher(pcm: BuddyL1Tests.fixturePCM)
     let encoder = BuddyL1Tests.EchoEncoder()
     let logs = LockedList<String>()
@@ -445,11 +415,10 @@ extension BuddyConsultController {
       log: { logs.append($0) }, audioInputs: audio, inputReadyWait: .disabled,
       machineFacts: { uid in audio.facts(forUID: uid) })
     let task = Task { try await engine.run() }
-    try await R4Fixture.waitUntil { await remote.captured.all.count >= 1 }
+    try await R4Fixture.waitUntil { await remote.pollCount >= 1 }
     task.cancel()
     try await task.value
-    let all = await remote.captured.all
-    guard let fields = all.first, let captured = fields else {
+    guard let captured = await remote.capturedInstall() else {
       Issue.record("no install fields captured")
       return
     }

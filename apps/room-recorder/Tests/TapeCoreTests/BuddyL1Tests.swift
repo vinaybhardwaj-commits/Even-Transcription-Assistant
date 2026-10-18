@@ -107,8 +107,10 @@ import Testing
     private var queue: [String] = []
     private(set) var acks: [R4Ack] = []
     private(set) var pollCount = 0
+    private var lastInstall: InstallPollFields?
 
     func push(_ commandJSON: String) { queue.append(commandJSON) }
+    func capturedInstall() -> InstallPollFields? { lastInstall }
 
     func activeSession(tabID: String?, since: String?) async throws -> ActiveSessionResponse {
       try JSONDecoder().decode(ActiveSessionResponse.self, from: Data(R4Fixture.idleActiveJSON.utf8))
@@ -126,6 +128,7 @@ import Testing
       primaryLevels: BenchLevelPair?, install: InstallPollFields?
     ) async throws -> CommandPollResponse {
       pollCount += 1
+      lastInstall = install
       let commands = queue.isEmpty ? "[]" : "[" + queue.removeFirst() + "]"
       return try JSONDecoder().decode(
         CommandPollResponse.self,
