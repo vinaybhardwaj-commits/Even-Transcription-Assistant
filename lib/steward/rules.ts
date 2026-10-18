@@ -539,6 +539,35 @@ function micReturnSilent(c: Ctx): Decision[] {
   return [mk(c, MIC_SILENT_RULE, "alert", { room_id: s.room_id, room: s.room_name }, `room ${s.room_name} started recording after its microphone came back, but the tape has been digital zero since the session began (2 min); nothing was stopped`, "never a restart: the mic is physical", "error", {}, { session_started_at: s.recording.session_started_at, silent_since: s.audio.silent_while_recording_since })];
 }
 
+export const SESSION_SILENT_RULE = "session_silent";
+export const SESSION_SILENT_AFTER_MS = 30 * MIN;
+/**
+ * An OPEN, recording session that is delivering nothing: its newest piece (primary or backup; bench_chunk carries both) is older than 30 min, or it has no piece and started more
+ * than 30 min ago. Any roster room, clinic or OT, any hour: the rule only reads an open session, so an OT room between cases (no session) is untouched. Alert only, never a room action.
+ * One alert per session (params carry the session id, never minutes), held by the rule's own memory because the loop's 15 min dedupe would re-page a long-dead session; one log_only
+ * row closes the episode when a piece arrives while the session is still open.
+ */
+function sessionSilent(c: Ctx): Decision[] {
+  const { s } = c;
+  const r = s.recording;
+  if (r.session_open !== true || r.session_status !== "recording" || !r.session_id || !r.session_started_at) return [];
+  const started = Date.parse(r.session_started_at);
+  if (!Number.isFinite(started)) return [];
+  const piece = r.last_chunk_at ? Date.parse(r.last_chunk_at) : NaN;
+  const newest = Number.isFinite(piece) ? piece : started;
+  const silentMs = c.A - newest;
+  const mine = c.recent.room.filter((x) => x.rule === SESSION_SILENT_RULE && x.params.session_id === r.session_id);
+  const newestRow = mine[0]; // recent.room is newest first
+  if (silentMs > SESSION_SILENT_AFTER_MS) {
+    if (newestRow && newestRow.action === "alert") return [];
+    return [mk(c, SESSION_SILENT_RULE, "alert", { room_id: s.room_id, session_id: r.session_id }, `room ${s.room_name}: a session is open and recording but no audio piece has reached the server for ${Math.floor(silentMs / MIN)} min; nothing was stopped`, "alert only: never a room action", "error", {}, { silent_min: Math.floor(silentMs / MIN), session_started_at: r.session_started_at, last_chunk_at: r.last_chunk_at, pieces_seen: Number.isFinite(piece) })];
+  }
+  if (newestRow && newestRow.action === "alert") {
+    return [mk(c, SESSION_SILENT_RULE, "log_only", { room_id: s.room_id, session_id: r.session_id, state: "cleared" }, `room ${s.room_name}: audio pieces are arriving again; the silent-session episode is closed`, null, "info", {}, {})];
+  }
+  return [];
+}
+
 function notRecording(c: Ctx): Decision[] {
   const { s, cfg } = c;
   const L = s.listener;
@@ -955,6 +984,7 @@ export function decideRoom(sense: RoomSense, cfg: Config, asOf: number | string 
     ds.push(mk(c, "device_missing", "log_only", { state: "back" }, `room ${sense.room_name}: the input device is back; the missing-device episode is closed`, null, "info", {}, {}));
   }
   ds.push(...micReturnSilent(c));
+  ds.push(...sessionSilent(c));
   // opd4-guard S4. Only where the chain cannot see the room: no bound machine, or the session state unreadable. Every other failing primary (not_recording, session_died,
   // kiosk_asleep, ...) already names the fault, and a second alert row per tick on top of it would double the decision log; the standing sweep (lib/alerts/ops-sweep.ts)
   // pages recorder_off for ALL roster rooms regardless of what the steward decided.
