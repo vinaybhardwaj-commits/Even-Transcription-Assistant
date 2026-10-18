@@ -312,11 +312,12 @@ class Subscriber:
                 try:
                     raw = bytes(raw).decode("utf-8").replace("\r\n", "\n")     # what text-mode (universal newlines) gave the reader before
                 except UnicodeDecodeError:
-                    return False                         # undecodable: not stored (the text-mode reader used to die and reconnect on it)
+                    self._audit_invalid(room, stream, "not_utf8", nbytes)    # not stored; one audit row, byte length only
+                    return False
         else:
             nbytes = len(str(raw).rstrip("\r\n").encode("utf-8", "surrogatepass"))
         if nbytes > STREAM_MAX_BYTES:
-            self._audit_oversize(room, stream, nbytes)   # opens no case, never raises, never any line content
+            self._audit_invalid(room, stream, "oversize", nbytes)   # opens no case, never raises, never any line content
             return False
         try:
             obj, dup = loads_dupcheck(raw)
@@ -371,16 +372,16 @@ class Subscriber:
                 self.sink.guardian_recovered(room, now)
         return True
 
-    def _audit_oversize(self, room, stream, nbytes):
+    def _audit_invalid(self, room, stream, reason, nbytes):
         try:
             now = self.clock()
-            key = (room, stream)
+            key = (room, stream, reason)                # deduped per reason: an oversize audit does not hide a not_utf8 one
             if now - self._oversize_at.get(key, -OVERSIZE_AUDIT_S) < OVERSIZE_AUDIT_S:
                 return
             d = os.path.join(self.data, datetime.fromtimestamp(now, IST).strftime("%Y-%m-%d"))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f"{room}.{stream}-invalid.jsonl"), "a") as f:
-                f.write(json.dumps({"ts": int(now), "reason": "oversize", "bytes": nbytes}) + "\n")
+                f.write(json.dumps({"ts": int(now), "reason": reason, "bytes": nbytes}) + "\n")
             self._oversize_at[key] = now
         except Exception:                      # noqa: BLE001 -- an audit fault must never reach the ingest loop
             pass

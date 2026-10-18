@@ -99,6 +99,23 @@ class CapTests(unittest.TestCase):
         e = CAEnv(); self.assertFalse(e.sub.on_line("kiosk/r1/canary", "1" * 5000))
         self.assertEqual([json.loads(l)["reason"] for l in open(os.path.join(day_dir(e), "r1.canary-invalid.jsonl"))], ["oversize"]); self.assertEqual(e.router.store.list_open(), [])
 
+    def test_non_utf8_line_is_audited_not_stored_deduped_no_content(self):
+        for stream in sb.STREAMS:
+            with self.subTest(stream=stream):
+                e = CAEnv(); bad = b'{"k":"\xff\xfeSECRETTEXT"}\n'
+                aud = os.path.join(day_dir(e), f"r1.{stream}-invalid.jsonl")
+                for _ in range(3): self.assertFalse(e.sub.on_line(f"kiosk/r1/{stream}", bad))
+                self.assertIsNone(stored(e, "r1", stream)); self.assertEqual(e.router.store.list_open(), [])
+                txt = open(aud).read(); rows = [json.loads(l) for l in txt.splitlines()]
+                self.assertEqual(len(rows), 1); self.assertEqual(set(rows[0]), {"ts", "reason", "bytes"})
+                self.assertEqual((rows[0]["reason"], rows[0]["bytes"]), ("not_utf8", len(bad.rstrip(b"\n")))); self.assertNotIn("SECRET", txt)
+                e.clock.adv(600); e.sub.on_line(f"kiosk/r1/{stream}", bad); self.assertEqual(len(open(aud).read().splitlines()), 2)
+
+    def test_non_utf8_and_oversize_dedupe_independently(self):
+        e = CAEnv(); e.sub.on_line("kiosk/r1/health", b"\xff"); e.sub.on_line("kiosk/r1/health", line(CAP + 1).encode())
+        rows = [json.loads(l)["reason"] for l in open(os.path.join(day_dir(e), "r1.health-invalid.jsonl"))]
+        self.assertEqual(rows, ["not_utf8", "oversize"])
+
     def test_reader_hands_bytes(self):
         src = open(os.path.join(HERE, "..", "subscriber", "run_subscriber.py")).read()
         self.assertNotIn("text=True)", src[src.index("def reader"):src.index("def publish(")])
