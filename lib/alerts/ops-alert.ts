@@ -36,6 +36,8 @@ export type OpsAlert = {
   reason?: string | null;
   /** recorder_off only: set when the room has an open consult window and no audio is arriving (rule FR1-A). Changes the dedupe key, subject and body; plain recorder_off is untouched. */
   consult_open?: { window_open_min: number };
+  /** recorder_off only: the variant for an OPEN recording session that is delivering nothing (any room, any hour). The kind is unchanged because room_alert_outbox_kind_chk lists the kinds the relay knows; the dedupe key carries the session id, so a new session pages again. */
+  session_silent?: { session_id: string };
 };
 
 const SAFE = /[^A-Za-z0-9_.:-]/g;
@@ -49,14 +51,16 @@ export function composeOpsAlert(a: OpsAlert): { subject: string; body: string; d
   const slug = clean(a.room_slug) || clean(a.room_id);
   const mins = a.minutes === null || !Number.isFinite(a.minutes) ? null : Math.max(0, Math.round(a.minutes));
   const consult = a.kind === "recorder_off" && a.consult_open ? a.consult_open : null;
-  const dedupeKey = a.kind === "install_retired" ? clean(a.install_id ?? "") || "unknown_install" : consult ? "recorder_off_consult" : a.kind;
+  const silent = a.kind === "recorder_off" && a.session_silent && !consult ? a.session_silent : null;
+  const dedupeKey = a.kind === "install_retired" ? clean(a.install_id ?? "") || "unknown_install" : consult ? "recorder_off_consult" : silent ? `recorder_off_session:${clean(silent.session_id) || "unknown_session"}` : a.kind;
   const name = a.room_name ? cleanName(a.room_name) : "";
   const parts = [`room=${slug}`, ...(name ? [`name="${name}"`] : []), `room_id=${clean(a.room_id)}`, `problem=${a.kind}`];
   if (a.install_id) parts.push(`install_id=${clean(a.install_id)}`);
   if (a.reason) parts.push(`reason=${clean(a.reason)}`);
   if (mins !== null) parts.push(a.kind === "install_retired" ? `last_seen_min_ago=${mins}` : `minutes=${mins}`);
   if (consult) parts.push(`consult_open=1 window_open_min=${Number.isFinite(consult.window_open_min) ? Math.max(0, Math.round(consult.window_open_min)) : 0}`);
-  return { subject: `[ops] ${a.kind}${consult ? " IN CONSULT" : ""} ${slug}`, body: parts.join(" "), dedupe_key: dedupeKey };
+  if (silent) parts.push(`variant=session_silent session_id=${clean(silent.session_id) || "unknown_session"}`);
+  return { subject: `[ops] ${a.kind}${consult ? " IN CONSULT" : silent ? " SESSION SILENT" : ""} ${slug}`, body: parts.join(" "), dedupe_key: dedupeKey };
 }
 
 /** Queue one alert. Returns true when a row was inserted, false when it was deduped or could not be written. */

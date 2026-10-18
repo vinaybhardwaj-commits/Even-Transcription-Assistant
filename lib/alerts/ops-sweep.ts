@@ -6,6 +6,10 @@
  *                  room's audio, never the install: OPD 4 had no install and a stale machine binding, and every rule that began at the install was silent.
  *   recorder_off   (consult variant, FR1-A) any hour: the room has an OPEN eta_encounter_windows row (t_close IS NULL, opened within CONSULT_WINDOW_MAX_AGE_MIN, open >= CONSULT_WINDOW_MIN_OPEN_MIN)
  *                  and max(newest chunk, t_open) is >= CONSULT_RECORDER_OFF_MINUTES old. Own dedupe key, so it can stand beside the plain rule.
+ *   recorder_off   (session variant, SILENT-SESSION R2) any room, clinic or OT (ORB2 included), any hour: a session that is OPEN and recording (any IST date, not only today's) whose newest piece, primary or
+ *                  backup, is >= SESSION_SILENT_MINUTES old, or which has no piece and started that long ago. Same kind and outbox, dedupe key per session id (a new session pages again). It is
+ *                  suppressed for a room that is already paging recorder_off in this same plan (the plain or consult rule), so one silence is one page. A paused session and a room with no session are
+ *                  never read: OT idle between cases is untouched.
  *   mic_denied     the room's live install reports mic_state 'denied'; or, with no live install, the newest retired one did. Any hour.
  *   no_machine     clinic hours and the roster room has NO live (enrolled, un-retired) install. The steward's own rule (lib/steward/rules.ts) also reads a config machine override;
  *                  this one asks only whether a recorder is installed.
@@ -13,7 +17,8 @@
  * "We looked and found nothing" and "we never looked" are different: a source that cannot be read is named in `degraded` and its rule is skipped, never read as healthy or as dark.
  */
 import { sql } from "@/lib/db";
-import { lastChunkByRoom, openEncounterWindowsByRoom } from "@/lib/room-access/tool-reads";
+import { lastChunkByRoom, openEncounterWindowsByRoom, openRecordingSessions } from "@/lib/room-access/tool-reads";
+import { NEVER_ROSTER_ROOM_IDS, SCRATCH_ROOM_PREFIX } from "@/lib/steward/config";
 import { ROOMS } from "@/lib/rooms-live/rooms";
 import { CONSULT_RECORDER_OFF_MINUTES, isClinicHours, recorderOffMinutes } from "./clinic-hours";
 import { queueOpsAlert, type OpsAlert } from "./ops-alert";
@@ -22,6 +27,11 @@ import { queueOpsAlert, type OpsAlert } from "./ops-alert";
 export const CONSULT_WINDOW_MAX_AGE_MIN = 90;
 /** A window must have been open this long before it can page (a recorder needs a moment to start). */
 export const CONSULT_WINDOW_MIN_OPEN_MIN = 3;
+
+/** A recording session with no audio for this long pages (the steward rule session_silent uses the same 30 min). */
+export const SESSION_SILENT_MINUTES = 30;
+
+export type OpenSession = { id: string; room_id: string; started_ms: number; last_piece_ms: number | null };
 
 export type SweepInputs = {
   now_ms: number;
@@ -37,6 +47,8 @@ export type SweepInputs = {
   open_windows?: ReadonlyMap<string, number> | null;
   /** room_id -> room.name, carried in the body beside the slug */
   names?: ReadonlyMap<string, string>;
+  /** every OPEN recording session of every enabled room, any day. null/absent = the source was not read (session rule skipped). */
+  open_sessions?: readonly OpenSession[] | null;
 };
 
 /** PURE — the alerts that stand right now. A null source skips its rules (they are "degraded", not "fine"). */
@@ -72,6 +84,16 @@ export function planOpsAlerts(inp: SweepInputs): OpsAlert[] {
       if (!inst && inp.retired_installs?.get(room.room_id)?.mic_state === "denied") {
         out.push({ kind: "mic_denied", room_id: room.room_id, room_slug: slug, room_name, minutes: null });
       }
+    }
+  }
+  if (inp.open_sessions) {
+    for (const ses of inp.open_sessions) {
+      if (ses.room_id.startsWith(SCRATCH_ROOM_PREFIX) || NEVER_ROSTER_ROOM_IDS.includes(ses.room_id)) continue;
+      const mins = Math.floor((inp.now_ms - (ses.last_piece_ms ?? ses.started_ms)) / 60_000);
+      if (!Number.isFinite(mins) || mins < SESSION_SILENT_MINUTES) continue;
+      // one silence, one page: a room already paging recorder_off in this plan (plain or consult) keeps that page alone
+      if (out.some((a) => a.kind === "recorder_off" && a.room_id === ses.room_id)) continue;
+      out.push({ kind: "recorder_off", room_id: ses.room_id, room_slug: inp.slugs?.get(ses.room_id) ?? ses.room_id, room_name: inp.names?.get(ses.room_id), minutes: mins, session_silent: { session_id: ses.id } });
     }
   }
   return out;
@@ -135,17 +157,33 @@ export async function runOpsSweep(nowMs: number = Date.now()): Promise<SweepResu
     console.error("[ops-sweep] could not read eta_encounter_windows:", e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200));
   }
 
+  let openSessions: OpenSession[] | null = null;
+  try {
+    const rows = await openRecordingSessions();
+    openSessions = [];
+    for (const r of rows) {
+      const started = new Date(r.started_at as string).getTime();
+      if (!Number.isFinite(started)) continue;
+      const piece = r.last_chunk_at == null ? NaN : new Date(r.last_chunk_at as string).getTime();
+      openSessions.push({ id: r.id, room_id: r.room_id, started_ms: started, last_piece_ms: Number.isFinite(piece) ? piece : null });
+    }
+  } catch (e) {
+    degraded.push("open_sessions");
+    console.error("[ops-sweep] could not read open sessions:", e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200));
+  }
+
   let slugs: Map<string, string> | undefined;
   let names: Map<string, string> | undefined;
   try {
-    const rows = (await sql`SELECT id, slug, name FROM room WHERE id = ANY(${ids}::text[])`) as Array<{ id: string; slug: string; name: string | null }>;
+    const nameIds = [...new Set([...ids, ...(openSessions ?? []).map((x) => x.room_id)])];
+    const rows = (await sql`SELECT id, slug, name FROM room WHERE id = ANY(${nameIds}::text[])`) as Array<{ id: string; slug: string; name: string | null }>;
     slugs = new Map(rows.map((r) => [r.id, r.slug]));
     names = new Map(rows.filter((r) => r.name).map((r) => [r.id, r.name as string]));
   } catch {
     /* the id names the room */
   }
 
-  const plan = planOpsAlerts({ now_ms: nowMs, last_chunk_ms: lastChunk, live_installs: installs, retired_installs: retired, open_windows: openWindows, slugs, names });
+  const plan = planOpsAlerts({ now_ms: nowMs, last_chunk_ms: lastChunk, live_installs: installs, retired_installs: retired, open_windows: openWindows, open_sessions: openSessions, slugs, names });
   let queued = 0;
   for (const a of plan) if (await queueOpsAlert(a)) queued++;
   return { ok: degraded.length === 0, planned: plan.length, queued, degraded };

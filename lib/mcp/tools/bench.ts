@@ -2864,7 +2864,18 @@ const diffRoom: McpTool = {
             return t !== null && (acc === null || t > acc) ? t : acc;
           }, null);
           const anyTapeToday = sessions.some((s) => s.chunk_count + s.backup_chunk_count > 0);
-          const stalled = sessions.some((s) => isBenchStalled(s, now.getTime()));
+          // The stall badge's pool is every RECORDING session of the room, whatever day it started, not only today's.
+          // `sessions` is IST-date scoped, so a session that opened before midnight and never delivered a piece fell out
+          // of it and could never read as stalled (ORB2, 16 Oct: open > 24 h, zero pieces, stalled:false). Same helper and
+          // same fallback to started_at as rooms-live; only the pool widens.
+          let openRecording: BenchSessionRollupRow[] = [];
+          try {
+            openRecording = await listBenchSessions({ room_id: room.id, status: "recording" });
+          } catch {
+            reasons.push("open_sessions_unavailable");
+          }
+          const stallPool = [...sessions, ...openRecording.filter((o) => !sessions.some((s) => s.id === o.id))];
+          const stalled = stallPool.some((s) => isBenchStalled(s, now.getTime()));
           const liars = sessions.filter((s) => endedAtLies(msOfLoose(s.ended_at), msOfLoose(s.last_any_chunk_at) ?? msOfLoose(s.started_at)));
           // The last cue on the room's brain day. A brain fault is UNKNOWN, never a flag.
           let lastCue: { id: string; type: string; at: string } | null = null;
@@ -2884,7 +2895,7 @@ const diffRoom: McpTool = {
           // Same fix, same reason: a session paused before midnight and never resumed or ended
           // falls out of `sessions` (today-scoped) too. One active-session lookup answers both.
           const pausedSession = active?.status === "paused";
-          const stalledSession = sessions.find((s) => isBenchStalled(s, now.getTime())) ?? null;
+          const stalledSession = stallPool.find((s) => isBenchStalled(s, now.getTime())) ?? null;
           const stalledAgeMs = stalledSession
             ? now.getTime() - (msOfLoose(stalledSession.last_any_chunk_at) ?? msOfLoose(stalledSession.started_at) ?? now.getTime())
             : null;
