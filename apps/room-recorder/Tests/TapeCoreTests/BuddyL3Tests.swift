@@ -394,4 +394,20 @@ extension BuddyConsultController {
     #expect(controller.isLive, "a runner is open")
     _ = controller.consultEnded(opaqueID: "opq_f4d")
   }
+
+  @Test func engineReportsUnusableConfigInInstallPollField_WellFormed0644() async throws {
+    // The engine's install-poll fields include buddy_runner_config=unusable for a 0644 file.
+    let root = R4Fixture.temporaryRoot()
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configURL = root.appendingPathComponent(BuddyRunnerConfig.fileName)
+    try Data(#"{"base":"http://c4:43124","key":"KEY-SECRET-1"}"#.utf8).write(to: configURL)
+    chmod(configURL.path, 0o644)
+    #expect(BuddyRunnerConfig.status(root: root) == .unusable, "the file is 0644 so unusable")
+    let facts = R4AudioInputs.standard().facts(forUID: "device-a")
+    var fields = InstallPollFields(installID: "install_x", facts: facts, tapeAdvancing: false)
+    fields.buddyRunnerConfig = BuddyRunnerConfig.status(root: root).rawValue
+    let items = Dictionary(uniqueKeysWithValues: fields.queryItems().map { ($0.name, $0.value ?? "") })
+    #expect(items["buddy_runner_config"] == "unusable", "the field reports unusable: \(items)")
+  }
 }
