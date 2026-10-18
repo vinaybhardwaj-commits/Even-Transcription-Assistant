@@ -6,14 +6,14 @@
  * nothing and sends the person back to the client with error=access_denied, so the client can restart instead of dead-ending on an error page.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { CODE_TTL_S, CONSENT_PURPOSE, PENDING_COOKIE, approverEmail, identityEnforced, mcpIssuer } from "@/lib/mcp/oauth/config";
+import { CODE_TTL_S, CONSENT_PURPOSE, PENDING_COOKIE, approverEmail, codeRoute, identityEnforced, mcpIssuer } from "@/lib/mcp/oauth/config";
 import { hashSecret, randomId, safeEqual, verifyBlob } from "@/lib/mcp/oauth/crypto";
 import { describeClient, type Consent } from "@/lib/mcp/oauth/consent";
 import { done, readForm } from "@/lib/mcp/oauth/flow";
 import { htmlError, NO_STORE, oauthGate, redirectError } from "@/lib/mcp/oauth/http";
 import { burnConsent, getPerson, insertCode } from "@/lib/mcp/oauth/store";
 import { auditOauthGranted, auditOauthRefused } from "@/lib/mcp/audit";
-import { identityStatus } from "@/lib/mcp/identity";
+import { activeKeyIdOf, identityStatus } from "@/lib/mcp/identity";
 import { alertSignIn } from "@/lib/mcp/notify";
 
 
@@ -68,15 +68,23 @@ export async function POST(req: NextRequest) {
         return done(redirectError(consent.ru, "access_denied", consent.st, 303));
       }
     }
+    let keyId: string | null = null;
+    if (identityEnforced()) {
+      keyId = await activeKeyIdOf(person.email); // the session is bound to this key
+      if (!keyId && person.email !== approverEmail()) {
+        await auditOauthRefused(consent.email, "no_key");
+        return done(redirectError(consent.ru, "access_denied", consent.st, 303));
+      }
+    }
     const raw = randomId(32);
     await insertCode({
       code_hash: hashSecret(raw), client_id: consent.cid, email: consent.email, code_challenge: consent.cc,
-      redirect_uri: consent.ru, resource: consent.res, scopes: person.scopes, ttl_s: CODE_TTL_S,
+      redirect_uri: consent.ru, resource: consent.res, scopes: person.scopes, ttl_s: CODE_TTL_S, key_id: keyId,
     });
     const u = new URL(consent.ru);
     const who = await describeClient(consent.cid);
     await auditOauthGranted(consent.email, who.audit, u.host);
-    if (consent.email !== approverEmail()) await alertSignIn(consent.email, u.host); // every non-V sign-in is mailed to V at once (best-effort)
+    if (consent.email !== approverEmail()) await alertSignIn(consent.email, u.host, codeRoute() === "self_after_approval" ? "self_after_approval" : "approver"); // every non-V sign-in is mailed to V at once (best-effort)
     u.searchParams.set("code", raw);
     if (consent.st) u.searchParams.set("state", consent.st);
     u.searchParams.set("iss", mcpIssuer());

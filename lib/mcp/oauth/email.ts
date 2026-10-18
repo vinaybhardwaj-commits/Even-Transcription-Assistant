@@ -20,21 +20,24 @@ export const emailCodeHash = (pendingId: string, code: string): string => hashSe
 
 export const EMAIL_SUBJECT = "EvenScribe MCP sign-in code (approval needed)";
 /** The code goes to the APPROVER, never to the requester (spec 18 Oct). The requester's address is named so V knows whom to pass it to. */
-export const emailBody = (code: string, requester: string): string =>
-  `${requester} is signing in to the EvenScribe MCP connector. The sign-in code: ${code}. It expires in ${EMAIL_CODE_TTL_S / 60} minutes and works once. Pass it on only if you expect this request; otherwise ignore it.`;
+export const emailBody = (code: string, requester: string, toSelf = false): string =>
+  toSelf
+    ? `Your EvenScribe MCP sign-in code: ${code}. It expires in ${EMAIL_CODE_TTL_S / 60} minutes and works once. If you did not ask for this, ignore it.`
+    : `${requester} is signing in to the EvenScribe MCP connector. The sign-in code: ${code}. It expires in ${EMAIL_CODE_TTL_S / 60} minutes and works once. Pass it on only if you expect this request; otherwise ignore it.`;
 
 /**
  * True when Resend accepted the message. Any failure is false, logged count-only with the status (never the address, the code or the body).
- * The recipient is ALWAYS the approver (SCRIBE_MCP_OAUTH_APPROVER); there is no parameter to send a code anywhere else. No approver configured = false, nothing is sent.
+ * The recipient is the approver (SCRIBE_MCP_OAUTH_APPROVER) unless `toSelf`, which the start route sets ONLY when SCRIBE_MCP_CODE_ROUTE=self_after_approval and V approved that address. No approver configured = false, nothing is sent.
  */
-export async function sendEmailCode(requester: string, code: string): Promise<boolean> {
-  const to = approverEmail();
+export async function sendEmailCode(requester: string, code: string, toSelf = false): Promise<boolean> {
+  if (!approverEmail()) return false; // V must be configured in every route: the sign-in alert goes to V
+  const to = toSelf ? requester : approverEmail();
   if (!to) return false;
   try {
     const r = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { Authorization: `Bearer ${process.env[RESEND_API_KEY_ENV] ?? ""}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: process.env[RESEND_FROM_ENV], to: [to], subject: EMAIL_SUBJECT, text: emailBody(code, requester) }),
+      body: JSON.stringify({ from: process.env[RESEND_FROM_ENV], to: [to], subject: EMAIL_SUBJECT, text: emailBody(code, requester, toSelf) }),
       cache: "no-store",
       signal: AbortSignal.timeout(RESEND_TIMEOUT_MS),
     });

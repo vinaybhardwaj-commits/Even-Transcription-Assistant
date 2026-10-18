@@ -2,7 +2,7 @@
  * tests/support/mcp-oauth-fake-store.ts — an in-memory stand-in for lib/mcp/oauth/store with the SAME atomic semantics (single-use claim, rotation claim).
  * The SQL itself is exercised by tests/unit/mcp-oauth-o2-pg.test.ts against a real Postgres when Docker is available.
  */
-import { REFRESH_FAMILY_MAX_AGE_S } from "@/lib/mcp/oauth/config";
+import { REFRESH_FAMILY_MAX_AGE_S, SESSION_MAX_AGE_S } from "@/lib/mcp/oauth/config";
 import type { ClientRow, CodeRow, PersonRow, TokenRow } from "@/lib/mcp/oauth/store";
 
 let clock = 0;
@@ -41,9 +41,9 @@ export const upsertClient = async (c: { client_id: string; kind: "cimd" | "dcr";
 };
 export const touchClient = async (_id: string) => {};
 export const personGrantedSinceCode = async (email: string, codeHash: string, _ttlS: number) => (state.granted.get(email) ?? -Infinity) >= (state.codeCreated.get(codeHash) ?? Infinity);
-export const insertCode = async (c: { code_hash: string; client_id: string; email: string; code_challenge: string; redirect_uri: string; resource: string; scopes: string[]; ttl_s: number }) => {
+export const insertCode = async (c: { code_hash: string; client_id: string; email: string; code_challenge: string; redirect_uri: string; resource: string; scopes: string[]; ttl_s: number; key_id?: string | null }) => {
   state.codeCreated.set(c.code_hash, tick());
-  state.codes.set(c.code_hash, { code_hash: c.code_hash, client_id: c.client_id, email: c.email, code_challenge: c.code_challenge, redirect_uri: c.redirect_uri, resource: c.resource, scopes: c.scopes, expires_at: "", used_at: null, exp: Date.now() + c.ttl_s * 1000 });
+  state.codes.set(c.code_hash, { code_hash: c.code_hash, client_id: c.client_id, email: c.email, code_challenge: c.code_challenge, redirect_uri: c.redirect_uri, resource: c.resource, scopes: c.scopes, key_id: c.key_id ?? null, expires_at: "", used_at: null, exp: Date.now() + c.ttl_s * 1000 });
 };
 export const burnConsent = async (h: string) => {
   if (state.burned.has(h)) return false;
@@ -57,11 +57,11 @@ export const claimCode = async (h: string) => {
   return c;
 };
 export const codeWasUsed = async (h: string) => Boolean(state.codes.get(h)?.used_at);
-export const insertToken = async (t: { token_hash: string; kind: "access" | "refresh"; email: string; client_id: string; scopes: string[]; resource: string; family_id: string; ttl_s: number }) => {
+export const insertToken = async (t: { token_hash: string; kind: "access" | "refresh"; email: string; client_id: string; scopes: string[]; resource: string; family_id: string; ttl_s: number; key_id?: string | null }) => {
   if (state.families.has(t.family_id)) return false;
   state.created.set(t.token_hash, tick());
   if (!state.familyBorn.has(t.family_id)) state.familyBorn.set(t.family_id, Date.now());
-  state.tokens.set(t.token_hash, { token_hash: t.token_hash, kind: t.kind, email: t.email, client_id: t.client_id, scopes: t.scopes, resource: t.resource, family_id: t.family_id, expires_at: "", revoked_at: null, rotated_to: null, exp: Date.now() + t.ttl_s * 1000 });
+  state.tokens.set(t.token_hash, { token_hash: t.token_hash, kind: t.kind, email: t.email, client_id: t.client_id, scopes: t.scopes, resource: t.resource, family_id: t.family_id, key_id: t.key_id ?? null, expires_at: "", revoked_at: null, rotated_to: null, exp: Date.now() + t.ttl_s * 1000 });
   return true;
 };
 export const familyRevoked = async (fam: string) => state.families.has(fam);
@@ -88,7 +88,8 @@ export const lookupAccessToken = async (h: string) => {
   const t = state.tokens.get(h);
   if (!t || t.kind !== "access") return null;
   const p = state.people.get(t.email);
-  return { ...t, expired: t.exp <= Date.now(), family_revoked: state.families.has(t.family_id), predates_grant: predates(h, t.email), person_status: p?.status ?? null, person_scopes: p?.scopes ?? null };
+  const born = state.familyBorn.get(t.family_id);
+  return { ...t, expired: t.exp <= Date.now(), family_expired: born !== undefined && born <= Date.now() - SESSION_MAX_AGE_S * 1000, family_revoked: state.families.has(t.family_id), predates_grant: predates(h, t.email), person_status: p?.status ?? null, person_scopes: p?.scopes ?? null };
 };
 export const grantPerson = async (email: string, scopes: string[], _by: string) => {
   const prev = state.people.get(email)?.status ?? null;

@@ -6,11 +6,12 @@
  * Refresh: rotated on every use, and refused (audited, family revoked) once the family's first token is 30 d old (R2 F3). A reused rotated token revokes the whole family. A person no longer active revokes the family. Errors are RFC 6749 JSON, no-store.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { ACCESS_TOKEN_TTL_S, CODE_TTL_S, REFRESH_TOKEN_TTL_S, mcpResourceUrl } from "@/lib/mcp/oauth/config";
+import { ACCESS_TOKEN_TTL_S, CODE_TTL_S, REFRESH_TOKEN_TTL_S, identityEnforced, mcpResourceUrl } from "@/lib/mcp/oauth/config";
 import { hashSecret, randomToken, s256, safeEqual, validVerifier } from "@/lib/mcp/oauth/crypto";
 import { jsonError, NO_STORE, oauthGate } from "@/lib/mcp/oauth/http";
 import { redirectsEquivalent } from "@/lib/mcp/oauth/redirects";
 import { auditOauthRefused } from "@/lib/mcp/audit";
+import { sessionKeyOk } from "@/lib/mcp/identity";
 import { claimCode, claimRefresh, codeWasUsed, familyOfCode, familyRevoked, getPerson, getToken, insertToken, personGrantedSinceCode, revokeFamily } from "@/lib/mcp/oauth/store";
 
 export const runtime = "nodejs";
@@ -22,10 +23,10 @@ const MAX_FORM_BYTES = 8192;
  * Mint the pair into a family. The family tombstone makes a racing revoke safe in both orders: insertToken refuses a tombstoned family, and AFTER inserting we look again — if the
  * family was revoked meanwhile we sweep our own rows (the sweep's snapshot is after our insert) and answer invalid_grant. A revoke that lands later sweeps them itself.
  */
-async function issue(p: { email: string; client_id: string; scopes: string[]; resource: string; family_id: string }, rotated?: { raw: string; hash: string }): Promise<NextResponse> {
+async function issue(p: { email: string; client_id: string; scopes: string[]; resource: string; family_id: string; key_id?: string | null }, rotated?: { raw: string; hash: string }): Promise<NextResponse> {
   const access = randomToken("esp_");
   const refresh = rotated?.raw ?? randomToken("esr_");
-  const base = { email: p.email, client_id: p.client_id, scopes: p.scopes, resource: p.resource, family_id: p.family_id };
+  const base = { email: p.email, client_id: p.client_id, scopes: p.scopes, resource: p.resource, family_id: p.family_id, key_id: p.key_id ?? null };
   const a = await insertToken({ ...base, token_hash: hashSecret(access), kind: "access", ttl_s: ACCESS_TOKEN_TTL_S });
   const r = await insertToken({ ...base, token_hash: rotated?.hash ?? hashSecret(refresh), kind: "refresh", ttl_s: REFRESH_TOKEN_TTL_S });
   if (!a || !r || (await familyRevoked(p.family_id))) {
@@ -84,7 +85,8 @@ async function codeGrant(f: URLSearchParams): Promise<NextResponse> {
   if (!person || person.status !== "active") return jsonError(400, "invalid_grant");
   if (await personGrantedSinceCode(row.email, codeHash, CODE_TTL_S)) return jsonError(400, "invalid_grant"); // the person was re-granted after this code was minted (LOW-7)
 
-  return issue({ email: row.email, client_id: row.client_id, scopes: person.scopes, resource: row.resource, family_id: familyOfCode(codeHash) });
+  if (identityEnforced() && !(await sessionKeyOk(row.key_id, row.email))) return jsonError(400, "invalid_grant"); // the session is bound to a live key of this email
+  return issue({ email: row.email, client_id: row.client_id, scopes: person.scopes, resource: row.resource, family_id: familyOfCode(codeHash), key_id: row.key_id ?? null });
 }
 
 async function refreshGrant(f: URLSearchParams): Promise<NextResponse> {
@@ -118,11 +120,16 @@ async function refreshGrant(f: URLSearchParams): Promise<NextResponse> {
     return jsonError(400, "invalid_grant");
   }
 
+  if (identityEnforced() && !(await sessionKeyOk(tok.key_id, tok.email))) { // the key (or the email) was revoked: the session dies with it
+    await revokeFamily(tok.family_id, "key_revoked");
+    return jsonError(400, "invalid_grant");
+  }
+
   const refresh = randomToken("esr_");
   const newHash = hashSecret(refresh);
   if (!(await claimRefresh(oldHash, newHash))) { // lost a race with another presenter of the same token
     await revokeFamily(tok.family_id, "refresh_race");
     return jsonError(400, "invalid_grant");
   }
-  return issue({ email: tok.email, client_id: tok.client_id, scopes: person.scopes, resource: tok.resource, family_id: tok.family_id }, { raw: refresh, hash: newHash });
+  return issue({ email: tok.email, client_id: tok.client_id, scopes: person.scopes, resource: tok.resource, family_id: tok.family_id, key_id: tok.key_id ?? null }, { raw: refresh, hash: newHash });
 }

@@ -44,11 +44,11 @@ export default async function McpKeysPage() {
             </tbody>
           </table>
           <table className="min-w-full">
-            <thead><tr className="text-left text-even-ink-600">{["identity", "status", "by", "created", ""].map((c) => <th key={c} className="px-2 py-1 font-medium">{c}</th>)}</tr></thead>
+            <thead><tr className="text-left text-even-ink-600">{["identity", "status", "by", "created", "code to self", ""].map((c) => <th key={c} className="px-2 py-1 font-medium">{c}</th>)}</tr></thead>
             <tbody>
               {ids.map((i) => (
                 <tr key={i.email} className="border-t border-even-ink-200">
-                  <td className="px-2 py-1">{i.email}</td><td className="px-2 py-1">{i.status}</td><td className="px-2 py-1">{i.created_by ?? "—"}</td><td className="px-2 py-1">{i.created_at}</td>
+                  <td className="px-2 py-1">{i.email}</td><td className="px-2 py-1">{i.status}</td><td className="px-2 py-1">{i.created_by ?? "—"}</td><td className="px-2 py-1">{i.created_at}</td><td className="px-2 py-1">{i.self_approved ? "approved" : "no"} {i.status === "active" ? (i.self_approved ? post({ action: "self_withdraw", email: i.email }, "Withdraw") : post({ action: "self_approve", email: i.email }, "Approve (once)")) : null}</td>
                   <td className="px-2 py-1">{i.status === "blacklisted" ? null : <>{post({ action: "identity", email: i.email, status: "revoked" }, "Revoke")} {post({ action: "identity", email: i.email, status: "blacklisted" }, "Blacklist")}</>}</td>
                 </tr>
               ))}

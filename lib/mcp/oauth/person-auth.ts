@@ -40,11 +40,11 @@ export async function authenticateMcp(req: Request): Promise<McpAuthResult> {
     return unauthorized;
   };
   if (row.revoked_at || row.family_revoked || row.predates_grant) return deny("revoked"); // predates_grant: created before the person's last (re)grant, e.g. a token a racing redemption slipped past revoke_person // the family tombstone (O2-FIX1) kills a token a racing redemption left unswept
-  if (row.expired) return deny("expired");
+  if (row.expired || row.family_expired) return deny("expired"); // family_expired: the 30-day session ends on day 30 however it was refreshed (no sliding)
   if (row.resource !== mcpResourceUrl()) return deny("resource");
   if (row.person_status !== "active") return deny("inactive");
   const personScopes = new Set(row.person_scopes ?? []);
   const scopes = new Set<McpScope>(row.scopes.filter((s): s is McpScope => VALID_SCOPES.has(s) && personScopes.has(s)));
   if (scopes.size === 0) return deny("inactive");
-  return { ok: true, principal: { token_id: `person:${row.email}`, scopes, person: { email: row.email, session_id: row.family_id } } };
+  return { ok: true, principal: { token_id: `person:${row.email}`, scopes, person: { email: row.email, session_id: row.family_id, key_id: row.key_id ?? null } } };
 }

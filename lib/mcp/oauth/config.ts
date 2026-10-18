@@ -130,3 +130,12 @@ export function ownerActors(): ReadonlySet<string> {
 export function identityEnforced(): boolean {
   return process.env[MCP_IDENTITY_FLAG_ENV]?.trim().toLowerCase() === "on";
 }
+
+/**
+ * SCRIBE_MCP_CODE_ROUTE (spec addendum 1): "approver" (default; any other value, blank or unset) = V receives every sign-in code.
+ * "self_after_approval" = V approves an address ONCE in /admin/mcp-keys; later codes go to that person's own address. V still gets the sign-in alert either way.
+ */
+export const MCP_CODE_ROUTE_ENV = "SCRIBE_MCP_CODE_ROUTE";
+export const codeRoute = (): "approver" | "self_after_approval" => (process.env[MCP_CODE_ROUTE_ENV]?.trim().toLowerCase() === "self_after_approval" ? "self_after_approval" : "approver");
+/** A sign-in session lasts 30 days from the code sign-in and is NEVER extended (no sliding): the same cap as a refresh family. */
+export const SESSION_MAX_AGE_S = REFRESH_FAMILY_MAX_AGE_S;

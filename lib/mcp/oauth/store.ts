@@ -3,12 +3,12 @@
  * family_id of a code's tokens is "f_" + the first 32 hex of the code hash, so a replayed code can revoke exactly what it issued with no extra column.
  */
 import { sql } from "@/lib/db";
-import { EMAIL_LOCK_S, REFRESH_FAMILY_MAX_AGE_S } from "./config";
+import { EMAIL_LOCK_S, REFRESH_FAMILY_MAX_AGE_S, SESSION_MAX_AGE_S } from "./config";
 
 export type PersonRow = { email: string; scopes: string[]; status: "active" | "revoked"; granted_at?: string };
 export type ClientRow = { client_id: string; kind: "cimd" | "dcr"; redirect_uris: string[]; metadata_url: string | null; client_name: string | null; created_at: string };
-export type CodeRow = { code_hash: string; client_id: string; email: string; code_challenge: string; redirect_uri: string; resource: string; scopes: string[]; expires_at: string; used_at: string | null };
-export type TokenRow = { token_hash: string; kind: "access" | "refresh"; email: string; client_id: string; scopes: string[]; resource: string; family_id: string; expires_at: string; created_at?: string; revoked_at: string | null; rotated_to: string | null };
+export type CodeRow = { code_hash: string; client_id: string; email: string; code_challenge: string; redirect_uri: string; resource: string; scopes: string[]; expires_at: string; used_at: string | null; key_id?: string | null };
+export type TokenRow = { token_hash: string; kind: "access" | "refresh"; email: string; client_id: string; scopes: string[]; resource: string; family_id: string; expires_at: string; created_at?: string; revoked_at: string | null; rotated_to: string | null; key_id?: string | null };
 
 export const familyOfCode = (codeHash: string): string => `f_${codeHash.slice(0, 32)}`;
 
@@ -39,10 +39,10 @@ export async function touchClient(clientId: string): Promise<void> {
   await sql`UPDATE mcp_oauth_client SET last_used_at = now() WHERE client_id = ${clientId}`;
 }
 
-export async function insertCode(c: { code_hash: string; client_id: string; email: string; code_challenge: string; redirect_uri: string; resource: string; scopes: string[]; ttl_s: number }): Promise<void> {
+export async function insertCode(c: { code_hash: string; client_id: string; email: string; code_challenge: string; redirect_uri: string; resource: string; scopes: string[]; ttl_s: number; key_id?: string | null }): Promise<void> {
   await sql`
-    INSERT INTO mcp_oauth_code (code_hash, client_id, email, code_challenge, redirect_uri, resource, scopes, expires_at)
-    VALUES (${c.code_hash}, ${c.client_id}, ${c.email}, ${c.code_challenge}, ${c.redirect_uri}, ${c.resource}, ${c.scopes}::text[], now() + (${c.ttl_s} * interval '1 second'))
+    INSERT INTO mcp_oauth_code (code_hash, client_id, email, code_challenge, redirect_uri, resource, scopes, key_id, expires_at)
+    VALUES (${c.code_hash}, ${c.client_id}, ${c.email}, ${c.code_challenge}, ${c.redirect_uri}, ${c.resource}, ${c.scopes}::text[], ${c.key_id ?? null}, now() + (${c.ttl_s} * interval '1 second'))
   `;
 }
 
@@ -117,7 +117,7 @@ export async function claimCode(codeHash: string): Promise<CodeRow | null> {
   const rows = (await sql`
     UPDATE mcp_oauth_code SET used_at = now()
     WHERE code_hash = ${codeHash} AND used_at IS NULL AND expires_at > now()
-    RETURNING code_hash, client_id, email, code_challenge, redirect_uri, resource, scopes, expires_at, used_at
+    RETURNING code_hash, client_id, email, code_challenge, redirect_uri, resource, scopes, expires_at, used_at, key_id
   `) as CodeRow[];
   return rows[0] ?? null;
 }
@@ -141,10 +141,10 @@ export async function personGrantedSinceCode(email: string, codeHash: string, tt
   return rows.length > 0;
 }
 
-export async function insertToken(t: { token_hash: string; kind: "access" | "refresh"; email: string; client_id: string; scopes: string[]; resource: string; family_id: string; ttl_s: number }): Promise<boolean> {
+export async function insertToken(t: { token_hash: string; kind: "access" | "refresh"; email: string; client_id: string; scopes: string[]; resource: string; family_id: string; ttl_s: number; key_id?: string | null }): Promise<boolean> {
   const rows = (await sql`
-    INSERT INTO mcp_oauth_token (token_hash, kind, email, client_id, scopes, resource, family_id, expires_at)
-    SELECT ${t.token_hash}, ${t.kind}, ${t.email}, ${t.client_id}, ${t.scopes}::text[], ${t.resource}, ${t.family_id}, now() + (${t.ttl_s} * interval '1 second')
+    INSERT INTO mcp_oauth_token (token_hash, kind, email, client_id, scopes, resource, family_id, key_id, expires_at)
+    SELECT ${t.token_hash}, ${t.kind}, ${t.email}, ${t.client_id}, ${t.scopes}::text[], ${t.resource}, ${t.family_id}, ${t.key_id ?? null}, now() + (${t.ttl_s} * interval '1 second')
      WHERE NOT EXISTS (SELECT 1 FROM mcp_oauth_family WHERE family_id = ${t.family_id})
     RETURNING token_hash
   `) as unknown[];
@@ -162,7 +162,7 @@ export async function familyRevoked(familyId: string): Promise<boolean> {
  */
 export async function getToken(tokenHash: string, familyMaxAgeS: number = REFRESH_FAMILY_MAX_AGE_S): Promise<(TokenRow & { expired: boolean; family_revoked: boolean; predates_grant: boolean; family_expired: boolean }) | null> {
   const rows = (await sql`
-    SELECT t.token_hash, t.kind, t.email, t.client_id, t.scopes, t.resource, t.family_id, t.expires_at, t.revoked_at, t.rotated_to, (t.expires_at <= now()) AS expired,
+    SELECT t.token_hash, t.kind, t.email, t.client_id, t.scopes, t.resource, t.family_id, t.key_id, t.expires_at, t.revoked_at, t.rotated_to, (t.expires_at <= now()) AS expired,
            EXISTS (SELECT 1 FROM mcp_oauth_family f WHERE f.family_id = t.family_id) AS family_revoked,
            COALESCE(t.created_at < p.granted_at, false) AS predates_grant,
            COALESCE((SELECT min(f2.created_at) FROM mcp_oauth_token f2 WHERE f2.family_id = t.family_id) <= now() - (${familyMaxAgeS} * interval '1 second'), false) AS family_expired
@@ -193,13 +193,14 @@ export async function revokeFamily(familyId: string, reason: string = "revoked")
 
 // ─── O3: access-token lookup and the person admin actions ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-export type AccessLookup = TokenRow & { expired: boolean; family_revoked: boolean; predates_grant: boolean; person_status: "active" | "revoked" | null; person_scopes: string[] | null };
+export type AccessLookup = TokenRow & { family_expired?: boolean; expired: boolean; family_revoked: boolean; predates_grant: boolean; person_status: "active" | "revoked" | null; person_scopes: string[] | null };
 
 /** One query: the token row plus the person's CURRENT status and scopes. No cache: a revoke is visible to the very next call. */
 export async function lookupAccessToken(tokenHash: string): Promise<AccessLookup | null> {
   const rows = (await sql`
-    SELECT t.token_hash, t.kind, t.email, t.client_id, t.scopes, t.resource, t.family_id, t.expires_at, t.revoked_at, t.rotated_to,
-           (t.expires_at <= now()) AS expired, EXISTS (SELECT 1 FROM mcp_oauth_family f WHERE f.family_id = t.family_id) AS family_revoked,
+    SELECT t.token_hash, t.kind, t.email, t.client_id, t.scopes, t.resource, t.family_id, t.key_id, t.expires_at, t.revoked_at, t.rotated_to,
+           (t.expires_at <= now()) AS expired,
+           COALESCE((SELECT min(f2.created_at) FROM mcp_oauth_token f2 WHERE f2.family_id = t.family_id) <= now() - (${SESSION_MAX_AGE_S} * interval '1 second'), false) AS family_expired, EXISTS (SELECT 1 FROM mcp_oauth_family f WHERE f.family_id = t.family_id) AS family_revoked,
            COALESCE(t.created_at < p.granted_at, false) AS predates_grant, p.status AS person_status, p.scopes AS person_scopes
       FROM mcp_oauth_token t
       LEFT JOIN mcp_person p ON p.email = t.email

@@ -4,8 +4,8 @@
  * A blacklisted address cannot be issued a key here; lifting a blacklist is an edit of mcp_identity by V.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { issueKey, listIdentities, listKeys, revokeKey, rotateKey, setIdentityStatus, type KeyScope } from "@/lib/mcp/identity";
-import { alertIdentityChanged, alertKeyIssued, alertKeyRevoked } from "@/lib/mcp/notify";
+import { issueKey, listIdentities, listKeys, revokeKey, rotateKey, setIdentityStatus, setSelfApproved, type KeyScope } from "@/lib/mcp/identity";
+import { alertSelfApproval, alertIdentityChanged, alertKeyIssued, alertKeyRevoked } from "@/lib/mcp/notify";
 import { ownerFromRequest } from "@/lib/mcp/owner-gate";
 
 export const runtime = "nodejs";
@@ -51,6 +51,12 @@ export async function POST(req: NextRequest) {
       const status = f.get("status") === "blacklisted" ? "blacklisted" : "revoked";
       await setIdentityStatus(f.get("email") ?? "", status, owner);
       await alertIdentityChanged((f.get("email") ?? "").trim().toLowerCase(), status, owner);
+      return back();
+    }
+    if (action === "self_approve" || action === "self_withdraw") {
+      const approve = action === "self_approve";
+      const email = (f.get("email") ?? "").trim().toLowerCase();
+      if (await setSelfApproved(email, approve, owner)) await alertSelfApproval(email, approve, owner);
       return back();
     }
     return NextResponse.json({ error: "bad_action" }, { status: 400, headers: NO_STORE });

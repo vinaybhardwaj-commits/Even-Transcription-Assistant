@@ -26,7 +26,8 @@ export async function mailApprover(subject: string, text: string): Promise<boole
   }
 }
 
-export const alertSignIn = (email: string, clientHost: string) => mailApprover("EvenScribe MCP: sign-in", `${email} signed in to the EvenScribe MCP connector (client ${clientHost}).`);
+export const alertSignIn = (email: string, clientHost: string, route: string = "approver") => mailApprover("EvenScribe MCP: sign-in", `${email} signed in to the EvenScribe MCP connector (client ${clientHost}). Code route: ${route}. The session lasts 30 days.`);
+export const alertSelfApproval = (email: string, approved: boolean, by: string) => mailApprover("EvenScribe MCP: code route " + (approved ? "approved" : "withdrawn"), `${by} ${approved ? "approved" : "withdrew"} self-delivery of sign-in codes for ${email}.`);
 export const alertKeyIssued = (email: string, keyId: string, scope: string, by: string) => mailApprover("EvenScribe MCP: key issued", `A ${scope} key (${keyId}) was issued for ${email} by ${by}.`);
 export const alertKeyRevoked = (email: string | null, keyId: string, by: string) => mailApprover("EvenScribe MCP: key revoked", `Key ${keyId}${email ? ` of ${email}` : ""} was revoked by ${by}.`);
 export const alertIdentityChanged = (email: string, status: string, by: string) => mailApprover("EvenScribe MCP: identity " + status, `${email} was set to ${status} by ${by}; every key of that address stopped working.`);

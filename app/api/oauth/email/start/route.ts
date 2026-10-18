@@ -7,13 +7,13 @@
  * A failed send deletes the code row and writes the audit row; the page cannot change after the fact (a different page for a qualifying address would be the enumeration oracle).
  */
 import { after, NextRequest } from "next/server";
-import { identityEnforced, EMAIL_CODE_MAX_ATTEMPTS, EMAIL_CODE_TTL_S, EMAIL_RATE_PER_EMAIL, EMAIL_RATE_WINDOW_S, EMAIL_LOCK_S, mcpOauthDomain } from "@/lib/mcp/oauth/config";
+import { codeRoute, identityEnforced, EMAIL_CODE_MAX_ATTEMPTS, EMAIL_CODE_TTL_S, EMAIL_RATE_PER_EMAIL, EMAIL_RATE_WINDOW_S, EMAIL_LOCK_S, mcpOauthDomain } from "@/lib/mcp/oauth/config";
 import { emailCodeHash, codeEntryPage, newEmailCode, sendEmailCode } from "@/lib/mcp/oauth/email";
 import { emailStartLimited } from "@/lib/mcp/oauth/email-limit";
 import { originOk, readForm, readPending } from "@/lib/mcp/oauth/flow";
 import { clientIp, htmlError, oauthGate } from "@/lib/mcp/oauth/http";
 import { countRecentEmailCodes, deleteEmailCode, getPerson, insertEmailCode } from "@/lib/mcp/oauth/store";
-import { identityStatus } from "@/lib/mcp/identity";
+import { identityStatus, selfApproved } from "@/lib/mcp/identity";
 import { auditOauthRefused } from "@/lib/mcp/audit";
 
 export const runtime = "nodejs";
@@ -66,6 +66,7 @@ export async function POST(req: NextRequest) {
         return codeEntryPage();
       }
     }
+    const toSelf = codeRoute() === "self_after_approval" && (await selfApproved(person.email)); // V approved this address once; default route is the approver
     const code = newEmailCode();
     const id = await insertEmailCode({
       pending_id: pending.pid, email: person.email, code_hash: emailCodeHash(pending.pid, code),
@@ -76,7 +77,7 @@ export async function POST(req: NextRequest) {
       return codeEntryPage();
     }
     await defer(async () => {
-      if (await sendEmailCode(person.email, code)) return;
+      if (await sendEmailCode(person.email, code, toSelf)) return;
       try {
         await deleteEmailCode(id);
       } catch { /* the row expires on its own in 10 minutes */ }

@@ -244,27 +244,27 @@ describe.skipIf(!HAVE)("unknown, revoked and blacklisted keys are refused 401 an
     try {
       const { hashSecret } = await import("@/lib/mcp/oauth/crypto");
       let n = 0;
-      const session = async (email: string) => {
+      const session = async (email: string, key_id: string | null = null) => {
         await S.grantPerson(email, ["read"], "test");
         const token = `esp_idpg${++n}-${"y".repeat(32)}`;
-        await S.insertToken({ token_hash: hashSecret(token), kind: "access", email, client_id: "https://client.example.test/meta.json", scopes: ["read"], resource: "https://www.evenscribe.app/api/mcp", family_id: `f_idpg${n}`, ttl_s: 3600 });
+        await S.insertToken({ token_hash: hashSecret(token), kind: "access", email, client_id: "https://client.example.test/meta.json", scopes: ["read"], resource: "https://www.evenscribe.app/api/mcp", family_id: `f_idpg${n}`, ttl_s: 3600, key_id });
         return token;
       };
       const eve = "eve@example.test";
-      const tok = await session(eve);
-      await ID.issueKey(eve, "read", "test"); // an identity that is active
+      const evKey = await ID.issueKey(eve, "read", "test"); // an identity that is active
+      const tok = await session(eve, evKey.key_id);
       const t = await mark();
       expect((await header(tok, tool("scribe_now"))).status).toBe(200);
       const rows = await rowsSince(t);
       expect(rows[0]!.metadata_json).toMatchObject({ email: eve, door: "header", outcome: "ok" });
-      expect(rows[0]!.metadata_json.key_id).toMatch(/^k_/); // bound to the email's key
+      expect(rows[0]!.metadata_json.key_id).toBe(evKey.key_id); // bound to the key it signed in with
       await ID.setIdentityStatus(eve, "revoked", "test");
       const t2 = await mark();
       expect((await header(tok, tool("scribe_now"))).status).toBe(401);
-      expect((await rowsSince(t2))[0]!.metadata_json).toMatchObject({ reason: "identity_revoked" });
-      const noIdentity = await session("frank@example.test"); // allowlisted person, but never given an identity
+      expect((await rowsSince(t2))[0]!.metadata_json).toMatchObject({ reason: "revoked" }); // the revoke already swept the family: a denied row
+      const noIdentity = await session("frank@example.test", "k_nonexistent"); // allowlisted person, key that does not exist
       expect((await header(noIdentity, tool("scribe_now"))).status).toBe(401);
-      const vTok = await session(APPROVER);
+      const vTok = await session(APPROVER); // V's session needs no key
       const t3 = await mark();
       expect((await header(vTok, tool("scribe_now"))).status).toBe(200);
       expect(await rowsSince(t3)).toHaveLength(0);
@@ -452,5 +452,144 @@ describe.skipIf(!HAVE)("approver-routed code: the 5-try / 15-minute address lock
     pg.exec(`UPDATE mcp_oauth_email_code SET created_at = now() - interval '16 minutes' WHERE email = '${e}'`);
     expect(await mk("p3")).not.toBeNull(); // 15 minutes later it opens again
     expect(await S.takeEmailAttempt("p3", 5)).not.toBeNull();
+  });
+});
+
+// ─── addendum 1: sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+describe.skipIf(!HAVE)("session: 30 days, not sliding, bound to the key, killed at once on revoke", () => {
+  let n = 0;
+  const CLIENT = "https://client.example.test/meta.json";
+  const RES = "https://www.evenscribe.app/api/mcp";
+  async function session(email: string, keyId: string | null) {
+    const { hashSecret } = await import("@/lib/mcp/oauth/crypto");
+    await S.grantPerson(email, ["read"], "test");
+    const fam = `f_sess${++n}${Date.now()}`;
+    const access = `esp_sess${n}-${"s".repeat(32)}`;
+    const refresh = `esr_sess${n}-${"s".repeat(32)}`;
+    await S.insertToken({ token_hash: hashSecret(access), kind: "access", email, client_id: CLIENT, scopes: ["read"], resource: RES, family_id: fam, ttl_s: 3600, key_id: keyId });
+    await S.insertToken({ token_hash: hashSecret(refresh), kind: "refresh", email, client_id: CLIENT, scopes: ["read"], resource: RES, family_id: fam, ttl_s: 30 * 86400, key_id: keyId });
+    return { access, refresh, fam };
+  }
+  const withOAuth = async (fn: () => Promise<void>) => {
+    process.env.SCRIBE_MCP_OAUTH = "on"; process.env.MCP_OAUTH_TOKEN_PEPPER = "p".repeat(32);
+    try { await fn(); } finally { delete process.env.SCRIBE_MCP_OAUTH; }
+  };
+  const refreshGrant = async (t: string) => {
+    const { POST } = await import("@/app/api/oauth/token/route");
+    return POST(new NextRequest("https://www.evenscribe.app/api/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: t, client_id: CLIENT, resource: RES }).toString() }));
+  };
+
+  it("revoking the KEY ends the session on the very next call, tombstones the family and kills its refresh token", async () => {
+    await withOAuth(async () => {
+      const k = await ID.issueKey("sess1@example.test", "read", "test");
+      const s1 = await session("sess1@example.test", k.key_id);
+      expect((await header(s1.access, tool("scribe_now"))).status).toBe(200);
+      await ID.revokeKey(k.key_id);
+      const t = await mark();
+      expect((await header(s1.access, tool("scribe_now"))).status).toBe(401);
+      expect((await q`SELECT 1 FROM mcp_oauth_family WHERE family_id = ${s1.fam}`)).toHaveLength(1);
+      expect((await q`SELECT 1 FROM mcp_oauth_token WHERE family_id = ${s1.fam} AND revoked_at IS NULL`)).toHaveLength(0);
+      expect((await refreshGrant(s1.refresh)).status).toBe(400);
+      expect(t).toBeTruthy();
+    });
+  });
+
+  it("revoking or blacklisting the EMAIL ends every session of that address; another person's session is untouched", async () => {
+    await withOAuth(async () => {
+      const a = await ID.issueKey("sess2@example.test", "read", "test");
+      const b = await ID.issueKey("sess3@example.test", "read", "test");
+      const sa = await session("sess2@example.test", a.key_id);
+      const sb = await session("sess3@example.test", b.key_id);
+      await ID.setIdentityStatus("sess2@example.test", "blacklisted", "test");
+      const t = await mark();
+      expect((await header(sa.access, tool("scribe_now"))).status).toBe(401);
+      expect((await rowsSince(t))[0]!.metadata_json).toMatchObject({ ok: false, reason: "revoked" });
+      expect((await header(sb.access, tool("scribe_now"))).status).toBe(200);
+    });
+  });
+
+  it("rotating the key ends sessions signed in with the old key; the new key's sessions work", async () => {
+    await withOAuth(async () => {
+      const k = await ID.issueKey("sess4@example.test", "read", "test");
+      const old = await session("sess4@example.test", k.key_id);
+      const k2 = await ID.rotateKey(k.key_id, "test");
+      expect((await header(old.access, tool("scribe_now"))).status).toBe(401);
+      const fresh = await session("sess4@example.test", k2.key_id);
+      expect((await header(fresh.access, tool("scribe_now"))).status).toBe(200);
+    });
+  });
+
+  it("even a revoke made behind the app's back (a direct row edit, no sweep) is seen by the next call: session_key_revoked", async () => {
+    await withOAuth(async () => {
+      const k = await ID.issueKey("sess7@example.test", "read", "test");
+      const s7 = await session("sess7@example.test", k.key_id);
+      pg.exec(`UPDATE mcp_key SET revoked_at = now() WHERE key_id = '${k.key_id}'`);
+      const t = await mark();
+      expect((await header(s7.access, tool("scribe_now"))).status).toBe(401);
+      expect((await rowsSince(t))[0]!.metadata_json).toMatchObject({ reason: "session_key_revoked", key_id: k.key_id });
+    });
+  });
+
+  it("a session with no bound key is refused for everyone but V", async () => {
+    await withOAuth(async () => {
+      await ID.issueKey("sess5@example.test", "read", "test");
+      const s5 = await session("sess5@example.test", null);
+      expect((await header(s5.access, tool("scribe_now"))).status).toBe(401);
+    });
+  });
+
+  it("expiry is absolute: a session whose FIRST token is 31 days old is refused even when its newest access token is minutes old (no sliding); at day 29 it still works", async () => {
+    await withOAuth(async () => {
+      const k = await ID.issueKey("sess6@example.test", "read", "test");
+      const s6 = await session("sess6@example.test", k.key_id);
+      pg.exec(`UPDATE mcp_oauth_token SET created_at = now() - interval '29 days' WHERE family_id = '${s6.fam}' AND kind = 'refresh'`);
+      expect((await header(s6.access, tool("scribe_now"))).status).toBe(200); // fresh access token, first token 29 days old
+      pg.exec(`UPDATE mcp_oauth_token SET created_at = now() - interval '31 days' WHERE family_id = '${s6.fam}' AND kind = 'refresh'`);
+      const t = await mark();
+      expect((await header(s6.access, tool("scribe_now"))).status).toBe(401); // the fresh access token does not rescue a 31-day-old session
+      expect((await refreshGrant(s6.refresh)).status).toBe(400);
+      expect(t).toBeTruthy();
+    });
+  });
+});
+
+describe.skipIf(!HAVE)("self_after_approval: V approves an address once", () => {
+  it("approval needs an active identity, can be withdrawn, and does not survive a revoke", async () => {
+    const e = "selfapp@example.test";
+    expect(await ID.setSelfApproved(e, true, "v")).toBe(false); // no identity yet
+    await ID.issueKey(e, "read", "test");
+    expect(await ID.selfApproved(e)).toBe(false);
+    expect(await ID.setSelfApproved(e, true, "v")).toBe(true);
+    expect(await ID.selfApproved(e)).toBe(true);
+    expect((await ID.listIdentities()).find((i) => i.email === e)!.self_approved).toBe(true);
+    expect(await ID.setSelfApproved(e, false, "v")).toBe(true);
+    expect(await ID.selfApproved(e)).toBe(false);
+    await ID.setSelfApproved(e, true, "v");
+    await ID.setIdentityStatus(e, "revoked", "test");
+    expect(await ID.selfApproved(e)).toBe(false);
+    await ID.activateIdentity(e);
+    expect(await ID.selfApproved(e)).toBe(false); // re-activation does not restore the approval
+  });
+
+  it("the keys API: only V can approve; approving mails V (never a code)", async () => {
+    const vTok = await signAdminJwt({ admin_id: "a1", email: APPROVER });
+    const other = await signAdminJwt({ admin_id: "a2", email: "other-admin@example.test" });
+    const post = (cookie: string, body: string) =>
+      keysPost(new NextRequest("https://www.evenscribe.app/api/admin/mcp-keys", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", cookie: `eta_admin_session=${cookie}` }, body }));
+    await ID.issueKey("selfapp2@example.test", "read", "test");
+    process.env.RESEND_API_KEY = "re_synthetic"; process.env.RESEND_FROM_EMAIL = "noreply@example.test";
+    const mails: Array<{ to: string[]; text: string }> = [];
+    vi.stubGlobal("fetch", async (u: string, init: RequestInit) => { if (String(u) === "https://api.resend.com/emails") mails.push(JSON.parse(String(init.body))); return new Response("{}", { status: 200 }); });
+    try {
+      expect((await post(other, "action=self_approve&email=selfapp2@example.test")).status).toBe(403);
+      expect(await ID.selfApproved("selfapp2@example.test")).toBe(false);
+      expect((await post(vTok, "action=self_approve&email=selfapp2@example.test")).status).toBe(303);
+      expect(await ID.selfApproved("selfapp2@example.test")).toBe(true);
+      expect(mails.map((m) => m.to)).toEqual([[APPROVER]]);
+      expect((await post(vTok, "action=self_withdraw&email=selfapp2@example.test")).status).toBe(303);
+      expect(await ID.selfApproved("selfapp2@example.test")).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

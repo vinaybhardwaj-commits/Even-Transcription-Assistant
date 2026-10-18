@@ -5,6 +5,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { sql } from "@/lib/db";
+import { approverEmail } from "./oauth/config";
 
 export type IdentityStatus = "active" | "revoked" | "blacklisted";
 export type KeyScope = "read" | "admin";
@@ -84,12 +85,14 @@ export async function rotateKey(keyId: string, by: string): Promise<Issued> {
   if (old.revoked_at) throw new Error("already_revoked");
   const issued = await issueKey(old.email, old.scope, by, keyId);
   await sql`UPDATE mcp_key SET revoked_at = now() WHERE key_id = ${keyId} AND revoked_at IS NULL`;
+  await killSessions({ keyId }); // sessions signed in with the old key end with it
   return issued;
 }
 
 /** Revokes one key. True when a live key was revoked. */
 export async function revokeKey(keyId: string): Promise<{ revoked: boolean; email: string | null }> {
   const rows = (await sql`UPDATE mcp_key SET revoked_at = now() WHERE key_id = ${keyId} AND revoked_at IS NULL RETURNING email`) as Array<{ email: string }>;
+  if (rows.length > 0) await killSessions({ keyId });
   return { revoked: rows.length > 0, email: rows[0]?.email ?? null };
 }
 
@@ -99,6 +102,8 @@ export async function setIdentityStatus(emailIn: string, status: "revoked" | "bl
   if (!email) throw new Error("bad_email");
   await sql`INSERT INTO mcp_identity (email, status, created_by) VALUES (${email}, ${status}, ${by}) ON CONFLICT (email) DO UPDATE SET status = EXCLUDED.status WHERE mcp_identity.status <> 'blacklisted' OR EXCLUDED.status = 'blacklisted'`;
   await sql`UPDATE mcp_key SET revoked_at = now() WHERE email = ${email} AND revoked_at IS NULL`;
+  await sql`UPDATE mcp_identity SET code_self_approved_at = NULL, code_self_approved_by = NULL WHERE email = ${email}`; // an approval does not survive a revoke
+  await killSessions({ email });
 }
 
 /** Links an EXISTING token (by its sha256, from the Vercel token maps) to an address so it keeps working under SCRIBE_MCP_IDENTITY. Idempotent per hash. */
@@ -119,8 +124,8 @@ export async function listKeys(): Promise<Array<{ key_id: string; email: string;
   `) as never;
 }
 
-export async function listIdentities(): Promise<Array<{ email: string; status: IdentityStatus; created_by: string | null; created_at: string }>> {
-  return (await sql`SELECT email, status, created_by, created_at::text AS created_at FROM mcp_identity ORDER BY email`) as never;
+export async function listIdentities(): Promise<Array<{ email: string; status: IdentityStatus; created_by: string | null; created_at: string; self_approved: boolean }>> {
+  return (await sql`SELECT email, status, created_by, created_at::text AS created_at, (code_self_approved_at IS NOT NULL) AS self_approved FROM mcp_identity ORDER BY email`) as never;
 }
 
 /** Re-activates a REVOKED identity. A blacklisted one is never touched here: V edits the row to lift a blacklist. Returns whether a row changed. */
@@ -128,5 +133,50 @@ export async function activateIdentity(emailIn: string): Promise<boolean> {
   const email = normaliseEmail(emailIn);
   if (!email) throw new Error("bad_email");
   const rows = (await sql`UPDATE mcp_identity SET status = 'active' WHERE email = ${email} AND status = 'revoked' RETURNING email`) as unknown[];
+  return rows.length > 0;
+}
+
+// ─── sessions bound to a key (addendum 1) ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** True while the key exists, is not revoked, belongs to `email` and its identity is active. Live read, no cache. */
+export async function keyLive(keyId: string, email: string): Promise<boolean> {
+  const rows = (await sql`
+    SELECT 1 AS x FROM mcp_key k JOIN mcp_identity i ON i.email = k.email
+     WHERE k.key_id = ${keyId} AND k.email = ${email} AND k.revoked_at IS NULL AND i.status = 'active'
+  `) as unknown[];
+  return rows.length > 0;
+}
+
+/** A session's bound key: live, or (V's own sessions only) no key at all. Anyone else without a bound live key has no session. */
+export async function sessionKeyOk(keyId: string | null | undefined, email: string): Promise<boolean> {
+  if (!keyId) return email === approverEmail();
+  return keyLive(keyId, email);
+}
+
+/** Tombstones and sweeps every OAuth session family signed in with these keys (hygiene on top of the per-call check, which already refuses them). */
+async function killSessions(where: { keyId?: string; email?: string }): Promise<void> {
+  const rows = (where.keyId
+    ? await sql`SELECT DISTINCT family_id FROM mcp_oauth_token WHERE key_id = ${where.keyId}`
+    : await sql`SELECT DISTINCT family_id FROM mcp_oauth_token WHERE email = ${where.email ?? ""}`) as Array<{ family_id: string }>;
+  for (const r of rows) {
+    await sql`INSERT INTO mcp_oauth_family (family_id, reason) VALUES (${r.family_id}, 'key_revoked') ON CONFLICT (family_id) DO NOTHING`;
+    await sql`UPDATE mcp_oauth_token SET revoked_at = now() WHERE family_id = ${r.family_id} AND revoked_at IS NULL`;
+  }
+}
+
+// ─── self_after_approval code route ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+export async function selfApproved(email: string): Promise<boolean> {
+  const rows = (await sql`SELECT 1 AS x FROM mcp_identity WHERE email = ${email} AND status = 'active' AND code_self_approved_at IS NOT NULL`) as unknown[];
+  return rows.length > 0;
+}
+
+/** V approves an address once (true) or withdraws that approval (false). Only an active identity can be approved. Returns whether a row changed. */
+export async function setSelfApproved(emailIn: string, approved: boolean, by: string): Promise<boolean> {
+  const email = normaliseEmail(emailIn);
+  if (!email) throw new Error("bad_email");
+  const rows = (approved
+    ? await sql`UPDATE mcp_identity SET code_self_approved_at = now(), code_self_approved_by = ${by} WHERE email = ${email} AND status = 'active' RETURNING email`
+    : await sql`UPDATE mcp_identity SET code_self_approved_at = NULL, code_self_approved_by = NULL WHERE email = ${email} RETURNING email`) as unknown[];
   return rows.length > 0;
 }

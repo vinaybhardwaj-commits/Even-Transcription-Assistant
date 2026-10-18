@@ -14,7 +14,7 @@ import { checkPathKey } from "@/lib/mcp/doors";
 import { auditIdentityRefused } from "@/lib/mcp/audit";
 import { approverEmail, identityEnforced, ownerActors } from "@/lib/mcp/oauth/config";
 import { authenticateMcp, type McpAuthResult } from "@/lib/mcp/oauth/person-auth";
-import { activeKeyIdOf, identityStatus, keyRefusal, lookupKey, refusalForStatus, sha256Hex } from "@/lib/mcp/identity";
+import { identityStatus, sessionKeyOk, keyRefusal, lookupKey, refusalForStatus, sha256Hex } from "@/lib/mcp/identity";
 
 export type DoorName = "header" | "lab" | "path" | "path-lab";
 
@@ -43,13 +43,17 @@ export async function authenticateDoor(req: Request, door: DoorName, opts: { pat
       const p = base.principal;
       if (p.person) {
         const email = p.person.email;
+        if (!(await sessionKeyOk(p.person.key_id, email))) { // the session is bound to its key: key revoked, email revoked/blacklisted or key never bound = no session
+          await auditIdentityRefused({ email, key_id: p.person.key_id ?? null }, "session_key_revoked", door);
+          return { ok: false, failure: unauthorized };
+        }
         if (email === approver) return { ok: true, principal: { ...p, owner: { key_id: `session:${p.person.session_id.slice(0, 12)}`, door } } };
         const refusal = refusalForStatus(await identityStatus(email));
         if (refusal) {
           await auditIdentityRefused({ email }, refusal, door);
           return { ok: false, failure: unauthorized };
         }
-        const keyId = (await activeKeyIdOf(email)) ?? `session:${p.person.session_id.slice(0, 12)}`;
+        const keyId = p.person.key_id ?? `session:${p.person.session_id.slice(0, 12)}`;
         return { ok: true, principal: { ...p, identity: { email, key_id: keyId, door } } };
       }
       if (ownerActors().has(p.token_id)) return { ok: true, principal: { ...p, owner: { key_id: `k_${(p.key_hash ?? "").slice(0, 8)}`, door } } };

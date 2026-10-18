@@ -10,6 +10,9 @@ import { NextRequest } from "next/server";
 const audit: Array<{ text: string; values: unknown[] }> = [];
 vi.mock("@/lib/db", () => ({ sql: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => { audit.push({ text: strings.join("?"), values }); return []; }) }));
 vi.mock("@/lib/mcp/oauth/store", async () => await import("../support/mcp-oauth-fake-store"));
+// the identity tables are exercised for real in mcp-identity-audit-pg.test.ts; here they are a switchboard
+const IDM = vi.hoisted(() => ({ status: "active" as string | null, self: false, keyId: "k_alice" as string | null, live: true }));
+vi.mock("@/lib/mcp/identity", () => ({ identityStatus: async () => IDM.status, selfApproved: async () => IDM.self, activeKeyIdOf: async () => IDM.keyId, sessionKeyOk: async () => IDM.live, keyLive: async () => IDM.live }));
 // after(): captured when `deferMode.capture` (to prove the send is off the response path); otherwise it throws, as it does outside a request scope, and the route runs the work inline.
 const deferred: Array<() => unknown> = [];
 const deferMode = { capture: false };
@@ -100,6 +103,7 @@ beforeEach(() => {
   delete process.env.SCRIBE_MCP_OAUTH_ISSUER;
   fake.resetFakeStore();
   fake.addPerson(ALICE);
+  Object.assign(IDM, { status: "active", self: false, keyId: "k_alice", live: true });
   audit.length = 0;
   resetDeniedAuditForTests();
   resetOauthFlagWarningForTests();
@@ -1332,7 +1336,8 @@ describe("approver-routed email code", () => {
   });
 
   it("SCRIBE_MCP_IDENTITY on: an allowlisted person with no active mcp_identity gets the identical page, no mail and a no_identity refusal row", async () => {
-    process.env.SCRIBE_MCP_IDENTITY = "on"; // the mocked sql returns no identity row
+    process.env.SCRIBE_MCP_IDENTITY = "on";
+    IDM.status = null; // no identity row
     const s = await startSignIn();
     const r = await start(s.cookie, ALICE);
     expect(r.status).toBe(200);
@@ -1347,11 +1352,123 @@ describe("approver-routed email code", () => {
     expect(alerts).toHaveLength(1);
     expect(alerts[0]!.to).toBe("approver@example.test");
     expect(alerts[0]!.text).toContain(ALICE);
-    expect(alerts[0]!.text).not.toMatch(/code|csrf|token/i);
+    expect(alerts[0]!.text).not.toMatch(/\d{6}|csrf|token/i);
     fake.addPerson("approver@example.test");
     resetEmailLimitForTests();
     mailed.length = 0;
     await fullSignIn({}, "allow", "approver@example.test");
     expect(mailed.filter((m) => m.subject === "EvenScribe MCP: sign-in")).toHaveLength(0);
+  });
+});
+
+// ─── addendum 1: code route switch, 30-day non-sliding session bound to the key ─────────────────────────────────────────────────────────────────────
+describe("SCRIBE_MCP_CODE_ROUTE", () => {
+  it("default and unknown values route every code to the approver, even for an approved address", async () => {
+    IDM.self = true;
+    for (const v of [undefined, "", "approver", "bogus", "SELF"]) {
+      if (v === undefined) delete process.env.SCRIBE_MCP_CODE_ROUTE; else process.env.SCRIBE_MCP_CODE_ROUTE = v;
+      resetEmailLimitForTests(); fake.state.emailCodes.clear(); mailed.length = 0;
+      await start((await startSignIn()).cookie, ALICE);
+      expect(mailed.map((m) => m.to)).toEqual(["approver@example.test"]);
+    }
+  });
+
+  it("self_after_approval: an address V has NOT approved still gets its code through the approver", async () => {
+    process.env.SCRIBE_MCP_CODE_ROUTE = "self_after_approval";
+    IDM.self = false;
+    await start((await startSignIn()).cookie, ALICE);
+    expect(mailed.map((m) => m.to)).toEqual(["approver@example.test"]);
+    expect(mailed[0]!.text).toContain(ALICE);
+  });
+
+  it("self_after_approval: once V approved the address, the code goes to that person's own address (and only there); the sign-in alert still goes to V and names the route", async () => {
+    process.env.SCRIBE_MCP_CODE_ROUTE = "self_after_approval";
+    IDM.self = true;
+    const r = await fullSignIn({}, "allow", ALICE);
+    expect(r.res.status).toBe(303);
+    const code = mailed.find((m) => m.subject === "EvenScribe MCP sign-in code (approval needed)")!;
+    expect(code.to).toBe(ALICE);
+    expect(code.text).toMatch(/^Your EvenScribe MCP sign-in code: \d{6}\./);
+    const alerts = mailed.filter((m) => m.subject === "EvenScribe MCP: sign-in");
+    expect(alerts.map((m) => m.to)).toEqual(["approver@example.test"]);
+    expect(alerts[0]!.text).toContain("self_after_approval");
+    expect(mailed.filter((m) => m.to === "approver@example.test" && m.subject !== "EvenScribe MCP: sign-in")).toHaveLength(0);
+  });
+
+  it("self_after_approval still needs the approver env (V gets the alert): without it nothing is mailed to anyone", async () => {
+    process.env.SCRIBE_MCP_CODE_ROUTE = "self_after_approval";
+    IDM.self = true;
+    const s = await startSignIn();
+    delete process.env.SCRIBE_MCP_OAUTH_APPROVER;
+    expect((await start(s.cookie, ALICE)).status).toBe(503);
+    expect(mailed).toHaveLength(0);
+  });
+});
+
+describe("session bound to the key (SCRIBE_MCP_IDENTITY on)", () => {
+  const signedIn = async () => {
+    process.env.SCRIBE_MCP_IDENTITY = "on";
+    const r = await fullSignIn({}, "allow", ALICE);
+    expect(r.res.status).toBe(303);
+    return r.to.searchParams.get("code")!;
+  };
+  const exchange = async (code: string) => (await tokenPost(tokenReq(codeBody(code)))).json() as Promise<Record<string, any>>;
+
+  it("the key id is stored on the code and carried to the access and refresh token of the session", async () => {
+    const tok = await exchange(await signedIn());
+    expect(tok.access_token).toMatch(/^esp_/);
+    const rows = [...fake.state.tokens.values()];
+    expect(rows).toHaveLength(2);
+    expect(rows.map((t) => t.key_id)).toEqual(["k_alice", "k_alice"]);
+  });
+
+  it("an address with no live key cannot finish sign-in (access_denied, no code, a no_key refusal row); V's own sign-in needs none", async () => {
+    IDM.keyId = null;
+    process.env.SCRIBE_MCP_IDENTITY = "on";
+    const r = await fullSignIn({}, "allow", ALICE);
+    expect(loc(r.res).searchParams.get("error")).toBe("access_denied");
+    expect(fake.state.codes.size).toBe(0);
+    expect(JSON.stringify(audit.filter((a) => a.text.includes("mcp.oauth_refused")).map((a) => a.values))).toContain("no_key");
+    fake.addPerson("approver@example.test");
+    resetEmailLimitForTests();
+    const v = await fullSignIn({}, "allow", "approver@example.test");
+    expect(loc(v.res).searchParams.get("code")).toBeTruthy();
+  });
+
+  it("the code exchange is refused if the bound key died between consent and exchange", async () => {
+    const code = await signedIn();
+    IDM.live = false;
+    const res = await tokenPost(tokenReq(codeBody(code)));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("invalid_grant");
+    expect(fake.state.tokens.size).toBe(0);
+  });
+
+  it("refresh after the key (or the email) was revoked: invalid_grant and the whole family is tombstoned; refresh while the key lives works", async () => {
+    const tok = await exchange(await signedIn());
+    const refresh = (t: string) => tokenPost(tokenReq({ grant_type: "refresh_token", refresh_token: t, client_id: CIMD, resource: RESOURCE }));
+    const ok = await refresh(tok.refresh_token);
+    expect(ok.status).toBe(200);
+    const next = (await ok.json()).refresh_token as string;
+    IDM.live = false;
+    const dead = await refresh(next);
+    expect(dead.status).toBe(400);
+    expect((await dead.json()).error).toBe("invalid_grant");
+    expect(fake.state.families.size).toBe(1);
+    expect([...fake.state.tokens.values()].every((t) => t.revoked_at)).toBe(true);
+  });
+
+  it("30 days from sign-in, not from the last refresh: a refresh at day 29 does not extend the session; at day 30 the family is refused", async () => {
+    const tok = await exchange(await signedIn());
+    const fam = [...fake.state.tokens.values()][0]!.family_id;
+    const day = 86_400_000;
+    fake.state.familyBorn.set(fam, Date.now() - 29 * day);
+    const refresh = (t: string) => tokenPost(tokenReq({ grant_type: "refresh_token", refresh_token: t, client_id: CIMD, resource: RESOURCE }));
+    const r29 = await refresh(tok.refresh_token);
+    expect(r29.status).toBe(200);
+    expect(fake.state.familyBorn.get(fam)).toBeLessThan(Date.now() - 28 * day); // the refresh did not move the start
+    fake.state.familyBorn.set(fam, Date.now() - 30 * day - 1000);
+    const r30 = await refresh((await r29.json()).refresh_token);
+    expect(r30.status).toBe(400);
   });
 });

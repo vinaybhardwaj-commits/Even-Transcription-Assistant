@@ -103,7 +103,7 @@ export type McpPrincipal = {
   rooms?: ReadonlySet<string>;
   tools?: ReadonlySet<string>;
   /** OAUTH-O3: set only for an OAuth person principal. `token_id` is then `person:<email>`; session_id is the token's family id (never the token). */
-  person?: { email: string; session_id: string };
+  person?: { email: string; session_id: string; key_id?: string | null };
   /** Plain sha256 hex of the presented static key (never the key): the join to mcp_key. Absent for an OAuth person principal. */
   key_hash?: string;
   /** SCRIBE_MCP_IDENTITY on, set by lib/mcp/door-auth: who this key (or session) resolved to. A principal carrying `identity` gets one fail-closed audit_log row per call. */
