@@ -3,10 +3,16 @@
 sentinel_forward (default false): build_subscriber wires this in only when router.json has "sentinel_forward": true.
 
 Post rule (per room): post when there is no stored post for the room, when the code CHANGED, or when the last successful post is
-at least REFRESH_S old -- at most one post per 60 s otherwise. A post that is not 2xx is NOT marked: the next health line (or a
-code change) retries it, so a failed send is retried, never rate-limited away. A health line with no code the server would accept
-(kiosk build predates Sentinel, or a code word outside the 8-code set) posts nothing: an unknown code is a 400 on the server, and
-nothing is invented -- OK is never sent for a line that does not say OK.
+at least REFRESH_S old -- at most one post per 60 s otherwise. A post that is not 2xx does NOT count as posted: the room is marked
+with an exponential backoff (BACKOFF_BASE_S doubling per consecutive failure, capped at BACKOFF_CAP_S = 5 min) and no retry may
+start before next_retry, so a failing endpoint (a wrong-hash 401, a down relay) is never hammered -- at most ~7 attempts in the
+first 5 minutes instead of one per 10 s health line. A code CHANGE always posts immediately (new state is not rate-limited away);
+the backoff streak is per room and survives code changes. In background mode at most one pending post per room is queued
+(latest line wins, replacing the queued body); the queue is bounded to MAX_PENDING rooms and an overflow DROPS THE OLDEST room,
+counting the drop (persisted; never logged per item). Backoff progress is logged once per backoff STEP (when the interval
+grows), one audit line, never per item. A health line with no code the server would accept (kiosk build predates Sentinel, or a
+code word outside the 8-code set) posts nothing: an unknown code is a 400 on the server, and nothing is invented -- OK is never
+sent for a line that does not say OK.
 
 Credential: the SAME config/env as the mic-guard poller (tools/eta-micguard-poller/poll.py): token file env MICGUARD_TOKEN_FILE
 (default ~/.claude/secrets/kiosk_health_ingest_token), URL env MICGUARD_INGEST_URL (default the prod kiosk-health endpoint). The
@@ -22,6 +28,9 @@ SOURCE = "mini_sentinel_forwarder"
 INSTALL_ID = "mini-sentinel-forwarder"
 REFRESH_S = 60            # re-post an unchanged room at most once per this many seconds (unless the code changed)
 POST_TIMEOUT_S = 10
+BACKOFF_BASE_S = 5        # first retry wait after a failed post; doubles per consecutive failure (F1: no re-post storm)
+BACKOFF_CAP_S = 300       # the backoff never waits longer than 5 minutes between attempts
+MAX_PENDING = 16          # the background queue is bounded; an overflow drops the oldest room (drop-oldest, counted)
 DEFAULT_URL = "https://www.evenscribe.app/api/kiosk-health"      # the apex 307-redirects, and urllib does not follow a POST redirect
 DEFAULT_CRED_PATH = "~/.claude/secrets/kiosk_health_ingest_token"
 CODES = ("MIC_DEAD_WEBCAM", "MIC_MUTED_TONOR", "DEVICE_MISSING", "RECORDER_DOWN", "PRESENCE_DEAD", "TAILNET_DOWN", "MIC_PERM", "OK")
@@ -112,7 +121,10 @@ class SentinelForward:
         self._wlock = threading.Lock()                # taken by _enqueue and by the worker's idle exit, so an item can never be queued for a worker that is leaving
         self.boot_epoch = int(clock())
         self.seq = 0
-        self.state = {}                               # room -> {"code": ..., "posted_at": ...} (a SUCCESSFUL post only)
+        self.drops = 0                                # queue overflow drops (drop-oldest); counted and persisted, never logged per item
+        self.state = {}                               # room -> {"code","posted_at"} of the last SUCCESS + the failure streak
+                                                 #     {"pending_code","fails","next_retry","backoff_s","attempted_at"} (F1)
+        self._queued = {}                             # background mode: room -> (code, body, now); at most one pending post per room (latest wins)
         self._load()
 
     # ---- state (seq advances BEFORE the post, as the mic-guard poller does: never reused)
@@ -127,10 +139,27 @@ class SentinelForward:
                     self.boot_epoch = int(d["boot_epoch"])
                 if _num(d.get("seq")) and d["seq"] >= 0:
                     self.seq = int(d["seq"])
+                if _num(d.get("drops")):
+                    self.drops = int(d["drops"])
                 rooms = d.get("rooms")
                 if isinstance(rooms, dict):
-                    self.state = {str(k): v for k, v in rooms.items()
-                                  if isinstance(v, dict) and isinstance(v.get("code"), str) and _num(v.get("posted_at"))}
+                    for k, v in rooms.items():
+                        if not isinstance(v, dict):
+                            continue
+                        # a valid entry has the last success (code+posted_at) or a live failure streak (pending_code+next_retry)
+                        if not (isinstance(v.get("code"), str) and _num(v.get("posted_at"))) and not (isinstance(v.get("pending_code"), str) and _num(v.get("next_retry"))):
+                            continue
+                        e = {}
+                        if isinstance(v.get("code"), str):
+                            e["code"] = v["code"]
+                        if _num(v.get("posted_at")):
+                            e["posted_at"] = int(v["posted_at"])
+                        if isinstance(v.get("pending_code"), str):
+                            e["pending_code"] = v["pending_code"]
+                        for key in ("fails", "next_retry", "backoff_s", "attempted_at"):
+                            if _num(v.get(key)):
+                                e[key] = int(v[key])
+                        self.state[str(k)] = e
         except (OSError, ValueError):
             pass
 
@@ -140,7 +169,7 @@ class SentinelForward:
             return
         try:
             with self._lock:
-                d = {"boot_epoch": self.boot_epoch, "seq": self.seq, "rooms": dict(self.state)}
+                d = {"boot_epoch": self.boot_epoch, "seq": self.seq, "drops": self.drops, "rooms": dict(self.state)}
                 tmp = f"{self.state_path}.tmp{os.getpid()}"
                 with open(tmp, "w") as f:
                     json.dump(d, f, sort_keys=True)
@@ -173,8 +202,14 @@ class SentinelForward:
         if payload is None:
             return
         with self._lock:
-            if not should_post(self.state.get(room), payload["code"], now):
-                return
+            st = self.state.get(room)
+            pc = st.get("pending_code") if st else None       # the code of the last FAILED attempt (None: none pending)
+            nr = st.get("next_retry") if st else None
+            if pc == payload["code"] and nr is not None and now < int(nr):
+                return                       # F1: backing off on exactly this code -- hold the line, no re-post
+            if pc != payload["code"] and not should_post(st, payload["code"], now):
+                return                       # same code as the last success, inside the refresh window, nothing pending
+            # a code CHANGE always posts (new state is not rate-limited away), even mid-backoff
             self.seq += 1
             boot_id = str(self.boot_epoch)
             seq = self.seq
@@ -200,17 +235,45 @@ class SentinelForward:
             status = 0
         if isinstance(status, int) and 200 <= status < 300:
             with self._lock:
-                self.state[room] = {"code": code, "posted_at": int(now)}
+                self.state[room] = {"code": code, "posted_at": int(now), "pending_code": None, "fails": 0,
+                                    "next_retry": None, "backoff_s": 0, "attempted_at": int(now)}
             self._save()
             self._audit(room, "sentinel_forwarded", now, code=code, status=status)
         else:
-            # no mark: the next health line (or a code change) retries. Never the token in the audit.
+            # F1: the failure is marked and the room backs off exponentially (5 s doubling, capped at 5 min); a code change
+            # still posts immediately, a success clears the streak. Never the token in the audit.
+            with self._lock:
+                st = self.state.get(room) or {}
+                fails = int(st.get("fails", 0)) + 1
+                backoff = min(BACKOFF_CAP_S, BACKOFF_BASE_S * (2 ** (fails - 1)))
+                self.state[room] = {"code": st.get("code"), "posted_at": st.get("posted_at"),
+                                    "pending_code": code, "fails": fails, "next_retry": int(now) + backoff,
+                                    "backoff_s": backoff, "attempted_at": int(now)}
+                stepped = backoff != int(st.get("backoff_s", 0))
+                self._save()
+            if stepped:
+                self._audit(room, "sentinel_backoff", now, code=code, fails=fails, backoff_s=backoff)  # one line per step, not per item
             self._audit(room, "sentinel_post_failed", now, code=code, status=status)
 
     # ---- background worker (same idle-exit pattern as start_day)
-    def _enqueue(self, room, code, body, now):
+    def _queue_item(self, room, code, body, now):
+        """One pending post per room: a newer line for a queued room REPLACES its body (latest wins). The queue is bounded to
+        MAX_PENDING rooms; an overflow drops the OLDEST room and counts the drop (persisted; never logged per item)."""
         with self._wlock:
-            self._q.put((room, code, body, now))
+            if room in self._queued:
+                self._queued[room] = (code, body, now)
+                return
+            if len(self._queued) >= MAX_PENDING:
+                oldest = min(self._queued, key=lambda r: self._queued[r][2])
+                del self._queued[oldest]
+                self.drops += 1
+                self._save()
+            self._queued[room] = (code, body, now)
+
+    def _enqueue(self, room, code, body, now):
+        self._queue_item(room, code, body, now)
+        with self._wlock:
+            self._q.put(room)
             if self._worker is None or not self._worker.is_alive():    # restarted if it ever died or has gone idle
                 self._worker = threading.Thread(target=self._work, name="sentinel-forwarder", daemon=True)
                 self._worker.start()
@@ -226,13 +289,16 @@ class SentinelForward:
     def _work(self):
         while True:
             try:
-                room, code, body, now = self._q.get(timeout=self.idle_s)
+                room = self._q.get(timeout=self.idle_s)
             except queue.Empty:
                 if self._try_exit():
                     return                # idle: the thread ends and the next send starts a new one
                 continue                  # an item arrived while we were leaving: take it
             try:
-                self._send(room, code, body, now)
+                item = self._queued.pop(room, None)
+                if item is not None:      # None: the item was dropped by the bound (or replaced and already consumed)
+                    code, body, now = item
+                    self._send(room, code, body, now)
             except BaseException:         # noqa: BLE001 -- the worker never dies on a fault
                 pass
 

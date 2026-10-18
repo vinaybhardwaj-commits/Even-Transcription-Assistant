@@ -89,8 +89,11 @@ describe("readSentinel", () => {
     const c = H.calls[0]!;
     expect(c.text).toMatch(/row_number\(\) OVER \(PARTITION BY k\.room_id ORDER BY k\.received_at DESC/);
     expect(c.text).toMatch(/k\.kind = 'sentinel'/);
+    expect(c.text).toMatch(/k\.source = \?/); // F2: only the forwarder's source may drive the staff tile
+    expect(c.values).toContain("mini_sentinel_forwarder");
     expect(c.text).toMatch(/k\.ts >= \?::timestamptz - interval '24 hours'/); // bounded on ts: rides (kind, ts DESC)
-    expect(c.values[0]).toEqual(["room_a", "room_b"]);
+    expect(c.text).toMatch(/k\.received_at <= \?::timestamptz/); // T19: a future-dated row is not the room's state
+    expect(c.values[1]).toEqual(["room_a", "room_b"]);
   });
   it("a room whose newest row is over 600 s old has no entry (stale is no data)", async () => {
     H.rows.value = [row("room_a", pl(), 700), row("room_b", pl(), 30)];
@@ -110,5 +113,53 @@ describe("readSentinel", () => {
     expect(r).toEqual({ byRoom: {}, ok: false });
     expect(JSON.stringify(warn.mock.calls)).not.toContain("postgres://");
     warn.mockRestore();
+  });
+});
+
+describe("readSentinel — the WHERE bounds, as the database would apply them (F2 source, T19 received_at)", () => {
+  /** A fake db that enforces a bound ONLY when the query carries it: a query missing the bound (the mutant) passes the row through. */
+  const queryAwareDb = (rows: Row[]) => {
+    const calls: Array<{ text: string; values: unknown[] }> = [];
+    const db = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const text = strings.raw.join("?").replace(/\s+/g, " ");
+      calls.push({ text, values });
+      let out = rows;
+      if (text.includes("k.source = ?") && values.includes("mini_sentinel_forwarder")) {
+        out = out.filter((r) => r.source === "mini_sentinel_forwarder");
+      }
+      if (text.includes("k.received_at <= ?::timestamptz")) {
+        const hi = values[2] as string;
+        out = out.filter((r) => new Date(r.received_at as string).getTime() <= Date.parse(hi));
+      }
+      return out;
+    }) as never;
+    return { db, calls };
+  };
+
+  it("a row from any OTHER source is not the room's state (F2: no other path can drive the tile)", async () => {
+    const rows = [row("room_a", pl(), 30)];
+    (rows[0] as { source?: string }).source = "mini_micguard_poller";
+    const { db, calls } = queryAwareDb(rows);
+    const r = await readSentinel(db, ["room_a"], NOW);
+    expect(r.ok).toBe(true);
+    expect(r.byRoom).toEqual({});
+    expect(calls[0]!.text).toContain("k.source = ?"); // the bound is in the SQL, not a post-hoc filter
+  });
+
+  it("a row from the forwarder's source IS the room's state", async () => {
+    const rows = [row("room_a", pl(), 30)];
+    (rows[0] as { source?: string }).source = "mini_sentinel_forwarder";
+    const { db } = queryAwareDb(rows);
+    const r = await readSentinel(db, ["room_a"], NOW);
+    expect(r.byRoom.room_a?.code).toBe("MIC_MUTED_TONOR");
+  });
+
+  it("a future-dated received_at is not the room's state (T19: the received_at <= asOf bound)", async () => {
+    const rows = [row("room_a", pl(), -3600)]; // one hour in the future (clock skew or a bad line)
+    (rows[0] as { source?: string }).source = "mini_sentinel_forwarder";
+    const { db, calls } = queryAwareDb(rows);
+    const r = await readSentinel(db, ["room_a"], NOW);
+    expect(r.byRoom).toEqual({});
+    expect(calls[0]!.text).toContain("k.received_at <= ?::timestamptz");
   });
 });

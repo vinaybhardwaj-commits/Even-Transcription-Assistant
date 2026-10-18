@@ -121,11 +121,29 @@ describe("POST /api/kiosk-health — kind \"sentinel\" (the Mini forwarder, Sent
     expect(M.sql).not.toHaveBeenCalled();
   });
 
-  it("the daemon token also carries a valid sentinel row (the daemon path has no kind restriction)", async () => {
-    M.sql.mockResolvedValueOnce(idsFor(1));
-    const res = await POST(post({ events: [sev(1)] }, `Bearer ${TOKEN}`));
+  it("the daemon token CANNOT carry a sentinel row (F2: sentinel is poller-only) — rejected by name, never stored, and the daemon's own rows in the same batch still land", async () => {
+    M.sql.mockImplementation(async (_t: string, p: unknown[]) => idsFor(p.length / 9));
+    const res = await POST(post({ events: [sev(1), ev(2)] }, `Bearer ${TOKEN}`));
     expect(res.status).toBe(200);
-    expect(await j(res)).toMatchObject({ ok: true, accepted: 1, rejected: 0 });
+    const out = await j(res);
+    expect(out).toMatchObject({ ok: true, accepted: 1, rejected: 1 });
+    expect(out.rejected_reasons).toEqual([{ index: -1, reason: "sentinel_poller_only" }]);
+    // only the heartbeat row was inserted (one 9-value tuple)
+    expect((M.sql.mock.calls[0] as [string, unknown[]])[1]).toHaveLength(9);
+  });
+
+  it("a Device post CANNOT carry a sentinel row even with the helper source and the device's own Mac and room (F2: wrong_kind)", async () => {
+    const { authenticateDevice } = await import("@/lib/fleet/device-auth");
+    (authenticateDevice as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue({
+      ok: true,
+      device: { machine: "opd3", room_id: "room_abc" },
+    });
+    const res = await POST(post({ events: [sev(1, { source: "helper" })] }, "Device eyJ0eXAiOiJKV1Qi.fake-jws"));
+    expect(res.status).toBe(200);
+    const out = await j(res);
+    expect(out).toMatchObject({ ok: true, accepted: 0, rejected: 1 });
+    expect(out.rejected_reasons).toEqual([{ index: -1, reason: "wrong_kind" }]);
+    expect(M.sql).not.toHaveBeenCalled();
   });
 
   it("a poller-token post is scoped: a sentinel with the micguard source is wrong_kind, mic_guard with the forwarder source is wrong_kind, another source is wrong_source; nothing is stored", async () => {

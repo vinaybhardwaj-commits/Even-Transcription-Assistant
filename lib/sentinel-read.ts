@@ -18,7 +18,7 @@
  * A room with no sentinel row in 24 h has no entry (the line is absent, not green).
  */
 import type { WindowsDb } from "@/lib/encounter-windows/db";
-import { SENTINEL_CODES, SENTINEL_MIC_CLASSES, SENTINEL_MODES, type SentinelCode, type SentinelMicClass, type SentinelMode } from "@/lib/sentinel-ingest";
+import { SENTINEL_CODES, SENTINEL_MIC_CLASSES, SENTINEL_MODES, SENTINEL_SOURCE, type SentinelCode, type SentinelMicClass, type SentinelMode } from "@/lib/sentinel-ingest";
 
 export const SENTINEL_WINDOW_H = 24;
 /** the newest row older than this (by received_at) is no longer the room's state */
@@ -98,8 +98,9 @@ export async function readSentinel(sql: WindowsDb, roomIds: readonly string[], a
           SELECT k.room_id, k.received_at, k.payload,
                  row_number() OVER (PARTITION BY k.room_id ORDER BY k.received_at DESC, k.ts DESC) AS rn
             FROM kiosk_health_events k
-           WHERE k.kind = 'sentinel'
-             AND k.room_id = ANY(${ids}::text[])
+            WHERE k.kind = 'sentinel'
+              AND k.source = ${SENTINEL_SOURCE}
+              AND k.room_id = ANY(${ids}::text[])
              AND k.ts >= ${hi}::timestamptz - interval '24 hours'
              AND k.received_at <= ${hi}::timestamptz
         ) r

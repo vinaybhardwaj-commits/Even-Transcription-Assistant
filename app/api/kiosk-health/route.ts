@@ -3,10 +3,11 @@
  *
  * Body: { events: [ { machine, room_id, install_id, boot_id, seq, source, kind, ts, payload } ... ] }, 1..500 items.
  * Auth: EITHER Authorization: Bearer ${KIOSK_HEALTH_INGEST_TOKEN}, constant-time compare (missing/wrong → 401; env unset → 500, logged once) — the standalone daemon, unchanged —
+ *       (kind "sentinel" is POLLER-ONLY, Sentinel S6 F2: a daemon-posted sentinel row is rejected by name, reason sentinel_poller_only, never stored),
  *       OR Authorization: Device <device JWS> (TS-H10 #47, corrected in TS-H8): the room app posts the helper's spooled events with its per-device Ed25519 credential, exactly the
  *       token it signs for /api/fleet/* (lib/fleet/device-auth.ts: aud evenscribe-fleet, htm POST, htu /api/kiosk-health, bsha = hash of THIS body, single-use jti). A Device post may
- *       carry only source "helper", only for the device's OWN Mac and room; steward.result is allowed (the app reports ticket results here) and only touches that Mac's tickets.
- *       Any other event is rejected by name (wrong_source · machine_not_in_room · room_mismatch). An invalid Device token → 401.
+ *       carry only source "helper", only for the device's OWN Mac and room, and never kind "sentinel" (rejected wrong_kind, Sentinel S6 F2); steward.result is allowed (the app reports
+ *       ticket results here) and only touches that Mac's tickets. Any other event is rejected by name (wrong_kind · wrong_source · machine_not_in_room · room_mismatch). An invalid Device token → 401.
  *       OR Authorization: Bearer <poller token>, checked as sha256(token) against KIOSK_HEALTH_POLLER_TOKEN_SHA256 (after the daemon token; path off when unset, blank or not 64 hex chars): the Mini mic-guard poller. It may post only kind "mic_guard" with source
  *       "mini_micguard_poller", OR kind "sentinel" with source "mini_sentinel_forwarder" (Sentinel S6: the subscriber's forwarder posts the room-sentinel state; same credential, scoped by name); any other row is rejected by name (wrong_source · wrong_kind), never stored,
  *       and never reaches applyStewardResults. The poller token cannot read steward tickets.
@@ -129,8 +130,8 @@ export async function POST(req: NextRequest) {
   const v = validateKioskHealthBatch(body);
   if (v.error) return reply(400, { ok: false, error: v.error });
 
-  // Sentinel S6: a sentinel payload is validated strictly for EVERY auth path (the daemon path carries no kind restriction).
-  // One malformed sentinel row rejects the whole request: the forwarder must never post an unknown code, and a 400 makes it retry.
+  // Sentinel S6: a sentinel payload is validated strictly on EVERY path. One malformed sentinel row rejects the whole request:
+  // the forwarder must never post an unknown code, and a 400 makes it retry.
   for (const r of v.rows) {
     if (r.kind === SENTINEL_KIND && !validateSentinelPayload(r.payload)) return reply(400, { ok: false, error: "bad_sentinel" });
   }
@@ -138,13 +139,26 @@ export async function POST(req: NextRequest) {
   const rejected = [...v.rejected];
   let rows = v.rows;
 
+  // Sentinel S6 (F2): kind "sentinel" is POLLER-ONLY. The on-device daemon and the room app's Device credential never post
+  // sentinel state (the Mini subscriber's forwarder does, on the poller token, scoped below); such rows are rejected by name
+  // and never stored, so no other source can ever drive the staff tile.
+  if (device === null && !pollerMode) {
+    const kept: KioskHealthRow[] = [];
+    for (const r of rows) {
+      if (r.kind === SENTINEL_KIND) rejected.push({ index: -1, reason: "sentinel_poller_only" });
+      else kept.push(r);
+    }
+    rows = kept;
+  }
+
   // A Device post is confined to its own device: the helper's source, this device's Mac and room. steward.result is allowed: it only touches tickets of that same machine.
   if (device !== null) {
     const myMachine = normalizeHostname(device.machine).toLowerCase();
     const kept: KioskHealthRow[] = [];
     for (const r of rows) {
       const why =
-        r.source !== "helper" ? "wrong_source"
+        r.kind === SENTINEL_KIND ? "wrong_kind" // sentinel is poller-only (F2): the app never posts it
+        : r.source !== "helper" ? "wrong_source"
         : r.room_id !== null && r.room_id !== device.room_id ? "room_mismatch"
         : normalizeHostname(r.machine).toLowerCase() !== myMachine ? "machine_not_in_room"
         : null;

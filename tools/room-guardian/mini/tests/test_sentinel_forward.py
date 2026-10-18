@@ -1,5 +1,6 @@
 import importlib, json, os, sys, tempfile, threading, time, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "subscriber"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "router"))
 import sentinel_forward as sf
 import subscriber as sb
 
@@ -102,21 +103,64 @@ class ForwardTests(unittest.TestCase):
         self.clock.adv(10); self.f.on_health("r1", health("OK"), T0 + 80)
         self.assertEqual(len(self.poster.calls), 3)
 
-    def test_post_failure_is_not_marked_and_retries(self):
+    def test_failed_post_backs_off_and_is_not_retried_before_next_retry(self):
         self.token_env()
         self.poster.status = 500
         self.f.on_health("r1", health("RECORDER_DOWN"), T0)
-        self.assertEqual(len(self.poster.calls), 1)
-        self.clock.adv(15); self.f.on_health("r1", health("RECORDER_DOWN"), T0 + 15)
-        self.assertEqual(len(self.poster.calls), 2)                       # failed send: retried on the next line, not rate-limited away
+        self.assertEqual(len(self.poster.calls), 1)                       # t0: fails, backoff 5 s -> next_retry T0+5
+        self.clock.adv(4); self.f.on_health("r1", health("RECORDER_DOWN"), T0 + 4)
+        self.assertEqual(len(self.poster.calls), 1)                       # t4: still inside the 5 s backoff -- no re-post
+        self.clock.adv(11); self.f.on_health("r1", health("RECORDER_DOWN"), T0 + 15)
+        self.assertEqual(len(self.poster.calls), 2)                       # t15: backoff elapsed, retry (fails again, backoff 10 s -> T0+25)
+        self.clock.adv(9); self.f.on_health("r1", health("RECORDER_DOWN"), T0 + 24)
+        self.assertEqual(len(self.poster.calls), 2)                       # t24: inside the 10 s backoff -- no re-post
         self.poster.status = 200
-        self.clock.adv(15); self.f.on_health("r1", health("RECORDER_DOWN"), T0 + 30)
-        self.assertEqual(len(self.poster.calls), 3)
+        self.clock.adv(6); self.f.on_health("r1", health("RECORDER_DOWN"), T0 + 30)
+        self.assertEqual(len(self.poster.calls), 3)                       # t30: retry succeeds; streak cleared
         self.clock.adv(15); self.f.on_health("r1", health("RECORDER_DOWN"), T0 + 45)
-        self.assertEqual(len(self.poster.calls), 3)                       # now marked: back inside the 60 s window
+        self.assertEqual(len(self.poster.calls), 3)                       # back inside the 60 s window from the success
+        st = json.load(open(self.state))["rooms"]["r1"]
+        self.assertEqual(st, {"code": "RECORDER_DOWN", "posted_at": T0 + 30, "pending_code": None, "fails": 0,
+                              "next_retry": None, "backoff_s": 0, "attempted_at": T0 + 30})
         audit = open(self.audit).read()
         self.assertIn("sentinel_post_failed", audit)
+        self.assertIn("sentinel_backoff", audit)
         self.assertIn("sentinel_forwarded", audit)
+
+    def test_failing_endpoint_is_not_hammered(self):
+        """F1 repro: a 503 endpoint must not get one post per 10 s health line. With backoff, 61 lines -> 4 posts."""
+        self.token_env()
+        self.poster.status = 503
+        for t in range(0, 61, 10):
+            self.f.on_health("r1", health("RECORDER_DOWN"), T0 + t)
+        self.assertEqual(len(self.poster.calls), 4)                       # t0, t10, t20, t40 (t30/t50/t60 inside backoff)
+        st = json.load(open(self.state))["rooms"]["r1"]
+        self.assertEqual(st["fails"], 4)
+        self.assertEqual(st["next_retry"], T0 + 40 + 40)                  # backoff 40 s after the 4th failure
+
+    def test_backoff_doubles_to_a_5_minute_cap_and_logs_one_line_per_step(self):
+        self.token_env()
+        self.poster.status = 503
+        at, backs = T0, [5, 10, 20, 40, 80, 160, 300, 300]
+        for i, b in enumerate(backs):
+            self.f.on_health("r1", health("RECORDER_DOWN"), at)
+            self.assertEqual(len(self.poster.calls), i + 1)
+            at = at + b                                                    # next attempt exactly at next_retry
+        st = json.load(open(self.state))["rooms"]["r1"]
+        self.assertEqual(st["fails"], 8)
+        self.assertEqual(st["backoff_s"], 300)                            # capped: the 8th failure does not grow past 5 min
+        self.assertEqual(st["next_retry"], at - 300 + 300)
+        steps = [l for l in open(self.audit).read().splitlines() if "sentinel_backoff" in l]
+        self.assertEqual(len(steps), 7)                                   # one line per step (5,10,20,40,80,160,300), not per item
+        self.assertEqual([json.loads(l)["backoff_s"] for l in steps], [5, 10, 20, 40, 80, 160, 300])
+
+    def test_code_change_during_backoff_posts_immediately(self):
+        self.token_env()
+        self.poster.status = 503
+        self.f.on_health("r1", health("RECORDER_DOWN"), T0)                # fails, backoff 5 s
+        self.clock.adv(2); self.f.on_health("r1", health("PRESENCE_DEAD"), T0 + 2)
+        self.assertEqual(len(self.poster.calls), 2)                       # a NEW state is not rate-limited away
+        self.assertEqual(self.poster.calls[-1]["body"]["events"][0]["payload"]["code"], "PRESENCE_DEAD")
 
     def test_event_shape_and_seq_never_reused(self):
         self.token_env()
@@ -135,7 +179,8 @@ class ForwardTests(unittest.TestCase):
         self.assertEqual(ev1["seq"], ev0["seq"] + 1)
         st = json.load(open(self.state))
         self.assertEqual(st["seq"], 2)
-        self.assertEqual(st["rooms"]["r1"], {"code": "TAILNET_DOWN", "posted_at": T0 + 70})
+        self.assertEqual(st["rooms"]["r1"], {"code": "TAILNET_DOWN", "posted_at": T0 + 70, "pending_code": None, "fails": 0,
+                                             "next_retry": None, "backoff_s": 0, "attempted_at": T0 + 70})
         # a restart (a new forwarder on the same state file) continues the seq, never reuses it
         f2 = sf.SentinelForward(self.poster, self.state, self.clock, self.audit, background=False)
         self.clock.adv(70); f2.on_health("r1", health("TAILNET_DOWN", mic_class="unknown"), T0 + 140)
@@ -152,6 +197,53 @@ class ForwardTests(unittest.TestCase):
         for line in open(self.audit).read().splitlines():
             self.assertNotIn("sentinel-tok-secret", line)
         self.assertNotIn("sentinel-tok-secret", json.dumps(self.poster.calls[0]["body"]))
+
+
+class QueueTests(unittest.TestCase):
+    """F1: the background queue is bounded (drop-oldest, counted) and holds one pending post per room (latest wins)."""
+
+    def setUp(self):
+        self.home = mk_home()
+        self.f = sf.SentinelForward(Poster(), os.path.join(self.home, "data", "sentinel-forward-state.json"),
+                                    Clock(T0), os.path.join(self.home, "logs", "sentinel-forward-audit.jsonl"), background=True)
+
+    def test_queue_is_bounded_and_drops_the_oldest_counting_the_drop(self):
+        for i in range(sf.MAX_PENDING + 4):
+            self.f._queue_item(f"r{i}", "OK", b"{}" , T0 + i)
+        self.assertEqual(len(self.f._queued), sf.MAX_PENDING)
+        self.assertEqual(self.f.drops, 4)
+        self.assertNotIn("r0", self.f._queued)                            # the four oldest are gone
+        self.assertNotIn("r3", self.f._queued)
+        self.assertIn("r4", self.f._queued)
+        self.assertIn(f"r{sf.MAX_PENDING + 3}", self.f._queued)
+        self.assertEqual(json.load(open(os.path.join(self.home, "data", "sentinel-forward-state.json")))["drops"], 4)
+
+    def test_a_newer_line_for_a_queued_room_replaces_the_body_latest_wins(self):
+        self.f._queue_item("r1", "OK", b'{"a":1}', T0)
+        self.f._queue_item("r1", "RECORDER_DOWN", b'{"a":2}', T0 + 10)
+        self.assertEqual(len(self.f._queued), 1)
+        self.assertEqual(self.f._queued["r1"][0], "RECORDER_DOWN")
+        self.assertEqual(self.f._queued["r1"][1], b'{"a":2}')
+        self.assertEqual(self.f.drops, 0)
+
+
+class FlagDefaultTests(unittest.TestCase):
+    """P6: the flag defaults to false -- only a literal true turns the forwarder on."""
+
+    def _cfg(self, **extra):
+        import ubus_bus
+        t = tempfile.mkdtemp()
+        p = os.path.join(t, "router.json")
+        json.dump(dict({"to": ["a"], "ackers": ["a"]}, **extra), open(p, "w"))
+        return ubus_bus.load_cfg(p)
+
+    def test_absent_key_defaults_false(self):
+        self.assertIs(self._cfg()["sentinel_forward"], False)
+
+    def test_only_a_literal_true_turns_it_on(self):
+        self.assertIs(self._cfg(sentinel_forward=True)["sentinel_forward"], True)
+        for bad in ("true", 1, "yes", None, {}):
+            self.assertIs(self._cfg(sentinel_forward=bad)["sentinel_forward"], False)
 
 
 class WiringTests(unittest.TestCase):

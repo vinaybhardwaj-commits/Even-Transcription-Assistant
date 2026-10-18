@@ -103,12 +103,12 @@ describe("buildSnapshot — attaches the newest sentinel row per room (S6 fan-ou
   }
 
   it("a fresh row (<= 600 s) becomes the room's view; the other rooms stay null; no degraded name", async () => {
-    const [a, b] = ROOMS as Array<{ room_id: string }>;
+    const [a, b] = ROOMS;
     const rows = [
       { room_id: a.room_id, received_at: iso(NOW - 30_000), payload: { code: "MIC_MUTED_TONOR", mic_class: "tonor", zr: 0.99, peak: null, last_action: "restart_app", last_result: "ok", mode: "shadow" }, rn: 1 },
     ];
     const { db, calls } = fakeDb(rows);
-    const s = await buildSnapshot({ db: db as never, now: () => NOW, rooms: [a, b] as never });
+    const s = await buildSnapshot({ db: db as never, now: () => NOW, rooms: [a, b] });
     expect(s.rooms[0]!.sentinel).toEqual({
       code: "MIC_MUTED_TONOR", mic_class: "tonor", zr: 0.99, peak: null, last_action: "restart_app", last_result: "ok", mode: "shadow",
       updated_at: iso(NOW - 30_000), age_s: 30,
@@ -119,21 +119,21 @@ describe("buildSnapshot — attaches the newest sentinel row per room (S6 fan-ou
   });
 
   it("a row older than 600 s is no data: the room stays null (the forwarder is down or the room went quiet)", async () => {
-    const [a, b] = ROOMS as Array<{ room_id: string }>;
+    const [a, b] = ROOMS;
     const rows = [{ room_id: a.room_id, received_at: iso(NOW - 601_000), payload: { code: "RECORDER_DOWN", mic_class: "webcam", zr: null, peak: null, last_action: null, last_result: null, mode: "shadow" }, rn: 1 }];
     const { db } = fakeDb(rows);
-    const s = await buildSnapshot({ db: db as never, now: () => NOW, rooms: [a, b] as never });
+    const s = await buildSnapshot({ db: db as never, now: () => NOW, rooms: [a, b] });
     expect(s.rooms[0]!.sentinel).toBeNull();
   });
 
   it("a failed sentinel read leaves every room null and never degrades the snapshot", async () => {
-    const [a, b] = ROOMS as Array<{ room_id: string }>;
+    const [a, b] = ROOMS;
     const db = (async (strings: TemplateStringsArray, ..._v: unknown[]) => {
       const text = strings.join("?").replace(/\s+/g, " ");
       if (text.includes(sentinelText)) throw new Error("boom with a secret postgres://user:pw@host/db");
       return [];
     }) as unknown as import("@/lib/rooms-live/read").Db;
-    const s = await buildSnapshot({ db: db as never, now: () => NOW, rooms: [a, b] as never });
+    const s = await buildSnapshot({ db: db as never, now: () => NOW, rooms: [a, b] });
     expect(s.rooms.map((r) => r.sentinel)).toEqual([null, null]);
     expect(s.degraded).not.toContain("sentinel");
   });

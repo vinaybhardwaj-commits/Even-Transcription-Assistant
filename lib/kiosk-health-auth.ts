@@ -1,7 +1,8 @@
 /**
  * lib/kiosk-health-auth.ts — the bearer check shared by the kiosk-facing routes (POST /api/kiosk-health, GET /api/steward/tickets).
  * Authorization: Bearer ${KIOSK_HEALTH_INGEST_TOKEN}, constant-time compare. A token saved with a trailing newline still matches (token is trimmed).
- * A second credential, checked against KIOSK_HEALTH_POLLER_TOKEN_SHA256 (hex SHA-256 of the token; the server never holds the token), is accepted by POST /api/kiosk-health ONLY (never by the steward tickets route) and may post only POLLER_KIND events from POLLER_SOURCE.
+ * A second credential, checked against KIOSK_HEALTH_POLLER_TOKEN_SHA256 (hex SHA-256 of the token; the server never holds the token), is accepted by POST /api/kiosk-health ONLY (never by the steward tickets route) and may post only POLLER_KIND events from POLLER_SOURCE, or kind "sentinel" from source "mini_sentinel_forwarder" (Sentinel S6).
+ * Kind "sentinel" is poller-ONLY: the daemon bearer path and the Device path reject sentinel rows by name (sentinel_poller_only / wrong_kind), and the sentinel read (lib/sentinel-read.ts) filters on that source, so no other path can ever drive the staff tile.
  */
 import { createHash, timingSafeEqual } from "crypto";
 
