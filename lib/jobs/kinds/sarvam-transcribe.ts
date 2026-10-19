@@ -295,7 +295,7 @@ async function initStep(ctx: StepContext, pass: Pass): Promise<StepOutcome> {
     return bail(init, "sarvam_submit_failed");
   }
   // G2: the id is persisted by returning it in progress BEFORE the upload, so a replay resumes instead of paying for a second job
-  return nextStep(STEPS.upload, { ...ctx.progress, sarvam_job_id: init.jobId, duration_ms: Math.round(ms), started_at: new Date().toISOString() });
+  return nextStep(STEPS.upload, { ...ctx.progress, sarvam_job_id: init.jobId, stt_model: SARVAM_GW_STT_MODEL, duration_ms: Math.round(ms), started_at: new Date().toISOString() });
 }
 
 // --- upload ---------------------------------------------------------------------------------------------------------------------------------

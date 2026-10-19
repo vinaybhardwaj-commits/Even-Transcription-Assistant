@@ -11,6 +11,11 @@ export const SARVAM_STT_VERSION_LABEL = "saaras-v4";
 /** Engine names a READER accepts as "Sarvam already transcribed this", preference order: v4 first, then v3. */
 export const SARVAM_STT_ENGINES_READ: readonly string[] = ["sarvam-saaras-v4", "sarvam-saaras-v3"];
 
+/** The model a job row says it sent. A row with no recorded model ran before the v4 cutover, so it reads saaras:v3: history is never relabelled v4. */
+export function recordedSttModel(v: unknown): string {
+  return typeof v === "string" && /^saaras:v\d+$/.test(v) ? v : "saaras:v3";
+}
+
 const V3_RE = /saaras[:_\-.]?v?3/i;
 
 /** An env override of the STT model. A v3 value is refused (treated as unset, one count-only log line); anything else unset or empty gives v4. */

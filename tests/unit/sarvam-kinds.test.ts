@@ -184,7 +184,7 @@ describe("sarvam_transcribe: init (F2 measured duration, G3 cap, G2 persisted id
     gw.init.mockResolvedValue({ ok: true, jobId: "sj_9" });
     const out = await init();
     expect(gw.init).toHaveBeenCalledWith(expect.objectContaining({ mode: "codemix", numSpeakers: 2 }));
-    expect(out).toMatchObject({ kind: "next", step: "upload", progress: { sarvam_job_id: "sj_9", duration_ms: 600_000, clip_key: "clip.webm", scope: "encounter", ref: "enc_1" } });
+    expect(out).toMatchObject({ kind: "next", step: "upload", progress: { sarvam_job_id: "sj_9", stt_model: "saaras:v4", duration_ms: 600_000, clip_key: "clip.webm", scope: "encounter", ref: "enc_1" } });
     expect((out as { progress: Row }).progress.started_at).toEqual(expect.any(String));
   });
 
@@ -738,7 +738,7 @@ describe("D — ledger and lane", () => {
     await T.sarvamTranscribeKind.run(ctx("finish", args, fin));
     const l = lane();
     expect(l).toMatchObject({ caller: "scribe-mcp", machine: "vercel", updated_at: expect.any(String) });
-    expect(l.active).toEqual([{ job_id: "job_other", mode: "batch", task: "transcribe", model: "saaras:v4", audio_s: 300, started_at: "2026-10-08T06:30:00.000Z", scope: "encounter" }]);
+    expect(l.active).toEqual([{ job_id: "job_other", mode: "batch", task: "transcribe", model: "saaras:v3", audio_s: 300, started_at: "2026-10-08T06:30:00.000Z", scope: "encounter" }]); // job_other row has no recorded model: ran before the cutover);
     expect(l.today).toEqual({ jobs: 1, audio_min: 10, failed: 0, throttled: 0, by_use: { production: 1 }, by_scope: { encounter: 1 }, by_status: { ok: 1 } }); // the line this job just wrote
     expect(l.all_time).toEqual({ jobs: 3, audio_min: 20 }); // 2 earlier lines (one ok 10 min, one failed) + today's
     expect(JSON.stringify(l)).not.toMatch(/ref|enc_1|transcript/);

@@ -69,6 +69,8 @@ describe("no code path can produce a saaras:v3 request", () => {
   it("lib/sarvam-model.ts keeps v3 only as the reader engine name and the refusal regex", () => {
     const src = stripComments(readFileSync("lib/sarvam-model.ts", "utf8"));
     expect(src).toMatch(/"sarvam-saaras-v3"/);
-    expect(src).not.toMatch(/["']saaras:v3["']/);
+    // the one non-reader mention: recordedSttModel's fallback LABEL for a job row with no recorded model (never sent as a request)
+    expect(src.replace(/function recordedSttModel[\s\S]*?\n\}/, "")).not.toMatch(/["']saaras:v3["']/);
+    expect(src.match(/["']saaras:v3["']/g)).toHaveLength(1);
   });
 });
