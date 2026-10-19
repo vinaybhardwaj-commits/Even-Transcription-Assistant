@@ -1,0 +1,16 @@
+# SPINE-S0-R2-BUILD — fix round R2 on spine/s0-schema (on top of 2a21440f). Not applied to Neon.
+## Changed
+- db/migrations/0173_spine.sql: F3 spine_job.status has no DEFAULT. F4 spine_signal.attrs CHECK also refuses any key at any depth (arrays included) matching text|name|phone|patient|transcript|email|uhid, case-insensitive, via jsonb_path_exists over `$.** ? (@.type()=="object").keyvalue()` (the type filter is needed: keyvalue() errors on non-objects). spine_encounter.boundary_rev DEFAULT 0. CHECK t_close IS NULL OR t_close >= t_open on spine_signal and spine_encounter.
+- db/rollbacks/0173_spine.down.sql: F1 deletes `WHERE version = 173 AND name = '0173_spine'` (schema_migrations columns are version, name). Number 0173 kept; run-migrations untouched.
+- tests/unit/spine-schema-pg.test.ts: 9 -> 12 tests. New: foreign 173 row survives rollback (F1); 17-char id, ids with 0/1/8/9, a valid id with digits 2-7 (F2); cut_version-only artefact rows both accepted, exact duplicate refused; nemotron_window accepted; job insert without status refused (F3); nested key refused at depth 1/2/3 and inside arrays, mixed case, `{"foo":1}`, allowed nested id keys accepted (F4); boundary_rev default 0; one t_close test each for signal and encounter.
+## Tests
+- spine-schema-pg alone: `Tests  12 passed (12)`.
+- Refute A1-A10 (.bc/oref, copied in temporarily, not committed): `Tests  3 failed | 7 passed (10)`. A5, A6, A10 fail BY DESIGN: they assert the old gap (nested keys accepted), the old job default 'queued' and the old unscoped rollback delete, all of which R2 changed. A1-A4, A7-A9 pass.
+- Gate (.bc/gate.log, 4 workers, minWorkers=1, foreground): typecheck=0, typecheck:tests=0, `Test Files  2 failed | 448 passed | 1 skipped (452)`, `Tests  2 failed | 9308 passed | 5 skipped (9348)`, `Errors  2 errors`. The 2 failures are the pre-existing e11-silent-room-window and no-identity-literals (same 19 conftest.py hits as base e9f7e6a2 per the refute). The 2 errors are vitest "Timeout calling onTaskUpdate" at host load. The chain stopped at vitest, so I ran the rest by hand: `npm run build` exit 0; `npm run check:silent` "Found 9" (the accepted 9, exit 1). swift build/test N/A on Linux.
+## Mutants (.bc/oref/mutate2.py, .bc/r2-mutants.log; run against the builder suite plus oref)
+- The refute's 5 survivors (id {16,}, [a-z0-9], artefact UQ minus cut_version, proxy minus nemotron_window, job default) are all killed, as are the 14 other original mutants and the new ones: attrs depth guard removed, phone dropped from the regex, case flag dropped, boundary_rev default 1, either t_close CHECK removed, rollback unscoped, rollback without the 173 delete.
+- attrs-object-only is killed by the new `{"foo":1}` test. "attrs allowlist + text" is EQUIVALENT now: the depth guard refuses a top-level `text` key anyway.
+## Assumptions / risks
+- The 0173 collision with 0173_mcp_blacklist_applied.sql is still open (gating-lead owns it); F1 only stops the rollback deleting the other row. run-migrations still skips by version alone.
+- The regex matches substrings, so a key such as `filename` or `hostname` in attrs is refused (safer reading). Values are not screened; S1's route stays the real screen.
+- Because the migration is CREATE IF NOT EXISTS, a DB that already ran the old 0173 would not pick up these changes. None has: it was never applied.
