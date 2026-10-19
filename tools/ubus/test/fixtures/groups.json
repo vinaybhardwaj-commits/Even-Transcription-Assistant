@@ -1,0 +1,22 @@
+{
+  "group:eta-leads": {
+    "members": [
+      "fable",
+      "consult-lead",
+      "herdr-lead",
+      "orbox-lead",
+      "backfill-lead",
+      "palimpsest-architect",
+      "scribe-mcp-lead",
+      "gating-lead"
+    ]
+  },
+  "group:host-owners": {
+    "members": ["grok:minibot", "grok:air-bot", "grok:yoga-encounter-stt"]
+  },
+  "group:grok": { "dynamic": "grok" },
+  "group:mini-panes": { "dynamic": "panes", "machine": "mini", "owner_gated_grok": true },
+  "group:t4-panes": { "dynamic": "panes", "machine": "eta-lab-t4", "owner_gated_grok": true },
+  "group:c3-panes": { "dynamic": "panes", "machine": "eta-ci-c3", "owner_gated_grok": true },
+  "group:all-agents": { "dynamic": "all", "restricted": true }
+}

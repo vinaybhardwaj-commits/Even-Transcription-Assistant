@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup|resume|clear|compact",
+        "hooks": [ { "type": "command", "command": "/Users/vinaybhardwaj/.local/ubus-mcp/bin/ubus-hook", "args": ["session-start"], "timeout": 10 } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "/Users/vinaybhardwaj/.local/ubus-mcp/bin/ubus-hook", "args": ["prompt"], "timeout": 5 } ] }
+    ],
+    "Stop": [
+      { "hooks": [
+        { "type": "command", "command": "/Users/vinaybhardwaj/.local/ubus-mcp/bin/ubus-hook", "args": ["stop"], "timeout": 5 },
+        { "type": "command", "command": "/Users/vinaybhardwaj/.local/ubus-mcp/bin/ubus-hook", "args": ["watch", "--max-s", "3600"], "async": true, "asyncRewake": true }
+      ] }
+    ]
+  }
+}

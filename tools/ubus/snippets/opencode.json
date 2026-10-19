@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "ubus": {
+      "type": "local",
+      "command": ["/Users/vinaybhardwaj/.local/ubus-mcp/bin/ubus-mcp"],
+      "enabled": true,
+      "environment": { "UBUS_RUNTIME": "opencode" }
+    }
+  }
+}

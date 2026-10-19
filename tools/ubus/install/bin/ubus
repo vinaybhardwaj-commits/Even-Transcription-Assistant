@@ -1,0 +1,3 @@
+#!/bin/zsh
+ROOT="${UBUS_HOME:-/Users/vinaybhardwaj/dev/ubus}"
+exec /bin/zsh "$ROOT/install/ubus-launch.zsh" "$@"

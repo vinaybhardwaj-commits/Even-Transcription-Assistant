@@ -1,0 +1,25 @@
+# Add this ingress rule to /etc/cloudflared/config.yml on the Mini.
+# Do not commit tunnel credentials. The credentials-file path already
+# lives in the existing cloudflared config; leave it there.
+#
+# Hostname bus.llmvinayminihome.uk is the public ubus door.
+# Put this rule above the catch-all 404.
+#
+# ingress:
+#   - hostname: bus.llmvinayminihome.uk
+#     service: http://127.0.0.1:8790
+#   - service: http_status:404
+#
+# Access application (create in the Cloudflare dashboard, do not store tokens here):
+#   name: ubus
+#   domain: bus.llmvinayminihome.uk
+#   policy: Service Auth
+#   service tokens: one for class grok-platform, one for class cursor-cloud
+#   session: not required for service-token callers
+#
+# D12 fallback: a secret URL path /mcp/<secret> is accepted by ubus itself
+# when the caller cannot send CF-Access-Client-Id / CF-Access-Client-Secret.
+# That path is not a substitute for locking the hostname down in Access
+# if you can. If a platform cannot send headers, allow that path through
+# Access (bypass or service-token-less policy on the path only) and keep
+# the secret in ~/.config/ubus/secret-paths.json mode 0600.

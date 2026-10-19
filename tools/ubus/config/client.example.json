@@ -1,0 +1,6 @@
+{
+  "url": "http://127.0.0.1:8790/mcp",
+  "tailnet_url": "https://<mini-tailnet-host>/ubus/mcp",
+  "cf_url": "https://bus.llmvinayminihome.uk/mcp",
+  "cf_token_file": "~/.config/ubus/cf-service-token.json"
+}

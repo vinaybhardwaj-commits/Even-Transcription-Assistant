@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>uk.llmvinayminihome.ubus</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/vinaybhardwaj/dev/ubus/install/ubus-launch.zsh</string>
+    <string>serve</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/vinaybhardwaj/dev/ubus</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/vinaybhardwaj/Library/Logs/ubus.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/vinaybhardwaj/Library/Logs/ubus.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>UBUS_HOME</key>
+    <string>/Users/vinaybhardwaj/dev/ubus</string>
+    <key>UBUS_CONFIG</key>
+    <string>/Users/vinaybhardwaj/dev/ubus/config/ubus.json</string>
+    <key>UBUS_MINI_HOST</key>
+    <string>__UBUS_MINI_HOST__</string>
+  </dict>
+</dict>
+</plist>

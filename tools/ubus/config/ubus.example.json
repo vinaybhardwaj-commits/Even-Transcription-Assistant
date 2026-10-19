@@ -1,0 +1,50 @@
+{
+  "host": "127.0.0.1",
+  "port": 8790,
+  "data_dir": "/Users/vinaybhardwaj/dev/ubus/data",
+  "spool_dir": "/Users/vinaybhardwaj/dev/ubus/data/spool",
+  "audit_path": "/Users/vinaybhardwaj/dev/ubus/data/audit/audit.jsonl",
+  "stop_file": "/Users/vinaybhardwaj/dev/ubus/STOP",
+  "groups_file": "/Users/vinaybhardwaj/dev/ubus/registry/groups.json",
+  "db_path": "/Users/vinaybhardwaj/dev/ubus/data/ubus.db",
+  "volume_mount": "/Volumes/Time Machine",
+  "cold_root": "/Volumes/Time Machine/cold/ubus-log",
+  "expected_volume_uuid": "06934966-C7D8-4B5B-9326-9C91C0FDADCD",
+  "trust_forwarded_for": true,
+  "tick_ms": 30000,
+  "edge_auth": {
+    "enabled": true,
+    "allow_loopback": true,
+    "tokens_file": "/Users/vinaybhardwaj/.config/ubus/cf-service-tokens.json",
+    "secret_paths_file": "/Users/vinaybhardwaj/.config/ubus/secret-paths.json",
+    "team_domain": "REPLACE_TEAM.cloudflareaccess.com",
+    "audience": "REPLACE_ACCESS_AUD_TAG"
+  },
+  "limits": {
+    "sends_per_hour": 20,
+    "broadcasts_per_hour": 3,
+    "control_per_hour": 5,
+    "bridge_per_hour": 20
+  },
+  "eta": {
+    "mode": "command",
+    "post_command": ["/bin/zsh", "/Users/vinaybhardwaj/dev/ubus/scripts/eta-post.template.sh"],
+    "tail_db_path": "/Users/vinaybhardwaj/dev/_fable/bus/bus.db",
+    "read_only": true,
+    "table": "posts"
+  },
+  "herdr": {
+    "mode": "command",
+    "command": ["/bin/zsh", "/Users/vinaybhardwaj/dev/ubus/scripts/herdr-ubus.template.sh"]
+  },
+  "openbot": { "mode": "fake" },
+  "handoff": { "mode": "fake" },
+  "whois": {
+    "mode": "command",
+    "command": ["tailscale", "whois", "--json"]
+  },
+  "approvers": {
+    "engineering": ["fable"],
+    "elevated": ["v", "vinay"]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "ubus": {
+      "type": "remote",
+      "url": "https://<mini-tailnet-host>/ubus/mcp",
+      "enabled": true,
+      "oauth": false
+    }
+  }
+}

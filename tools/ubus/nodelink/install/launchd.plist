@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Template. Do not edit by hand: install/install-nodelink.sh substitutes @NODE@, @REPO@, @HOME@ and @PATH@ (node and herdr dirs first) with
+     absolute paths found at install time, writes ~/Library/LaunchAgents/in.evenhc.ubus-nodelink.plist, and prints the
+     `launchctl bootstrap gui/$(id -u) <plist>` command (it does not run it). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>in.evenhc.ubus-nodelink</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@NODE@</string>
+    <string>--disable-warning=ExperimentalWarning</string>
+    <string>@REPO@/dist/nodelink/bin/ubus-node.js</string>
+    <string>run</string>
+  </array>
+  <!-- launchd's own PATH is /usr/bin:/bin:/usr/sbin:/sbin; the installer puts the dirs of the resolved node and herdr first -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>@PATH@</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>@HOME@/.ubus/nodelink.log</string>
+</dict>
+</plist>

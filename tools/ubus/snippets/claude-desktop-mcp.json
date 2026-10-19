@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ubus": {
+      "command": "/Users/vinaybhardwaj/.local/ubus-mcp/bin/ubus-mcp",
+      "args": [],
+      "env": { "UBUS_RUNTIME": "cowork" }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+data/
+*.log
+.DS_Store
+config/local.json
+config/dev.json
+config/ubus.json
+.ubus-secrets/
+coverage/
+_to_delete/
+*.bak*
+*.orig
+*.orig-*
+install/local.env

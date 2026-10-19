@@ -1,0 +1,16 @@
+# Template. install/install-nodelink.sh substitutes @NODE@, @REPO@, @HOME@ and @PATH@ and writes ~/.config/systemd/user/ubus-nodelink.service.
+# Then:  systemctl --user daemon-reload && systemctl --user enable --now ubus-nodelink
+# Headless nodes also need:  loginctl enable-linger $USER   (otherwise the service starts only at login and stops at logout)
+[Unit]
+Description=ubus nodelink (per-node companion)
+
+[Service]
+ExecStart=@NODE@ --disable-warning=ExperimentalWarning @REPO@/dist/nodelink/bin/ubus-node.js run
+Environment=PATH=@PATH@
+Restart=always
+RestartSec=5
+# key lives in %h/.ubus/node.key (0600); never put it in this unit
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

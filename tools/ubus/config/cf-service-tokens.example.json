@@ -1,0 +1,14 @@
+{
+  "clients": [
+    {
+      "id": "REPLACE_GROK_ACCESS_CLIENT_ID",
+      "secret": "REPLACE_GROK_ACCESS_CLIENT_SECRET",
+      "class": "grok-platform"
+    },
+    {
+      "id": "REPLACE_CURSOR_ACCESS_CLIENT_ID",
+      "secret": "REPLACE_CURSOR_ACCESS_CLIENT_SECRET",
+      "class": "cursor-cloud"
+    }
+  ]
+}

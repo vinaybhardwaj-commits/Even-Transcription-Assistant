@@ -1,0 +1,15 @@
+# Every machine with a ubus client (derived from ubus_directory machines and ~/.ssh/config, 12 Oct 2026).
+# columns: directory-machine-label  ssh-host  os  note
+# ssh-host is an alias from ~/.ssh/config, or "local". No addresses live in this file.
+mini         local     darwin  server host; client runs from the repo tree, not ~/.local/ubus-mcp
+air          air       darwin
+yoga         yoga      linux   directory label ubuntuyoga
+asus         asus      linux   directory label asus-ubuntu; alias is missing from ~/.ssh/config on the Mini at 12 Oct (fleet-mcp deploy scripts use user@address)
+eta-lab-t4   e2e-lab   linux   directory label eta-lab-t4 (ssh alias e2e-lab)
+eta-ci-c3    e2e-ci    linux   directory label eta-ci-c3 (ssh alias e2e-ci)
+orb3         orb3      linux   directory label orbox3
+e2e-c4       e2e-c4    linux   cloud door
+# RETIRED 12 Oct 2026 (Space dead, paused, not deleted): hf-1         -         linux   HF Space, cloud door; no ssh from the Mini
+# RETIRED 12 Oct 2026 (Space dead, paused, not deleted): hf-2         -         linux   HF Space, cloud door; no ssh from the Mini
+eta-hf-3     -         linux   HF Space, cloud door; no ssh from the Mini
+eta-hf-4     -         linux   HF Space, cloud door; no ssh from the Mini

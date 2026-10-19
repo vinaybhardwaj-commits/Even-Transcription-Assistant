@@ -1,0 +1,10 @@
+#!/bin/zsh
+# Claude Code hook. Fails open inside the node program.
+ROOT="${UBUS_HOME:-/Users/vinaybhardwaj/dev/ubus}"
+NODE="${UBUS_NODE:-}"
+if [[ -z "$NODE" ]]; then
+  if [[ -x /opt/homebrew/bin/node ]]; then NODE=/opt/homebrew/bin/node
+  elif [[ -x /usr/local/bin/node ]]; then NODE=/usr/local/bin/node
+  else NODE="$(command -v node)"; fi
+fi
+exec "$NODE" --disable-warning=ExperimentalWarning "$ROOT/dist/bin/ubus-hook.js" "$@"
