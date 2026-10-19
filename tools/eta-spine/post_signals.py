@@ -6,6 +6,7 @@
 DEFAULT IS --dry-run: it prints counts only (no ids, no names), opens no socket and reads no token. --post needs --url and --token-file, a regular file with mode 0600 holding the token.
 The poster sends no source_rev: the server applies the rev rule (a new rev only when t_open, t_close, room_id or the close reason changed), so a re-run is idempotent.
 A key matching the PHI word list at any depth (normalised), an attrs key outside ids / quality / close_reason, or a value outside the closed rules (ids allowlist, enums, tokens) is refused HERE: that row is skipped and counted as `refused`, the rest still go. rc 0 with refused/skipped > 0 is reported in the counts.
+Exit codes: 0 done (refused / skipped rows are in the counts); 1 the server answered non-200; 3 the server reported `conflict` > 0 (a changed signal lost its race and was NOT stored: re-run the same file, the rev rule makes that idempotent). The `conflict` count is always in the post summary.
 No timer is installed by this file.
 
 Input shapes:
@@ -17,20 +18,17 @@ import argparse, datetime as dt, json, os, re, stat, sys, unicodedata, urllib.er
 
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 WORDS = re.compile(r"text|name|phone|patient|transcript|email|uhid|mrn|mobile|dob|aadhaar|addr|address")
-ID_RE = re.compile(r"[A-Za-z0-9_@.:-]{1,120}")
-ID_KEYS = {"consult_key", "consult_uid", "hypothesis_id", "room_day_id", "shadow_id", "run_id", "pqm_step_uid", "window_id"}
-ATTR_KEYS = {"ids", "quality", "close_reason"}
 MAX_DEPTH = 12
 BATCH = 500
 KINDS = ("pqm", "cutter", "caa")
-_PULSE_REASON = {"endConsult", "url_clear", "next_open", "logout", "idle_timeout", "cap_90m", "open"}
-_PULSE_QUALITY = {"clean", "ambiguous", "multi_doctor", "unclosed", "unattributed"}
-# Closed enums per proxy: mirror lib/spine/phi-screen.ts (a test compares both with tests/fixtures/spine-phi-cases.json).
-ENUMS = {
-    "pqm": {"close_reason": {"pqm"}, "quality": {"pqm", "suspect"}},
-    "cutter": {"close_reason": _PULSE_REASON | {"pqm"}, "quality": {"cut", "skipped", "error", "planned", "deferred", "deferred_long"} | _PULSE_QUALITY | {"pqm", "suspect"}},
-    "caa": {"close_reason": set(), "quality": set()},
-}
+ATTR_KEYS = {"ids", "quality", "close_reason"}
+# The value rules are shared with lib/spine/phi-screen.ts: ONE json both read (enums, id keys, per-key formats, source_key format per proxy).
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "phi-rules.json"), encoding="utf-8") as _fh:
+    _RULES = json.load(_fh)
+ID_KEYS = set(_RULES["id_keys"])
+FORMATS = {k: re.compile(v) for k, v in _RULES["formats"].items()}
+SOURCE_KEY_FORMAT = _RULES["source_key_format"]
+ENUMS = {p: {"close_reason": set(e["close_reason"]), "quality": set(e["quality"])} for p, e in _RULES["enums"].items()}
 _LOOKALIKE = {
     "ı": "i", "а": "a", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c", "т": "t", "у": "y", "х": "x",
     "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "ԛ": "q", "ԝ": "w", "һ": "h", "ӏ": "l",
@@ -65,20 +63,21 @@ def refuse_keys(v, depth=0):
             refuse_keys(x, depth + 1)
 
 
-def _tok(v):
-    return isinstance(v, str) and ID_RE.fullmatch(v) is not None
+def _fmt(key, v):
+    f = FORMATS.get(key) if key is not None else None
+    return f is not None and isinstance(v, str) and f.fullmatch(v) is not None
 
 
 def refuse_values(s):
     """Mirrors refuseValues in lib/spine/phi-screen.ts; the server would answer 422 for any of these."""
-    if not _tok(s.get("source_key")):
+    if not _fmt(SOURCE_KEY_FORMAT.get(s.get("proxy")), s.get("source_key")):
         raise Refused("source_key")
-    if s.get("room_id") is not None and not _tok(s["room_id"]):
+    if s.get("room_id") is not None and not _fmt("room_id", s["room_id"]):
         raise Refused("room_id")
     a = s.get("attrs") or {}
-    ids = a.get("ids")
-    if ids is not None:
-        if not isinstance(ids, dict) or any(k not in ID_KEYS or not _tok(x) for k, x in ids.items()):
+    if "ids" in a:                                  # present-but-null is refused, as the server does
+        ids = a["ids"]
+        if not isinstance(ids, dict) or any(k not in ID_KEYS or not _fmt(k, x) for k, x in ids.items()):
             raise Refused("attrs_ids")
     en = ENUMS.get(s.get("proxy"), {"close_reason": set(), "quality": set()})
     if "close_reason" in a and not (isinstance(a["close_reason"], str) and a["close_reason"] in en["close_reason"]):
@@ -239,7 +238,7 @@ def main(argv=None, now=None):
         print(json.dumps({"mode": "dry-run", "kind": a.kind, **counts}))
         return 0
     token = read_token(a.token_file)
-    sent = dup = 0
+    sent = dup = conflict = 0
     for i in range(0, len(signals), BATCH):
         code, body = post_batch(a.url, token, signals[i:i + BATCH])
         if code != 200:
@@ -250,8 +249,9 @@ def main(argv=None, now=None):
             return 0
         sent += body.get("inserted", 0)
         dup += body.get("duplicate", 0)
-    print(json.dumps({"mode": "post", "kind": a.kind, **counts, "inserted": sent, "duplicate": dup}))
-    return 0
+        conflict += body.get("conflict", 0)
+    print(json.dumps({"mode": "post", "kind": a.kind, **counts, "inserted": sent, "duplicate": dup, "conflict": conflict}))
+    return 3 if conflict > 0 else 0
 
 
 if __name__ == "__main__":

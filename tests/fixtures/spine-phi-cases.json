@@ -1,37 +1,1249 @@
 {
-  "_comment": "Shared by tests/unit/spine-phi.test.ts (TS) and tools/eta-spine/tests/test_phi_screen.py (Python). Synthetic only.",
-  "enums": {
-    "pulse": {"close_reason": ["endConsult","url_clear","next_open","logout","idle_timeout","cap_90m","open"], "quality": ["clean","ambiguous","multi_doctor","unclosed","unattributed"]},
-    "acoustic": {"close_reason": ["non_speech","unjudged_gap","tape_off","dead_mic","end_of_input","content_boundary","pulse_end","jev_end","next_start","last_doc_turn","cap_90m"], "quality": []},
-    "timeline": {"close_reason": ["patient_left","next_start","tape_off","dead_mic","cap"], "quality": []},
-    "pqm": {"close_reason": ["pqm"], "quality": ["pqm","suspect"]},
-    "cutter": {"close_reason": ["endConsult","url_clear","next_open","logout","idle_timeout","cap_90m","open","pqm"], "quality": ["cut","skipped","error","planned","deferred","deferred_long","clean","ambiguous","multi_doctor","unclosed","unattributed","pqm","suspect"]},
-    "caa": {"close_reason": [], "quality": []}
+ "_comment": "Shared by tests/unit/spine-phi.test.ts (TS) and tools/eta-spine/tests/test_phi_screen.py (Python). Synthetic only. Placeholders {MS13} {P16} {PHONE10} {PLUS_PHONE} {DIG7} {DIG8} are filled by both tests at run time, so no digit run of 8+ sits in this file. R3: per-key id formats, value cases and key cases ported from the Opus refute (.bc/oref-r2-tests).",
+ "enums": {
+  "pulse": {
+   "close_reason": [
+    "endConsult",
+    "url_clear",
+    "next_open",
+    "logout",
+    "idle_timeout",
+    "cap_90m",
+    "open"
+   ],
+   "quality": [
+    "clean",
+    "ambiguous",
+    "multi_doctor",
+    "unclosed",
+    "unattributed"
+   ]
   },
-  "id_keys": ["consult_key","consult_uid","hypothesis_id","room_day_id","shadow_id","run_id","pqm_step_uid","window_id"],
-  "refuse_keys": [
-    "name", "fullName", "PATIENT", "Transcript_raw", "phone", "mobilePhone", "free_text", "email", "uhid", "UHID", "mrn", "mobile", "dob", "aadhaar", "addr", "address",
-    "ｎａｍｅ", "ＰＨＯＮＥ", "na​me", "pa­tient", "nàme", "nаme", "patıent", "trаnscript", "еmail"
+  "acoustic": {
+   "close_reason": [
+    "non_speech",
+    "unjudged_gap",
+    "tape_off",
+    "dead_mic",
+    "end_of_input",
+    "content_boundary",
+    "pulse_end",
+    "jev_end",
+    "next_start",
+    "last_doc_turn",
+    "cap_90m"
+   ],
+   "quality": []
+  },
+  "timeline": {
+   "close_reason": [
+    "patient_left",
+    "next_start",
+    "tape_off",
+    "dead_mic",
+    "cap"
+   ],
+   "quality": []
+  },
+  "pqm": {
+   "close_reason": [
+    "pqm"
+   ],
+   "quality": [
+    "pqm",
+    "suspect"
+   ]
+  },
+  "cutter": {
+   "close_reason": [
+    "endConsult",
+    "url_clear",
+    "next_open",
+    "logout",
+    "idle_timeout",
+    "cap_90m",
+    "open",
+    "pqm"
+   ],
+   "quality": [
+    "cut",
+    "skipped",
+    "error",
+    "planned",
+    "deferred",
+    "deferred_long",
+    "clean",
+    "ambiguous",
+    "multi_doctor",
+    "unclosed",
+    "unattributed",
+    "pqm",
+    "suspect"
+   ]
+  },
+  "caa": {
+   "close_reason": [],
+   "quality": []
+  },
+  "doctor_activity": {
+   "close_reason": [],
+   "quality": []
+  },
+  "nemotron_window": {
+   "close_reason": [],
+   "quality": []
+  }
+ },
+ "id_keys": [
+  "consult_key",
+  "consult_uid",
+  "hypothesis_id",
+  "room_day_id",
+  "shadow_id",
+  "run_id",
+  "pqm_step_uid",
+  "window_id"
+ ],
+ "refuse_keys": [
+  "name",
+  "fullName",
+  "PATIENT",
+  "Transcript_raw",
+  "phone",
+  "mobilePhone",
+  "free_text",
+  "email",
+  "uhid",
+  "UHID",
+  "mrn",
+  "mobile",
+  "dob",
+  "aadhaar",
+  "addr",
+  "address",
+  "\uff4e\uff41\uff4d\uff45",
+  "\uff30\uff28\uff2f\uff2e\uff25",
+  "na\u200bme",
+  "pa\u00adtient",
+  "n\u00e0me",
+  "n\u0430me",
+  "pat\u0131ent",
+  "tr\u0430nscript",
+  "\u0435mail"
+ ],
+ "ok_keys": [
+  "consult_uid",
+  "hypothesis_id",
+  "run_id",
+  "window_id",
+  "pqm_step_uid",
+  "room_day_id",
+  "shadow_id",
+  "consult_key",
+  "ids",
+  "quality",
+  "close_reason"
+ ],
+ "deep": [
+  {
+   "nest": 14,
+   "leaf": 1,
+   "expect": "too_deep"
+  },
+  {
+   "nest": 3,
+   "leaf": {
+    "Name": "x"
+   },
+   "expect": "text_key"
+  },
+  {
+   "nest": 3,
+   "leaf": 1,
+   "expect": null
+  }
+ ],
+ "signals": [
+  {
+   "label": "good pqm",
+   "expect": "ok",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "room_id": "room_abcd2345",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "enc_testaaaaaaaaaaaa",
+      "pqm_step_uid": "a1b2c3d4e5f6a7b8c9d0"
+     },
+     "quality": "pqm",
+     "close_reason": "pqm"
+    }
+   }
+  },
+  {
+   "label": "good pulse key",
+   "expect": "ok",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "enc_testaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_key": "enc_testaaaaaaaaaaaa@mach_test"
+     }
+    }
+   }
+  },
+  {
+   "label": "prose in ids value",
+   "expect": "422",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "Patient Name said chest pain"
+     }
+    }
+   }
+  },
+  {
+   "label": "ids key outside allowlist",
+   "expect": "422",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "foo": "x"
+     }
+    }
+   }
+  },
+  {
+   "label": "ids nested",
+   "expect": "422",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": {
+       "run_id": "x"
+      }
+     }
+    }
+   }
+  },
+  {
+   "label": "ids value non-string",
+   "expect": "422",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "window_id": 7
+     }
+    }
+   }
+  },
+  {
+   "label": "ids value too long",
+   "expect": "422",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "run_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+     }
+    }
+   }
+  },
+  {
+   "label": "name_digits token in close_reason",
+   "expect": "422",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "close_reason": "Ravi_Kumar_98765"
+    }
+   }
+  },
+  {
+   "label": "close_reason from another proxy's enum",
+   "expect": "422",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "close_reason": "patient_left"
+    }
+   }
+  },
+  {
+   "label": "quality outside enum",
+   "expect": "422",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "enc_testaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "quality": "chest_pain"
+    }
+   }
+  },
+  {
+   "label": "source_key prose",
+   "expect": "422",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "Ravi Kumar",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z"
+   }
+  },
+  {
+   "label": "room_id too long",
+   "expect": "422",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "room_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z"
+   }
+  },
+  {
+   "label": "text key in value position key",
+   "expect": "422",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "n\u0430me": "x"
+     }
+    }
+   }
+  }
+ ],
+ "good_ids": {
+  "consult_uid": "enc_testaaaaaaaaaaaa",
+  "consult_key": "enc_testaaaaaaaaaaaa@mach_test",
+  "pqm_step_uid": "a1b2c3d4e5f6a7b8c9d0",
+  "window_id": "bw_abcd2345_{MS13}_primary",
+  "room_id": "room_abcd2345",
+  "room_day_id": "rd_abcd2345",
+  "hypothesis_id": "eh_abcdefghjkmn",
+  "run_id": "ehr_abcdefghjkmn",
+  "shadow_id": "et_0a1b2c3d4e5f6a7b8c"
+ },
+ "good_source_key": {
+  "pulse": "enc_testaaaaaaaaaaaa@mach_test",
+  "timeline": "enc_testaaaaaaaaaaaa@mach_test",
+  "acoustic": "eh_abcdefghjkmn",
+  "pqm": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+  "cutter": "enc_testaaaaaaaaaaaa",
+  "caa": "enc_testaaaaaaaaaaaa",
+  "nemotron_window": "bw_abcd2345_{MS13}_primary"
+ },
+ "formats_accept": {
+  "consult_uid": [
+   "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+   "pqm_0f9e8d7c6b5a4f3e2d1c0b",
+   "enc_testaaaaaaaaaaaa",
+   "enc_abc123",
+   "11111111-2222-4333-8444-555555555555",
+   "abcdefghij0123abcdef",
+   "enc_x1y2z3"
   ],
-  "ok_keys": ["consult_uid", "hypothesis_id", "run_id", "window_id", "pqm_step_uid", "room_day_id", "shadow_id", "consult_key", "ids", "quality", "close_reason"],
-  "deep": [
-    {"nest": 14, "leaf": 1, "expect": "too_deep"},
-    {"nest": 3, "leaf": {"Name": "x"}, "expect": "text_key"},
-    {"nest": 3, "leaf": 1, "expect": null}
+  "consult_key": [
+   "enc_testaaaaaaaaaaaa@mach_test",
+   "enc_abc123@EHRC-TEST1s-Mac-mini",
+   "enc_abc123@opd-1_mini",
+   "11111111-2222-4333-8444-555555555555@m1"
   ],
-  "signals": [
-    {"label": "good pqm", "expect": "ok", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "room_id": "room_test_a", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"consult_uid": "uid_test_01", "pqm_step_uid": "step_test_01"}, "quality": "pqm", "close_reason": "pqm"}}},
-    {"label": "good pulse key", "expect": "ok", "signal": {"proxy": "pulse", "source_key": "uid_test_01@mach_test", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"consult_key": "uid_test_01@mach_test"}}}},
-    {"label": "prose in ids value", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"consult_uid": "Patient Name said chest pain"}}}},
-    {"label": "ids key outside allowlist", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"foo": "x"}}}},
-    {"label": "ids nested", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"consult_uid": {"run_id": "x"}}}}},
-    {"label": "ids value non-string", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"window_id": 7}}}},
-    {"label": "ids value too long", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"run_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}}},
-    {"label": "name_digits token in close_reason", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"close_reason": "Ravi_Kumar_98765"}}},
-    {"label": "close_reason from another proxy's enum", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"close_reason": "patient_left"}}},
-    {"label": "quality outside enum", "expect": "422", "signal": {"proxy": "pulse", "source_key": "k_test", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"quality": "chest_pain"}}},
-    {"label": "source_key prose", "expect": "422", "signal": {"proxy": "pqm", "source_key": "Ravi Kumar", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z"}},
-    {"label": "room_id too long", "expect": "422", "signal": {"proxy": "pqm", "source_key": "k_test", "room_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z"}},
-    {"label": "text key in value position key", "expect": "422", "signal": {"proxy": "pqm", "source_key": "k_test", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"nаme": "x"}}}}
+  "pqm_step_uid": [
+   "a1b2c3d4e5f6a7b8c9d0",
+   "11111111-2222-4333-8444-555555555555",
+   "0f9e8d7c6b5a4f3e"
+  ],
+  "window_id": [
+   "bw_abcd2345_{MS13}_primary",
+   "bw_abcd2345_{MS13}_backup",
+   "1",
+   "12",
+   "{DIG7}",
+   "{P16}"
+  ],
+  "room_id": [
+   "room_abcd2345",
+   "room_zz992345"
+  ],
+  "room_day_id": [
+   "rd_abcd2345",
+   "rd_bcdefghj"
+  ],
+  "hypothesis_id": [
+   "eh_abcdefghjkmn",
+   "eh_23456789zyxw"
+  ],
+  "run_id": [
+   "ehr_abcdefghjkmn",
+   "ets_0a1b2c3d4e5f6a7b8c"
+  ],
+  "shadow_id": [
+   "et_0a1b2c3d4e5f6a7b8c"
   ]
+ },
+ "formats_refuse_common": [
+  "ramesh_9845",
+  "ramesh9845",
+  "{PHONE10}",
+  "{PLUS_PHONE}",
+  "Ravi Kumar",
+  "",
+  "enc_testaaaaaaaaaaaa\n",
+  "enc_testaaaaaaaaaaaa ",
+  "\uff11\uff12\uff13",
+  "enc_test\u200baaaaaaaaaaaa",
+  "ENC_TESTAAAAAAAAAAAA",
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+ ],
+ "formats_refuse": {
+  "consult_uid": [
+   "enc_phone{DIG7}x",
+   "enc_abc12{DIG7}",
+   "pqm_a1b2c3d4e5f6a7b8c9d0e",
+   "pqm_A1B2C3D4E5F6A7B8C9D0E1",
+   "pqm_a1b2c3d4e5f6a7b8c9d0e1f",
+   "enc_ab",
+   "tok_{DIG7}abcdefghijklmnop",
+   "{DIG7}{DIG7}{DIG7}{DIG7}"
+  ],
+  "consult_key": [
+   "enc_testaaaaaaaaaaaa",
+   "enc_testaaaaaaaaaaaa@",
+   "@mach_test",
+   "enc_testaaaaaaaaaaaa@mach test",
+   "enc_testaaaaaaaaaaaa@m_{DIG7}",
+   "pqm_a1b2c3d4e5f6a7b8c9d0e1@pqm",
+   "11111111-2222-4333-8444-555555555555@m_{DIG7}"
+  ],
+  "pqm_step_uid": [
+   "step_test_01",
+   "0f9e8d7c6b5a4f",
+   "A1B2C3D4E5F6A7B8C9D0",
+   "{PHONE10}"
+  ],
+  "window_id": [
+   "bw_abcd2345_{MS13}_other",
+   "bw_abcd234_{MS13}_primary",
+   "bw_abcd2345_12_primary",
+   "12345678",
+   "{PHONE10}",
+   "{PLUS_PHONE}",
+   "1{P16}",
+   "2000000000000000",
+   "bw_abcd2345_{MS13}_primary_x"
+  ],
+  "room_id": [
+   "room_abcd234",
+   "room_abcd23456",
+   "room_scratch_abcd2345",
+   "room_ABCD2345",
+   "room_abci2345",
+   "rm_abcd2345",
+   "room_ramesh98"
+  ],
+  "room_day_id": [
+   "rd_abcd234",
+   "rd_abcd23456",
+   "rd_scratch_abcd2345_{DIG8}",
+   "rd_abci2345"
+  ],
+  "hypothesis_id": [
+   "eh_abcdefghjkm",
+   "eh_abcdefghjkmnp",
+   "eh_abcdefghjklm",
+   "ehr_abcdefghjkmn",
+   "eh_ramesh9845"
+  ],
+  "run_id": [
+   "ehr_abcdefghjkm",
+   "ets_0a1b2c3d4e5f6a7b8",
+   "ets_0A1B2C3D4E5F6A7B8C",
+   "run_test_01",
+   "eh_abcdefghjkmn"
+  ],
+  "shadow_id": [
+   "et_0a1b2c3d4e5f6a7b8",
+   "et_0a1b2c3d4e5f6a7b8cd",
+   "ets_0a1b2c3d4e5f6a7b8c",
+   "tl_test_01"
+  ]
+ },
+ "keys": {
+  "comb_acute": "n\u0301ame",
+  "comb_lowline": "n\u0332a\u0332m\u0332e\u0332",
+  "cgj": "na\u034fme",
+  "armenian_vo_n": "\u0578ame",
+  "armenian_oh": "ph\u0585ne",
+  "armenian_ho": "p\u0570one",
+  "greek_alpha": "n\u03b1me",
+  "greek_cap_alpha": "N\u0391ME",
+  "greek_omicron": "ph\u03bfne",
+  "cyr_caps": "\u0420\u041d\u041eN\u0415",
+  "mixed_cyr": "p\u0430t\u0456\u0435nt",
+  "cyr_shha": "p\u04bbone",
+  "turkish_I": "pat\u0130ent",
+  "sep_underscore": "p_a_t_i_e_n_t",
+  "sep_dash": "na-me",
+  "sep_dot": "pa.tient",
+  "sep_space": "na me",
+  "sep_linesep": "n\u2028ame",
+  "small_caps": "\u0274\u1d00\u1d0d\u1d07",
+  "math_bold": "\ud835\udc27\ud835\udc1a\ud835\udc26\ud835\udc1e",
+  "circled": "\u24dd\u24d0\u24dc\u24d4",
+  "tag_char": "na\udb40\udc61me",
+  "mongolian_vs": "na\u180eme",
+  "hangul_filler": "na\u3164me",
+  "zwsp": "na\u200bme",
+  "greek_eps": "\u03b5mail",
+  "fullwidth_uhid": "\uff55\uff48\uff49\uff44",
+  "dob_upper": "DOB",
+  "lone_surrogate": "na\ud800me"
+ },
+ "key_verdicts": {
+  "comb_acute": "text_key",
+  "comb_lowline": "text_key",
+  "cgj": "text_key",
+  "armenian_vo_n": null,
+  "armenian_oh": null,
+  "armenian_ho": null,
+  "greek_alpha": "text_key",
+  "greek_cap_alpha": "text_key",
+  "greek_omicron": "text_key",
+  "cyr_caps": "text_key",
+  "mixed_cyr": "text_key",
+  "cyr_shha": "text_key",
+  "turkish_I": "text_key",
+  "sep_underscore": null,
+  "sep_dash": null,
+  "sep_dot": null,
+  "sep_space": null,
+  "sep_linesep": null,
+  "small_caps": null,
+  "math_bold": "text_key",
+  "circled": "text_key",
+  "tag_char": "text_key",
+  "mongolian_vs": "text_key",
+  "hangul_filler": null,
+  "zwsp": "text_key",
+  "greek_eps": "text_key",
+  "fullwidth_uhid": "text_key",
+  "dob_upper": "text_key",
+  "lone_surrogate": null
+ },
+ "value_cases": [
+  {
+   "label": "ids_name_digits",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "ramesh_9845"
+     }
+    }
+   }
+  },
+  {
+   "label": "ids_phone",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "{PHONE10}"
+     }
+    }
+   }
+  },
+  {
+   "label": "ids_plus_phone",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "{PLUS_PHONE}"
+     }
+    }
+   }
+  },
+  {
+   "label": "ids_name_digits_run_id",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "run_id": "ramesh_9845"
+     }
+    }
+   }
+  },
+  {
+   "label": "sk_name_digits",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "ramesh_9845",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "sk_phone",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "{PHONE10}",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "room_name_digits",
+   "expect": "room_id",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {},
+    "room_id": "ramesh_9845"
+   }
+  },
+  {
+   "label": "room_phone",
+   "expect": "room_id",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {},
+    "room_id": "{PHONE10}"
+   }
+  },
+  {
+   "label": "cr_name_digits",
+   "expect": "attrs_close_reason",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "close_reason": "ramesh_9845"
+    }
+   }
+  },
+  {
+   "label": "q_upper",
+   "expect": "attrs_quality",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "quality": "PQM"
+    }
+   }
+  },
+  {
+   "label": "ids_null",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": null
+    }
+   }
+  },
+  {
+   "label": "ids_list",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": []
+    }
+   }
+  },
+  {
+   "label": "ids_empty",
+   "expect": "ok",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {}
+    }
+   }
+  },
+  {
+   "label": "ids_trailing_nl",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "run_id": "ehr_abcdefghjkmn\n"
+     }
+    }
+   }
+  },
+  {
+   "label": "ids_fullwidth_digits",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "window_id": "\uff11\uff12\uff13"
+     }
+    }
+   }
+  },
+  {
+   "label": "ids_zw_value",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "run_id": "ehr_abcdefghjkmn\u200b"
+     }
+    }
+   }
+  },
+  {
+   "label": "ids_key_case",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "Consult_uid": "enc_testaaaaaaaaaaaa"
+     }
+    }
+   }
+  },
+  {
+   "label": "ids_key_zw",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid\u200b": "enc_testaaaaaaaaaaaa"
+     }
+    }
+   }
+  },
+  {
+   "label": "pulse_endConsult",
+   "expect": "ok",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "enc_testaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "close_reason": "endConsult"
+    }
+   }
+  },
+  {
+   "label": "timeline_patient_left",
+   "expect": "ok",
+   "signal": {
+    "proxy": "timeline",
+    "source_key": "enc_testaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "close_reason": "patient_left"
+    }
+   }
+  },
+  {
+   "label": "acoustic_cap90",
+   "expect": "ok",
+   "signal": {
+    "proxy": "acoustic",
+    "source_key": "eh_abcdefghjkmn",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "close_reason": "cap_90m"
+    }
+   }
+  },
+  {
+   "label": "pqm_patient_left",
+   "expect": "attrs_close_reason",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "close_reason": "patient_left"
+    }
+   }
+  },
+  {
+   "label": "caa_quality",
+   "expect": "attrs_quality",
+   "signal": {
+    "proxy": "caa",
+    "source_key": "enc_testaaaaaaaaaaaa",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "quality": "x"
+    }
+   }
+  },
+  {
+   "label": "cr_number",
+   "expect": "attrs_close_reason",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "close_reason": 5
+    }
+   }
+  },
+  {
+   "label": "cr_null",
+   "expect": "attrs_close_reason",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "close_reason": null
+    }
+   }
+  },
+  {
+   "label": "room_empty",
+   "expect": "room_id",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {},
+    "room_id": ""
+   }
+  },
+  {
+   "label": "sk_120",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "sk_121",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "attrs_extra",
+   "expect": "attrs_key",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "foo": "x"
+    }
+   }
+  },
+  {
+   "label": "attrs_sep_key",
+   "expect": "attrs_key",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "p_a_t_i_e_n_t": "x"
+    }
+   }
+  },
+  {
+   "label": "ids_window_small_int",
+   "expect": "ok",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "window_id": "12"
+     }
+    }
+   }
+  },
+  {
+   "label": "ids_window_bw",
+   "expect": "ok",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "window_id": "bw_abcd2345_{MS13}_primary"
+     }
+    }
+   }
+  },
+  {
+   "label": "cutter_deferred_long",
+   "expect": "ok",
+   "signal": {
+    "proxy": "cutter",
+    "source_key": "enc_testaaaaaaaaaaaa",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "quality": "deferred_long",
+     "close_reason": "idle_timeout"
+    }
+   }
+  },
+  {
+   "label": "cutter_planned",
+   "expect": "ok",
+   "signal": {
+    "proxy": "cutter",
+    "source_key": "enc_testaaaaaaaaaaaa",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "quality": "planned"
+    }
+   }
+  },
+  {
+   "label": "cutter_pqm_suspect",
+   "expect": "ok",
+   "signal": {
+    "proxy": "cutter",
+    "source_key": "enc_testaaaaaaaaaaaa",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "quality": "suspect",
+     "close_reason": "pqm"
+    }
+   }
+  },
+  {
+   "label": "pqm_quality_suspect",
+   "expect": "ok",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "quality": "suspect",
+     "close_reason": "pqm"
+    }
+   }
+  },
+  {
+   "label": "ids_proto",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "__proto__": "x"
+     }
+    }
+   }
+  },
+  {
+   "label": "good_all_ids_acoustic",
+   "expect": "ok",
+   "signal": {
+    "proxy": "acoustic",
+    "source_key": "eh_abcdefghjkmn",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "hypothesis_id": "eh_abcdefghjkmn",
+      "room_day_id": "rd_abcd2345",
+      "run_id": "ehr_abcdefghjkmn"
+     },
+     "close_reason": "cap_90m"
+    },
+    "room_id": "room_abcd2345"
+   }
+  },
+  {
+   "label": "good_all_ids_timeline",
+   "expect": "ok",
+   "signal": {
+    "proxy": "timeline",
+    "source_key": "enc_testaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_key": "enc_testaaaaaaaaaaaa@mach_test",
+      "shadow_id": "et_0a1b2c3d4e5f6a7b8c",
+      "run_id": "ets_0a1b2c3d4e5f6a7b8c"
+     },
+     "close_reason": "patient_left"
+    },
+    "room_id": "room_abcd2345"
+   }
+  },
+  {
+   "label": "good_all_ids_pqm",
+   "expect": "ok",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+      "pqm_step_uid": "a1b2c3d4e5f6a7b8c9d0"
+     },
+     "quality": "pqm",
+     "close_reason": "pqm"
+    },
+    "room_id": "room_abcd2345"
+   }
+  },
+  {
+   "label": "good_all_ids_cutter",
+   "expect": "ok",
+   "signal": {
+    "proxy": "cutter",
+    "source_key": "enc_testaaaaaaaaaaaa",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "enc_testaaaaaaaaaaaa",
+      "window_id": "{P16}"
+     },
+     "quality": "cut"
+    },
+    "room_id": "room_abcd2345"
+   }
+  },
+  {
+   "label": "sk_cross_0_acoustic",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "acoustic",
+    "source_key": "enc_testaaaaaaaaaaaa",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "sk_cross_1_pulse",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "enc_testaaaaaaaaaaaa",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "sk_cross_2_timeline",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "timeline",
+    "source_key": "eh_abcdefghjkmn",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "sk_cross_3_pqm",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "enc_testaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "sk_cross_4_cutter",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "cutter",
+    "source_key": "eh_abcdefghjkmn",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "sk_cross_5_doctor_activity",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "doctor_activity",
+    "source_key": "enc_testaaaaaaaaaaaa",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "sk_cross_6_doctor_activity",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "doctor_activity",
+    "source_key": "bw_abcd2345_{MS13}_primary",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "sk_cross_7_nemotron_window",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "nemotron_window",
+    "source_key": "enc_testaaaaaaaaaaaa",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "ids_room_id_is_not_an_ids_key",
+   "expect": "attrs_ids",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "room_id": "room_abcd2345"
+     }
+    }
+   }
+  }
+ ]
 }

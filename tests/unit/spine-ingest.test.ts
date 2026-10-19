@@ -5,7 +5,7 @@ import { parseIngestMode } from "@/lib/spine/config";
 import { refuseKeys, validateSignals } from "@/lib/spine/signal-validate";
 
 const win = (over: Record<string, unknown> = {}) => ({
-  consult_key: "uid_test_01@mach_test", consult_uid: "uid_test_01", room_id: "room_test_a", t_open: "2026-10-18T04:00:00.000Z", t_close: "2026-10-18T04:10:00.000Z",
+  consult_key: "enc_testaaaaaaaaaaaa@mach_test", consult_uid: "enc_testaaaaaaaaaaaa", room_id: "room_abcd2345", t_open: "2026-10-18T04:00:00.000Z", t_close: "2026-10-18T04:10:00.000Z",
   close_reason: "endConsult", quality: "clean", computed_at: "2026-10-18T04:11:00.000Z", ...over,
 });
 const prior = (rows: ReturnType<typeof toSignals>): Prior => new Map(rows.map((s) => [s.source_key, { rev: s.source_rev, hash: signalHash({ ...s, close_reason: s.attrs.close_reason }) }]));
@@ -13,7 +13,7 @@ const prior = (rows: ReturnType<typeof toSignals>): Prior => new Map(rows.map((s
 describe("toSignals rev rule", () => {
   it("a new key is rev 1 and maps ids / quality / close_reason only", () => {
     const [s] = toSignals([win()], "pulse");
-    expect(s).toMatchObject({ proxy: "pulse", source_key: "uid_test_01@mach_test", source_rev: 1, room_id: "room_test_a", t_close: "2026-10-18T04:10:00.000Z" });
+    expect(s).toMatchObject({ proxy: "pulse", source_key: "enc_testaaaaaaaaaaaa@mach_test", source_rev: 1, room_id: "room_abcd2345", t_close: "2026-10-18T04:10:00.000Z" });
     expect(Object.keys(s.attrs).sort()).toEqual(["close_reason", "ids", "quality"]);
   });
   it("an unchanged row keeps its rev, whatever else moved (computed_at, quality, ISO spelling)", () => {
@@ -23,20 +23,20 @@ describe("toSignals rev rule", () => {
   });
   it("a moved t_close gives rev+1; so do a moved t_open, room_id and close reason", () => {
     const p = prior(toSignals([win()], "pulse"));
-    for (const over of [{ t_close: "2026-10-18T04:12:00.000Z" }, { t_open: "2026-10-18T03:59:00.000Z" }, { room_id: "room_test_b" }, { close_reason: "cap_90m" }])
+    for (const over of [{ t_close: "2026-10-18T04:12:00.000Z" }, { t_open: "2026-10-18T03:59:00.000Z" }, { room_id: "room_bcde2345" }, { close_reason: "cap_90m" }])
       expect(toSignals([win(over)], "pulse", p)[0].source_rev, JSON.stringify(over)).toBe(2);
   });
   it("an open window that closes is a new rev, and the next rev continues from the stored one", () => {
     const open = toSignals([win({ t_close: null, close_reason: "open" })], "pulse");
     expect(open[0].t_close).toBeNull();
-    const p = new Map([["uid_test_01@mach_test", { rev: 4, hash: open[0] ? signalHash({ ...open[0], close_reason: "open" }) : "" }]]);
+    const p = new Map([["enc_testaaaaaaaaaaaa@mach_test", { rev: 4, hash: open[0] ? signalHash({ ...open[0], close_reason: "open" }) : "" }]]);
     expect(toSignals([win()], "pulse", p)[0].source_rev).toBe(5);
   });
   it("acoustic and timeline map ms spans and closed_by", () => {
-    const a = toSignals([{ id: "hyp_test_01", room_day_id: "rd_test_01", room_id: "room_test_a", start_ms: "1760760000000", end_ms: 1760760600000, closed_by: "non_speech", created_at: "2026-10-18T05:00:00Z" }], "acoustic");
-    expect(a[0]).toMatchObject({ proxy: "acoustic", source_key: "hyp_test_01", t_open: "2025-10-18T04:00:00.000Z", attrs: { close_reason: "non_speech" } });
-    const t = toSignals([{ consult_key: "uid_test_01@mach_test", id: "tl_test_01", run_id: "run_test_01", room_id: null, start_ms: 1760760000000, end_ms: 1760760600000, closed_by: "patient_left", created_at: "2026-10-18T05:00:00Z" }], "timeline");
-    expect(t[0]).toMatchObject({ proxy: "timeline", source_key: "uid_test_01@mach_test", room_id: null });
+    const a = toSignals([{ id: "eh_abcdefghjkmn", room_day_id: "rd_abcd2345", room_id: "room_abcd2345", start_ms: "1760760000000", end_ms: 1760760600000, closed_by: "non_speech", created_at: "2026-10-18T05:00:00Z" }], "acoustic");
+    expect(a[0]).toMatchObject({ proxy: "acoustic", source_key: "eh_abcdefghjkmn", t_open: "2025-10-18T04:00:00.000Z", attrs: { close_reason: "non_speech" } });
+    const t = toSignals([{ consult_key: "enc_testaaaaaaaaaaaa@mach_test", id: "tl_test_01", run_id: "run_test_01", room_id: null, start_ms: 1760760000000, end_ms: 1760760600000, closed_by: "patient_left", created_at: "2026-10-18T05:00:00Z" }], "timeline");
+    expect(t[0]).toMatchObject({ proxy: "timeline", source_key: "enc_testaaaaaaaaaaaa@mach_test", room_id: null });
   });
   it("a row with no key or no open time is skipped", () => {
     expect(toSignals([win({ consult_key: null }), win({ t_open: null })], "pulse")).toEqual([]);
@@ -65,14 +65,14 @@ describe("key refusal and validation", () => {
     expect(refuseKeys({ a: { phone_no: 1 } })).toBe("text_key");
     expect(refuseKeys({ a: { b: { c: { PATIENT: 1 } } } })).toBe("text_key");
     expect(refuseKeys([{ a: [{ transcript_en: 1 }] }])).toBe("text_key");
-    expect(refuseKeys({ ids: { consult_uid: "uid_test_01" }, quality: "clean" })).toBeNull();
+    expect(refuseKeys({ ids: { consult_uid: "enc_testaaaaaaaaaaaa" }, quality: "clean" })).toBeNull();
   });
   it("refuses a pathologically deep body", () => {
     let o: Record<string, unknown> = {};
     for (let i = 0; i < 40; i++) o = { k: o };
     expect(refuseKeys(o)).toBe("too_deep");
   });
-  const good = { proxy: "pqm", source_key: "pqm_test_01", t_open: "2026-10-18T04:00:00Z", observed_at: "2026-10-18T04:20:00Z", attrs: { ids: { consult_uid: "pqm_test_01" }, close_reason: "pqm" } };
+  const good = { proxy: "pqm", source_key: "pqm_a1b2c3d4e5f6a7b8c9d0e1", t_open: "2026-10-18T04:00:00Z", observed_at: "2026-10-18T04:20:00Z", attrs: { ids: { consult_uid: "pqm_a1b2c3d4e5f6a7b8c9d0e1" }, close_reason: "pqm" } };
   it("accepts a good signal and normalises times", () => {
     const v = validateSignals([good]);
     expect(v.ok && v.rows[0]).toMatchObject({ proxy: "pqm", t_open: "2026-10-18T04:00:00.000Z", t_close: null, room_id: null });

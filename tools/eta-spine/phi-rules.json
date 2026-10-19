@@ -1,0 +1,127 @@
+{
+ "_comment": "Spine PHI value rules, read by lib/spine/phi-screen.ts AND tools/eta-spine/post_signals.py. formats: one fullmatch regex per id key (ASCII classes only, no flags, syntax common to JS and Python); source_key_format: proxy -> the id key whose format its source_key must have (a proxy absent here is refused). Derivation with file:line is in lib/spine/phi-screen.ts.",
+ "enums": {
+  "pulse": {
+   "close_reason": [
+    "endConsult",
+    "url_clear",
+    "next_open",
+    "logout",
+    "idle_timeout",
+    "cap_90m",
+    "open"
+   ],
+   "quality": [
+    "clean",
+    "ambiguous",
+    "multi_doctor",
+    "unclosed",
+    "unattributed"
+   ]
+  },
+  "acoustic": {
+   "close_reason": [
+    "non_speech",
+    "unjudged_gap",
+    "tape_off",
+    "dead_mic",
+    "end_of_input",
+    "content_boundary",
+    "pulse_end",
+    "jev_end",
+    "next_start",
+    "last_doc_turn",
+    "cap_90m"
+   ],
+   "quality": []
+  },
+  "timeline": {
+   "close_reason": [
+    "patient_left",
+    "next_start",
+    "tape_off",
+    "dead_mic",
+    "cap"
+   ],
+   "quality": []
+  },
+  "pqm": {
+   "close_reason": [
+    "pqm"
+   ],
+   "quality": [
+    "pqm",
+    "suspect"
+   ]
+  },
+  "cutter": {
+   "close_reason": [
+    "endConsult",
+    "url_clear",
+    "next_open",
+    "logout",
+    "idle_timeout",
+    "cap_90m",
+    "open",
+    "pqm"
+   ],
+   "quality": [
+    "cut",
+    "skipped",
+    "error",
+    "planned",
+    "deferred",
+    "deferred_long",
+    "clean",
+    "ambiguous",
+    "multi_doctor",
+    "unclosed",
+    "unattributed",
+    "pqm",
+    "suspect"
+   ]
+  },
+  "caa": {
+   "close_reason": [],
+   "quality": []
+  },
+  "doctor_activity": {
+   "close_reason": [],
+   "quality": []
+  },
+  "nemotron_window": {
+   "close_reason": [],
+   "quality": []
+  }
+ },
+ "id_keys": [
+  "consult_key",
+  "consult_uid",
+  "hypothesis_id",
+  "room_day_id",
+  "shadow_id",
+  "run_id",
+  "pqm_step_uid",
+  "window_id"
+ ],
+ "formats": {
+  "consult_uid": "^(?:pqm_[0-9a-f]{22}|(?:enc_(?!.*[0-9]{7})[A-Za-z0-9]{6,40}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?!.*[0-9]{7})[A-Za-z0-9]{20,40}))$",
+  "consult_key": "^(?:enc_(?!.*[0-9]{7})[A-Za-z0-9]{6,40}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?!.*[0-9]{7})[A-Za-z0-9]{20,40})@(?!.*[0-9]{7})[A-Za-z0-9][A-Za-z0-9._-]{0,62}$",
+  "pqm_step_uid": "^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,64})$",
+  "window_id": "^(?:bw_[a-hjkmnp-z2-9]{8}_[0-9]{13}_(?:primary|backup)|[0-9]{1,7}|1[0-2][0-9]{14})$",
+  "room_id": "^room_[a-hjkmnp-z2-9]{8}$",
+  "room_day_id": "^rd_[a-hjkmnp-z2-9]{8}$",
+  "hypothesis_id": "^eh_[a-hjkmnp-z2-9]{12}$",
+  "run_id": "^(?:ehr_[a-hjkmnp-z2-9]{12}|ets_[0-9a-f]{18})$",
+  "shadow_id": "^et_[0-9a-f]{18}$"
+ },
+ "source_key_format": {
+  "pulse": "consult_key",
+  "timeline": "consult_key",
+  "acoustic": "hypothesis_id",
+  "pqm": "consult_uid",
+  "cutter": "consult_uid",
+  "caa": "consult_uid",
+  "nemotron_window": "window_id"
+ }
+}

@@ -23,9 +23,9 @@ def run(argv):
     return rc, out.getvalue()
 
 
-PQM = dict(consult_uid="pqm_test_01", room_id="room_test_a", t_open=T0, t_close=T0 + 600, close_reason="pqm", quality="pqm", pqm_step_uid="step_test_01")
-CUT = dict(consult_uid="uid_test_01", room_id="room_test_a", span_start="2026-10-18 09:30:00.000", span_end="2026-10-18 09:40:00.500", status="cut", window_id=7)
-CAA = dict(consult_uid="uid_test_02", scope_path="scope/room_test_a/x", manifest=dict(t0_ms=1790000000000, t1_ms=1790000600000))
+PQM = dict(consult_uid="pqm_a1b2c3d4e5f6a7b8c9d0e1", room_id="room_abcd2345", t_open=T0, t_close=T0 + 600, close_reason="pqm", quality="pqm", pqm_step_uid="a1b2c3d4e5f6a7b8c9d0")
+CUT = dict(consult_uid="enc_testaaaaaaaaaaaa", room_id="room_abcd2345", span_start="2026-10-18 09:30:00.000", span_end="2026-10-18 09:40:00.500", status="cut", window_id=7)
+CAA = dict(consult_uid="enc_testbbbbbbbbbbbb", scope_path="scope/room_abcd2345/x", manifest=dict(t0_ms=1790000000000, t1_ms=1790000600000))
 
 
 def test_dry_run_is_default_prints_counts_only_and_makes_no_network_call(tmp_path):
@@ -34,7 +34,7 @@ def test_dry_run_is_default_prints_counts_only_and_makes_no_network_call(tmp_pat
         rc, out = run(["--kind", "pqm", "--file", f])
     assert rc == 0
     assert json.loads(out) == {"mode": "dry-run", "kind": "pqm", "read": 3, "bad_lines": 1, "skipped": 1, "refused": 0, "signals": 1}
-    assert "pqm_test_01" not in out and "room_test_a" not in out
+    assert "pqm_a1b2c3d4e5f6a7b8c9d0e1" not in out and "room_abcd2345" not in out
 
 
 def test_dry_run_never_reads_the_token(tmp_path):
@@ -45,22 +45,22 @@ def test_dry_run_never_reads_the_token(tmp_path):
 
 def test_mappers():
     p = P.from_pqm(PQM, "o")
-    assert (p["proxy"], p["source_key"], p["t_open"], p["t_close"]) == ("pqm", "pqm_test_01", "2026-09-21T14:13:20.000Z", "2026-09-21T14:23:20.000Z")
-    assert p["attrs"] == {"ids": {"consult_uid": "pqm_test_01", "pqm_step_uid": "step_test_01"}, "quality": "pqm", "close_reason": "pqm"}
+    assert (p["proxy"], p["source_key"], p["t_open"], p["t_close"]) == ("pqm", "pqm_a1b2c3d4e5f6a7b8c9d0e1", "2026-09-21T14:13:20.000Z", "2026-09-21T14:23:20.000Z")
+    assert p["attrs"] == {"ids": {"consult_uid": "pqm_a1b2c3d4e5f6a7b8c9d0e1", "pqm_step_uid": "a1b2c3d4e5f6a7b8c9d0"}, "quality": "pqm", "close_reason": "pqm"}
     c = P.from_cutter(CUT, "o")
     assert (c["t_open"], c["t_close"]) == ("2026-10-18T04:00:00.000Z", "2026-10-18T04:10:00.500Z")   # IST -> UTC
     a = P.from_caa(CAA, "o")
-    assert (a["room_id"], a["t_close"]) == ("room_test_a", "2026-09-21T14:23:20.000Z")
+    assert (a["room_id"], a["t_close"]) == ("room_abcd2345", "2026-09-21T14:23:20.000Z")
     assert P.from_caa(dict(CAA, manifest={}), "o") is None
     for s in (p, c, a):
         assert set(s) <= {"proxy", "source_key", "room_id", "t_open", "t_close", "observed_at", "attrs"} and "source_rev" not in s
 
 
 def test_cutter_takes_the_latest_row_per_uid(tmp_path):
-    f = write(tmp_path, [CUT, CUT | {"span_end": "2026-10-18 09:45:00.000"}, CUT | {"consult_uid": "uid_test_09"}])
+    f = write(tmp_path, [CUT, CUT | {"span_end": "2026-10-18 09:45:00.000"}, CUT | {"consult_uid": "enc_testcccccccccccc"}])
     sigs, counts = P.build(f, "cutter", "o")
     assert counts["signals"] == 2
-    assert [s["t_close"] for s in sigs if s["source_key"] == "uid_test_01"] == ["2026-10-18T04:15:00.000Z"]
+    assert [s["t_close"] for s in sigs if s["source_key"] == "enc_testaaaaaaaaaaaa"] == ["2026-10-18T04:15:00.000Z"]
 
 
 def test_disallowed_keys_are_refused_client_side_at_any_depth_and_never_sent(tmp_path):
@@ -95,7 +95,7 @@ def test_post_needs_url_and_token_file_and_a_0600_token(tmp_path):
 
 
 def test_post_sends_a_bearer_batch_and_reports_counts(tmp_path):
-    f = write(tmp_path, [PQM, PQM | {"consult_uid": "pqm_test_02"}])
+    f = write(tmp_path, [PQM, PQM | {"consult_uid": "pqm_b1b2c3d4e5f6a7b8c9d0e1"}])
     tok = tmp_path / "tok"
     tok.write_text("tok_test\n")
     os.chmod(tok, 0o600)
@@ -110,3 +110,31 @@ def test_post_sends_a_bearer_batch_and_reports_counts(tmp_path):
     with mock.patch.object(P, "post_batch", lambda u, t, b: (401, {})):
         rc, out = run(["--kind", "pqm", "--file", f, "--post", "--url", "https://x.test/x", "--token-file", str(tok)])
     assert rc == 1 and json.loads(out)["failed_status"] == 401
+
+
+def _post(tmp_path, rows, responder):
+    f = write(tmp_path, rows)
+    tok = tmp_path / "tok"
+    tok.write_text("tok_test\n")
+    os.chmod(tok, 0o600)
+    with mock.patch.object(P, "post_batch", responder):
+        return run(["--kind", "pqm", "--file", f, "--post", "--url", "https://x.test/x", "--token-file", str(tok)])
+
+
+def test_a_server_conflict_is_counted_reported_and_exits_3(tmp_path):
+    rc, out = _post(tmp_path, [PQM, PQM | {"consult_uid": "pqm_b1b2c3d4e5f6a7b8c9d0e1"}], lambda u, t, b: (200, {"ok": True, "inserted": 1, "duplicate": 0, "conflict": 1}))
+    assert rc == 3
+    assert json.loads(out)["conflict"] == 1 and json.loads(out)["inserted"] == 1
+
+
+def test_conflicts_add_up_across_batches_and_zero_conflict_is_rc_0(tmp_path):
+    with mock.patch.object(P, "BATCH", 1):
+        rc, out = _post(tmp_path, [PQM, PQM | {"consult_uid": "pqm_b1b2c3d4e5f6a7b8c9d0e1"}], lambda u, t, b: (200, {"ok": True, "inserted": 0, "duplicate": 0, "conflict": 1}))
+    assert rc == 3 and json.loads(out)["conflict"] == 2
+    rc, out = _post(tmp_path, [PQM], lambda u, t, b: (200, {"ok": True, "inserted": 1, "duplicate": 0, "conflict": 0}))
+    assert rc == 0 and json.loads(out)["conflict"] == 0
+
+
+def test_a_response_without_a_conflict_field_is_zero(tmp_path):
+    rc, out = _post(tmp_path, [PQM], lambda u, t, b: (200, {"ok": True, "inserted": 1, "duplicate": 0}))
+    assert rc == 0 and json.loads(out)["conflict"] == 0

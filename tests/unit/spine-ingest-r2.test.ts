@@ -8,11 +8,11 @@ import { storeSignals, readIngestMode } from "@/lib/spine/ingest-store";
 import { parseIngestMode } from "@/lib/spine/config";
 import { signalHash, toSignals } from "@/lib/spine/ingest";
 
-const s = (over: Record<string, unknown> = {}) => ({ proxy: "pqm" as const, source_key: "pqm_test_01", room_id: null, t_open: "2026-10-18T04:00:00.250Z", t_close: "2026-10-18T04:10:00.750Z", observed_at: "2026-10-18T04:20:00.000Z", attrs: {}, ...over });
+const s = (over: Record<string, unknown> = {}) => ({ proxy: "pqm" as const, source_key: "pqm_a1b2c3d4e5f6a7b8c9d0e1", room_id: null, t_open: "2026-10-18T04:00:00.250Z", t_close: "2026-10-18T04:10:00.750Z", observed_at: "2026-10-18T04:20:00.000Z", attrs: {}, ...over });
 const isPrior = (t: string) => /FROM spine_signal WHERE proxy/.test(t);
 const isInsert = (t: string) => /INSERT INTO spine_signal/.test(t);
 const echo = (params: unknown[]) => (JSON.parse(params[0] as string) as Array<Record<string, unknown>>).map((r) => ({ proxy: r.proxy, source_key: r.source_key, source_rev: r.source_rev }));
-const prior = (rev: number, t_open: unknown, t_close: unknown) => [{ source_key: "pqm_test_01", source_rev: rev, room_id: null, t_open, t_close, close_reason: null }];
+const prior = (rev: number, t_open: unknown, t_close: unknown) => [{ source_key: "pqm_a1b2c3d4e5f6a7b8c9d0e1", source_rev: rev, room_id: null, t_open, t_close, close_reason: null }];
 
 beforeEach(() => { D.calls.length = 0; });
 
@@ -85,7 +85,7 @@ describe("config gate", () => {
 
 describe("toSignals carries run_id for acoustic", () => {
   it("attrs.ids has hypothesis_id and run_id", () => {
-    const [a] = toSignals([{ id: "hyp_test_01", run_id: "run_test_01", room_day_id: "rd_test_01", room_id: "r", start_ms: 1760760000000, end_ms: 1760760600000, closed_by: "non_speech", created_at: "2026-10-18T05:00:00Z" }], "acoustic");
-    expect(a.attrs.ids).toEqual({ hypothesis_id: "hyp_test_01", room_day_id: "rd_test_01", run_id: "run_test_01" });
+    const [a] = toSignals([{ id: "eh_abcdefghjkmn", run_id: "run_test_01", room_day_id: "rd_abcd2345", room_id: "r", start_ms: 1760760000000, end_ms: 1760760600000, closed_by: "non_speech", created_at: "2026-10-18T05:00:00Z" }], "acoustic");
+    expect(a.attrs.ids).toEqual({ hypothesis_id: "eh_abcdefghjkmn", room_day_id: "rd_abcd2345", run_id: "run_test_01" });
   });
 });

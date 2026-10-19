@@ -11,7 +11,7 @@ import { NextRequest } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 
 const SAVED = { t: process.env.SPINE_INGEST_TOKEN, c: process.env.CRON_SECRET };
-const sig = (over: Record<string, unknown> = {}) => ({ proxy: "pqm", source_key: "pqm_test_01", source_rev: 1, t_open: "2026-10-18T04:00:00Z", observed_at: "2026-10-18T04:20:00Z", attrs: { ids: { consult_uid: "pqm_test_01" } }, ...over });
+const sig = (over: Record<string, unknown> = {}) => ({ proxy: "pqm", source_key: "pqm_a1b2c3d4e5f6a7b8c9d0e1", source_rev: 1, t_open: "2026-10-18T04:00:00Z", observed_at: "2026-10-18T04:20:00Z", attrs: { ids: { consult_uid: "pqm_a1b2c3d4e5f6a7b8c9d0e1" } }, ...over });
 const post = (body: unknown, auth: string | null = "Bearer tok_test") =>
   new NextRequest("https://x.test/api/spine/signals", { method: "POST", body: typeof body === "string" ? body : JSON.stringify(body), headers: auth ? { authorization: auth } : {} });
 
