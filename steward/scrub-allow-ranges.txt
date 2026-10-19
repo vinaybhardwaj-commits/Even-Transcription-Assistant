@@ -30,3 +30,6 @@ steward/scrub-allow-ranges.txt 169.254.0.0/16
 steward/scrub-allow-ranges.txt ::1
 steward/scrub-allow-ranges.txt fc00::/7
 steward/scrub-allow-ranges.txt fe80::/10
+# Fable ruling 19 Oct 2026: RFC 1918 literal in a ubus test fixture (an ECONNREFUSED error string); not a host.
+tools/ubus/nodelink/test/nodelink.test.ts 10.0.0.1
+steward/scrub-allow-ranges.txt 10.0.0.1
