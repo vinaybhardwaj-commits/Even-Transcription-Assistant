@@ -223,7 +223,10 @@ async function ackRig(): Promise<{ rig: ReturnType<typeof setup>; v3: string; v1
   process.env.UBUS_V3_ALLOWLIST = join(rig.dir, "allowlist.json");
   await register(rig.ubus, "fable", { runtime: "cowork", session: "cowork:fable", owner: "v" });
   await register(rig.ubus, "worker");
-  const sent = await rig.ubus.call("ubus_send", { to: ["fable"], subject: "note", body: "count=1 path=~/dev/eta-lab/a.json" }, caller("worker"));
+  // Straight to the v3 log: through the shim the alias would now route to v1's fable.
+  const sent = (rig.ubus as unknown as { hub(): { send(a: object, c: unknown): Record<string, unknown> } })
+    .hub()
+    .send({ to: ["cc-air-work-local"], subject: "note", body: "count=1 path=~/dev/eta-lab/a.json" }, caller("worker"));
   await rig.ubus.call("ubus_inbox", {}, caller("fable"));
   const req = await rig.ubus.call("ubus_request", { to: "fable", subject: "need count", body: "path=~/dev/eta-lab/r.json count=1" }, caller("worker"));
   const v3 = String(sent.id);

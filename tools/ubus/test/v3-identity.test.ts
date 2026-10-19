@@ -13,16 +13,17 @@ test("a send to fable and one to cc-air-work-local land in the same inbox", asyn
   writeFileSync(process.env.UBUS_V3_ALLOWLIST, JSON.stringify({ terms: ["Human RAG", "newcat"] }));
   try {
     await register(rig.ubus, "fable", { runtime: "cowork", session: "cowork:fable", owner: "v" });
+    await register(rig.ubus, "worker");
     const direct = await rig.ubus.call(
       "ubus_send",
       { to: ["fable"], subject: "one", body: "count=1 path=~/dev/eta-lab/a.json" },
-      caller("fable"),
+      caller("worker"),
     );
     assert.equal(direct.ok, true, JSON.stringify(direct));
     const viaAlias = await rig.ubus.call(
       "ubus_send",
       { to: ["cc-air-work-local"], subject: "two", body: "count=2 path=~/dev/eta-lab/b.json" },
-      caller("fable"),
+      caller("worker"),
     );
     assert.equal(viaAlias.ok, true, JSON.stringify(viaAlias));
     assert.equal((viaAlias.delivery as Array<{ to: string }>)[0]?.to, "fable");
@@ -32,7 +33,7 @@ test("a send to fable and one to cc-air-work-local land in the same inbox", asyn
     const messages = inbox.messages as Array<{ subject: string; from: { handle: string }; state: string }>;
     assert.equal(messages.length, 2, JSON.stringify(messages.map((m) => m.subject)));
     assert.deepEqual(messages.map((m) => m.subject).sort(), ["one", "two"]);
-    assert.equal(messages.every((m) => typeof m.state === "string" && m.state.length > 0), true);
+    assert.equal(messages.every((m) => typeof (m.state ?? (m as { delivery_status?: string }).delivery_status) === "string"), true);
   } finally {
     delete process.env.UBUS_V3;
     delete process.env.UBUS_V3_DB;

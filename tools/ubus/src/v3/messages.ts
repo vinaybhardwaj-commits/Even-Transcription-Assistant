@@ -198,7 +198,13 @@ export class Messages {
     return [];
   }
 
-  send(args: Record<string, unknown>, caller: Caller): ToolResult {
+  /** True when v3 can deliver to this name itself (identity registry or a live v1-registered agent). */
+  resolves(name: string): boolean {
+    return !!(this.opts.identity.resolve(name) ?? (this.opts.exists?.(name) ? name : undefined));
+  }
+
+  /** `bodyMaxBytes` overrides the v3 280-byte cap; the UBUS_V3 shim passes the v1 limit. */
+  send(args: Record<string, unknown>, caller: Caller, limits: { bodyMaxBytes?: number } = {}): ToolResult {
     const sender = caller.handle;
     if (!sender) return { ok: false, error: "not_registered", message: "call ubus_register with {handle, machine}; session is optional" };
     const subject = asString(args.subject);
@@ -218,8 +224,9 @@ export class Messages {
       return { ok: false, error: "too_long", reason: "too_long", field: "subject", limit: SUBJECT_MAX_CHARS, got: subject.length };
     }
     // The body limit holds whether or not a body_ref is attached.
-    if (bytesLen(body) > BODY_MAX_BYTES) {
-      return { ok: false, error: "too_long", reason: "too_long", field: "body", limit: BODY_MAX_BYTES, got: bytesLen(body) };
+    const bodyMax = limits.bodyMaxBytes ?? BODY_MAX_BYTES;
+    if (bytesLen(body) > bodyMax) {
+      return { ok: false, error: "too_long", reason: "too_long", field: "body", limit: bodyMax, got: bytesLen(body) };
     }
     if (body && bodyRef) return { ok: false, error: "invalid", reason: "invalid", message: "body and body_ref are mutually exclusive" };
     const checked = checkFilter(`${subject}\n${body}`, this.opts.filter);
