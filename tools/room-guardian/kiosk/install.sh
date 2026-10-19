@@ -28,12 +28,16 @@ case "$ROOM" in ''|*[!a-z0-9-]*) echo "--room <slug> required (lowercase letters
 # S2: --mic-class writes GUARDIAN_MIC_CLASS into the conf: the --config source (else the existing conf, else the stub) with any active GUARDIAN_MIC_CLASS line replaced.
 if [ "$MIC_SET" = 1 ]; then
   case "$MIC_CLASS" in webcam|tonor) ;; *) echo "refusing: --mic-class must be webcam or tonor" >&2; exit 2 ;; esac
-  MC_BASE="$CONFIG"
-  if [ -z "$MC_BASE" ] && [ -f "$GUARDIAN_HOME/guardian.conf" ] && [ -r "$GUARDIAN_HOME/guardian.conf" ]; then MC_BASE="$GUARDIAN_HOME/guardian.conf"; fi
+  MC_BASE="$CONFIG"; MC_TMP=""; MC_OUT=""
+  trap 'rm -f "${MC_TMP:-}" "${MC_OUT:-}"' EXIT   # F3: the temp conf goes on every exit path, refusals included
+  if [ -z "$MC_BASE" ] && { [ -e "$GUARDIAN_HOME/guardian.conf" ] || [ -L "$GUARDIAN_HOME/guardian.conf" ]; }; then
+    # F2: an existing conf that cannot be read is refused, as without the flag; it never falls back to the stub
+    if [ -f "$GUARDIAN_HOME/guardian.conf" ] && [ -r "$GUARDIAN_HOME/guardian.conf" ]; then MC_BASE="$GUARDIAN_HOME/guardian.conf"; else echo "refusing: existing guardian.conf is not a readable file; move it aside" >&2; exit 2; fi
+  fi
   MC_TMP="$(mktemp)" || exit 1
   if [ -n "$MC_BASE" ]; then cat "$MC_BASE" >"$MC_TMP"; else sed "s/<room-slug>/$ROOM/" "$SRC/guardian.conf.example" >"$MC_TMP"; fi
   MC_OUT="$(mktemp)" || exit 1
-  { grep -v -E '^[[:space:]]*(export[[:space:]]+)?GUARDIAN_MIC_CLASS=' "$MC_TMP"; printf 'GUARDIAN_MIC_CLASS="%s"\n' "$MIC_CLASS"; } >"$MC_OUT"
+  ( . "$SRC/lib/conf.sh"; mic_class_set "$MIC_CLASS" ) <"$MC_TMP" >"$MC_OUT" || exit 1
   rm -f "$MC_TMP"; CONFIG="$MC_OUT"
 fi
 # R12: guardian.conf is data, parsed by lib/conf.sh. Refuse a config the agent would reject (it would run killed), before anything is installed.
@@ -222,5 +226,4 @@ if [ "$LOAD" -eq 1 ]; then
 else
   echo "agent NOT loaded. Load with: launchctl bootstrap gui/\$(id -u) \"$PLIST\"  (or re-run with --load)"
 fi
-[ -z "${MC_OUT:-}" ] || rm -f "$MC_OUT"
 echo "manual: sudoers NOPASSWD for $GUARDIAN_ROOT_HELPER only; Guardian starts in SHADOW; HEAL is set from the Mini."
