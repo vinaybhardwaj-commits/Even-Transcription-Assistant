@@ -41,6 +41,18 @@ class SubscriberTests(unittest.TestCase):
         self.assertEqual(open(os.path.join(d, "r1.health.jsonl")).read(), '{"a":1}\n')
         self.assertEqual(sorted(os.listdir(d)), ["r1.heal.jsonl", "r1.health.jsonl"])
 
+    def test_health_line_with_unknown_sense_keys_passes_through_unchanged(self):
+        # S2: the kiosk health line gains zr, peak, mic_class; the subscriber stores the line as received and keeps handling it
+        s = self.mk()
+        line = '{"room_id":"r1","rms_dbfs_2s":-70.1,"guardian":"v","zr":0.800,"peak":0.0009,"mic_class":"tonor"}\n'
+        self.assertTrue(s.on_line("kiosk/r1/health", line))
+        d = os.path.join(s.data, "2026-10-13")
+        self.assertEqual(open(os.path.join(d, "r1.health.jsonl")).read(), line)
+        self.assertEqual(s.last_health["r1"][1]["zr"], 0.8); self.assertEqual(s.last_health["r1"][1]["mic_class"], "tonor")
+        nulls = '{"room_id":"r1","zr":null,"peak":null,"mic_class":null}\n'
+        self.assertTrue(s.on_line("kiosk/r1/health", nulls))
+        self.assertEqual(open(os.path.join(d, "r1.health.jsonl")).read(), line + nulls)
+
     def test_quiet_after_120s_once_then_recovery_closes(self):
         s = self.mk()
         self.clock.adv(100); s.on_line("kiosk/r1/health", "{}"); self.assertEqual(s.check_quiet(), [])

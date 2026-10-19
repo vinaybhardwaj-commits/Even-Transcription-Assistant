@@ -31,6 +31,7 @@ conf_value_ok() {
   local re_sudo='^[A-Za-z0-9 ._/=:,+-]*$'
   local re_abs='^/[A-Za-z0-9 ._/+@-]{0,254}$'
   local re_pat='^[A-Za-z0-9 ._+()-]{1,64}$'
+  local re_class='^[A-Za-z0-9 ._+()-]{0,64}$'
   local re_vol='^0\.[0-9]{1,2}$'
   local re_ssh='^[[:print:]]*$'
   case "$k" in
@@ -42,6 +43,7 @@ conf_value_ok() {
       case "$v" in */..|*/../*|*/./*|*/.) return 1 ;; esac
       return 0 ;;
     USB_MIC_PATTERN) [[ $v =~ $re_pat ]] ;;
+    GUARDIAN_MIC_CLASS) [[ $v =~ $re_class ]] ;;   # S2: shape only; any value but webcam or tonor resolves to unknown (mic_class_apply), it never kills the agent
     CANARY_VOLUME) [[ $v =~ $re_vol ]] ;;
     GUARDIAN_PIPE_SSH) [ "${#v}" -le 2048 ] && [[ $v =~ $re_ssh ]] ;;
     *) return 1 ;;
@@ -50,7 +52,7 @@ conf_value_ok() {
 
 conf_key_known() {
   case "$1" in
-    GUARDIAN_ROOM|GUARDIAN_PUBLISH_CMD|GUARDIAN_SUBSCRIBE_CMD|GUARDIAN_CONTROL_SUB_CMD|GUARDIAN_SUDO|GUARDIAN_ROOT_HELPER|USB_MIC_PATTERN|CANARY_VOLUME|PRESENCE_FILE|GUARDIAN_PIPE_SSH) return 0 ;;
+    GUARDIAN_ROOM|GUARDIAN_PUBLISH_CMD|GUARDIAN_SUBSCRIBE_CMD|GUARDIAN_CONTROL_SUB_CMD|GUARDIAN_SUDO|GUARDIAN_ROOT_HELPER|USB_MIC_PATTERN|CANARY_VOLUME|PRESENCE_FILE|GUARDIAN_PIPE_SSH|GUARDIAN_MIC_CLASS) return 0 ;;
   esac
   return 1
 }
@@ -126,7 +128,7 @@ conf_load() {
   local re_bare='^([A-Za-z0-9._/:@+,=%-]*)([[:space:]]*|[[:space:]]+#.*)$'
   local re_badbyte=$'[^[:print:]\t]'
   local re_bad_dq='(^|[^\\])(\\\\)*[$`]'
-  CONF_ERR_N=0
+  CONF_ERR_N=0; CONF_USB_EXPLICIT=0
   if [ "${2:-}" != noperm ]; then conf_perms_ok "$file" || return 1; fi
   if [ ! -f "$file" ] || [ ! -r "$file" ]; then
     # /dev/null and friends: a readable non-regular file is an empty config, not an error
@@ -165,9 +167,26 @@ conf_load() {
     fi
     if ! conf_value_ok "$key" "$inner"; then conf_err "$lineno" "value rejected: $key"; continue; fi
     printf -v "$key" '%s' "$inner"
+    if [ "$key" = USB_MIC_PATTERN ]; then CONF_USB_EXPLICIT=1; fi
     if [ "$key" = GUARDIAN_PIPE_SSH ]; then export GUARDIAN_PIPE_SSH; fi
   done <<<"$content"
+  mic_class_apply
   [ "$CONF_ERR_N" -eq 0 ]
+}
+
+# S2: conf text on stdin -> stdout with every active GUARDIAN_MIC_CLASS line removed and exactly one for <class> appended (install.sh --mic-class).
+mic_class_set() {
+  grep -v -E '^[[:space:]]*(export[[:space:]]+)?GUARDIAN_MIC_CLASS=' || true
+  printf 'GUARDIAN_MIC_CLASS="%s"\n' "$1"
+}
+
+# S2 (sense only): the room's mic class. GUARDIAN_MIC_CLASS is webcam or tonor; unset or anything else is unknown.
+# The class picks the USB pattern: webcam keeps the USB_MIC_PATTERN default (C270), tonor uses TONOR; an explicit USB_MIC_PATTERN in the conf always wins.
+mic_class_apply() {
+  case "${GUARDIAN_MIC_CLASS:-}" in webcam|tonor) ;; *) GUARDIAN_MIC_CLASS=unknown ;; esac
+  # F4: the real ioreg product name of the Tonor mic is UNVERIFIED; the match stays case-sensitive unless the conf's USB_MIC_PATTERN says otherwise.
+  if [ "$GUARDIAN_MIC_CLASS" = tonor ] && [ "${CONF_USB_EXPLICIT:-0}" != 1 ]; then USB_MIC_PATTERN=TONOR; fi
+  return 0
 }
 
 # ---- R15 (G14-3 i, ii): the code tree and every ancestor of it ----
