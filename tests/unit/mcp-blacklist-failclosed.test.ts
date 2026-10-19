@@ -31,7 +31,9 @@ describe("N4 blacklist lookup fails closed", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     H.handler = async (t) => (t.includes("mcp_identity") ? [{ x: 1 }] : []);
     await expect(S.grantPerson(E, ["read"], "t")).rejects.toThrow("blacklisted");
-    expect(wrote(H.calls).every((c) => c.text.includes("audit_log"))).toBe(true);
+    const w = wrote(H.calls);
+    expect(w).toHaveLength(1);
+    expect(w[0]!.text).toContain("audit_log");
     expect(H.calls.some((c) => c.text.includes("mcp_person"))).toBe(false);
   });
 });
@@ -44,14 +46,14 @@ describe("N12 env denylist source is wired into realSources", () => {
     const hash = "ab".repeat(32);
     process.env[MCP_TOKENS_DENY_ENV] = JSON.stringify([hash]);
     H.handler = async (t, v) => {
-      if (t.includes("FROM mcp_key WHERE key_hash")) { expect(JSON.stringify(v)).toContain(hash); return [{ email: "r7.env@example.test" }]; }
+      if (t.includes("FROM mcp_key WHERE key_hash")) { expect(JSON.stringify(v)).toContain(hash); return [{ email: "r7.env@example.test" }, { email: "r7.env2@example.test" }]; }
       if (t.includes("FROM mcp_person")) return [{ email: "r7.db@example.test" }];
       return [];
     };
-    expect(await run(["--dry-count"])).toEqual({ code: 0, lines: ["db=1 env=1 union=2 rejected=0"] });
+    expect(await run(["--dry-count"])).toEqual({ code: 0, lines: ["db=1 env=2 union=3 rejected=0"] });
     const f = `${outside}/n12.json`;
     const w = await run([f]);
-    expect(w).toEqual({ code: 0, lines: ["db=1 env=1 addresses=2"] });
-    expect(JSON.parse(readFileSync(f, "utf8"))).toEqual(["r7.db@example.test", "r7.env@example.test"]);
+    expect(w).toEqual({ code: 0, lines: ["db=1 env=2 addresses=3"] });
+    expect(JSON.parse(readFileSync(f, "utf8"))).toEqual(["r7.db@example.test", "r7.env2@example.test", "r7.env@example.test"]);
   });
 });

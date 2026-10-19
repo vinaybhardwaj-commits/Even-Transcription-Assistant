@@ -74,4 +74,13 @@ describe("blacklist-from-revocations script", () => {
     expect((await run([`${outside}/many.json`], many, [])).code).toBe(1);
     expect(existsSync(`${outside}/none.json`)).toBe(false);
   });
+  it("R8 rejected counts distinct unusable rows from the db side too (dry-count and real run both exit 1)", async () => {
+    const dry = await run(["--dry-count"], [A, "Bad@example.test"], [B]);
+    expect(dry).toEqual({ code: 1, lines: ["db=1 env=1 union=2 rejected=1"] });
+    expect((await run([`${outside}/r8-db-bad.json`], [A, "Bad@example.test"], [B])).code).toBe(1);
+  });
+  it("R8 duplicate usable rows are not rejects (dry-count exits 0, rejected=0); duplicate unusable rows count once", async () => {
+    expect(await run(["--dry-count"], [A, A], [B, B])).toEqual({ code: 0, lines: ["db=1 env=1 union=2 rejected=0"] });
+    expect((await run(["--dry-count"], ["Bad@example.test", "Bad@example.test"], [])).lines).toEqual(["db=0 env=0 union=0 rejected=1"]);
+  });
 });
