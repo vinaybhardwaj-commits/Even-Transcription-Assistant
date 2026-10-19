@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # Kiosk Guardian main loop (launchd user agent, runs as the console user).
 #   guardian.sh run      loop forever: health line every 10 s, heal cycle, subscriber child
 #   guardian.sh once     one tick (collect, publish health, heal cycle) and exit
@@ -14,7 +14,18 @@
 # re-exec. The one re-exec carries a marker ARGUMENT (an argument cannot come from the environment); if p is still missing after it, exit killed.
 G_REEXEC=0
 if [[ ${1:-} == --reexec ]]; then G_REEXEC=1; shift; fi
-if [[ $- != *p* ]] && [[ ${1:-run} == run || ${1:-} == check ]]; then
+# R15 (N3): once and handle re-exec under bash -p exactly as run and check do, unless this is the test entry: the harness marker, a once|handle mode, and tests/run.sh next to
+# the script tree (the same condition as below, built from keywords and builtins only).
+# R15b (S2): the shebang is `#!/bin/bash -p` and the plist runs `/bin/bash -p`, so an entry through either never reads BASH_ENV or ENV and never imports an exported function.
+# The re-exec below is the fallback for `bash guardian.sh ...` by hand, and it uses the builtin exec: a BASH_ENV defining exec() would stop it. `bash guardian.sh` under a hostile
+# BASH_ENV set by the agent uid is out of the model (README).
+G_SRCDIR=.; [[ ${BASH_SOURCE[0]} == */* ]] && G_SRCDIR="${BASH_SOURCE[0]%/*}"
+G_NEED_P=0
+case "${1:-run}" in
+  run|check) G_NEED_P=1 ;;
+  once|handle) if ! { [[ ${GUARDIAN_TEST_ENTRY:-} == 1 ]] && [ -f "$G_SRCDIR/../tests/run.sh" ]; }; then G_NEED_P=1; fi ;;
+esac
+if [[ $- != *p* ]] && [[ $G_NEED_P == 1 ]]; then
   if [[ $G_REEXEC == 1 ]]; then echo "guardian: bash -p could not be set: KILLED" >&2; exit 3; fi
   exec /bin/bash -p "$0" --reexec "$@"
 fi
@@ -24,18 +35,64 @@ shopt -u expand_aliases 2>/dev/null
 trap - DEBUG ERR RETURN 2>/dev/null
 set +T +E 2>/dev/null
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERE_U="$(CDPATH='' cd -- "$G_SRCDIR/.." && pwd)"   # builtins only (R15b): no dirname, no PATH lookup before the pre-source check; CDPATH cleared. R16b: the path AS STARTED, symlinks unresolved
+HERE="$(CDPATH='' cd -P -- "$G_SRCDIR/.." && pwd -P)"   # the resolved tree (R16 N1). Any difference from HERE_U means a symlink on the way in: the pre-source check refuses it
 G_MODE_ARG="${1:-run}"
 # R13 S5. The test entry is honoured only for once|handle, with GUARDIAN_TEST_ENTRY=1, and only when the test harness file sits next to this
 # script tree. install.sh never copies tests/, so an installed tree has no such file and ignores the variable.
 if [ "${GUARDIAN_TEST_ENTRY:-}" = 1 ] && { [ "$G_MODE_ARG" = once ] || [ "$G_MODE_ARG" = handle ]; } && [ -f "$HERE/tests/run.sh" ]; then
-  unset G_RUNMODE G_CONF_BAD G_BAD_CONST
+  unset G_RUNMODE G_CONF_BAD G_BAD_CONST G_TREE_BAD G_TREE_WHY
   CONF="${GUARDIAN_CONF:-${GUARDIAN_HOME:-$HOME/Library/Application Support/EvenScribe/Guardian}/guardian.conf}"
 else
   unset GUARDIAN_TESTMODE GUARDIAN_FAKE_NOW GUARDIAN_PS GUARDIAN_FLAG_CMD GUARDIAN_CONF GUARDIAN_TEST_ENTRY CANARY_AFPLAY \
-    GUARDIAN_ROOT_TESTMODE GUARDIAN_ROOT_TEST_DB FAKE_SP_SLEEP G_CONF_BAD G_BAD_CONST GUARDIAN_PIPE_SSH
+    GUARDIAN_ROOT_TESTMODE GUARDIAN_ROOT_TEST_DB FAKE_SP_SLEEP G_CONF_BAD G_BAD_CONST G_TREE_BAD G_TREE_WHY GUARDIAN_PIPE_SSH HEAL_EXTRA USB_REBOOT_ISSUED GUARDIAN_TEST_DPRIME_HEAL USB_DPRIME_HEAL
   G_RUNMODE=1; readonly G_RUNMODE
+  G_TREE_BAD=1   # R15: killed until tree_check has passed (a path that never ran the check stays killed)
   CONF="${GUARDIAN_HOME:-$HOME/Library/Application Support/EvenScribe/Guardian}/guardian.conf"
+fi
+# R15b (S1): the pre-source check. In run mode, before ANY lib is sourced (a group-writable lib/*.sh with changed content would otherwise run as the agent at the next start,
+# before tree_check can look at it): $HERE, bin/, lib/ and every file this script sources or runs from its tree must be a directory or regular file (never a symlink), owned by
+# root or this uid, not group- or world-writable, with no ACL entry at all. Only the pinned absolute /usr/bin/stat, /usr/bin/id and /bin/ls, shell builtins, and no function
+# from any lib. On a finding: one line on stderr (guardian.err) and exit 3, WITHOUT sourcing anything. This deliberately stops health too: the Mini opens guardian_quiet
+# after 120 s, and that is the page. (The per-tick tree_check keeps health flowing when the tree is loosened while the agent runs.) The test entry skips it.
+if [ "${G_RUNMODE:-}" = 1 ]; then
+  G_PRE_ME="$(/usr/bin/id -u 2>/dev/null)"
+  # R16b: the unresolved $HERE must equal the resolved one. A symlinked install dir (or any symlink component) is a finding: exit 3, nothing sourced.
+  if [ "$HERE_U" != "$HERE" ]; then
+    echo "guardian: code tree unsafe (symlink: $HERE_U): refusing to start, nothing was loaded" >&2
+    exit 3
+  fi
+  for G_PRE_P in "$HERE" "$HERE/bin" "$HERE/lib" "$HERE/bin/guardian.sh" "$HERE/lib/common.sh" "$HERE/lib/conf.sh" "$HERE/lib/collect.sh" "$HERE/lib/killswitch.sh" \
+      "$HERE/lib/faulttree.sh" "$HERE/lib/heal.sh" "$HERE/lib/probe.sh" "$HERE/lib/canary.sh"; do
+    G_PRE_WHY=""
+    if [ ! -e "$G_PRE_P" ] && [ ! -L "$G_PRE_P" ]; then
+      # an older install has no canary.sh and the tick then skips it
+      [ "$G_PRE_P" = "$HERE/lib/canary.sh" ] && continue
+      G_PRE_WHY="missing"
+    else
+      G_PRE_ST="$(/usr/bin/stat -f '%u %Lp %HT' "$G_PRE_P" 2>/dev/null)"
+      G_PRE_UID="${G_PRE_ST%% *}"; G_PRE_REST="${G_PRE_ST#* }"; G_PRE_MODE="${G_PRE_REST%% *}"; G_PRE_TYP="${G_PRE_REST#* }"
+      case "$G_PRE_TYP" in
+        [Ss]ymbolic*|[Ss]ymlink*) G_PRE_WHY="symlink" ;;
+        [Dd]irectory*|[Rr]egular*) ;;
+        *) G_PRE_WHY="type" ;;
+      esac
+      case "$G_PRE_UID" in ''|*[!0-9]*) G_PRE_WHY="${G_PRE_WHY:-owner}" ;; esac
+      if [ -z "$G_PRE_WHY" ] && [ "$G_PRE_UID" != 0 ] && [ "$G_PRE_UID" != "$G_PRE_ME" ]; then G_PRE_WHY="owner"; fi
+      case "$G_PRE_MODE" in
+        ''|*[!0-7]*) G_PRE_WHY="${G_PRE_WHY:-mode}" ;;
+        *) G_PRE_MODE=$((8#$G_PRE_MODE))
+           if [ $(((G_PRE_MODE >> 3) & 2)) -ne 0 ] || [ $((G_PRE_MODE & 2)) -ne 0 ]; then G_PRE_WHY="${G_PRE_WHY:-writable}"; fi ;;
+      esac
+      # any ACL entry shows as a second line of `ls -led`; no output at all is "cannot say" = a finding
+      G_PRE_LS="$(/bin/ls -led "$G_PRE_P" 2>/dev/null)"
+      if [ -z "$G_PRE_LS" ]; then G_PRE_WHY="${G_PRE_WHY:-acl}"; else case "$G_PRE_LS" in *$'\n'*) G_PRE_WHY="${G_PRE_WHY:-acl}" ;; esac; fi
+    fi
+    if [ -n "$G_PRE_WHY" ]; then
+      echo "guardian: code tree unsafe ($G_PRE_WHY: $G_PRE_P): refusing to start, nothing was loaded" >&2
+      exit 3
+    fi
+  done
 fi
 # shellcheck source=../lib/common.sh
 . "$HERE/lib/common.sh"
@@ -64,6 +121,8 @@ tick() {
   collect_all
   publish "kiosk/$GUARDIAN_ROOM/health" "$(health_line)"
   heal_cycle
+  # a reboot was just issued (2.4 d'): nothing else acts this tick
+  [ "${USB_REBOOT_ISSUED:-0}" = 1 ] && return 0
   if type canary_cycle >/dev/null 2>&1; then canary_cycle; fi
 }
 
@@ -137,16 +196,16 @@ loop_watch() {
 }
 
 subscriber_loop() {
-  local topic payload backoff=2
+  local topic payload backoff=2 rc
   [ -n "$GUARDIAN_SUBSCRIBE_CMD" ] || return 0
   loop_init
   while :; do
     loop_parent_ok || loop_orphaned
     { g_conf_cmd "$GUARDIAN_SUBSCRIBE_CMD" "$GUARDIAN_ROOM" </dev/null 2>/dev/null | while IFS="$(printf '\t')" read -r topic payload; do
       handle_message "$topic" "$payload"
-    done; } </dev/null &
-    loop_watch $!
-    audit "subscriber exited; retry in ${backoff}s"
+    done; exit "${PIPESTATUS[0]}"; } </dev/null &   # R16 (GR15-2): the exit code of the subscribe command (ssh), not of the while loop
+    loop_watch $!; rc=$?
+    audit "subscriber exited rc=$rc; retry in ${backoff}s"
     loop_nap "$backoff"
     [ "$backoff" -lt 60 ] && backoff=$((backoff * 2))
   done
@@ -188,15 +247,15 @@ control_pump() {
 
 # Kiosk's own subscription to guardian/control. Same backoff pattern as subscriber_loop.
 control_loop() {
-  local backoff=2
+  local backoff=2 rc
   [ -n "$GUARDIAN_CONTROL_SUB_CMD" ] || return 0
   loop_init
   while :; do
     # bash drops NUL on read, which would turn "fa<NUL>lse" into a clean "false": map NUL to 0x01 first so the raw-byte check on control.last kills it.
     loop_parent_ok || loop_orphaned
-    { g_conf_cmd "$GUARDIAN_CONTROL_SUB_CMD" "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | nul_to_soh | control_pump; } </dev/null &
-    loop_watch $!
-    audit "control subscriber exited; retry in ${backoff}s"
+    { g_conf_cmd "$GUARDIAN_CONTROL_SUB_CMD" "$GUARDIAN_ROOM" "$GUARDIAN_CONTROL_TOPIC" </dev/null 2>/dev/null | nul_to_soh | control_pump; exit "${PIPESTATUS[0]}"; } </dev/null &   # R16: first stage = the subscribe command's own exit code
+    loop_watch $!; rc=$?
+    audit "control subscriber exited rc=$rc; retry in ${backoff}s"
     loop_nap "$backoff"
     [ "$backoff" -lt 60 ] && backoff=$((backoff * 2))
   done
@@ -207,6 +266,7 @@ run() {
   audit "guardian start version=$GUARDIAN_VERSION"
   [ -n "$GUARDIAN_ROOM" ] || { audit "running KILLED: no room (guardian.conf has no valid GUARDIAN_ROOM)"; echo "GUARDIAN_ROOM not set" >&2; exit 2; }
   if [ "${G_CONF_BAD:-}" = 1 ]; then audit "guardian.conf rejected: running KILLED (shadow, no actions); health continues"; fi
+  tree_check || true
   MAIN_PID="$(g_ppid)"
   [ -n "$MAIN_PID" ] || MAIN_PID=$$
   trap 'exit 0' TERM INT HUP
@@ -218,6 +278,7 @@ run() {
   set +m
   while :; do
     t0="$(now_epoch)"
+    tree_check || true   # R15: before any act path, every tick
     flag_poll
     tick
     t1="$(now_epoch)"
@@ -229,6 +290,7 @@ run() {
 # check: the state the kill switch would give right now (same parse the actions use). Prints "killswitch=engaged|clear mode=shadow|heal why=<reason>".
 check() {
   local ks=clear
+  tree_check || true
   flag_fetch
   killswitch_engaged && ks=engaged
   echo "killswitch=$ks mode=$(current_mode) why=${CTRL_WHY:-none}"
@@ -242,7 +304,7 @@ fi
 case "$G_MODE_ARG" in
   run) run ;;
   check) check ;;
-  once) flag_fetch; tick ;;
+  once) tree_check || true; flag_fetch; tick ;;
   handle) handle_message "$2" "$3" ;;
   *) echo "usage: guardian.sh run|check|once|handle" >&2; exit 2 ;;
 esac

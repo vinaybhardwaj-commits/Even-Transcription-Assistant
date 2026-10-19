@@ -4,7 +4,7 @@
 # Sourced, never executed. Every external effect goes through a PATH command or a GUARDIAN_* command
 # variable, so tests can substitute fakes.
 
-GUARDIAN_VERSION="c1-0.3.0-r14"   # bump per release: the audit "guardian start version=" line identifies the tree
+GUARDIAN_VERSION="c1-0.4.8-r16e"   # bump per release: the audit "guardian start version=" line identifies the tree
 
 # R12. Run mode (guardian.sh run|check, G_RUNMODE=1) reads no test seam and no environment tunable: every name below is assigned its default
 # unconditionally and only guardian.conf (parsed as data by conf.sh, never sourced) can change the allow-listed keys. Library tests source this
@@ -45,6 +45,9 @@ g_const G_BASH /bin/bash
 g_const G_ID /usr/bin/id
 g_const G_STAT /usr/bin/stat
 g_const G_LS /bin/ls
+g_const G_MKTEMP /usr/bin/mktemp
+# 2.4 d': the unified-log reader is pinned too (a bare `log` is a zsh builtin). Library tests may point it at a fake through GUARDIAN_LOG_BIN; run mode never reads that name.
+if [ "${G_RUNMODE:-}" = 1 ]; then g_const G_LOG /usr/bin/log; else g_const G_LOG "${GUARDIAN_LOG_BIN:-/usr/bin/log}"; fi
 # The PATH every conf command (transport, sudo path) is started with in run mode (R13): a constant, never the caller's PATH.
 # R14 A4: system directories only. /opt/homebrew/bin is writable by the agent's uid (and group admin) on a kiosk, so a planted file there would replace a
 # transport binary. A conf command that needs a tool outside these four directories names it by absolute path.
@@ -77,15 +80,39 @@ g_def PRESENCE_STALE_S 300
 g_def FLAG_MAX_AGE_S 30
 g_def CONFIRM_TIMEOUT_S 30
 g_const HEAL_MAX_PER_HOUR 3
+# 2.4 d' (USB-C power-off -> reboot): safety numbers, constants in code, not conf keys.
+# A: d' stays SHADOW (would_do only) in this build whatever the mode says. Flipping it to 1 is its own one-line commit after the Fable gate. A code constant, not a conf key;
+# run mode assigns 0 unconditionally. Library tests may set GUARDIAN_TEST_DPRIME_HEAL (the same pattern as G_LOG): guardian.sh run|check never read it.
+if [ "${G_RUNMODE:-}" = 1 ]; then g_const USB_DPRIME_HEAL 0; else g_const USB_DPRIME_HEAL "${GUARDIAN_TEST_DPRIME_HEAL:-0}"; fi
+g_const USB_BUDGET_S 86400          # B: the reboot budget is spent for this long after the state epoch as well as for the IST day
+g_const USB_ABSENT_MIN_TICKS 2      # the capture device absent for this many consecutive health ticks
+g_const USB_ABSENT_MIN_SPAN_S 20    # AND the first absent tick at least this many seconds ago (tick spacing is only >= 5 s)
+g_const USB_HID_IDLE_MIN_S 600      # HID idle needed before a reboot
+g_const USB_CC_MAX_AGE_S 900        # the cable-detect line must be inside the last 15 min
+g_const USB_LOG_CAP_S 4             # cap on the log probe
+g_const USB_VERIFY_S 600            # the kiosk-side verify window after the reboot
+g_const USB_LOCK_S 86400            # lock after a failed verify
+# Fixed predicate (INFERRED from the OPD 5 log lines): kernel, subsystem com.apple.usb:all, message contains the cable-detect text.
+g_const USB_LOG_PREDICATE 'process == "kernel" AND processID == 0 AND subsystem == "com.apple.usb:all" AND eventMessage CONTAINS "AppleUSBHostPort::cableChangeOccurred: powering off"'
 g_def IDLE_MIN_S 600
 g_def SPEECH_GATE_DBFS -50   # INFERRED: tape RMS at or above this is speech
 g_def SPEECH_QUIET_S 600
 g_def PUBLISH_CAP_S 4
 g_def CANARY_ENABLED 1
-g_const CANARY_START 2135
-g_const CANARY_END 0700
+g_const CANARY_PM_START 2140   # R16d: slot pm, the post-check (IST)
+g_const CANARY_PM_END 2240
+g_const CANARY_AM_START 0720   # slot am, the pre-flight (IST)
+g_const CANARY_AM_END 0820
 g_const CANARY_IDLE_MIN_S 600
-g_def CANARY_PASS_DB 20   # tone window must rise this far above the 5 s before it
+# tone window must rise this far above the 5 s before it. Machine-set (R16d, no per-room hand tuning): the pooled night null of ~/oc/herdr-lead/mic-cal/CANARY-RISE-NULL-16-OCT-2026.md
+# (n=4855, p99.9 29.65, max 32.64) under the rule max(p99.9 + 3, 10) = 32.65.
+g_def CANARY_PASS_DB 32.65
+# R16d item 8: the decision statistic is the 1-3 kHz band rise, 2 of 2 plays. Machine-set from herdr-lead's FINAL band null (Opus refute 0 MUST): ~/oc/herdr-lead/mic-cal/CANARY-BAND-REFUTE-16OCT.md. Still g_def, as item 8 says.
+g_def CANARY_BAND_PASS_DB 34.67
+g_def CANARY_PLAY_GAP_S 15   # the second play starts this long after the first started (R16d-3 G1: 15 s removes tape-lag false FAILs)
+# RBJ biquad coefficients "b0 b1 b2 a1 a2" (fs 16000, Q 0.70710678), 10 decimals: HP 1000 Hz then LP 3000 Hz. Same filter as herdr-lead's band null (rise_db_null_band.py).
+g_const CANARY_HP_COEF "0.7570763753 -1.5141527507 0.7570763753 -1.4542435863 0.5740619151"
+g_const CANARY_LP_COEF "0.1866943331 0.3733886662 0.1866943331 -0.4629380253 0.2097153578"
 g_def CANARY_SAMPLE_S 7   # seconds after the start at which the tape is read (checkpoint lag)
 g_def GUARDIAN_SETTLE_S 1
 
@@ -151,6 +178,12 @@ hhmm_in_window() {
 
 in_clinic_hours() { hhmm_in_window "$(ist_hhmm)" "$CLINIC_START" "$CLINIC_END"; }
 in_night_window() { hhmm_in_window "$(ist_hhmm)" "$NIGHT_START" "$NIGHT_END"; }
+
+# YYYYMMDD in Asia/Kolkata for an epoch (default now).
+ist_date() {
+  local e="${1:-$(now_epoch)}"
+  TZ=Asia/Kolkata "$G_DATE" -r "$e" +%Y%m%d 2>/dev/null || TZ=Asia/Kolkata "$G_DATE" -d "@$e" +%Y%m%d
+}
 
 # ---- JSON out (hand built; escape \ " and control characters) ----
 jesc() { printf '%s' "$1" | "$G_SED" -e 's/\\/\\\\/g' -e 's/"/\\"/g' | "$G_TR" '\n\t\r' '   '; }

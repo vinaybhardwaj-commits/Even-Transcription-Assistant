@@ -6,8 +6,15 @@
 # CoreAudio (layer 4) is evaluated in its place but its verdict is held back until layers 5-9 are
 # clear (A3 cross-cutting note, spec 2.4b): killing coreaudiod never fixed a permission or 409 fault.
 
+# <=80 chars of printable ASCII (control bytes and non-ASCII dropped, runs of blanks collapsed, then trimmed); "null" when nothing is left
+fault_err80() {
+  local e
+  e="$(printf '%s' "$1" | LC_ALL=C "$G_TR" '\n\t\r' '   ' | LC_ALL=C "$G_TR" -cd ' -~' | "$G_TR" -s ' ' | "$G_SED" -e 's/^ //' -e 's/ $//' | "$G_HEAD" -c 80 | "$G_SED" -e 's/ $//')"
+  [ -n "$e" ] && printf '%s' "$e" || printf 'null'
+}
+
 fault_tree() {
-  local ca_held="" l59=0
+  local ca_held="" l59=0 k
 
   # 1 power / sleep
   if [ -n "$S_boot_age" ] && [ "$S_boot_age" -lt 900 ] 2>/dev/null; then
@@ -18,8 +25,16 @@ fault_tree() {
     offline) echo "network|network_offline|state=offline last_http=${S_last_http:-null}" ;;
   esac
   # 3 USB device
+  # 3' (2.4 d') rung d' sits before d: absent for >= 2 ticks AND a fresh CC cable-detect "powering off" line. Absence without that line stays d (escalate only).
   if [ "$S_usb" = "false" ]; then
-    echo "usb|usb_device_missing|usb_mic_present=false audio_engine_present=${S_engine:-null}"
+    case "${S_cc_age:-}" in
+      ''|*[!0-9]*) echo "usb|usb_device_missing|usb_mic_present=false audio_engine_present=${S_engine:-null}" ;;
+      *) if [ "${S_usb_ticks:-0}" -ge "$USB_ABSENT_MIN_TICKS" ] 2>/dev/null && [ "${S_usb_span:-0}" -ge "$USB_ABSENT_MIN_SPAN_S" ] 2>/dev/null; then
+           echo "usb|usb_power_off|usb_mic_present=false usb_absent_ticks=$S_usb_ticks cc_power_off_age_s=$S_cc_age port=${S_cc_port:-unknown}"
+         else
+           echo "usb|usb_device_missing|usb_mic_present=false audio_engine_present=${S_engine:-null}"
+         fi ;;
+    esac
   fi
   # 4 CoreAudio (held)
   if [ "$S_usb" = "true" ] && [ "$S_engine" = "false" ]; then
@@ -33,10 +48,16 @@ fault_tree() {
     restricted) echo "tcc|mic_restricted|mic_state=restricted"; l59=1 ;;
     *)
       if [ "$S_state" = "mic_denied" ]; then echo "tcc|mic_denied|state=mic_denied tcc_row=${S_tcc_row:-null}"; l59=1
-      elif [ -n "$S_tcc_row" ] && [ "$S_tcc_row" != "2" ] && [ "$S_tcc_row" != "error" ] && [ "$S_tcc_row" != "none" ]; then
-        echo "tcc|mic_denied|tcc_row=$S_tcc_row mic_state=${S_mic_state:-null}"; l59=1
+      elif [ -z "$S_tcc_row" ] || [ "$S_tcc_row" = "2" ]; then :
       elif [ "$S_tcc_row" = "none" ]; then
         echo "tcc|mic_row_missing|tcc_row=none"; l59=1
+      elif [[ $S_tcc_row =~ ^[0-9]+$ ]]; then
+        echo "tcc|mic_denied|tcc_row=$S_tcc_row mic_state=${S_mic_state:-null}"; l59=1
+      else
+        # R15c + R16: error, error:read, error:<why> and ANY other non-numeric text = the row is UNKNOWN (the helper could not read TCC.db): no verdict, no l59, no page. Only a number other than 2 is a denial.
+        # R16d NIT-1: the stamp key is bounded: the first 32 chars of the row, reduced to [A-Za-z0-9:_-]
+        k="$(printf '%.32s' "$S_tcc_row" | LC_ALL=C "$G_TR" -c 'A-Za-z0-9:_-' '_')"
+        once_per "tcc_row_unreadable:$k" 86400 && audit "tcc row unreadable: $S_tcc_row"
       fi ;;
   esac
   # 6 recorder process
@@ -50,6 +71,8 @@ fault_tree() {
   case "$S_state" in
     needs_enrol) echo "recorder|recorder_needs_enrol|state=needs_enrol"; l59=1 ;;
     capture_stalled) echo "recorder|recorder_capture_stalled|state=capture_stalled"; l59=1 ;;
+    # R16d: state=failed is its own fault (escalate only in heal.sh). last_error is printable ASCII only, whitespace collapsed, at most 80 chars; the JSON escape happens in heal_event.
+    failed) echo "recorder|recorder_failed|state=failed last_error=$(fault_err80 "$S_last_error")"; l59=1 ;;
   esac
   # 7 helper (XPC)
   if [ "$S_helper_ok" = "false" ]; then echo "helper|helper_xpc_down|helper_xpc_ok=false"; l59=1; fi
