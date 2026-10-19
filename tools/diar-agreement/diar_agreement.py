@@ -27,6 +27,8 @@ import itertools
 import json
 import math
 import os
+import re
+import stat
 import sys
 
 import numpy as np
@@ -36,12 +38,21 @@ REVIEW_DIS = 0.5  # bench-C rule dis >= 0.5 (score.py:539)
 NEMOTRON_BASE = "nvidia/Nemotron-3-Diarization"
 DEFAULT_OUT = "/home/eta/oc/nemotron/diar-agreement.jsonl"
 DEFAULT_REB = os.path.join(os.path.expanduser("~"), "eta-data", "reb")
+NEMOTRON_VERSION_PREFIX = "f667ed7"
+NEMOTRON_PREFIX = "diar.nemotron"  # bench-C canonical(scope, 'diar.nemotron'): glob <prefix>__*.json
+SARVAM_PREFIX = "diar.sarvam-saaras-v3"
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 FIELDS = ("consult_uid", "ist_date", "diar_agreement", "review_flag", "nemotron_model",
-          "sarvam_track_id", "computed_at")
+          "nemotron_track_id", "sarvam_track_id", "computed_at")
 
 
 class InputError(ValueError):
     pass
+
+
+class OutputError(RuntimeError):
+    """The output file is unsafe to append to (symlink, loose mode, foreign owner, not a file)."""
 
 
 # ---------------- metric (bench-C score.py:109-219) ----------------
@@ -133,7 +144,7 @@ def compute_dis(nemo_track, sarvam_track, t0_ms, dur_s):
 
 
 # ---------------- row ----------------
-def make_row(consult_uid, ist_date, dis, nemotron_model, sarvam_track_id, now=None):
+def make_row(consult_uid, ist_date, dis, nemotron_model, nemotron_track_id, sarvam_track_id, now=None):
     if dis is None or not isinstance(dis, float) or math.isnan(dis) or not (0.0 <= dis <= 1.0):
         raise InputError("disagreement not in [0,1]")
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -143,6 +154,7 @@ def make_row(consult_uid, ist_date, dis, nemotron_model, sarvam_track_id, now=No
         "diar_agreement": round(1.0 - dis, 6),
         "review_flag": bool(dis >= REVIEW_DIS),
         "nemotron_model": nemotron_model,
+        "nemotron_track_id": nemotron_track_id,
         "sarvam_track_id": sarvam_track_id,
         "computed_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
@@ -158,10 +170,11 @@ def _load_json(path):
 
 
 def canonical_track(tracks_dir, prefix):
-    """Latest status=ok track file for a prefix (bench-C score.py:249-260): by extras.created_at,
+    """Latest status=ok track file for the exact prefix (glob <prefix>__*.json, as bench-C
+    score.py:249-260): by extras.created_at,
     then mtime. Returns (track_dict, file_stem) or (None, None)."""
     cands = []
-    for f in glob.glob(os.path.join(tracks_dir, prefix + "*__*.json")):
+    for f in glob.glob(os.path.join(tracks_dir, prefix + "__*.json")):
         try:
             d = _load_json(f)
         except InputError:
@@ -186,6 +199,19 @@ def nemotron_model_id(track):
     return f"{model}@{ver[:7]}"
 
 
+def check_nemotron(track, allow_model=False):
+    nemotron_model_id(track)
+    if allow_model:
+        return
+    if track.get("model") != NEMOTRON_BASE or not str(track.get("version")).startswith(NEMOTRON_VERSION_PREFIX):
+        raise InputError(f"nemotron model/version differs from {NEMOTRON_BASE}@{NEMOTRON_VERSION_PREFIX} "
+                         f"(got {track.get('model')!r}@{str(track.get('version'))[:12]!r}); use --allow-model")
+
+
+def _pos_finite(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0
+
+
 def find_consult_dirs(reb_root, date=None, uids=None):
     pat = os.path.join(reb_root, date or "*", "*", "_consults", "*")
     out = []
@@ -196,38 +222,50 @@ def find_consult_dirs(reb_root, date=None, uids=None):
     return out
 
 
-def row_from_consult_dir(cdir, now=None):
-    """Build the row for one consult dir, or return None when a track is missing (reason via
-    InputError otherwise)."""
+def row_from_consult_dir(cdir, now=None, allow_model=False):
+    """Build the row for one consult dir, or return None when a track is missing. Bad input raises
+    InputError (the caller logs and skips; it never aborts the run)."""
     uid = os.path.basename(cdir)
     man = _load_json(os.path.join(cdir, "manifest.json"))
     try:
         t0 = man["t0_ms"]
-        dur = man["audio"]["duration_ms"] / 1000.0
+        dur_ms = man["audio"]["duration_ms"]
         ist_date = man["ist_date"]
     except (KeyError, TypeError) as e:
         raise InputError("manifest lacks t0_ms/audio.duration_ms/ist_date") from e
-    if not isinstance(t0, (int, float)) or isinstance(t0, bool) or not isinstance(ist_date, str) \
-            or not isinstance(dur, float) or dur <= 0:
-        raise InputError("manifest fields malformed")
+    if not _pos_finite(t0):
+        raise InputError("manifest t0_ms not finite and positive")
+    if not _pos_finite(dur_ms):
+        raise InputError("manifest audio.duration_ms not finite and positive")
+    if not isinstance(ist_date, str) or not DATE_RE.match(ist_date):
+        raise InputError("manifest ist_date not YYYY-MM-DD")
+    want = dt.datetime.fromtimestamp(t0 / 1000.0, IST).date().isoformat()
+    if ist_date != want:
+        raise InputError("manifest ist_date does not match the IST date of t0_ms")
+    dur = dur_ms / 1000.0
     tdir = os.path.join(cdir, "tracks")
-    nemo, _ = canonical_track(tdir, "diar.nemotron")
-    sar, sar_id = canonical_track(tdir, "diar.sarvam")
+    nemo, nemo_id = canonical_track(tdir, NEMOTRON_PREFIX)
+    sar, sar_id = canonical_track(tdir, SARVAM_PREFIX)
     if nemo is None or sar is None:
         return None
+    check_nemotron(nemo, allow_model)
     dis = compute_dis(nemo, sar, t0, dur)
     if math.isnan(dis):
         raise InputError("no comparable speech (nan disagreement)")
-    return make_row(uid, ist_date, dis, nemotron_model_id(nemo), sar_id, now)
+    return make_row(uid, ist_date, dis, nemotron_model_id(nemo), nemo_id, sar_id, now)
 
 
 # ---------------- JSONL store ----------------
 def read_latest(path):
-    """{consult_uid: row}; later lines win; malformed lines are ignored."""
+    """{consult_uid: row}; later lines win; malformed lines are ignored. Refuses a symlink."""
     latest = {}
-    if not os.path.exists(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
         return latest
-    with open(path) as fh:
+    except OSError as e:
+        raise OutputError(f"cannot open output safely: {e.strerror}") from e
+    with os.fdopen(fd) as fh:
         for line in fh:
             try:
                 r = json.loads(line)
@@ -242,27 +280,76 @@ def should_skip(row, latest, force=False):
     if force:
         return False
     prev = latest.get(row["consult_uid"])
-    return bool(prev and prev.get("nemotron_model") == row["nemotron_model"]
-                and prev.get("sarvam_track_id") == row["sarvam_track_id"])
+    return bool(prev and all(prev.get(k) == row[k]
+                             for k in ("nemotron_model", "nemotron_track_id", "sarvam_track_id")))
+
+
+def _check_fd(fd):
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise OutputError("output is not a regular file")
+    if stat.S_IMODE(st.st_mode) != 0o600:
+        raise OutputError(f"output mode is {stat.S_IMODE(st.st_mode):04o}, must be 0600")
+    if st.st_uid != os.getuid():
+        raise OutputError("output is not owned by the current user")
+    return st
+
+
+def preflight_out(path):
+    """Refuse (OutputError) before any work when an existing output is unsafe. Writes nothing."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        raise OutputError(f"cannot open output safely: {e.strerror}") from e
+    try:
+        _check_fd(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        view = view[n:]
 
 
 def append_rows(path, rows):
-    """Append-only, 0600 on create (umask 077), never truncates. One write() per row under flock."""
+    """Append-only, never truncates. Creates 0600 (umask 077, O_EXCL|O_NOFOLLOW). An existing file must
+    be a regular 0600 file owned by us, else OutputError and nothing is written. Under flock, a torn
+    last line (no trailing newline) is terminated first; short writes are looped."""
     if not rows:
         return 0
+    preflight_out(path)
     parent = os.path.dirname(path)
     old = os.umask(0o077)
     try:
         if parent:
             os.makedirs(parent, mode=0o700, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            try:
+                fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                fd = os.open(path, flags)
+    except OSError as e:
+        raise OutputError(f"cannot open output safely: {e.strerror}") from e
     finally:
         os.umask(old)
     try:
+        st = _check_fd(fd)
         import fcntl
         fcntl.flock(fd, fcntl.LOCK_EX)
-        for r in rows:
-            os.write(fd, (json.dumps(r, sort_keys=False, separators=(",", ":")) + "\n").encode())
+        size = os.fstat(fd).st_size
+        buf = b""
+        if size > 0 and os.pread(fd, 1, size - 1) != b"\n":
+            buf = b"\n"
+        buf += b"".join((json.dumps(r, separators=(",", ":")) + "\n").encode() for r in rows)
+        _write_all(fd, buf)
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -270,13 +357,16 @@ def append_rows(path, rows):
 
 
 # ---------------- CLI ----------------
-def run(reb_root, out, date=None, uids=None, force=False, write=False, now=None, log=sys.stderr):
+def run(reb_root, out, date=None, uids=None, force=False, write=False, now=None, log=sys.stderr,
+        allow_model=False):
+    if write:
+        preflight_out(out)
     latest = read_latest(out)
     rows, stats = [], {"consults": 0, "rows": 0, "skipped_same": 0, "missing_track": 0, "bad_input": 0}
     for cdir in find_consult_dirs(reb_root, date, uids):
         stats["consults"] += 1
         try:
-            row = row_from_consult_dir(cdir, now)
+            row = row_from_consult_dir(cdir, now, allow_model)
         except InputError as e:
             stats["bad_input"] += 1
             print(f"skip {os.path.basename(cdir)}: {e}", file=log)
@@ -300,13 +390,18 @@ def main(argv=None):
     ap.add_argument("--out", default=DEFAULT_OUT, metavar="PATH")
     ap.add_argument("--date", help="ist_date filter, YYYY-MM-DD")
     ap.add_argument("--consult-uid", action="append", help="repeatable")
+    ap.add_argument("--allow-model", action="store_true", help="accept a Nemotron model/version other than the pinned one")
     ap.add_argument("--force", action="store_true", help="append even if the latest row has the same model and sarvam track")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--dry-run", action="store_true", default=True, help="print rows, write nothing (default)")
     g.add_argument("--write", action="store_true", help="append rows to --out")
     a = ap.parse_args(argv)
-    rows, stats = run(a.reb_root, a.out, a.date, set(a.consult_uid) if a.consult_uid else None,
-                      a.force, write=a.write)
+    try:
+        rows, stats = run(a.reb_root, a.out, a.date, set(a.consult_uid) if a.consult_uid else None,
+                          a.force, write=a.write, allow_model=a.allow_model)
+    except OutputError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
     for r in rows:
         print(json.dumps(r, separators=(",", ":")))
     print(json.dumps({"mode": "write" if a.write else "dry-run", "out": a.out, **stats}), file=sys.stderr)
