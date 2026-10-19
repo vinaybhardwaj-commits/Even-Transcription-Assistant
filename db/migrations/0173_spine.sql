@@ -6,6 +6,13 @@
 -- REFS ONLY. spine_artefact holds bucket + object key + sha256, never a body.
 -- SHADOW. spine_config has no seed rows: a missing or malformed value means off.
 --
+-- FLAGS. spine_encounter.flags holds the merge flags, so an ambiguous encounter can be excluded from FreeScript (R1) and queried. The CHECK set equals every string
+--   lib/spine/merge.ts can emit on origin/spine/s2-merge, plus covered_by_pulse (S2 R4):
+--   multi_machine (merge.ts:332), pulse_overlap (:336-337), clamped (:319), clamp_failed (:322), ambiguous (:326); covered_by_pulse is not emitted yet.
+--   The set is only ever emitted via flags.get(g).add(...) at those lines, then sorted into flags[] (:425, :443); the passthrough at :459 is [].
+--
+--   READERS: the GIN index serves `flags @> ARRAY['ambiguous']` (and &&), NOT `'ambiguous' = ANY(flags)`, which measured a Seq Scan on 10k rows. Use @>.
+--
 -- ADDITIVE AND IDEMPOTENT. CREATE ... IF NOT EXISTS everywhere. No existing table is altered. GRANTS: none.
 -- Down-migration: db/rollbacks/0173_spine.down.sql (run by hand, never from here).
 -- =====================================================================
@@ -45,11 +52,14 @@ CREATE TABLE IF NOT EXISTS spine_encounter (
   boundary_rev   int         NOT NULL DEFAULT 0,
   merge_version  text        NOT NULL,
   reason         text,
+  flags          text[]      NOT NULL DEFAULT '{}'
+    CONSTRAINT spine_encounter_flags_chk CHECK (flags <@ ARRAY['ambiguous','multi_machine','pulse_overlap','clamped','clamp_failed','covered_by_pulse']::text[]),
   created_at     timestamptz NOT NULL DEFAULT now(),
   updated_at     timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT spine_encounter_close_chk CHECK (t_close IS NULL OR t_close >= t_open)
 );
 CREATE INDEX IF NOT EXISTS spine_encounter_date_room_idx ON spine_encounter (ist_date, room_id);
+CREATE INDEX IF NOT EXISTS spine_encounter_flags_idx ON spine_encounter USING gin (flags);
 
 CREATE TABLE IF NOT EXISTS spine_link (
   encounter_id text        NOT NULL REFERENCES spine_encounter (encounter_id),
