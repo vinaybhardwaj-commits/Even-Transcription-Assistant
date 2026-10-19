@@ -1,6 +1,6 @@
 /**
  * POST /api/spine/report — the runner reports a claimed job. Bearer (SPINE_BEARER_TOKEN).
- * Body {job_id, owner, outcome: done|transient|permanent|budget|shadow|release, error_code?, artefact? (done only)}.
+ * Body {job_id, owner, outcome: done|transient|permanent|budget|shadow|release|blocked (no consult_uid link: held, no tick, no attempt), error_code?, artefact? (done only)}.
  * A `shadow` report for a stage that is live NOW is stored as a re-queue (N3), not consumed. Owner-matched: 409 lease_lost when the caller no longer holds the lease.
  */
 import { NextRequest, NextResponse } from "next/server";
@@ -14,7 +14,7 @@ import type { Outcome } from "@/lib/spine/retry";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const OUTCOMES: readonly string[] = ["done", "transient", "permanent", "budget", "shadow", "release"];
+const OUTCOMES: readonly string[] = ["done", "transient", "permanent", "budget", "shadow", "release", "blocked"];
 const TOKEN_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
 export async function POST(req: NextRequest) {
   const bad = checkSpineBearer(req.headers);

@@ -4,12 +4,16 @@ Each executor runs the EXISTING CLI for one consult uid, as a subprocess, by pat
   recut      <SPINE_CUTTER_PY> -m cutter.run --once --only UID --recut                      (cwd SPINE_CUTTER_DIR; nice 10, as recut_queue)
   acoustics  <SPINE_LAB_PY> -m kit.reb.clip_lanes --lane acoustics --consult UID --write     (cwd SPINE_LAB_DIR, the directory that holds kit/)
   nemotron   <SPINE_LAB_PY> -m kit.reb.clip_lanes --lane nemotron --consult UID --write --worker-status worker
-Optional env: SPINE_DATA_DIR (default ~/eta-data), SPINE_GPU_LOCK (default ~/gpu.lock). A missing SPINE_*_DIR / _PY is ExecutorUnconfigured: the runner releases the job untouched.
+Optional env: SPINE_DATA_DIR (default ~/eta-data), SPINE_GPU_LOCK (default ~/gpu.lock), SPINE_HOURLY_FROM_MIN / SPINE_HOURLY_TO_MIN (K-lane refusal window, default 25 / 45).
+NOTE (F8): SPINE_DATA_DIR moves OUR lock and track paths only. clip_lanes keeps its own root and its own ~/gpu.lock (hard-coded in the lab), so it does not follow SPINE_DATA_DIR or SPINE_GPU_LOCK. A missing SPINE_*_DIR / _PY is ExecutorUnconfigured: the runner releases the job untouched.
 
 LOCKS (the same ones the timers take, so the runner and the hourly never run one stage for one uid at once):
   recut      cutter.lock is taken by the cutter itself (non-waiting with --only; busy prints {"locked": true}); we also probe it first, and refuse inside the :35 gap
              (the 180 s after a firing, and when the next firing is under 720 s away: recut_queue's rule).
-  K lanes    <data>/reb/_hourly.lock is held by US (flock, non-blocking) for the whole child run. A busy lock is transient and nothing is spawned.
+  K lanes    <data>/reb/_hourly.lock is held by US (flock, non-blocking) for the whole child run, and the CHILD INHERITS the fd (pass_fds), so the lock lives as long as the child even if
+             this runner is SIGKILLed. A busy lock is transient and nothing is spawned. palimpsest-hourly starts at :40 and skips its WHOLE run when it cannot take the lock, so K lanes are
+             refused (transient hourly_gap) from :25 to :45, and the child timeout is capped to the time left before the next :25 (a job started at :45 ends before :25).
+             Children run in their own process group; on SIGTERM / SIGINT the runner kills the group, waits, and only then exits (install_signal_handlers).
   GPU lane   ~/gpu.lock is only PROBED here (acquire + release): clip_lanes holds it per inference itself, so holding it here would deadlock the child.
 Every busy lock is TRANSIENT (backoff, attempt counted, breaker-visible). Nothing here waits for a lock.
 
@@ -17,7 +21,8 @@ ERROR MAP (Result.outcome / code):
   rc 0 + cut / written / skipped_existing   done, with an artefact REF + sha256 of the file the engine wrote
   silent_audio, blind_room_day, blind_refused   permanent (the audio will not change; retrying cannot help)
   locked, gpu busy, timer gap, timeout, lane failed, no tape yet, clip not cut yet, stopped, any other rc   transient
-  rc 2 from clip_lanes (usage / validation)   permanent
+  rc 2 from clip_lanes or the cutter (usage / validation)   permanent
+  no consult_uid link   BLOCKED (not a failure): no breaker tick, no attempt spent, not retried until a link appears
 No uid, path, argv or child output is ever logged or reported: only the codes below. Stdlib only.
 """
 from __future__ import annotations
@@ -29,13 +34,16 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 TIMER_MINUTE, TIMER_LAUNCH_S, MIN_BEFORE_TIMER_S = 35, 180, 720   # recut_queue.py:15
 CHILD_TIMEOUT_S = 840                                              # under the 15 min lease
+HOURLY_FROM_MIN, HOURLY_TO_MIN, HOURLY_CAP_MIN = 25, 45, 25      # K lanes refused from :25 to :45 (palimpsest-hourly starts :40); a child must end before the next :25
 UID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$")      # never starts with '-': it cannot be read as a flag
 EXECUTOR_STAGES = ("recut", "acoustics", "nemotron")
 
@@ -46,7 +54,7 @@ class ExecutorUnconfigured(Exception):
 
 @dataclass
 class Result:
-    outcome: str                      # done | transient | permanent
+    outcome: str                      # done | transient | permanent | blocked
     code: str | None = None
     artefact: dict | None = None
     note: dict = field(default_factory=dict)
@@ -88,6 +96,32 @@ def seconds_to_next_timer(now: float) -> float:
     return (nxt - t).total_seconds()
 
 
+def minute_of_hour_s(now: float) -> float:
+    t = dt.datetime.fromtimestamp(now, IST)
+    return t.minute * 60 + t.second + t.microsecond / 1e6
+
+
+def in_hourly_window(now: float, from_min: int = HOURLY_FROM_MIN, to_min: int = HOURLY_TO_MIN) -> bool:
+    """True from :from_min:00 up to (not including) :to_min:00 of every IST hour."""
+    return from_min * 60 <= minute_of_hour_s(now) < to_min * 60
+
+
+def lane_timeout_s(now: float, cap_min: int = HOURLY_CAP_MIN, base: float | None = None) -> float:
+    """min(base, seconds until the next :cap_min). At exactly :cap_min the next one is an hour away."""
+    d = cap_min * 60 - minute_of_hour_s(now)
+    if d <= 0:
+        d += 3600
+    return min(CHILD_TIMEOUT_S if base is None else base, d)
+
+
+def _env_min(raw: str | None, default: int) -> int:
+    try:
+        v = int(raw) if raw is not None else default
+    except ValueError:
+        return default
+    return v if 0 <= v <= 60 else default
+
+
 def last_json(out: str | None) -> dict | None:
     for line in reversed((out or "").strip().splitlines()):
         try:
@@ -115,7 +149,10 @@ class Executors:
     def __init__(self, env=None, run=None, clock=None):
         e = dict(os.environ if env is None else env)
         self.env = e
-        self._run = run or subprocess.run
+        self._children: set[subprocess.Popen] = set()
+        self._run = run or self._run_group
+        self.hourly_from = _env_min(e.get("SPINE_HOURLY_FROM_MIN"), HOURLY_FROM_MIN)
+        self.hourly_to = _env_min(e.get("SPINE_HOURLY_TO_MIN"), HOURLY_TO_MIN)
         self.clock = clock or time.time
         home = os.path.expanduser("~")
         self.data = e.get("SPINE_DATA_DIR") or os.path.join(home, "eta-data")
@@ -124,6 +161,36 @@ class Executors:
         self.hourly_lock = os.path.join(self.data, "reb", "_hourly.lock")
         self.clips = os.path.join(self.data, "consult", "clips")
         self.reb = os.path.join(self.data, "reb")
+
+    def _run_group(self, argv, cwd=None, timeout=None, pass_fds=(), **_kw) -> subprocess.CompletedProcess:
+        """subprocess.run, but the child leads its own process group, so a timeout or a signal kills the child AND whatever it spawned; pass_fds are inherited."""
+        p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, pass_fds=tuple(pass_fds))
+        self._children.add(p)
+        try:
+            out, err = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._kill_group(p)
+            raise
+        finally:
+            self._children.discard(p)
+        return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+    @staticmethod
+    def _kill_group(p: subprocess.Popen) -> None:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            p.communicate()   # reap, and drain the pipes
+        except Exception:   # noqa: BLE001
+            pass
+
+    def kill_children(self) -> None:
+        """Kill every running child's process group and wait for it. The caller exits only after this returns."""
+        for p in list(self._children):
+            self._kill_group(p)
+        self._children.clear()
 
     def has(self, stage: str) -> bool:
         return stage in EXECUTOR_STAGES
@@ -142,7 +209,7 @@ class Executors:
         else:
             raise ExecutorUnconfigured(f"no executor for {stage}")
         if not uid or not UID_RE.match(uid):
-            return Result("permanent", "no_consult_uid" if not uid else "bad_consult_uid")
+            return Result("blocked", "no_consult_uid") if not uid else Result("permanent", "bad_consult_uid")
         return self.recut(uid) if stage == "recut" else self.lane(stage, uid)
 
     # ---------------------------------------------------------------- recut
@@ -166,6 +233,8 @@ class Executors:
         return self._classify_recut(p.returncode, p.stdout, p.stderr, uid)
 
     def _classify_recut(self, rc: int, out: str, err: str, uid: str) -> Result:
+        if rc == 2:
+            return Result("permanent", "usage")
         if rc != 0:
             return Result("transient", f"rc_{rc}" if 0 < rc < 128 else "killed")   # 3 = prints invalid: global, not the job's fault
         s = last_json(out)
@@ -213,6 +282,10 @@ class Executors:
 
     # ---------------------------------------------------------------- K clip lanes
     def lane(self, stage: str, uid: str) -> Result:
+        now = self.clock()
+        if in_hourly_window(now, self.hourly_from, self.hourly_to):
+            return Result("transient", "hourly_gap")
+        timeout = lane_timeout_s(now, self.hourly_from)
         try:
             hourly = try_flock(self.hourly_lock)
         except OSError:
@@ -231,7 +304,7 @@ class Executors:
             if stage == "nemotron":
                 argv += ["--worker-status", "worker"]   # yield to the production Nemotron worker before every inference
             try:
-                p = self._run(argv, cwd=cwd, capture_output=True, text=True, timeout=CHILD_TIMEOUT_S, check=False)
+                p = self._run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False, pass_fds=(hourly,))   # the child holds the lock too
             except subprocess.TimeoutExpired:
                 return Result("transient", "timeout")
             except OSError:
@@ -285,5 +358,18 @@ class Executors:
             status = st if st in ("ok", "empty", "failed", "skipped") else "ok"
         except (OSError, ValueError, AttributeError):
             pass
+        try:
+            sha = sha256_file(path)
+        except OSError:
+            return Result("transient", "artefact_missing")   # the file vanished between the glob and the read
         return Result("done", None, {"engine": m["engine"], "version": m["version"], "cfg8": m["cfg8"], "store": "box", "status": status,
-                                     "sha256": sha256_file(path), "object_key": f"tracks/{os.path.basename(path)}"})
+                                     "sha256": sha, "object_key": f"tracks/{os.path.basename(path)}"})
+
+
+def install_signal_handlers(execs: Executors) -> None:
+    """SIGTERM / SIGINT: kill the children's process groups, wait for them, and only then exit (143 / 130). The hourly lock is the child's too, so it is never free while a child runs."""
+    def _h(signum, _frame):
+        execs.kill_children()
+        sys.exit(128 + signum)
+    signal.signal(signal.SIGTERM, _h)
+    signal.signal(signal.SIGINT, _h)

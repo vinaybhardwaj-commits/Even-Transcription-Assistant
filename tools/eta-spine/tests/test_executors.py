@@ -35,6 +35,7 @@ FAKE_CUTTER = textwrap.dedent('''
         except OSError: print(json.dumps({"locked": True})); sys.exit(0)
     if mode == "locked": print(json.dumps({"locked": True})); sys.exit(0)
     if mode == "abort": print(json.dumps({"aborted": "prints_invalid"})); sys.exit(3)
+    if mode == "usage": sys.exit(2)
     if mode == "sleep":
         import time; time.sleep(30)
     if mode == "silent":
@@ -146,8 +147,8 @@ def test_uid_that_could_be_read_as_a_flag_or_is_missing_never_spawns(box):
     ex = box.ex()
     for bad in ["--since", "-x", "a b", "a;b", "", "x" * 200]:
         r = ex.execute("recut", bad)
-        assert (r.outcome, r.code) == ("permanent", "bad_consult_uid" if bad else "no_consult_uid"), bad
-    assert ex.execute("nemotron", None).code == "no_consult_uid"
+        assert (r.outcome, r.code) == (("permanent", "bad_consult_uid") if bad else ("blocked", "no_consult_uid")), bad   # F3: no link is BLOCKED, not a failure
+    assert (ex.execute("nemotron", None).outcome, ex.execute("nemotron", None).code) == ("blocked", "no_consult_uid")
     assert box.calls() == []
 
 
@@ -203,6 +204,7 @@ def test_success_without_a_file_is_transient_artefact_missing(box, monkeypatch):
     ("error", "transient", "cut_error"),
     ("none", "transient", "not_selected"),
     ("abort", "transient", "rc_3"),
+    ("usage", "permanent", "usage"),                    # rc 2, like the lanes
 ])
 def test_recut_error_map(box, monkeypatch, mode, outcome, code):
     monkeypatch.setenv("FAKE_MODE", mode)
@@ -344,3 +346,137 @@ def test_runner_live_silent_audio_reports_permanent(box, monkeypatch):
         return (200, {"ok": True, "jobs": [job]}) if path.endswith("claim") else (200, {"ok": True})
     runner.Runner("https://x", "t", "o", live=True, post=post, log=lambda m: None, execs=box.ex()).run_once()
     assert sent[1][1] == {"job_id": 5, "owner": "o", "outcome": "permanent", "error_code": "silent_audio"}
+
+
+# ---------------------------------------------------------------- F1: the :40 hourly window and the child cap
+@pytest.mark.parametrize("minute,second,refused", [(24, 59, False), (25, 0, True), (40, 0, True), (44, 59, True), (45, 0, False), (10, 0, False)])
+@pytest.mark.parametrize("stage", ["acoustics", "nemotron"])
+def test_k_lanes_are_refused_from_25_to_45(box, stage, minute, second, refused):
+    ex = executors.Executors(env=box.env, clock=lambda: at(minute, second))
+    r = ex.execute(stage, UID)
+    if refused:
+        assert (r.outcome, r.code) == ("transient", "hourly_gap") and box.calls() == []
+    else:
+        assert r.outcome == "done"
+
+
+def test_window_is_configurable_by_env(box):
+    env = dict(box.env, SPINE_HOURLY_FROM_MIN="5", SPINE_HOURLY_TO_MIN="15")
+    assert executors.Executors(env=env, clock=lambda: at(10)).execute("acoustics", UID).code == "hourly_gap"
+    assert executors.Executors(env=env, clock=lambda: at(30)).execute("acoustics", UID).outcome == "done"
+
+
+def test_recut_is_not_subject_to_the_hourly_window(box):
+    assert executors.Executors(env=box.env, clock=lambda: at(40)).execute("recut", UID).outcome == "done"
+
+
+@pytest.mark.parametrize("minute,second,expect", [(45, 0, 840), (45, 1, 840), (10, 0, 840), (24, 59, 1), (24, 0, 60), (21, 0, 240), (20, 0, 300), (0, 0, 840), (5, 0, 840), (11, 0, 840), (12, 0, 780)])
+def test_lane_timeout_cap(minute, second, expect):
+    assert executors.lane_timeout_s(at(minute, second)) == expect
+
+
+def test_a_job_started_at_45_ends_before_25(box):
+    for second in range(0, 3600, 60):   # every start minute allowed by the window
+        now = at(0) + second
+        if executors.in_hourly_window(now):
+            continue
+        end = now + executors.lane_timeout_s(now)
+        assert not executors.in_hourly_window(end - 0.001) and end - now <= executors.CHILD_TIMEOUT_S
+
+
+def test_lane_passes_the_computed_cap_and_the_lock_fd_to_the_child(box):
+    seen = {}
+
+    def run(argv, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"counts": {"clips": 1, "nothing": 0}}), "")
+    ex = executors.Executors(env=box.env, run=run, clock=lambda: at(21))
+    ex.execute("acoustics", UID)
+    assert seen["timeout"] == 240 and len(seen["pass_fds"]) == 1
+
+
+# ---------------------------------------------------------------- F2: the child holds the hourly lock; a signal kills the group first
+SLOW_LANE = textwrap.dedent('''
+    import os, sys, time
+    open(os.environ["FAKE_PIDFILE"], "w").write(str(os.getpid()))
+    time.sleep(60)
+''')
+DRIVER = textwrap.dedent('''
+    import os, sys
+    sys.path.insert(0, sys.argv[1])
+    import executors
+    ex = executors.Executors(env=dict(os.environ), clock=lambda: 1_000_000 * 0 + float(sys.argv[2]))
+    executors.install_signal_handlers(ex)
+    print("ready", flush=True)
+    ex.execute("acoustics", "uid_test_01")
+''')
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+        return open(f"/proc/{pid}/stat").read().split()[2] != "Z"
+    except (OSError, FileNotFoundError):
+        return False
+
+
+def _drive(box, tmp_path):
+    (box.tmp / "lab" / "kit" / "reb" / "clip_lanes.py").write_text(SLOW_LANE)
+    pidfile = tmp_path / "child.pid"
+    env = dict(os.environ, FAKE_PIDFILE=str(pidfile))
+    drv = subprocess.Popen([sys.executable, "-c", DRIVER, os.path.join(os.path.dirname(__file__), ".."), str(at(10))], env=env, stdout=subprocess.PIPE, text=True)
+    assert drv.stdout.readline().strip() == "ready"
+    for _ in range(100):
+        if pidfile.exists() and pidfile.read_text():
+            break
+        time.sleep(0.05)
+    return drv, int(pidfile.read_text())
+
+
+def test_sigterm_kills_the_child_group_and_the_lock_is_never_free_while_it_runs(box, tmp_path):
+    lock = str(box.data / "reb" / "_hourly.lock")
+    drv, child = _drive(box, tmp_path)
+    assert not executors.probe_flock(lock)
+    drv.terminate()
+    assert drv.wait(timeout=10) == 128 + 15
+    assert not _alive(child), "the runner exited while the child was still running"
+    assert executors.probe_flock(lock)
+
+
+def test_child_keeps_the_hourly_lock_even_when_the_runner_is_sigkilled(box, tmp_path):
+    lock = str(box.data / "reb" / "_hourly.lock")
+    drv, child = _drive(box, tmp_path)
+    drv.kill()
+    drv.wait()
+    try:
+        assert _alive(child)
+        assert not executors.probe_flock(lock), "the lock was free while the child still ran"
+    finally:
+        os.killpg(child, 9)
+    for _ in range(100):
+        if executors.probe_flock(lock):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("lock never freed after the child died")
+
+
+def test_timeout_kills_the_whole_process_group(box, tmp_path, monkeypatch):
+    (box.tmp / "lab" / "kit" / "reb" / "clip_lanes.py").write_text(SLOW_LANE)
+    monkeypatch.setenv("FAKE_PIDFILE", str(tmp_path / "child.pid"))
+    monkeypatch.setattr(executors, "CHILD_TIMEOUT_S", 1)
+    r = box.ex().execute("acoustics", UID)
+    assert (r.outcome, r.code) == ("transient", "timeout")
+    assert not _alive(int((tmp_path / "child.pid").read_text()))
+
+
+# ---------------------------------------------------------------- F8
+def test_a_track_file_that_vanishes_is_transient_not_a_crash(box, monkeypatch):
+    real = executors.sha256_file
+
+    def gone(path):
+        os.unlink(path)
+        return real(path)
+    monkeypatch.setattr(executors, "sha256_file", gone)
+    r = box.ex().execute("acoustics", UID)
+    assert (r.outcome, r.code) == ("transient", "artefact_missing")

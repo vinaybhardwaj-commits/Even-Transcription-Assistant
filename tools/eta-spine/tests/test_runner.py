@@ -90,7 +90,8 @@ def test_live_runs_through_the_executor_and_reports_its_outcome_code_and_artefac
     art = {"engine": "cutter", "version": "v1", "cfg8": "abcdef01", "store": "box", "status": "ok", "sha256": "0" * 64}
     for res, want in [(executors.Result("done", None, art), {"outcome": "done", "artefact": art}),
                       (executors.Result("transient", "lock_busy"), {"outcome": "transient", "error_code": "lock_busy"}),
-                      (executors.Result("permanent", "silent_audio"), {"outcome": "permanent", "error_code": "silent_audio"})]:
+                      (executors.Result("permanent", "silent_audio"), {"outcome": "permanent", "error_code": "silent_audio"}),
+                      (executors.Result("blocked", "no_consult_uid"), {"outcome": "blocked", "error_code": "no_consult_uid"})]:
         ex = FakeExecs(res)
         r, sent, logs = live_runner([{**JOB, "mode": "live", "consult_uid": "uid_test_01"}], ex)
         assert r.run_once() == 0
@@ -98,6 +99,16 @@ def test_live_runs_through_the_executor_and_reports_its_outcome_code_and_artefac
         assert sent[0][1]["limit"] == 1 and sent[0][1]["live"] is True
         assert sent[1][1] == {"job_id": 7, "owner": "o", **want}
         assert not any("uid_test_01" in m for m in logs)   # the uid is never logged
+
+
+def test_main_live_installs_the_signal_handlers(monkeypatch):
+    monkeypatch.setenv("SPINE_BASE_URL", "https://x")
+    monkeypatch.setenv("SPINE_BEARER_TOKEN", "t")
+    seen = []
+    monkeypatch.setattr(executors, "install_signal_handlers", lambda ex: seen.append(ex))
+    monkeypatch.setattr(runner.Runner, "run_once", lambda self: 0)
+    assert runner.main(["--live", "--once"]) == 0 and len(seen) == 1
+    assert runner.main(["--once"]) == 0 and len(seen) == 1   # would_run installs nothing
 
 
 def test_live_unconfigured_executor_releases_and_exits_3():

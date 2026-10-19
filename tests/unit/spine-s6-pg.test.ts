@@ -8,7 +8,7 @@ import { dockerAvailable, pgContainer } from "../support/s1-pg";
 const H = vi.hoisted(() => ({ tag: null as null | ((s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>) }));
 vi.mock("@/lib/db", () => ({ sql: async (s: TemplateStringsArray, ...v: unknown[]) => H.tag!(s, ...v) }));
 
-import { claimJobs, enqueue, reportJob } from "@/lib/spine/jobs";
+import { claimJobs, enqueue, openBreakers, reportJob } from "@/lib/spine/jobs";
 import { parseArtefact } from "@/lib/spine/artefact";
 import { NextRequest } from "next/server";
 import { POST as claimPOST } from "@/app/api/spine/claim/route";
@@ -142,6 +142,54 @@ d("spine S6 on postgres:16", () => {
     expect("consult_uid" in sh.jobs[0]!).toBe(false);
   });
 
+  // ------------------------------------------------------------ F4: enqueue wires requeueShadow itself
+  it("F4: enqueue of a key spent in shadow re-queues that one row when the stage is live NOW, and leaves it alone when it is not", async () => {
+    await q("DELETE FROM spine_job");
+    const { e, id } = await mkJob("recut", "c1", "f4");
+    await q("UPDATE spine_job SET status = 'shadow', attempts = 0 WHERE job_id = ?::bigint", id);
+    const key = { encounter_id: e, stage: "recut", cut_version: "c1", input_key: "f4" };
+    await setCfg({ jobs: "live", "mode.recut": "shadow" });
+    expect(await enqueue(key)).toBeNull();
+    expect((await row(id)).status).toBe("shadow");
+    await setCfg({ jobs: "off", "mode.recut": "live" });   // jobs off: not live
+    expect(await enqueue(key)).toBeNull();
+    await setCfg({ jobs: "live", "mode.recut": "live" });
+    expect(await enqueue(key)).toBe(id);
+    expect(await row(id)).toMatchObject({ status: "queued", attempts: 0, next_attempt_at: null });
+    expect(await q("SELECT count(*)::int AS n FROM spine_job WHERE encounter_id = ?", e)).toEqual([{ n: 1 }]);
+    expect(await enqueue(key)).toBeNull();   // now queued: a further enqueue is a no-op
+    // a sibling encounter's shadow row is untouched
+    const sib = await mkJob("recut", "c1", "f4");
+    await q("UPDATE spine_job SET status = 'shadow' WHERE job_id = ?::bigint", sib.id);
+    expect(await enqueue(key)).toBeNull();
+    expect((await row(sib.id)).status).toBe("shadow");
+  });
+
+  // ------------------------------------------------------------ F3: no consult_uid link is BLOCKED, not a failure
+  it("F3: 10 jobs reported blocked/no_consult_uid never open the breaker, spend no attempt, are not claimable, and come back on unblock", async () => {
+    await q("DELETE FROM spine_job"); await q("DELETE FROM spine_tick");
+    await setCfg({ jobs: "live", "mode.recut": "live" });
+    const ids: Array<{ e: string; id: number }> = [];
+    for (let i = 0; i < 10; i++) ids.push(await mkJob("recut", "c1", `f3-${i}`));
+    for (const j of ids) {
+      const c = await (await claimPOST(claimReq({ owner: "rb", limit: 1, live: true }))).json() as { jobs: Array<{ job_id: number; consult_uid: string | null }> };
+      expect(c.jobs.length).toBe(1);
+      expect(c.jobs[0]!.consult_uid).toBeNull();
+      const r = await reportPOST(reportReq({ job_id: c.jobs[0]!.job_id, owner: "rb", outcome: "blocked", error_code: "no_consult_uid" }));
+      expect(r.status).toBe(200);
+    }
+    for (const j of ids) expect(await row(j.id)).toMatchObject({ status: "queued", attempts: 0, last_error_code: "no_consult_uid", last_error_class: null, lease_owner: null });
+    expect(await q("SELECT count(*)::int AS n FROM spine_tick WHERE kind = 'attempt:recut'")).toEqual([{ n: 0 }]);
+    expect(await openBreakers(["recut"], T0)).toEqual([]);
+    expect(await claimJobs("rb", ["recut"], 5, new Date("2099-01-01T00:00:00Z"))).toEqual([]);   // held: not retried, however late
+    // a link appears: the enqueuer re-queues exactly that row
+    const first = ids[0]!;
+    expect(await enqueue({ encounter_id: first.e, stage: "recut", cut_version: "c1", input_key: "f3-0" })).toBeNull();   // no flag: untouched
+    expect(await enqueue({ encounter_id: first.e, stage: "recut", cut_version: "c1", input_key: "f3-0", unblock: true })).toBe(first.id);
+    expect(await row(first.id)).toMatchObject({ status: "queued", attempts: 0, next_attempt_at: null, last_error_code: null });
+    expect((await claimJobs("rb", ["recut"], 5, T0)).map((j) => j.job_id)).toEqual([first.id]);
+  });
+
   // ------------------------------------------------------------ artefact reports
   const leased = async (stage = "recut", key = "art") => {
     const j = await mkJob(stage, "cutA", key);
@@ -195,7 +243,10 @@ describe("parseArtefact", () => {
   it("accepts a ref, refuses text-ish / path-escaping / digit-run engine", () => {
     expect(parseArtefact(ART)).toMatchObject({ engine: "cutter", sha256: SHA_A, bucket: null });
     expect(parseArtefact({ ...ART, version: "12345678" })).not.toBeNull();            // a hex revision may be all digits
-    expect(parseArtefact({ ...ART, object_key: "tracks/diar.nemotron__12345678__0123abcd.json" })).not.toBeNull();
+    expect(parseArtefact({ ...ART, object_key: "tracks/diar.nemotron__12345678__12345678.json" })).not.toBeNull();   // the box-generated version / cfg8 parts may hold a digit run
+    // F6: object_key gets the digit-run and identity-word screen too
+    for (const bad of ["tracks/20261019123456/x.json", "2026-10-19/consult.flac", "room_a/consult.flac", "tracks/uid_test_01.json", "enc_testaaaaaaaaaaaa/consult.flac", "tracks/patient.json", "tracks/12345678.json", "tracks/diar.nemotron12345678__v1__0123abcd.json"])
+      expect(parseArtefact({ ...ART, object_key: bad }), bad).toBeNull();
     expect(parseArtefact({ ...ART, engine: "e12345678" })).toBeNull();
     for (const bad of [null, [], "x", {}, { ...ART, cfg8: "ABCDEFGH" }, { ...ART, cfg8: "abc" }, { ...ART, status: "weird" }, { ...ART, bucket: "a b" }, { ...ART, object_key: "a/../b" }, { ...ART, object_key: "a b" }]) expect(parseArtefact(bad)).toBeNull();
   });

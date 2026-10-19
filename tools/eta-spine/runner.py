@@ -8,7 +8,7 @@ untouched and the runner exits 3; the rest of that claim is released too (it doe
 
 Env: SPINE_BASE_URL (https://host), SPINE_BEARER_TOKEN; --live also SPINE_CUTTER_DIR/_PY (recut) and SPINE_LAB_DIR/_PY (acoustics, nemotron), see executors.py. Optional: SPINE_RUNNER_OWNER (replaces the hostname part), SPINE_POLL_SECONDS (default 60; a malformed value falls back to 60 with one error line).
 Owner: <hostname>:<pid>:<random token>, fresh per process (two runners on one box never share a lease owner).
-Exit codes: 0 once-pass done, 2 bad config, 3 live refused (or an executor is not configured).
+Exit codes: 143/130 on SIGTERM/SIGINT (after the child's process group is killed), 0 once-pass done, 2 bad config, 3 live refused (or an executor is not configured).
 """
 from __future__ import annotations
 
@@ -148,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     owner = make_owner()
     r = Runner(base, token, owner, live=a.live)
+    if a.live:
+        executors.install_signal_handlers(r.execs)
     r.log(f"spine-runner start mode={'live' if a.live else 'would_run'} owner={owner}")
     poll = poll_seconds(os.environ.get("SPINE_POLL_SECONDS"))
     while True:

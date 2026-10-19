@@ -8,7 +8,7 @@
  */
 import { sql } from "@/lib/db";
 import { queueOpsAlert } from "@/lib/alerts/ops-alert";
-import type { Mode } from "./config";
+import { readModes, type Mode } from "./config";
 import { breakerOpen, LEASE_MS, MAX_ATTEMPTS, resolveOutcome, type Outcome } from "./retry";
 
 export type SpineJob = { job_id: number; encounter_id: string; stage: string; cut_version: string; input_key: string; attempts: number; lease_until: string | null; consult_uid?: string | null };
@@ -35,18 +35,29 @@ const toJob = (r: Record<string, unknown>, withUid = false): SpineJob => ({
 /**
  * Idempotent on (encounter_id, stage, cut_version, input_key). Returns the job id, or null when the key already exists.
  * S6 N3: a key processed in SHADOW is spent for live (status `shadow` is terminal). `requeueShadow` (the caller found the stage live) puts that one row back to
- * `queued` with attempts 0 and returns its id; a row in any other status is never touched.
+ * `queued` with attempts 0 and returns its id; a row in any other status is never touched. Without the flag, enqueue reads the stage mode itself when the key already exists (F4) and re-queues a
+ * `shadow` row when the stage is live now. `unblock` (F3: a consult_uid link appeared) re-queues a row held as `blocked` (queued, next_attempt_at infinity).
  */
-export async function enqueue(j: { encounter_id: string; stage: string; cut_version: string; input_key: string; priority?: number; requeueShadow?: boolean }): Promise<number | null> {
-  const rows = (await sql`
-    INSERT INTO spine_job (encounter_id, stage, cut_version, input_key, status, priority)
-    VALUES (${j.encounter_id}, ${j.stage}, ${j.cut_version}, ${j.input_key}, 'queued', ${j.priority ?? 0}::int)
-    ON CONFLICT ON CONSTRAINT spine_job_key_uq DO UPDATE
-       SET status = 'queued', attempts = 0, next_attempt_at = NULL, lease_owner = NULL, lease_until = NULL,
-           last_error_class = NULL, last_error_code = NULL, done_at = NULL
-     WHERE ${j.requeueShadow === true}::boolean AND spine_job.status = 'shadow'
-    RETURNING job_id`) as Array<{ job_id: unknown }>;
-  return rows[0] ? num(rows[0].job_id) : null;
+export async function enqueue(
+  j: { encounter_id: string; stage: string; cut_version: string; input_key: string; priority?: number; requeueShadow?: boolean; unblock?: boolean },
+  modeOf: (stage: string) => Promise<Mode> = async (s) => (await readModes([s])).stages[s] ?? "off",
+): Promise<number | null> {
+  const put = async (requeueShadow: boolean): Promise<number | null> => {
+    const rows = (await sql`
+      INSERT INTO spine_job (encounter_id, stage, cut_version, input_key, status, priority)
+      VALUES (${j.encounter_id}, ${j.stage}, ${j.cut_version}, ${j.input_key}, 'queued', ${j.priority ?? 0}::int)
+      ON CONFLICT ON CONSTRAINT spine_job_key_uq DO UPDATE
+         SET status = 'queued', attempts = 0, next_attempt_at = NULL, lease_owner = NULL, lease_until = NULL,
+             last_error_class = NULL, last_error_code = NULL, done_at = NULL
+       WHERE (${requeueShadow}::boolean AND spine_job.status = 'shadow')
+          OR (${j.unblock === true}::boolean AND spine_job.status = 'queued' AND spine_job.next_attempt_at = 'infinity'::timestamptz)
+      RETURNING job_id`) as Array<{ job_id: unknown }>;
+    return rows[0] ? num(rows[0].job_id) : null;
+  };
+  const first = await put(j.requeueShadow === true);
+  if (first !== null || j.requeueShadow === true) return first;
+  // F4: the key exists. A row spent in shadow goes back to queued when the stage is live NOW (the mode is read only on this path).
+  return (await modeOf(j.stage)) === "live" ? put(true) : null;
 }
 
 /** Leased rows whose lease ran out on the LAST allowed attempt can never be claimed again: they die here (once, by the UPDATE). */
@@ -118,16 +129,16 @@ export async function reportJob(
     if (artefact === "conflict") { outcome = "permanent"; errorCode = "sha_conflict"; }
   }
   const r = resolveOutcome(outcome, attempts, a.now, a.rng());
-  const code = outcome === "done" || outcome === "shadow" || outcome === "release" ? null : errorCode;
+  const code = outcome === "done" || outcome === "shadow" || outcome === "release" ? null : errorCode;   // blocked keeps its code (no_consult_uid)
   // Breaker bookkeeping (no schema change): one spine_tick row 'attempt:<stage>' per finished attempt, written in the SAME statement as the owner-matched
-  // UPDATE, so a lost lease records nothing. done = failed 0; transient / permanent / dead = failed 1. budget, shadow and release give the attempt back: not recorded.
+  // UPDATE, so a lost lease records nothing. done = failed 0; transient / permanent / dead = failed 1. budget, shadow, release and blocked give the attempt back: not recorded (blocked is no failure of the engine, F3).
   const recorded = outcome === "done" || outcome === "transient" || outcome === "permanent";
   const failedTick = outcome === "done" ? 0 : 1;
   const upd = (await sql`
     WITH u AS (
     UPDATE spine_job
        SET status = ${r.status}::text,
-           next_attempt_at = ${r.nextAttemptAt ? r.nextAttemptAt.toISOString() : null}::timestamptz,
+           next_attempt_at = CASE WHEN ${r.hold === true}::boolean THEN 'infinity'::timestamptz ELSE ${r.nextAttemptAt ? r.nextAttemptAt.toISOString() : null}::timestamptz END,
            attempts = greatest(attempts + ${r.attemptsDelta}::int, 0),
            last_error_class = ${r.errorClass}::text,
            last_error_code = ${code}::text,
