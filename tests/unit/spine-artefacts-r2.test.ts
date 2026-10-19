@@ -10,6 +10,7 @@ import type { SpineDb } from "@/lib/spine/artefacts-store";
 
 const pg = pgContainer("eta-spine-artefacts-r2");
 const mig = (f: string) => readFileSync(`db/migrations/${f}`, "utf8");
+const NO_BLIND = { blindIds: async () => [] as string[] };
 const NOW = new Date("2026-10-19T10:00:00Z");
 const SHA = (c: string) => c.repeat(64);
 const MARK = "PHIMARK";
@@ -81,7 +82,7 @@ d("oref adversarial: spine S3 on postgres:16", () => {
   it("REVOKE + PHI: on-mode run as a SELECT-only role succeeds; no marker reaches the app or spine_artefact", async () => {
     setMode('"live"');
     const seen: unknown[] = [];
-    const r = await indexSpineArtefacts(NOW, dbAs("spine_ro", seen));
+    const r = await indexSpineArtefacts(NOW, dbAs("spine_ro", seen), NO_BLIND);
     expect(r.mode).toBe("live");
     expect(r.inserted).toBe(6);    // cut, sarvam, reb, nemotron, freescript, catalog stt (the catalog clip is dup_source)
     expect(JSON.stringify(seen)).not.toContain(MARK);
@@ -98,9 +99,9 @@ d("oref adversarial: spine S3 on postgres:16", () => {
       INSERT INTO diarize_nemotron_window (window_id, room_day_id, model, model_rev, config, config_hash, worker_id, machine, audio_ms, payload_sha256, status) VALUES
         ('bw_test_w1', 'rd_w', 'm', 'drev1', '{}'::jsonb, 'feed5678aaaa', 'w', 'box', 1000, '${SHA("c")}', 'ok'),
         ('bw_test_w2', 'rd_w', 'm', 'drev1', '{}'::jsonb, 'feed5678aaaa', 'w', 'box', 1000, '${SHA("d")}', 'ok');`);
-    const r = await indexSpineArtefacts(NOW, dbAs("postgres", []));
+    const r = await indexSpineArtefacts(NOW, dbAs("postgres", []), NO_BLIND);
     const keys = q1("SELECT string_agg(object_key, ',' ORDER BY object_key) FROM spine_artefact WHERE encounter_id = 'enc_testwwwwwwwwwwww'");
-    expect({ keys, conflicts: r.counts.conflicts }).toEqual({ keys: "diarize_nemotron_window/bw_test_w1,diarize_nemotron_window/bw_test_w2,reb/w/w1.json,reb/w/w2.json", conflicts: {} });
+    expect({ keys, conflicts: r.counts.conflicts }).toEqual({ keys: "diarize_nemotron_window/2,diarize_nemotron_window/3,reb/w/w1.json,reb/w/w2.json", conflicts: {} });
   });
 
   it("collision: one encounter with two consult_uids (M8 merge survivor), same sarvam config: both should land, none 'unchanged'", async () => {
@@ -113,7 +114,7 @@ d("oref adversarial: spine S3 on postgres:16", () => {
       INSERT INTO consult_sarvam_result (consult_uid, cut_version, mode, english, job_id, result_r2_key, model_stt, model_translate, model_rev, pipeline_rev, t0_ms) VALUES
         ('cu_test_m1', 'cv1', 'transcribe', false, 'job_m1', 'mcp-sarvam/m1.json', 'a', 'b', 'rev1', 'p1', 1),
         ('cu_test_m2', 'cv1', 'transcribe', false, 'job_m2', 'mcp-sarvam/m2.json', 'a', 'b', 'rev1', 'p1', 3);`);
-    const r = await indexSpineArtefacts(NOW, dbAs("postgres", []));
+    const r = await indexSpineArtefacts(NOW, dbAs("postgres", []), NO_BLIND);
     const keys = q1("SELECT string_agg(object_key, ',' ORDER BY object_key) FROM spine_artefact WHERE encounter_id = 'enc_testmmmmmmmmmmmm'");
     expect({ keys, unchanged: r.counts.unchanged }).toEqual({ keys: "consult-clips/m/1.flac,consult-clips/m/2.flac,mcp-sarvam/m1.json,mcp-sarvam/m2.json", unchanged: 0 });
   });
@@ -122,7 +123,7 @@ d("oref adversarial: spine S3 on postgres:16", () => {
     pg.exec(`DELETE FROM spine_artefact;
       INSERT INTO spine_artefact (encounter_id, stage, engine, version, cfg8, cut_version, store, object_key, sha256, status, source_table)
         VALUES ('enc_testpppppppppppp', 'cut', 'cutter', 'c1', '${hash8("cu_test_p1")}', 'cv1', 'r2', 'consult-clips/p/other.flac', '${SHA("e")}', 'ok', 'spine_report');`);
-    const r = await indexSpineArtefacts(NOW, dbAs("postgres", []));
+    const r = await indexSpineArtefacts(NOW, dbAs("postgres", []), NO_BLIND);
     expect(q1("SELECT sha256 FROM spine_artefact WHERE source_table = 'spine_report'")).toBe(SHA("e"));   // not overwritten
     expect(r.counts.to_insert).toBe(r.inserted);
     expect(r.counts.foreign_conflict).toEqual({ consult_index: 1 });   // counted, not dropped
@@ -141,18 +142,18 @@ d("oref adversarial: spine S3 on postgres:16", () => {
   it("M8: a freescript run with state ok but no artifact is not ok", async () => {
     pg.exec(`DELETE FROM spine_artefact;
       INSERT INTO freescript_run (consult_uid, schema_version, state, validator_ok, generator_code_sha, generator_prompt_sha, input_sha256) VALUES ('cu_test_p1', 'eta.freescript.v0.2', 'ok', true, '${SHA("a")}', '${SHA("a")}', '${SHA("f")}');`);
-    await indexSpineArtefacts(NOW, dbAs("postgres", []));
+    await indexSpineArtefacts(NOW, dbAs("postgres", []), NO_BLIND);
     expect(q1(`SELECT string_agg(status, ',' ORDER BY status) FROM spine_artefact WHERE source_table = 'freescript_run' AND cfg8 = '${hash8("cu_test_p1", SHA("f"))}'`)).toBe("skipped");
   });
 
   it("catalog dedupe: a catalog object already indexed from consult_index is dup_source, not a second row; the clip sha is used when present", async () => {
     pg.exec(`DELETE FROM spine_artefact; DELETE FROM encounter_catalog WHERE consult_uid = 'cu_test_p1';
       INSERT INTO encounter_catalog (consult_uid, clip, layers) VALUES ('cu_test_p1', '{"r2_key":"consult-clips/p/one.flac"}'::jsonb, '{"stt":{"r2_key":"reb/p/stt.json","status":"ok"},"diar":{"r2_key":"reb/p/own.json","status":"ok"}}'::jsonb);`);
-    const r = await indexSpineArtefacts(NOW, dbAs("postgres", []));
+    const r = await indexSpineArtefacts(NOW, dbAs("postgres", []), NO_BLIND);
     expect(r.counts.dup_source).toEqual({ encounter_catalog: 2 });   // the clip (consult_index) and reb/p/stt.json (reb row of a linked window)
     expect(q1("SELECT string_agg(object_key, ',' ORDER BY object_key) FROM spine_artefact WHERE source_table = 'encounter_catalog'")).toBe("reb/p/own.json");
     pg.exec(`DELETE FROM spine_artefact; UPDATE encounter_catalog SET clip = '{"r2_key":"consult-clips/p/solo.flac","sha256":"${SHA("9")}"}'::jsonb WHERE consult_uid = 'cu_test_p1';`);
-    await indexSpineArtefacts(NOW, dbAs("postgres", []));
+    await indexSpineArtefacts(NOW, dbAs("postgres", []), NO_BLIND);
     expect(q1("SELECT sha256 FROM spine_artefact WHERE source_table = 'encounter_catalog' AND object_key = 'consult-clips/p/solo.flac'")).toBe(SHA("9"));
   });
 
@@ -166,14 +167,14 @@ d("oref adversarial: spine S3 on postgres:16", () => {
         SELECT 'cu_test_c' || lpad(g::text, 5, '0'), 'room_c', 'rc', '2026-10-19', 1, 2, 'consult-clips/c/' || g || '.flac', 'cv1', 'c1', '${SHA("a")}' FROM generate_series(1, 5000) g;`);
     const got: number[] = [];
     for (let run = 1; run <= 3; run++) {
-      const r = await indexSpineArtefacts(NOW, dbAs("postgres", []));
+      const r = await indexSpineArtefacts(NOW, dbAs("postgres", []), NO_BLIND);
       got.push(r.inserted);
       expect(r.counts.conflicts).toEqual({});
       expect(r.counts.unchanged, `run ${run}: a page must not re-read the row at the watermark`).toBe(0);
     }
     expect(got).toEqual([2000, 2000, 1000]);
     expect(q1("SELECT count(*) || ',' || count(DISTINCT object_key) FROM spine_artefact WHERE source_table = 'consult_index'")).toBe("5000,5000");
-    const again = await indexSpineArtefacts(NOW, dbAs("postgres", []));
+    const again = await indexSpineArtefacts(NOW, dbAs("postgres", []), NO_BLIND);
     expect([again.inserted, again.counts.unchanged]).toEqual([0, 2000]);   // the sweep restarted from the top and found nothing new
   });
 });

@@ -14,6 +14,7 @@ const HAVE_DOCKER = dockerAvailable();
 const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
 const pg = pgContainer("eta-spine-artefacts");
 const mig = (f: string) => readFileSync(`db/migrations/${f}`, "utf8");
+const NO_BLIND = { blindIds: async () => [] as string[] };
 const NOW = new Date("2026-10-19T10:00:00Z");
 
 describe("REQUIRED PROOF — spine artefact index runs against a real postgres", () => {
@@ -47,10 +48,10 @@ describe("spine artefacts: pure mapping and gate", () => {
   it("each source's SELECT column list is exactly its ref columns; no body, text, name or prescription column anywhere", () => {
     expect(SOURCE_DEFS.consult_index.columns).toEqual(["s.consult_uid", "s.cut_version", "s.code_commit", "s.clip_r2_key", "s.source_sha256", "l.encounter_id"]);
     expect(SOURCE_DEFS.consult_sarvam_result.columns).toEqual(["s.consult_uid", "s.cut_version", "s.mode", "s.english", "s.model_rev", "s.pipeline_rev", "s.result_r2_key", "l.encounter_id"]);
-    expect(SOURCE_DEFS.reb_track_index.columns).toEqual(["s.window_id", "s.layer", "s.engine", "s.version", "s.config_hash", "s.shadow", "s.status", "s.r2_key", "s.sha256", "l.encounter_id"]);
-    expect(SOURCE_DEFS.diarize_nemotron_window.columns).toEqual(["s.window_id", "s.model_rev", "s.config_hash", "s.payload_sha256", "s.status", "l.encounter_id"]);
+    expect(SOURCE_DEFS.reb_track_index.columns).toEqual(["s.window_id", "s.layer", "s.engine", "s.version", "s.config_hash", "s.shadow", "s.status", "s.r2_key", "s.sha256", "(s.window_id = ANY($2::varchar[])) AS blind", "l.encounter_id"]);
+    expect(SOURCE_DEFS.diarize_nemotron_window.columns).toEqual(["s.id", "s.window_id", "s.model_rev", "s.config_hash", "s.payload_sha256", "s.status", "(s.window_id = ANY($2::varchar[])) AS blind", "l.encounter_id"]);
     expect(SOURCE_DEFS.freescript_run.columns.slice(0, 5)).toEqual(["s.id", "s.consult_uid", "s.schema_version", "s.state", "s.input_sha256"]);
-    expect(SOURCE_DEFS.encounter_catalog.columns).toEqual(["s.consult_uid", "c.layer", "c.r2_key", "c.sha256", "c.status", "c.dup_source", "l.encounter_id"]);
+    expect(SOURCE_DEFS.encounter_catalog.columns).toEqual(["s.consult_uid", "c.layer", "c.r2_key", "c.sha256", "c.status", "c.dup_source", "c.blind", "l.encounter_id"]);
     const FORBIDDEN = /\b(turns_json|config|artifact|validator_errors|completion_required|doctor_name|patient_name|prescription_uid|presc_uid|individual_uid|prescription|transcript\w*|text|note|english_chars|stages|allowance|freescript|jev|clef_affect|presence)\b/i;
     for (const s of SOURCES) {
       const list = SOURCE_DEFS[s].columns.join(", ");
@@ -81,9 +82,11 @@ d("spine artefact index on postgres:16", () => {
   let log: string[] = [];
   const db: SpineDb = (text, params = []) => {
     log.push(text);
-    const parts = text.split(/\$\d+/);
-    if (parts.length - 1 !== params.length) throw new Error("test driver: placeholders and params differ");
-    return pg.sql(Object.assign(parts, { raw: parts }) as unknown as TemplateStringsArray, ...params);
+    const bits = text.split(/\$(\d+)/);   // [text, n, text, n, ...]: a placeholder may repeat or come out of order
+    const parts = bits.filter((_, i) => i % 2 === 0);
+    const vals = bits.filter((_, i) => i % 2 === 1).map((n) => params[Number(n) - 1]);
+    if (new Set(bits.filter((_, i) => i % 2 === 1).map(Number)).size !== params.length) throw new Error("test driver: placeholders and params differ");
+    return pg.sql(Object.assign(parts, { raw: parts }) as unknown as TemplateStringsArray, ...vals);
   };
   const rows = async (text: string): Promise<Array<Record<string, unknown>>> => (await db(text, [])) as Array<Record<string, unknown>>;
   const one = async (text: string) => Object.values((await rows(text))[0] ?? {})[0];
@@ -141,7 +144,7 @@ d("spine artefact index on postgres:16", () => {
     for (const v of [null, '"off"', '"on"', '"ON"', '42', '{"mode":"loud"}', '[]']) {
       setMode(v);
       log = [];
-      const r = await indexSpineArtefacts(NOW, db);
+      const r = await indexSpineArtefacts(NOW, db, NO_BLIND);
       expect(r.mode, String(v)).toBe("off");
       expect(r.inserted).toBe(0);
       expect(log).toEqual([CONFIG_SQL]);
@@ -151,7 +154,7 @@ d("spine artefact index on postgres:16", () => {
 
   it("shadow reads and counts but writes nothing", async () => {
     setMode('"shadow"');
-    const r = await indexSpineArtefacts(NOW, db);
+    const r = await indexSpineArtefacts(NOW, db, NO_BLIND);
     expect(r.mode).toBe("shadow");
     expect(r.inserted).toBe(0);
     expect(r.counts.to_insert).toBeGreaterThan(0);
@@ -160,7 +163,7 @@ d("spine artefact index on postgres:16", () => {
 
   it("on: one join fixture per source lands the expected refs, and only through an active link", async () => {
     setMode('{"mode":"live"}');
-    const r = await indexSpineArtefacts(NOW, db);
+    const r = await indexSpineArtefacts(NOW, db, NO_BLIND);
     expect(r.mode).toBe("live");
     const all = await artefacts();
     const by = (t: string) => all.filter((a) => a.source_table === t);
@@ -176,7 +179,7 @@ d("spine artefact index on postgres:16", () => {
       [E2, "stt", "engx:shadow", "abcd1234", "reb/t/stt-shadow.json", "empty"],
     ]);
     expect(by("diarize_nemotron_window")).toEqual([
-      { encounter_id: E2, stage: "diarize", engine: "nemotron", version: "drev1", cfg8: "feed5678", cut_version: "window:bw_test_01", store: "neon", bucket: null, object_key: "diarize_nemotron_window/bw_test_01", sha256: SHA_A, status: "ok", source_table: "diarize_nemotron_window" },
+      { encounter_id: E2, stage: "diarize", engine: "nemotron", version: "drev1", cfg8: "feed5678", cut_version: "window:bw_test_01", store: "neon", bucket: null, object_key: "diarize_nemotron_window/1", sha256: SHA_A, status: "ok", source_table: "diarize_nemotron_window" },
     ]);
     expect(by("freescript_run").map((a) => [a.encounter_id, a.status, a.cfg8, a.store])).toEqual([
       [E1, "ok", hash8("cu_test_01", SHA_B), "neon"],
@@ -193,7 +196,7 @@ d("spine artefact index on postgres:16", () => {
 
   it("orphans are counted by source table, never time-matched into the overlapping encounter", async () => {
     setMode('"shadow"');
-    const r = await indexSpineArtefacts(NOW, db);
+    const r = await indexSpineArtefacts(NOW, db, NO_BLIND);
     expect(r.counts.orphans).toEqual({ consult_index: 2, consult_sarvam_result: 1, reb_track_index: 1, diarize_nemotron_window: 1, freescript_run: 1, encounter_catalog: 1 });
     expect(await one(`SELECT count(*)::int FROM spine_artefact WHERE object_key LIKE '%orph%' OR object_key LIKE '%old%' OR object_key LIKE '%job_t3%'`)).toBe(0);
   });
@@ -201,7 +204,7 @@ d("spine artefact index on postgres:16", () => {
   it("rerun makes 0 changes", async () => {
     setMode('"live"');
     const before = await artefacts();
-    const again = await indexSpineArtefacts(new Date("2026-10-20T00:00:00Z"), db);
+    const again = await indexSpineArtefacts(new Date("2026-10-20T00:00:00Z"), db, NO_BLIND);
     expect(again.inserted).toBe(0);
     expect(again.counts.to_insert).toBe(0);
     expect(again.counts.conflicts).toEqual({});
@@ -215,7 +218,7 @@ d("spine artefact index on postgres:16", () => {
     pg.exec(`UPDATE consult_index SET source_sha256 = '${SHA_B}' WHERE consult_uid = 'cu_test_01';
              UPDATE diarize_nemotron_window SET payload_sha256 = '${SHA_B}' WHERE window_id = 'bw_test_01';`);
     const before = await artefacts();
-    const r = await indexSpineArtefacts(NOW, db);
+    const r = await indexSpineArtefacts(NOW, db, NO_BLIND);
     expect(r.counts.conflicts).toEqual({ consult_index: 1, diarize_nemotron_window: 1 });
     expect(r.inserted).toBe(0);
     expect(await artefacts()).toEqual(before);
@@ -227,7 +230,7 @@ d("spine artefact index on postgres:16", () => {
     pg.exec(`INSERT INTO consult_index (consult_uid, room_id, room_slug, ist_date, t0_ms, t1_ms, clip_r2_key, cut_version, source_sha256) VALUES ('cu_test_02', 'room_a', 'ra', '2026-10-19', 1, 2, 'consult-clips/t/two.flac', 'cv1', '${SHA_A}');
              INSERT INTO spine_link (encounter_id, key_kind, value, basis) VALUES ('${E1}', 'consult_uid', 'cu_test_02', 'exact');`);
     log = [];
-    const r = await indexSpineArtefacts(NOW, db);
+    const r = await indexSpineArtefacts(NOW, db, NO_BLIND);
     expect(r.inserted).toBe(1);
     for (const stmt of log) {
       if (stmt === INSERT_SQL || stmt === CURSOR_UPSERT_SQL) continue;

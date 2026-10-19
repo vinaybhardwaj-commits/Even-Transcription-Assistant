@@ -17,11 +17,14 @@
  * | encounter_catalog       | layer     | catalog                     | none         | hash8(consult_uid, layer, r2_key)             | none               |
  *
  * SAME KEY, TWO ROWS. A null sha256 never equals another null: when either side has no sha the object_key decides. A key held by another
- * source_table is counted as foreign_conflict, never dropped silently. A catalog object already indexed from consult_index or reb is dup_source.
+ * source_table is counted as foreign_conflict, never dropped silently. A catalog object already indexed from consult_index, or from reb for a window actively linked to the SAME encounter, is dup_source.
+ * HELD-OUT WINDOWS. The room-table reads are in lib/room-access/readers/spine-artefacts.ts; a blind window's rows come back marked and are counted as blind_excluded, never mapped.
  * CURSOR. Each source is read in primary-key order, at most ROW_LIMIT rows per run, from the watermark kept in spine_config.artefacts_cursor.
  * When a source runs out of rows its watermark resets, so the next run sweeps again (late-linked rows get picked up; reruns are idempotent).
  */
 import { createHash } from "node:crypto";
+import { CATALOG_DEF, LINK_CU, NEMOTRON_DEF, REB_DEF } from "@/lib/room-access/readers/spine-artefacts";
+import type { SourceDef } from "@/lib/room-access/readers/spine-artefacts";
 
 export const SOURCES = ["consult_index", "consult_sarvam_result", "reb_track_index", "diarize_nemotron_window", "freescript_run", "encounter_catalog"] as const;
 export type SourceTable = (typeof SOURCES)[number];
@@ -63,6 +66,8 @@ export interface ArtefactCounts {
   foreign_conflict: Record<string, number>;
   /** Catalog objects already indexed from consult_index or reb_track_index, by source table. */
   dup_source: Record<string, number>;
+  /** Rows of a held-out (blind) window, or catalog objects that are its ref: counted, never mapped or indexed, by source table. */
+  blind_excluded: Record<string, number>;
   unchanged: number;
   to_insert: number;
 }
@@ -87,17 +92,7 @@ export function parseArtefactsMode(value: unknown): ArtefactsMode {
 }
 
 // ── The SELECTs. Column lists are the whole contract: ids, keys, shas, statuses. No body, text, transcript, name or prescription column. ──
-interface SourceDef {
-  columns: string[];
-  from: string;
-  /** Text expression of the source primary key: the cursor and the ORDER BY. Fixed width for numbers, so text order = key order. */
-  pk: string;
-  /** Rows the mapper never sees (no ref to index). */
-  where?: string;
-}
-const LINK_CU = "LEFT JOIN spine_link l ON l.key_kind = 'consult_uid' AND l.value = s.consult_uid AND l.active";
-const LINK_WIN = "LEFT JOIN spine_link l ON l.key_kind = 'window_id' AND l.value = s.window_id AND l.active";
-export const SOURCE_DEFS: Record<Exclude<SourceTable, "encounter_catalog">, SourceDef> & { encounter_catalog: SourceDef } = {
+export const SOURCE_DEFS: Record<SourceTable, SourceDef> = {
   consult_index: {
     columns: ["s.consult_uid", "s.cut_version", "s.code_commit", "s.clip_r2_key", "s.source_sha256", "l.encounter_id"],
     from: `consult_index s ${LINK_CU}`,
@@ -108,38 +103,18 @@ export const SOURCE_DEFS: Record<Exclude<SourceTable, "encounter_catalog">, Sour
     from: `consult_sarvam_result s ${LINK_CU}`,
     pk: "lpad(s.id::text, 20, '0')",
   },
-  reb_track_index: {
-    columns: ["s.window_id", "s.layer", "s.engine", "s.version", "s.config_hash", "s.shadow", "s.status", "s.r2_key", "s.sha256", "l.encounter_id"],
-    from: `reb_track_index s ${LINK_WIN}`,
-    pk: "lpad(s.id::text, 20, '0')",
-  },
-  diarize_nemotron_window: {
-    columns: ["s.window_id", "s.model_rev", "s.config_hash", "s.payload_sha256", "s.status", "l.encounter_id"],
-    from: `diarize_nemotron_window s ${LINK_WIN}`,
-    pk: "lpad(s.id::text, 20, '0')",
-  },
+  // The room-table sources live in the room-access reader (held-out windows are marked there).
+  reb_track_index: REB_DEF,
+  diarize_nemotron_window: NEMOTRON_DEF,
   freescript_run: {
     columns: ["s.id", "s.consult_uid", "s.schema_version", "s.state", "s.input_sha256", "(EXISTS (SELECT 1 FROM freescript_artifact a WHERE a.run_id = s.id)) AS has_artifact", "l.encounter_id"],
     from: `freescript_run s ${LINK_CU}`,
     pk: "lpad(s.id::text, 20, '0')",
   },
-  // The catalog's ref fields only, picked out of its json columns by key: the clip key, and each layer's key and status.
-  encounter_catalog: {
-    columns: ["s.consult_uid", "c.layer", "c.r2_key", "c.sha256", "c.status", "c.dup_source", "l.encounter_id"],
-    pk: "(c.consult_uid || chr(31) || c.layer)",
-    // dup_source: the object is already indexed from consult_index (same consult) or reb_track_index (window with an active link).
-    from: `(SELECT k.consult_uid, 'clip' AS layer, k.clip->>'r2_key' AS r2_key, k.clip->>'sha256' AS sha256, NULL::text AS status FROM encounter_catalog k
-              WHERE jsonb_typeof(k.clip) = 'object' AND k.clip->>'r2_key' IS NOT NULL
-            UNION ALL
-            SELECT k.consult_uid, e.key, e.value->>'r2_key', NULL::text, e.value->>'status' FROM encounter_catalog k
-              CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(k.layers) = 'object' THEN k.layers ELSE '{}'::jsonb END) e
-              WHERE jsonb_typeof(e.value) = 'object' AND e.value->>'r2_key' IS NOT NULL) c0
-           CROSS JOIN LATERAL (SELECT c0.consult_uid, c0.layer, c0.r2_key, c0.sha256, c0.status,
-              (EXISTS (SELECT 1 FROM consult_index ci WHERE ci.consult_uid = c0.consult_uid AND ci.clip_r2_key = c0.r2_key)
-               OR EXISTS (SELECT 1 FROM reb_track_index rt JOIN spine_link wl ON wl.key_kind = 'window_id' AND wl.value = rt.window_id AND wl.active WHERE rt.r2_key = c0.r2_key)) AS dup_source) c
-           JOIN encounter_catalog s ON s.consult_uid = c.consult_uid ${LINK_CU}`,
-  },
+  encounter_catalog: CATALOG_DEF,
 };
+/** The bound parameters of a source page: the watermark, plus the held-out window ids for a source that marks them. */
+export const sourceParams = (src: SourceTable, cursor: string, blindIds: readonly string[]): unknown[] => (SOURCE_DEFS[src].blind ? [cursor, [...blindIds]] : [cursor]);
 /** One page of a source, in primary-key order after the watermark $1 (use "" for the start). Deterministic: same rows in, same page out. */
 export function sourceSelect(src: SourceTable): string {
   const d = SOURCE_DEFS[src];
@@ -179,9 +154,9 @@ export function mapRow(src: SourceTable, r: Record<string, unknown>): Mapped | n
       return { stage: layer, engine: r.shadow === true ? `${engine}:shadow` : engine, version: ver, cfg8: cfg.slice(0, 8), cut_version: `window:${win}`, store: "r2", bucket: null, object_key: key, sha256: str(r.sha256), status };
     }
     case "diarize_nemotron_window": {
-      const win = str(r.window_id); const rev = str(r.model_rev); const cfg = str(r.config_hash); const status = asStatus(r.status);
-      if (!win || !rev || !cfg || !status) return null;
-      return { stage: "diarize", engine: "nemotron", version: rev, cfg8: cfg.slice(0, 8), cut_version: `window:${win}`, store: "neon", bucket: null, object_key: `diarize_nemotron_window/${win}`, sha256: str(r.payload_sha256), status };
+      const win = str(r.window_id); const rev = str(r.model_rev); const cfg = str(r.config_hash); const status = asStatus(r.status); const id = r.id;
+      if (!win || !rev || !cfg || !status || (typeof id !== "number" && typeof id !== "string")) return null;
+      return { stage: "diarize", engine: "nemotron", version: rev, cfg8: cfg.slice(0, 8), cut_version: `window:${win}`, store: "neon", bucket: null, object_key: `diarize_nemotron_window/${id}`, sha256: str(r.payload_sha256), status };
     }
     case "freescript_run": {
       const ver = str(r.schema_version); const input = str(r.input_sha256); const id = r.id; const uid = str(r.consult_uid);
@@ -210,10 +185,11 @@ const sameObject = (a: { sha256: string | null; object_key?: string | null }, b:
 export function planArtefacts(rows: Array<{ source: SourceTable; row: SourceRow }>, existing: ExistingArtefact[]): ArtefactPlan {
   const seen = new Map<string, { sha256: string | null; object_key: string | null; source_table: string | null | undefined }>();
   for (const e of existing) seen.set(keyOf(e), { sha256: e.sha256, object_key: e.object_key ?? null, source_table: e.source_table });
-  const counts: ArtefactCounts = { seen: rows.length, orphans: {}, unmapped: {}, conflicts: {}, foreign_conflict: {}, dup_source: {}, unchanged: 0, to_insert: 0 };
+  const counts: ArtefactCounts = { seen: rows.length, orphans: {}, unmapped: {}, conflicts: {}, foreign_conflict: {}, dup_source: {}, blind_excluded: {}, unchanged: 0, to_insert: 0 };
   const inserts: ArtefactDraft[] = [];
   const cands: ArtefactDraft[] = [];
   for (const { source, row } of rows) {
+    if (row.blind === true) { bump(counts.blind_excluded, source); continue; }
     if (!row.encounter_id) { bump(counts.orphans, source); continue; }
     if (row.dup_source === true) { bump(counts.dup_source, source); continue; }
     const m = mapRow(source, row);
