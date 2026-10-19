@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
-import { SOURCES, SOURCE_DEFS, sourceSelect, INSERT_SQL, EXISTING_SQL, CONFIG_SQL, mapRow, parseArtefactsMode, planArtefacts } from "@/lib/spine/artefacts";
+import { hash8, SOURCES, SOURCE_DEFS, sourceSelect, INSERT_SQL, CURSOR_UPSERT_SQL, EXISTING_SQL, CONFIG_SQL, mapRow, parseArtefactsMode, planArtefacts } from "@/lib/spine/artefacts";
 import type { SourceRow } from "@/lib/spine/artefacts";
 import { indexSpineArtefacts } from "@/lib/spine/artefacts-store";
 import type { SpineDb } from "@/lib/spine/artefacts-store";
@@ -25,10 +25,10 @@ describe("REQUIRED PROOF — spine artefact index runs against a real postgres",
 
 // ── pure parts: no docker needed ──
 describe("spine artefacts: pure mapping and gate", () => {
-  it("the mode is off unless the config says shadow or on", () => {
-    for (const v of [undefined, null, "", "OFF", "yes", 1, true, [], {}, { mode: "ON" }, { mode: 1 }, "onn"]) expect(parseArtefactsMode(v)).toBe("off");
-    expect(parseArtefactsMode("on")).toBe("on");
-    expect(parseArtefactsMode({ mode: "on" })).toBe("on");
+  it("the mode is off unless the config says shadow or live ('on' is malformed)", () => {
+    for (const v of [undefined, null, "", "OFF", "yes", 1, true, [], {}, { mode: "ON" }, { mode: 1 }, "onn", "on", { mode: "on" }, "Shadow", " live"]) expect(parseArtefactsMode(v)).toBe("off");
+    expect(parseArtefactsMode("live")).toBe("live");
+    expect(parseArtefactsMode({ mode: "live" })).toBe("live");
     expect(parseArtefactsMode("shadow")).toBe("shadow");
   });
   it("every SELECT is a SELECT: no INSERT/UPDATE/DELETE/DDL word in any source statement", () => {
@@ -50,7 +50,7 @@ describe("spine artefacts: pure mapping and gate", () => {
     expect(SOURCE_DEFS.reb_track_index.columns).toEqual(["s.window_id", "s.layer", "s.engine", "s.version", "s.config_hash", "s.shadow", "s.status", "s.r2_key", "s.sha256", "l.encounter_id"]);
     expect(SOURCE_DEFS.diarize_nemotron_window.columns).toEqual(["s.window_id", "s.model_rev", "s.config_hash", "s.payload_sha256", "s.status", "l.encounter_id"]);
     expect(SOURCE_DEFS.freescript_run.columns.slice(0, 5)).toEqual(["s.id", "s.consult_uid", "s.schema_version", "s.state", "s.input_sha256"]);
-    expect(SOURCE_DEFS.encounter_catalog.columns).toEqual(["s.consult_uid", "c.layer", "c.r2_key", "c.status", "l.encounter_id"]);
+    expect(SOURCE_DEFS.encounter_catalog.columns).toEqual(["s.consult_uid", "c.layer", "c.r2_key", "c.sha256", "c.status", "c.dup_source", "l.encounter_id"]);
     const FORBIDDEN = /\b(turns_json|config|artifact|validator_errors|completion_required|doctor_name|patient_name|prescription_uid|presc_uid|individual_uid|prescription|transcript\w*|text|note|english_chars|stages|allowance|freescript|jev|clef_affect|presence)\b/i;
     for (const s of SOURCES) {
       const list = SOURCE_DEFS[s].columns.join(", ");
@@ -138,7 +138,7 @@ d("spine artefact index on postgres:16", () => {
   beforeEach(() => { log = []; });
 
   it("off (no config row, and malformed values) makes no query on the sources and no write", async () => {
-    for (const v of [null, '"off"', '"ON"', '42', '{"mode":"loud"}', '[]']) {
+    for (const v of [null, '"off"', '"on"', '"ON"', '42', '{"mode":"loud"}', '[]']) {
       setMode(v);
       log = [];
       const r = await indexSpineArtefacts(NOW, db);
@@ -159,13 +159,13 @@ d("spine artefact index on postgres:16", () => {
   });
 
   it("on: one join fixture per source lands the expected refs, and only through an active link", async () => {
-    setMode('{"mode":"on"}');
+    setMode('{"mode":"live"}');
     const r = await indexSpineArtefacts(NOW, db);
-    expect(r.mode).toBe("on");
+    expect(r.mode).toBe("live");
     const all = await artefacts();
     const by = (t: string) => all.filter((a) => a.source_table === t);
     expect(by("consult_index")).toEqual([
-      { encounter_id: E1, stage: "cut", engine: "cutter", version: "abc1234", cfg8: "none", cut_version: "cv1", store: "r2", bucket: null, object_key: "consult-clips/t/one.flac", sha256: SHA_A, status: "ok", source_table: "consult_index" },
+      { encounter_id: E1, stage: "cut", engine: "cutter", version: "abc1234", cfg8: hash8("cu_test_01"), cut_version: "cv1", store: "r2", bucket: null, object_key: "consult-clips/t/one.flac", sha256: SHA_A, status: "ok", source_table: "consult_index" },
     ]);
     expect(by("consult_sarvam_result").map((a) => [a.encounter_id, a.engine, a.object_key, a.version, a.sha256])).toEqual([
       [E1, "sarvam_transcribe", "mcp-sarvam/job_t1.json", "rev1", null],
@@ -176,16 +176,16 @@ d("spine artefact index on postgres:16", () => {
       [E2, "stt", "engx:shadow", "abcd1234", "reb/t/stt-shadow.json", "empty"],
     ]);
     expect(by("diarize_nemotron_window")).toEqual([
-      { encounter_id: E2, stage: "diarize", engine: "nemotron", version: "drev1", cfg8: "feed5678", cut_version: "window", store: "neon", bucket: null, object_key: "diarize_nemotron_window/bw_test_01", sha256: SHA_A, status: "ok", source_table: "diarize_nemotron_window" },
+      { encounter_id: E2, stage: "diarize", engine: "nemotron", version: "drev1", cfg8: "feed5678", cut_version: "window:bw_test_01", store: "neon", bucket: null, object_key: "diarize_nemotron_window/bw_test_01", sha256: SHA_A, status: "ok", source_table: "diarize_nemotron_window" },
     ]);
     expect(by("freescript_run").map((a) => [a.encounter_id, a.status, a.cfg8, a.store])).toEqual([
-      [E1, "ok", SHA_B.slice(0, 8), "neon"],
-      [E1, "failed", SHA_A.slice(0, 8), "neon"],
+      [E1, "ok", hash8("cu_test_01", SHA_B), "neon"],
+      [E1, "failed", hash8("cu_test_01", SHA_A), "neon"],
     ]);
     expect(by("encounter_catalog").map((a) => [a.encounter_id, a.stage, a.object_key, a.status])).toEqual([
-      [E1, "clip", "consult-clips/t/one.flac", "ok"],
       [E1, "stt", "reb/t/cat-stt.json", "ok"],
     ]);
+    expect(r.counts.dup_source).toEqual({ encounter_catalog: 1 });   // the clip is already indexed from consult_index
     expect(r.counts.unmapped).toEqual({ encounter_catalog: 1 });   // the layer with an unknown status, not guessed
     expect(r.inserted).toBe(all.length);
     expect(await one("SELECT count(*)::int FROM spine_artefact WHERE bucket IS NOT NULL OR source_table IS NULL")).toBe(0);
@@ -199,7 +199,7 @@ d("spine artefact index on postgres:16", () => {
   });
 
   it("rerun makes 0 changes", async () => {
-    setMode('"on"');
+    setMode('"live"');
     const before = await artefacts();
     const again = await indexSpineArtefacts(new Date("2026-10-20T00:00:00Z"), db);
     expect(again.inserted).toBe(0);
@@ -211,7 +211,7 @@ d("spine artefact index on postgres:16", () => {
   });
 
   it("a sha conflict on the unique key is counted by source and never overwritten", async () => {
-    setMode('"on"');
+    setMode('"live"');
     pg.exec(`UPDATE consult_index SET source_sha256 = '${SHA_B}' WHERE consult_uid = 'cu_test_01';
              UPDATE diarize_nemotron_window SET payload_sha256 = '${SHA_B}' WHERE window_id = 'bw_test_01';`);
     const before = await artefacts();
@@ -223,15 +223,16 @@ d("spine artefact index on postgres:16", () => {
   });
 
   it("read-only: every statement run against the sources is a SELECT; the only write is INSERT INTO spine_artefact; no prescription/individual id or text column is selected", async () => {
-    setMode('"on"');
+    setMode('"live"');
     pg.exec(`INSERT INTO consult_index (consult_uid, room_id, room_slug, ist_date, t0_ms, t1_ms, clip_r2_key, cut_version, source_sha256) VALUES ('cu_test_02', 'room_a', 'ra', '2026-10-19', 1, 2, 'consult-clips/t/two.flac', 'cv1', '${SHA_A}');
              INSERT INTO spine_link (encounter_id, key_kind, value, basis) VALUES ('${E1}', 'consult_uid', 'cu_test_02', 'exact');`);
     log = [];
     const r = await indexSpineArtefacts(NOW, db);
     expect(r.inserted).toBe(1);
     for (const stmt of log) {
-      if (stmt === INSERT_SQL) continue;
+      if (stmt === INSERT_SQL || stmt === CURSOR_UPSERT_SQL) continue;
       expect(stmt.trim().startsWith("SELECT"), stmt.slice(0, 40)).toBe(true);
+      expect(stmt).not.toMatch(/\bFOR UPDATE\b/i);
       expect(stmt).not.toMatch(/\b(insert|update|delete|truncate|alter|drop)\b/i);
       expect(stmt).not.toMatch(/\b(prescription_uid|presc_uid|individual_uid|turns_json|patient_name|doctor_name|validator_errors)\b/i);
     }

@@ -3,6 +3,23 @@
  * store, bucket, object key, sha256, status, source table. No clock, no randomness, no I/O: `now` and the rows are parameters.
  * An artefact is placed ONLY through an active spine_link (consult_uid or window_id). No link = orphan: counted, never guessed or time-matched.
  * A sha conflict on the unique key is counted, never overwritten. consult_key is not used: none of these tables carries it.
+ *
+ * KEY DERIVATION. The 0173 unique key is (encounter_id, stage, engine, version, cfg8, cut_version) and is frozen, so each source puts its OWN
+ * identity into cfg8 or cut_version. Distinct real objects therefore never share a key (an encounter linked to 2 windows, or an M8 survivor
+ * holding 2 consult_uids, keeps both). hash8 = first 8 hex of sha256 over the parts joined by U+001F.
+ *
+ * | source                  | stage     | engine                      | version      | cfg8                                          | cut_version        |
+ * | consult_index           | cut       | cutter                      | code_commit  | hash8(consult_uid)                            | cut_version        |
+ * | consult_sarvam_result   | stt       | sarvam_<mode>[_en]          | model_rev    | hash8(consult_uid, mode, english, pipeline_rev) | cut_version      |
+ * | reb_track_index         | layer     | engine[:shadow]             | version      | config_hash[0:8]                              | window:<window_id> |
+ * | diarize_nemotron_window | diarize   | nemotron                    | model_rev    | config_hash[0:8]                              | window:<window_id> |
+ * | freescript_run          | freescript| eta2freescript              | schema_ver   | hash8(consult_uid, input_sha256)              | none               |
+ * | encounter_catalog       | layer     | catalog                     | none         | hash8(consult_uid, layer, r2_key)             | none               |
+ *
+ * SAME KEY, TWO ROWS. A null sha256 never equals another null: when either side has no sha the object_key decides. A key held by another
+ * source_table is counted as foreign_conflict, never dropped silently. A catalog object already indexed from consult_index or reb is dup_source.
+ * CURSOR. Each source is read in primary-key order, at most ROW_LIMIT rows per run, from the watermark kept in spine_config.artefacts_cursor.
+ * When a source runs out of rows its watermark resets, so the next run sweeps again (late-linked rows get picked up; reruns are idempotent).
  */
 import { createHash } from "node:crypto";
 
@@ -10,7 +27,9 @@ export const SOURCES = ["consult_index", "consult_sarvam_result", "reb_track_ind
 export type SourceTable = (typeof SOURCES)[number];
 export type ArtefactStatus = "ok" | "empty" | "failed" | "skipped";
 export type ArtefactStore = "r2" | "neon" | "box";
-export type ArtefactsMode = "off" | "shadow" | "on";
+export type ArtefactsMode = "off" | "shadow" | "live";
+export const ROW_LIMIT = 2000;
+export const CURSOR_KEY = "artefacts_cursor";
 
 export interface ArtefactDraft {
   encounter_id: string;
@@ -30,6 +49,7 @@ export interface ArtefactDraft {
 export type SourceRow = Record<string, unknown> & { encounter_id: string | null };
 export interface ExistingArtefact {
   encounter_id: string; stage: string; engine: string; version: string; cfg8: string; cut_version: string; sha256: string | null;
+  object_key?: string | null; source_table?: string | null;
 }
 export interface ArtefactCounts {
   seen: number;
@@ -39,6 +59,10 @@ export interface ArtefactCounts {
   unmapped: Record<string, number>;
   /** Same unique key already indexed with a different sha256 (or object key), by source table. Never overwritten. */
   conflicts: Record<string, number>;
+  /** The key is already held by a different source_table (another writer). Never overwritten, by source table. */
+  foreign_conflict: Record<string, number>;
+  /** Catalog objects already indexed from consult_index or reb_track_index, by source table. */
+  dup_source: Record<string, number>;
   unchanged: number;
   to_insert: number;
 }
@@ -56,16 +80,18 @@ export function hash8(...parts: Array<string | number | boolean | null>): string
 const str = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
 const asStatus = (v: unknown): ArtefactStatus | null => (typeof v === "string" && STATUSES.includes(v) ? (v as ArtefactStatus) : null);
 
-/** spine_config 'artefacts': "off" | "shadow" | "on", or {mode}. Missing or malformed is off. shadow reads and counts but writes nothing. */
+/** spine_config 'artefacts': "off" | "shadow" | "live", or {mode}. Anything else ("on" included) is off. shadow reads and counts but writes nothing. */
 export function parseArtefactsMode(value: unknown): ArtefactsMode {
   const v = value && typeof value === "object" && !Array.isArray(value) ? (value as { mode?: unknown }).mode : value;
-  return v === "on" || v === "shadow" ? v : "off";
+  return v === "live" || v === "shadow" ? v : "off";
 }
 
 // ── The SELECTs. Column lists are the whole contract: ids, keys, shas, statuses. No body, text, transcript, name or prescription column. ──
 interface SourceDef {
   columns: string[];
   from: string;
+  /** Text expression of the source primary key: the cursor and the ORDER BY. Fixed width for numbers, so text order = key order. */
+  pk: string;
   /** Rows the mapper never sees (no ref to index). */
   where?: string;
 }
@@ -75,40 +101,54 @@ export const SOURCE_DEFS: Record<Exclude<SourceTable, "encounter_catalog">, Sour
   consult_index: {
     columns: ["s.consult_uid", "s.cut_version", "s.code_commit", "s.clip_r2_key", "s.source_sha256", "l.encounter_id"],
     from: `consult_index s ${LINK_CU}`,
+    pk: "s.consult_uid",
   },
   consult_sarvam_result: {
     columns: ["s.consult_uid", "s.cut_version", "s.mode", "s.english", "s.model_rev", "s.pipeline_rev", "s.result_r2_key", "l.encounter_id"],
     from: `consult_sarvam_result s ${LINK_CU}`,
+    pk: "lpad(s.id::text, 20, '0')",
   },
   reb_track_index: {
     columns: ["s.window_id", "s.layer", "s.engine", "s.version", "s.config_hash", "s.shadow", "s.status", "s.r2_key", "s.sha256", "l.encounter_id"],
     from: `reb_track_index s ${LINK_WIN}`,
+    pk: "lpad(s.id::text, 20, '0')",
   },
   diarize_nemotron_window: {
     columns: ["s.window_id", "s.model_rev", "s.config_hash", "s.payload_sha256", "s.status", "l.encounter_id"],
     from: `diarize_nemotron_window s ${LINK_WIN}`,
+    pk: "lpad(s.id::text, 20, '0')",
   },
   freescript_run: {
     columns: ["s.id", "s.consult_uid", "s.schema_version", "s.state", "s.input_sha256", "(EXISTS (SELECT 1 FROM freescript_artifact a WHERE a.run_id = s.id)) AS has_artifact", "l.encounter_id"],
     from: `freescript_run s ${LINK_CU}`,
+    pk: "lpad(s.id::text, 20, '0')",
   },
   // The catalog's ref fields only, picked out of its json columns by key: the clip key, and each layer's key and status.
   encounter_catalog: {
-    columns: ["s.consult_uid", "c.layer", "c.r2_key", "c.status", "l.encounter_id"],
-    from: `(SELECT k.consult_uid, 'clip' AS layer, k.clip->>'r2_key' AS r2_key, NULL::text AS status FROM encounter_catalog k
+    columns: ["s.consult_uid", "c.layer", "c.r2_key", "c.sha256", "c.status", "c.dup_source", "l.encounter_id"],
+    pk: "(c.consult_uid || chr(31) || c.layer)",
+    // dup_source: the object is already indexed from consult_index (same consult) or reb_track_index (window with an active link).
+    from: `(SELECT k.consult_uid, 'clip' AS layer, k.clip->>'r2_key' AS r2_key, k.clip->>'sha256' AS sha256, NULL::text AS status FROM encounter_catalog k
               WHERE jsonb_typeof(k.clip) = 'object' AND k.clip->>'r2_key' IS NOT NULL
             UNION ALL
-            SELECT k.consult_uid, e.key, e.value->>'r2_key', e.value->>'status' FROM encounter_catalog k
+            SELECT k.consult_uid, e.key, e.value->>'r2_key', NULL::text, e.value->>'status' FROM encounter_catalog k
               CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(k.layers) = 'object' THEN k.layers ELSE '{}'::jsonb END) e
-              WHERE jsonb_typeof(e.value) = 'object' AND e.value->>'r2_key' IS NOT NULL) c
+              WHERE jsonb_typeof(e.value) = 'object' AND e.value->>'r2_key' IS NOT NULL) c0
+           CROSS JOIN LATERAL (SELECT c0.consult_uid, c0.layer, c0.r2_key, c0.sha256, c0.status,
+              (EXISTS (SELECT 1 FROM consult_index ci WHERE ci.consult_uid = c0.consult_uid AND ci.clip_r2_key = c0.r2_key)
+               OR EXISTS (SELECT 1 FROM reb_track_index rt JOIN spine_link wl ON wl.key_kind = 'window_id' AND wl.value = rt.window_id AND wl.active WHERE rt.r2_key = c0.r2_key)) AS dup_source) c
            JOIN encounter_catalog s ON s.consult_uid = c.consult_uid ${LINK_CU}`,
   },
 };
+/** One page of a source, in primary-key order after the watermark $1 (use "" for the start). Deterministic: same rows in, same page out. */
 export function sourceSelect(src: SourceTable): string {
   const d = SOURCE_DEFS[src];
-  return `SELECT ${d.columns.join(", ")} FROM ${d.from}${d.where ? ` WHERE ${d.where}` : ""}`;
+  const where = [`${d.pk} COLLATE "C" > $1`, ...(d.where ? [d.where] : [])].join(" AND ");
+  return `SELECT ${d.columns.join(", ")}, ${d.pk} AS pk FROM ${d.from} WHERE ${where} ORDER BY ${d.pk} COLLATE "C" LIMIT ${ROW_LIMIT}`;
 }
-export const EXISTING_SQL = "SELECT encounter_id, stage, engine, version, cfg8, cut_version, sha256 FROM spine_artefact WHERE source_table = ANY($1::text[])";
+/** Every artefact of the encounters in the page, whoever wrote it (so a key held by another source_table is seen). */
+export const EXISTING_SQL = "SELECT encounter_id, stage, engine, version, cfg8, cut_version, sha256, object_key, source_table FROM spine_artefact WHERE encounter_id = ANY($1::text[])";
+export const CURSOR_UPSERT_SQL = "INSERT INTO spine_config (key, value, updated_at) VALUES ($1, $2::jsonb, $3::timestamptz) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at RETURNING key";
 export const CONFIG_SQL = "SELECT value FROM spine_config WHERE key = $1";
 /** The only write the index makes. Source tables get SELECTs only. */
 export const INSERT_SQL = `INSERT INTO spine_artefact (encounter_id, stage, engine, version, cfg8, cut_version, store, bucket, object_key, sha256, status, source_table, created_at)
@@ -124,37 +164,37 @@ type Mapped = Omit<ArtefactDraft, "encounter_id" | "source_table">;
 export function mapRow(src: SourceTable, r: Record<string, unknown>): Mapped | null {
   switch (src) {
     case "consult_index": {
-      const key = str(r.clip_r2_key); const cut = str(r.cut_version);
-      if (!key || !cut) return null;
-      return { stage: "cut", engine: "cutter", version: str(r.code_commit) ?? NONE, cfg8: NONE, cut_version: cut, store: "r2", bucket: null, object_key: key, sha256: str(r.source_sha256), status: "ok" };
+      const key = str(r.clip_r2_key); const cut = str(r.cut_version); const uid = str(r.consult_uid);
+      if (!key || !cut || !uid) return null;
+      return { stage: "cut", engine: "cutter", version: str(r.code_commit) ?? NONE, cfg8: hash8(uid), cut_version: cut, store: "r2", bucket: null, object_key: key, sha256: str(r.source_sha256), status: "ok" };
     }
     case "consult_sarvam_result": {
-      const key = str(r.result_r2_key); const cut = str(r.cut_version); const mode = str(r.mode); const rev = str(r.model_rev);
-      if (!key || !cut || !mode || !rev || typeof r.english !== "boolean") return null;
-      return { stage: "stt", engine: `sarvam_${mode}${r.english ? "_en" : ""}`, version: rev, cfg8: hash8(mode, r.english, str(r.pipeline_rev)), cut_version: cut, store: "r2", bucket: null, object_key: key, sha256: null, status: "ok" };
+      const key = str(r.result_r2_key); const cut = str(r.cut_version); const mode = str(r.mode); const rev = str(r.model_rev); const uid = str(r.consult_uid);
+      if (!key || !cut || !mode || !rev || !uid || typeof r.english !== "boolean") return null;
+      return { stage: "stt", engine: `sarvam_${mode}${r.english ? "_en" : ""}`, version: rev, cfg8: hash8(uid, mode, r.english, str(r.pipeline_rev)), cut_version: cut, store: "r2", bucket: null, object_key: key, sha256: null, status: "ok" };
     }
     case "reb_track_index": {
-      const layer = str(r.layer); const engine = str(r.engine); const ver = str(r.version); const cfg = str(r.config_hash); const key = str(r.r2_key); const status = asStatus(r.status);
-      if (!layer || !engine || !ver || !cfg || !key || !status) return null;
-      return { stage: layer, engine: r.shadow === true ? `${engine}:shadow` : engine, version: ver, cfg8: cfg.slice(0, 8), cut_version: "window", store: "r2", bucket: null, object_key: key, sha256: str(r.sha256), status };
+      const layer = str(r.layer); const engine = str(r.engine); const ver = str(r.version); const cfg = str(r.config_hash); const key = str(r.r2_key); const status = asStatus(r.status); const win = str(r.window_id);
+      if (!layer || !engine || !ver || !cfg || !key || !status || !win) return null;
+      return { stage: layer, engine: r.shadow === true ? `${engine}:shadow` : engine, version: ver, cfg8: cfg.slice(0, 8), cut_version: `window:${win}`, store: "r2", bucket: null, object_key: key, sha256: str(r.sha256), status };
     }
     case "diarize_nemotron_window": {
       const win = str(r.window_id); const rev = str(r.model_rev); const cfg = str(r.config_hash); const status = asStatus(r.status);
       if (!win || !rev || !cfg || !status) return null;
-      return { stage: "diarize", engine: "nemotron", version: rev, cfg8: cfg.slice(0, 8), cut_version: "window", store: "neon", bucket: null, object_key: `diarize_nemotron_window/${win}`, sha256: str(r.payload_sha256), status };
+      return { stage: "diarize", engine: "nemotron", version: rev, cfg8: cfg.slice(0, 8), cut_version: `window:${win}`, store: "neon", bucket: null, object_key: `diarize_nemotron_window/${win}`, sha256: str(r.payload_sha256), status };
     }
     case "freescript_run": {
-      const ver = str(r.schema_version); const input = str(r.input_sha256); const id = r.id;
-      if (!ver || !input || (typeof id !== "number" && typeof id !== "string")) return null;
+      const ver = str(r.schema_version); const input = str(r.input_sha256); const id = r.id; const uid = str(r.consult_uid);
+      if (!ver || !input || !uid || (typeof id !== "number" && typeof id !== "string")) return null;
       const status: ArtefactStatus = r.state === "ok" ? (r.has_artifact === true ? "ok" : "skipped") : "failed";
-      return { stage: "freescript", engine: "eta2freescript", version: ver, cfg8: input.slice(0, 8), cut_version: NONE, store: "neon", bucket: null, object_key: `freescript_run/${id}`, sha256: input, status };
+      return { stage: "freescript", engine: "eta2freescript", version: ver, cfg8: hash8(uid, input), cut_version: NONE, store: "neon", bucket: null, object_key: `freescript_run/${id}`, sha256: input, status };
     }
     case "encounter_catalog": {
-      const layer = str(r.layer); const key = str(r.r2_key);
-      if (!layer || !key) return null;
+      const layer = str(r.layer); const key = str(r.r2_key); const uid = str(r.consult_uid);
+      if (!layer || !key || !uid) return null;
       const status = r.status === null || r.status === undefined ? "ok" : asStatus(r.status);
       if (!status) return null;
-      return { stage: layer === "clip" ? "clip" : layer, engine: "catalog", version: NONE, cfg8: hash8(key), cut_version: NONE, store: "r2", bucket: null, object_key: key, sha256: null, status };
+      return { stage: layer === "clip" ? "clip" : layer, engine: "catalog", version: NONE, cfg8: hash8(uid, layer, key), cut_version: NONE, store: "r2", bucket: null, object_key: key, sha256: str(r.sha256), status };
     }
   }
 }
@@ -162,25 +202,37 @@ export function mapRow(src: SourceTable, r: Record<string, unknown>): Mapped | n
 const keyOf = (e: { encounter_id: string; stage: string; engine: string; version: string; cfg8: string; cut_version: string }): string =>
   [e.encounter_id, e.stage, e.engine, e.version, e.cfg8, e.cut_version].join("\u001f");
 const bump = (m: Record<string, number>, k: string): void => { m[k] = (m[k] ?? 0) + 1; };
+/** Same object? A null sha256 never equals another null: if either side has no sha, the object key decides. */
+const sameObject = (a: { sha256: string | null; object_key?: string | null }, b: { sha256: string | null; object_key?: string | null }): boolean =>
+  a.sha256 !== null && b.sha256 !== null ? a.sha256 === b.sha256 : (a.object_key ?? null) === (b.object_key ?? null);
 
 /** Decide what to insert. Placement is by the row's own encounter_id (from the spine_link join) and nothing else. */
 export function planArtefacts(rows: Array<{ source: SourceTable; row: SourceRow }>, existing: ExistingArtefact[]): ArtefactPlan {
-  const seen = new Map<string, string | null>();
-  for (const e of existing) seen.set(keyOf(e), e.sha256);
-  const counts: ArtefactCounts = { seen: rows.length, orphans: {}, unmapped: {}, conflicts: {}, unchanged: 0, to_insert: 0 };
+  const seen = new Map<string, { sha256: string | null; object_key: string | null; source_table: string | null | undefined }>();
+  for (const e of existing) seen.set(keyOf(e), { sha256: e.sha256, object_key: e.object_key ?? null, source_table: e.source_table });
+  const counts: ArtefactCounts = { seen: rows.length, orphans: {}, unmapped: {}, conflicts: {}, foreign_conflict: {}, dup_source: {}, unchanged: 0, to_insert: 0 };
   const inserts: ArtefactDraft[] = [];
+  const cands: ArtefactDraft[] = [];
   for (const { source, row } of rows) {
     if (!row.encounter_id) { bump(counts.orphans, source); continue; }
+    if (row.dup_source === true) { bump(counts.dup_source, source); continue; }
     const m = mapRow(source, row);
     if (!m) { bump(counts.unmapped, source); continue; }
-    const draft: ArtefactDraft = { encounter_id: row.encounter_id, source_table: source, ...m };
+    cands.push({ encounter_id: row.encounter_id, source_table: source, ...m });
+  }
+  // Canonical order, so the winner of a colliding key does not depend on the order the source rows arrived in.
+  const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+  cands.sort((a, b) => cmp(keyOf(a), keyOf(b)) || cmp(a.source_table, b.source_table) || cmp(a.object_key ?? "", b.object_key ?? "") || cmp(a.sha256 ?? "", b.sha256 ?? ""));
+  for (const draft of cands) {
     const k = keyOf(draft);
-    if (seen.has(k)) {
-      if (seen.get(k) === draft.sha256) counts.unchanged += 1;
-      else bump(counts.conflicts, source);
+    const held = seen.get(k);
+    if (held) {
+      if (held.source_table !== undefined && held.source_table !== draft.source_table) bump(counts.foreign_conflict, draft.source_table);
+      else if (sameObject(held, draft)) counts.unchanged += 1;
+      else bump(counts.conflicts, draft.source_table);
       continue;
     }
-    seen.set(k, draft.sha256);
+    seen.set(k, { sha256: draft.sha256, object_key: draft.object_key, source_table: draft.source_table });
     inserts.push(draft);
   }
   counts.to_insert = inserts.length;
