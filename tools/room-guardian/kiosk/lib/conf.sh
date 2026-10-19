@@ -174,10 +174,17 @@ conf_load() {
   [ "$CONF_ERR_N" -eq 0 ]
 }
 
+# S2: conf text on stdin -> stdout with every active GUARDIAN_MIC_CLASS line removed and exactly one for <class> appended (install.sh --mic-class).
+mic_class_set() {
+  grep -v -E '^[[:space:]]*(export[[:space:]]+)?GUARDIAN_MIC_CLASS=' || true
+  printf 'GUARDIAN_MIC_CLASS="%s"\n' "$1"
+}
+
 # S2 (sense only): the room's mic class. GUARDIAN_MIC_CLASS is webcam or tonor; unset or anything else is unknown.
 # The class picks the USB pattern: webcam keeps the USB_MIC_PATTERN default (C270), tonor uses TONOR; an explicit USB_MIC_PATTERN in the conf always wins.
 mic_class_apply() {
   case "${GUARDIAN_MIC_CLASS:-}" in webcam|tonor) ;; *) GUARDIAN_MIC_CLASS=unknown ;; esac
+  # F4: the real ioreg product name of the Tonor mic is UNVERIFIED; the match stays case-sensitive unless the conf's USB_MIC_PATTERN says otherwise.
   if [ "$GUARDIAN_MIC_CLASS" = tonor ] && [ "${CONF_USB_EXPLICIT:-0}" != 1 ]; then USB_MIC_PATTERN=TONOR; fi
   return 0
 }

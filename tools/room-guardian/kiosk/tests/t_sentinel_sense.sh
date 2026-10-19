@@ -186,3 +186,48 @@ test_install_writes_mic_class() {
   assert_has "$(cat "$GUARDIAN_HOME/guardian.conf")" '^GUARDIAN_MIC_CLASS="webcam"$' "webcam replaced tonor"
   ( load_libs; . "$KDIR/lib/conf.sh"; audit() { :; }; conf_load "$GUARDIAN_HOME/guardian.conf" noperm ) && ok || fail "installed conf parses"
 }
+
+# ---- R2 fixes (F1 example conf, F2 unreadable conf, F3 temp cleanup, one class line) ----
+test_example_conf_has_no_active_usb_pattern() {
+  assert_eq "$(grep -c -E '^[[:space:]]*USB_MIC_PATTERN=' "$KDIR/guardian.conf.example")" "0" "no active USB_MIC_PATTERN in the example"
+  sed "s/<room-slug>/opd9/" "$KDIR/guardian.conf.example" >"$T/mc.conf"; printf 'GUARDIAN_MIC_CLASS="tonor"\n' >>"$T/mc.conf"
+  sense_env; load_libs; mc_load
+  assert_eq "$GUARDIAN_MIC_CLASS|$USB_MIC_PATTERN|$MC_RC" "tonor|TONOR|0" "stub + tonor resolves to TONOR"
+  sed "s/<room-slug>/opd9/" "$KDIR/guardian.conf.example" >"$T/mc.conf"; printf 'GUARDIAN_MIC_CLASS="webcam"\n' >>"$T/mc.conf"
+  mc_load
+  assert_eq "$GUARDIAN_MIC_CLASS|$USB_MIC_PATTERN|$MC_RC" "webcam|C270|0" "stub + webcam resolves to C270"
+  sed "s/<room-slug>/opd9/" "$KDIR/guardian.conf.example" >"$T/mc.conf"; printf 'GUARDIAN_MIC_CLASS="tonor"\nUSB_MIC_PATTERN="X1"\n' >>"$T/mc.conf"
+  mc_load
+  assert_eq "$GUARDIAN_MIC_CLASS|$USB_MIC_PATTERN|$MC_RC" "tonor|X1|0" "an explicit pattern in a real conf still wins"
+}
+
+test_install_mic_class_refuses_unreadable_existing_conf() {
+  rm -rf "$GUARDIAN_HOME"; mkdir -p "$GUARDIAN_HOME/guardian.conf"   # exists, not a readable file
+  sense_inst --mic-class tonor >"$T/out" 2>&1; assert_rc $? 2 "directory conf refused"
+  assert_has "$(cat "$T/out")" "not a readable file" "refusal names the conf"
+  rm -rf "$GUARDIAN_HOME"; mkdir -p "$GUARDIAN_HOME"; ln -s "$T/nonexistent" "$GUARDIAN_HOME/guardian.conf"   # dangling link
+  sense_inst --mic-class webcam >"$T/out" 2>&1; assert_rc $? 2 "dangling link conf refused"
+  assert_has "$(cat "$T/out")" "not a readable file" "refusal names the conf (link)"
+  [ -L "$GUARDIAN_HOME/guardian.conf" ] && [ ! -e "$GUARDIAN_HOME/bin" ] && ok || fail "nothing installed after the refusal"
+}
+
+test_install_mic_class_temp_removed_on_refusal() {
+  rm -rf "$GUARDIAN_HOME"; mkdir -p "$T/tmpd"
+  printf 'NOT_A_KEY=1\n' >"$T/bad.conf"
+  TMPDIR="$T/tmpd" sense_inst --config "$T/bad.conf" --mic-class tonor >"$T/out" 2>&1; assert_rc $? 2 "bad config refused after the temp was made"
+  assert_has "$(cat "$T/out")" "refusing: --config is not valid" "refused at the config check"
+  assert_eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" "0" "no temp file left in TMPDIR"
+}
+
+test_mic_class_set_leaves_exactly_one_line() {
+  load_libs; . "$KDIR/lib/conf.sh"
+  printf 'GUARDIAN_ROOM="opd9"\n# GUARDIAN_MIC_CLASS="webcam"\n' >"$T/a.conf"
+  mic_class_set tonor <"$T/a.conf" >"$T/b.conf"
+  mic_class_set webcam <"$T/b.conf" >"$T/c.conf"
+  mic_class_set tonor <"$T/c.conf" >"$T/d.conf"
+  assert_eq "$(grep -c -E '^GUARDIAN_MIC_CLASS=' "$T/d.conf")" "1" "one active class line after three installs"
+  assert_has "$(cat "$T/d.conf")" '^GUARDIAN_MIC_CLASS="tonor"$' "the last class wins"
+  assert_has "$(cat "$T/d.conf")" '^# GUARDIAN_MIC_CLASS="webcam"$' "comments are kept"
+  printf 'GUARDIAN_MIC_CLASS="webcam"\nexport GUARDIAN_MIC_CLASS=tonor\n' | mic_class_set tonor >"$T/e.conf"
+  assert_eq "$(grep -c 'GUARDIAN_MIC_CLASS=' "$T/e.conf")" "1" "active and exported lines both replaced"
+}

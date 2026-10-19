@@ -30,7 +30,7 @@ GUARDIAN_CONTROL_SUB_CMD='<command that streams one control payload line per mes
 # The kiosk-sudo path: a command that runs its arguments as root (sudoers NOPASSWD for the root helper only).
 GUARDIAN_SUDO="sudo -n"
 GUARDIAN_ROOT_HELPER="/usr/local/libexec/eta-guardian-root"
-USB_MIC_PATTERN="C270"
+# USB_MIC_PATTERN="C270"   # default C270 (webcam); mic class tonor selects TONOR. Set it only to override both.
 # The mic class of this room, reported on the health line as mic_class (sense only, it changes no decision): webcam or tonor. Unset or any other value is unknown (reported null).
 # It also picks the USB pattern when USB_MIC_PATTERN is not set here: webcam keeps C270, tonor uses TONOR. An explicit USB_MIC_PATTERN above always wins.
 # install.sh --mic-class webcam|tonor writes this line for you.
