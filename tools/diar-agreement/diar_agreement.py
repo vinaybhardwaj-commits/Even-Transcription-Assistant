@@ -59,7 +59,12 @@ class OutputError(RuntimeError):
 def segs_of(track, t0, dur):
     """Clip-relative (a, b, speaker) tuples, clamped to [0, dur] (score.py:109-119)."""
     out = []
-    for s in track.get("segments") or []:
+    segments = track.get("segments") or []
+    if not isinstance(segments, list):
+        raise InputError("track segments is not a list")
+    for s in segments:
+        if not isinstance(s, dict):
+            raise InputError("segment is not an object")
         try:
             a = (s["t0_ms"] - t0) / 1000.0
             b = (s["t1_ms"] - t0) / 1000.0
@@ -181,7 +186,12 @@ def canonical_track(tracks_dir, prefix):
             continue
         if not isinstance(d, dict) or d.get("status") != "ok":
             continue
-        ca = (d.get("extras") or {}).get("created_at") or ""
+        ex = d.get("extras")
+        if ex is not None and not isinstance(ex, dict):
+            raise InputError(f"track extras is not an object: {os.path.basename(f)}")
+        if d.get("segments") is not None and not isinstance(d.get("segments"), list):
+            raise InputError(f"track segments is not a list: {os.path.basename(f)}")
+        ca = (ex or {}).get("created_at") or ""
         cands.append((str(ca), os.path.getmtime(f), f, d))
     if not cands:
         return None, None
@@ -206,6 +216,10 @@ def check_nemotron(track, allow_model=False):
     if track.get("model") != NEMOTRON_BASE or not str(track.get("version")).startswith(NEMOTRON_VERSION_PREFIX):
         raise InputError(f"nemotron model/version differs from {NEMOTRON_BASE}@{NEMOTRON_VERSION_PREFIX} "
                          f"(got {track.get('model')!r}@{str(track.get('version'))[:12]!r}); use --allow-model")
+
+
+T0_MIN_MS, T0_MAX_MS = 1.5e12, 4.1e12  # 2017-07 .. 2099
+DUR_MAX_MS = 2.16e7  # 6 h
 
 
 def _pos_finite(x):
@@ -233,13 +247,16 @@ def row_from_consult_dir(cdir, now=None, allow_model=False):
         ist_date = man["ist_date"]
     except (KeyError, TypeError) as e:
         raise InputError("manifest lacks t0_ms/audio.duration_ms/ist_date") from e
-    if not _pos_finite(t0):
-        raise InputError("manifest t0_ms not finite and positive")
-    if not _pos_finite(dur_ms):
-        raise InputError("manifest audio.duration_ms not finite and positive")
+    if not _pos_finite(t0) or not (T0_MIN_MS <= t0 <= T0_MAX_MS):
+        raise InputError("manifest t0_ms not finite or outside the sane range")
+    if not _pos_finite(dur_ms) or dur_ms > DUR_MAX_MS:
+        raise InputError("manifest audio.duration_ms not finite, positive and at most 6 h")
     if not isinstance(ist_date, str) or not DATE_RE.match(ist_date):
         raise InputError("manifest ist_date not YYYY-MM-DD")
-    want = dt.datetime.fromtimestamp(t0 / 1000.0, IST).date().isoformat()
+    try:
+        want = dt.datetime.fromtimestamp(t0 / 1000.0, IST).date().isoformat()
+    except (ValueError, OverflowError, OSError) as e:
+        raise InputError("manifest t0_ms not convertible to a date") from e
     if ist_date != want:
         raise InputError("manifest ist_date does not match the IST date of t0_ms")
     dur = dur_ms / 1000.0
@@ -256,15 +273,31 @@ def row_from_consult_dir(cdir, now=None, allow_model=False):
 
 
 # ---------------- JSONL store ----------------
-def read_latest(path):
-    """{consult_uid: row}; later lines win; malformed lines are ignored. Refuses a symlink."""
-    latest = {}
+def _open_ro(path):
+    """Open an existing output read-only, or None if absent. lstat first: anything that is not a
+    regular file (symlink, FIFO, directory, device) is refused before any open, so nothing can block."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        st = os.lstat(path)
     except FileNotFoundError:
-        return latest
+        return None
+    except OSError as e:
+        raise OutputError(f"cannot stat output: {e.strerror}") from e
+    if not stat.S_ISREG(st.st_mode):
+        raise OutputError("output is not a regular file")
+    try:
+        return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
     except OSError as e:
         raise OutputError(f"cannot open output safely: {e.strerror}") from e
+
+
+def read_latest(path):
+    """{consult_uid: row}; later lines win; malformed lines are ignored. Refuses non-regular files."""
+    latest = {}
+    fd = _open_ro(path)
+    if fd is None:
+        return latest
     with os.fdopen(fd) as fh:
         for line in fh:
             try:
@@ -297,12 +330,9 @@ def _check_fd(fd):
 
 def preflight_out(path):
     """Refuse (OutputError) before any work when an existing output is unsafe. Writes nothing."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except FileNotFoundError:
+    fd = _open_ro(path)
+    if fd is None:
         return
-    except OSError as e:
-        raise OutputError(f"cannot open output safely: {e.strerror}") from e
     try:
         _check_fd(fd)
     finally:
@@ -328,7 +358,7 @@ def append_rows(path, rows):
     try:
         if parent:
             os.makedirs(parent, mode=0o700, exist_ok=True)
-        flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW
+        flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
             fd = os.open(path, flags)
         except FileNotFoundError:
@@ -361,15 +391,15 @@ def run(reb_root, out, date=None, uids=None, force=False, write=False, now=None,
         allow_model=False):
     if write:
         preflight_out(out)
-    latest = read_latest(out)
+    latest = read_latest(out)  # refuses non-regular files even in dry-run
     rows, stats = [], {"consults": 0, "rows": 0, "skipped_same": 0, "missing_track": 0, "bad_input": 0}
     for cdir in find_consult_dirs(reb_root, date, uids):
         stats["consults"] += 1
         try:
             row = row_from_consult_dir(cdir, now, allow_model)
-        except InputError as e:
+        except Exception as e:  # one bad consult never aborts the run (OutputError is not raised here)
             stats["bad_input"] += 1
-            print(f"skip {os.path.basename(cdir)}: {e}", file=log)
+            print(f"skip {os.path.basename(cdir)}: {type(e).__name__}: {e}", file=log)
             continue
         if row is None:
             stats["missing_track"] += 1

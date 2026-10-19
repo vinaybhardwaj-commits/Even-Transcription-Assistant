@@ -414,3 +414,93 @@ def test_t0_offset_parity():
     assert a == b == pytest.approx(bench_dis(NEMO_OFF, SARVAM), abs=1e-12)
     # a wrong offset (ignoring t0) must differ
     assert da.compute_dis(track(shift(NEMO_OFF)), track(shift(SARVAM)), T0, DUR) != a
+
+
+# ---- refute R2 fixes ----
+import subprocess  # noqa: E402
+
+CLI = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "diar_agreement.py")]
+
+
+def _cli(*args, timeout=10):
+    return subprocess.run(CLI + list(args), capture_output=True, text=True, timeout=timeout)
+
+
+@pytest.mark.parametrize("t0", [2.6e14, 1e300, 1e12, 5e12, 1.49e12])
+def test_f1_huge_or_out_of_range_t0_skipped(tmp_path, t0):
+    bad = write_consult(tmp_path, "pqm_bad", NEMO_OFF, SARVAM)
+    write_consult(tmp_path, "pqm_ok", NEMO_OFF, SARVAM, room="room_b")
+    _set_manifest(bad, t0_ms=t0)
+    with pytest.raises(da.InputError):
+        da.row_from_consult_dir(str(bad))
+    rows, stats = da.run(str(tmp_path), str(tmp_path / "o.jsonl"), log=open(os.devnull, "w"))
+    assert [r["consult_uid"] for r in rows] == ["pqm_ok"] and stats["bad_input"] == 1
+
+
+def test_f2_fifo_refused_not_hang(tmp_path):
+    write_consult(tmp_path / "reb", "pqm_aaa", NEMO_OFF, SARVAM)
+    out = tmp_path / "o.jsonl"
+    os.mkfifo(out, 0o600)
+    for extra in ([], ["--write"]):
+        p = _cli("--reb-root", str(tmp_path / "reb"), "--out", str(out), *extra, timeout=5)
+        assert p.returncode == 2 and p.stdout == ""
+    with pytest.raises(da.OutputError):
+        da.read_latest(str(out))
+    with pytest.raises(da.OutputError):
+        da.preflight_out(str(out))
+
+
+@pytest.mark.parametrize("flags", [[], ["--write"]])
+def test_f4_directory_out_refused_no_traceback(tmp_path, flags):
+    write_consult(tmp_path / "reb", "pqm_aaa", NEMO_OFF, SARVAM)
+    out = tmp_path / "o.jsonl"
+    out.mkdir(mode=0o700)
+    p = _cli("--reb-root", str(tmp_path / "reb"), "--out", str(out), *flags)
+    assert p.returncode == 2 and "Traceback" not in p.stderr and p.stdout == ""
+
+
+@pytest.mark.parametrize("bad", [{"segments": 5}, {"extras": "x"}, {"segments": [5]},
+                                 {"segments": [{"t0_ms": 1, "t1_ms": 2}]}, {"segments": "abc"},
+                                 {"extras": [1]}])
+@pytest.mark.parametrize("which", ["diar.nemotron__f667ed73__52a308d1.json",
+                                   "diar.sarvam-saaras-v3__saaras-v3__04486dbb.json"])
+def test_f3_bad_track_shape_skips_run_continues(tmp_path, bad, which):
+    write_consult(tmp_path, "pqm_ok", NEMO_OFF, SARVAM, room="room_b")
+    cdir = write_consult(tmp_path, "pqm_bad", NEMO_OFF, SARVAM)
+    p = cdir / "tracks" / which
+    d = json.loads(p.read_text()); d.update(bad); p.write_text(json.dumps(d))
+    rows, stats = da.run(str(tmp_path), str(tmp_path / "o.jsonl"), log=open(os.devnull, "w"))
+    assert [r["consult_uid"] for r in rows] == ["pqm_ok"] and stats["bad_input"] == 1
+
+
+def test_f3_unexpected_exception_is_a_skip_and_outputerror_stays_fatal(tmp_path, monkeypatch):
+    write_consult(tmp_path, "pqm_ok", NEMO_OFF, SARVAM, room="room_b")
+    write_consult(tmp_path, "pqm_boom", NEMO_OFF, SARVAM)
+    real = da.compute_dis
+    def boom(n, s_, t0, dur):
+        if n is not None and getattr(boom, "calls", 0) == 0:
+            boom.calls = 1
+            raise RuntimeError("unexpected")
+        return real(n, s_, t0, dur)
+    monkeypatch.setattr(da, "compute_dis", boom)
+    rows, stats = da.run(str(tmp_path), str(tmp_path / "o.jsonl"), log=open(os.devnull, "w"))
+    assert len(rows) == 1 and stats["bad_input"] == 1
+    out = tmp_path / "loose.jsonl"
+    out.write_text("")
+    os.chmod(out, 0o644)
+    with pytest.raises(da.OutputError):
+        da.run(str(tmp_path), str(out), write=True, log=open(os.devnull, "w"))
+
+
+@pytest.mark.parametrize("dur", [2.16e7 + 1, 1e9, 1e300])
+def test_f5_duration_over_6h_skipped(tmp_path, dur):
+    cdir = write_consult(tmp_path, "pqm_d", NEMO_OFF, SARVAM)
+    _set_manifest(cdir, dur=dur)
+    with pytest.raises(da.InputError):
+        da.row_from_consult_dir(str(cdir))
+
+
+def test_f5_duration_exactly_6h_allowed(tmp_path):
+    cdir = write_consult(tmp_path, "pqm_d", NEMO_OFF, SARVAM)
+    _set_manifest(cdir, dur=2.16e7)
+    assert da.row_from_consult_dir(str(cdir)) is not None
