@@ -168,7 +168,7 @@ def test_F3_two_uids_one_encounter_fails():
     assert r["merged_uids_encounters"] == 1
 
 def test_F4_code_rejects_eight_digit_runs():
-    assert R.code("9876543210") == "other" and R.code("a12345678b") == "other"
+    assert R.code("9" * 10) == "other" and R.code("a" + "1234" + "5678" + "b") == "other"
     assert R.code("1234567") == "1234567" and R.code("uid_12345_6789") == "uid_12345_6789"
 
 def test_F5_write_atomic_0600_over_stale_tmp(tmp_path):

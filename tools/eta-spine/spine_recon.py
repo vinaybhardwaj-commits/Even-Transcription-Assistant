@@ -10,19 +10,24 @@ SPINE.json is an export of the day's spine rows, made by the caller from read-on
    "signal_counts": {"pulse": 17, ...},                                                                          -- spine_signal by proxy for the date (optional)
    "artefacts":  [{"encounter_id", "stage", "status"}]}                                                          -- spine_artefact (optional)
 LEDGER (assumed shape, UNVERIFIED: consult_ledger.py is withheld from the mirror): <eta-data>/consult-stage-ledger.jsonl, one JSON object per line with consult_uid, a date
-(ist_date, else the IST date of ts / t_close / t_open, else a bare date | day) and either "stages": {stage: state} or "stage" + "state". The last line per (uid, stage) wins.
+and either "stages": {stage: state} or "stage" + "state". The last line per (uid, stage) wins. The IST date comes ONLY from an explicit ist_date, or from a zone-aware ts / t_close / t_open
+converted to Asia/Kolkata. A bare date | day and a naive ts (no zone) make the line UNDATED (gate fails), unless the file declares its zone in a header line {"tz": "Asia/Kolkata"|"UTC"}:
+then a naive ts is read in that zone, and a bare date | day is accepted only under Asia/Kolkata (a UTC calendar date cannot give an IST date).
 Mapping rule: every ledger consult_uid maps to exactly 1 confirmed encounter. Every other outcome is a diff with a reason code:
   missing_uid | split (one uid, several encounters) | not_confirmed:<status> | merged_uids (one encounter holds several uids; informational, not a failure).
 Extras (a live spine encounter no ledger uid reaches) are listed by proxy plus reason. An ambiguous encounter is counted and shown, never hidden (R1).
 Gate FAILS (gate="fail", "gate_reasons" = closed codes, exit 1; the report is still written) when: ledger_uids == 0 | ledger_bad_lines > 0 | ledger_undated_lines > 0 |
-matched uids < 95% of ledger uids | two_uids_one_encounter (listed by encounter_id in "two_uids_encounters") | any diff | a stage or proxy mismatch.
-The ledger date is the IST date of ts / t_close / t_open (never UTC). Flags (ambiguous, multi_machine, pulse_overlap, clamped, clamp_failed, covered_by_pulse) are counted and shown (R1).
-Exit 0 when the report is written and the gate passes, 1 when it is written and the gate fails, 2 on a bad argument or an unreadable/corrupt input, 4 when --upload failed."""
+matched uids < 95% of ledger uids | two_uids_one_encounter (listed in "two_uids_encounters"; an id that is not a clean enc_ id is replaced by "redacted_id" and counted in "redacted_ids") | any diff | a stage or proxy mismatch.
+Flags (ambiguous, multi_machine, pulse_overlap, clamped, clamp_failed, covered_by_pulse) are counted and shown (R1).
+Exit 0 when the report is written and the gate passes, 1 ONLY when it is written and the gate fails, 2 on a bad argument or any unreadable/corrupt/unexpected input, 4 when --upload failed."""
 import argparse, collections, datetime as dt, json, os, re, sys
 
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 CODE = re.compile(r"^[a-z0-9_:\-]{1,40}$")
 DIGITS8 = re.compile(r"[0-9]{8}")
+SEPARATORS = re.compile(r"[-. ()+]")
+ENC_ID = re.compile(r"^enc_[a-z0-9]{1,40}$")
+TZ_NAMES = {"asia/kolkata": IST, "utc": dt.timezone.utc}
 FLAGS = ("ambiguous", "multi_machine", "pulse_overlap", "clamped", "clamp_failed", "covered_by_pulse")
 MATCH_FLOOR = 0.95
 DONE_STATES = ("done", "ok", "written", "sealed", "ready")
@@ -35,7 +40,13 @@ class BrokenInput(Exception):
 def code(v, default="other"):
     """A closed-vocabulary label or `default`: free text can never reach the output."""
     s = str(v).strip().lower() if v is not None else ""
-    return s if CODE.match(s) and not DIGITS8.search(s) else default
+    return s if CODE.match(s) and not DIGITS8.search(SEPARATORS.sub("", s)) else default
+
+
+def enc_code(v):
+    """An encounter id that is a clean enc_ id with no 8+ digit run, else None."""
+    s = code(v, "")
+    return s if ENC_ID.match(s) else None
 
 
 def read_json(path, what):
@@ -46,63 +57,77 @@ def read_json(path, what):
         raise BrokenInput(f"{what}: {type(e).__name__}")
 
 
-def ist_date_of(v):
+def ist_date_of(v, default_tz=None):
+    """IST date of an instant. A naive instant is read in default_tz, and is None (undated) when there is none."""
     try:
         t = dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
     except ValueError:
         return None
     if t.tzinfo is None:
-        t = t.replace(tzinfo=dt.timezone.utc)
+        if default_tz is None:
+            return None
+        t = t.replace(tzinfo=default_tz)
     return t.astimezone(IST).date().isoformat()
 
 
-def line_date(r):
-    """IST date only: an explicit ist_date wins, then the IST date of an instant (ts / t_close / t_open), and only then a bare date / day (whose zone is unknown)."""
+def line_date(r, tz=None):
+    """IST date only: an explicit ist_date wins, then the IST date of an instant (ts / t_close / t_open). A bare date / day counts only when the header declares Asia/Kolkata."""
     def plain(k):
         return r[k] if isinstance(r.get(k), str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", r[k]) else None
     if plain("ist_date"):
         return plain("ist_date")
     for k in ("ts", "t_close", "t_open"):
         if r.get(k):
-            d = ist_date_of(r[k])
+            d = ist_date_of(r[k], tz)
             if d:
                 return d
-    return plain("date") or plain("day")
+    if tz is IST:
+        return plain("date") or plain("day")
+    return None
 
 
 def load_ledger(path, date):
     """(stages, bad, undated): stages = {uid: {stage: state}} for `date`, last line per (uid, stage)."""
     stages, bad, undated = {}, 0, 0
     try:
-        fh = open(path, encoding="utf-8")
+        with open(path, encoding="utf-8") as fh:
+            lines = [x.strip() for x in fh]
     except OSError as e:
         raise BrokenInput(f"ledger: {type(e).__name__}")
-    with fh:
-        for raw in fh:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                r = json.loads(raw)
-            except ValueError:
+    tz, rows = None, []
+    for raw in lines:
+        if not raw:
+            continue
+        try:
+            r = json.loads(raw)
+        except ValueError:
+            bad += 1
+            continue
+        if isinstance(r, dict) and "tz" in r and not r.get("consult_uid"):
+            z = TZ_NAMES.get(str(r["tz"]).strip().lower())
+            if z is None:
                 bad += 1
-                continue
-            if not isinstance(r, dict) or not r.get("consult_uid"):
-                bad += 1
-                continue
-            d = line_date(r)
-            if d is None:
-                undated += 1
-                continue
-            if d != date:
-                continue
-            uid = str(r["consult_uid"])
-            slot = stages.setdefault(uid, {})
-            if isinstance(r.get("stages"), dict):
-                for s, st in r["stages"].items():
-                    slot[code(s)] = code(st if not isinstance(st, dict) else st.get("state"))
-            elif r.get("stage") is not None:
-                slot[code(r["stage"])] = code(r.get("state", r.get("status")))
+            else:
+                tz = z
+            continue
+        rows.append(r)
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("consult_uid"):
+            bad += 1
+            continue
+        d = line_date(r, tz)
+        if d is None:
+            undated += 1
+            continue
+        if d != date:
+            continue
+        uid = str(r["consult_uid"])
+        slot = stages.setdefault(uid, {})
+        if isinstance(r.get("stages"), dict):
+            for s, st in r["stages"].items():
+                slot[code(s)] = code(st if not isinstance(st, dict) else st.get("state"))
+        elif r.get("stage") is not None:
+            slot[code(r["stage"])] = code(r.get("state", r.get("status")))
     return stages, bad, undated
 
 
@@ -193,7 +218,9 @@ def reconcile(date, ledger, spine, daily=None, expect=None, ledger_bad=0, ledger
         dr["clips_cut_minus_ledger_uids"] = dr["clips_cut"] - dr["ledger_uids"]
     else:
         dr = {"present": False}
-    two = sorted(e for e, us in enc_uids.items() if len(us) > 1)
+    two_raw = sorted(e for e, us in enc_uids.items() if len(us) > 1)
+    two = [enc_code(e) or "redacted_id" for e in two_raw]
+    redacted_ids = two.count("redacted_id")
     reasons = []
     if not ledger:
         reasons.append("ledger_empty")
@@ -222,6 +249,7 @@ def reconcile(date, ledger, spine, daily=None, expect=None, ledger_bad=0, ledger
         "ambiguous_encounters": flag_counts["ambiguous"],
         "flag_counts": flag_counts,
         "two_uids_encounters": two,
+        "redacted_ids": redacted_ids,
         "gate_reasons": reasons,
         "ledger_bad_lines": ledger_bad,
         "ledger_undated_lines": ledger_undated,
@@ -292,6 +320,9 @@ def main(argv=None, client=None):
         rep = reconcile(a.date, ledger, spine, daily, parse_expect(a.expect), bad, undated)
     except (BrokenInput, ValueError) as e:
         print(f"BROKEN INPUT: {e}", file=sys.stderr)
+        return 2
+    except Exception as e:  # a malformed input must never look like gate=fail (exit 1)
+        print(f"BROKEN INPUT: unexpected {type(e).__name__}", file=sys.stderr)
         return 2
     body = json.dumps(rep, indent=1, sort_keys=True) + "\n"
     write_atomic(a.out, body)
