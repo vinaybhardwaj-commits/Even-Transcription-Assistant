@@ -837,10 +837,8 @@ def ref_ll(p, rho, n, f):
 
 
 def ref_profile(p, n, f):
-    """Stable-reference profile: the max over rho = 0 and rho >= 1e-6 — the only regime where the
-    double-precision likelihood is representable (below it, any direct evaluation drifts
-    ~1e-4..1e-3 by cancellation; see stats._RHO_GRID)."""
-    return max(ref_ll(p, float(r), n, f) for r in stats._RHO_GRID if r == 0.0 or r >= 1e-6)
+    """Reference profile: the max over the full product rho grid (rho = 0 and 1e-6..0.5)."""
+    return max(ref_ll(p, float(r), n, f) for r in stats._RHO_GRID)
 
 
 def test_gammaln_matches_math_lgamma():
@@ -852,9 +850,7 @@ def test_gammaln_matches_math_lgamma():
 def test_profile_loglik_matches_independent_reference():
     n = np.array([300.0, 500, 120, 800, 60])
     f = np.array([0.0, 2, 0, 1, 1])
-    # only rho = 0 and rho >= 1e-6 are checked: below that, the raw double-precision likelihood
-    # loses ~1e-4..1e-3 to cancellation in ANY direct evaluation (harness and reference alike)
-    grid = np.array([float(r) for r in stats._RHO_GRID if r == 0.0 or r >= 1e-6])
+    grid = np.array([float(r) for r in stats._RHO_GRID])  # the full grid, rho = 0 included
     for p in (0.0005, 0.003, 0.02):
         got = stats._ll_over_rho(p, n, f, grid)
         want = [ref_ll(p, float(r), n, f) for r in grid]
@@ -1117,23 +1113,15 @@ BF_CASES = {
     "single_event_first_of_20_x137": (np.full(20, 137.0), np.array([1.0] + [0.0] * 19)),
 }
 
-# Sparse-event cases (all f_i <= 1): the profile maximum sits at tiny rho, where the
-# double-precision likelihood carries a formula-specific rounding offset of up to ~2e-3; two
-# independent implementations' offsets need not agree better than that (the bound inherits up to
-# ~3e-3 relative there). Dense and zero-event cases agree to ~1e-11.
-BF_REL_TOL = {"events_three_k20_n137": 1e-2, "events_twelve_k15_n500": 1e-2,
-              "single_event_first_of_20_x137": 1e-2}
-
-
 @pytest.mark.parametrize("case", sorted(BF_CASES))
 def test_bound_matches_independent_bruteforce(case):
     """M1: the polished grid bound must agree with an independent dense-grid + polish reference
-    (1e-4; 1e-2 in the sparse-event cases, where the tiny-rho double-precision offset dominates)."""
+    (1e-4, sparse-event cases included)."""
     n, f = BF_CASES[case]
     got = stats.betabinom_profile_upper(n, f)["upper"]
     want = bf_upper(n, f)
     assert want > 0
-    assert abs(got - want) / want <= BF_REL_TOL.get(case, 1e-4), (case, got, want)
+    assert abs(got - want) / want <= 1e-4, (case, got, want)
 
 
 def test_chi2_95_half_pinned_to_chi2_ppf_095_1_over_2():
@@ -1220,3 +1208,63 @@ def test_summary_json_is_strict_json_for_zero_event_clusters(tmp_path, monkeypat
         for cl in data[name]["clusterings"].values():
             if cl["method"] == stats.METHOD:
                 assert cl["rho_hat"] is None
+
+
+# ---------------------------------------------------------------- fix7: stable (cancellation-free) oracle
+
+def _stable_oracle():
+    from eval.pdqi9.t28b.tests import stable_oracle
+    return stable_oracle
+
+
+_SO_CACHE: dict = {}
+
+
+def _stable_upper_cached(name, n, f):
+    if name not in _SO_CACHE:
+        _SO_CACHE[name] = _stable_oracle().stable_upper(n, f)[0]
+    return _SO_CACHE[name]
+
+
+@pytest.mark.parametrize("idx", range(9))
+def test_bound_within_1e4_of_stable_oracle_d1_d9(idx):
+    """M1 (the 1e-4 ruling): D1-D9, sparse D2/D6 included, vs the product-form (no gammaln) oracle."""
+    name, n, f = _stable_oracle().CASES[idx]
+    got = stats.betabinom_profile_upper(n, f)["upper"]
+    want = _stable_upper_cached(name, n, f)
+    assert abs(got - want) / want <= 1e-4, (name, got, want)
+
+
+@pytest.mark.parametrize("n,f", [
+    (np.full(20, 137.0), np.array([0.0] * 14 + [1.0] * 3 + [0.0] * 3)),
+    (np.full(20, 137.0), np.array([1.0] + [0.0] * 19)),
+    (np.full(15, 500.0), np.array([1.0] * 12 + [0.0] * 3)),
+])
+def test_sparse_bound_not_above_binomial_supremum(n, f):
+    """For f_i <= 1 the beta-binomial (rho >= 0) log-likelihood cannot exceed the closed-form
+    binomial supremum at p = F/N: ll_max must not (a cancellation error would push it above)."""
+    F, N = float(f.sum()), float(n.sum())
+    sup = F * math.log(F / N) + (N - F) * math.log1p(-F / N)
+    assert stats.betabinom_profile_upper(n, f)["ll_max"] <= sup + 1e-9
+
+
+def test_rho_grid_floor_is_1e6_with_zero_kept():
+    """S1: moving the floor below 1e-6 (where the gammaln form cancels) must fail this test."""
+    g = stats._RHO_GRID
+    assert g[0] == 0.0 and g[1] == pytest.approx(1e-6, rel=1e-12) and g[-1] == stats.RHO_MAX
+    assert g.min() == 0.0 and g[g > 0].min() >= 1e-6 * (1 - 1e-12)
+
+
+def test_no_p_search_in_product():
+    """S1: a copy of the old oracle's p-search must not come back."""
+    src = pathlib.Path(stats.__file__).read_text()
+    for token in ("_p_search", "_p_polish", "_TINY_RHO"):
+        assert token not in src and not hasattr(stats, token)
+
+
+def test_sparse_bound_call_is_cheap():
+    """S1/M2: a sparse bound call stays interactive (fix6's p-search took 36-43 s)."""
+    import time
+    t = time.perf_counter()
+    stats.betabinom_profile_upper(np.full(20, 137.0), np.array([1.0] + [0.0] * 19))
+    assert time.perf_counter() - t < 10.0

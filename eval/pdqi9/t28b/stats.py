@@ -135,14 +135,11 @@ def bca_upper(
 METHOD = "betabinom_profile_v1"
 CHI2_95_HALF = 1.9207294103470620  # chi2.ppf(0.95, 1) / 2: the 0.95 two-sided profile, upper end = one-sided 97.5%
 RHO_MAX = 0.5
-# rho grid: 0 plus 400 geometric points 1e-10..0.5, identical to the acceptance oracle
-# (.bc/refute/verify_profile.py). The rho bounds must match the oracle's exactly: in the
-# sparse-event regime the double-precision evaluation of the likelihood at tiny rho defines the
-# profile-likelihood numerics that both sides share, so a coarser or shifted grid would not
-# find the same joint (p, rho) maximum.
-_RHO_GRID = np.concatenate(([0.0], np.geomspace(1e-10, RHO_MAX, 400)))
-_POLISH_XATOL = 1e-14  # bounded polish tolerance in rho, same as the oracle
-_TINY_RHO = 1e-6  # a profile maximum below this rho lives in the double-precision rounding regime
+# rho grid: 0 (binomial) plus 400 geometric points 1e-6..0.5. Below 1e-6 the gammaln form of the
+# beta-binomial likelihood cancels catastrophically (5.5e-6 ll error at 1e-8, 3.4e-4 at 1e-10), so
+# the grid stops there; rho = 0 is evaluated exactly as the binomial.
+_RHO_GRID = np.concatenate(([0.0], np.geomspace(1e-6, RHO_MAX, 400)))
+_POLISH_XATOL = 1e-14  # bounded polish tolerance in rho
 _HALF_LN_2PI = 0.5 * math.log(2.0 * math.pi)
 
 try:
@@ -172,10 +169,7 @@ def gammaln(x):
 def _ll_over_rho(p: float, n: np.ndarray, f: np.ndarray, rho: np.ndarray) -> np.ndarray:
     """Beta-binomial log-likelihood (binomial coefficients dropped) at mean p for each rho. rho=0 is binomial.
 
-    The rho > 0 expression mirrors the acceptance oracle term-for-term and, with scipy available,
-    uses the same scipy.special.gammaln: the double-precision rounding of this exact expression at
-    tiny rho is part of the shared profile-likelihood numerics (see _RHO_GRID), so it must not be
-    "improved" without changing the oracle too."""
+    Accurate for rho >= 1e-6 (see _RHO_GRID); callers must not pass smaller positive rho."""
     out = np.empty(len(rho))
     pos = rho > 0
     gl = _SCIPY_GAMMALN if _SCIPY_GAMMALN is not None else gammaln
@@ -197,8 +191,7 @@ def _ll_scalar(p: float, n, f, rho: float) -> float:
 
 def _polish_rho(p: float, n, f, lo: float, hi: float) -> tuple[float, float]:
     """(max of ll(p, rho) for rho in [lo, hi], the rho attaining it). Bounded 1-D maximiser with
-    xatol _POLISH_XATOL in rho: scipy bounded Brent when available (the same call the oracle
-    makes), else golden section."""
+    xatol _POLISH_XATOL in rho: scipy bounded Brent when available, else golden section."""
     def neg_ll(x: float) -> float:
         return -_ll_scalar(p, n, f, float(x))
     if _MINIMIZE_SCALAR is not None:
@@ -227,8 +220,7 @@ def _profile(p: float, n, f) -> tuple[float, float]:
     """(max over rho in [0, 0.5] of the log-likelihood at p, the rho that attains it).
 
     Grid argmax on _RHO_GRID, then a bounded 1-D polish (xatol 1e-14 in rho) on the bracketing
-    neighbours — the same scheme as the acceptance oracle, so the profile agrees with it
-    point-for-point. rho = 0 and rho = 0.5 are grid points, so boundary maxima (e.g. the
+    neighbours. rho = 0 and rho = 0.5 are grid points, so boundary maxima (e.g. the
     zero-event edge at rho = 0.5) are returned exactly.
     """
     pc = min(max(p, 1e-300), 1.0 - 1e-12)
@@ -246,87 +238,8 @@ def _profile(p: float, n, f) -> tuple[float, float]:
 
 
 def _profile_vals(p_arr, n, f) -> np.ndarray:
-    """Profile values for many p at once: the rho grid is vectorised over p and each p gets the
-    same argmax + bounded polish as _profile, so every value is identical to _profile(p)[0]."""
-    pc = np.minimum(np.maximum(np.asarray(p_arr, dtype=float), 1e-300), 1.0 - 1e-12)
-    gl = _SCIPY_GAMMALN if _SCIPY_GAMMALN is not None else gammaln
-    r = _RHO_GRID[1:][:, None, None]
-    s = (1.0 - r) / r
-    a = pc[None, :, None] * s
-    b = (1.0 - pc[None, :, None]) * s
-    vals_pos = (gl(f + a) + gl(n - f + b) - gl(n + s)
-                - gl(a) - gl(b) + gl(s)).sum(axis=2)
-    ll0 = (f[None, :] * np.log(pc)[:, None] + (n - f)[None, :] * np.log1p(-pc)[:, None]).sum(axis=1)
-    g = _RHO_GRID
-    out = np.empty(len(pc))
-    for j in range(len(pc)):
-        ll = np.concatenate(([ll0[j]], vals_pos[:, j]))
-        i = int(np.argmax(ll))
-        best = float(ll[i])
-        lo = float(g[max(i - 1, 0)])
-        hi = float(g[min(i + 1, len(g) - 1)])
-        if hi > lo > 0.0:
-            v, _x = _polish_rho(pc[j], n, f, lo, hi)
-            if v > best:
-                best = v
-        out[j] = best
-    return out
-
-
-def _p_polish(n, f, lo: float, hi: float) -> tuple[float, float]:
-    """(max of the profile for log p in [log lo, log hi], the p attaining it): the same bounded
-    call as the oracle (xatol 1e-14 in log p), else golden section in log p."""
-    def neg_ll(lp: float) -> float:
-        return -_profile(float(np.exp(lp)), n, f)[0]
-    t_lo, t_hi = math.log(lo), math.log(hi)
-    if _MINIMIZE_SCALAR is not None:
-        res = _MINIMIZE_SCALAR(neg_ll, bounds=(t_lo, t_hi), method="bounded",
-                               options={"xatol": _POLISH_XATOL})
-        return -float(res.fun), float(np.exp(res.x))
-    gr = (math.sqrt(5.0) - 1.0) / 2.0
-    c, d = t_hi - gr * (t_hi - t_lo), t_lo + gr * (t_hi - t_lo)
-    fc, fd = neg_ll(c), neg_ll(d)
-    for _ in range(300):
-        if t_hi - t_lo <= _POLISH_XATOL:
-            break
-        if fc < fd:
-            t_hi, d, fd = d, c, fc
-            c = t_hi - gr * (t_hi - t_lo)
-            fc = neg_ll(c)
-        else:
-            t_lo, c, fc = c, d, fd
-            d = t_lo + gr * (t_hi - t_lo)
-            fd = neg_ll(d)
-    t = (t_lo + t_hi) / 2.0
-    return -neg_ll(t), float(np.exp(t))
-
-
-def _p_search(n, f) -> tuple[float, float, float]:
-    """(p_hat, ll_max, rho_hat) by the acceptance oracle's independent p search: a 2000-point
-    geomspace (1e-9..0.99) global scan, the top-3 well-separated peaks, a 3000-point local scan per
-    peak, and a bounded polish (xatol 1e-14 in log p) per peak. In the sparse-event regime the
-    profile maximum is set by the double-precision rounding of the likelihood at tiny rho, so only
-    this search — the one the oracle runs — lands on the same joint (p, rho) maximum."""
-    grid = np.geomspace(1e-9, 0.99, 2000)
-    vals = _profile_vals(grid, n, f)
-    order = np.argsort(vals)[::-1]
-    peaks = []
-    for idx in order:
-        if all(abs(int(idx) - k) > 5 for k in peaks):
-            peaks.append(int(idx))
-        if len(peaks) == 3:
-            break
-    cands = []
-    for i in peaks:
-        lo = float(grid[max(i - 1, 0)])
-        hi = float(grid[min(i + 1, len(grid) - 1)])
-        local = np.geomspace(lo, hi, 3000)
-        lv = _profile_vals(local, n, f)
-        j = int(np.argmax(lv))
-        cands.append((float(lv[j]), float(local[j])))
-        cands.append(_p_polish(n, f, float(local[max(j - 1, 0)]), float(local[min(j + 1, len(local) - 1)])))
-    ll_max, p_hat = max(cands)
-    return p_hat, ll_max, _profile(p_hat, n, f)[1]
+    """Profile values for many p at once (the rho grid is vectorised over p); each value equals _profile(p)[0]."""
+    return np.array([_profile(float(p), n, f)[0] for p in np.asarray(p_arr, dtype=float)])
 
 
 def betabinom_profile_upper(n_i, f_i) -> dict:
@@ -357,11 +270,6 @@ def betabinom_profile_upper(n_i, f_i) -> dict:
                 fd = _profile(d, n, f)[0]
         p_hat = (lo + hi) / 2.0
         ll_max, rho_hat = _profile(p_hat, n, f)
-        if rho_hat < _TINY_RHO:
-            # the profile maximum sits at tiny rho, where the double-precision rounding of the
-            # likelihood defines the numerics: re-search p with the oracle's independent scan,
-            # which is the only search that lands on the same joint (p, rho) maximum
-            p_hat, ll_max, rho_hat = _p_search(n, f)
     thr = ll_max - CHI2_95_HALF
     lo, hi = p_hat, max(p_hat * 1.5, 1e-6)
     cap = 1.0 - 1e-9
