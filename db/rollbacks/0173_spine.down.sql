@@ -9,5 +9,5 @@ DROP TABLE IF EXISTS spine_artefact;
 DROP TABLE IF EXISTS spine_link;
 DROP TABLE IF EXISTS spine_encounter;
 DROP TABLE IF EXISTS spine_signal;
-DELETE FROM schema_migrations WHERE version = 173;
+DELETE FROM schema_migrations WHERE version = 173 AND name = '0173_spine';
 COMMIT;

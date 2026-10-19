@@ -51,6 +51,24 @@ d("spine schema on postgres:16", () => {
     rejects(sig(", attrs", `('pqm','k5',1,now(),now(),'[1]')`));
     rejects(sig("", "('pulse','k1',1,now(),now())"));
     pg.exec(sig("", "('pulse','k1',2,now(),now())"));
+    pg.exec(sig("", "('nemotron_window','k6',1,now(),now())"));
+  });
+
+  it("spine_signal: attrs refuse identity-like keys at any depth, arrays included; id keys allowed; t_close >= t_open", () => {
+    const a = (k: string, json: string) => sig(", attrs", `('pqm','${k}',1,now(),now(),'${json}')`);
+    rejects(a("d1", '{"ids":{"text":"x"}}'));
+    rejects(a("d2", '{"ids":{"a":{"Phone":1}}}'));
+    rejects(a("d3", '{"quality":{"a":{"b":{"transcript":1}}}}'));
+    rejects(a("d4", '{"quality":[{"patient_id":1}]}'));
+    rejects(a("d5", '{"ids":[[{"x":{"EMAIL":1}}]]}'));
+    rejects(a("d6", '{"ids":{"uhid":1}}'));
+    rejects(a("d7", '{"ids":{"firstname":1}}'));
+    rejects(a("d8", '{"foo":1}'));
+    rejects(a("d9", '{"Text":"x"}'));
+    pg.exec(a("ok1", '{"ids":{"consult_uid":"uid_test_01","window_id":"w1"},"quality":[{"score":1}],"close_reason":"x"}'));
+    pg.exec(a("ok2", '{"ids":[{"pqm_uid":"uid_test_02"}]}'));
+    rejects(sig(", t_close", "('pulse','kc',1, now(), now(), now() - interval '1 minute')"));
+    pg.exec(sig(", t_close", "('pulse','kc',1, now(), now(), now())"));
   });
 
   it("spine_encounter: id format CHECK (incl. no 8-digit run), status CHECK, primary key", () => {
@@ -65,6 +83,37 @@ d("spine schema on postgres:16", () => {
     rejects(ins("enc_22222222cccccccc", "candidate"));
     rejects(ins("enc_cc34567234cccccc", "candidate"));
     rejects(ins(E1, "candidate"));
+    rejects(ins("enc_testddddddddddddd", "candidate")); // 17 chars
+    for (const bad of ["enc_testeeeeeeeeeee0", "enc_testeeeeeeeeeee1", "enc_testeeeeeeeeeee8", "enc_testeeeeeeeeeee9"]) rejects(ins(bad, "candidate"));
+    pg.exec(ins("enc_test2345a2345a23", "candidate"));
+  });
+
+  it("spine_encounter: boundary_rev defaults to 0; t_close before t_open refused", async () => {
+    expect(await names("SELECT boundary_rev::text FROM spine_encounter WHERE encounter_id = '" + E1 + "'")).toEqual(["0"]);
+    const ins = (id: string, close: string) => `INSERT INTO spine_encounter (encounter_id, ist_date, t_open, t_close, status, merge_version) VALUES ('${id}', '2026-10-19', now(), ${close}, 'candidate', 'mv1');`;
+    rejects(ins("enc_testffffffffffff", "now() - interval '1 minute'"));
+    pg.exec(ins("enc_testffffffffffff", "now()"));
+  });
+
+  it("spine_encounter.flags: default '{}', every allowed flag accepted, unknown or NULL element refused, GIN index used", async () => {
+    expect(await names("SELECT flags::text FROM spine_encounter WHERE encounter_id = '" + E1 + "'")).toEqual(["{}"]);
+    const ins = (id: string, flags: string) => `INSERT INTO spine_encounter (encounter_id, ist_date, t_open, status, merge_version, flags) VALUES ('${id}', '2026-10-19', now(), 'candidate', 'mv1', ${flags});`;
+    const fid = (t: string) => "enc_flag" + t.padEnd(12, "a"); // enc_ + 16 letters: valid id format
+    const ok = ["ambiguous", "multi_machine", "pulse_overlap", "clamped", "clamp_failed", "covered_by_pulse"];
+    ok.forEach((f, i) => pg.exec(ins(fid("ok" + "abcdef"[i]), `ARRAY['${f}']`)));
+    pg.exec(ins(fid("multi"), `ARRAY['${ok.join("','")}']`));
+    rejects(ins(fid("bada"), "ARRAY['bogus']"));
+    rejects(ins(fid("badb"), "ARRAY['ambiguous','bogus']"));
+    rejects(ins(fid("badc"), "ARRAY['Ambiguous']"));
+    rejects(ins(fid("nulla"), "ARRAY['ambiguous',NULL]"));
+    rejects(ins(fid("nullb"), "NULL"));
+    pg.exec("INSERT INTO spine_encounter (encounter_id, ist_date, t_open, status, merge_version, flags) SELECT 'enc_perfaaaa' || translate(lpad(i::text, 8, '0'), '0123456789', 'abcdefghij'), '2026-10-19', now(), 'candidate', 'mv1', CASE WHEN i % 1000 = 0 THEN ARRAY['ambiguous'] ELSE '{}'::text[] END FROM generate_series(1, 10000) i;");
+    pg.exec("ANALYZE spine_encounter;");
+    pg.exec("CREATE FUNCTION spine_test_plan_of(q text) RETURNS text LANGUAGE plpgsql AS $f$ DECLARE r text; o text := ''; BEGIN FOR r IN EXECUTE 'EXPLAIN ' || q LOOP o := o || r || E'\\n'; END LOOP; RETURN o; END $f$;");
+    // GIN on text[] serves @> / && / <@ / =, NOT `'x' = ANY(flags)` (measured: Seq Scan). Readers must use @>.
+    const plan = (await names("SELECT spine_test_plan_of($q$SELECT encounter_id FROM spine_encounter WHERE flags @> ARRAY['ambiguous']$q$)")).join("\n");
+    pg.exec("DROP FUNCTION spine_test_plan_of(text);");
+    expect(plan).toMatch(/spine_encounter_flags_idx/);
   });
 
   it("spine_link: kind and basis CHECKs; partial unique allows a duplicate only when the old row is inactive", () => {
@@ -86,9 +135,13 @@ d("spine schema on postgres:16", () => {
     rejects(ins("r2", "bogus", "v2"));
     rejects(ins("box", "empty"));
     pg.exec(ins("box", "empty", "v2"));
+    const cv = (c: string) => `INSERT INTO spine_artefact (encounter_id, stage, engine, version, cfg8, cut_version, store, status) VALUES ('${E1}', 'stt', 'eng', 'v9', 'cfg00000', '${c}', 'r2', 'ok');`;
+    pg.exec(cv("cvA"));
+    pg.exec(cv("cvB"));
+    rejects(cv("cvA"));
   });
 
-  it("spine_job: status and error-class CHECKs, UNIQUE key, defaults", async () => {
+  it("spine_job: status and error-class CHECKs, UNIQUE key, no status default", async () => {
     const ins = (status: string, key = "in1", cls = "NULL") => `INSERT INTO spine_job (encounter_id, stage, cut_version, input_key, status, last_error_class) VALUES ('${E1}', 'stt', 'cv1', '${key}', '${status}', ${cls});`;
     pg.exec(ins("shadow"));
     rejects(ins("bogus", "in2"));
@@ -96,6 +149,7 @@ d("spine schema on postgres:16", () => {
     rejects(ins("queued"));
     pg.exec(ins("queued", "in4", "'budget'"));
     expect(await names("SELECT status FROM spine_job WHERE input_key = 'in4'")).toEqual(["queued"]);
+    rejects(`INSERT INTO spine_job (encounter_id, stage, cut_version, input_key) VALUES ('${E1}', 'stt', 'cv1', 'in5');`);
   });
 
   it("spine_config and spine_tick: key is unique, counts must be an object", () => {
@@ -115,5 +169,13 @@ d("spine schema on postgres:16", () => {
     pg.exec(UP);
     expect((await spineObjects()).filter((n) => TABLES.includes(n))).toEqual(TABLES);
     expect(await names("SELECT count(*)::text FROM schema_migrations WHERE version = 173")).toEqual(["1"]);
+  });
+
+  it("rollback leaves a foreign schema_migrations row with version 173 and another name", async () => {
+    pg.exec(DOWN);
+    pg.exec("INSERT INTO schema_migrations (version, name) VALUES (173, '0173_other');");
+    pg.exec(DOWN);
+    expect(await names("SELECT name FROM schema_migrations WHERE version = 173")).toEqual(["0173_other"]);
+    pg.exec("DELETE FROM schema_migrations WHERE version = 173;");
   });
 });
