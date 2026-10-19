@@ -9,9 +9,11 @@ export const PIPELINE_VIEW_TIMEOUT_MS = 4000;
 export const PIPELINE_MEMO_MS = 10_000;
 
 export type StageCounts = { done: number; queued: number; failed: number; dead: number };
+/** Status counts plus one count per merge flag (spine_encounter.flags, S0 R3). */
+export interface EncounterCounts { candidate: number; confirmed: number; rejected: number; merged: number; ambiguous: number; multi_machine: number; pulse_overlap: number; clamped: number; clamp_failed: number; covered_by_pulse: number }
 export interface RoomPipeline {
   signals: Record<string, number>;
-  encounters: { candidate: number; confirmed: number; rejected: number; merged: number; ambiguous: number };
+  encounters: EncounterCounts;
   stages: Record<string, StageCounts>;
   oldest_queued_age_s: number | null;
 }
@@ -21,7 +23,7 @@ export interface PipelineView {
 }
 
 export interface SignalRow { room_id: string | null; proxy: string; n: unknown }
-export interface EncounterRow { room_id: string | null; status: string; n: unknown; ambiguous: unknown }
+export interface EncounterRow { room_id: string | null; status: string; n: unknown; ambiguous: unknown; multi_machine?: unknown; pulse_overlap?: unknown; clamped?: unknown; clamp_failed?: unknown; covered_by_pulse?: unknown }
 export interface JobRow { room_id: string | null; stage: string; status: string; n: unknown; oldest_queued: unknown }
 export interface PipelineRows { signals: SignalRow[]; encounters: EncounterRow[]; jobs: JobRow[] }
 export type PipelineDb = (text: string, params: unknown[]) => Promise<unknown[]>;
@@ -32,13 +34,15 @@ const num = (v: unknown): number => {
 };
 const NO_ROOM = "_none";
 const ENC_STATUS = ["candidate", "confirmed", "rejected", "merged"] as const;
+const FLAGS = ["ambiguous", "multi_machine", "pulse_overlap", "clamped", "clamp_failed", "covered_by_pulse"] as const;
 const JOB_BUCKET: Record<string, keyof StageCounts> = { done: "done", queued: "queued", leased: "queued", failed: "failed", dead: "dead" };
 
 export const SIGNALS_SQL = `SELECT room_id, proxy, count(*)::int AS n FROM spine_signal WHERE (t_open AT TIME ZONE 'Asia/Kolkata')::date = $1::date GROUP BY room_id, proxy`;
-export const ENCOUNTERS_SQL = `SELECT room_id, status, count(*)::int AS n, count(*) FILTER (WHERE reason ILIKE '%ambiguous%')::int AS ambiguous FROM spine_encounter WHERE ist_date = $1::date GROUP BY room_id, status`;
+export const ENCOUNTERS_SQL = `SELECT room_id, status, count(*)::int AS n, count(*) FILTER (WHERE flags @> ARRAY['ambiguous'])::int AS ambiguous, count(*) FILTER (WHERE flags @> ARRAY['multi_machine'])::int AS multi_machine, count(*) FILTER (WHERE flags @> ARRAY['pulse_overlap'])::int AS pulse_overlap, count(*) FILTER (WHERE flags @> ARRAY['clamped'])::int AS clamped, count(*) FILTER (WHERE flags @> ARRAY['clamp_failed'])::int AS clamp_failed, count(*) FILTER (WHERE flags @> ARRAY['covered_by_pulse'])::int AS covered_by_pulse FROM spine_encounter WHERE ist_date = $1::date GROUP BY room_id, status`;
 export const JOBS_SQL = `SELECT e.room_id, j.stage, j.status, count(*)::int AS n, min(j.created_at) FILTER (WHERE j.status IN ('queued','leased')) AS oldest_queued FROM spine_job j JOIN spine_encounter e ON e.encounter_id = j.encounter_id WHERE e.ist_date = $1::date GROUP BY e.room_id, j.stage, j.status`;
 
-const empty = (): RoomPipeline => ({ signals: {}, encounters: { candidate: 0, confirmed: 0, rejected: 0, merged: 0, ambiguous: 0 }, stages: {}, oldest_queued_age_s: null });
+const emptyEncounters = (): EncounterCounts => ({ candidate: 0, confirmed: 0, rejected: 0, merged: 0, ambiguous: 0, multi_machine: 0, pulse_overlap: 0, clamped: 0, clamp_failed: 0, covered_by_pulse: 0 });
+const empty = (): RoomPipeline => ({ signals: {}, encounters: emptyEncounters(), stages: {}, oldest_queued_age_s: null });
 
 /** Pure: rows in, view out. `now` is passed in; nothing here reads a clock. Only counts and closed-vocabulary keys leave. */
 export function shapePipeline(istDate: string, rows: PipelineRows, now: Date): PipelineView {
@@ -51,7 +55,7 @@ export function shapePipeline(istDate: string, rows: PipelineRows, now: Date): P
   for (const r of rows.encounters) {
     const p = room(r.room_id);
     if ((ENC_STATUS as readonly string[]).includes(r.status)) p.encounters[r.status as (typeof ENC_STATUS)[number]] += num(r.n);
-    p.encounters.ambiguous += num(r.ambiguous);
+    for (const f of FLAGS) p.encounters[f] += num(r[f]);
   }
   for (const r of rows.jobs) {
     const bucket = JOB_BUCKET[r.status];
@@ -87,10 +91,10 @@ function project(v: PipelineView): PipelineView {
     for (const [k, n] of Object.entries(r.signals ?? {})) signals[k] = num(n);
     const stages: Record<string, StageCounts> = {};
     for (const [k, s] of Object.entries(r.stages ?? {})) stages[k] = { done: num(s.done), queued: num(s.queued), failed: num(s.failed), dead: num(s.dead) };
-    const e = r.encounters ?? ({} as RoomPipeline["encounters"]);
+    const e = (r.encounters ?? {}) as Partial<Record<keyof EncounterCounts, unknown>>;
     rooms[id] = {
       signals,
-      encounters: { candidate: num(e.candidate), confirmed: num(e.confirmed), rejected: num(e.rejected), merged: num(e.merged), ambiguous: num(e.ambiguous) },
+      encounters: Object.fromEntries(Object.keys(emptyEncounters()).map((k) => [k, num(e[k as keyof EncounterCounts])])) as unknown as EncounterCounts,
       stages,
       oldest_queued_age_s: r.oldest_queued_age_s === null || r.oldest_queued_age_s === undefined ? null : num(r.oldest_queued_age_s),
     };

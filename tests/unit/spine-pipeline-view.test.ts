@@ -13,7 +13,7 @@ vi.mock("@/lib/spine/pipeline-view", async (orig) => ({ ...(await orig<typeof im
 import { __resetPipelineMemoForTests, PIPELINE_MEMO_MS, shapePipeline, type PipelineView } from "@/lib/spine/pipeline-view";
 
 const actual = await vi.importActual<typeof import("@/lib/spine/pipeline-view")>("@/lib/spine/pipeline-view");
-const view = (n: number): PipelineView => ({ ist_date: "2026-10-19", rooms: { room_a: { signals: { pulse: n }, encounters: { candidate: 0, confirmed: n, rejected: 0, merged: 0, ambiguous: 0 }, stages: {}, oldest_queued_age_s: null } } });
+const view = (n: number): PipelineView => ({ ist_date: "2026-10-19", rooms: { room_a: { signals: { pulse: n }, encounters: { candidate: 0, confirmed: n, rejected: 0, merged: 0, ambiguous: 0, multi_machine: 0, pulse_overlap: 0, clamped: 0, clamp_failed: 0, covered_by_pulse: 0 }, stages: {}, oldest_queued_age_s: null } } });
 
 beforeEach(() => {
   __resetPipelineMemoForTests();
@@ -56,7 +56,7 @@ describe("pipelineOrNull", () => {
     const out = await actual.pipelineOrNull("2026-10-19", { read: async () => dirty as never });
     const r = out!.rooms.room_a;
     expect(Object.keys(r).sort()).toEqual(["encounters", "oldest_queued_age_s", "signals", "stages"]);
-    expect(Object.keys(r.encounters).sort()).toEqual(["ambiguous", "candidate", "confirmed", "merged", "rejected"]);
+    expect(Object.keys(r.encounters).sort()).toEqual(["ambiguous", "candidate", "clamp_failed", "clamped", "confirmed", "covered_by_pulse", "merged", "multi_machine", "pulse_overlap", "rejected"]);
     expect(Object.keys(r.stages.recut).sort()).toEqual(["dead", "done", "failed", "queued"]);
   });
 });
@@ -75,7 +75,7 @@ describe("shapePipeline", () => {
       ],
     }, now);
     expect(v.rooms.room_a.signals).toEqual({ pulse: 2, acoustic: 3 });
-    expect(v.rooms.room_a.encounters).toEqual({ candidate: 1, confirmed: 2, rejected: 0, merged: 0, ambiguous: 1 });
+    expect(v.rooms.room_a.encounters).toEqual({ candidate: 1, confirmed: 2, rejected: 0, merged: 0, ambiguous: 1, multi_machine: 0, pulse_overlap: 0, clamped: 0, clamp_failed: 0, covered_by_pulse: 0 });
     expect(v.rooms.room_a.stages.recut).toEqual({ done: 4, queued: 3, failed: 0, dead: 0 });
     expect(v.rooms.room_a.oldest_queued_age_s).toBe(3600);
     expect(v.rooms._none.signals).toEqual({ caa: 1 });
