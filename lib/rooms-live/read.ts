@@ -13,7 +13,7 @@ const iso = (x: unknown): string => new Date(x as string | number | Date).toISOS
 export const istDateOf = (ms: number): string => new Date(ms + 19_800_000).toISOString().slice(0, 10);
 
 export type ListenerRow = { room_id: string; last_poll_at: string | null; levels_at: string | null; mic_peak: number | null; mic_zero_ratio: number | null; recording_session_id: string | null; paused: boolean | null };
-export type InstallRow = { room_id: string; hostname: string | null; state_flags: unknown; state_changed_at: string | null; input_device_name: string | null; input_devices: unknown };
+export type InstallRow = { room_id: string; hostname: string | null; state_flags: unknown; state_changed_at: string | null; input_device_name: string | null; input_devices: unknown; expected_device_name: string | null };
 export type SessionRow = { room_id: string; id: string; status: string; started_at: string; last_chunk_at: string | null };
 export type LevelDbRow = { room_id: string; sampled_at: string; peak: number; zero_ratio: number | null };
 export type HeartbeatRow = { machine: string; received_at: string };
@@ -42,12 +42,12 @@ export async function readListeners(db: Db, ids: readonly string[]): Promise<Lis
 
 export async function readInstalls(db: Db, ids: readonly string[]): Promise<InstallRow[]> {
   const rows = (await db`
-    SELECT room_id, hostname, state_flags, state_changed_at, input_device_name, input_devices
+    SELECT room_id, hostname, state_flags, state_changed_at, input_device_name, input_devices, expected_device_name
       FROM room_install
      WHERE room_id = ANY(${ids}::text[]) AND retired_at IS NULL AND enrolled_at IS NOT NULL
      LIMIT 30
   `) as Array<Record<string, unknown>>;
-  return rows.map((r) => ({ room_id: String(r.room_id), hostname: (r.hostname as string | null) ?? null, state_flags: r.state_flags ?? null, state_changed_at: tsOrNull(r.state_changed_at), input_device_name: (r.input_device_name as string | null) ?? null, input_devices: r.input_devices ?? null }));
+  return rows.map((r) => ({ room_id: String(r.room_id), hostname: (r.hostname as string | null) ?? null, state_flags: r.state_flags ?? null, state_changed_at: tsOrNull(r.state_changed_at), input_device_name: (r.input_device_name as string | null) ?? null, input_devices: r.input_devices ?? null, expected_device_name: (r.expected_device_name as string | null) ?? null }));
 }
 
 /**

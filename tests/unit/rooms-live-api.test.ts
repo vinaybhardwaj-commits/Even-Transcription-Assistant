@@ -25,7 +25,7 @@ const MACH: Record<string, string> = {
   room_pnyc9u49: "EHRC-CONSUL6s-Mac-mini", room_qyzghzaf: "EHRC-CONSUL7s-Mac-mini", room_ymch4bxu: "EHRC-DISCUSSIONs-Mac-mini", room_bh6jtq4t: "EHRC-ECHOs-Mac-mini",
 };
 
-type Opt = { fail?: string[]; calls?: string[]; unplugged?: string; muted?: string; config?: Array<{ key: string; value: unknown }>; configFails?: boolean; decisions?: Array<Record<string, unknown>> };
+type Opt = { fail?: string[]; calls?: string[]; unplugged?: string; muted?: string; config?: Array<{ key: string; value: unknown }>; configFails?: boolean; decisions?: Array<Record<string, unknown>>; expected?: Record<string, string | null> };
 function fakeDb(o: Opt = {}) {
   const calls: string[] = o.calls ?? [];
   const db = (async (strings: TemplateStringsArray) => {
@@ -41,7 +41,7 @@ function fakeDb(o: Opt = {}) {
     if (!name) throw new Error("unexpected statement " + text.slice(0, 60));
     if (o.fail?.includes(name)) throw new Error("boom with a secret postgres://user:pw@host/db");
     if (name === "bench_listener") return ROOM_IDS.map((id) => ({ room_id: id, last_poll_at: iso(NOW - 1000), levels_at: iso(NOW - 800), mic_peak: id === o.muted ? 0 : 0.035, mic_zero_ratio: id === o.muted ? 1 : 0.001, recording_session_id: "bs_1", paused: false }));
-    if (name === "room_install") return ROOM_IDS.map((id) => ({ room_id: id, hostname: HOST[id], state_flags: { flags: id === o.unplugged ? ["DEVICE_MISSING"] : [], drift_since: null }, state_changed_at: iso(NOW - 600_000), input_device_name: "C270 HD WEBCAM", input_devices: id === o.unplugged ? [] : [{ name: "C270 HD WEBCAM" }] }));
+    if (name === "room_install") return ROOM_IDS.map((id) => ({ room_id: id, hostname: HOST[id], state_flags: { flags: id === o.unplugged ? ["DEVICE_MISSING"] : [], drift_since: null }, state_changed_at: iso(NOW - 600_000), expected_device_name: o.expected?.[id] ?? null, input_device_name: "C270 HD WEBCAM", input_devices: id === o.unplugged ? [] : [{ name: "C270 HD WEBCAM" }] }));
     if (name === "bench_session") return ROOM_IDS.map((id) => ({ room_id: id, id: "bs_" + id, status: "recording", started_at: iso(NOW - 3_600_000), last_chunk_at: iso(NOW - 70_000) }));
     if (name === "bench_level_sample") return ROOM_IDS.flatMap((id) => Array.from({ length: 150 }, (_, i) => ({ room_id: id, sampled_at: iso(NOW - 800 - i * 2300), peak: id === o.muted ? 0 : i < 4 ? 0.035 + i * 0.002 : 0.009 + (i % 5) * 0.0004, zero_ratio: id === o.muted ? 1 : 0.001 })));
     if (name === "steward_decisions") return o.decisions ?? [];
@@ -76,6 +76,14 @@ describe("row shape", () => {
     expect(r.session.chunk_age_s).toBe(70);
     expect(s.degraded).toEqual([]);
     expect(typeof s.generated_at).toBe("string");
+  });
+  it("Sentinel S1: device.kind comes from room_install.expected_device_name, else the reported input; it picks the repair copy", async () => {
+    const [a, b, c] = ROOM_IDS as unknown as [string, string, string];
+    const s = await buildSnapshot({ db: fakeDb({ expected: { [a]: "TONOR TM20 Audio Device", [b]: "Some USB Mic" } }).db, now: () => NOW });
+    const by = new Map(s.rooms.map((r) => [r.room_id, r]));
+    expect(by.get(a)!.device.kind).toBe("tonor");
+    expect(by.get(b)!.device.kind).toBe("unknown");
+    expect(by.get(c)!.device.kind).toBe("webcam"); // no expected name: the reported input (C270 HD WEBCAM)
   });
   it("a healthy day: speech in the last seconds -> listening; unplugged and muted rooms show their state", async () => {
     const s = await buildSnapshot({ db: fakeDb({ unplugged: "room_ux92qpws", muted: "room_87frpus9" }).db, now: () => NOW });

@@ -9,6 +9,7 @@ import { expandKeys, matchKey } from "@/lib/kiosk-health-read";
 import { machineKeys } from "@/lib/encounter-windows/machine-keys";
 import type { Coverage } from "@/lib/jev/worker/coverage";
 import { raceTimeout } from "@/lib/steward/timeout";
+import { deviceClass, type DeviceClass } from "@/lib/steward/device-class";
 import { autoClearDue, claimResolved, resolvedStreak, toView, CLEAR_AFTER_POLLS, forgetStreaksExcept, type ClaimView, type ClaimsPort } from "./claims";
 import { ROOMS as ROOMS_DEFAULT, type RoomDef } from "./rooms";
 import { loadRoster, resetRosterForTests } from "./roster";
@@ -54,7 +55,8 @@ export type RoomRow = {
   detail_code: string | null;
   level: { rms: number | null; zero: number | null; at: string | null; stale: boolean };
   baseline_rms: number | null;
-  device: { name: string | null; missing: boolean };
+  /** kind: the repair-copy class of the room's device (room_install.expected_device_name, else the reported input); absent = unknown */
+  device: { name: string | null; missing: boolean; kind?: DeviceClass };
   session: { open: boolean; since: string | null; chunk_age_s: number | null };
   steward: { action: string; mode: string; at: string } | null;
   /** v1.7 S2: the one plain-words Steward line for the card (newest action of the last 60 min, else the hold line), or null */
@@ -281,7 +283,7 @@ export async function buildSnapshot(deps: Deps): Promise<Snapshot> {
       detail_code: r.detail_code,
       level: { rms: r5(r.level.rms), zero: r5(r.level.zero), at: r.level.at === null ? null : new Date(r.level.at).toISOString(), stale: r.level.stale },
       baseline_rms: r5(r.baseline_rms),
-      device: r.device,
+      device: { ...r.device, kind: deviceClass(inst?.expected_device_name ?? inst?.input_device_name) },
       session: { open: input.session.open, since: input.session.since === null ? null : new Date(input.session.since).toISOString(), chunk_age_s: input.session.chunk_age_s },
       steward: sdec ? { action: sdec.action, mode: sdec.mode, at: sdec.ts } : null,
       steward_line: cardLine(actBy.get(def.room_id) ?? [], now),
