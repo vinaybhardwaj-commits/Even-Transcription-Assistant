@@ -41,7 +41,14 @@ describe("breakerOpen", () => {
     expect(breakerOpen(rows(6, 20, 1), now)).toBe(true);
     expect(breakerOpen(rows(5, 20, 1), now)).toBe(false);
     expect(breakerOpen(rows(6, 20, 31), now)).toBe(false);
-    expect(breakerOpen(rows(3, 4, 1), now)).toBe(false);   // too few samples
+    expect(breakerOpen(rows(3, 4, 1), now)).toBe(true);    // no minimum sample size (plan §4)
+    expect(breakerOpen(rows(1, 1, 1), now)).toBe(true);
+    expect(breakerOpen(rows(0, 20, 1), now)).toBe(false);
+    expect(breakerOpen([], now)).toBe(false);
+    // only the LAST 20 count: 12 old failures behind 20 recent successes stay outside the window
+    const old = Array.from({ length: 12 }, (_, i) => ({ status: "failed", done_at: new Date(now.getTime() - (21 + i) * 60_000).toISOString() }));
+    expect(breakerOpen([...rows(0, 20, 1), ...old], now)).toBe(false);
+    expect(breakerOpen([...rows(6, 20, 1), ...old], now)).toBe(true);
   });
 });
 
@@ -54,6 +61,13 @@ describe("config: missing or malformed means off", () => {
     expect(modesFrom(rows, ["recut", "sarvam", "bogus", "acoustics"])).toEqual({ jobs: "shadow", stages: { recut: "live", sarvam: "off", bogus: "off", acoustics: "off" } });
     expect(modesFrom(rows.slice(1), ["recut"]).stages.recut).toBe("off");
     expect(modesFrom([...rows, { key: "kill_switch", value: true }], ["recut"])).toEqual({ jobs: "off", stages: { recut: "off" } });
+  });
+  it("F4: a kill_switch that is not exactly false / {on:false} is KILLED", () => {
+    const base = [{ key: "jobs", value: "live" }, { key: "mode.recut", value: "live" }];
+    const st = (v: unknown) => modesFrom([...base, { key: "kill_switch", value: v }], ["recut"]).stages.recut;
+    for (const v of ["yes", "ON", "1", { on: "yes" }, "false", 0, null, [], {}, { on: "false" }, true, { on: true }]) expect(st(v)).toBe("off");
+    for (const v of [false, { on: false }]) expect(st(v)).toBe("live");
+    expect(modesFrom(base, ["recut"]).stages.recut).toBe("live");   // no kill_switch row: not a kill
   });
 });
 
@@ -94,13 +108,15 @@ describe("routes", () => {
   });
   it("claim passes only stages that are not off and whose breaker is closed; live=true narrows to live", async () => {
     await claimPOST(req("/api/spine/claim", { owner: "r" }));
-    expect(M.claim.mock.calls[0]![1]).toEqual(["acoustics"]);      // recut breaker open
+    expect(M.claim.mock.calls[0]![1]).toEqual([]);                 // F1: non-live takes shadow stages only (recut shadow but breaker open; acoustics is live)
     M.modes.stages.recut = "live";
     await claimPOST(req("/api/spine/claim", { owner: "r", live: true }));
     expect(M.claim.mock.calls[1]![1]).toEqual(["acoustics"]);
     M.modes.stages.acoustics = "shadow";
     await claimPOST(req("/api/spine/claim", { owner: "r", live: true }));
     expect(M.claim.mock.calls[2]![1]).toEqual([]);
+    await claimPOST(req("/api/spine/claim", { owner: "r" }));
+    expect(M.claim.mock.calls[3]![1]).toEqual(["acoustics"]);      // shadow, breaker closed
   });
   it("claim and report validate input", async () => {
     expect((await claimPOST(req("/api/spine/claim", { owner: "bad owner!" }))).status).toBe(400);

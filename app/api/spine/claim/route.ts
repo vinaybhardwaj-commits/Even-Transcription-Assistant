@@ -1,7 +1,7 @@
 /**
  * POST /api/spine/claim — the box runner takes spine jobs. Bearer (SPINE_BEARER_TOKEN). Body {owner, limit?, live?}.
  * Returns {ok, jobs:[...]} — EMPTY when spine_config jobs is off, the kill switch is on, a stage is off (paid stages always are), or the stage's breaker is open.
- * live=true only returns jobs of stages whose mode is live. Each job carries its stage mode.
+ * live=true only returns jobs of stages whose mode is live; a non-live claim only returns jobs of SHADOW stages. Each job carries its stage mode.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { checkSpineBearer } from "@/lib/spine/auth";
@@ -24,8 +24,8 @@ export async function POST(req: NextRequest) {
   try {
     const modes = await readModes();
     if (modes.jobs === "off") return NextResponse.json({ ok: true, jobs: [] });
-    const want = body.live === true ? "live" : null;
-    const allowed = KNOWN_STAGES.filter((s) => (modes.stages[s] === "shadow" || modes.stages[s] === "live") && (!want || modes.stages[s] === want));
+    const want = body.live === true ? "live" : "shadow";   // a non-live (would_run) claim never takes a live-mode stage: it would consume the job as shadow
+    const allowed = KNOWN_STAGES.filter((s) => modes.stages[s] === want);
     const open = new Set(await openBreakers(allowed, now));
     const stages = allowed.filter((s) => !open.has(s));
     const notifier = (await readMode("dead_alert")) === "live" ? opsAlertNotifier : stubNotifier;

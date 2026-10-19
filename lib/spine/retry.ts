@@ -9,7 +9,6 @@ export const BACKOFF_BASE_MS = 2 * 60_000;
 export const BACKOFF_CAP_MS = 6 * 3_600_000;
 export const JITTER = 0.2;
 export const BREAKER_WINDOW = 20;
-export const BREAKER_MIN_SAMPLES = 5;
 export const BREAKER_FAIL_RATIO = 0.3;
 export const BREAKER_OPEN_MS = 30 * 60_000;
 
@@ -53,14 +52,15 @@ export function resolveOutcome(outcome: Outcome, attempts: number, now: Date, ra
   }
 }
 
+/** One attempt outcome: failed = a transient, permanent or lease-expired result; done = a success. `done_at` is when it was reported. */
 export type Finished = { status: string; done_at: Date | string };
 
-/** Open when >= 30% of the last 20 finished jobs failed (failed|dead) AND the latest failure is under 30 min old. Stateless: derived from rows at read time. */
-export function breakerOpen(finished: Finished[], now: Date): boolean {
-  const last = [...finished].sort((a, b) => new Date(b.done_at).getTime() - new Date(a.done_at).getTime()).slice(0, BREAKER_WINDOW);
-  if (last.length < BREAKER_MIN_SAMPLES) return false;
-  const failed = last.filter((j) => j.status === "failed" || j.status === "dead");
-  if (failed.length / last.length < BREAKER_FAIL_RATIO) return false;
+/** SPINE-PLAN §4: open when >= 30% of the last 20 ATTEMPT outcomes failed (transient included, no minimum sample) AND the latest failure is under 30 min old. Stateless: derived at read time. */
+export function breakerOpen(attempts: Finished[], now: Date): boolean {
+  const last = [...attempts].sort((a, b) => new Date(b.done_at).getTime() - new Date(a.done_at).getTime()).slice(0, BREAKER_WINDOW);
+  if (last.length === 0) return false;
+  const failed = last.filter((j) => j.status === "failed");
+  if (failed.length === 0 || failed.length / last.length < BREAKER_FAIL_RATIO) return false;
   const latest = Math.max(...failed.map((j) => new Date(j.done_at).getTime()));
   return now.getTime() < latest + BREAKER_OPEN_MS;
 }

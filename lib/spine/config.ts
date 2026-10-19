@@ -16,15 +16,16 @@ export function parseMode(v: unknown): Mode {
   return m === "shadow" || m === "live" ? m : "off";
 }
 
-export function isTruthyKill(v: unknown): boolean {
+/** A kill_switch row that is not exactly `false` / `{"on": false}` counts as KILLED (malformed fails toward killed). An absent row is not a kill (jobs still defaults off). */
+export function isKilled(v: unknown): boolean {
   const x = v && typeof v === "object" && !Array.isArray(v) ? (v as { on?: unknown }).on : v;
-  return x === true || x === "on" || x === "true" || x === 1;
+  return x !== false;
 }
 
 /** Pure: modes for `stages` from the config rows. */
 export function modesFrom(rows: Array<{ key: string; value: unknown }>, stages: readonly string[]): { jobs: Mode; stages: Record<string, Mode> } {
   const by = new Map(rows.map((r) => [r.key, r.value]));
-  if (isTruthyKill(by.get("kill_switch"))) return { jobs: "off", stages: Object.fromEntries(stages.map((s) => [s, "off" as Mode])) };
+  if (by.has("kill_switch") && isKilled(by.get("kill_switch"))) return { jobs: "off", stages: Object.fromEntries(stages.map((s) => [s, "off" as Mode])) };
   const jobs = parseMode(by.get("jobs"));
   const out: Record<string, Mode> = {};
   for (const s of stages) out[s] = jobs === "off" || PAID_STAGES.includes(s) || !KNOWN_STAGES.includes(s) ? "off" : parseMode(by.get(`mode.${s}`));

@@ -16,9 +16,10 @@ export type DeadJob = { job_id: number; stage: string; encounter_id: string; err
 /** D13 sink: a pluggable notifier. The default does nothing. */
 export type Notifier = { dead(job: DeadJob): Promise<unknown> };
 export const stubNotifier: Notifier = { dead: async () => undefined };
-/** queueOpsAlert dedupes per (kind, room, key) per hour in the database; the key is the stage. No ubus client is built here. */
+/** D13: at most one alert per STAGE per 6 h (the stage is the "room" in the dedupe key). Kind heal_escalated is the only one room_alert_outbox_kind_chk lets through; the Mini relay will present it as a room heal escalation for a "room" named spine-<stage> (relay side unverified). No ubus client is built here. */
+export const DEAD_ALERT_DEDUPE_MINUTES = 6 * 60;
 export const opsAlertNotifier: Notifier = {
-  dead: (j) => queueOpsAlert({ kind: "heal_escalated", room_id: "spine", room_slug: `spine-${j.stage}`, minutes: null, reason: `dead_${j.stage}` }),
+  dead: (j) => queueOpsAlert({ kind: "heal_escalated", room_id: `spine-${j.stage}`, room_slug: `spine-${j.stage}`, minutes: null, reason: `dead_${j.stage}`, dedupe_minutes: DEAD_ALERT_DEDUPE_MINUTES }),
 };
 
 const num = (v: unknown): number => Number(v);
@@ -30,8 +31,8 @@ const toJob = (r: Record<string, unknown>): SpineJob => ({
 /** Idempotent on (encounter_id, stage, cut_version, input_key). Returns the new job id, or null when the key already exists. */
 export async function enqueue(j: { encounter_id: string; stage: string; cut_version: string; input_key: string; priority?: number }): Promise<number | null> {
   const rows = (await sql`
-    INSERT INTO spine_job (encounter_id, stage, cut_version, input_key, priority)
-    VALUES (${j.encounter_id}, ${j.stage}, ${j.cut_version}, ${j.input_key}, ${j.priority ?? 0}::int)
+    INSERT INTO spine_job (encounter_id, stage, cut_version, input_key, status, priority)
+    VALUES (${j.encounter_id}, ${j.stage}, ${j.cut_version}, ${j.input_key}, 'queued', ${j.priority ?? 0}::int)
     ON CONFLICT ON CONSTRAINT spine_job_key_uq DO NOTHING
     RETURNING job_id`) as Array<{ job_id: unknown }>;
   return rows[0] ? num(rows[0].job_id) : null;
@@ -40,10 +41,15 @@ export async function enqueue(j: { encounter_id: string; stage: string; cut_vers
 /** Leased rows whose lease ran out on the LAST allowed attempt can never be claimed again: they die here (once, by the UPDATE). */
 export async function reapExhausted(now: Date, notifier: Notifier = stubNotifier): Promise<number> {
   const rows = (await sql`
-    UPDATE spine_job
-       SET status = 'dead', done_at = ${now.toISOString()}::timestamptz, lease_owner = NULL, lease_until = NULL, last_error_class = 'transient', last_error_code = 'lease_expired'
-     WHERE status = 'leased' AND attempts >= ${MAX_ATTEMPTS}::int AND lease_until < ${now.toISOString()}::timestamptz
-    RETURNING job_id, stage, encounter_id`) as Array<Record<string, unknown>>;
+    WITH upd AS (
+      UPDATE spine_job
+         SET status = 'dead', done_at = ${now.toISOString()}::timestamptz, lease_owner = NULL, lease_until = NULL, last_error_class = 'transient', last_error_code = 'lease_expired'
+       WHERE status = 'leased' AND attempts >= ${MAX_ATTEMPTS}::int AND lease_until < ${now.toISOString()}::timestamptz
+      RETURNING job_id, stage, encounter_id
+    ), tick AS (
+      INSERT INTO spine_tick (kind, ticked_at, counts) SELECT 'attempt:' || stage, ${now.toISOString()}::timestamptz, '{"failed":1}'::jsonb FROM upd
+    )
+    SELECT job_id, stage, encounter_id FROM upd`) as Array<Record<string, unknown>>;
   for (const r of rows) await notifier.dead({ job_id: num(r.job_id), stage: String(r.stage), encounter_id: String(r.encounter_id), error_code: "lease_expired" });
   return rows.length;
 }
@@ -88,7 +94,12 @@ export async function reportJob(
   const attempts = num(cur[0].attempts);
   const r = resolveOutcome(a.outcome, attempts, a.now, a.rng());
   const code = a.outcome === "done" || a.outcome === "shadow" || a.outcome === "release" ? null : (a.error_code ?? null);
+  // Breaker bookkeeping (no schema change): one spine_tick row 'attempt:<stage>' per finished attempt, written in the SAME statement as the owner-matched
+  // UPDATE, so a lost lease records nothing. done = failed 0; transient / permanent / dead = failed 1. budget, shadow and release give the attempt back: not recorded.
+  const recorded = a.outcome === "done" || a.outcome === "transient" || a.outcome === "permanent";
+  const failedTick = a.outcome === "done" ? 0 : 1;
   const upd = (await sql`
+    WITH u AS (
     UPDATE spine_job
        SET status = ${r.status}::text,
            next_attempt_at = ${r.nextAttemptAt ? r.nextAttemptAt.toISOString() : null}::timestamptz,
@@ -98,20 +109,25 @@ export async function reportJob(
            done_at = ${r.doneAt ? r.doneAt.toISOString() : null}::timestamptz,
            lease_owner = NULL, lease_until = NULL
      WHERE job_id = ${a.job_id}::bigint AND lease_owner = ${a.owner}::text AND status = 'leased' AND attempts = ${attempts}::int
-    RETURNING job_id`) as Array<unknown>;
+    RETURNING job_id, stage
+    ), tick AS (
+      INSERT INTO spine_tick (kind, ticked_at, counts)
+      SELECT 'attempt:' || stage, ${a.now.toISOString()}::timestamptz, jsonb_build_object('failed', ${failedTick}::int) FROM u WHERE ${recorded}::boolean
+    )
+    SELECT job_id FROM u`) as Array<unknown>;
   if (upd.length === 0) return { ok: false, error: "lease_lost" };
   if (r.status === "dead") await notifier.dead({ job_id: a.job_id, stage: String(cur[0].stage), encounter_id: String(cur[0].encounter_id), error_code: code });
   return { ok: true, status: r.status };
 }
 
-/** Stages whose breaker is open now: derived from the last 20 finished rows per stage at read time. */
+/** Stages whose breaker is open now: derived at read time from the last 20 recorded ATTEMPT outcomes per stage (spine_tick kind 'attempt:<stage>'). */
 export async function openBreakers(stages: string[], now: Date): Promise<string[]> {
   const open: string[] = [];
   for (const s of stages) {
     const rows = (await sql`
-      SELECT status, done_at FROM spine_job
-       WHERE stage = ${s}::text AND status IN ('done','failed','dead') AND done_at IS NOT NULL
-       ORDER BY done_at DESC LIMIT 20`) as Array<{ status: string; done_at: string }>;
+      SELECT CASE WHEN counts->>'failed' = '1' THEN 'failed' ELSE 'done' END AS status, ticked_at AS done_at FROM spine_tick
+       WHERE kind = ${"attempt:" + s}::text
+       ORDER BY ticked_at DESC, id DESC LIMIT 20`) as Array<{ status: string; done_at: string }>;
     if (breakerOpen(rows, now)) open.push(s);
   }
   return open;
