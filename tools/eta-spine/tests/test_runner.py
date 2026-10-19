@@ -5,6 +5,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import executors  # noqa: E402
 import runner  # noqa: E402
 
 JOB = {"job_id": 7, "encounter_id": "enc_testaaaaaaaaaaaa", "stage": "recut", "mode": "shadow"}
@@ -61,12 +62,76 @@ def test_live_refuses_paid_stage_even_if_server_said_live():
     assert r.run_once() == 3 and sent[1][1]["outcome"] == "release"
 
 
-def test_live_runs_a_live_stage_and_maps_exit_codes(monkeypatch):
-    for rc, outcome in [(0, "done"), (75, "transient"), (2, "permanent"), (70, "budget"), (9, "transient")]:
-        r, sent, _ = make(live=True, jobs=[{**JOB, "mode": "live"}])
-        monkeypatch.setattr(subprocess, "run", lambda *a, _rc=rc, **k: subprocess.CompletedProcess(a, _rc))
+class FakeExecs:
+    def __init__(self, res=None, exc=None, stages=("recut", "acoustics", "nemotron")):
+        self.res, self.exc, self.stages, self.calls = res, exc, stages, []
+
+    def has(self, stage):
+        return stage in self.stages
+
+    def execute(self, stage, uid):
+        self.calls.append((stage, uid))
+        if self.exc:
+            raise self.exc
+        return self.res
+
+
+def live_runner(jobs, execs):
+    sent = []
+
+    def post(p, b):
+        sent.append((p, b))
+        return (200, {"ok": True, "jobs": list(jobs)}) if p.endswith("claim") else (200, {"ok": True})
+    logs = []
+    return runner.Runner("https://x", "t", "o", live=True, post=post, log=logs.append, execs=execs), sent, logs
+
+
+def test_live_runs_through_the_executor_and_reports_its_outcome_code_and_artefact():
+    art = {"engine": "cutter", "version": "v1", "cfg8": "abcdef01", "store": "box", "status": "ok", "sha256": "0" * 64}
+    for res, want in [(executors.Result("done", None, art), {"outcome": "done", "artefact": art}),
+                      (executors.Result("transient", "lock_busy"), {"outcome": "transient", "error_code": "lock_busy"}),
+                      (executors.Result("permanent", "silent_audio"), {"outcome": "permanent", "error_code": "silent_audio"})]:
+        ex = FakeExecs(res)
+        r, sent, logs = live_runner([{**JOB, "mode": "live", "consult_uid": "uid_test_01"}], ex)
         assert r.run_once() == 0
-        assert sent[1][1]["outcome"] == outcome
+        assert ex.calls == [("recut", "uid_test_01")]
+        assert sent[0][1]["limit"] == 1 and sent[0][1]["live"] is True
+        assert sent[1][1] == {"job_id": 7, "owner": "o", **want}
+        assert not any("uid_test_01" in m for m in logs)   # the uid is never logged
+
+
+def test_live_unconfigured_executor_releases_and_exits_3():
+    r, sent, _ = live_runner([{**JOB, "mode": "live"}], FakeExecs(exc=executors.ExecutorUnconfigured("SPINE_CUTTER_DIR")))
+    assert r.run_once() == 3 and sent[1][1]["outcome"] == "release"
+
+
+def test_live_stage_without_executor_is_refused_released():
+    ex = FakeExecs(stages=("recut",))
+    r, sent, _ = live_runner([{**JOB, "mode": "live", "stage": "collector"}], ex)
+    assert r.run_once() == 3 and sent[1][1]["outcome"] == "release" and ex.calls == []
+
+
+def test_n4_refusal_releases_the_rest_of_the_claim_and_runs_none_of_them():
+    ex = FakeExecs(executors.Result("done"))
+    jobs = [{**JOB, "job_id": 1, "mode": "shadow"}, {**JOB, "job_id": 2, "mode": "live"}, {**JOB, "job_id": 3, "mode": "live"}]
+    r, sent, _ = live_runner(jobs, ex)
+    assert r.run_once() == 3
+    assert [(b["job_id"], b["outcome"]) for p, b in sent[1:]] == [(1, "release"), (2, "release"), (3, "release")]
+    assert ex.calls == []
+
+
+def test_n4_job_that_ran_is_not_released_but_the_unstarted_one_after_a_refusal_is():
+    ex = FakeExecs(executors.Result("done"))
+    jobs = [{**JOB, "job_id": 1, "mode": "live"}, {**JOB, "job_id": 2, "mode": "shadow"}, {**JOB, "job_id": 3, "mode": "live"}]
+    r, sent, _ = live_runner(jobs, ex)
+    assert r.run_once() == 3
+    assert [(b["job_id"], b["outcome"]) for p, b in sent[1:]] == [(1, "done"), (2, "release"), (3, "release")]
+    assert len(ex.calls) == 1
+
+
+def test_n4_would_run_path_is_unchanged_every_job_shadow():
+    r, sent = mk([{**JOB, "job_id": i} for i in (1, 2)])
+    assert r.run_once() == 0 and [b["outcome"] for p, b in sent[1:]] == ["shadow", "shadow"]
 
 
 def test_failed_claim_does_nothing():
