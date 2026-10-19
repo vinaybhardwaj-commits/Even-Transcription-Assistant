@@ -455,7 +455,7 @@ describe("S3 — the paid-call audit row is retried, or the step throws and the 
 describe("G13 — ledger accuracy", () => {
   const T0 = "2026-10-08T06:00:00.000Z";
   const line = (over: Row = {}) => ({
-    caller: "scribe-mcp", machine: "vercel", job_id: "job_x", request_id: "sj", route: "gateway", mode: "batch", task: "transcribe", model: "saaras:v3", audio_s: 600,
+    caller: "scribe-mcp", machine: "vercel", job_id: "job_x", request_id: "sj", route: "gateway", mode: "batch", task: "transcribe", model: "saaras:v4", audio_s: 600,
     started_at: T0, finished_at: "2026-10-08T06:20:00.000Z", status: "ok", http_status: 200, throttled: false, scope: "encounter", ref: "enc_1", ...over,
   }) as import("@/lib/sarvam-lab").CallLine;
 
@@ -577,7 +577,7 @@ describe("sarvam_transcribe: poll / finish / ledger", () => {
       english_pass: "pending", sarvam_job_ids: { native: "sj_9", english: null }, minutes: { native: 10, english: 0 },
     });
     expect(ledgerLines()).toEqual([{
-      caller: "scribe-mcp", machine: "vercel", job_id: "job_t1", request_id: "sj_9", route: "gateway", mode: "batch", task: "transcribe", model: "saaras:v3", audio_s: 600,
+      caller: "scribe-mcp", machine: "vercel", job_id: "job_t1", request_id: "sj_9", route: "gateway", mode: "batch", task: "transcribe", model: "saaras:v4", audio_s: 600,
       started_at: "2026-10-08T06:00:00.000Z", finished_at: expect.any(String), status: "ok", http_status: 200, throttled: false, scope: "encounter", ref: "enc_1", use: "production",
     }]);
     expect(JSON.stringify(ledgerLines())).not.toContain("namaste"); // no text in the ledger
@@ -738,7 +738,7 @@ describe("D — ledger and lane", () => {
     await T.sarvamTranscribeKind.run(ctx("finish", args, fin));
     const l = lane();
     expect(l).toMatchObject({ caller: "scribe-mcp", machine: "vercel", updated_at: expect.any(String) });
-    expect(l.active).toEqual([{ job_id: "job_other", mode: "batch", task: "transcribe", model: "saaras:v3", audio_s: 300, started_at: "2026-10-08T06:30:00.000Z", scope: "encounter" }]);
+    expect(l.active).toEqual([{ job_id: "job_other", mode: "batch", task: "transcribe", model: "saaras:v4", audio_s: 300, started_at: "2026-10-08T06:30:00.000Z", scope: "encounter" }]);
     expect(l.today).toEqual({ jobs: 1, audio_min: 10, failed: 0, throttled: 0, by_use: { production: 1 }, by_scope: { encounter: 1 }, by_status: { ok: 1 } }); // the line this job just wrote
     expect(l.all_time).toEqual({ jobs: 3, audio_min: 20 }); // 2 earlier lines (one ok 10 min, one failed) + today's
     expect(JSON.stringify(l)).not.toMatch(/ref|enc_1|transcript/);
@@ -862,7 +862,7 @@ describe("S8A4 — the English track comes from a second Sarvam pass over the au
     expect(doc.drug_candidates[0]).toEqual({ entry_idx: 2, heard: "combat land", suggested: expect.stringMatching(/^combiflam/i), score: expect.any(Number), source: expect.stringContaining("pulse-medications"), category: "drug" });
     expect(doc.english_entries[2].text).toContain("combat land"); // proposed, not rewritten
     expect(doc.sarvam_job_ids).toEqual({ native: "sj_9", english: "sj_en" });
-    expect(ledgerLines().filter((l) => l.job_id === "job_t1:en")).toEqual([expect.objectContaining({ task: "translate", request_id: "sj_en", audio_s: 600, status: "ok", model: "saaras:v3" })]);
+    expect(ledgerLines().filter((l) => l.job_id === "job_t1:en")).toEqual([expect.objectContaining({ task: "translate", request_id: "sj_en", audio_s: 600, status: "ok", model: "saaras:v4" })]);
   });
 
   it("a pass-2 entry with no native partner is kept in the English track (native_idx null)", async () => {

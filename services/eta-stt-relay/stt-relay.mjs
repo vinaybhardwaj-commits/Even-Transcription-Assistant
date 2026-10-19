@@ -49,7 +49,8 @@ wss.on("connection", (client, req) => {
   // forward only the allowlisted Sarvam params the browser supplied
   const qp = new URLSearchParams();
   for (const [k, v] of u.searchParams) if (ALLOWED.has(k)) qp.set(k, v);
-  if (!qp.has("model")) qp.set("model", "saaras:v3");
+  // saaras:v4 only: a browser-supplied model (v3 included) is not honoured, there is no v3 fallback
+  qp.set("model", "saaras:v4");
   if (!qp.has("mode")) qp.set("mode", "codemix");
   if (!qp.has("language-code")) qp.set("language-code", "unknown");
   if (!qp.has("sample_rate")) qp.set("sample_rate", "16000");

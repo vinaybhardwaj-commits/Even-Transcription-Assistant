@@ -3,15 +3,16 @@
  * lib/sarvam.ts already uses against api.sarvam.ai; only the transport differs. The direct callers of lib/sarvam.ts (room drain, fanout, bake-offs)
  * are NOT touched and keep SARVAM_API_KEY.
  *
- * Batch model saaras:v3 ONLY (the gateway does not cover saarika:v2.5, today's direct default). Every function returns a result object and never
+ * Batch model saaras:v4 ONLY (the gateway does not cover saarika:v2.5, today's direct default). Every function returns a result object and never
  * throws; error strings are codes (`init_502`, `sarvam_gateway_sts: 403 AccessDenied`), never a response body, a token or a URL.
  *
  * S8A-FIX: the batch submit is split in three idempotent calls (init / upload / start) so the job can persist Sarvam's job id BETWEEN them; every
  * failure carries `status` (HTTP, when there was one) and `transient` (429, 5xx, timeout, network: worth retrying; a 4xx is terminal).
  */
+import { SARVAM_STT_MODEL } from "./sarvam-model";
 import { gatewayFetch, SarvamGatewayError } from "./sarvam-gateway";
 
-export const SARVAM_GW_STT_MODEL = "saaras:v3";
+export const SARVAM_GW_STT_MODEL = SARVAM_STT_MODEL;
 export const SARVAM_GW_TRANSLATE_MODEL = "mayura:v1";
 export const TRANSLATE_CHUNK_CHARS = 900;
 const JOB_PATH = "/speech-to-text/job/v1";

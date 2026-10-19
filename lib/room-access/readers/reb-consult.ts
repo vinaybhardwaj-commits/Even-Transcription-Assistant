@@ -16,6 +16,7 @@
 import { createHash } from "node:crypto";
 import { sql } from "@/lib/db";
 import { parseFlag } from "@/lib/flags";
+import { SARVAM_STT_ENGINES_READ } from "@/lib/sarvam-model";
 import { labStore, REB_CONSULT_KEY, type LabStore } from "@/lib/sarvam-lab";
 import { blindRefusal } from "@/lib/room-access/readers/common";
 import type { ConsultSpan } from "@/lib/room-access/readers/consult-span";
@@ -45,7 +46,7 @@ type IndexRow = { layer: string; engine: string; config_hash: string; r2_key: st
  * the first engine here with a usable row decides, and if that row is not wholly English the stt layer yields nothing (no fallback to a later engine).
  * medasr is English-only run on every clip, so its text is not the transcript of record and is deliberately absent. A caa-version row is never taken.
  */
-export const REB_STT_ENGINE_PREFERENCE: readonly string[] = ["sarvam-saaras-v3"];
+export const REB_STT_ENGINE_PREFERENCE: readonly string[] = SARVAM_STT_ENGINES_READ; // v4 first, then v3: an existing v3 result counts as done
 const isCaaVersion = (r: IndexRow): boolean => /caa/i.test(String(r.version ?? ""));
 const isEnglishTag = (v: unknown): boolean => typeof v === "string" && v.toLowerCase().startsWith("en");
 const sha256 = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
@@ -364,13 +365,13 @@ export async function findRebTrack(uid: string, roomId: string, istDate: string,
 }
 
 // ---- consult-reuse: the palimpsest's OWN Sarvam tracks of THIS cut, found before Sarvam is called again ---------------------------------------------------------------------
-export const SARVAM_TRACK_ENGINE = "sarvam-saaras-v3";
+export const SARVAM_TRACK_ENGINES: readonly string[] = SARVAM_STT_ENGINES_READ; // reuse accepts v4 and v3 tracks, v4 preferred
 export type SarvamTrackSegment = { t0_ms: number; t1_ms: number; speaker: string | null; lang: string | null; text: string };
 export type SarvamTrack = { layer: "stt" | "translate"; engine: string; model: string | null; version: string | null; config_hash: string; r2_key: string; segments: SarvamTrackSegment[] };
 export type SarvamReuse = { found: { stt: SarvamTrack | null; translate: SarvamTrack | null } | null; n_integrity_skipped: number; n_other_cut: number; missing: Array<"stt" | "translate"> } | { unavailable: true };
 
 /**
- * A live (status ok, not shadow) engine sarvam-saaras-v3 track of this consult, FOR THIS CUT: the track's own config.clip_signature must give the same cut version as the index row's (`cutVersion`, from
+ * A live (status ok, not shadow) engine sarvam-saaras-v4 or sarvam-saaras-v3 track of this consult, FOR THIS CUT: the track's own config.clip_signature must give the same cut version as the index row's (`cutVersion`, from
  * lib/consult-index/parse.ts signatureVersion). A track of another cut (the clip was re-cut after the track was made) is skipped and counted, never returned. The same key ownership (this uid, this room) and
  * sha256 checks as every other palimpsest read. Newest first; the newest matching track of each layer (stt, translate) is returned.
  *
@@ -387,13 +388,14 @@ export async function findSarvamTracks(uid: string, roomId: string, roomSlug: st
     rows = (await sql`
       SELECT layer, engine, config_hash, r2_key, sha256
         FROM reb_track_index
-       WHERE window_id = ${`consult-${uid}`}::text AND status = 'ok' AND shadow = false AND engine = ${SARVAM_TRACK_ENGINE}::text AND layer IN ('stt', 'translate')
+       WHERE window_id = ${`consult-${uid}`}::text AND status = 'ok' AND shadow = false AND engine = ANY(${[...SARVAM_TRACK_ENGINES]}::text[]) AND layer IN ('stt', 'translate')
        ORDER BY finished_at DESC NULLS LAST, id DESC
        LIMIT 40
     `) as IndexRow[];
   } catch {
     return { unavailable: true };
   }
+  rows.sort((x, y) => SARVAM_TRACK_ENGINES.indexOf(x.engine) - SARVAM_TRACK_ENGINES.indexOf(y.engine)); // v4 before v3; Array.sort is stable, so newest-first holds within an engine
   const out: { stt: SarvamTrack | null; translate: SarvamTrack | null } = { stt: null, translate: null };
   let skipped = 0, otherCut = 0;
   const missing: Array<"stt" | "translate"> = [];
@@ -408,7 +410,7 @@ export async function findSarvamTracks(uid: string, roomId: string, roomSlug: st
       if (typeof row.sha256 !== "string" || sha256(obj.body) !== row.sha256.toLowerCase()) { skipped += 1; continue; }
       let doc: { status?: unknown; engine?: unknown; model?: unknown; version?: unknown; segments?: unknown; config?: { clip_signature?: unknown } };
       try { doc = JSON.parse(obj.body); } catch { skipped += 1; continue; }
-      if (doc?.status !== "ok" || doc.engine !== SARVAM_TRACK_ENGINE || !Array.isArray(doc.segments)) continue;
+      if (doc?.status !== "ok" || typeof doc.engine !== "string" || !SARVAM_TRACK_ENGINES.includes(doc.engine) || !Array.isArray(doc.segments)) continue;
       if (signatureOf(doc.config?.clip_signature) !== cutVersion) { otherCut += 1; continue; }
       const segs: SarvamTrackSegment[] = [];
       for (const g of doc.segments as Array<Record<string, unknown>>) {
@@ -417,7 +419,7 @@ export async function findSarvamTracks(uid: string, roomId: string, roomSlug: st
         if (!Number.isFinite(t0) || !Number.isFinite(t1)) continue;
         segs.push({ t0_ms: t0, t1_ms: t1, speaker: typeof g.speaker === "string" ? g.speaker : null, lang: typeof g.lang === "string" ? g.lang : null, text: typeof g.text === "string" ? g.text : "" });
       }
-      out[layer] = { layer, engine: SARVAM_TRACK_ENGINE, model: typeof doc.model === "string" ? doc.model : null, version: typeof doc.version === "string" ? doc.version : null, config_hash: String(row.config_hash), r2_key: row.r2_key, segments: segs };
+      out[layer] = { layer, engine: doc.engine, model: typeof doc.model === "string" ? doc.model : null, version: typeof doc.version === "string" ? doc.version : null, config_hash: String(row.config_hash), r2_key: row.r2_key, segments: segs };
     }
   } catch {
     return { unavailable: true };

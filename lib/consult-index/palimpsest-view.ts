@@ -9,6 +9,7 @@
  * mode), else mayura:v1 as for our own results; job_id null (no job ran); created_at null (the track carries no time we can vouch for).
  * Arch #91: reb_role_flags { attender_present, two_consults, diar_partial } is attached only when the caller passes those booleans. Absent otherwise, so the key set is unchanged.
  */
+import { SARVAM_STT_MODEL, SARVAM_STT_VERSION_LABEL } from "@/lib/sarvam-model";
 import type { ResultDoc, ResultEntry, EnglishEntry } from "@/lib/jobs/kinds/sarvam-common";
 import type { ConsultResult, StoredIndexRow } from "@/lib/room-access/consult-index-store";
 import type { RebRoleFlags, SarvamTrack } from "@/lib/room-access/readers/reb-consult";
@@ -53,7 +54,7 @@ export function palimpsestAsResult(row: Pick<StoredIndexRow, "consult_uid" | "cu
   };
   const result = {
     consult_uid: row.consult_uid, cut_version: row.cut_version, mode: "transcribe", english: translate !== null, num_speakers: null, job_id: "", result_r2_key: stt.r2_key,
-    model_stt: stt.model ?? "saaras:v3", model_translate: translate?.model ?? "mayura:v1", model_rev: stt.version ?? stt.model ?? "saaras-v3", pipeline_rev: "palimpsest",
+    model_stt: stt.model ?? SARVAM_STT_MODEL, model_translate: translate?.model ?? "mayura:v1", model_rev: stt.version ?? stt.model ?? SARVAM_STT_VERSION_LABEL, pipeline_rev: "palimpsest",
     language_code, duration_s, speaker_count: speakers.length, transcript_chars: transcript.length, english_chars: english.length, english_pass: doc.english_pass ?? "not_requested", t0_ms: row.t0_ms, created_at: "",
     source: PALIMPSEST_SOURCE,
     ...(roleFlags ? { reb_role_flags: roleFlags } : {}),

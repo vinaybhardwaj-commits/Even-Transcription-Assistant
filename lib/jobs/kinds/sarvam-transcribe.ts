@@ -1,11 +1,11 @@
 /**
- * lib/jobs/kinds/sarvam-transcribe.ts — S8A. Transcribe ISOLATED CONSULT AUDIO with Sarvam saaras:v3 THROUGH THE AWS GATEWAY
+ * lib/jobs/kinds/sarvam-transcribe.ts — S8A. Transcribe ISOLATED CONSULT AUDIO with Sarvam saaras:v4 THROUGH THE AWS GATEWAY
  * (lib/sarvam-gateway.ts), with speaker labels and (by default) an English rendering from mayura:v1.
  *
  * V's STANDING RULE (restated 08 Oct ~20:40): only isolated consult audio goes to Sarvam. No other room audio, never whole windows. So the sources are
  *   { encounter_id }  a doctor-recorded encounter (audio production already sends to Sarvam today)         scope "encounter"
  *   { consult_uid }   a clip cut by the CONSULT cutter, resolved through the consult_index table (0150); refusals: consult_not_indexed, consult_sealed, consult_voice_isolated,
- *                     mirror_minutes_missing, reuse_lookup_unavailable, audio_unreadable. A live palimpsest sarvam-saaras-v3 track of the SAME CUT is reused (source palimpsest), not re-sent. A result for the SAME CUT VERSION and options already stored is returned, never re-sent.  scope "consult_clip"
+ *                     mirror_minutes_missing, reuse_lookup_unavailable, audio_unreadable. A live palimpsest sarvam-saaras-v4 or -v3 track of the SAME CUT is reused (source palimpsest), not re-sent. A result for the SAME CUT VERSION and options already stored is returned, never re-sent.  scope "consult_clip"
  * Room / session arguments (room, from, to, session_id, from_ms, to_ms) are REFUSED with scope_consult_only.
  *
  *   prepare   gateway + cap check; the encounter's audio object, or the consult's index row + clip (an existing result for that cut ends the job here, before any Sarvam call)
@@ -31,6 +31,7 @@ import { recordResult, type ConsultResult } from "@/lib/room-access/consult-inde
 import { gatewayConfigured } from "@/lib/sarvam-gateway";
 import { chunkText, gwBatchInit, gwBatchResult, gwBatchStartJob, gwBatchStatus, gwBatchUpload, gwTranslateChunk, SARVAM_GW_STT_MODEL, SARVAM_GW_TRANSLATE_MODEL, type Fail } from "@/lib/sarvam-gw";
 import { SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
+import { SARVAM_STT_VERSION_LABEL } from "@/lib/sarvam-model";
 import { appendLedger, touchLane, type CallLine } from "@/lib/sarvam-lab";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
@@ -48,7 +49,7 @@ import { parseRoomSource, resolveRangeSession, resolveRoomClip, type RoomSource 
 export const SARVAM_TRANSCRIBE_KIND = "sarvam_transcribe";
 const STEPS = {
   prepare: "prepare", init: "init", upload: "upload", start: "start", poll: "poll", finish: "finish",
-  // S8A4: the second Sarvam pass (saaras:v3 translate mode, speech -> English) on the same audio, then the merge
+  // S8A4: the second Sarvam pass (saaras:v4 translate mode, speech -> English) on the same audio, then the merge
   enInit: "en_init", enUpload: "en_upload", enStart: "en_start", enPoll: "en_poll", enFinish: "en_finish",
   translate: "translate",
 } as const;
@@ -458,7 +459,7 @@ async function finishStep(ctx: StepContext): Promise<StepOutcome> {
   }
   if (!wantEnglish) await recordConsult(ctx, doc); // a consult's result is registered under its cut version before the job reports done (a throw retries the step; nothing is re-sent to Sarvam)
   await ledgerBatch(ctx, "ok", 200, ctx.progress.throttled === true);
-  // S8A4: the English track comes from the AUDIO: a second saaras:v3 pass in translate mode, whatever the file-level language_code says
+  // S8A4: the English track comes from the AUDIO: a second saaras:v4 pass in translate mode, whatever the file-level language_code says
   if (wantEnglish) return nextStep(STEPS.enInit, { ...ctx.progress, total_entries: entries.length, language_code: res.languageCode });
   return doneWith({ ...summary(ctx.job.id, doc), ...consultFields(ctx) });
 }
@@ -548,7 +549,7 @@ async function recordConsult(ctx: StepContext, doc: ResultDoc): Promise<void> {
   if (a.source !== "consult" || typeof cut !== "string" || !cut) return;
   await recordResult({
     consult_uid: a.consult_uid, cut_version: cut, mode: a.mode, english: a.english, num_speakers: a.num_speakers ?? null, job_id: ctx.job.id, result_r2_key: resultKey(ctx.job.id),
-    model_stt: SARVAM_GW_STT_MODEL, model_translate: SARVAM_GW_TRANSLATE_MODEL, model_rev: SARVAM_GW_STT_MODEL, pipeline_rev: PIPELINE_REV, language_code: doc.language_code, duration_s: doc.duration_s,
+    model_stt: SARVAM_GW_STT_MODEL, model_translate: SARVAM_GW_TRANSLATE_MODEL, model_rev: SARVAM_STT_VERSION_LABEL, pipeline_rev: PIPELINE_REV, language_code: doc.language_code, duration_s: doc.duration_s,
     speaker_count: doc.speakers.length, transcript_chars: doc.transcript.length, english_chars: doc.english?.length ?? 0, english_pass: doc.english_pass ?? "not_requested",
     t0_ms: num(ctx.progress.clip_t0_ms) || 0,
   });

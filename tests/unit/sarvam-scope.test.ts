@@ -319,7 +319,7 @@ describe("2 — a Sarvam job ended by the runner or cancelled writes one ledger 
   it("endedLine: audio_s is the measured seconds when a batch was started, else 0; ids and enums only", () => {
     const j = job() as { id: string; kind: string; args: Row; progress: Row; created_at: string };
     expect(H.endedLine(j, "failed", "2026-10-08T07:00:00.000Z")).toEqual({
-      caller: "scribe-mcp", machine: "vercel", route: "gateway", job_id: "job_s1", request_id: "sj_9", mode: "batch", task: "transcribe", model: "saaras:v3", audio_s: 600,
+      caller: "scribe-mcp", machine: "vercel", route: "gateway", job_id: "job_s1", request_id: "sj_9", mode: "batch", task: "transcribe", model: "saaras:v4", audio_s: 600,
       started_at: "2026-10-08T06:00:00.000Z", finished_at: "2026-10-08T07:00:00.000Z", status: "failed", http_status: null, throttled: false, scope: "encounter", ref: "enc_1", use: "production",
     });
     const notStarted = { ...j, progress: { clip_key: "k", scope: "encounter", ref: "enc_1", duration_ms: 600_000, sarvam_job_id: "sj_9" } }; // created at Sarvam, never started

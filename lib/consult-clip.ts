@@ -4,7 +4,7 @@
  *   1. the consult_index row (0150): none -> consult_not_indexed
  *   2. sealed -> consult_sealed;  voice_isolated -> consult_voice_isolated (the cutter's isolation flag; that output is not identity and is not sent);  no positive minutes -> mirror_minutes_missing
  *   3. a result for THIS cut version and these options already exists -> returned as `existing` (idempotent: never sent, never billed twice)
- *   4. PALIMPSEST REUSE: the palimpsest already holds a live ok sarvam-saaras-v3 stt track for this consult AND THIS CUT (its config.clip_signature = the index row's signature) -> returned as
+ *   4. PALIMPSEST REUSE: the palimpsest already holds a live ok sarvam-saaras-v4 (or v3) stt track for this consult AND THIS CUT (its config.clip_signature = the index row's signature) -> returned as
  *      `reuse` (source "palimpsest"); Sarvam is not called. A track of another cut does not count (the clip was re-cut). If the lookup cannot be made -> reuse_lookup_unavailable: a failure is never read as "none".
  *      A track the index lists as ok whose R2 object is MISSING -> track_missing (not "none"); only an explicit force:true goes on to Sarvam.
  *   5. voice_isolated -> consult_voice_isolated (that output is not identity and is not SENT; a reused track sends nothing, so reuse comes first);  no positive minutes -> mirror_minutes_missing

@@ -56,10 +56,10 @@ describe("transient vs terminal", () => {
 });
 
 describe("the batch submit is three separate idempotent calls", () => {
-  it("init creates the job and returns its id (saaras:v3, diarization, timestamps; codemix / speakers only when asked)", async () => {
+  it("init creates the job and returns its id (saaras:v4, diarization, timestamps; codemix / speakers only when asked)", async () => {
     respond = () => jsonRes({ job_id: "sj_7" });
     expect(await W.gwBatchInit()).toEqual({ ok: true, jobId: "sj_7" });
-    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ job_parameters: { model: "saaras:v3", with_diarization: true, with_timestamps: true } });
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ job_parameters: { model: "saaras:v4", with_diarization: true, with_timestamps: true } });
     expect(calls[0]!.route).toBe("/speech-to-text/job/v1");
     await W.gwBatchInit({ mode: "codemix", numSpeakers: 3, languageCode: "hi-IN", prompt: "p" });
     expect(JSON.parse(String(calls[1]!.init.body)).job_parameters).toMatchObject({ mode: "codemix", num_speakers: 3, language_code: "hi-IN", prompt: "p" });

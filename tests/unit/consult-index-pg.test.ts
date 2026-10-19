@@ -283,10 +283,10 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
   const withSig = (uid: string, o: Row = {}) => indexRow(uid, { signature: sig(uid), ...o });
   const segs = (n: number, textOf: (i: number) => string) => Array.from({ length: n }, (_, i) => ({ t0_ms: T1 - 120_000 + i * 4000, t1_ms: T1 - 120_000 + i * 4000 + 3500, speaker: `SPEAKER_0${i % 2}`, lang: "hi-IN", text: textOf(i) }));
   /** write a palimpsest track into the (fake) lab bucket and index it in reb_track_index, as palimpsest does */
-  function putTrack(uid: string, layer: "stt" | "translate", o: { dropObject?: boolean; clipSig?: Row; engine?: string; indexEngine?: string; status?: string; shadow?: boolean; shaWrong?: boolean; n?: number; hash?: string } = {}) {
-    const doc = { config: { clip_signature: o.clipSig ?? sig(uid), gateway: "x", job_parameters: {} }, config_hash: o.hash ?? "ab12cd34", engine: o.engine ?? "sarvam-saaras-v3", extras: {}, layer, machine: "m", model: "saaras:v3", reason: null, schema: "reb.track.v1",
-      segments: segs(o.n ?? 3, (i) => (layer === "stt" ? `namaste ${i}` : `hello ${i}`)), status: o.status ?? "ok", version: "saaras-v3", window_id: `consult-${uid}` };
-    const key = `reb/${DAY}/${ROOM}/_consults/${uid}/tracks/${layer}.${doc.engine}__saaras-v3__${doc.config_hash}.json`;
+  function putTrack(uid: string, layer: "stt" | "translate", o: { dropObject?: boolean; clipSig?: Row; engine?: string; gen?: "v3" | "v4"; indexEngine?: string; status?: string; shadow?: boolean; shaWrong?: boolean; n?: number; hash?: string } = {}) {
+    const doc = { config: { clip_signature: o.clipSig ?? sig(uid), gateway: "x", job_parameters: {} }, config_hash: o.hash ?? "ab12cd34", engine: o.engine ?? `sarvam-saaras-${o.gen ?? "v3"}`, extras: {}, layer, machine: "m", model: `saaras:${o.gen ?? "v3"}`, reason: null, schema: "reb.track.v1",
+      segments: segs(o.n ?? 3, (i) => (layer === "stt" ? `namaste ${i}` : `hello ${i}`)), status: o.status ?? "ok", version: `saaras-${o.gen ?? "v3"}`, window_id: `consult-${uid}` };
+    const key = `reb/${DAY}/${ROOM}/_consults/${uid}/tracks/${layer}.${doc.engine}__saaras-${o.gen ?? "v3"}__${doc.config_hash}.json`;
     const body = JSON.stringify(doc);
     if (!o.dropObject) lab.set(key, { body, etag: "t" });
     pg.exec(`INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, shadow, status, r2_key, sha256) VALUES ('consult-${uid}', '${DAY}', '${ROOM}', '${layer}', '${o.indexEngine ?? doc.engine}', 'saaras-v3', '${doc.config_hash}', ${o.shadow ? "true" : "false"}, 'ok', '${key}', '${o.shaWrong ? "0".repeat(64) : sha(body)}');`);
@@ -304,6 +304,26 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     await noJobsNoGateway(calls);
     expect(H.heads).toEqual([]); // not even the clip was probed
     expect(JSON.stringify(out)).not.toMatch(/namaste|hello/);
+  });
+
+  it("a v4 palimpsest track is reused the same way (not re-sent), and v4 is preferred over a v3 track of the same cut", async () => {
+    await backfill([withSig(UA)]);
+    putClips(UA);
+    putTrack(UA, "stt", { hash: "v3old" }); // older v3 result, indexed first
+    putTrack(UA, "stt", { gen: "v4", hash: "v4new", n: 2 });
+    const calls = gwCalls();
+    const out = await tool({ action: "transcribe", consult_uid: UA, english: false });
+    expect(out).toMatchObject({ ok: true, existing: true, source: "palimpsest", billed: false, model_stt: "saaras:v4", model_rev: "saaras-v4", transcript_chars: "namaste 0 namaste 1".length });
+    await noJobsNoGateway(calls);
+  });
+
+  it("a consult that has only a v3 track (nothing re-run) is NOT re-sent, and labels stay v3 on the way out", async () => {
+    await backfill([withSig(UA)]);
+    putClips(UA);
+    putTrack(UA, "stt", { gen: "v3" });
+    const calls = gwCalls();
+    expect(await tool({ action: "transcribe", consult_uid: UA, english: false })).toMatchObject({ ok: true, existing: true, source: "palimpsest", billed: false, model_stt: "saaras:v3", model_rev: "saaras-v3" });
+    await noJobsNoGateway(calls);
   });
 
   it("the same through the JOB (scribe_job_submit): done, existing, source palimpsest, no gateway call, no paid-call row", async () => {
@@ -604,7 +624,7 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     expect(await tool({ action: "consult_result", consult_uid: UA })).toMatchObject({ ok: true, result: null });
   });
 
-  it("only a LIVE ok sarvam-saaras-v3 track counts: another engine, a failed or shadow track, a track whose sha256 is wrong are ignored (Sarvam is called)", async () => {
+  it("only a LIVE ok sarvam-saaras-v4/v3 track counts: another engine, a failed or shadow track, a track whose sha256 is wrong are ignored (Sarvam is called)", async () => {
     await backfill([withSig(UA), withSig(UE)]);
     putClips(UA, UE);
     putTrack(UA, "stt", { engine: "medasr", hash: "m1" });
