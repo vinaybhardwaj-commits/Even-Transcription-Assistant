@@ -293,11 +293,10 @@ test("R2-7/R3-5: ubus_ack under the flag acks v3 idempotently and falls through 
   try {
     await register(rig.ubus, "fable", { runtime: "cowork", session: "cowork:fable", owner: "v" });
     await register(rig.ubus, "worker");
-    const sent = await rig.ubus.call(
-      "ubus_send",
-      { to: ["fable"], subject: "note", body: "count=1 path=~/dev/eta-lab/a.json" },
-      caller("fable"),
-    );
+    // Written straight to the v3 log: through the shim the alias would now route to v1's fable.
+    const sent = (rig.ubus as unknown as { hub(): { send(a: object, c: unknown): Record<string, unknown> } })
+      .hub()
+      .send({ to: ["cc-air-work-local"], subject: "note", body: "count=1 path=~/dev/eta-lab/a.json" }, caller("worker"));
     assert.equal(sent.ok, true, JSON.stringify(sent));
     const mid = String(sent.id);
 

@@ -341,10 +341,29 @@ export class Ubus {
     return undefined;
   }
 
+  /** The names whose mail `handle` reads: itself, plus its cb- twin only when the twin is the same agent (same session row, or the same claiming connection). */
+  private readNames(handle: string, sessionId?: string): string[] {
+    const twin = pairedNames(handle)[1];
+    if (!twin) return [handle];
+    const tw = this.store.getAgent(twin);
+    if (!tw || tw.closed || this.presenceOf(tw) === "gone") return [handle];
+    return this.sameAgent(handle, twin, sessionId) ? [handle, twin] : [handle];
+  }
+
+  /** Two names are one agent only when they share a session row or the same claiming connection. */
+  private sameAgent(a: string, b: string, sessionId?: string): boolean {
+    const ra = this.store.getAgent(a);
+    const rb = this.store.getAgent(b);
+    if (ra && rb && ra.machine === rb.machine && ra.runtime === rb.runtime && ra.session === rb.session) return true;
+    const mine = sessionId ?? this.claimOwner(a);
+    return !!mine && this.claimOwner(b) === mine;
+  }
+
   /** Hook/shim summary: counts, ids, handles. No subjects or bodies. */
-  unreadSummary(handle: string): { count: number; ids: string[]; from: string[] } {
-    const summary = this.store.unreadIds(handle, 20);
-    return { count: this.store.unreadCount(handle), ids: summary.ids, from: summary.from };
+  unreadSummary(handle: string, sessionId?: string): { count: number; ids: string[]; from: string[] } {
+    const names = this.readNames(handle, sessionId);
+    const summary = this.store.unreadIds(names, 20);
+    return { count: this.store.unreadCount(names), ids: summary.ids, from: summary.from };
   }
 
   pollEta(): number {
@@ -384,12 +403,12 @@ export class Ubus {
       case "ubus_groups":
         return this.groupsTool();
       case "ubus_send":
-        if (v3Enabled()) return this.hub().send(args, caller);
+        if (v3Enabled()) return this.sendViaV3(args, caller);
         return this.send(args, caller, "msg");
       case "ubus_reply":
         return this.reply(args, caller);
       case "ubus_inbox":
-        if (v3Enabled()) return this.hub().inbox(args, caller);
+        if (v3Enabled()) return this.inboxViaV3(args, caller);
         return this.inbox(args, caller);
       case "ubus_wait":
         return this.wait(args, caller);
@@ -448,6 +467,103 @@ export class Ubus {
   }
 
   /**
+   * ubus_send under UBUS_V3=1 is v1-first: every recipient v1 can resolve (registered
+   * handle, bridged ETA handle, group:, known agent://) takes the v1 path unchanged.
+   * Only names v1 cannot resolve and v3 can (v3-only node handles) go to the v3 log.
+   * The v1 leg runs first and carries every v1 check (text, secret filter, rate,
+   * groups, reply_to, kiosk guard), so if v1 would throw nothing is stored anywhere.
+   * A v3 failure after the v1 commit is reported per recipient, never retried.
+   */
+  private sendViaV3(args: Record<string, unknown>, caller: Caller): ToolResult {
+    const hub = this.hub();
+    const sender = this.requireSender(caller);
+    // A v3 alias of a handle registered locally in v1 is that handle: route the canonical
+    // name through v1 and drop repeats, so the agent gets one copy and v1 sees the mail.
+    const canonical = (t: string): string => {
+      if (t.startsWith("group:") || this.planSafe(t, sender).kind !== "unknown") return t;
+      const id = hub.identity.resolve(t);
+      return id && id !== t && this.planSafe(id, sender).kind === "inbox" ? id : t;
+    };
+    const given = this.normalizeTo(args.to);
+    const mapped = given.map(canonical);
+    const rewritten = mapped.some((t, i) => t !== given[i]);
+    const targets = rewritten ? [...new Set(mapped)] : given;
+    if (rewritten) args = { ...args, to: targets };
+    const v3Targets = targets.filter((t) => !t.startsWith("group:") && this.planSafe(t, sender).kind === "unknown" && hub.resolves(t));
+    if (!v3Targets.length) return this.send(args, caller, "msg");
+    const legacy = this.send(args, caller, "msg");
+    if (legacy.ok && legacy.idempotent) {
+      // A v3-only first send leaves no v1 row, so the stored delivery is not available: report the targets as stored.
+      const known = Array.isArray(legacy.delivery) && legacy.delivery.length;
+      return known ? legacy : { ...legacy, delivery: v3Targets.map((to) => ({ to, status: "stored" })) };
+    }
+    if (!legacy.ok && legacy.error !== "unknown_agent") return legacy;
+    const replyTo = asString(args.reply_to);
+    const parentThread = replyTo ? this.store.getMessage(replyTo)?.threadId : undefined;
+    const threadId = (typeof legacy.thread_id === "string" && legacy.thread_id) || parentThread || asString(args.thread_id) || undefined;
+    const limits = { bodyMaxBytes: this.config.limits.bodyMaxBytes };
+    let v3: ToolResult;
+    try {
+      v3 = hub.send({ ...args, to: v3Targets, thread_id: threadId }, caller, limits);
+    } catch (err) {
+      v3 = { ok: false, error: "internal", reason: err instanceof Error ? err.message : "v3_failed" };
+    }
+    const failed = v3Targets.map((to) => ({ to, status: "failed", reason: String(v3.reason ?? v3.error ?? "v3_failed") }));
+    const v1Delivery = (Array.isArray(legacy.delivery) ? (legacy.delivery as Array<Record<string, unknown>>) : []).filter((d) => !v3Targets.includes(String(d.to)));
+    const v3Delivery = v3.ok && Array.isArray(v3.delivery) ? (v3.delivery as Array<Record<string, unknown>>) : failed;
+    if (!legacy.ok) {
+      // Nothing was stored by v1: the v3 leg alone decides the result.
+      if (!v3.ok) return this.v1Shape(v3);
+      const idem = asString(args.idempotency_key);
+      if (idem && typeof v3.id === "string") this.store.putIdempotency(sender.handle, idem, v3.id, this.clock.iso());
+      const unknown = (Array.isArray(legacy.to) ? (legacy.to as string[]) : []).filter((t) => !v3Targets.includes(t)).map((to) => ({ to, status: "unknown_agent" }));
+      return { ...v3, delivery: [...v3Delivery, ...unknown] };
+    }
+    const delivery = [...v1Delivery, ...v3Delivery];
+    // Keep the real per-recipient status with the v1 row so an idempotent retry reports it.
+    if (typeof legacy.id === "string") this.store.updateMessageDelivery(legacy.id, JSON.stringify(delivery));
+    return { ...legacy, v3_id: v3.ok ? v3.id : undefined, delivery };
+  }
+
+  /** v3-only failures and ack errors carry the v1 shape: no v3 `reason` echo of `error`. */
+  private v1Shape(res: ToolResult): ToolResult {
+    if (res.ok || res.reason !== res.error) return res;
+    const { reason: _reason, ...rest } = res;
+    return rest;
+  }
+
+  /**
+   * ubus_inbox under UBUS_V3=1: v1 mail unchanged unless v3 holds mail for the caller;
+   * then both stores are merged oldest first (ts, then source order) and the limit applies once.
+   */
+  private inboxViaV3(args: Record<string, unknown>, caller: Caller): ToolResult {
+    const hub = this.hub();
+    const probe = hub.inbox({ ...args, peek: true }, caller);
+    if (!probe.ok || !Array.isArray(probe.messages) || !probe.messages.length) return this.inbox(args, caller);
+    const limit = clamp(asNumber(args.limit, 10), 1, 100);
+    const rowsOf = (r: ToolResult) => (Array.isArray(r.messages) ? (r.messages as Array<Record<string, unknown>>) : []);
+    const merge = (x: Array<Record<string, unknown>>, y: Array<Record<string, unknown>>) => {
+      const out: Array<Record<string, unknown>> = [];
+      let i = 0;
+      let j = 0;
+      while (i < x.length && j < y.length) {
+        const c = String(x[i].ts).localeCompare(String(y[j].ts)) || String(x[i].id).localeCompare(String(y[j].id));
+        out.push(c <= 0 ? x[i++] : y[j++]);
+      }
+      return [...out, ...x.slice(i), ...y.slice(j)];
+    };
+    const v3rows = rowsOf(probe);
+    const v1rows = rowsOf(this.inbox({ ...args, peek: true }, caller));
+    const tagged = merge(v3rows.map((m) => ({ ...m, __v3: true })), v1rows).slice(-limit);
+    if (asBool(args.peek, false)) return { ok: true, messages: tagged.map(({ __v3, ...m }) => m) };
+    const k3 = tagged.filter((m) => m.__v3).length;
+    const k1 = tagged.length - k3;
+    const got3 = k3 ? rowsOf(hub.inbox({ ...args, limit: k3 }, caller)) : [];
+    const got1 = k1 ? rowsOf(this.inbox({ ...args, limit: k1 }, caller)) : [];
+    return { ok: true, messages: merge(got3, got1) };
+  }
+
+  /**
    * ubus_ack under UBUS_V3=1: v3 answers for its own ids; ids it does not know
    * (reply/request/ETA mail written by v1) fall through to the v1 store so an
    * ack never silently misses older mail.
@@ -459,7 +575,7 @@ export class Ubus {
     const note = asString(args.note);
     if (note && caller.handle) this.assertText(this.requireSender(caller), "ack", note, "ubus_ack", undefined, false, "", true);
     const res = this.hub().ackTool(args, caller);
-    if (!res.ok) return res;
+    if (!res.ok) return this.v1Shape(res);
     const acked = Array.isArray(res.acked) ? res.acked.map(String) : [];
     const missing = Array.isArray(res.missing) ? res.missing.map(String) : [];
     const unknown = Array.isArray(res.unknown) ? res.unknown.map(String) : [];
@@ -1118,10 +1234,11 @@ export class Ubus {
     const unreadOnly = asBool(args.unread_only, true);
     const peek = asBool(args.peek, false);
     const threadId = asString(args.thread_id);
-    const rows = this.store.inbox(handle, { unreadOnly, threadId: threadId || undefined, limit });
+    const names = this.readNames(handle, caller.sessionId);
+    const rows = this.store.inbox(names, { unreadOnly, threadId: threadId || undefined, limit });
     const external = this.readerExternal(this.store.getAgent(handle), caller);
-    if (!peek && unreadOnly) this.store.markRead(handle, rows.map((r) => r.messageId), this.clock.iso());
-    else if (!peek && !unreadOnly) this.store.markRead(handle, rows.filter((r) => !r.readAt).map((r) => r.messageId), this.clock.iso());
+    if (!peek && unreadOnly) this.store.markRead(names, rows.map((r) => r.messageId), this.clock.iso());
+    else if (!peek && !unreadOnly) this.store.markRead(names, rows.filter((r) => !r.readAt).map((r) => r.messageId), this.clock.iso());
     return {
       ok: true,
       messages: rows.map((r) => ({
@@ -1145,7 +1262,7 @@ export class Ubus {
     const agent = this.requireSender(caller);
     if (agent.runtime === "grok" || isGrokHandle(agent.handle)) throw new BusError("grok_no_poll", "Grok bots read ubus_inbox at turn start only");
     const timeout = clamp(asNumber(args.timeout_s, 25), 0, 25);
-    const summary = () => this.unreadSummary(agent.handle);
+    const summary = () => this.unreadSummary(agent.handle, caller.sessionId);
     if (summary().count > 0 || timeout === 0) return { ok: true, ...summary() };
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, timeout * 1000);
@@ -1188,8 +1305,9 @@ export class Ubus {
     if (note && !noteChecked) this.assertText(this.requireSender(caller), "ack", note, "ubus_ack");
     const acked: string[] = [];
     const missing: string[] = [];
+    const readNames = this.readNames(handle, caller.sessionId);
     for (const mid of ids) {
-      if (this.store.markAck(handle, mid, this.clock.iso(), note)) acked.push(mid);
+      if (this.store.markAck(readNames, mid, this.clock.iso(), note)) acked.push(mid);
       else missing.push(mid);
     }
     this.archive.append({ src: "ubus", event: "ack", essential: true, rec: { handle, ids: acked, note: note ? sha256(note) : null } });
@@ -1562,6 +1680,11 @@ export class Ubus {
       ? this.store.listAgents().find((a) => !a.closed && a.machine === parsed.machine && a.runtime === parsed.runtime && a.session === parsed.session)
       : this.store.getAgent(name);
     if (agent?.closed) agent = undefined;
+    if (!parsed && (!agent || this.presenceOf(agent) === "gone")) {
+      // A pane registers "X" while its identity is "cb-X" (or the reverse): deliver to the live one.
+      const twin = this.store.getAgent(pairedNames(name)[1] || "\0");
+      if (twin && !twin.closed && this.presenceOf(twin) !== "gone" && (!agent || this.sameAgent(name, twin.handle))) agent = twin;
+    }
     const handle = agent?.handle || (parsed ? "" : name);
     const herdr = this.herdr.listAgents().find((a) => a.name === handle || a.name === name);
     const pane = !!(agent?.session.startsWith("herdr:") || herdr);
@@ -2268,9 +2391,11 @@ export class Ubus {
   }
 
   private wakeWaiter(handle: string): void {
-    const list = this.waiters.get(handle) ?? [];
-    this.waiters.set(handle, []);
-    for (const fn of list) fn();
+    for (const name of pairedNames(handle).filter(Boolean)) {
+      const list = this.waiters.get(name) ?? [];
+      this.waiters.set(name, []);
+      for (const fn of list) fn();
+    }
   }
 
   private wakeCorr(corrId: string): void {
@@ -2439,6 +2564,13 @@ function compareId(a: string, b: string): number {
 
 
 /** Server-owned rows (the ubus process itself) never expire. */
+/** [handle, its cb- twin]: panes register "X" while their identity is "cb-X". Exact and symmetric: x <-> cb-x only. The twin is "" when there is none ("cb-"). */
+function pairedNames(handle: string): [string, string] {
+  if (handle.startsWith("cb-") && handle.length > 3 && !handle.startsWith("cb-cb-")) return [handle, handle.slice(3)];
+  if (handle.startsWith("cb-")) return [handle, ""];
+  return [handle, `cb-${handle}`];
+}
+
 function isSystem(agent: AgentRow): boolean {
   try {
     return (JSON.parse(agent.capabilitiesJson || "{}") as { system?: unknown }).system === true;

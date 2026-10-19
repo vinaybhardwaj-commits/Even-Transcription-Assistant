@@ -95,8 +95,12 @@ export class Hub {
     return this.identity.register(id, aliases);
   }
 
-  send(args: Record<string, unknown>, caller: Caller): ToolResult {
-    return this.messages.send(args, caller);
+  send(args: Record<string, unknown>, caller: Caller, limits: { bodyMaxBytes?: number } = {}): ToolResult {
+    return this.messages.send(args, caller, limits);
+  }
+
+  resolves(name: string): boolean {
+    return this.messages.resolves(name);
   }
 
   inbox(args: Record<string, unknown>, caller: Caller): ToolResult {

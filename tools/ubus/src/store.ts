@@ -392,44 +392,58 @@ export class Store {
     ).lastId;
   }
 
-  inbox(handle: string, opts: { unreadOnly: boolean; threadId?: string; limit: number }): Array<DeliveryRow & { message: MessageRow }> {
+  inbox(handle: string | string[], opts: { unreadOnly: boolean; threadId?: string; limit: number }): Array<DeliveryRow & { message: MessageRow }> {
+    const hs = Store.handles(handle);
     const rows = all(
       this.db,
       `SELECT d.*, m.id AS mid FROM deliveries d
        JOIN messages m ON m.id = d.message_id
-       WHERE d.to_handle = ?
+       WHERE d.to_handle IN (${hs.map(() => "?").join(",")})
          AND d.status IN ('stored','stored_poll','hook_pending','nudged','lead_routed')
          AND (? = 0 OR d.read_at = '')
          AND (? = '' OR m.thread_id = ?)
        ORDER BY d.id DESC
        LIMIT ?`,
-      handle,
+      ...hs,
       opts.unreadOnly ? 1 : 0,
       opts.threadId ?? "",
       opts.threadId ?? "",
-      opts.limit,
+      opts.limit * hs.length,
     );
     const out: Array<DeliveryRow & { message: MessageRow }> = [];
+    const seen = new Set<string>();
     for (const row of rows) {
-      const msg = this.getMessage(str(row, "message_id"));
+      if (out.length >= opts.limit) break;
+      const mid = str(row, "message_id");
+      if (seen.has(mid)) continue;
+      const msg = this.getMessage(mid);
       if (!msg) continue;
+      seen.add(mid);
       out.push({ ...delivery(row), message: msg });
     }
     return out.reverse();
   }
 
-  /** One definition of "unread": the delivery has a message row. Count and ids both use it. */
-  private static UNREAD_FROM = `FROM deliveries d JOIN messages m ON m.id = d.message_id
-       WHERE d.to_handle = ? AND d.read_at = ''
-         AND d.status IN ('stored','stored_poll','hook_pending','nudged','lead_routed')`;
+  private static handles(handle: string | string[]): string[] {
+    return Array.isArray(handle) ? handle : [handle];
+  }
 
-  unreadCount(handle: string): number {
-    const row = get(this.db, `SELECT COUNT(*) AS n ${Store.UNREAD_FROM}`, handle);
+  /** One definition of "unread": the delivery has a message row. Count and ids both use it. */
+  private static unreadFrom(n: number): string {
+    return `FROM deliveries d JOIN messages m ON m.id = d.message_id
+       WHERE d.to_handle IN (${Array(n).fill("?").join(",")}) AND d.read_at = ''
+         AND d.status IN ('stored','stored_poll','hook_pending','nudged','lead_routed')`;
+  }
+
+  unreadCount(handle: string | string[]): number {
+    const hs = Store.handles(handle);
+    const row = get(this.db, `SELECT COUNT(DISTINCT d.message_id) AS n ${Store.unreadFrom(hs.length)}`, ...hs);
     return row ? num(row, "n") : 0;
   }
 
-  unreadIds(handle: string, limit = 20): { ids: string[]; from: string[] } {
-    const rows = all(this.db, `SELECT d.message_id, m.from_handle ${Store.UNREAD_FROM} ORDER BY d.id ASC LIMIT ?`, handle, limit);
+  unreadIds(handle: string | string[], limit = 20): { ids: string[]; from: string[] } {
+    const hs = Store.handles(handle);
+    const rows = all(this.db, `SELECT d.message_id, m.from_handle, MIN(d.id) AS did ${Store.unreadFrom(hs.length)} GROUP BY d.message_id ORDER BY did ASC LIMIT ?`, ...hs, limit);
     return {
       ids: rows.map((r) => str(r, "message_id")),
       from: rows.map((r) => str(r, "from_handle")),
@@ -456,22 +470,28 @@ export class Store {
     return row ? num(row, "n") : 0;
   }
 
-  markRead(handle: string, messageIds: string[], ts: string): void {
-    for (const id of messageIds) {
-      run(this.db, "UPDATE deliveries SET read_at = ? WHERE to_handle = ? AND message_id = ? AND read_at = ''", ts, handle, id);
+  markRead(handle: string | string[], messageIds: string[], ts: string): void {
+    for (const h of Store.handles(handle)) {
+      for (const id of messageIds) {
+        run(this.db, "UPDATE deliveries SET read_at = ? WHERE to_handle = ? AND message_id = ? AND read_at = ''", ts, h, id);
+      }
     }
   }
 
-  markAck(handle: string, messageId: string, ts: string, note: string): boolean {
-    const res = run(
-      this.db,
-      "UPDATE deliveries SET acked_at = ? , ack_note = ? WHERE to_handle = ? AND message_id = ? AND acked_at = ''",
-      ts,
-      note,
-      handle,
-      messageId,
-    );
-    return res.changes > 0;
+  markAck(handle: string | string[], messageId: string, ts: string, note: string): boolean {
+    let changed = false;
+    for (const h of Store.handles(handle)) {
+      const res = run(
+        this.db,
+        "UPDATE deliveries SET acked_at = ? , ack_note = ? WHERE to_handle = ? AND message_id = ? AND acked_at = ''",
+        ts,
+        note,
+        h,
+        messageId,
+      );
+      if (res.changes > 0) changed = true;
+    }
+    return changed;
   }
 
   participant(threadId: string, handle: string): boolean {
