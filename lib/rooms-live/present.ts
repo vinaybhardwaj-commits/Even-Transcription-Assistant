@@ -3,6 +3,7 @@
  */
 import type { RoomRow } from "./snapshot";
 import type { RoomStateName } from "./state";
+import type { DeviceClass } from "@/lib/steward/device-class";
 
 export type Group = "attention" | "fine" | "nodoctor";
 export const PROBLEM_STATES: readonly RoomStateName[] = ["muted", "unplugged", "notrec", "off"];
@@ -58,12 +59,25 @@ export const GROUND = "#F6F5F2";
 /** the last line of every problem state (no phone number: the ETA team is on site; the card itself escalates) */
 export const STILL_NOT_WORKING = "Still not working? This card turns darker red the longer it stays, so everyone can see it.";
 
-export function stepsFor(state: RoomStateName): string[] {
+/** Sentinel S1: the repair line for a silent or unplugged mic follows the room's device class (only the TONOR TM20 can be muted at the mic; the webcams cannot). */
+export const MUTED_STEP: Record<DeviceClass, string> = {
+  webcam: "Check the webcam's USB cable is pushed firmly into the back of the room computer. If it does not clear in 5 minutes, tell IT.",
+  tonor: "The TONOR mic may be muted. Ask the doctor to press the mute button on the mic. If it stays silent, check its USB cable.",
+  unknown: "The microphone is sending only silence. Check the microphone's USB cable at the back of the room computer.",
+};
+export const UNPLUGGED_STEP: Record<DeviceClass, string> = {
+  webcam: "The computer cannot find the webcam mic. Push the webcam's USB cable firmly into the back of the room computer.",
+  tonor: "The TONOR mic is not connected. Check its USB cable at the back of the room computer.",
+  unknown: "The computer cannot find the microphone. Check the microphone's USB cable at the back of the room computer.",
+};
+
+/** `device` is the room's device class (RoomRow.device.kind); a room whose device is not known gets the generic microphone text, never the webcam's */
+export function stepsFor(state: RoomStateName, device: DeviceClass = "unknown"): string[] {
   switch (state) {
     case "muted":
-      return ["Check the webcam's USB cable is pushed firmly into the back of the room computer. If it does not clear in 5 minutes, tell IT."];
+      return [MUTED_STEP[device]];
     case "unplugged":
-      return ["The computer cannot find the webcam mic. Push the webcam's USB cable firmly into the back of the room computer.", "Wait 30 seconds. The card clears by itself.", STILL_NOT_WORKING];
+      return [UNPLUGGED_STEP[device], "Wait 30 seconds. The card clears by itself.", STILL_NOT_WORKING];
     case "notrec":
       return ["Recording restarts by itself within 5 minutes.", STILL_NOT_WORKING];
     case "off":
