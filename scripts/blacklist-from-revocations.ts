@@ -3,7 +3,7 @@
  * `mcp-keys.ts blacklist-file` (SCRIBE_MCP_BLACKLIST_FILE=<that path>). Prints ONLY counts. Never an address.
  *
  *   npx tsx scripts/blacklist-from-revocations.ts <path-outside-the-repo>
- *   npx tsx scripts/blacklist-from-revocations.ts --dry-count        (prints `db=N env=M union=K`, writes nothing)
+ *   npx tsx scripts/blacklist-from-revocations.ts --dry-count        (prints `db=N env=M union=K rejected=R`, writes nothing; exit 1 when R>0)
  *
  * Two sources, unioned (exact lowercase): (db) mcp_person revoked that IST day, plus addresses whose mcp_key rows were revoked that day and who hold no live key now; (env) the key denylist env
  * (SCRIBE_MCP_TOKENS_DENY, hashes) joined to mcp_key.key_hash. Refuses an existing file, a path inside the repo (realpath of the parent directory), no rows, or more than 50 addresses. Exit 0 ok, 1 refused.
@@ -42,9 +42,10 @@ export async function main(argv: string[], sources: () => Promise<Sources> = rea
   const d = usable(db);
   const e = usable(env);
   const union = [...new Set([...d, ...e])].sort();
-  if (dry) { out(`db=${d.size} env=${e.size} union=${union.length}`); return 0; }
+  const rejected = new Set(db).size - d.size + (new Set(env).size - e.size); // unusable rows: the real run refuses on these, so --dry-count must too
+  if (dry) { out(`db=${d.size} env=${e.size} union=${union.length} rejected=${rejected}`); return rejected > 0 ? 1 : 0; }
   if (union.length === 0) { console.error("refused: addresses=0, nothing written"); return 1; }
-  if (union.length > 50 || d.size !== new Set(db).size || e.size !== new Set(env).size) { console.error(`refused: ${union.length} usable addresses (db=${db.length} env=${env.length} rows)`); return 1; }
+  if (union.length > 50 || rejected > 0) { console.error(`refused: ${union.length} usable addresses (db=${db.length} env=${env.length} rows)`); return 1; }
   let fd: number;
   try { fd = openSync(path, "wx", 0o600); } catch { console.error("refused: cannot create the file (exists, or no permission)"); return 1; }
   try { writeSync(fd, JSON.stringify(union)); } catch { closeSync(fd); try { unlinkSync(path); } catch { /* best effort */ } console.error("refused: write failed"); return 1; }

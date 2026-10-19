@@ -39,11 +39,17 @@ describe("blacklist-from-revocations script", () => {
     expect((await run([f2], [], [B])).lines).toEqual(["db=0 env=1 addresses=1"]);
     expect(JSON.parse(readFileSync(f2, "utf8"))).toEqual([B]);
   });
-  it("--dry-count prints db=N env=M union=K, writes nothing, needs no path", async () => {
+  it("--dry-count prints db=N env=M union=K rejected=R, writes nothing, needs no path", async () => {
     const r = await run(["--dry-count"], [A, B], [B, C]);
-    expect(r).toEqual({ code: 0, lines: ["db=2 env=2 union=3"] });
+    expect(r).toEqual({ code: 0, lines: ["db=2 env=2 union=3 rejected=0"] });
     expect((await run(["--dry-count", `${outside}/x.json`], [A], [])).code).toBe(1);
     expect(existsSync(`${outside}/x.json`)).toBe(false);
+  });
+  it("Z5: --dry-count counts unusable rows as rejected=<n>, exits 1 like the real run, and prints no address", async () => {
+    const dry = await run(["--dry-count"], [A], ["Mixed@example.test", "nonsense"]);
+    expect(dry).toEqual({ code: 1, lines: ["db=1 env=0 union=1 rejected=2"] });
+    expect((await run([`${outside}/z5.json`], [A], ["Mixed@example.test", "nonsense"])).code).toBe(1);
+    expect(existsSync(`${outside}/z5.json`)).toBe(false);
   });
   it("M18: refuses a path inside the repo, including through a symlinked directory (realpath), and a path whose parent does not exist", async () => {
     const direct = await run([`${repo}/addr.json`], [A], []);
