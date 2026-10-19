@@ -60,7 +60,7 @@ export interface MergedEncounter {
   boundary_rev: number;
   merge_version: string;
   reason: string;
-  /** multi_machine | pulse_overlap | ambiguous | frozen. Not a spine_encounter column. */
+  /** multi_machine | pulse_overlap | ambiguous | frozen | clamped | clamp_failed. Not a spine_encounter column. */
   flags: string[];
   /** True when the boundary moved against prior: the writer enqueues a recut. */
   boundary_moved: boolean;

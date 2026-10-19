@@ -112,9 +112,9 @@ describe("determinism", () => {
 });
 
 describe("rules, edge", () => {
-  it("M3: overlap exactly 50% of the shorter joins; 49.9% does not", () => {
-    expect(run([pulse("p1", 0, 10 * MIN, "u1"), sig("pqm", "q", 5 * MIN, 30 * MIN, { pqm_uid: "x" })]).encounters).toHaveLength(1);
-    expect(run([pulse("p1", 0, 10 * MIN, "u1"), sig("pqm", "q", 5 * MIN + 600, 30 * MIN, { pqm_uid: "x" })]).encounters).toHaveLength(2);
+  it("M3 (R3 X2: mutual 50% of both spans for pulse+pqm): exactly 50% joins; 49.9% does not", () => {
+    expect(run([pulse("p1", 0, 10 * MIN, "u1"), sig("pqm", "q", 5 * MIN, 15 * MIN, { pqm_uid: "x" })]).encounters).toHaveLength(1);
+    expect(run([pulse("p1", 0, 10 * MIN, "u1"), sig("pqm", "q", 5 * MIN + 600, 15 * MIN, { pqm_uid: "x" })]).encounters).toHaveLength(2);
   });
   it("M6: cap_90m inferred close loses to an acoustic close", () => {
     const e = run([pulse("p1", 0, 30 * MIN, "u1", "cap_90m"), sig("acoustic", "a", 1 * MIN, 25 * MIN)]).encounters[0];

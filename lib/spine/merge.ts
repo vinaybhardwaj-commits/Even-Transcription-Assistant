@@ -13,7 +13,15 @@
  * - I2, M4 "even when they overlap": any positive overlap between two same-kind strong anchors sets pulse_overlap (raw spans).
  * - I3 (safer reading, pending ruling): a weak or inferred boundary is clamped at the open/close of a neighbouring
  *   strong-anchored encounter in the same room, flag `clamped`. Explicit strong closes (M6 rank) are never clamped.
- * - I4, M8 "After ist_date+72 h only links change": a frozen prior keeps its links; nothing moves from or to it.
+ * - I4, M8 "After ist_date+72 h only links change": a frozen prior keeps its links; nothing moves from or to it. A frozen prior
+ *   never absorbs a live one (a live candidate survives instead), and a frozen loser's signals keep their assignment.
+ * - X1 (R3): a prior claimed by any group is never also a loser; the uniqueness assert runs over every emitted row.
+ * - X2 (R3, interim safer rule pending a ruling): a pulse group and a pqm group merge by TIME only when the overlap is >= 50%
+ *   of BOTH spans; by shared key as before. In a pulse+pqm merge the pulse-anchored prior survives. A strong-anchored prior
+ *   is never marked merged into a strong prior of the same kind.
+ * - X3c (R3): when the clamp would leave an empty span the raw span is kept and the flag `clamp_failed` is set.
+ * - X5 (R3): strongOwner prefers the identity link (consult_key | pqm_uid) over a stale encounter_id.
+ * - X6c (R3): a weak signal with only a consult_uid that exists on more than one machine gets the flag `ambiguous` on its group.
  */
 import { createHmac } from "node:crypto";
 import type {
@@ -93,6 +101,12 @@ function shorter(a: Span, b: Span): number {
 function meets(a: Span, b: Span): boolean {
   const sh = shorter(a, b);
   return sh > 0 && overlapMs(a, b) * 100 >= sh * OVERLAP_PCT;
+}
+/** X2: overlap >= 50% of BOTH spans. */
+function mutual(a: Span, b: Span): boolean {
+  const la = a.close - a.open, lb = b.close - b.open;
+  const o = overlapMs(a, b);
+  return la > 0 && lb > 0 && o * 100 >= la * OVERLAP_PCT && o * 100 >= lb * OVERLAP_PCT;
 }
 function ratio(a: Span, b: Span): number {
   const sh = shorter(a, b);
@@ -236,7 +250,8 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
       if (a.members[0].room !== b.members[0].room) continue;
       const sa = spanOf(a), sb = spanOf(b);
       const byKey = b.members.some((m) => sharesKey(m, a));
-      if (byKey || meets(sa, sb)) pairs.push({ a, b, byKey, r: ratio(sa, sb) });
+      const cross = hasProxy(a, "pulse") !== hasProxy(b, "pulse") && (hasProxy(a, "pqm") || hasProxy(b, "pqm"));
+      if (byKey || (cross ? mutual(sa, sb) : meets(sa, sb))) pairs.push({ a, b, byKey, r: ratio(sa, sb) });
     }
   }
   pairs.sort((x, y) => Number(y.byKey) - Number(x.byKey) || y.r - x.r || cmp(groupSortKey(x.a), groupSortKey(y.a)) || cmp(groupSortKey(x.b), groupSortKey(y.b)));
@@ -253,6 +268,11 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
 
   // ---- weak signals: M2 key, M3 time, M7 ambiguity; leftovers seed weak groups
   const ambiguous = new Set<Group>();
+  const uidMachines = new Map<string, Set<string>>();
+  for (const n of norms) {
+    const u = attr(n.sig, "consult_uid"), mk = mkey(n);
+    if (u && mk) (uidMachines.get(u) ?? uidMachines.set(u, new Set()).get(u)!).add(mk);
+  }
   for (const n of norms.filter(isWeak)) {
     const cands = live().filter((g) => g.members[0].room === n.room);
     const keyed = cands.filter((g) => sharesKey(n, g));
@@ -265,6 +285,8 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
       n.via = "overlap";
       if (pool.length > 1) ambiguous.add(to);
     }
+    const nu = attr(n.sig, "consult_uid");
+    if (nu && !mkey(n) && (uidMachines.get(nu)?.size ?? 0) > 1) ambiguous.add(to); // X6c
     to.members.push(n);
   }
 
@@ -296,7 +318,10 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
     if (close > open && (open !== d.open || close !== d.close)) {
       flags.get(g)!.add("clamped");
       spans.set(g, { open, close });
-    } else spans.set(g, { open: d.open, close: d.close });
+    } else {
+      if (open !== d.open || close !== d.close) flags.get(g)!.add("clamp_failed"); // X3c: empty span, raw span kept
+      spans.set(g, { open: d.open, close: d.close });
+    }
   }
   for (const g of ambiguous) flags.get(g)?.add("ambiguous");
   const pulseByUid = new Map<string, Set<Group>>();
@@ -329,6 +354,7 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
   const frozen = (e: PriorEncounter) => now >= horizonEnd(e.ist_date);
   const survives = (a: PriorEncounter, b: PriorEncounter) => {
     const sa = STRONG_PROXIES.includes(a.anchor_proxy), sb = STRONG_PROXIES.includes(b.anchor_proxy);
+    if (sa && sb && a.anchor_proxy !== b.anchor_proxy) return a.anchor_proxy === "pulse"; // X2: the pulse-anchored prior survives
     return sa !== sb ? sa : a.created_at !== b.created_at ? a.created_at < b.created_at : a.encounter_id < b.encounter_id;
   };
 
@@ -337,6 +363,7 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
   const assignments: SignalAssignment[] = [];
   const claimed = new Set<string>();
   const losers = new Map<string, string>(); // loser id -> survivor id
+  const frozenKept = new Map<string, Group>(); // I4: frozen candidates that lost; their signals keep their assignment
   const groupIds: string[] = [];
   const idToGroup = new Map<string, Group>();
 
@@ -347,10 +374,10 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
       if (!isStrong(m)) continue;
       const ident = m.sig.proxy === "pulse" ? "consult_key" : "pqm_uid";
       const ids = new Set<string>();
-      if (m.sig.encounter_id) ids.add(resolve(m.sig.encounter_id));
       const iv = attr(m.sig, ident);
       const l = iv ? priorLinkId.get(`${ident}\u0000${iv}`) : undefined;
-      if (l) ids.add(l);
+      if (l && priorById.get(l)?.anchor_proxy === m.sig.proxy) ids.add(l); // X5: the identity link beats a stale id
+      else if (m.sig.encounter_id) ids.add(resolve(m.sig.encounter_id));
       for (const id of ids) {
         const pe = priorById.get(id);
         if (pe && pe.anchor_proxy === m.sig.proxy && !strongOwner.has(id)) strongOwner.set(id, g);
@@ -366,14 +393,17 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
     const cand = [...ids].map((id) => priorById.get(id)).filter((e): e is PriorEncounter =>
       !!e && !claimed.has(e.encounter_id) && e.room_id === g.members[0].room && e.status !== "merged" &&
       (!STRONG_PROXIES.includes(e.anchor_proxy) || strongOwner.get(e.encounter_id) === g));
-    const survivor = cand.length ? cand.reduce((a, b) => (survives(b, a) ? b : a)) : null;
+    const liveCand = cand.filter((e) => !frozen(e));
+    const pool = liveCand.length ? liveCand : cand; // I4: a frozen prior never absorbs a live one
+    const survivor = pool.length ? pool.reduce((a, b) => (survives(b, a) ? b : a)) : null;
     const anchor = anchorOf(g);
     const span = spans.get(g)!;
     let id: string;
     if (survivor) {
       id = survivor.encounter_id;
       for (const e of cand) {
-        if (e === survivor || frozen(e)) continue;
+        if (e === survivor) continue;
+        if (frozen(e)) { frozenKept.set(e.encounter_id, g); continue; }
         if (e.anchor_proxy === survivor.anchor_proxy && STRONG_PROXIES.includes(e.anchor_proxy)) continue; // M4 across reruns
         losers.set(e.encounter_id, id);
       }
@@ -413,10 +443,14 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
         reason, flags: [...fl].sort(), boundary_moved: moved,
       });
     }
-    for (const m of g.members) assignments.push({ proxy: m.sig.proxy, source_key: m.sig.source_key, source_rev: m.sig.source_rev, encounter_id: id });
+    for (const m of g.members) {
+      const was = m.sig.encounter_id ? resolve(m.sig.encounter_id) : null;
+      const keep = was && was !== id && frozenKept.get(was) === g ? was : id; // X4b
+      assignments.push({ proxy: m.sig.proxy, source_key: m.sig.source_key, source_rev: m.sig.source_rev, encounter_id: keep });
+    }
   }
 
-  assertUniqueIds(encounters);
+  for (const c of claimed) losers.delete(c); // X1: a claimed prior is never also a loser
   // losers (M8): merged rows, links move by alias
   for (const [lid, sid] of [...losers].sort()) {
     const e = priorById.get(lid)!;
@@ -425,6 +459,8 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
       anchor_proxy: e.anchor_proxy, boundary_rev: e.boundary_rev, merge_version, reason: "merged", flags: [], boundary_moved: false,
     });
   }
+
+  assertUniqueIds(encounters); // F1/X1: after the loser rows, so it sees every emitted row
 
   // ---- links: one active owner per (kind, value)
   const want = new Map<string, MergedLink[]>();
