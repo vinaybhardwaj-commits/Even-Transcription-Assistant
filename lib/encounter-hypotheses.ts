@@ -488,13 +488,20 @@ export async function readLatestAcousticRun(
 }
 
 /**
- * Spine S1 (shadow ingest): every interval whose start is at or after `sinceMs`, across runs, with the room the room-day belongs to. Ids, times and closed_by only. The spine copies these into spine_signal.
+ * Spine S1 (shadow ingest): the ACOUSTIC intervals whose start is at or after `sinceMs`, with the room the room-day belongs to. Ids, times and closed_by only. The spine copies these into spine_signal.
+ * Only the LATEST acoustic run of each room-day is read (a hypothesis row id is per run, so older runs would re-enter as new signals on every rerun); fused and timeline runs are never read here.
+ * Before 0118 the run has no source column and neither can a fused run exist, so the unscoped read is the acoustic read (as readLatestAcousticRun).
  * Kept here so that the store stays the only module that queries encounter_hypothesis (tests/unit/encounter-shadow.test.ts).
  */
 export async function readHypothesesSince(sinceMs: number, limit: number): Promise<Array<Record<string, unknown>>> {
   const q = sql as unknown as (text: string, params: unknown[]) => Promise<Array<Record<string, unknown>>>;
-  return q(
-    "SELECT h.id, h.room_day_id, d.room_id, h.start_ms, h.end_ms, h.closed_by, h.created_at FROM encounter_hypothesis h LEFT JOIN room_day d ON d.id = h.room_day_id WHERE h.start_ms >= $1::bigint ORDER BY h.start_ms DESC LIMIT $2::int",
-    [String(Math.trunc(sinceMs)), limit],
-  );
+  const params = [String(Math.trunc(sinceMs)), limit];
+  const head = "SELECT h.id, h.run_id, h.room_day_id, d.room_id, h.start_ms, h.end_ms, h.closed_by, h.created_at FROM encounter_hypothesis h LEFT JOIN room_day d ON d.id = h.room_day_id";
+  const tail = "AND h.start_ms >= $1::bigint ORDER BY h.start_ms DESC LIMIT $2::int";
+  try {
+    return await q(`${head} WHERE h.run_id IN (SELECT DISTINCT ON (room_day_id) id FROM encounter_hypothesis_run WHERE source = 'acoustic' ORDER BY room_day_id, created_at DESC) ${tail}`, params);
+  } catch (e) {
+    if (!isMissingSourceColumn(e)) throw e;
+    return q(`${head} WHERE h.run_id IN (SELECT DISTINCT ON (room_day_id) id FROM encounter_hypothesis_run ORDER BY room_day_id, created_at DESC) ${tail}`, params);
+  }
 }

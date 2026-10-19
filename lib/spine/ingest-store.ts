@@ -1,14 +1,14 @@
 /**
  * lib/spine/ingest-store.ts — Spine S1 writes. The only table written is spine_signal (append-only) plus one spine_tick row per live pass.
  *   ingestSpineSignals(now)  the cron step: copy I2 / I5 / I6 rows from the last 72 h (D7 horizon) into spine_signal, rev on change.
- *   storeSignals(rows)       the POST path: insert box-posted signals; a row with no source_rev gets its rev from the newest stored one.
+ *   storeSignals(rows)       the POST path: insert box-posted signals; a row with no source_rev gets its rev from the newest stored one (retry on a lost race, else `conflict`).
  *   readIngestMode()         spine_config gate; a read failure means off.
  * Nothing reads spine_signal yet.
  */
 import { sql } from "@/lib/db";
 import { readHypothesesSince } from "@/lib/encounter-hypotheses";
 import { parseIngestMode, type IngestMode } from "./config";
-import { hashOfSignal, nextRev, toSignals, type IngestProxy, type Prior, type SignalRow } from "./ingest";
+import { hashOfSignal, nextRev, toSignals, type IngestProxy, type Prior, type SignalRow, type Time } from "./ingest";
 import type { PostedSignal } from "./signal-validate";
 
 type Q = (text: string, params: unknown[]) => Promise<Array<Record<string, unknown>>>;
@@ -32,16 +32,18 @@ INSERT INTO spine_signal (proxy, source_key, source_rev, room_id, t_open, t_clos
 SELECT x.proxy, x.source_key, x.source_rev, x.room_id, x.t_open, x.t_close, x.observed_at, x.attrs
 FROM jsonb_to_recordset($1::jsonb) AS x(proxy text, source_key text, source_rev int, room_id text, t_open timestamptz, t_close timestamptz, observed_at timestamptz, attrs jsonb)
 ON CONFLICT (proxy, source_key, source_rev) DO NOTHING
-RETURNING 1 AS n`;
+RETURNING proxy, source_key, source_rev`;
 
-/** Insert rows that already carry their rev. -> how many were new (the rest were duplicates). */
-async function insertRows(rows: ReadonlyArray<SignalRow>): Promise<number> {
-  let inserted = 0;
+const idOf = (proxy: unknown, key: unknown, rev: unknown) => `${proxy}\u0000${key}\u0000${Number(rev)}`;
+
+/** Insert rows that already carry their rev. -> the (proxy, key, rev) of every row that was new; the rest conflicted. */
+async function insertRows(rows: ReadonlyArray<SignalRow>): Promise<Set<string>> {
+  const done = new Set<string>();
   for (let i = 0; i < rows.length; i += BATCH) {
     const res = await q()(INSERT_SQL, [JSON.stringify(rows.slice(i, i + BATCH))]);
-    inserted += res.length;
+    for (const r of res) done.add(idOf(r.proxy, r.source_key, r.source_rev));
   }
-  return inserted;
+  return done;
 }
 
 /** Newest stored rev + hash per source_key for one proxy, rebuilt from the stored columns. */
@@ -56,38 +58,55 @@ async function loadPrior(proxy: string, keys: ReadonlyArray<string>): Promise<Pr
     for (const r of rows) {
       prior.set(String(r.source_key), {
         rev: Number(r.source_rev),
-        hash: hashOfSignal({ room_id: (r.room_id as string | null) ?? null, t_open: String(r.t_open), t_close: r.t_close ? String(r.t_close) : null, attrs: { close_reason: (r.close_reason as string | null) ?? undefined } }),
+        hash: hashOfSignal({ room_id: (r.room_id as string | null) ?? null, t_open: r.t_open as Time, t_close: (r.t_close ?? null) as Time, attrs: { close_reason: (r.close_reason as string | null) ?? undefined } }),
       });
     }
   }
   return prior;
 }
 
-export type StoreCounts = { inserted: number; duplicate: number };
+export type StoreCounts = { inserted: number; duplicate: number; conflict: number };
 
-/** The POST path. A row with an explicit source_rev is inserted as sent; one without gets the rev rule against the newest stored rev. */
+const MAX_TRIES = 3;
+
+/**
+ * The POST path. A row with an explicit source_rev is inserted as sent (a repeat is a duplicate). One without gets the rev rule against the newest stored rev;
+ * if the insert loses a race for that rev, the newest rev is re-read and the rule applied again (up to MAX_TRIES): identical content is then a duplicate, changed content takes rev+1.
+ * A row still losing after MAX_TRIES is counted as `conflict`, never as a duplicate. (Two rev-less rows for one key in one batch that both race can land out of order; the box sends one per key.)
+ */
 export async function storeSignals(rows: ReadonlyArray<PostedSignal>): Promise<StoreCounts> {
-  const ready: SignalRow[] = [];
-  let duplicate = 0;
+  let inserted = 0, duplicate = 0, conflict = 0;
+  const explicit: SignalRow[] = [];
   const byProxy = new Map<string, PostedSignal[]>();
   for (const r of rows) {
-    if (r.source_rev !== undefined) ready.push({ ...r, source_rev: r.source_rev });
+    if (r.source_rev !== undefined) explicit.push({ ...r, source_rev: r.source_rev });
     else byProxy.set(r.proxy, [...(byProxy.get(r.proxy) ?? []), r]);
   }
-  for (const [proxy, list] of byProxy) {
-    const prior = await loadPrior(proxy, [...new Set(list.map((r) => r.source_key))]);
-    const latest = new Map(prior);
-    for (const r of list) {
-      const hash = hashOfSignal(r);
-      const p = latest.get(r.source_key);
-      if (p && p.hash === hash) { duplicate += 1; continue; }
-      const rev = nextRev(p, hash);
-      latest.set(r.source_key, { rev, hash });
-      ready.push({ ...r, source_rev: rev });
-    }
+  if (explicit.length) {
+    const done = await insertRows(explicit);
+    inserted += done.size;
+    duplicate += explicit.length - done.size;
   }
-  const inserted = await insertRows(ready);
-  return { inserted, duplicate: duplicate + (ready.length - inserted) };
+  for (const [proxy, list] of byProxy) {
+    let todo = list;
+    for (let attempt = 1; todo.length && attempt <= MAX_TRIES; attempt++) {
+      const latest = new Map(await loadPrior(proxy, [...new Set(todo.map((r) => r.source_key))]));
+      const ready: Array<{ row: PostedSignal; out: SignalRow }> = [];
+      for (const r of todo) {
+        const hash = hashOfSignal(r);
+        const p = latest.get(r.source_key);
+        if (p && p.hash === hash) { duplicate += 1; continue; }
+        const rev = nextRev(p, hash);
+        latest.set(r.source_key, { rev, hash });
+        ready.push({ row: r, out: { ...r, source_rev: rev } });
+      }
+      const done = await insertRows(ready.map((x) => x.out));
+      inserted += done.size;
+      todo = ready.filter((x) => !done.has(idOf(x.out.proxy, x.out.source_key, x.out.source_rev))).map((x) => x.row);
+    }
+    conflict += todo.length;
+  }
+  return { inserted, duplicate, conflict };
 }
 
 export type IngestCounts = { skipped: "off" } | { mode: "shadow" | "live"; read: Record<IngestProxy, number>; inserted: Record<IngestProxy, number> };
@@ -103,9 +122,11 @@ const SOURCES: Record<IngestProxy, { sql: string; params: (now: number) => unkno
     sql: "",
     params: () => [],
   },
-  timeline: {   // the newest run's row per consult_key
-    sql: `SELECT DISTINCT ON (t.consult_key) t.consult_key, t.id, t.run_id, t.room_day_id, d.room_id, t.start_ms, t.end_ms, t.closed_by, t.created_at
-          FROM encounter_timeline_shadow t LEFT JOIN room_day d ON d.id = t.room_day_id WHERE t.start_ms >= $1::bigint ORDER BY t.consult_key, t.created_at DESC LIMIT ${READ_LIMIT}`,
+  timeline: {   // the newest run's row per consult_key, newest first (a LIMIT keeps the newest, not the alphabetically first keys)
+    sql: `SELECT * FROM (
+            SELECT DISTINCT ON (t.consult_key) t.consult_key, t.id, t.run_id, t.room_day_id, d.room_id, t.start_ms, t.end_ms, t.closed_by, t.created_at
+            FROM encounter_timeline_shadow t LEFT JOIN room_day d ON d.id = t.room_day_id WHERE t.start_ms >= $1::bigint ORDER BY t.consult_key, t.created_at DESC
+          ) x ORDER BY x.created_at DESC LIMIT ${READ_LIMIT}`,
     params: (now) => [String(now - HORIZON_MS)],
   },
 };
@@ -121,7 +142,7 @@ export async function ingestSpineSignals(now: number): Promise<IngestCounts> {
     read[proxy] = rows.length;
     const keyOf = (r: Record<string, unknown>) => String(proxy === "acoustic" ? r.id : r.consult_key);
     const prior = await loadPrior(proxy, [...new Set(rows.map(keyOf))]);
-    inserted[proxy] = await insertRows(toSignals(rows, proxy, prior));
+    inserted[proxy] = (await insertRows(toSignals(rows, proxy, prior))).size;
   }
   const counts = { mode, read, inserted };
   await q()("INSERT INTO spine_tick (kind, counts) VALUES ($1, $2::jsonb)", ["ingest", JSON.stringify(counts)]);

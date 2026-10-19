@@ -5,7 +5,7 @@
 
 DEFAULT IS --dry-run: it prints counts only (no ids, no names), opens no socket and reads no token. --post needs --url and --token-file, a regular file with mode 0600 holding the token.
 The poster sends no source_rev: the server applies the rev rule (a new rev only when t_open, t_close, room_id or the close reason changed), so a re-run is idempotent.
-A key containing text / name / phone / patient / transcript at any depth, or an attrs key outside ids / quality / close_reason, is refused HERE before anything is sent.
+A key matching the PHI word list at any depth (normalised), an attrs key outside ids / quality / close_reason, or a value outside the closed rules (ids allowlist, enums, tokens) is refused HERE: that row is skipped and counted as `refused`, the rest still go. rc 0 with refused/skipped > 0 is reported in the counts.
 No timer is installed by this file.
 
 Input shapes:
@@ -13,32 +13,78 @@ Input shapes:
   cutter  index.jsonl (append-only: the latest row per consult_uid wins): consult_uid, room_id, span_start / span_end naive IST "YYYY-MM-DD HH:MM:SS[.fff]", status, window_id.
   caa     JSONL of scope bundles: {consult_uid, scope_path "<scope>/<room dir>/...", manifest: {t0_ms, t1_ms}}. UNVERIFIED shape: taken from tools/eta2freescript/ingest.py bundle_window.
 """
-import argparse, datetime as dt, json, os, re, stat, sys, urllib.error, urllib.request
+import argparse, datetime as dt, json, os, re, stat, sys, unicodedata, urllib.error, urllib.request
 
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
-TEXT_KEY = re.compile(r"text|name|phone|patient|transcript", re.I)
+WORDS = re.compile(r"text|name|phone|patient|transcript|email|uhid|mrn|mobile|dob|aadhaar|addr|address")
+ID_RE = re.compile(r"[A-Za-z0-9_@.:-]{1,120}")
+ID_KEYS = {"consult_key", "consult_uid", "hypothesis_id", "room_day_id", "shadow_id", "run_id", "pqm_step_uid", "window_id"}
 ATTR_KEYS = {"ids", "quality", "close_reason"}
 MAX_DEPTH = 12
 BATCH = 500
 KINDS = ("pqm", "cutter", "caa")
+_PULSE_REASON = {"endConsult", "url_clear", "next_open", "logout", "idle_timeout", "cap_90m", "open"}
+_PULSE_QUALITY = {"clean", "ambiguous", "multi_doctor", "unclosed", "unattributed"}
+# Closed enums per proxy: mirror lib/spine/phi-screen.ts (a test compares both with tests/fixtures/spine-phi-cases.json).
+ENUMS = {
+    "pqm": {"close_reason": {"pqm"}, "quality": {"pqm", "suspect"}},
+    "cutter": {"close_reason": _PULSE_REASON | {"pqm"}, "quality": {"cut", "skipped", "error", "planned", "deferred", "deferred_long"} | _PULSE_QUALITY | {"pqm", "suspect"}},
+    "caa": {"close_reason": set(), "quality": set()},
+}
+_LOOKALIKE = {
+    "ı": "i", "а": "a", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c", "т": "t", "у": "y", "х": "x",
+    "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "ԛ": "q", "ԝ": "w", "һ": "h", "ӏ": "l",
+    "α": "a", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p", "τ": "t", "υ": "u", "χ": "x",
+}
 
 
 class Refused(ValueError):
     pass
 
 
+def norm_key(k):
+    """NFKC, drop combining marks and Unicode Cf, lower-case, fold Cyrillic / Greek lookalikes. Mirrors normKey in lib/spine/phi-screen.ts."""
+    s = unicodedata.normalize("NFD", unicodedata.normalize("NFKC", str(k)))
+    s = "".join(c for c in s if unicodedata.category(c) not in ("Mn", "Cf")).lower()
+    return "".join(_LOOKALIKE.get(c, c) for c in s)
+
+
 def refuse_keys(v, depth=0):
-    """Raise Refused('text_key' | 'too_deep') when any key at any depth looks like identity or text. Mirrors lib/spine/signal-validate.ts."""
+    """Raise Refused('text_key' | 'too_deep') when any key at any depth looks like identity or text. Mirrors refuseKeys in lib/spine/signal-validate.ts (depth counts containers only)."""
+    if not isinstance(v, (list, dict)):
+        return
     if depth > MAX_DEPTH:
         raise Refused("too_deep")
     if isinstance(v, list):
         for x in v:
             refuse_keys(x, depth + 1)
-    elif isinstance(v, dict):
+    else:
         for k, x in v.items():
-            if TEXT_KEY.search(str(k)):
+            if WORDS.search(norm_key(k)):
                 raise Refused("text_key")
             refuse_keys(x, depth + 1)
+
+
+def _tok(v):
+    return isinstance(v, str) and ID_RE.fullmatch(v) is not None
+
+
+def refuse_values(s):
+    """Mirrors refuseValues in lib/spine/phi-screen.ts; the server would answer 422 for any of these."""
+    if not _tok(s.get("source_key")):
+        raise Refused("source_key")
+    if s.get("room_id") is not None and not _tok(s["room_id"]):
+        raise Refused("room_id")
+    a = s.get("attrs") or {}
+    ids = a.get("ids")
+    if ids is not None:
+        if not isinstance(ids, dict) or any(k not in ID_KEYS or not _tok(x) for k, x in ids.items()):
+            raise Refused("attrs_ids")
+    en = ENUMS.get(s.get("proxy"), {"close_reason": set(), "quality": set()})
+    if "close_reason" in a and not (isinstance(a["close_reason"], str) and a["close_reason"] in en["close_reason"]):
+        raise Refused("attrs_close_reason")
+    if "quality" in a and not (isinstance(a["quality"], str) and a["quality"] in en["quality"]):
+        raise Refused("attrs_quality")
 
 
 def check_signal(s):
@@ -46,6 +92,7 @@ def check_signal(s):
     extra = set(s.get("attrs", {})) - ATTR_KEYS
     if extra:
         raise Refused("attrs_key")
+    refuse_values(s)
     return s
 
 
@@ -69,7 +116,7 @@ def iso_ist(s):
 
 
 def _attrs(ids, quality=None, close_reason=None):
-    a = {"ids": {k: v for k, v in ids.items() if v}}
+    a = {"ids": {k: str(v) for k, v in ids.items() if v}}
     if quality:
         a["quality"] = str(quality)
     if close_reason:

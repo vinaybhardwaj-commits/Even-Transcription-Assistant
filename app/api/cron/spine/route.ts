@@ -5,6 +5,7 @@
  * Response: counts only. A failure returns 500 { error: { code: "SPINE_INGEST_FAILED" } }.
  */
 import { NextResponse } from "next/server";
+import { bearerMatches } from "@/lib/spine/auth";
 import { ingestSpineSignals } from "@/lib/spine/ingest-store";
 
 export const runtime = "nodejs";
@@ -16,7 +17,7 @@ const NO_STORE = { headers: { "cache-control": "no-store" } };
 export async function GET(req: Request) {
   const secret = process.env.CRON_SECRET;
   if (!secret) return NextResponse.json({ error: { code: "NOT_CONFIGURED", message: "CRON_SECRET is not set" } }, { status: 503, ...NO_STORE });
-  if ((req.headers.get("authorization") ?? "") !== `Bearer ${secret}`) return NextResponse.json({ error: { code: "AUTH_REQUIRED", message: "cron bearer required" } }, { status: 401, ...NO_STORE });
+  if (!bearerMatches(req.headers.get("authorization"), secret)) return NextResponse.json({ error: { code: "AUTH_REQUIRED", message: "cron bearer required" } }, { status: 401, ...NO_STORE });
   try {
     const ingest = await ingestSpineSignals(Date.now());
     return NextResponse.json({ ok: true, ingest }, NO_STORE);

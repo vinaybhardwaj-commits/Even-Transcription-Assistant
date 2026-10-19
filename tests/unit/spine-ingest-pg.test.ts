@@ -49,14 +49,16 @@ d("spine ingest on postgres:16", () => {
     pg.exec(`
       CREATE TABLE room_day (id text PRIMARY KEY, room_id text NOT NULL);
       CREATE TABLE eta_encounter_windows (consult_key text PRIMARY KEY, consult_uid text, room_id text, t_open timestamptz NOT NULL, t_close timestamptz, close_reason text NOT NULL, quality text NOT NULL, computed_at timestamptz NOT NULL DEFAULT now());
-      CREATE TABLE encounter_hypothesis (id text PRIMARY KEY, room_day_id text NOT NULL, start_ms bigint NOT NULL, end_ms bigint NOT NULL, closed_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+      CREATE TABLE encounter_hypothesis_run (id text PRIMARY KEY, room_day_id text NOT NULL, source text NOT NULL DEFAULT 'acoustic', created_at timestamptz NOT NULL DEFAULT now());
+      CREATE TABLE encounter_hypothesis (id text PRIMARY KEY, run_id text NOT NULL, room_day_id text NOT NULL, start_ms bigint NOT NULL, end_ms bigint NOT NULL, closed_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
       CREATE TABLE encounter_timeline_shadow (id text PRIMARY KEY, run_id text NOT NULL, room_day_id text NOT NULL, consult_key text NOT NULL, start_ms bigint NOT NULL, end_ms bigint NOT NULL, closed_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
       INSERT INTO room_day VALUES ('rd_test_01', 'room_test_a');
       INSERT INTO eta_encounter_windows VALUES
         ('uid_test_01@mach_test', 'uid_test_01', 'room_test_a', '2026-10-18T04:00:00Z', '2026-10-18T04:10:00Z', 'endConsult', 'clean', '2026-10-18T04:11:00Z'),
         ('uid_test_02@mach_test', 'uid_test_02', 'room_test_a', '2026-10-18T04:30:00Z', NULL, 'open', 'unclosed', '2026-10-18T04:31:00Z'),
         ('uid_test_old@mach_test', 'uid_test_old', 'room_test_a', '2026-10-01T04:00:00Z', '2026-10-01T04:10:00Z', 'endConsult', 'clean', '2026-10-01T04:11:00Z');
-      INSERT INTO encounter_hypothesis VALUES ('hyp_test_01', 'rd_test_01', ${T0}, ${T0 + 600000}, 'non_speech', '2026-10-18T04:12:00Z');
+      INSERT INTO encounter_hypothesis_run VALUES ('hr_test_01', 'rd_test_01', 'acoustic', '2026-10-18T04:12:00Z');
+      INSERT INTO encounter_hypothesis VALUES ('hyp_test_01', 'hr_test_01', 'rd_test_01', ${T0}, ${T0 + 600000}, 'non_speech', '2026-10-18T04:12:00Z');
       INSERT INTO encounter_timeline_shadow VALUES
         ('tl_test_01', 'run_test_01', 'rd_test_01', 'uid_test_01@mach_test', ${T0}, ${T0 + 590000}, 'patient_left', '2026-10-18T04:12:00Z'),
         ('tl_test_02', 'run_test_02', 'rd_test_01', 'uid_test_01@mach_test', ${T0}, ${T0 + 600000}, 'patient_left', '2026-10-18T05:12:00Z');
@@ -95,10 +97,10 @@ d("spine ingest on postgres:16", () => {
 
   it("storeSignals: an explicit rev twice is a duplicate; with no rev the rev rule applies; the attrs CHECK still refuses a stray key", async () => {
     const s = { proxy: "pqm" as const, source_key: "pqm_test_01", room_id: "room_test_a", t_open: "2026-10-18T04:00:00.000Z", t_close: "2026-10-18T04:10:00.000Z", observed_at: "2026-10-18T04:20:00.000Z", attrs: { close_reason: "pqm" } };
-    expect(await storeSignals([{ ...s, source_rev: 1 }])).toEqual({ inserted: 1, duplicate: 0 });
-    expect(await storeSignals([{ ...s, source_rev: 1 }])).toEqual({ inserted: 0, duplicate: 1 });
-    expect(await storeSignals([s])).toEqual({ inserted: 0, duplicate: 1 });                                               // unchanged: same hash as stored rev 1
-    expect(await storeSignals([{ ...s, t_close: "2026-10-18T04:15:00.000Z" }])).toEqual({ inserted: 1, duplicate: 0 });   // moved: rev 2
+    expect(await storeSignals([{ ...s, source_rev: 1 }])).toEqual({ inserted: 1, duplicate: 0, conflict: 0 });
+    expect(await storeSignals([{ ...s, source_rev: 1 }])).toEqual({ inserted: 0, duplicate: 1, conflict: 0 });
+    expect(await storeSignals([s])).toEqual({ inserted: 0, duplicate: 1, conflict: 0 });                                               // unchanged: same hash as stored rev 1
+    expect(await storeSignals([{ ...s, t_close: "2026-10-18T04:15:00.000Z" }])).toEqual({ inserted: 1, duplicate: 0, conflict: 0 });   // moved: rev 2
     expect(await count("proxy = 'pqm' AND source_rev = 2")).toBe(1);
     await expect(storeSignals([{ ...s, source_key: "pqm_test_bad", source_rev: 1, attrs: { stray: 1 } as never }])).rejects.toThrow();
   });

@@ -29,7 +29,7 @@ export type SignalRow = {
 };
 export type Prior = ReadonlyMap<string, { rev: number; hash: string }>;
 
-type Time = string | number | Date | null | undefined;
+export type Time = string | number | Date | null | undefined;
 const ms = (v: Time): number | null => {
   if (v === null || v === undefined || v === "") return null;
   const t = v instanceof Date ? v.getTime() : typeof v === "number" ? v : new Date(v).getTime();   // Neon returns timestamps as ISO strings, bigint ms as strings
@@ -49,7 +49,8 @@ export function nextRev(prior: { rev: number; hash: string } | undefined, hash: 
   return prior.hash === hash ? prior.rev : prior.rev + 1;
 }
 
-export function hashOfSignal(s: Pick<SignalRow, "room_id" | "t_open" | "t_close" | "attrs">): string {
+/** t_open / t_close may be ISO strings or Dates (the Neon driver returns timestamptz as a Date): they are compared as epoch ms, never stringified. */
+export function hashOfSignal(s: { room_id: string | null; t_open: Time; t_close: Time; attrs: { close_reason?: string } }): string {
   return signalHash({ t_open: s.t_open, t_close: s.t_close, room_id: s.room_id, close_reason: s.attrs.close_reason });
 }
 
@@ -66,7 +67,7 @@ function build(proxy: Proxy, key: string, room: string | null, open: Time, close
 
 /**
  * rows: I2 for "pulse" (consult_key, consult_uid, room_id, t_open, t_close, close_reason, quality, computed_at);
- *       I5 for "acoustic" (id, room_id [joined from room_day], start_ms, end_ms, closed_by, created_at);
+ *       I5 for "acoustic" (id, run_id, room_id [joined from room_day], start_ms, end_ms, closed_by, created_at);
  *       I6 for "timeline" (consult_key, id, run_id, room_id [joined], start_ms, end_ms, closed_by, created_at).
  * A row with no key or no usable open time is skipped (counted by the caller as the difference in length).
  */
@@ -80,7 +81,7 @@ export function toSignals(rows: ReadonlyArray<Raw>, proxy: IngestProxy, prior: P
     } else if (proxy === "acoustic") {
       const id = str(r.id);
       s = build("acoustic", id ?? "", str(r.room_id), msOfBig(r.start_ms), msOfBig(r.end_ms), r.created_at as Time,
-        { ids: { hypothesis_id: id, room_day_id: str(r.room_day_id) }, ...(str(r.closed_by) ? { close_reason: str(r.closed_by)! } : {}) }, prior);
+        { ids: { hypothesis_id: id, room_day_id: str(r.room_day_id), run_id: str(r.run_id) }, ...(str(r.closed_by) ? { close_reason: str(r.closed_by)! } : {}) }, prior);
     } else {
       s = build("timeline", str(r.consult_key) ?? "", str(r.room_id), msOfBig(r.start_ms), msOfBig(r.end_ms), r.created_at as Time,
         { ids: { consult_key: str(r.consult_key), shadow_id: str(r.id), run_id: str(r.run_id) }, ...(str(r.closed_by) ? { close_reason: str(r.closed_by)! } : {}) }, prior);

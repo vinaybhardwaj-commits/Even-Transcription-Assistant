@@ -1,0 +1,37 @@
+{
+  "_comment": "Shared by tests/unit/spine-phi.test.ts (TS) and tools/eta-spine/tests/test_phi_screen.py (Python). Synthetic only.",
+  "enums": {
+    "pulse": {"close_reason": ["endConsult","url_clear","next_open","logout","idle_timeout","cap_90m","open"], "quality": ["clean","ambiguous","multi_doctor","unclosed","unattributed"]},
+    "acoustic": {"close_reason": ["non_speech","unjudged_gap","tape_off","dead_mic","end_of_input","content_boundary","pulse_end","jev_end","next_start","last_doc_turn","cap_90m"], "quality": []},
+    "timeline": {"close_reason": ["patient_left","next_start","tape_off","dead_mic","cap"], "quality": []},
+    "pqm": {"close_reason": ["pqm"], "quality": ["pqm","suspect"]},
+    "cutter": {"close_reason": ["endConsult","url_clear","next_open","logout","idle_timeout","cap_90m","open","pqm"], "quality": ["cut","skipped","error","planned","deferred","deferred_long","clean","ambiguous","multi_doctor","unclosed","unattributed","pqm","suspect"]},
+    "caa": {"close_reason": [], "quality": []}
+  },
+  "id_keys": ["consult_key","consult_uid","hypothesis_id","room_day_id","shadow_id","run_id","pqm_step_uid","window_id"],
+  "refuse_keys": [
+    "name", "fullName", "PATIENT", "Transcript_raw", "phone", "mobilePhone", "free_text", "email", "uhid", "UHID", "mrn", "mobile", "dob", "aadhaar", "addr", "address",
+    "ｎａｍｅ", "ＰＨＯＮＥ", "na​me", "pa­tient", "nàme", "nаme", "patıent", "trаnscript", "еmail"
+  ],
+  "ok_keys": ["consult_uid", "hypothesis_id", "run_id", "window_id", "pqm_step_uid", "room_day_id", "shadow_id", "consult_key", "ids", "quality", "close_reason"],
+  "deep": [
+    {"nest": 14, "leaf": 1, "expect": "too_deep"},
+    {"nest": 3, "leaf": {"Name": "x"}, "expect": "text_key"},
+    {"nest": 3, "leaf": 1, "expect": null}
+  ],
+  "signals": [
+    {"label": "good pqm", "expect": "ok", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "room_id": "room_test_a", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"consult_uid": "uid_test_01", "pqm_step_uid": "step_test_01"}, "quality": "pqm", "close_reason": "pqm"}}},
+    {"label": "good pulse key", "expect": "ok", "signal": {"proxy": "pulse", "source_key": "uid_test_01@mach_test", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"consult_key": "uid_test_01@mach_test"}}}},
+    {"label": "prose in ids value", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"consult_uid": "Patient Name said chest pain"}}}},
+    {"label": "ids key outside allowlist", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"foo": "x"}}}},
+    {"label": "ids nested", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"consult_uid": {"run_id": "x"}}}}},
+    {"label": "ids value non-string", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"window_id": 7}}}},
+    {"label": "ids value too long", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"run_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}}},
+    {"label": "name_digits token in close_reason", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"close_reason": "Ravi_Kumar_98765"}}},
+    {"label": "close_reason from another proxy's enum", "expect": "422", "signal": {"proxy": "pqm", "source_key": "pqm_test_01", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"close_reason": "patient_left"}}},
+    {"label": "quality outside enum", "expect": "422", "signal": {"proxy": "pulse", "source_key": "k_test", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"quality": "chest_pain"}}},
+    {"label": "source_key prose", "expect": "422", "signal": {"proxy": "pqm", "source_key": "Ravi Kumar", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z"}},
+    {"label": "room_id too long", "expect": "422", "signal": {"proxy": "pqm", "source_key": "k_test", "room_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z"}},
+    {"label": "text key in value position key", "expect": "422", "signal": {"proxy": "pqm", "source_key": "k_test", "t_open": "2026-10-18T04:00:00Z", "observed_at": "2026-10-18T04:20:00Z", "attrs": {"ids": {"nаme": "x"}}}}
+  ]
+}
