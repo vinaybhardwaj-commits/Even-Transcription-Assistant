@@ -35,7 +35,8 @@ if [ "$MIC_SET" = 1 ]; then
     if [ -f "$GUARDIAN_HOME/guardian.conf" ] && [ -r "$GUARDIAN_HOME/guardian.conf" ]; then MC_BASE="$GUARDIAN_HOME/guardian.conf"; else echo "refusing: existing guardian.conf is not a readable file; move it aside" >&2; exit 2; fi
   fi
   MC_TMP="$(mktemp)" || exit 1
-  if [ -n "$MC_BASE" ]; then cat "$MC_BASE" >"$MC_TMP"; else sed "s/<room-slug>/$ROOM/" "$SRC/guardian.conf.example" >"$MC_TMP"; fi
+  # N1: a --config that passes -r but cannot be read as a file (a directory) is refused here, as without the flag; no class-only conf may reach the R12 check
+  if [ -n "$MC_BASE" ]; then cat "$MC_BASE" >"$MC_TMP" 2>/dev/null || { echo "cannot read --config" >&2; exit 2; }; else sed "s/<room-slug>/$ROOM/" "$SRC/guardian.conf.example" >"$MC_TMP"; fi
   MC_OUT="$(mktemp)" || exit 1
   ( . "$SRC/lib/conf.sh"; mic_class_set "$MIC_CLASS" ) <"$MC_TMP" >"$MC_OUT" || exit 1
   rm -f "$MC_TMP"; CONFIG="$MC_OUT"
