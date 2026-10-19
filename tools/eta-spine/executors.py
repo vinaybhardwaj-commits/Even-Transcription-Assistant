@@ -12,7 +12,8 @@ LOCKS (the same ones the timers take, so the runner and the hourly never run one
              (the 180 s after a firing, and when the next firing is under 720 s away: recut_queue's rule).
   K lanes    <data>/reb/_hourly.lock is held by US (flock, non-blocking) for the whole child run, and the CHILD INHERITS the fd (pass_fds), so the lock lives as long as the child even if
              this runner is SIGKILLed. A busy lock is transient and nothing is spawned. palimpsest-hourly starts at :40 and skips its WHOLE run when it cannot take the lock, so K lanes are
-             refused (transient hourly_gap) from :25 to :45, and the child timeout is capped to the time left before the next :25 (a job started at :45 ends before :25).
+             refused (release hourly_gap: the attempt is given back, no breaker tick) from :25 to :45, and also when under MIN_LANE_BUDGET_S (300 s) is left before the next :25 (release budget_too_small).
+             The child timeout is capped to the time left before the next :25 (a job started at :45 ends before :25). The claim route does not hand K lanes out in that time either.
              Children run in their own process group; on SIGTERM / SIGINT the runner kills the group, waits, and only then exits (install_signal_handlers).
   GPU lane   ~/gpu.lock is only PROBED here (acquire + release): clip_lanes holds it per inference itself, so holding it here would deadlock the child.
 Every busy lock is TRANSIENT (backoff, attempt counted, breaker-visible). Nothing here waits for a lock.
@@ -43,6 +44,7 @@ from dataclasses import dataclass, field
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 TIMER_MINUTE, TIMER_LAUNCH_S, MIN_BEFORE_TIMER_S = 35, 180, 720   # recut_queue.py:15
 CHILD_TIMEOUT_S = 840                                              # under the 15 min lease
+MIN_LANE_BUDGET_S = 300                                           # a K lane is not started with less than this before the next :25 (nemotron's worker-status wait alone can reach 30 min)
 HOURLY_FROM_MIN, HOURLY_TO_MIN, HOURLY_CAP_MIN = 25, 45, 25      # K lanes refused from :25 to :45 (palimpsest-hourly starts :40); a child must end before the next :25
 UID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$")      # never starts with '-': it cannot be read as a flag
 EXECUTOR_STAGES = ("recut", "acoustics", "nemotron")
@@ -54,7 +56,7 @@ class ExecutorUnconfigured(Exception):
 
 @dataclass
 class Result:
-    outcome: str                      # done | transient | permanent | blocked
+    outcome: str                      # done | transient | permanent | blocked | release
     code: str | None = None
     artefact: dict | None = None
     note: dict = field(default_factory=dict)
@@ -122,6 +124,16 @@ def _env_min(raw: str | None, default: int) -> int:
     return v if 0 <= v <= 60 else default
 
 
+def _env_window(env: dict) -> tuple[int, int]:
+    """(from, to) minutes of the K-lane refusal window. An inverted or empty pair (from >= to) would silently open the gap: use the defaults, with one stderr line."""
+    f = _env_min(env.get("SPINE_HOURLY_FROM_MIN"), HOURLY_FROM_MIN)
+    t = _env_min(env.get("SPINE_HOURLY_TO_MIN"), HOURLY_TO_MIN)
+    if f >= t:
+        print(f"spine-executors: SPINE_HOURLY_FROM_MIN={f} must be below SPINE_HOURLY_TO_MIN={t}: using {HOURLY_FROM_MIN}/{HOURLY_TO_MIN}", file=sys.stderr)
+        return HOURLY_FROM_MIN, HOURLY_TO_MIN
+    return f, t
+
+
 def last_json(out: str | None) -> dict | None:
     for line in reversed((out or "").strip().splitlines()):
         try:
@@ -151,8 +163,7 @@ class Executors:
         self.env = e
         self._children: set[subprocess.Popen] = set()
         self._run = run or self._run_group
-        self.hourly_from = _env_min(e.get("SPINE_HOURLY_FROM_MIN"), HOURLY_FROM_MIN)
-        self.hourly_to = _env_min(e.get("SPINE_HOURLY_TO_MIN"), HOURLY_TO_MIN)
+        self.hourly_from, self.hourly_to = _env_window(e)
         self.clock = clock or time.time
         home = os.path.expanduser("~")
         self.data = e.get("SPINE_DATA_DIR") or os.path.join(home, "eta-data")
@@ -164,8 +175,14 @@ class Executors:
 
     def _run_group(self, argv, cwd=None, timeout=None, pass_fds=(), **_kw) -> subprocess.CompletedProcess:
         """subprocess.run, but the child leads its own process group, so a timeout or a signal kills the child AND whatever it spawned; pass_fds are inherited."""
-        p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, pass_fds=tuple(pass_fds))
-        self._children.add(p)
+        # SIGTERM/SIGINT are blocked across spawn + register, so a signal cannot land between Popen() and _children.add() and orphan the child; the child gets the old mask back before exec.
+        old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
+        try:
+            p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, pass_fds=tuple(pass_fds),
+                                 preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, old))
+            self._children.add(p)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old)   # a pending signal is delivered here, with the child already registered
         try:
             out, err = p.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -284,8 +301,10 @@ class Executors:
     def lane(self, stage: str, uid: str) -> Result:
         now = self.clock()
         if in_hourly_window(now, self.hourly_from, self.hourly_to):
-            return Result("transient", "hourly_gap")
+            return Result("release", "hourly_gap")   # nothing ran and it is not the job's fault: the attempt is given back, no breaker tick
         timeout = lane_timeout_s(now, self.hourly_from)
+        if timeout < MIN_LANE_BUDGET_S:
+            return Result("release", "budget_too_small")
         try:
             hourly = try_flock(self.hourly_lock)
         except OSError:
@@ -344,7 +363,10 @@ class Executors:
     def _track_artefact(self, stage: str, uid: str) -> Result:
         """The newest track file of this lane under reb/<date>/<room>/_consults/<uid>/tracks/. The ref is `tracks/<file>` only: no date, room or uid."""
         pat = os.path.join(self.reb, "*", "*", "_consults", glob.escape(uid), "tracks", f"{self.LANE_PREFIX[stage]}__*__*.json")
-        files = sorted(glob.glob(pat), key=lambda p: (os.path.getmtime(p), p))
+        try:
+            files = sorted(glob.glob(pat), key=lambda p: (os.path.getmtime(p), p))
+        except OSError:
+            return Result("transient", "artefact_missing")   # a file vanished between the glob and its mtime
         if not files:
             return Result("transient", "artefact_missing")
         path = files[-1]

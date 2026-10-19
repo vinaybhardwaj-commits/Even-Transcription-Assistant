@@ -231,6 +231,7 @@ def test_lane_error_map(box, monkeypatch, mode, outcome, code):
 def test_timeout_is_transient_and_the_child_is_killed(box, monkeypatch):
     monkeypatch.setenv("FAKE_MODE", "sleep")
     monkeypatch.setattr(executors, "CHILD_TIMEOUT_S", 1)
+    monkeypatch.setattr(executors, "MIN_LANE_BUDGET_S", 0)
     t = time.time()
     r = box.ex().execute("recut", UID)
     assert (r.outcome, r.code) == ("transient", "timeout") and time.time() - t < 10
@@ -349,13 +350,13 @@ def test_runner_live_silent_audio_reports_permanent(box, monkeypatch):
 
 
 # ---------------------------------------------------------------- F1: the :40 hourly window and the child cap
-@pytest.mark.parametrize("minute,second,refused", [(24, 59, False), (25, 0, True), (40, 0, True), (44, 59, True), (45, 0, False), (10, 0, False)])
+@pytest.mark.parametrize("minute,second,code", [(20, 0, None), (20, 1, "budget_too_small"), (24, 59, "budget_too_small"), (25, 0, "hourly_gap"), (40, 0, "hourly_gap"), (44, 59, "hourly_gap"), (45, 0, None), (10, 0, None)])
 @pytest.mark.parametrize("stage", ["acoustics", "nemotron"])
-def test_k_lanes_are_refused_from_25_to_45(box, stage, minute, second, refused):
+def test_k_lanes_are_refused_from_20_to_45_and_released(box, stage, minute, second, code):
     ex = executors.Executors(env=box.env, clock=lambda: at(minute, second))
     r = ex.execute(stage, UID)
-    if refused:
-        assert (r.outcome, r.code) == ("transient", "hourly_gap") and box.calls() == []
+    if code:
+        assert (r.outcome, r.code) == ("release", code) and box.calls() == []   # R3 F1b: given back, never a failed tick
     else:
         assert r.outcome == "done"
 
@@ -390,9 +391,9 @@ def test_lane_passes_the_computed_cap_and_the_lock_fd_to_the_child(box):
     def run(argv, **kw):
         seen.update(kw)
         return subprocess.CompletedProcess(argv, 0, json.dumps({"counts": {"clips": 1, "nothing": 0}}), "")
-    ex = executors.Executors(env=box.env, run=run, clock=lambda: at(21))
+    ex = executors.Executors(env=box.env, run=run, clock=lambda: at(19))
     ex.execute("acoustics", UID)
-    assert seen["timeout"] == 240 and len(seen["pass_fds"]) == 1
+    assert seen["timeout"] == 360 and len(seen["pass_fds"]) == 1
 
 
 # ---------------------------------------------------------------- F2: the child holds the hourly lock; a signal kills the group first
@@ -465,6 +466,7 @@ def test_timeout_kills_the_whole_process_group(box, tmp_path, monkeypatch):
     (box.tmp / "lab" / "kit" / "reb" / "clip_lanes.py").write_text(SLOW_LANE)
     monkeypatch.setenv("FAKE_PIDFILE", str(tmp_path / "child.pid"))
     monkeypatch.setattr(executors, "CHILD_TIMEOUT_S", 1)
+    monkeypatch.setattr(executors, "MIN_LANE_BUDGET_S", 0)
     r = box.ex().execute("acoustics", UID)
     assert (r.outcome, r.code) == ("transient", "timeout")
     assert not _alive(int((tmp_path / "child.pid").read_text()))

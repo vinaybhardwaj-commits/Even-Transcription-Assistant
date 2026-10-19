@@ -8,12 +8,22 @@ const KEY_RE = /^[A-Za-z0-9_.\/-]{1,200}$/;
 const noIdRun = (s: string) => !/[0-9]{8}/.test(s);
 const ID_WORDS = new Set(["patient", "name", "phone", "uhid", "mrn", "aadhaar", "email", "doctor", "room", "uid", "enc"]);
 const noIdWord = (s: string) => !s.toLowerCase().split(/[^a-z0-9]+/).some((t) => ID_WORDS.has(t));
-/** object_key (F6): no 8-digit run and no identity word, in the directories and the lane part of the file name. A track file is `<layer>.<engine>__<version>__<cfg8>.json`; its box-generated
- *  version / cfg8 parts are validated elsewhere and may hold a digit run by chance (cfg8 is hex), so they are exempt from the digit screen. */
+const noDate = (s: string) => !/\d{4}-\d{2}-\d{2}/.test(s);
+const fullyClean = (s: string) => noIdRun(s) && noIdWord(s) && noDate(s);
+/** The lanes the box writes (clip_lanes.py LANES: layer.engine), closed. The cutter's own artefact is `consult.flac`. */
+export const TRACK_LANES: readonly string[] = ["acoustics.room_profile_acoustics", "diar.nemotron", "stt.koyal", "stt.medasr"];
+export const CUTTER_FILE = "consult.flac";
+const TRACK_RE = new RegExp(`^(${TRACK_LANES.map((l) => l.replace(/\./g, "\\.")).join("|")})__([A-Za-z0-9.-]{1,40})__([0-9a-f]{8})\\.json$`);
+/** object_key (F6): a path whose file name is the closed REAL track shape `{layer}.{engine}__{version}__{cfg8}.json` (writer.track_filename) or `consult.flac` keeps only a word and date screen on
+ *  the file name (the version is a box-generated revision and cfg8 is hex, so either may hold a digit run by chance). Every other part (directories, any free file name) gets the full
+ *  identity-word, date and 8-digit screens. */
 const keyClean = (k: string): boolean => {
-  const i = k.lastIndexOf("/");
-  const lane = k.slice(i + 1).split("__")[0] ?? "";
-  return noIdRun(k.slice(0, i + 1) + lane) && noIdWord(k) && !/\d{4}-\d{2}-\d{2}/.test(k);
+  const parts = k.split("/");
+  const file = parts.pop() ?? "";
+  if (!parts.every((p) => p !== "" && fullyClean(p))) return false;
+  if (file === CUTTER_FILE) return true;
+  const m = TRACK_RE.exec(file);
+  return m ? noIdWord(m[2]!) && noDate(m[2]!) : fullyClean(file);
 };
 
 /** An artefact REF: tokens only, no `..`; engine and bucket carry no 8-digit run (version / object_key are box-generated and may hold a hex revision). null = invalid. */
