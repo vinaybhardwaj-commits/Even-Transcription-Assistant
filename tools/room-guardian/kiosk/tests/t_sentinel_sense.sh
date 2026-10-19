@@ -231,3 +231,49 @@ test_mic_class_set_leaves_exactly_one_line() {
   printf 'GUARDIAN_MIC_CLASS="webcam"\nexport GUARDIAN_MIC_CLASS=tonor\n' | mic_class_set tonor >"$T/e.conf"
   assert_eq "$(grep -c 'GUARDIAN_MIC_CLASS=' "$T/e.conf")" "1" "active and exported lines both replaced"
 }
+
+# ---- R3: refuter R2 findings N1, M3, M9, M10 ----
+r3_stub() { sed "s/<room-slug>/opd9/" "$KDIR/guardian.conf.example" >"$1"; }
+
+test_install_config_dir_with_flag_refused() {   # N1: -r passes for a directory, cat fails; no class-only conf may reach the R12 check
+  rm -rf "$GUARDIAN_HOME"; mkdir -p "$T/cdir" "$T/tmpd"
+  TMPDIR="$T/tmpd" sense_inst --config "$T/cdir" --mic-class tonor >"$T/out" 2>&1; assert_rc $? 2 "--config directory with the flag refused"
+  assert_has "$(cat "$T/out")" "cannot read --config" "the same refusal as without the flag"
+  [ ! -e "$GUARDIAN_HOME/bin" ] && [ ! -e "$GUARDIAN_HOME/guardian.conf" ] && ok || fail "nothing installed"
+  assert_eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" "0" "no temp left"
+  TMPDIR="$T/tmpd" sense_inst --config "$T/cdir" >"$T/out" 2>&1; assert_rc $? 2 "flag off: refused too"
+}
+
+test_install_level_class_dedup() {   # M3: install.sh itself must leave one class line (a duplicate would fail its own conf check)
+  rm -rf "$GUARDIAN_HOME"; mkdir -p "$T/tmpd"
+  r3_stub "$T/c.conf"; printf 'GUARDIAN_MIC_CLASS="webcam"\n' >>"$T/c.conf"
+  TMPDIR="$T/tmpd" sense_inst --config "$T/c.conf" --mic-class tonor --dry-run >"$T/out" 2>&1
+  assert_not "$(cat "$T/out")" "refusing: --config is not valid" "no duplicate class line"
+  printf 'export GUARDIAN_MIC_CLASS=tonor\n' >>"$T/c.conf"   # the source itself has two class lines: the flag repairs it
+  TMPDIR="$T/tmpd" sense_inst --config "$T/c.conf" --mic-class webcam --dry-run >"$T/out" 2>&1
+  assert_not "$(cat "$T/out")" "refusing: --config is not valid" "no duplicate after two source lines"
+  assert_eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" "0" "TMPDIR empty after a dry run"
+}
+
+test_mic_class_set_indented_and_exported_lines() {   # M9: indented, tab and export class lines are replaced; a longer key is kept
+  load_libs; . "$KDIR/lib/conf.sh"
+  assert_eq "$(mic_class_set tonor </dev/null)" 'GUARDIAN_MIC_CLASS="tonor"' "empty input -> one line"
+  assert_eq "$(printf 'GUARDIAN_ROOM="x"' | mic_class_set webcam | wc -l | tr -d ' ')" "2" "no trailing newline: the class line is kept apart"
+  local o; o="$(printf 'GUARDIAN_MIC_CLASSX=1\n  GUARDIAN_MIC_CLASS=a\n\texport  GUARDIAN_MIC_CLASS=b\n' | mic_class_set tonor)"
+  assert_eq "$(printf '%s\n' "$o" | grep -c 'GUARDIAN_MIC_CLASS=')" "1" "indented, tab and export lines removed"
+  assert_has "$o" '^GUARDIAN_MIC_CLASSX=1$' "a longer key is kept"
+}
+
+test_install_mic_class_unreadable_regular_conf_refused() {   # M10: a regular file with mode 000 is refused; a readable conf and a readable link are accepted
+  [ "$(id -u)" != 0 ] || { echo "  SKIP root reads anything"; return 0; }
+  rm -rf "$GUARDIAN_HOME"; mkdir -p "$GUARDIAN_HOME" "$T/tmpd"; printf 'GUARDIAN_ROOM="real"\n' >"$GUARDIAN_HOME/guardian.conf"; chmod 000 "$GUARDIAN_HOME/guardian.conf"
+  TMPDIR="$T/tmpd" sense_inst --mic-class tonor >"$T/out" 2>&1; assert_rc $? 2 "mode-000 conf refused with the flag"
+  assert_has "$(cat "$T/out")" "not a readable file" "named"
+  chmod 600 "$GUARDIAN_HOME/guardian.conf"; assert_eq "$(cat "$GUARDIAN_HOME/guardian.conf")" 'GUARDIAN_ROOM="real"' "conf untouched"
+  [ ! -e "$GUARDIAN_HOME/bin" ] && ok || fail "nothing installed"
+  assert_eq "$(find "$T/tmpd" -mindepth 1 | wc -l | tr -d ' ')" "0" "no temp left"
+  rm -rf "$GUARDIAN_HOME"; mkdir -p "$GUARDIAN_HOME"; r3_stub "$GUARDIAN_HOME/guardian.conf"   # readable regular conf: accepted
+  TMPDIR="$T/tmpd" sense_inst --mic-class tonor --dry-run >"$T/out" 2>&1; assert_not "$(cat "$T/out")" "not a readable file" "readable conf accepted"
+  rm -rf "$GUARDIAN_HOME"; mkdir -p "$GUARDIAN_HOME"; r3_stub "$T/real.conf"; ln -s "$T/real.conf" "$GUARDIAN_HOME/guardian.conf"   # readable link: accepted
+  TMPDIR="$T/tmpd" sense_inst --mic-class tonor --dry-run >"$T/out" 2>&1; assert_not "$(cat "$T/out")" "not a readable file" "readable link accepted"
+}
