@@ -2,7 +2,7 @@
 -- Migration 0173 — Spine S0: the tables of SPINE-PLAN §2. Schema only: no writer, no reader, no seed rows.
 --
 -- NUMBER. 0173 is registered to the spine by gating-lead (0172 is parked with OAuth). A live branch also carries 0173_mcp_blacklist_applied.sql; gating-lead owns the numbering.
--- NO IDENTITY, NO TEXT. No name, phone, transcript, note or prescription id column. spine_signal.attrs is limited by CHECK to the keys ids / quality / close_reason.
+-- NO IDENTITY, NO TEXT. No name, phone, transcript, note or prescription id column. spine_signal.attrs is limited by CHECK to the keys ids / quality / close_reason, and no key at any depth may match text|name|phone|patient|transcript|email|uhid (case-insensitive).
 -- REFS ONLY. spine_artefact holds bucket + object key + sha256, never a body.
 -- SHADOW. spine_config has no seed rows: a missing or malformed value means off.
 --
@@ -24,8 +24,10 @@ CREATE TABLE IF NOT EXISTS spine_signal (
   received_at  timestamptz NOT NULL DEFAULT now(),
   encounter_id text,
   attrs        jsonb       NOT NULL DEFAULT '{}'::jsonb
-    CONSTRAINT spine_signal_attrs_chk CHECK (jsonb_typeof(attrs) = 'object' AND (attrs - ARRAY['ids','quality','close_reason']) = '{}'::jsonb),
-  CONSTRAINT spine_signal_key_uq UNIQUE (proxy, source_key, source_rev)
+    CONSTRAINT spine_signal_attrs_chk CHECK (jsonb_typeof(attrs) = 'object' AND (attrs - ARRAY['ids','quality','close_reason']) = '{}'::jsonb
+      AND NOT jsonb_path_exists(attrs, '$.** ? (@.type() == "object").keyvalue() ? (@.key like_regex "text|name|phone|patient|transcript|email|uhid" flag "i")')),
+  CONSTRAINT spine_signal_key_uq UNIQUE (proxy, source_key, source_rev),
+  CONSTRAINT spine_signal_close_chk CHECK (t_close IS NULL OR t_close >= t_open)
 );
 CREATE INDEX IF NOT EXISTS spine_signal_room_open_idx ON spine_signal (room_id, t_open);
 CREATE INDEX IF NOT EXISTS spine_signal_encounter_idx ON spine_signal (encounter_id) WHERE encounter_id IS NOT NULL;
@@ -40,11 +42,12 @@ CREATE TABLE IF NOT EXISTS spine_encounter (
   status         text        NOT NULL CONSTRAINT spine_encounter_status_chk CHECK (status IN ('candidate','confirmed','rejected','merged')),
   merged_into    text,
   anchor_proxy   text,
-  boundary_rev   int         NOT NULL DEFAULT 1,
+  boundary_rev   int         NOT NULL DEFAULT 0,
   merge_version  text        NOT NULL,
   reason         text,
   created_at     timestamptz NOT NULL DEFAULT now(),
-  updated_at     timestamptz NOT NULL DEFAULT now()
+  updated_at     timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT spine_encounter_close_chk CHECK (t_close IS NULL OR t_close >= t_open)
 );
 CREATE INDEX IF NOT EXISTS spine_encounter_date_room_idx ON spine_encounter (ist_date, room_id);
 
@@ -83,7 +86,7 @@ CREATE TABLE IF NOT EXISTS spine_job (
   stage            text        NOT NULL,
   cut_version      text        NOT NULL,
   input_key        text        NOT NULL,
-  status           text        NOT NULL DEFAULT 'queued' CONSTRAINT spine_job_status_chk CHECK (status IN ('queued','leased','done','failed','dead','superseded','shadow')),
+  status           text        NOT NULL CONSTRAINT spine_job_status_chk CHECK (status IN ('queued','leased','done','failed','dead','superseded','shadow')),
   priority         int         NOT NULL DEFAULT 0,
   attempts         int         NOT NULL DEFAULT 0,
   next_attempt_at  timestamptz,
