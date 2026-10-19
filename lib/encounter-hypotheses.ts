@@ -486,3 +486,15 @@ export async function readLatestAcousticRun(
     throw e;
   }
 }
+
+/**
+ * Spine S1 (shadow ingest): every interval whose start is at or after `sinceMs`, across runs, with the room the room-day belongs to. Ids, times and closed_by only. The spine copies these into spine_signal.
+ * Kept here so that the store stays the only module that queries encounter_hypothesis (tests/unit/encounter-shadow.test.ts).
+ */
+export async function readHypothesesSince(sinceMs: number, limit: number): Promise<Array<Record<string, unknown>>> {
+  const q = sql as unknown as (text: string, params: unknown[]) => Promise<Array<Record<string, unknown>>>;
+  return q(
+    "SELECT h.id, h.room_day_id, d.room_id, h.start_ms, h.end_ms, h.closed_by, h.created_at FROM encounter_hypothesis h LEFT JOIN room_day d ON d.id = h.room_day_id WHERE h.start_ms >= $1::bigint ORDER BY h.start_ms DESC LIMIT $2::int",
+    [String(Math.trunc(sinceMs)), limit],
+  );
+}
