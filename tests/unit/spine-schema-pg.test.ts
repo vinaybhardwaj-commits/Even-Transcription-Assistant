@@ -63,6 +63,8 @@ d("spine schema on postgres:16", () => {
     rejects(a("d5", '{"ids":[[{"x":{"EMAIL":1}}]]}'));
     rejects(a("d6", '{"ids":{"uhid":1}}'));
     rejects(a("d7", '{"ids":{"firstname":1}}'));
+    rejects(a("d8", '{"foo":1}'));
+    rejects(a("d9", '{"Text":"x"}'));
     pg.exec(a("ok1", '{"ids":{"consult_uid":"uid_test_01","window_id":"w1"},"quality":[{"score":1}],"close_reason":"x"}'));
     pg.exec(a("ok2", '{"ids":[{"pqm_uid":"uid_test_02"}]}'));
     rejects(sig(", t_close", "('pulse','kc',1, now(), now(), now() - interval '1 minute')"));
