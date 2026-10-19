@@ -248,6 +248,8 @@ test_f_g2_by_day_needs_idle_and_quiet() {
   echo 700000000000 >"$T/hid"; echo $((GUARDIAN_FAKE_NOW - 300)) >"$STATE_DIR/speech_seen"
   heal_chrome; assert_not "$(cat "$CALLS")" "pkill" "idle 700 s but speech 5 min ago: no restart"
   echo $((GUARDIAN_FAKE_NOW - 700)) >"$STATE_DIR/speech_seen"
+  heal_chrome; assert_not "$(cat "$CALLS")" "pkill" "idle 700 s and quiet 11 min but no consult signal (R16): no restart"
+  consult_clear
   heal_chrome; assert_has "$(cat "$CALLS")" 'pkill -x Google Chrome' "idle 700 s and quiet 11 min: restart"
   assert_has "$(cat "$CALLS")" 'open -a Google Chrome' "and reopened"
 }
@@ -255,7 +257,7 @@ test_f_g2_by_day_needs_idle_and_quiet() {
 test_f_g2_open_capture_without_a_tape_reading_is_not_proof_of_quiet() {
   load_libs; mk_tcc 2; write_status capture_open=true; echo 3600000000000 >"$T/hid"; go_heal; collect_all
   chrome_restart_allowed; assert_rc $? 1 "capture open, rms unknown: blocked by day"
-  write_status capture_open=false; collect_all
+  write_status capture_open=false; collect_all; consult_clear
   chrome_restart_allowed; assert_rc $? 0 "no capture, idle 1 h, no speech: allowed"
 }
 

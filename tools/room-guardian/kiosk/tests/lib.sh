@@ -30,9 +30,11 @@ mk_sandbox() { # sets T and the whole environment; PATH gets the fake bin dir fi
   export GUARDIAN_PUBLISH_CMD='{ printf "%s\t" "$1"; cat; } >>"$T/pub.log"'
   export GUARDIAN_FLAG_CMD='cat "$T/flagout"; exit "$(cat "$T/flagrc")"'
   export GUARDIAN_SUDO="$T/bin/fakesudo"
+  export GUARDIAN_TEST_DPRIME_HEAL=1   # test seam for 2.4 d' HEAL (the constant is 0 in run mode and in the shipped build); the d2 shadow test sets it to 0
   export GUARDIAN_ROOT_HELPER="$KDIR/bin/guardian-root.sh"
-  export GUARDIAN_ROOT_TESTMODE=1 GUARDIAN_ROOT_TEST_DB="$T/TCC.db"
-  export CANARY_AFPLAY="$T/bin/afplay" CANARY_SAMPLE_S=0   # afplay is always faked; no real sound
+  export GUARDIAN_ROOT_TESTMODE=1 GUARDIAN_ROOT_TEST_DB="$T/TCC.db" GUARDIAN_ROOT_LOG_BIN="$T/bin/log"   # R16: the helper pins /usr/bin/log; its own test seam (non-root + test mode only)
+  export GUARDIAN_LOG_BIN="$T/bin/fakelog" GUARDIAN_SHUTDOWN_BIN="$T/bin/fakeshutdown"   # /usr/bin/log and /sbin/shutdown are ALWAYS faked (2.4 d')
+  export CANARY_AFPLAY="$T/bin/afplay" CANARY_SAMPLE_S=0 CANARY_PLAY_GAP_S=0   # afplay is always faked; no real sound
   export CALLS="$T/calls.log"; : >"$CALLS"
   : >"$T/pub.log"; printf 'fleet=off\n' >"$T/flagout"; echo 0 >"$T/flagrc"
   echo 4242 >"$T/rec_pid"; echo 9999 >"$T/ca_pid"; : >"$T/tapewriters"
@@ -87,7 +89,7 @@ F
   printf '#!/bin/bash\nprintf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/x 100 40 60 40%% /\\n"\n' >"$b/df"
   cat >"$b/sysctl" <<'F'
 #!/bin/bash
-echo "{ sec = $(( GUARDIAN_FAKE_NOW - 100000 )), usec = 0 }"
+echo "{ sec = $(( GUARDIAN_FAKE_NOW - ${FAKE_BOOT_AGE:-100000} )), usec = 0 }"
 F
   cat >"$b/pmset" <<'F'
 #!/bin/bash
@@ -100,11 +102,31 @@ F
 if [ -e "$T/sp_no_out" ]; then echo '{"SPAudioDataType":[{"coreaudio_default_audio_input_device":"yes"}]}'; else echo '{"SPAudioDataType":[{"coreaudio_default_audio_input_device":"yes","coreaudio_default_audio_output_device":"yes"}]}'; fi
 F
   printf '#!/bin/bash\necho "line from log"\n' >"$b/log"
+  cat >"$b/fakelog" <<'F'
+#!/bin/bash
+echo "LOG $*" >>"$CALLS"
+[ -s "$T/log_sleep" ] && sleep "$(cat "$T/log_sleep")"
+[ -r "$T/log.txt" ] && cat "$T/log.txt"
+exit "$(cat "$T/log_rc" 2>/dev/null || echo 0)"
+F
+  cat >"$b/fakeshutdown" <<'F'
+#!/bin/bash
+echo "SHUTDOWN $*" >>"$CALLS"
+[ -s "$GUARDIAN_HOME/state/usb-reboot" ] && echo "SHUTDOWN_STATE_WRITTEN=yes" >>"$CALLS"
+exit 0
+F
   cat >"$b/afplay" <<'F'
 #!/bin/bash
 echo "afplay $*" >>"$CALLS"
-if [ -s "$T/afplay_lag" ]; then perl -e 'my($lag,$a)=@ARGV; my @s=((100) x ($lag*16000)); for my $b (1..3){ push @s,(($a) x 8000); push @s,((100) x 8000) if $b<3 } push @s,((100) x 8000); print pack("s<*",@s)' "$(cat "$T/afplay_lag")" "$(cat "$T/afplay_amp")" >>"$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"
-elif [ -s "$T/afplay_amp" ]; then perl -e 'print pack("s<*", ($ARGV[0]) x 40000)' "$(cat "$T/afplay_amp")" >>"$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"; fi
+# the tone is a 1 kHz sine whose RMS is the amp (peak amp*sqrt2), then 6 s of quiet at 100 RMS (the 10 s between plays); the quiet bed is the same 1 kHz sine at RMS 100
+TAPE="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm | head -n1)"
+PERL_S='srand(7); sub tn { my($r,$i,$f)=@_; if ($ENV{NOISE}) { my $u=rand()||1e-9; my $v=rand(); my $x=$r*sqrt(-2*log($u))*cos(6.28318530718*$v); $x=32767 if $x>32767; $x=-32767 if $x<-32767; return int($x); } return sn($r,$i,$f); } sub sn { my($r,$i,$f)=@_; $f ||= 1000; return int($r*1.41421356*sin(6.28318530718*$f*$i/16000)+($r>=0?0.5:-0.5)); }'
+# optional: afplay_hz = the tone frequency (default 1000), afplay_bedhz = the frequency of the quiet bed written after the tone (default 1000)
+export NOISE="$([ -e "$T/afplay_noise" ] && echo 1)" HZ="$(cat "$T/afplay_hz" 2>/dev/null || echo 1000)" BEDHZ="$(cat "$T/afplay_bedhz" 2>/dev/null || echo 1000)"
+if [ -s "$T/afplay_lag" ]; then perl -e "$PERL_S"'my($lag,$a)=@ARGV; my $i=0; my @s; push @s,sn(100,$i++,$ENV{BEDHZ}) for 1..($lag*16000); for my $b (1..3){ push @s,tn($a,$i++,$ENV{HZ}) for 1..8000; if ($b<3) { push @s,sn(100,$i++,$ENV{BEDHZ}) for 1..8000 } } push @s,sn(100,$i++,$ENV{BEDHZ}) for 1..8000; push @s,sn(100,$i++,$ENV{BEDHZ}) for 1..96000; print pack("s<*",@s)' "$(cat "$T/afplay_lag")" "$(cat "$T/afplay_amp")" >>"$TAPE"
+elif [ -s "$T/afplay_amp" ]; then perl -e "$PERL_S"'my $i=0; my @s; push @s,tn($ARGV[0],$i++,$ENV{HZ}) for 1..40000; push @s,sn(100,$i++,$ENV{BEDHZ}) for 1..96000; print pack("s<*",@s)' "$(cat "$T/afplay_amp")" >>"$TAPE"; fi
+# the append moves the mtime to the real clock; the library reads the fake clock, so put it back (R16d-3: canary_play_gate re-reads the tape)
+[ -n "$TAPE" ] && touch -t "$(date -j -f %s "$GUARDIAN_FAKE_NOW" +%Y%m%d%H%M.%S)" "$TAPE"
 exit "$(cat "$T/afplay_rc" 2>/dev/null || echo 0)"
 F
   printf '#!/bin/bash\necho "room-recorder $*" >>"$CALLS"; exit 0\n' >"$T/app/Contents/MacOS/room-recorder"
@@ -159,6 +181,22 @@ mk_pcm() { # amplitude seconds
   touch -t "$(date -j -f %s "$GUARDIAN_FAKE_NOW" +%Y%m%d%H%M.%S)" "$d/tape.pcm"
 }
 
+# canary tape bed: a 1 kHz sine of RMS amplitude $1 (the same level as mk_pcm DC $1) for $2 s, so the band statistic has something to read
+mk_pcm_tone() { # rms seconds [hz, default 1000]
+  local d="$RR_ROOT/captures/c1/seg_001"
+  mkdir -p "$d"
+  perl -e 'my($a,$s,$f)=@ARGV; print pack("s<*", map { int($a*1.41421356*sin(6.28318530718*$f*$_/16000)+0.5) } 0..($s*16000-1))' "$1" "$2" "${3:-1000}" >"$d/tape.pcm"
+  touch -t "$(date -j -f %s "$GUARDIAN_FAKE_NOW" +%Y%m%d%H%M.%S)" "$d/tape.pcm"
+}
+
+# R16 (GR15-10): the Chrome day rule needs the consult hold CLEAR. consult_clear [age_s]: store a fresh new-form control payload with consult_open false for this room, as the control subscriber would.
+consult_clear() {
+  local age="${1:-1}"
+  mkdir -p "$STATE_DIR"
+  { printf '%s\n' "$((GUARDIAN_FAKE_NOW - age))"; printf '{"consult_open": {"%s": false}, "kill": false, "modes": {"%s": "heal"}, "ts": %s}\n' "$GUARDIAN_ROOM" "$GUARDIAN_ROOM" "$GUARDIAN_FAKE_NOW"; } >"$STATE_DIR/control.last"
+  rm -f "$STATE_DIR/control_latch" "$STATE_DIR/control_state"
+  export GUARDIAN_CONTROL_SUB_CMD='true'
+}
 events() { grep "^kiosk/$GUARDIAN_ROOM/heal$(printf '\t')" "$T/pub.log" 2>/dev/null; }
 
 # reap_tracked <sandbox>: kill only the pids a test recorded in <sandbox>/*.pid, and only while they still look like what the test started

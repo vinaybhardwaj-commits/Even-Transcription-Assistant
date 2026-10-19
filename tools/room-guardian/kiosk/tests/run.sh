@@ -4,10 +4,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")" || exit 2
 # shellcheck source=lib.sh
 . ./lib.sh
 # Every sandbox lives under one parent so a leftover is countable (R11): none may survive a test function.
-SBROOT="$(mktemp -d "${TMPDIR:-/tmp}/guardian-tests.XXXXXX")"; export SBROOT
+SBROOT="$(mktemp -d "${TMPDIR:-/tmp}/guardian-tests.XXXXXX")"
+# R16b: the pre-source check refuses any symlink on the path the agent was started by, and macOS TMPDIR sits under /var -> /private/var: sandboxes use the resolved path.
+SBROOT="$(cd -P "$SBROOT" && pwd -P)"; export SBROOT
 trap 'rm -rf "$SBROOT"' EXIT
 total_fail=0; total_pass=0; ntests=0; leaks=0
-for f in t_*.sh; do
+for f in ${TFILES:-t_*.sh}; do
   echo "== $f"
   # shellcheck disable=SC1090
   . "./$f"
@@ -20,7 +22,7 @@ for f in t_*.sh; do
     p="$(echo "$res" | awk '{print $2}')"; fl="$(echo "$res" | awk '{print $3}')"
     if [ -z "$res" ]; then echo "  CRASH $fn"; printf '%s\n' "$out" | tail -n 8; total_fail=$((total_fail + 1)); continue; fi
     total_pass=$((total_pass + p)); total_fail=$((total_fail + fl))
-    if [ "$fl" -gt 0 ]; then echo " not ok $fn"; printf '%s\n' "$out" | grep -v '^__RESULT'; else echo " ok $fn ($p)"; fi
+    if [ "$fl" -gt 0 ]; then echo " not ok $fn"; printf '%s\n' "$out" | grep -v '^__RESULT'; else echo " ok $fn ($p)"; printf '%s\n' "$out" | grep '^  SKIP'; fi
   done
 done
 total_fail=$((total_fail + leaks))
