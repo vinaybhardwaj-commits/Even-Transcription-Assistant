@@ -1,6 +1,19 @@
 /**
  * Spine merge: pure mergeSignals (SPINE-PLAN §3, M1-M9). No clock, no randomness, no I/O: `now` is a parameter.
  * Rulings: D1 id = enc_ + 16 base32 with no 8-digit run, D7 72 h horizon, D8 overlap >= 50% of the shorter interval.
+ *
+ * Readings (R2), each interpreting a plan line:
+ * - A2, M2 "Two signals with the same consult_uid, consult_key or pqm_uid are the same encounter ... A Pulse enc id on two
+ *   machines gives two encounters, flagged multi_machine": consult_key and pqm_uid are merge keys. A consult_uid match
+ *   merges only when the machine matches too (the same consult_key, or none on either side); the same consult_uid on two
+ *   machines gives two encounters, both flagged multi_machine.
+ * - F1, M4 + M8: a prior encounter anchored by a strong signal (pulse|pqm) is claimed ONLY by the group that holds that
+ *   anchor signal (by its stale encounter_id or its identity key). A weak signal's stale encounter_id never pulls it in.
+ *   Two priors anchored by the same strong kind are never survivor and loser. Output encounter_ids are unique (throws).
+ * - I2, M4 "even when they overlap": any positive overlap between two same-kind strong anchors sets pulse_overlap (raw spans).
+ * - I3 (safer reading, pending ruling): a weak or inferred boundary is clamped at the open/close of a neighbouring
+ *   strong-anchored encounter in the same room, flag `clamped`. Explicit strong closes (M6 rank) are never clamped.
+ * - I4, M8 "After ist_date+72 h only links change": a frozen prior keeps its links; nothing moves from or to it.
  */
 import { createHmac } from "node:crypto";
 import type {
@@ -98,16 +111,22 @@ function closeRank(n: Norm): number {
 }
 
 /** M6. Highest-ranked explicit open and close; ties go to the earlier open and the later close. */
-function spanOf(g: Group): Span {
+function spanDetail(g: Group): Span & { openStrong: boolean; closeStrong: boolean } {
   const core = g.members.filter((m) => !isDerived(m));
   const best = (xs: Norm[], rank: (n: Norm) => number, pick: (a: Norm, b: Norm) => boolean) =>
     xs.reduce((a, b) => (rank(b) < rank(a) || (rank(b) === rank(a) && pick(b, a)) ? b : a));
-  const open = best(core, (n) => OPEN_RANK[n.sig.proxy] ?? 9, (b, a) => b.open < a.open).open;
+  const openN = best(core, (n) => OPEN_RANK[n.sig.proxy] ?? 9, (b, a) => b.open < a.open);
   const explicit = core.filter((m) => m.explicitClose);
-  const close = explicit.length
-    ? best(explicit, closeRank, (b, a) => b.close > a.close).close
-    : Math.max(...core.map((m) => m.close));
-  return close > open ? { open, close } : { open: Math.min(...core.map((m) => m.open)), close: Math.max(...core.map((m) => m.close)) };
+  const closeN = explicit.length ? best(explicit, closeRank, (b, a) => b.close > a.close) : null;
+  const close = closeN ? closeN.close : Math.max(...core.map((m) => m.close));
+  if (close > openN.open) {
+    return { open: openN.open, close, openStrong: isStrong(openN), closeStrong: !!closeN && isStrong(closeN) && closeRank(closeN) <= 1 };
+  }
+  return { open: Math.min(...core.map((m) => m.open)), close: Math.max(...core.map((m) => m.close)), openStrong: false, closeStrong: false };
+}
+function spanOf(g: Group): Span {
+  const { open, close } = spanDetail(g);
+  return { open, close };
 }
 
 function groupKeys(g: Group): Set<string> {
@@ -115,9 +134,16 @@ function groupKeys(g: Group): Set<string> {
   for (const m of g.members) for (const [k, v] of m.keys) if (MATCH_KINDS.includes(k)) s.add(`${k}\u0000${v}`);
   return s;
 }
+const mkey = (n: Norm) => n.keys.find(([k]) => k === "consult_key")?.[1] ?? null;
+/** A2: a consult_uid match also needs the machine to agree (same consult_key, or none on either side). */
 const sharesKey = (n: Norm, g: Group) => {
   const ks = groupKeys(g);
-  return n.keys.some(([k, v]) => MATCH_KINDS.includes(k) && ks.has(`${k}\u0000${v}`));
+  const nk = mkey(n);
+  return n.keys.some(([k, v]) => {
+    if (!MATCH_KINDS.includes(k) || !ks.has(`${k}\u0000${v}`)) return false;
+    if (k !== "consult_uid") return true;
+    return g.members.some((m) => m.keys.some(([mk, mv]) => mk === "consult_uid" && mv === v) && (nk === null || mkey(m) === null || mkey(m) === nk));
+  });
 };
 const hasProxy = (g: Group, p: Proxy) => g.members.some((m) => m.sig.proxy === p);
 
@@ -158,6 +184,15 @@ export function mintEncounterId(anchorProxy: string, sourceKey: string, roomId: 
     const id = encounterIdCandidate(anchorProxy, sourceKey, roomId, firstOpen, c);
     if (EIGHT_DIGITS.test(id) || taken.has(id)) continue;
     return id;
+  }
+}
+
+/** F1 backstop: two output rows with one encounter_id would be a duplicate PK for the writer, and could swap two patients' consults. */
+export function assertUniqueIds(encounters: { encounter_id: string }[]): void {
+  const seen = new Set<string>();
+  for (const e of encounters) {
+    if (seen.has(e.encounter_id)) throw new Error(`spine merge: duplicate encounter_id ${e.encounter_id}`);
+    seen.add(e.encounter_id);
   }
 }
 
@@ -246,6 +281,23 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
 
   // ---- flags (M2 multi_machine, M4 pulse_overlap)
   const flags = new Map<Group, Set<string>>(finals.map((g) => [g, new Set<string>()]));
+  const rawSpan = new Map<Group, Span>(finals.map((g) => [g, spanOf(g)]));
+  // I3: clamp weak or inferred boundaries at the open/close of a neighbouring strong-anchored encounter
+  const spans = new Map<Group, Span>();
+  for (const g of finals) {
+    const d = spanDetail(g);
+    let { open, close } = d;
+    for (const n of finals) {
+      if (n === g || n.members[0].room !== g.members[0].room || !(hasProxy(n, "pulse") || hasProxy(n, "pqm"))) continue;
+      const ns = rawSpan.get(n)!;
+      if (!d.closeStrong && ns.open > d.open && ns.open < d.close) close = Math.min(close, ns.open);
+      if (!d.openStrong && ns.open <= d.open && ns.close > d.open && ns.close < d.close) open = Math.max(open, ns.close);
+    }
+    if (close > open && (open !== d.open || close !== d.close)) {
+      flags.get(g)!.add("clamped");
+      spans.set(g, { open, close });
+    } else spans.set(g, { open: d.open, close: d.close });
+  }
   for (const g of ambiguous) flags.get(g)?.add("ambiguous");
   const pulseByUid = new Map<string, Set<Group>>();
   for (const g of finals) for (const m of g.members) {
@@ -255,7 +307,7 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
   for (const gs of pulseByUid.values()) if (gs.size > 1) for (const g of gs) flags.get(g)!.add("multi_machine");
   for (let i = 0; i < finals.length; i++) for (let j = i + 1; j < finals.length; j++) {
     const a = finals[i], b = finals[j];
-    if (a.members[0].room === b.members[0].room && strongConflict(a, b) && meets(spanOf(a), spanOf(b))) {
+    if (a.members[0].room === b.members[0].room && strongConflict(a, b) && overlapMs(rawSpan.get(a)!, rawSpan.get(b)!) > 0) {
       flags.get(a)!.add("pulse_overlap");
       flags.get(b)!.add("pulse_overlap");
     }
@@ -288,20 +340,43 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
   const groupIds: string[] = [];
   const idToGroup = new Map<string, Group>();
 
+  // F1: a strong-anchored prior is claimed only by the group that holds its anchor signal.
+  const strongOwner = new Map<string, Group>();
+  for (const g of finals) {
+    for (const m of g.members) {
+      if (!isStrong(m)) continue;
+      const ident = m.sig.proxy === "pulse" ? "consult_key" : "pqm_uid";
+      const ids = new Set<string>();
+      if (m.sig.encounter_id) ids.add(resolve(m.sig.encounter_id));
+      const iv = attr(m.sig, ident);
+      const l = iv ? priorLinkId.get(`${ident}\u0000${iv}`) : undefined;
+      if (l) ids.add(l);
+      for (const id of ids) {
+        const pe = priorById.get(id);
+        if (pe && pe.anchor_proxy === m.sig.proxy && !strongOwner.has(id)) strongOwner.set(id, g);
+      }
+    }
+  }
   for (const g of finals) {
     const ids = new Set<string>();
     for (const m of g.members) {
       if (m.sig.encounter_id) ids.add(resolve(m.sig.encounter_id));
       for (const [k, v] of m.keys) { const l = priorLinkId.get(`${k}\u0000${v}`); if (l) ids.add(l); }
     }
-    const cand = [...ids].map((id) => priorById.get(id)).filter((e): e is PriorEncounter => !!e && !claimed.has(e.encounter_id) && e.room_id === g.members[0].room && e.status !== "merged");
+    const cand = [...ids].map((id) => priorById.get(id)).filter((e): e is PriorEncounter =>
+      !!e && !claimed.has(e.encounter_id) && e.room_id === g.members[0].room && e.status !== "merged" &&
+      (!STRONG_PROXIES.includes(e.anchor_proxy) || strongOwner.get(e.encounter_id) === g));
     const survivor = cand.length ? cand.reduce((a, b) => (survives(b, a) ? b : a)) : null;
     const anchor = anchorOf(g);
-    const span = spanOf(g);
+    const span = spans.get(g)!;
     let id: string;
     if (survivor) {
       id = survivor.encounter_id;
-      for (const e of cand) if (e !== survivor && !frozen(e)) losers.set(e.encounter_id, id);
+      for (const e of cand) {
+        if (e === survivor || frozen(e)) continue;
+        if (e.anchor_proxy === survivor.anchor_proxy && STRONG_PROXIES.includes(e.anchor_proxy)) continue; // M4 across reruns
+        losers.set(e.encounter_id, id);
+      }
     } else {
       id = mintEncounterId(anchor.sig.proxy, anchor.sig.source_key, anchor.room, Math.min(...g.members.map((m) => m.open)), taken);
     }
@@ -341,6 +416,7 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
     for (const m of g.members) assignments.push({ proxy: m.sig.proxy, source_key: m.sig.source_key, source_rev: m.sig.source_rev, encounter_id: id });
   }
 
+  assertUniqueIds(encounters);
   // losers (M8): merged rows, links move by alias
   for (const [lid, sid] of [...losers].sort()) {
     const e = priorById.get(lid)!;
@@ -360,8 +436,18 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
     const sid = losers.get(resolve(l.encounter_id)) ?? losers.get(l.encounter_id);
     if (sid) add({ encounter_id: sid, key_kind: l.key_kind, value: l.value, basis: "merge" });
   }
-  for (const [k, opts] of want) {
+  const frozenIds = new Set(prior.encounters.filter((e) => e.status !== "merged" && frozen(e)).map((e) => e.encounter_id));
+  const priorKind = new Map(prior.links.map((l) => [`${l.key_kind}\u0000${l.value}`, l.key_kind]));
+  for (const [k, all] of want) {
     const keep = priorLinkId.get(k);
+    // I4: a link owned by a frozen prior stays; nothing moves to a frozen encounter from another owner
+    if (keep && frozenIds.has(keep)) {
+      const own = all.find((o) => o.encounter_id === keep);
+      links.push(own ?? { encounter_id: keep, key_kind: priorKind.get(k)!, value: k.split("\u0000")[1], basis: "exact" });
+      continue;
+    }
+    const opts = keep ? all.filter((o) => !frozenIds.has(o.encounter_id)) : all;
+    if (!opts.length) { links.push({ encounter_id: keep!, key_kind: priorKind.get(k)!, value: k.split("\u0000")[1], basis: "exact" }); continue; }
     opts.sort((a, b) => Number(b.encounter_id === keep) - Number(a.encounter_id === keep) || BASIS_RANK[a.basis] - BASIS_RANK[b.basis] || cmp(a.encounter_id, b.encounter_id));
     links.push(opts[0]);
   }
