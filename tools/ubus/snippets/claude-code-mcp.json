@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "ubus": {
+      "type": "stdio",
+      "command": "/Users/vinaybhardwaj/.local/ubus-mcp/bin/ubus-mcp",
+      "args": [],
+      "env": { "UBUS_RUNTIME": "claude-code" }
+    }
+  }
+}

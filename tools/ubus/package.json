@@ -1,0 +1,26 @@
+{
+  "name": "ubus",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Universal two-way agent bus (MCP). MVP.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "bin": {
+    "ubus": "./dist/bin/ubus.js",
+    "ubus-mcp": "./dist/bin/ubus-mcp.js",
+    "ubus-hook": "./dist/bin/ubus-hook.js",
+    "ubus-node": "./dist/nodelink/bin/ubus-node.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --disable-warning=ExperimentalWarning dist/bin/ubus.js serve",
+    "test": "npm run build && node --disable-warning=ExperimentalWarning --test --test-force-exit --test-timeout=30000 --test-reporter=spec dist/test/*.test.js dist/nodelink/test/*.test.js",
+    "ubus": "node --disable-warning=ExperimentalWarning dist/bin/ubus.js"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "typescript": "5.6.3"
+  }
+}
