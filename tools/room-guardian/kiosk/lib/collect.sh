@@ -7,9 +7,10 @@ STATUS_JSON="$RR_ROOT/status.json"
 RR_CONFIG_JSON="$RR_ROOT/config.json"
 LAUNCHD_LOG="$RR_ROOT/launchd.log"
 
-# dBFS of the last 2 s (64000 B of 16 kHz mono s16le) of the newest tape.pcm written < 5 s ago.
-# Reads the recorder's own file; never opens a capture (A2 row 1). Prints a number, or nothing.
-rms_dbfs_2s() {
+# Stats of the last 2 s (64000 B of 16 kHz mono s16le) of the newest tape.pcm written < 5 s ago, from ONE read of the tape (S2):
+# prints "<rms dBFS> <zero_ratio> <peak>" (zero_ratio = fraction of samples exactly 0, 3 decimals; peak = abs max / 32768, 4 decimals), or nothing.
+# Reads the recorder's own file; never opens a capture (A2 row 1). A missing, stale or future-dated tape gives nothing for all three.
+tape_stats_2s() {
   local f="" size off now mt
   # shellcheck disable=SC2012
   f="$(ls -t "$RR_ROOT"/captures/*/seg_*/tape.pcm 2>/dev/null | head -n1)"
@@ -22,8 +23,16 @@ rms_dbfs_2s() {
   off=$((size - 64000)); [ "$off" -lt 0 ] && off=0
   off=$((off / 2 * 2))
   tail -c "+$((off + 1))" "$f" 2>/dev/null | head -c 64000 | od -An -v -t d2 | awk '
-    { for (i = 1; i <= NF; i++) { s += $i * $i; n++ } }
-    END { if (n == 0) exit; r = sqrt(s / n) / 32768; if (r <= 0) printf "-120.0\n"; else printf "%.1f\n", 20 * log(r) / log(10) }'
+    { for (i = 1; i <= NF; i++) { v = $i + 0; s += v * v; n++; if (v == 0) z++; a = v < 0 ? -v : v; if (a > m) m = a } }
+    END { if (n == 0) exit; r = sqrt(s / n) / 32768
+          if (r <= 0) d = "-120.0"; else d = sprintf("%.1f", 20 * log(r) / log(10))
+          printf "%s %.3f %.4f\n", d, z / n, m / 32768 }'
+}
+
+# dBFS of the last 2 s of the newest tape.pcm (same freshness rules). Prints a number, or nothing.
+rms_dbfs_2s() {
+  local st; st="$(tape_stats_2s)"
+  printf '%s' "${st%% *}"; [ -z "$st" ] || echo
 }
 
 pid_age_s() { # pid -> seconds
@@ -162,7 +171,8 @@ collect_all() {
   S_poll_ok_age=""; [ -n "$ts" ] && S_poll_ok_age=$((now - ts))
   ts="$(ts_to_epoch "$(json_get "$STATUS_JSON" updated_at)")"
   S_status_age=""; [ -n "$ts" ] && S_status_age=$((now - ts))
-  S_rms="$(rms_dbfs_2s)"
+  S_rms=""; S_zr=""; S_peak=""
+  read -r S_rms S_zr S_peak <<<"$(tape_stats_2s)"
   note_speech
 
   S_usb=false; S_engine=false
@@ -209,10 +219,11 @@ pid_changes_last_hour() {
 }
 
 health_line() {
-  printf '{"room_id":%s,"install_id":%s,"ts":%s,"state":%s,"mic_state":%s,"capture_open":%s,"pending_piece_count":%s,"rms_dbfs_2s":%s,"usb_mic_present":%s,"audio_engine_present":%s,"coreaudiod_age_s":%s,"recorder_pid_age_s":%s,"helper_xpc_ok":%s,"last_poll_ok_age_s":%s,"last_http":%s,"disk_free_pct_root":%s,"disk_free_pct_home":%s,"boot_age_s":%s,"presence_heartbeat_age_s":%s,"mode":%s,"guardian":%s}' \
+  printf '{"room_id":%s,"install_id":%s,"ts":%s,"state":%s,"mic_state":%s,"capture_open":%s,"pending_piece_count":%s,"rms_dbfs_2s":%s,"usb_mic_present":%s,"audio_engine_present":%s,"coreaudiod_age_s":%s,"recorder_pid_age_s":%s,"helper_xpc_ok":%s,"last_poll_ok_age_s":%s,"last_http":%s,"disk_free_pct_root":%s,"disk_free_pct_home":%s,"boot_age_s":%s,"presence_heartbeat_age_s":%s,"mode":%s,"guardian":%s,"zr":%s,"peak":%s,"mic_class":%s}' \
     "$(jstr "$GUARDIAN_ROOM")" "$(jstr "$S_install_id")" "$(now_epoch)" "$(jstr "$S_state")" "$(jstr "$S_mic_state")" \
     "$(jbool "$S_capture_open")" "$(jnum "$S_pending")" "$(jnum "$S_rms")" "$(jbool "$S_usb")" "$(jbool "$S_engine")" \
     "$(jnum "$S_ca_age")" "$(jnum "$S_rec_age")" "$(jbool "$S_helper_ok")" "$(jnum "$S_poll_ok_age")" "$(jnum "$S_last_http")" \
     "$(jnum "$S_disk_root")" "$(jnum "$S_disk_home")" "$(jnum "$S_boot_age")" "$(jnum "$S_presence_age")" \
-    "$(jstr "$S_mode")" "$(jstr "$GUARDIAN_VERSION")"
+    "$(jstr "$S_mode")" "$(jstr "$GUARDIAN_VERSION")" \
+    "$(jnum "$S_zr")" "$(jnum "$S_peak")" "$(jstr "$([ "$GUARDIAN_MIC_CLASS" = unknown ] || printf '%s' "$GUARDIAN_MIC_CLASS")")"
 }

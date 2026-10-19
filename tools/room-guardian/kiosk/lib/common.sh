@@ -66,6 +66,7 @@ g_def GUARDIAN_CONTROL_SUB_CMD ""
 g_def GUARDIAN_SUDO ""
 g_def GUARDIAN_ROOT_HELPER /usr/local/libexec/eta-guardian-root
 g_def USB_MIC_PATTERN C270
+g_def GUARDIAN_MIC_CLASS unknown   # S2: webcam | tonor | unknown (sense only)
 g_def PRESENCE_FILE ""
 g_def CANARY_VOLUME 0.3   # afplay -v; the system volume is never changed
 # not conf keys: fixed defaults in run mode (the heal cap and the canary window / idle limit are constants)
