@@ -3,6 +3,7 @@
  * family_id of a code's tokens is "f_" + the first 32 hex of the code hash, so a replayed code can revoke exactly what it issued with no extra column.
  */
 import { sql } from "@/lib/db";
+import { auditOauthRefused } from "@/lib/mcp/audit";
 import { EMAIL_LOCK_S, REFRESH_FAMILY_MAX_AGE_S, SESSION_MAX_AGE_S } from "./config";
 
 export type PersonRow = { email: string; scopes: string[]; status: "active" | "revoked"; granted_at?: string };
@@ -222,8 +223,26 @@ export async function lookupAccessToken(tokenHash: string): Promise<AccessLookup
 
 export type PersonView = { email: string; scopes: string[]; status: "active" | "revoked"; granted_at: string; revoked_at: string | null };
 
+let grantRefusalLogged = false;
+export const resetGrantRefusalLogForTests = () => { grantRefusalLogged = false; };
+
+/** True when the address is a BLACKLISTED mcp_identity (the applied blacklist), whatever SCRIBE_MCP_IDENTITY says. A DB that predates mcp_identity has no blacklist; any other error propagates (a grant is not made blind). */
+export async function addressBlacklisted(email: string): Promise<boolean> {
+  try {
+    return ((await sql`SELECT 1 AS x FROM mcp_identity WHERE email = ${email} AND status = 'blacklisted'`) as unknown[]).length > 0;
+  } catch (e) {
+    if (/relation "mcp_identity" does not exist|42P01/.test(String((e as { message?: string; code?: string })?.message ?? "") + String((e as { code?: string })?.code ?? ""))) return false;
+    throw e;
+  }
+}
+
 /** Upsert an ACTIVE person. A re-grant of a REVOKED person reactivates them and bumps granted_at, which kills every token created before it (acceptance and refresh refuse created_at < granted_at). Changing the scopes of an active person keeps granted_at: tokens stay valid and read the new scopes. */
 export async function grantPerson(email: string, scopes: string[], grantedBy: string): Promise<PersonView & { previous_status: string | null }> {
+  if (await addressBlacklisted(email)) {
+    await auditOauthRefused(email, "grant_blacklisted"); // counted (rate-limited rows carry a suppressed count)
+    if (!grantRefusalLogged) { grantRefusalLogged = true; console.error("[mcp-oauth] person grant refused: the address is on the applied blacklist (count=1)"); }
+    throw new Error("blacklisted");
+  }
   const rows = (await sql`
     WITH prev AS (SELECT status FROM mcp_person WHERE email = ${email}),
     up AS (

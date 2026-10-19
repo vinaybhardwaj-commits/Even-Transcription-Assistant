@@ -24,6 +24,7 @@ export const state = {
 export function resetFakeStore(): void {
   for (const m of Object.values(state)) m.clear();
   emailClock.offsetMs = 0;
+  blacklistedFake.clear();
 }
 export const addPerson = (email: string, scopes = ["read", "invoke", "write", "admin"], status: "active" | "revoked" = "active"): void => {
   const old = state.people.get(email);
@@ -144,3 +145,7 @@ export const consumeEmailCode = async (id: string) => {
   r.used = true;
   return true;
 };
+
+/** R6: addresses the fake treats as blacklisted (the real store reads mcp_identity). Cleared by resetFakeStore callers via .clear(). */
+export const blacklistedFake = new Set<string>();
+export const addressBlacklisted = async (email: string): Promise<boolean> => blacklistedFake.has(email);

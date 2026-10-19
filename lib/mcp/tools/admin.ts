@@ -27,7 +27,7 @@ import { setRoomEnabled } from "@/lib/room-enable";
 import { bindInstall, findBoundInstall, findInstall, listRoomInstalls, type InstallRow } from "@/lib/room-admin";
 import { ADMIN_ACTOR_PREFIX } from "../auth";
 import { MCP_SCOPES, mcpOauthDomain } from "../oauth/config";
-import { grantPerson, listPeople, revokePerson } from "../oauth/store";
+import { addressBlacklisted, grantPerson, listPeople, revokePerson } from "../oauth/store";
 import { argBool, argStr, failSafe, ToolScopeError, type McpTool, type ToolArgs, type ToolContext } from "../registry";
 import { AmbiguousRoomError, resolveRoom, type RoomRef } from "./brain";
 
@@ -189,6 +189,7 @@ async function runPersonAction(action: "person_grant" | "person_list" | "revoke_
       if (!Array.isArray(raw) || raw.length === 0 || raw.length > 4 || !raw.every((x) => typeof x === "string" && SCOPE_SET.has(x))) return badArgs(`scopes must be a non-empty subset of ${MCP_SCOPES.join(",")}`);
       scopes = [...new Set(raw as string[])];
     }
+    if (await addressBlacklisted(email)) return refuse("blacklisted");
     const auditId = await preAudit(actor, "admin.person_grant", "mcp_person", email, { scopes, ...(reason ? { reason } : {}) });
     if (!auditId) return AUDIT_DOWN;
     const row = await grantPerson(email, scopes, ctx.actor);

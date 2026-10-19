@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { sql } from "@/lib/db";
 import { normaliseEmail, setIdentityStatus } from "./identity";
+import { MCP_TOKENS_DENY_ENV, parseDenyList } from "./auth";
 import { revokePerson } from "./oauth/store";
 
 export const BLACKLIST_FILE_ENV = "SCRIBE_MCP_BLACKLIST_FILE";
@@ -72,5 +73,16 @@ export async function revocationAddresses16Oct(): Promise<string[]> {
      WHERE k.revoked_at >= ${REVOKED_FROM}::timestamptz AND k.revoked_at < ${REVOKED_TO}::timestamptz
        AND NOT EXISTS (SELECT 1 FROM mcp_key l WHERE l.email = k.email AND l.revoked_at IS NULL)
   `) as Array<{ email: string }>;
+  return rows.map((r) => r.email);
+}
+
+/**
+ * R6 N1 second source: the sha256 denylist the 16 Oct revocation used (env SCRIBE_MCP_TOKENS_DENY, name from MCP_TOKENS_DENY_ENV; the value is never printed). Each hash is joined to mcp_key.key_hash
+ * (plain sha256 of the key) to find the address that held the key. Hashes with no mcp_key row yield nothing (counted by the caller as the gap). Raw rows; never logged.
+ */
+export async function denylistAddresses(raw: string | undefined = process.env[MCP_TOKENS_DENY_ENV]): Promise<string[]> {
+  const hashes = [...parseDenyList(raw)];
+  if (hashes.length === 0) return [];
+  const rows = (await sql`SELECT DISTINCT email FROM mcp_key WHERE key_hash = ANY(${hashes}::text[])`) as Array<{ email: string }>;
   return rows.map((r) => r.email);
 }

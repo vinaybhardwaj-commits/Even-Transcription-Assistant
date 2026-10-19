@@ -985,3 +985,70 @@ describe.skipIf(!HAVE)("R5: blacklist-file revokes the person too, writes the ma
     expect(ry.length + ry.reduce((a, row) => a + (row.metadata_json.suppressed ?? 0), 0)).toBe(3);
   });
 });
+
+describe.skipIf(!HAVE)("R6: a blacklisted address can never be re-granted, flag on or off; the env denylist is a second source", () => {
+  const listed = "r6.listed@example.test";
+  const files = async (list: string[]) => {
+    const { writeFileSync, mkdtempSync, chmodSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const f = `${mkdtempSync(`${tmpdir()}/bl6-`)}/list.json`;
+    writeFileSync(f, JSON.stringify(list));
+    chmodSync(f, 0o600);
+    return f;
+  };
+  const withFlag = async (v: string, fn: () => Promise<void>) => {
+    const saved = process.env.SCRIBE_MCP_IDENTITY;
+    process.env.SCRIBE_MCP_IDENTITY = v;
+    try { await fn(); } finally { if (saved === undefined) delete process.env.SCRIBE_MCP_IDENTITY; else process.env.SCRIBE_MCP_IDENTITY = saved; }
+  };
+
+  it("F2: grantPerson refuses a blacklisted address with the flag off AND on, counts each refusal, leaves the person revoked; a non-blacklisted grant still works", async () => {
+    const { applyBlacklistFile } = await import("@/lib/mcp/blacklist-file");
+    resetDeniedAuditForTests();
+    S.resetGrantRefusalLogForTests();
+    await S.grantPerson(listed, ["read"], "test");
+    expect(await applyBlacklistFile("test", await files([listed]))).toBe(1);
+    const t = await mark();
+    const err = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      for (const flag of ["off", "on"]) {
+        await withFlag(flag, async () => {
+          await expect(S.grantPerson(listed, ["read"], "test")).rejects.toThrow("blacklisted");
+          expect((await S.getPerson(listed))!.status).toBe("revoked");
+        });
+      }
+      expect(err.mock.calls.filter((c) => String(c[0]).includes("person grant refused"))).toHaveLength(1); // logged once
+      expect(JSON.stringify(err.mock.calls)).not.toContain("r6.listed");
+    } finally { err.mockRestore(); }
+    const rows = await q`SELECT metadata_json FROM audit_log WHERE action = 'mcp.oauth_refused' AND metadata_json->>'reason' = 'grant_blacklisted' AND created_at > ${t}::timestamptz`;
+    expect(rows.length).toBe(1); // second refusal inside the minute is suppressed and counted into the next row
+    await withFlag("off", async () => { expect((await S.grantPerson("r6.fine@example.test", ["read"], "test")).status).toBe("active"); });
+    await withFlag("on", async () => { expect((await S.grantPerson("r6.fine2@example.test", ["read"], "test")).status).toBe("active"); });
+  });
+
+  it("F2: the scribe_admin person_grant tool path refuses it too, with a refusal audit row and no grant", async () => {
+    const { adminTool } = await import("@/lib/mcp/tools/admin");
+    const { mcpOauthDomain } = await import("@/lib/mcp/oauth/config");
+    const { applyBlacklistFile } = await import("@/lib/mcp/blacklist-file");
+    const listedDom = `r6.admin.listed@${mcpOauthDomain()}`;
+    await S.grantPerson(listedDom, ["read"], "test");
+    expect(await applyBlacklistFile("test", await files([listedDom]))).toBe(1);
+    const t = await mark();
+    const out = (await adminTool.handler({ action: "person_grant", email: listedDom }, { actor: "mcp:admin:test", scopes: new Set(["read", "admin"]) } as never)) as unknown as Record<string, unknown>;
+    expect(JSON.stringify(out)).toContain("blacklisted");
+    expect((await S.getPerson(listedDom))!.status).toBe("revoked");
+    expect((await q`SELECT 1 FROM audit_log WHERE action = 'admin.person_grant.refused' AND created_at > ${t}::timestamptz`).length).toBe(1);
+  });
+
+  it("denylistAddresses: SCRIBE_MCP_TOKENS_DENY hashes join to mcp_key rows; a hash with no key row yields nothing; none, blank or malformed-without-hashes yields nothing", async () => {
+    const { denylistAddresses } = await import("@/lib/mcp/blacklist-file");
+    const k1 = await ID.issueKey("r6.denied1@example.test", "read", "test");
+    const k2 = await ID.issueKey("r6.denied2@example.test", "read", "test");
+    const hashes = (await q<{ key_hash: string }>`SELECT key_hash FROM mcp_key WHERE key_id IN (${k1.key_id}, ${k2.key_id}) ORDER BY email`).map((r) => r.key_hash);
+    const raw = JSON.stringify([...hashes, "f".repeat(64)]);
+    expect((await denylistAddresses(raw)).sort()).toEqual(["r6.denied1@example.test", "r6.denied2@example.test"]);
+    expect(await denylistAddresses(undefined)).toEqual([]);
+    expect(await denylistAddresses("  ")).toEqual([]);
+    expect(await denylistAddresses("[]")).toEqual([]);
+  });
+});
