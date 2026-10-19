@@ -1,6 +1,6 @@
 #!/bin/bash
 # Install the Kiosk Guardian on THIS Mac as the console user. Idempotent. Does not load the agent unless --load.
-#   install.sh --room <slug> [--config <file>] [--dry-run] [--load] [--sudo "<cmd>"]
+#   install.sh --room <slug> [--config <file>] [--mic-class webcam|tonor] [--dry-run] [--load] [--sudo "<cmd>"]
 # Test seams: GUARDIAN_HOME, LA_DIR, GUARDIAN_ROOT_HELPER.
 # R15: every ancestor of GUARDIAN_HOME is walked first (lib/conf.sh tree_walk_anc). One owned by root or by this user, not group/world-writable, no ACL beyond the macOS default
 # "group:everyone deny delete" passes. One owned by this user that fails on mode or ACL is repaired (chmod go-w, extra ACL entries removed) and each repair is logged.
@@ -11,11 +11,12 @@ GUARDIAN_HOME="${GUARDIAN_HOME:-$HOME/Library/Application Support/EvenScribe/Gua
 LA_DIR="${LA_DIR:-$HOME/Library/LaunchAgents}"
 GUARDIAN_ROOT_HELPER="${GUARDIAN_ROOT_HELPER:-/usr/local/libexec/eta-guardian-root}"
 LABEL="com.evenscribe.room-guardian"
-ROOM=""; CONFIG=""; DRY=0; LOAD=0; SUDO="sudo"
+ROOM=""; CONFIG=""; MIC_CLASS=""; MIC_SET=0; DRY=0; LOAD=0; SUDO="sudo"
 while [ $# -gt 0 ]; do
   case "$1" in
     --room) ROOM="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
+    --mic-class) MIC_CLASS="${2:-}"; MIC_SET=1; shift $(( $# >= 2 ? 2 : 1 )) ;;
     --dry-run) DRY=1; shift ;;
     --load) LOAD=1; shift ;;
     --sudo) SUDO="$2"; shift 2 ;;
@@ -24,6 +25,17 @@ while [ $# -gt 0 ]; do
 done
 case "$ROOM" in ''|*[!a-z0-9-]*) echo "--room <slug> required (lowercase letters, digits, hyphen)" >&2; exit 2 ;; esac
 [ -z "$CONFIG" ] || [ -r "$CONFIG" ] || { echo "cannot read --config" >&2; exit 2; }
+# S2: --mic-class writes GUARDIAN_MIC_CLASS into the conf: the --config source (else the existing conf, else the stub) with any active GUARDIAN_MIC_CLASS line replaced.
+if [ "$MIC_SET" = 1 ]; then
+  case "$MIC_CLASS" in webcam|tonor) ;; *) echo "refusing: --mic-class must be webcam or tonor" >&2; exit 2 ;; esac
+  MC_BASE="$CONFIG"
+  if [ -z "$MC_BASE" ] && [ -f "$GUARDIAN_HOME/guardian.conf" ] && [ -r "$GUARDIAN_HOME/guardian.conf" ]; then MC_BASE="$GUARDIAN_HOME/guardian.conf"; fi
+  MC_TMP="$(mktemp)" || exit 1
+  if [ -n "$MC_BASE" ]; then cat "$MC_BASE" >"$MC_TMP"; else sed "s/<room-slug>/$ROOM/" "$SRC/guardian.conf.example" >"$MC_TMP"; fi
+  MC_OUT="$(mktemp)" || exit 1
+  { grep -v -E '^[[:space:]]*(export[[:space:]]+)?GUARDIAN_MIC_CLASS=' "$MC_TMP"; printf 'GUARDIAN_MIC_CLASS="%s"\n' "$MIC_CLASS"; } >"$MC_OUT"
+  rm -f "$MC_TMP"; CONFIG="$MC_OUT"
+fi
 # R12: guardian.conf is data, parsed by lib/conf.sh. Refuse a config the agent would reject (it would run killed), before anything is installed.
 if [ -n "$CONFIG" ]; then
   # R16: GUARDIAN_PIPE_SSH goes through `eval`, which strips one level of quotes, and OpenSSH splits UserKnownHostsFile / IdentityFile values on
@@ -210,4 +222,5 @@ if [ "$LOAD" -eq 1 ]; then
 else
   echo "agent NOT loaded. Load with: launchctl bootstrap gui/\$(id -u) \"$PLIST\"  (or re-run with --load)"
 fi
+[ -z "${MC_OUT:-}" ] || rm -f "$MC_OUT"
 echo "manual: sudoers NOPASSWD for $GUARDIAN_ROOT_HELPER only; Guardian starts in SHADOW; HEAL is set from the Mini."
