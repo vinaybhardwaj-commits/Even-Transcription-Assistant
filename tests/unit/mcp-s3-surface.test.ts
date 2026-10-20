@@ -65,7 +65,7 @@ const JOB_KIND_TOOLS = new Set(["scribe_job_submit", "scribe_job_status", "scrib
 /** scribe_health's `aspect` enum and prose grew by `routes` (S2L); nothing else about it may differ from main */
 const ASPECT_TOOLS = new Set(["scribe_health"]);
 /** tool -> the one optional property epic #23 added (hypotheses source, shadow-run timeline replay, diarize-spend engine). */
-const EPIC23_PROP: Record<string, string> = { scribe_encounter_hypotheses: "source", scribe_encounter_shadow_run: "timeline", scribe_diarize_spend: "engine" };
+const EPIC23_PROP: Record<string, string> = { scribe_encounter_hypotheses: "source", scribe_encounter_shadow_run: "timeline", scribe_diarize_spend: "engine", scribe_audit_recent: "actor" /* OAUTH-O3: the exact-actor filter */ };
 /** scribe_voice gained the `console` view (S6A) with its action / min_cosine arguments; nothing else about it may differ from main */
 const CONSOLE_TOOLS = new Set(["scribe_voice"]);
 /**
@@ -222,6 +222,13 @@ describe("S3.1 profile selection (S1A: one list for everyone)", () => {
         const added = " engine=nemotron (window_id only) reads the SHADOW Nemotron turns instead of production's; omit it for production.";
         expect(String(out.help)).toContain(added);
         expect(String(out.help).replace(added, ""), t.name).toBe(t.description);
+        continue;
+      }
+      if (t.name === "scribe_audit_recent") {
+        // OAUTH-O3: the readable-action list grew (mcp.rpc, mcp.denied, mcp.oauth_refused, admin.person_*) and one sentence names the `actor` filter; with both normalised the text is main's exactly
+        const norm = (x: string) => x.replace(/Limited to .*? Filter by/, "<ACTIONS> Filter by").replace(" actor is an exact actor-id match (e.g. person:<email>), not a search.", "");
+        expect(norm(String(out.help)), t.name).toBe(norm(t.description));
+        expect(String(out.help)).toContain("actor is an exact actor-id match");
         continue;
       }
       if (t.name === "scribe_encounter_shadow_run") {
@@ -447,7 +454,7 @@ describe("S3.3 the description diet, every listed tool (S1A)", () => {
     const { body } = await door("tools/list");
     const chars = JSON.stringify(body.result).length;
     console.log(`S1A full tools/list: ${chars} chars (~${Math.round(chars / 4)} tokens), ${(body.result as { tools: unknown[] }).tools.length} tools`);
-    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(46_892); // MEASURED 46,892 = CATALOG-13's 46,877 + 15 for the scribe_rubric sweep_status action (RUBRIC-SWEEP); CATALOG-13: 46,877 (+87 over 46,790: the explorer_link action, its date argument and the no_clip help; measured 46,790: 46,593 + CATALOG-7 197)
+    expect(chars, `tools/list is ${chars} chars`).toBeLessThanOrEqual(47_207); // OAUTH-PERSON: 47,207 (MEASURED; +315 over 46,892: the scribe_admin people actions and their schema, the scribe_audit_recent actor filter); before it: MEASURED 46,892 = CATALOG-13's 46,877 + 15 for the scribe_rubric sweep_status action (RUBRIC-SWEEP); CATALOG-13: 46,877 (+87 over 46,790: the explorer_link action, its date argument and the no_clip help; measured 46,790: 46,593 + CATALOG-7 197)
   });
 
   it("S6-DIET: tools/list with every description field removed is IDENTICAL to the REL2-R2 capture (CATALOG-1: the scribe_catalog tool; ADMIN-1: the scribe_admin tool; consult-reuse: scribe_sarvam force; S4: scribe_steward ticket views; main 7a66f27: the engine property of scribe_diarize_segments; epic #23 c: the nemotron_identity job kind; 0142: the pulse_doctor_voice job kind; TS-H13: the helper and commands views of scribe_kiosks; 0143: the nemotron_lab_run job kind; TS-H13: the helper and commands views of scribe_kiosks) (names, schemas, enums, defaults, bounds, required, annotations)", async () => {

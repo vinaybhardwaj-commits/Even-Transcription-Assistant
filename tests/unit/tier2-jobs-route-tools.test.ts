@@ -131,7 +131,7 @@ describe("scribe_audit_recent — the Slice A gap", () => {
   it("is a READ tool with no free-text argument at all", () => {
     const t = tool("scribe_audit_recent");
     expect(t.scope).toBe("read");
-    expect(Object.keys(t.inputSchema.properties as Row).sort()).toEqual(["action", "limit", "since"]);
+    expect(Object.keys(t.inputSchema.properties as Row).sort()).toEqual(["action", "actor", "limit", "since"]);
   });
 
   it("returns the stored rows, renamed but not reshaped", async () => {

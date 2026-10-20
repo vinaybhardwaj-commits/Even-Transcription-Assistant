@@ -51,8 +51,45 @@ export function safeArgs(args: unknown): Record<string, unknown> {
   return out;
 }
 
+// SPEC 18 Oct: a per-user audit row names the SUBJECT of a call by id only: consult_uid, room, date range, encounter/visit/session ids. Never an argument value beyond these, never text.
+// R3 A6: each key has its OWN strict pattern. A value that merely has no spaces (a name, a word) does not pass: prefixed ids need their prefix, a uid needs a digit, a slug ends in its 4-char token.
+const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*-[a-z0-9]{4}$/;
+const DATE = /^\d{4}-\d{2}-\d{2}(?:T[0-9:.]{1,16}(?:Z|[+-]\d{2}:\d{2})?)?$/;
+const SUBJECT_PATTERN: Record<string, RegExp> = {
+  consult_uid: /^(?=.*\d)[A-Za-z0-9_-]{6,64}$/,
+  room_id: /^[a-z]{2,6}_[A-Za-z0-9]{3,40}$/,
+  room_slug: SLUG, room: SLUG,
+  ist_date: DATE, since: DATE,
+  encounter_id: /^enc_[A-Za-z0-9]{6,40}$/, visit_id: /^vis_[A-Za-z0-9]{6,40}$/, session_id: /^bs_[A-Za-z0-9_-]{4,60}$/,
+  // the REAL window id (lib/bench-window.ts): bw_<session suffix>_<start_ms>_<source_mic>, cut to 128. A name has no `_<13 digit ms>_<mic>` tail.
+  window_id: /^bw_[A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*_\d{10,14}_[A-Za-z0-9-]{1,24}$/,
+};
+const SUBJECT_KEYS = [...Object.keys(SUBJECT_PATTERN), "start", "end"] as const;
+
+/** Subject ids of a call: a fixed key list, values that look like ids (no spaces, no free text) or finite numbers. Anything else is dropped. */
+export function subjectIds(args: unknown): Record<string, string | number> {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) return {};
+  const a = args as Record<string, unknown>;
+  const out: Record<string, string | number> = {};
+  for (const k of SUBJECT_KEYS) {
+    const v = a[k];
+    if (typeof v === "string" && v.length <= 128 && (SUBJECT_PATTERN[k]?.test(v) ?? DATE.test(v))) out[k] = v; // start/end: a date, or (below) a number
+    else if (typeof v === "number" && Number.isFinite(v) && (k === "start" || k === "end")) out[k] = v;
+  }
+  return out;
+}
+
 /** S0.3 — why a call was not ok: the handler threw, or it answered `{error}` / `{degraded:true}`. */
-export type ErrKind = "throw" | "result_error" | null;
+export type ErrKind = "throw" | "result_error" | "refused" | null;
+
+/** OAUTH-O3: argument NAMES only (never values), sanitised and bounded, for the per-person row. */
+export function argKeys(args: unknown): string[] {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) return [];
+  return Object.keys(args as Record<string, unknown>).filter((k) => /^[A-Za-z0-9_]{1,40}$/.test(k)).slice(0, 30).sort();
+}
+
+/** The extra fields of a per-user row: `email`/`key_id`/`door` are set when SCRIBE_MCP_IDENTITY is on (static-key users and OAuth sessions alike). */
+export type PersonAuditFields = { session_id: string | null; method?: string; bytes_out?: number | null; email?: string; key_id?: string; door?: string };
 
 export async function auditToolCall(input: {
   tool: string;
@@ -69,7 +106,14 @@ export async function auditToolCall(input: {
   variant?: string | null;
   /** S0.3 — 'throw' | 'result_error' | null (ok). Stored in metadata_json.err_kind. */
   errKind?: ErrKind;
-}): Promise<void> {
+  /**
+   * OAUTH-O3 — set ONLY for an OAuth person principal (spec §12). The row is then actor_type 'person', actor_id `person:<email>` (the `actor` above), and its metadata is
+   * {session_id (the token FAMILY id, never a token), arg_keys, args (SAFE_ARG_KEYS only), ok, err_kind, bytes_out, ms, client_ip}. `method` names a non-tools/call JSON-RPC method
+   * (initialize, tools/list, ...): the action is then mcp.rpc and the target is the method name, or "unknown" for a method outside the known list.
+   */
+  person?: PersonAuditFields;
+}): Promise<boolean> {
+  if (input.person) return auditPersonRow(input, input.person);
   const meta = { args: safeArgs(input.args), ok: input.ok, ms: input.ms, ...(input.variant ? { variant: input.variant } : {}), err_kind: input.errKind ?? null };
   try {
     await sql`
@@ -77,8 +121,47 @@ export async function auditToolCall(input: {
       VALUES ('system', ${mcpActorId(input.actor)}, 'mcp.tools/call', 'mcp_tool', ${input.tool},
               ${JSON.stringify(meta)}::jsonb, ${input.ip ?? null}::inet, ${input.userAgent ? input.userAgent.slice(0, 256) : null})
     `;
+    return true;
   } catch (e) {
     console.warn("[mcp-audit] audit_log insert failed (console fallback)", JSON.stringify({ tool: input.tool, ...meta, err: String((e as Error)?.message ?? e).slice(0, 160) }));
+    return false;
+  }
+}
+
+const KNOWN_METHOD = /^(initialize|ping|tools\/list|tools\/call|notifications\/[a-z_]{1,40}(\/[a-z_]{1,40})?|parse_error|invalid_request)$/;
+
+async function auditPersonRow(
+  input: { tool: string; args: unknown; ok: boolean; ms: number; ip?: string | null; userAgent?: string | null; actor?: string | null; variant?: string | null; errKind?: ErrKind },
+  person: PersonAuditFields,
+): Promise<boolean> {
+  const isCall = !person.method;
+  const meta = {
+    ...(person.email ? { email: person.email } : {}),
+    ...(person.key_id ? { key_id: person.key_id } : {}),
+    ...(person.door ? { door: person.door } : {}),
+    session_id: person.session_id,
+    arg_keys: argKeys(input.args),
+    subject: subjectIds(input.args),
+    outcome: input.ok ? "ok" : input.errKind === "refused" ? "refused" : "error",
+    ok: input.ok,
+    err_kind: input.errKind ?? null,
+    bytes_out: person.bytes_out ?? null,
+    ms: input.ms,
+    client_ip: input.ip ?? null,
+    ...(input.variant ? { variant: input.variant } : {}),
+  };
+  // the target is never a client-chosen string: a registered tool name (the handler maps others to "unknown") or one of the known method names
+  const target = isCall ? input.tool : KNOWN_METHOD.test(person.method ?? "") ? (person.method as string) : "unknown";
+  try {
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json, ip, user_agent)
+      VALUES ('person', ${mcpActorId(input.actor)}, ${isCall ? "mcp.tools/call" : "mcp.rpc"}, ${isCall ? "mcp_tool" : "mcp_method"}, ${target},
+              ${JSON.stringify(meta)}::jsonb, ${input.ip ?? null}::inet, ${input.userAgent ? input.userAgent.slice(0, 256) : null})
+    `;
+    return true;
+  } catch (e) {
+    console.error("[mcp-audit] PERSON audit_log insert FAILED", JSON.stringify({ target, session_id: person.session_id, door: person.door ?? null })); // no error text: a driver error can echo row values
+    return false;
   }
 }
 
@@ -106,5 +189,119 @@ export async function auditDeniedCall(prefix: string, now: number = Date.now()):
   return true;
 }
 
+/**
+ * OAUTH-O3 (spec §12): a call with a revoked, expired, wrong-resource or inactive-person token. Action mcp.denied; actor `person:<email>` (actor_type 'person') because the token mapped to one.
+ * Reason code only in the metadata; never the token, its hash or a URL. At most one row per subject per minute (in memory per instance). Awaited by the caller, never void.
+ */
+/** Past 1000 entries, drops the aged ones, but KEEPS any that still carry a suppressed count (the next row of that key reports it, R5 ADV10); past 10000 even those go (memory bound). */
+function sweepAged(m: Map<string, { t: number; suppressed: number }>, now: number): void {
+  if (m.size <= 1000) return;
+  const hard = m.size > 10_000;
+  for (const [k, v] of m) if (now - v.t >= DENIED_AUDIT_EVERY_MS && (hard || v.suppressed === 0)) m.delete(k);
+}
+const personDeniedLast = new Map<string, { t: number; suppressed: number }>();
+export async function auditPersonDenied(email: string, reason: "expired" | "revoked" | "inactive" | "resource", now: number = Date.now()): Promise<boolean> {
+  const actor = `person:${email}`;
+  const last = personDeniedLast.get(actor);
+  if (last !== undefined && now - last.t < DENIED_AUDIT_EVERY_MS) { last.suppressed += 1; return false; } // counted into the next row
+  const suppressed = last?.suppressed ?? 0;
+  personDeniedLast.set(actor, { t: now, suppressed: 0 });
+  sweepAged(personDeniedLast, now);
+  try {
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+      VALUES ('person', ${actor.slice(0, 261)}, 'mcp.denied', 'mcp_auth', 'bearer', ${JSON.stringify({ ok: false, err_kind: "denied", reason, ...(suppressed > 0 ? { suppressed } : {}) })}::jsonb)
+    `;
+  } catch (e) {
+    console.error("[mcp-audit] person-denied audit insert failed", String((e as Error)?.message ?? e).slice(0, 120));
+  }
+  return true;
+}
+
+/**
+ * OAUTH-O2 (spec §12): one audit row for a refused sign-in. actor `person:<email>` when the address is a real even.in one (or the email-code row names it), else `unknown`; action `mcp.oauth_refused`; metadata is the reason
+ * code only (never a token, a code, an emailed sign-in code or an URL). At most one row per subject and reason per minute (in memory per instance); the refusals dropped in between are COUNTED into the next row as `suppressed`. Best-effort like every audit write.
+ */
+const refusedLast = new Map<string, { t: number; suppressed: number }>();
+export async function auditOauthRefused(subjectEmail: string | null, reason: string, now: number = Date.now()): Promise<boolean> {
+  const email = subjectEmail && /^[^\s@]{1,64}@[^\s@]{1,190}$/.test(subjectEmail) ? subjectEmail.toLowerCase() : null;
+  const actor = email ? `person:${email}` : "unknown";
+  const code = /^[a-z0-9_]{1,40}$/.test(reason) ? reason : "other";
+  const key = `${actor}|${code}`; // a different reason is its own row (R4)
+  const last = refusedLast.get(key);
+  if (last !== undefined && now - last.t < DENIED_AUDIT_EVERY_MS) { last.suppressed += 1; return false; } // not written, but COUNTED into the next row of this key
+  const suppressed = last?.suppressed ?? 0;
+  refusedLast.set(key, { t: now, suppressed: 0 });
+  sweepAged(refusedLast, now);
+  try {
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+      VALUES ('system', ${actor}, 'mcp.oauth_refused', 'mcp_auth', 'oauth', ${JSON.stringify({ ok: false, reason: code, ...(suppressed > 0 ? { suppressed } : {}) })}::jsonb)
+    `;
+  } catch (e) {
+    console.warn("[mcp-audit] oauth-refusal audit insert failed", String((e as Error)?.message ?? e).slice(0, 120));
+  }
+  return true;
+}
+
+/**
+ * R2 F2: one audit row for a sign-in the person ALLOWED on the consent page: actor `person:<email>`, action `mcp.oauth_granted`, metadata the client host (a metadata-document client) or the
+ * sha256 of the client_id (a registered one) and the redirect host. Never a code, a token or a full URL. Not rate-limited; best-effort like every audit write, but awaited.
+ */
+export async function auditOauthGranted(email: string, client: { client_host: string } | { client_sha256: string }, redirectHost: string): Promise<void> {
+  const actor = /^[^\s@]{1,64}@[^\s@]{1,190}$/.test(email) ? `person:${email.toLowerCase()}` : "unknown";
+  try {
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+      VALUES ('system', ${actor}, 'mcp.oauth_granted', 'mcp_auth', 'oauth', ${JSON.stringify({ ok: true, ...client, redirect_host: redirectHost.slice(0, 260) })}::jsonb)
+    `;
+  } catch (e) {
+    console.warn("[mcp-audit] oauth-grant audit insert failed", String((e as Error)?.message ?? e).slice(0, 120));
+  }
+}
+
 /** test seam */
-export function resetDeniedAuditForTests(): void { deniedLast.clear(); }
+export function resetDeniedAuditForTests(): void { identityRefusedLast.clear(); deniedLast.clear(); refusedLast.clear(); personDeniedLast.clear(); }
+
+/**
+ * OWNER SECURITY LOG (spec 18 Oct, V's exemption): V's own calls write ONLY (ts, key_id, tool, outcome) to mcp_owner_seclog. No email, no subject ids, no args, no ip, no user agent.
+ * It exists so a stolen V key shows up; it records nothing about what V looked at. Best-effort: V is never locked out by a logging fault (the failure is logged count-only).
+ */
+export async function logOwnerCall(keyId: string, tool: string, outcome: "ok" | "error" | "refused"): Promise<boolean> {
+  const t = /^[A-Za-z0-9_./:-]{1,64}$/.test(tool) ? tool : "unknown";
+  try {
+    await sql`INSERT INTO mcp_owner_seclog (key_id, tool, outcome) VALUES (${keyId.slice(0, 64)}, ${t}, ${outcome})`;
+    return true;
+  } catch {
+    console.error("[mcp-seclog] insert failed (count=1)");
+    return false;
+  }
+}
+
+const identityRefusedLast = new Map<string, { t: number; suppressed: number }>();
+/**
+ * A call (or sign-in) whose key resolved to no active email: audit_log row action mcp.refused, actor `person:<email>` when the key is known to an address, else `unknown:<first 8 hex of the key hash>`.
+ * Reason code, door and key id only. At most one row per subject, reason and door per 10 s (in memory per instance) so a looping client cannot flood the table; the refusals dropped in between are COUNTED into the next row as `suppressed`. Awaited; the caller refuses either way.
+ */
+export async function auditIdentityRefused(subject: { email?: string | null; key_id?: string | null; hash8?: string | null }, reason: string, door: string, now: number = Date.now()): Promise<boolean> {
+  const actor = subject.email ? `person:${subject.email}`.slice(0, 261) : `unknown:${(subject.hash8 ?? "").slice(0, 8)}`;
+  const key = `${actor}|${reason}|${door}`; // per DOOR: the same dead key on a second door is its own row (R3 A4)
+  const last = identityRefusedLast.get(key);
+  if (last !== undefined && now - last.t < 10_000) {
+    last.suppressed += 1; // counted, and written into the next row of this key
+    return false;
+  }
+  const suppressed = last?.suppressed ?? 0;
+  identityRefusedLast.set(key, { t: now, suppressed: 0 });
+  if (identityRefusedLast.size > 1000) for (const [k, v] of identityRefusedLast) if (now - v.t >= 10_000) identityRefusedLast.delete(k);
+  try {
+    await sql`
+      INSERT INTO audit_log (actor_type, actor_id, action, target_type, target_id, metadata_json)
+      VALUES ('person', ${actor}, 'mcp.refused', 'mcp_auth', ${door.slice(0, 32)}, ${JSON.stringify({ ok: false, outcome: "refused", err_kind: "refused", reason, door, ...(suppressed > 0 ? { suppressed } : {}), ...(subject.key_id ? { key_id: subject.key_id } : {}), ...(subject.email ? { email: subject.email } : {}) })}::jsonb)
+    `;
+    return true;
+  } catch {
+    console.error("[mcp-audit] refusal audit insert failed (count=1)");
+    return false;
+  }
+}

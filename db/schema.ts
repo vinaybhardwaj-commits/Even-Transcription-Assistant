@@ -533,3 +533,62 @@ export const etaEncounterWindows = pgTable("eta_encounter_windows", {
   byOpen:       index("eta_encounter_windows_open_idx").on(t.tOpen),
   byWhUnchecked: index("eta_encounter_windows_wh_unchecked_idx").on(t.tOpen).where(sql`warehouse_checked_at IS NULL`),
 }));
+
+// MCP OAuth (migration 0170_mcp_oauth, slice O2). Hashes are sha256(pepper || value). Value sets are CHECKs in SQL.
+export const mcpPerson = pgTable("mcp_person", {
+  email:     text("email").primaryKey(),                     // lowercase (CHECK)
+  scopes:    text("scopes").array().notNull(),
+  status:    text("status").notNull().default("active"),     // active | revoked
+  grantedBy: text("granted_by"),
+  grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  revokedBy: text("revoked_by"),
+});
+
+export const mcpOauthClient = pgTable("mcp_oauth_client", {
+  clientId:     text("client_id").primaryKey(),
+  kind:         text("kind").notNull(),                      // cimd | dcr
+  redirectUris: text("redirect_uris").array().notNull(),
+  metadataUrl:  text("metadata_url"),
+  clientName:   text("client_name"),
+  createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),   // for cimd: when the document was last fetched
+  lastUsedAt:   timestamp("last_used_at", { withTimezone: true }),
+});
+
+export const mcpOauthCode = pgTable("mcp_oauth_code", {
+  codeHash:      text("code_hash").primaryKey(),
+  clientId:      text("client_id").notNull(),
+  email:         text("email").notNull(),
+  codeChallenge: text("code_challenge").notNull(),
+  redirectUri:   text("redirect_uri").notNull(),
+  resource:      text("resource").notNull(),
+  scopes:        text("scopes").array().notNull(),
+  expiresAt:     timestamp("expires_at", { withTimezone: true }).notNull(),
+  usedAt:        timestamp("used_at", { withTimezone: true }),
+}, (t) => ({
+  byExpires: index("mcp_oauth_code_expires_idx").on(t.expiresAt),
+}));
+
+export const mcpOauthToken = pgTable("mcp_oauth_token", {
+  tokenHash: text("token_hash").primaryKey(),
+  kind:      text("kind").notNull(),                         // access | refresh
+  email:     text("email").notNull(),
+  clientId:  text("client_id").notNull(),
+  scopes:    text("scopes").array().notNull(),
+  resource:  text("resource").notNull(),
+  familyId:  text("family_id").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  rotatedTo: text("rotated_to"),
+}, (t) => ({
+  byEmail:  index("mcp_oauth_token_email_idx").on(t.email),
+  byFamily: index("mcp_oauth_token_family_idx").on(t.familyId),
+}));
+
+// FAMILY TOMBSTONE (O2-FIX1): a row means the token family is revoked and nothing more may be issued into it.
+export const mcpOauthFamily = pgTable("mcp_oauth_family", {
+  familyId:  text("family_id").primaryKey(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }).notNull().defaultNow(),
+  reason:    text("reason"),
+});

@@ -37,6 +37,10 @@ export type ToolArgs = Record<string, unknown>;
 export type ToolContext = {
   origin: string;
   actor: string;
+  /** R3 F1: V (the owner) may read the governance audit; everyone else, admin included, reads only their OWN person rows with subject ids stripped. */
+  owner?: boolean;
+  /** The caller's own address when the key or session resolves to one (identity on, or an OAuth person). */
+  email?: string | null;
   /** The caller's scopes. A tool whose OPTIONS differ by scope (scribe_job_status's include_urls,
    *  scribe_job_submit's per-kind check) reads this; the tool's own scope is still checked first
    *  by the handler, so this narrows within a tool, it never widens access to one. */

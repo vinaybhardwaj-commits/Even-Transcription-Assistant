@@ -227,24 +227,29 @@ const cancel: McpTool = {
  */
 const auditRecent: McpTool = {
   name: "scribe_audit_recent",
-  description: `Recent audit_log rows, newest first: action, actor, target and the stored metadata. ${AUDIT_ACTIONS_HINT} Filter by action and/or a since time. Metadata is returned AS STORED — the writers already restrict it to ids, counts and flags — and no free-text field is exposed: there is no query argument and no message body. Read-only.`,
+  description: `Recent audit_log rows, newest first: action, actor, target and the stored metadata. ${AUDIT_ACTIONS_HINT} Filter by action and/or a since time. Metadata is returned AS STORED — the writers already restrict it to ids, counts and flags — and no free-text field is exposed: there is no query argument and no message body. actor is an exact actor-id match (e.g. person:<email>), not a search. Read-only.`,
   scope: "read",
   inputSchema: {
     type: "object",
     properties: {
       action: { type: "string", description: "exact action, e.g. install.poll_write_failed" },
+      actor: { type: "string", description: "exact actor id, e.g. person:<email>" },
       since: { type: "string", description: "ISO time; defaults to the last 24 hours" },
       limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
     },
     additionalProperties: false,
   },
-  handler: async (args: ToolArgs) =>
+  handler: async (args: ToolArgs, ctx: ToolContext) =>
     failSafe({ rows: [] as unknown[] }, async () => {
       const since = argStr(args, "since", 40);
+      // a filter that cannot be applied must not silently widen to every actor
+      if (args.actor !== undefined && args.actor !== null && argStr(args, "actor", 261) === null) return { rows: [], error: "bad_actor" };
       return readRecentAudit({
         action: argStr(args, "action", 64),
+        actor: argStr(args, "actor", 261),
         since: since && Number.isFinite(Date.parse(since)) ? new Date(Date.parse(since)).toISOString() : null,
         limit: argInt(args, "limit", 50, 1, 200),
+        viewer: { owner: ctx.owner === true, email: ctx.email ?? null },
       });
     }),
 };

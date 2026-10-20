@@ -22,7 +22,8 @@
  * same fields. Do not add logging here without keeping that true.
  */
 import { NextRequest } from "next/server";
-import { checkPathKey, optionsResponse, withCors } from "@/lib/mcp/doors";
+import { authenticateDoor } from "@/lib/mcp/door-auth";
+import { optionsResponse, withCors } from "@/lib/mcp/doors";
 import { handleMcpRpc, mcpAuthFailureResponse, mcpMethodNotAllowedResponse } from "@/lib/mcp/handler";
 
 export const runtime = "nodejs";
@@ -40,7 +41,7 @@ export async function GET() {
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ key: string }> }) {
   const { key } = await ctx.params;
-  const auth = checkPathKey(typeof key === "string" ? key : "");
+  const auth = await authenticateDoor(req, "path", { pathKey: typeof key === "string" ? key : "" });
   if (!auth.ok) return withCors(mcpAuthFailureResponse(auth.failure));
   return withCors(await handleMcpRpc(req, auth.principal));
 }

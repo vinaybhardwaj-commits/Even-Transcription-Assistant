@@ -9,7 +9,7 @@
  * only a URL). One handler, two doors: they cannot drift apart in what they expose.
  */
 import { NextRequest } from "next/server";
-import { checkMcpBearer } from "@/lib/mcp/auth";
+import { authenticateDoor } from "@/lib/mcp/door-auth";
 import { optionsResponse } from "@/lib/mcp/doors";
 import { handleMcpRpc, mcpAuthFailureResponse, mcpMethodNotAllowedResponse } from "@/lib/mcp/handler";
 
@@ -29,7 +29,7 @@ export async function OPTIONS() {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = checkMcpBearer(req);
-  if (!auth.ok) return mcpAuthFailureResponse(auth.failure);
+  const auth = await authenticateDoor(req, "header");
+  if (!auth.ok) return mcpAuthFailureResponse(auth.failure, { challenge: true });
   return handleMcpRpc(req, auth.principal);
 }

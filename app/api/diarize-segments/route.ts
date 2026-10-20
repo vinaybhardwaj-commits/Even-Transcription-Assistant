@@ -12,7 +12,8 @@
  * only: no transcript text, no embedding, no stored label or name.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { checkMcpBearer } from "@/lib/mcp/auth";
+import { authenticateDoor } from "@/lib/mcp/door-auth";
+import { auditDoorCall } from "@/lib/mcp/door-audit";
 import { mcpAuthFailureResponse } from "@/lib/mcp/handler";
 import { lookupSegments } from "@/lib/diarize-segments";
 
@@ -22,12 +23,19 @@ export const dynamic = "force-dynamic";
 const NO_STORE = { "cache-control": "no-store" };
 
 export async function GET(req: NextRequest) {
-  const auth = checkMcpBearer(req);
+  const auth = await authenticateDoor(req, "diarize");
   if (!auth.ok) return mcpAuthFailureResponse(auth.failure);
+  const t0 = Date.now();
+  const p = req.nextUrl.searchParams;
+  const ids = { encounter_id: p.get("encounter_id"), window_id: p.get("window_id"), session_id: p.get("session_id") };
+  const ip = (req.headers.get("x-forwarded-for") ?? "").split(",")[0]?.trim() || null;
+  const audited = async (ok: boolean, refused = false): Promise<boolean> =>
+    auditDoorCall(auth.principal, { tool: "diarize_segments", args: ids, ok, refused, ms: Date.now() - t0, ip: ip && /^[0-9a-f:.]+$/i.test(ip) ? ip : null, userAgent: req.headers.get("user-agent") });
+  const auditDown = () => NextResponse.json({ ok: false, error: "audit_unavailable" }, { status: 503, headers: NO_STORE });
   if (!auth.principal.scopes.has("read")) {
+    if (!(await audited(false, true))) return auditDown();
     return NextResponse.json({ ok: false, error: "scope_or_tool_unavailable", needs: "read" }, { status: 403, headers: NO_STORE });
   }
-  const p = req.nextUrl.searchParams;
   try {
     const r = await lookupSegments({
       encounter_id: p.get("encounter_id"),
@@ -36,9 +44,11 @@ export async function GET(req: NextRequest) {
       limit: p.get("limit") === null ? null : Number(p.get("limit")),
       engine: p.get("engine"),
     });
+    if (!(await audited(r.ok))) return auditDown(); // data is never returned without its row
     if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: r.status, headers: NO_STORE });
     return NextResponse.json({ ok: true, ...r.payload }, { headers: NO_STORE });
   } catch (e) {
+    if (!(await audited(false))) return auditDown();
     console.error("[diarize-segments] read failed:", e instanceof Error ? e.message : String(e));
     return NextResponse.json({ ok: false, error: "read_failed" }, { status: 500, headers: NO_STORE });
   }
