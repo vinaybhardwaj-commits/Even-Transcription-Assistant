@@ -198,7 +198,7 @@ NEMO = dict(window_id="bw_abcd2345_1790000000000_primary", room_day_id="rd_abcd2
 
 def test_nemotron_window_poster_maps_a_window_row(tmp_path):
     f = write(tmp_path, [NEMO, NEMO | {"audio_ms": 600000}, NEMO | {"window_id": "bw_abcd2345_1790000900000_backup", "status": "empty", "start_ms": 1790000900000},
-                         NEMO | {"window_id": "bw_abcd2345_1790001800000_primary", "status": "failed", "audio_ms": 0},
+                         NEMO | {"window_id": "bw_abcd2345_1790001800000_primary", "status": "failed", "audio_ms": 5000},
                          NEMO | {"window_id": "bw_abcd2345_1790002700000_primary", "audio_ms": 0}, NEMO | {"window_id": None}])
     sigs, counts = P.build(f, "nemotron_window", "o")
     assert counts["signals"] == 2 and counts["skipped"] == 3 and counts["refused"] == 0   # latest row per window; failed / no-audio / no id skipped
