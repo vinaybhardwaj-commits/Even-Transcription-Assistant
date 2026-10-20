@@ -7,9 +7,12 @@
 -- SHADOW. spine_config has no seed rows: a missing or malformed value means off.
 --
 -- FLAGS. spine_encounter.flags holds the merge flags, so an ambiguous encounter can be excluded from FreeScript (R1) and queried. The CHECK set equals every string
---   lib/spine/merge.ts can emit on origin/spine/s2-merge, plus covered_by_pulse (S2 R4):
---   multi_machine (merge.ts:332), pulse_overlap (:336-337), clamped (:319), clamp_failed (:322), ambiguous (:326); covered_by_pulse is not emitted yet.
---   The set is only ever emitted via flags.get(g).add(...) at those lines, then sorted into flags[] (:425, :443); the passthrough at :459 is [].
+--   lib/spine/merge.ts can emit on origin/spine/s2-merge (83c41733), plus enc_conflict (S2 R5, ruled, not yet emitted). Each flag with its line:
+--   clamped (:352), clamp_failed (:355), ambiguous (:359), multi_machine (:365, :367), covered_by_pulse (:374), pulse_overlap (:379, :380),
+--   frozen (:485, emitted via the alias `fl = flags.get(g)`; the output sorts it into flags[] at :489 and :507). The passthrough at :524 is [].
+--   enc_conflict: fable ruling 20 Oct 13:40 (S2 R5 item 2): a shared pulse_enc_id that fails the machine/overlap guard flags BOTH encounters.
+--   The CHECK also requires a 1-D array (a nested '{{ambiguous}}' passes <@ but is refused by array_ndims).
+--   spine_link.key_kind also admits pulse_enc_id (fable M2 ruling; merge.ts MATCH_KINDS :51).
 --
 --   READERS: the GIN index serves `flags @> ARRAY['ambiguous']` (and &&), NOT `'ambiguous' = ANY(flags)`, which measured a Seq Scan on 10k rows. Use @>.
 --
@@ -53,7 +56,7 @@ CREATE TABLE IF NOT EXISTS spine_encounter (
   merge_version  text        NOT NULL,
   reason         text,
   flags          text[]      NOT NULL DEFAULT '{}'
-    CONSTRAINT spine_encounter_flags_chk CHECK (flags <@ ARRAY['ambiguous','multi_machine','pulse_overlap','clamped','clamp_failed','covered_by_pulse']::text[]),
+    CONSTRAINT spine_encounter_flags_chk CHECK (flags <@ ARRAY['ambiguous','multi_machine','pulse_overlap','clamped','clamp_failed','covered_by_pulse','frozen','enc_conflict']::text[] AND (array_ndims(flags) IS NULL OR array_ndims(flags) = 1)),
   created_at     timestamptz NOT NULL DEFAULT now(),
   updated_at     timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT spine_encounter_close_chk CHECK (t_close IS NULL OR t_close >= t_open)
@@ -63,7 +66,7 @@ CREATE INDEX IF NOT EXISTS spine_encounter_flags_idx ON spine_encounter USING gi
 
 CREATE TABLE IF NOT EXISTS spine_link (
   encounter_id text        NOT NULL REFERENCES spine_encounter (encounter_id),
-  key_kind     text        NOT NULL CONSTRAINT spine_link_kind_chk CHECK (key_kind IN ('consult_uid','consult_key','pqm_uid','window_id','caa_uid','buddy_opaque')),
+  key_kind     text        NOT NULL CONSTRAINT spine_link_kind_chk CHECK (key_kind IN ('consult_uid','consult_key','pqm_uid','window_id','caa_uid','buddy_opaque','pulse_enc_id')),
   value        text        NOT NULL,
   basis        text        NOT NULL CONSTRAINT spine_link_basis_chk CHECK (basis IN ('exact','overlap','merge')),
   active       boolean     NOT NULL DEFAULT true,
