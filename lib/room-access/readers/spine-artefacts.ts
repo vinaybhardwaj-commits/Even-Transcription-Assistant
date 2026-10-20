@@ -19,7 +19,7 @@ export type RoomSource = "reb_track_index" | "diarize_nemotron_window" | "encoun
 export const ROOM_SOURCES: readonly RoomSource[] = ["reb_track_index", "diarize_nemotron_window", "encounter_catalog"];
 
 /** SQL: is the (IST date, room) pair given by these two expressions in the held-out set ($2 text[] of 'YYYY-MM-DD|room' keys, from blindParams)? Never NULL: an unknown pair is not in the set. */
-export const blindDaySql = (day: string, room: string): string => `COALESCE((${day}::text || '|' || ${room}) = ANY($2::text[]), false)`;
+export const blindDaySql = (day: string, room: string): string => `COALESCE((to_char(${day}, 'YYYY-MM-DD') || '|' || ${room}) = ANY($2::text[]), false)`;
 const SCRATCH_PREFIX = "room_scratch_";
 const REAL_PREFIX = "room_";
 /**
