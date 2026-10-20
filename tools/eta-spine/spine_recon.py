@@ -25,7 +25,7 @@ import argparse, collections, datetime as dt, json, os, re, sys
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 CODE = re.compile(r"^[a-z0-9_:\-]{1,40}$")
 DIGITS8 = re.compile(r"[0-9]{8}")
-SEPARATORS = re.compile(r"[-. ()+]")
+SEPARATORS = re.compile(r"[-. ()+_:]")
 ENC_ID = re.compile(r"^enc_[a-z0-9]{1,40}$")
 TZ_NAMES = {"asia/kolkata": IST, "utc": dt.timezone.utc}
 FLAGS = ("ambiguous", "multi_machine", "pulse_overlap", "clamped", "clamp_failed", "covered_by_pulse")
@@ -59,6 +59,8 @@ def read_json(path, what):
 
 def ist_date_of(v, default_tz=None):
     """IST date of an instant. A naive instant is read in default_tz, and is None (undated) when there is none."""
+    if not re.search(r"[T ]\d{2}", str(v)):  # no time part: a date alone is not an instant
+        return None
     try:
         t = dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
     except ValueError:
@@ -94,10 +96,11 @@ def load_ledger(path, date):
             lines = [x.strip() for x in fh]
     except OSError as e:
         raise BrokenInput(f"ledger: {type(e).__name__}")
-    tz, rows = None, []
+    tz, rows, first = None, [], True
     for raw in lines:
         if not raw:
             continue
+        is_first, first = first, False
         try:
             r = json.loads(raw)
         except ValueError:
@@ -105,7 +108,7 @@ def load_ledger(path, date):
             continue
         if isinstance(r, dict) and "tz" in r and not r.get("consult_uid"):
             z = TZ_NAMES.get(str(r["tz"]).strip().lower())
-            if z is None:
+            if z is None or not is_first:  # one header, first non-blank line only; a late or second one is bad
                 bad += 1
             else:
                 tz = z
@@ -325,7 +328,11 @@ def main(argv=None, client=None):
         print(f"BROKEN INPUT: unexpected {type(e).__name__}", file=sys.stderr)
         return 2
     body = json.dumps(rep, indent=1, sort_keys=True) + "\n"
-    write_atomic(a.out, body)
+    try:
+        write_atomic(a.out, body)
+    except OSError as e:
+        print(f"BROKEN OUTPUT: {type(e).__name__}", file=sys.stderr)
+        return 2
     print(f"{a.date}: gate={rep['gate']} ledger_uids={rep['ledger_uids']} mapped={rep['mapped_to_one_confirmed']} diffs={sum(rep['diffs'].values())} extras={rep['extras_total']}")
     if a.upload:
         try:

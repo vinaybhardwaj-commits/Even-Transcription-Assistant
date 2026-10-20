@@ -90,7 +90,7 @@ def test_header_utc_does_not_make_bare_date_ist(tmp_path):
     rc, r = run(tmp_path, [{"tz": "UTC"}, dict(consult_uid="uid_test_01", date=D, stage="sarvam", state="done")], OK)
     assert rc == 1 and r["ledger_undated_lines"] == 1
 def test_header_anywhere_and_unknown_tz_is_bad(tmp_path):
-    rc, r = run(tmp_path, [dict(L1, ts="2026-10-19T10:00:00"), {"tz": "Asia/Kolkata"}], OK); assert rc == 0
+    rc, r = run(tmp_path, [dict(L1, ts="2026-10-19T10:00:00"), {"tz": "Asia/Kolkata"}], OK); assert rc == 1 and r["ledger_bad_lines"] == 1  # R4: a late header is bad
     rc, r = run(tmp_path, [{"tz": "Mars/Base"}, L1], OK); assert rc == 1 and r["ledger_bad_lines"] == 1
 def test_g2_redacted_id_counted_and_clean_id_kept(tmp_path):
     bad = "enc_" + "9" * 11
