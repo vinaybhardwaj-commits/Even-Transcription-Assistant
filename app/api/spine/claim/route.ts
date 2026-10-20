@@ -1,11 +1,12 @@
 /**
  * POST /api/spine/claim — the box runner takes spine jobs. Bearer (SPINE_BEARER_TOKEN). Body {owner, limit?, live?}.
  * Returns {ok, jobs:[...]} — EMPTY when spine_config jobs is off, the kill switch is on, a stage is off (paid stages always are), or the stage's breaker is open.
- * live=true only returns jobs of stages whose mode is live; a non-live claim only returns jobs of SHADOW stages. Each job carries its stage mode.
+ * live=true never returns K-lane (acoustics, nemotron) jobs from :20 to :45 IST (lib/spine/window.ts). live=true only returns jobs of stages whose mode is live, each with its consult_uid link (null when none; a would_run claim never sees it); a non-live claim only returns jobs of SHADOW stages. Each job carries its stage mode.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { checkSpineBearer } from "@/lib/spine/auth";
 import { KNOWN_STAGES, readMode, readModes } from "@/lib/spine/config";
+import { K_LANE_STAGES, kLaneBlockedNow } from "@/lib/spine/window";
 import { claimJobs, openBreakers, reapExhausted, opsAlertNotifier, stubNotifier } from "@/lib/spine/jobs";
 
 export const runtime = "nodejs";
@@ -27,10 +28,11 @@ export async function POST(req: NextRequest) {
     const want = body.live === true ? "live" : "shadow";   // a non-live (would_run) claim never takes a live-mode stage: it would consume the job as shadow
     const allowed = KNOWN_STAGES.filter((s) => modes.stages[s] === want);
     const open = new Set(await openBreakers(allowed, now));
-    const stages = allowed.filter((s) => !open.has(s));
+    const gap = want === "live" && kLaneBlockedNow(now);   // the box refuses K lanes in the hourly window: do not hand them out (a refusal would only bounce)
+    const stages = allowed.filter((s) => !open.has(s) && !(gap && K_LANE_STAGES.includes(s)));
     const notifier = (await readMode("dead_alert")) === "live" ? opsAlertNotifier : stubNotifier;
     await reapExhausted(now, notifier);
-    const jobs = await claimJobs(body.owner, stages, limit, now);
+    const jobs = await claimJobs(body.owner, stages, limit, now, undefined, want === "live");
     return NextResponse.json({ ok: true, jobs: jobs.map((j) => ({ ...j, mode: modes.stages[j.stage] })) });
   } catch (e) {
     return NextResponse.json({ ok: false, error: `db:${(e as { code?: string }).code ?? "unknown"}` }, { status: 503 });
