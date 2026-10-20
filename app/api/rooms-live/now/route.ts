@@ -7,11 +7,13 @@ import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { roomsLiveGuard } from "@/lib/rooms-live/guard";
 import { realClaimsPort } from "@/lib/rooms-live/claims";
+import { istDateOf } from "@/lib/rooms-live/read";
 import { ROOMS } from "@/lib/rooms-live/rooms";
 import { loadRoster } from "@/lib/rooms-live/roster";
 import { getSnapshot, type Snapshot } from "@/lib/rooms-live/snapshot";
 import { readMicGuard } from "@/lib/micguard-read";
 import { coverageOrNull } from "@/lib/jev/worker/coverage-view";
+import { pipelineOrNull } from "@/lib/spine/pipeline-view";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,12 +24,13 @@ const NO_STORE = { "cache-control": "no-store" };
 export async function GET(req: Request) {
   const who = await roomsLiveGuard(req); // always ok: access is open (owner ruling 8 Oct 2026); `who.kind` only decides whether the admin-only mic_guard field is added
   const coveragePromise = coverageOrNull({ timeoutMs: 2000 }); // JEV-COVERAGE JB-3: counts only, never throws, own 2 s bound; runs beside the snapshot; a null never enters `degraded` (room faults only)
+  const pipelinePromise = who.kind === "admin" ? pipelineOrNull(istDateOf(Date.now())) : Promise.resolve(null); // SPINE S4: admin only like mic_guard, counts only, never throws; shadow display, a null never enters `degraded`
   try {
     const [snapshot, coverage] = await Promise.all([getSnapshot({ db: sql, claims: realClaimsPort(sql as never) }), coveragePromise]);
     if (who.kind !== "admin") return NextResponse.json({ ...snapshot, coverage }, { headers: NO_STORE }); // staff and open callers: byte-identical to before mic_guard existed
     // admin only: the mic-permission guard state per room. A failed read leaves every room at null (never a 500, never a degraded flag).
-    const mg = await readMicGuard(sql as never, snapshot.rooms.map((r) => r.room_id));
-    return NextResponse.json({ ...snapshot, rooms: snapshot.rooms.map((r) => ({ ...r, mic_guard: mg.byRoom[r.room_id] ?? null })), coverage }, { headers: NO_STORE });
+    const [mg, pipeline] = await Promise.all([readMicGuard(sql as never, snapshot.rooms.map((r) => r.room_id)), pipelinePromise]);
+    return NextResponse.json({ ...snapshot, rooms: snapshot.rooms.map((r) => ({ ...r, mic_guard: mg.byRoom[r.room_id] ?? null, pipeline: pipeline?.rooms[r.room_id] ?? null })), coverage }, { headers: NO_STORE });
   } catch (e) {
     console.error("[rooms-live] snapshot failed:", e instanceof Error ? e.message.slice(0, 160) : "error");
     const empty: Snapshot = {

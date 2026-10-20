@@ -19,7 +19,7 @@
  */
 
 import { sql } from "@/lib/db";
-import { SQL_CUES_TODAY_SPLIT, benchChunkTotals, benchSessionTotals } from "@/lib/room-access/tool-reads";
+import { SPINE_STORE_TABLES, SQL_CUES_TODAY_SPLIT, benchChunkTotals, benchSessionTotals, spineTableCounts } from "@/lib/room-access/tool-reads";
 import { query } from "@/lib/brain/db";
 import { istDate } from "@/lib/brain/state";
 import { retrieve } from "@/lib/kb-retrieve";
@@ -41,7 +41,7 @@ const num = (rows: unknown, key = "n"): number => {
 // --- Fuse slice 3: live vs scratch, one query each (named so the report can quote them) ---
 
 /** Today's cues, split by the day's 0046 scratch flag. */
-export { SQL_CUES_TODAY_SPLIT };
+export { SQL_CUES_TODAY_SPLIT, SPINE_STORE_TABLES };
 
 /** Today's room_days, split the same way. */
 export const SQL_ROOM_DAYS_TODAY_SPLIT =
@@ -66,7 +66,7 @@ let totalsMemo: Promise<Awaited<ReturnType<typeof benchSessionTotals>>> | null =
 const sessionTotals = () => (totalsMemo ??= benchSessionTotals());
 const storeStats: McpTool = {
   name: "scribe_store_stats",
-  description: "Store counts: bench sessions (by status), bench chunks (by upload_state), consult marks, encounters (total + today), STT engines enabled, brain cues + room-days today (IST). The brain counts separate LIVE days (cues_today, room_days_today) from the fuse's SCRATCH days (scratch_cues_today, scratch_room_days_today) — a replayed or warehouse-loaded day never inflates the live numbers. Per-count fail-safe.",
+  description: "Store counts: bench sessions (by status), bench chunks (by upload_state), consult marks, encounters (total + today), STT engines enabled, brain cues + room-days today (IST). The brain counts separate LIVE days (cues_today, room_days_today) from the fuse's SCRATCH days (scratch_cues_today, scratch_room_days_today) — a replayed or warehouse-loaded day never inflates the live numbers. Also spine_tables: row counts of the spine and encounter-index tables (null when a table is absent; never degrades the tool). Per-count fail-safe.",
   scope: "read",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   handler: async () => {
@@ -108,11 +108,13 @@ const storeStats: McpTool = {
         return r.rows[0] ?? null;
       }),
     ]);
+    const spine = await spineTableCounts();
     const blindExcluded = await sessionTotals().then((t) => t.nBlindExcluded).catch(() => null);
     const parts = { sessions, sessionsByStatus, chunksByState, marks, encounters, encountersToday, enginesEnabled, cuesToday, roomDaysToday };
-    const errors = Object.entries(parts).filter(([, v]) => v.error).map(([k, v]) => `${k}: ${v.error}`);
+    const errors = Object.entries(parts).filter(([, v]) => v.error).map(([k, v]) => `${k}: ${v.error}`);  // spine tables are not in `errors`: a table not yet migrated reads null without degrading the tool
     return {
       ist_date: today,
+      spine_tables: spine,
       bench: { sessions: sessions.value, sessions_by_status: sessionsByStatus.value, chunks_by_upload_state: chunksByState.value, consult_marks: marks.value, n_blind_excluded: blindExcluded, n_blind_chunks_excluded: chunksBlindExcluded },
       encounters: { total: encounters.value, today_ist: encountersToday.value },
       stt: { engines_enabled: enginesEnabled.value },
