@@ -22,7 +22,7 @@ const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
 const pg = pgContainer("eta-spine-explorer");
 const UP = readFileSync("db/migrations/0173_spine.sql", "utf8");
 const NOW = Date.parse("2026-10-18T06:00:00Z");
-const A = "enc_testaaaaaaaaaaaa", B = "enc_testbbbbbbbbbbbb", C = "enc_testcccccccccccc";
+const A = "enc_testaaaaaaaaaaaa", B = "enc_testbbbbbbbbbbbb", C = "enc_testcccccccccccc", D = "enc_testffffffffffff";
 
 describe("REQUIRED PROOF — the explorer reads run against a real postgres", () => {
   it("ran, or was skipped deliberately", () => {
@@ -48,8 +48,14 @@ d("explorer reads on postgres:16", () => {
     expect(await encounterDetail(A)).toBeNull();
   });
 
-  it("the flag reads true/shadow, and a jsonb string 'off' is off", async () => {
-    pg.exec(`INSERT INTO spine_config (key, value) VALUES ('explorer', '"shadow"')`);
+  it("the flag reads the canonical forms; a jsonb string 'off', 'true' or 'shadow' and contradictions are off", async () => {
+    pg.exec(`INSERT INTO spine_config (key, value) VALUES ('explorer', '"on"')`);
+    expect(await readExplorerEnabled()).toBe(true);
+    for (const bad of ['"true"', '"shadow"', '{"on":false,"mode":"shadow"}', '{"on":true,"mode":"off"}']) {
+      pg.exec(`UPDATE spine_config SET value = '${bad}' WHERE key = 'explorer'`);
+      expect(await readExplorerEnabled(), bad).toBe(false);
+    }
+    pg.exec(`UPDATE spine_config SET value = 'true' WHERE key = 'explorer'`);
     expect(await readExplorerEnabled()).toBe(true);
     pg.exec(`UPDATE spine_config SET value = '"off"' WHERE key = 'explorer'`);
     expect(await readExplorerEnabled()).toBe(false);
@@ -64,6 +70,7 @@ d("explorer reads on postgres:16", () => {
           ('${A}', '2026-10-18', 'room_r1', '2026-10-18T04:00:00Z', '2026-10-18T04:20:00Z', 'confirmed', NULL, 'pulse', 'mv1', 'strong', '{ambiguous,multi_machine}'),
           ('${B}', '2026-10-18', 'room_r1', '2026-10-18T04:05:00Z', '2026-10-18T04:15:00Z', 'merged', '${A}', 'pqm', 'mv1', 'merged', '{}'),
           ('${C}', '2026-10-18', 'room_r2', '2026-10-18T05:00:00Z', NULL, 'candidate', NULL, 'cutter', 'mv1', 'weak_single', '{pulse_overlap}'),
+          ('${D}', '2026-10-16', 'room_r3', '2026-10-16T04:00:00Z', NULL, 'confirmed', NULL, 'pulse', 'mv1', 'strong', '{}'),
           ('enc_testdddddddddddd', '2026-10-17', 'room_r1', '2026-10-17T04:00:00Z', NULL, 'confirmed', NULL, 'pulse', 'mv1', 'strong', '{}');
         INSERT INTO spine_link (encounter_id, key_kind, value, basis, active) VALUES
           ('${A}', 'consult_uid', 'uid_test_01', 'exact', true), ('${A}', 'pqm_uid', 'pqm_test_01', 'overlap', true), ('${A}', 'window_id', 'win_test_01', 'merge', false);
@@ -73,7 +80,13 @@ d("explorer reads on postgres:16", () => {
           ('pqm', 'pqm_test_01', 1, 'room_r1', '2026-10-18T04:05:00Z', '2026-10-18T04:15:00Z', '2026-10-18T04:16:00Z', '${B}', '{}'),
           ('cutter', 'ck_test_01', 1, 'room_r2', '2026-10-18T05:00:00Z', NULL, '2026-10-18T05:01:00Z', '${C}', '{}'),
           ('acoustic', 'ak_test_01', 1, 'room_r1', '2026-10-18T04:30:00Z', NULL, '2026-10-18T04:31:00Z', NULL, '{}'),
-          ('acoustic', 'ak_test_02', 1, 'room_r1', '2026-10-17T04:30:00Z', NULL, '2026-10-17T04:31:00Z', NULL, '{}');
+          ('acoustic', 'ak_test_02', 1, 'room_r1', '2026-10-17T04:30:00Z', NULL, '2026-10-17T04:31:00Z', NULL, '{}'),
+          ('acoustic', 'ak_test_03', 1, 'room_r1', '2026-10-17T18:29:59Z', NULL, '2026-10-17T18:31:00Z', NULL, '{}'),
+          ('acoustic', 'ak_test_04', 1, 'room_r1', '2026-10-17T18:30:00Z', NULL, '2026-10-17T18:31:00Z', NULL, '{}'),
+          ('acoustic', 'ak_test_05', 1, 'room_r1', '2026-10-18T18:29:59Z', NULL, '2026-10-18T18:31:00Z', NULL, '{}'),
+          ('acoustic', 'ak_test_06', 1, 'room_r1', '2026-10-18T18:30:00Z', NULL, '2026-10-18T18:31:00Z', NULL, '{}'),
+          ('pulse', 'pk_test_02', 1, 'room_r3', '2026-10-16T04:10:00Z', NULL, '2026-10-16T04:11:00Z', '${D}', '{"close_reason":"PLANTED_MARKER_X"}'),
+          ('cutter', 'ck_test_02', 1, 'room_r3', '2026-10-16T04:11:00Z', NULL, '2026-10-16T04:12:00Z', '${D}', '{"close_reason":"endConsult"}');
         INSERT INTO spine_job (encounter_id, stage, cut_version, input_key, status, attempts, next_attempt_at, last_error_class, last_error_code, created_at) VALUES
           ('${A}', 'transcribe', 'cv1', 'ik_1', 'queued', 0, '2026-10-18T05:30:00Z', NULL, NULL, '2026-10-18T05:00:00Z'),
           ('${A}', 'transcribe', 'cv1', 'ik_2', 'queued', 0, NULL, NULL, NULL, '2026-10-18T05:30:00Z'),
@@ -94,7 +107,7 @@ d("explorer reads on postgres:16", () => {
       const [r1, r2] = out.rooms;
       expect(r1!.encounters).toEqual({ candidate: 0, confirmed: 1, rejected: 0, merged: 1, total: 2 });
       expect(r1!.flags).toEqual({ ambiguous: 1, multi_machine: 1, pulse_overlap: 0 });
-      expect(r1!.signals_by_proxy).toMatchObject({ pulse: 1, pqm: 1, acoustic: 1, cutter: 0 });
+      expect(r1!.signals_by_proxy).toMatchObject({ pulse: 1, pqm: 1, acoustic: 3, cutter: 0 });
       expect(r1!.jobs_by_stage).toEqual({
         transcribe: { queued: 2, leased: 0, done: 0, failed: 0, dead: 0, superseded: 0, shadow: 0, oldest_queued_age_s: 3600 },
         diarize: { queued: 0, leased: 0, done: 0, failed: 0, dead: 0, superseded: 0, shadow: 1, oldest_queued_age_s: null },
@@ -102,11 +115,13 @@ d("explorer reads on postgres:16", () => {
       expect(r2!.encounters).toEqual({ candidate: 1, confirmed: 0, rejected: 0, merged: 0, total: 1 });
       expect(r2!.flags).toEqual({ ambiguous: 0, multi_machine: 0, pulse_overlap: 1 });
       expect(r2!.signals_by_proxy).toMatchObject({ cutter: 1, pulse: 0 });
+      // IST midnight edges: 17T18:29:59Z is 17 Oct, 17T18:30:00Z and 18T18:29:59Z are 18 Oct, 18T18:30:00Z is 19 Oct. A range off by a day moves these counts.
       expect(r2!.jobs_by_stage.note).toMatchObject({ failed: 1, superseded: 1, queued: 0, oldest_queued_age_s: null });
       expect(r2!.jobs_by_stage.transcribe).toMatchObject({ done: 1 });
       const one = await dayView({ ist_date: "2026-10-18", room_id: "room_r2" }, NOW);
       expect(one.rooms.map((r) => r.room_id)).toEqual(["room_r2"]);
-      expect((await dayView({ ist_date: "2026-10-17" }, NOW)).rooms.map((r) => [r.room_id, r.encounters.total, r.signals_by_proxy.acoustic])).toEqual([["room_r1", 1, 1]]);
+      expect((await dayView({ ist_date: "2026-10-17" }, NOW)).rooms.map((r) => [r.room_id, r.encounters.total, r.signals_by_proxy.acoustic])).toEqual([["room_r1", 1, 2]]);
+      expect((await dayView({ ist_date: "2026-10-19" }, NOW)).rooms.map((r) => [r.room_id, r.signals_by_proxy.acoustic])).toEqual([["room_r1", 1]]);
     });
 
     it("encounters: shapes, the flag filter (@>), status, room, and keyset paging", async () => {
@@ -132,6 +147,15 @@ d("explorer reads on postgres:16", () => {
       const p2 = await encounterPage((parsed as { q: Parameters<typeof encounterPage>[0] }).q);
       expect(p2.rows.map((r) => r.encounter_id)).toEqual([C]);
       expect(p2.next_cursor).toBeNull();
+    });
+
+    it("close_reason is filtered on read against the per-proxy ingest enum; the count of withheld values is returned", async () => {
+      const b = (await encounterDetail(D))!;
+      expect(b.close_reason_withheld).toBe(1);
+      expect(JSON.stringify(b)).not.toContain("PLANTED_MARKER_X");
+      expect(b.signals.find((s) => s.source_key === "pk_test_02")!.close_reason).toBeNull();
+      expect(b.signals.find((s) => s.source_key === "ck_test_02")!.close_reason).toBe("endConsult");
+      expect((await encounterDetail(A))!.close_reason_withheld).toBe(0);
     });
 
     it("encounter: the row, links, signals (no attrs beyond close_reason), jobs, artefacts; a merged one shows merged_into", async () => {

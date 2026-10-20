@@ -25,7 +25,7 @@ const ROUTES: Array<[string, (r: NextRequest) => Promise<Response>, string]> = [
   ["encounter", (r) => ONE(r, { params: Promise.resolve({ encounter_id: ID }) }), `/api/spine/explorer/encounter/${ID}`],
 ];
 const SAVED = process.env.ADMIN_TOKEN;
-beforeEach(() => { process.env.ADMIN_TOKEN = "adm_test"; M.config = [{ key: "explorer", value: "shadow" }]; M.fail = false; M.calls = []; });
+beforeEach(() => { process.env.ADMIN_TOKEN = "adm_test"; M.config = [{ key: "explorer", value: { mode: "shadow" } }]; M.fail = false; M.calls = []; });
 afterEach(() => { if (SAVED === undefined) delete process.env.ADMIN_TOKEN; else process.env.ADMIN_TOKEN = SAVED; });
 
 describe.each(ROUTES)("%s route guard", (_n, call, path) => {
@@ -48,9 +48,13 @@ describe.each(ROUTES)("%s route guard", (_n, call, path) => {
 });
 
 describe("parseExplorerOn", () => {
-  it("accepts true / on / shadow in the plain, object and JSON-text forms only", () => {
-    for (const v of [true, "on", "shadow", { on: true }, { mode: "on" }, { mode: "shadow" }, '"shadow"', "true"]) expect(parseExplorerOn([{ key: "explorer", value: v }]), JSON.stringify(v)).toBe(true);
-    for (const v of [false, "off", "live", null, 1, {}, { on: "true" }, { mode: "live" }, []]) expect(parseExplorerOn([{ key: "explorer", value: v }]), JSON.stringify(v)).toBe(false);
+  it("accepts exactly one canonical on form per shape", () => {
+    for (const v of [true, "on", { on: true }, { mode: "on" }, { mode: "shadow" }, '"on"', '{"on":true}', '{"mode":"on"}', '{"mode":"shadow"}']) expect(parseExplorerOn([{ key: "explorer", value: v }]), JSON.stringify(v)).toBe(true);
+  });
+  it("contradictory, the string \"true\", unknown keys and every other value are off", () => {
+    for (const v of [{ on: false, mode: "shadow" }, { on: true, mode: "off" }, { on: true, mode: "on" }, { on: true, extra: 1 }, { mode: "on", extra: 1 }, { on: false }, { mode: "off" }, { mode: "live" }, { on: "true" },
+      "true", "shadow", "off", '"shadow"', '"true"', "true ", '{"on":true,"mode":"off"}', '{"on":false,"mode":"shadow"}', '{"on":true,"x":1}', "[true]", "1",
+      false, null, 1, {}, [], [true]]) expect(parseExplorerOn([{ key: "explorer", value: v }]), JSON.stringify(v)).toBe(false);
     expect(parseExplorerOn([{ key: "other", value: true }])).toBe(false);
   });
 });

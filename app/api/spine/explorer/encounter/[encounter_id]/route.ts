@@ -1,6 +1,6 @@
 /**
  * GET /api/spine/explorer/encounter/<encounter_id> — one encounter with its links, signals (no attrs but close_reason), jobs and artefacts (Spine S4b, read-only). A merged encounter shows merged_into.
- * Auth and gate as ../../day.   200 { ok, encounter, links, signals, jobs, artefacts }   400 bad_encounter_id   401   404 (unknown id too)   503
+ * Auth and gate as ../../day.   200 { ok, encounter, links, signals, close_reason_withheld, jobs, artefacts }   400 bad_encounter_id   401   404 (unknown id too)   503
  */
 import { NextRequest, NextResponse } from "next/server";
 import { encounterDetail, validEncounterId } from "@/lib/spine/explorer-read";

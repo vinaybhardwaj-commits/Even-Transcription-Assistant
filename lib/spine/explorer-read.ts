@@ -6,6 +6,8 @@
  */
 import { sql } from "@/lib/db";
 import { IST_FLOOR, realDate } from "@/lib/encounter-catalog/store";
+import { ENUMS } from "@/lib/spine/phi-screen";
+import type { Proxy } from "@/lib/spine/ingest";
 
 type Row = Record<string, unknown>;
 type Q = (text: string, params: unknown[]) => Promise<Row[]>;
@@ -20,20 +22,32 @@ export const DEFAULT_PAGE = 100;
 export const MAX_PAGE = 200;
 const ROOM = /^[A-Za-z0-9_.\- ]{1,96}$/;
 const ENC_ID = /^enc_[a-z2-7]{16}$/;
-const IST_DAY_OF = "(t_open AT TIME ZONE 'Asia/Kolkata')::date";
 const ISO = (c: string) => `to_char(${c} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
 const ISO_US = (c: string) => `to_char(${c} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 const num = (v: unknown): number => Number(v ?? 0);
 
 // ---------------------------------------------------------------- gate
-/** true, "on", "shadow", {on:true} or {mode:"on"|"shadow"}. Anything else, or no row, is off. */
+/** Exactly one canonical on form per shape: true, "on", {on:true} (no mode key), {mode:"on"|"shadow"} (no on key); a string holding the JSON text of an object or of "on" is read once. Contradictions, the string "true", unknown keys and everything else are off. */
+function canonicalOn(v: unknown, text: boolean): boolean {
+  if (v === true) return !text;
+  if (v === "on") return true;
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const keys = Object.keys(v);
+    if (keys.length !== 1) return false;
+    const o = v as { on?: unknown; mode?: unknown };
+    return keys[0] === "on" ? o.on === true : o.mode === "on" || o.mode === "shadow";
+  }
+  return false;
+}
 export function parseExplorerOn(rows: ReadonlyArray<{ key: string; value: unknown }>): boolean {
   const r = rows.find((x) => x.key === "explorer");
   if (!r) return false;
-  let v = r.value;
-  if (typeof v === "string") { try { v = JSON.parse(v); } catch { /* a bare string */ } }
-  if (v && typeof v === "object") { const o = v as { on?: unknown; mode?: unknown }; return o.on === true || o.mode === "on" || o.mode === "shadow"; }
-  return v === true || v === "on" || v === "shadow";
+  const v = r.value;
+  if (canonicalOn(v, false)) return true;
+  if (typeof v !== "string") return false;
+  let t: unknown;
+  try { t = JSON.parse(v); } catch { return false; }
+  return typeof t === "string" ? t === "on" : canonicalOn(t, true) && typeof t === "object";
 }
 
 export async function readExplorerEnabled(): Promise<boolean> {
@@ -120,7 +134,7 @@ export function foldDay(enc: Row[], sig: Row[], job: Row[], roomFilter?: string)
   return [...rooms.values()].sort((a, b) => (a.room_id === b.room_id ? 0 : a.room_id === null ? 1 : b.room_id === null ? -1 : a.room_id < b.room_id ? -1 : 1));
 }
 
-/** Signals count distinct source_key per proxy (a rev is the same signal again); their day is the IST date of t_open. Jobs follow their encounter's day and room. */
+/** Signals count distinct source_key per proxy (a rev is the same signal again); their day is the IST date of t_open, tested as an IST-midnight range on the bare column so (room_id, t_open) serves the room-filtered query (EXPLAIN in the pg test). Jobs follow their encounter's day and room. */
 export async function dayView(query: DayQuery, now: number): Promise<{ ist_date: string; rooms: RoomDay[] }> {
   const room = (col: string, params: unknown[]) => { if (!query.room_id) return ""; params.push(query.room_id); return ` AND ${col} = $${params.length}`; };
 
@@ -129,8 +143,8 @@ export async function dayView(query: DayQuery, now: number): Promise<{ ist_date:
     ${FLAG_COUNTS.map((f) => `(count(*) FILTER (WHERE flags @> ARRAY['${f}']::text[]))::int AS ${f}`).join(", ")}
   FROM spine_encounter WHERE ist_date = $1::date${room("room_id", pe)} GROUP BY room_id, status`;
 
-  const ps: unknown[] = [query.ist_date];
-  const sigSql = `SELECT room_id, proxy, count(DISTINCT source_key)::int AS n FROM spine_signal WHERE ${IST_DAY_OF} = $1::date${room("room_id", ps)} GROUP BY room_id, proxy`;
+  const ps: unknown[] = [query.ist_date, query.ist_date];
+  const sigSql = `SELECT room_id, proxy, count(DISTINCT source_key)::int AS n FROM spine_signal WHERE t_open >= ($1::date::timestamp AT TIME ZONE 'Asia/Kolkata') AND t_open < (($2::date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')${room("room_id", ps)} GROUP BY room_id, proxy`;
 
   const pj: unknown[] = [new Date(now).toISOString(), query.ist_date];   // $n in text order: the test drivers number placeholders by position
   const jobSql = `SELECT e.room_id, j.stage, j.status, count(*)::int AS n,
@@ -192,7 +206,7 @@ function arr(v: unknown): string[] {
 }
 
 // ---------------------------------------------------------------- one encounter
-export type EncounterDetail = { encounter: Row; links: Row[]; signals: Row[]; jobs: Row[]; artefacts: Row[] };
+export type EncounterDetail = { encounter: Row; links: Row[]; signals: Row[]; close_reason_withheld: number; jobs: Row[]; artefacts: Row[] };
 export async function encounterDetail(id: string): Promise<EncounterDetail | null> {
   const enc = await q()(`SELECT ${ENC_COLS} FROM spine_encounter WHERE encounter_id = $1`, [id]);
   if (enc.length === 0) return null;
@@ -202,5 +216,14 @@ export async function encounterDetail(id: string): Promise<EncounterDetail | nul
     q()(`SELECT stage, cut_version, status, attempts, ${ISO("next_attempt_at")} AS next_attempt_at, last_error_class, last_error_code FROM spine_job WHERE encounter_id = $1 ORDER BY stage, job_id`, [id]),
     q()("SELECT stage, engine, version, cut_version, store, bucket, object_key, sha256, status FROM spine_artefact WHERE encounter_id = $1 ORDER BY stage, id", [id]),
   ]);
-  return { encounter: { ...enc[0], flags: arr(enc[0]!.flags) }, links, signals, jobs, artefacts };
+  // close_reason is only trusted inside the per-proxy enum S1 enforces at ingest; the DB CHECK does not, so anything else is withheld here.
+  let close_reason_withheld = 0;
+  const shown = signals.map((s) => {
+    const cr = s.close_reason;
+    if (cr === null || cr === undefined) return { ...s, close_reason: null };
+    if (typeof cr === "string" && ENUMS[s.proxy as Proxy]?.close_reason.has(cr)) return s;
+    close_reason_withheld++;
+    return { ...s, close_reason: null };
+  });
+  return { encounter: { ...enc[0], flags: arr(enc[0]!.flags) }, links, signals: shown, close_reason_withheld, jobs, artefacts };
 }
