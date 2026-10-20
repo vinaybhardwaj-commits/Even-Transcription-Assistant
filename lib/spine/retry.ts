@@ -13,6 +13,8 @@ export const BREAKER_FAIL_RATIO = 0.3;
 export const BREAKER_OPEN_MS = 30 * 60_000;
 
 export type ErrorClass = "transient" | "permanent" | "budget";
+/** A released job (box refused it: window, budget, unconfigured) is not re-handed at the head of the queue at once (R4). */
+export const RELEASE_BACKOFF_MS = 60_000;
 export type Outcome = "done" | "transient" | "permanent" | "budget" | "shadow" | "release" | "blocked";
 
 /** `attempts` counts the attempt that just failed (1-based). `rand01` is in [0,1). */
@@ -51,7 +53,7 @@ export function resolveOutcome(outcome: Outcome, attempts: number, now: Date, ra
     case "budget": return { status: "queued", nextAttemptAt: nextIstDayStart(now), attemptsDelta: -1, errorClass: "budget", doneAt: null };
     case "shadow": return { status: "shadow", nextAttemptAt: null, attemptsDelta: -1, errorClass: null, doneAt: null };
     case "blocked": return { status: "queued", nextAttemptAt: null, attemptsDelta: -1, errorClass: null, doneAt: null, hold: true };
-    case "release": return { status: "queued", nextAttemptAt: null, attemptsDelta: -1, errorClass: null, doneAt: null };
+    case "release": return { status: "queued", nextAttemptAt: new Date(now.getTime() + RELEASE_BACKOFF_MS), attemptsDelta: -1, errorClass: null, doneAt: null };
   }
 }
 

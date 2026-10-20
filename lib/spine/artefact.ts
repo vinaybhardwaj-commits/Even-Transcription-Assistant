@@ -6,24 +6,24 @@ import type { ArtefactReport } from "./jobs";
 const ART_TOKEN_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const KEY_RE = /^[A-Za-z0-9_.\/-]{1,200}$/;
 const noIdRun = (s: string) => !/[0-9]{8}/.test(s);
-const ID_WORDS = new Set(["patient", "name", "phone", "uhid", "mrn", "aadhaar", "email", "doctor", "room", "uid", "enc"]);
-const noIdWord = (s: string) => !s.toLowerCase().split(/[^a-z0-9]+/).some((t) => ID_WORDS.has(t));
-const noDate = (s: string) => !/\d{4}-\d{2}-\d{2}/.test(s);
-const fullyClean = (s: string) => noIdRun(s) && noIdWord(s) && noDate(s);
-/** The lanes the box writes (clip_lanes.py LANES: layer.engine), closed. The cutter's own artefact is `consult.flac`. */
-export const TRACK_LANES: readonly string[] = ["acoustics.room_profile_acoustics", "diar.nemotron", "stt.koyal", "stt.medasr"];
+/** The lanes the box writes (clip_lanes.py LANES: layer.engine -> version form, closed). Versions: acoustics v<n>, nemotron the first 8 hex of the model revision, koyal box-t4-koyal-<n>. */
+export const TRACK_LANES: Readonly<Record<string, RegExp>> = {
+  "acoustics.room_profile_acoustics": /^v[0-9]{1,3}$/,
+  "diar.nemotron": /^(v[0-9]{1,3}|[0-9a-f]{8})$/,
+  "stt.koyal": /^box-t4-koyal-[0-9]{1,3}$/,
+};
 export const CUTTER_FILE = "consult.flac";
-const TRACK_RE = new RegExp(`^(${TRACK_LANES.map((l) => l.replace(/\./g, "\\.")).join("|")})__([A-Za-z0-9.-]{1,40})__([0-9a-f]{8})\\.json$`);
-/** object_key (F6): a path whose file name is the closed REAL track shape `{layer}.{engine}__{version}__{cfg8}.json` (writer.track_filename) or `consult.flac` keeps only a word and date screen on
- *  the file name (the version is a box-generated revision and cfg8 is hex, so either may hold a digit run by chance). Every other part (directories, any free file name) gets the full
- *  identity-word, date and 8-digit screens. */
+const TRACK_RE = /^([a-z]+\.[a-z_]+?)__([A-Za-z0-9-]+)__([0-9a-f]{8})\.json$/;
+/** object_key (F6b): exactly `consult.flac`, or `tracks/{layer}.{engine}__{version}__{cfg8}.json` with layer.engine from the closed lane list, the version in that lane's form and cfg8 8 hex.
+ *  Everything else is refused: no directories, no free file names, no free parts. */
 const keyClean = (k: string): boolean => {
+  if (k === CUTTER_FILE) return true;
   const parts = k.split("/");
-  const file = parts.pop() ?? "";
-  if (!parts.every((p) => p !== "" && fullyClean(p))) return false;
-  if (file === CUTTER_FILE) return true;
-  const m = TRACK_RE.exec(file);
-  return m ? noIdWord(m[2]!) && noDate(m[2]!) : fullyClean(file);
+  if (parts.length !== 2 || parts[0] !== "tracks") return false;
+  const m = TRACK_RE.exec(parts[1]!);
+  if (!m) return false;
+  const ver = Object.prototype.hasOwnProperty.call(TRACK_LANES, m[1]!) ? TRACK_LANES[m[1]!] : undefined;
+  return !!ver && ver.test(m[2]!);
 };
 
 /** An artefact REF: tokens only, no `..`; engine and bucket carry no 8-digit run (version / object_key are box-generated and may hold a hex revision). null = invalid. */

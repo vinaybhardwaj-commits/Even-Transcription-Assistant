@@ -151,7 +151,7 @@ d("spine S6 on postgres:16", () => {
   });
 
   it("R3 F6: parseArtefact on the closed lane list", () => {
-    for (const k of ["tracks/diar.nemotron__f667ed73__0123abcd.json", "tracks/diar.nemotron__12345678__87654321.json", "tracks/stt.koyal__box-t4-koyal-1__0a1b2c3d.json", "tracks/stt.medasr__box-t4-medasr-1__0a1b2c3d.json", "consult.flac"]) expect(parseArtefact({ ...ART, object_key: k }), k).not.toBeNull();
+    for (const k of ["tracks/diar.nemotron__f667ed73__0123abcd.json", "tracks/diar.nemotron__12345678__87654321.json", "tracks/stt.koyal__box-t4-koyal-1__0a1b2c3d.json", "consult.flac"]) expect(parseArtefact({ ...ART, object_key: k }), k).not.toBeNull();
     for (const k of ["tracks/uid_test_01/x.json", "2026-10-19/x/consult.flac", "tracks/12345678.json", "room_a/consult.flac", "tracks/diar.other_room__v1__0a1b2c3d.json", "tracks/diar.nemotron__v1__0A1B2C3D_room.json", "tracks//consult.flac"]) expect(parseArtefact({ ...ART, object_key: k }), k).toBeNull();
   });
 

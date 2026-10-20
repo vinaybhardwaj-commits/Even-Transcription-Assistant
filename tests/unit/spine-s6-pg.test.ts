@@ -96,8 +96,11 @@ d("spine S6 on postgres:16", () => {
     const r = await reportPOST(reportReq({ job_id: id, owner: "runner-s", outcome: "shadow" }));
     expect(r.status).toBe(200);
     expect(await row(id)).toMatchObject({ status: "queued", attempts: 0, lease_owner: null });
+    vi.useFakeTimers({ toFake: ["Date"] });   // R4: the re-queue is a release, which backs off 60 s
+    vi.setSystemTime(new Date(Date.now() + 61_000));
     const live = await (await claimPOST(claimReq({ owner: "runner-l", limit: 1, live: true }))).json() as { jobs: Array<{ job_id: number; mode: string }> };
     expect(live.jobs.map((j) => [j.job_id, j.mode])).toEqual([[id, "live"]]);
+    vi.useRealTimers();
   });
 
   it("N3: with the stage still shadow (or off) a shadow report is consumed as shadow, as before", async () => {
