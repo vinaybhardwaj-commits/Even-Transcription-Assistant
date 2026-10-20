@@ -1036,11 +1036,11 @@ def _gs_max_log(fn, t_lo: float, t_hi: float, xatol: float = 1e-12) -> tuple[flo
     return fn(t), t
 
 
-BF_RHO_T = np.linspace(math.log(1e-8), math.log(0.5), 801)
+BF_RHO_T = np.linspace(math.log(1e-6), math.log(0.5), 801)  # floor 1e-6: lgamma form cancels below it; rho=0 is a separate candidate
 
 
 def bf_profile(p, n, f) -> tuple[float, float]:
-    """Independent brute-force profile: dense log-rho grid (1e-8..0.5, 801 pts) + golden polish to 1e-12."""
+    """Independent brute-force profile: dense log-rho grid (1e-6..0.5, 801 pts, plus rho = 0) + golden polish to 1e-12."""
     pc = min(max(p, 1e-300), 1.0 - 1e-12)
     g = lambda t: ref_ll(pc, float(np.exp(t)), n, f)
     vals = np.array([g(t) for t in BF_RHO_T])
@@ -1262,9 +1262,28 @@ def test_no_p_search_in_product():
         assert token not in src and not hasattr(stats, token)
 
 
-def test_sparse_bound_call_is_cheap():
-    """S1/M2: a sparse bound call stays interactive (fix6's p-search took 36-43 s)."""
+def test_sparse_bound_call_is_cheap_and_has_no_p_scan(monkeypatch):
+    """S1 (fix8): behaviour pin on the absence of a dense p scan. A sparse K60 bound call must take
+    < 1 s and make <= 200 _profile calls (measured here: ~110; a 300-point p scan makes ~390)."""
     import time
+    calls = [0]
+    real = stats._profile
+
+    def counting(*a, **k):
+        calls[0] += 1
+        return real(*a, **k)
+    monkeypatch.setattr(stats, "_profile", counting)
     t = time.perf_counter()
-    stats.betabinom_profile_upper(np.full(20, 137.0), np.array([1.0] + [0.0] * 19))
-    assert time.perf_counter() - t < 10.0
+    stats.betabinom_profile_upper(np.full(60, 137.0), np.array([1.0] + [0.0] * 59))
+    assert time.perf_counter() - t < 1.0
+    assert calls[0] <= 200, calls[0]
+
+
+@pytest.mark.parametrize("idx", (2, 4))
+def test_dense_bound_matches_stable_oracle_to_1e8(idx):
+    """S2 (fix8): on dense D3/D5 the bound matches the stable oracle to 1e-8, which pins _POLISH_XATOL
+    (a polish tolerance of 1e-5 or looser gives >1e-7 on D5)."""
+    name, n, f = _stable_oracle().CASES[idx]
+    got = stats.betabinom_profile_upper(n, f)["upper"]
+    want = _stable_upper_cached(name, n, f)
+    assert abs(got - want) / want <= 1e-8, (name, got, want)
