@@ -3,7 +3,9 @@
  * config query: no source table is touched. Source tables are read with SELECT only; the writes are INSERT into spine_artefact (create-only,
  * ON CONFLICT DO NOTHING) and the per-source watermark in spine_config `artefacts_cursor` (live only; shadow never persists it).
  */
-import { CONFIG_SQL, CURSOR_KEY, CURSOR_UPSERT_SQL, EXISTING_SQL, INSERT_SQL, ROW_LIMIT, SOURCES, parseArtefactsMode, planArtefacts, sourceParams, sourceSelect } from "./artefacts";
+import { CONFIG_SQL, CURSOR_KEY, CURSOR_UPSERT_SQL, EXISTING_SQL, INSERT_SQL, ROW_LIMIT, SOURCES, parseArtefactsMode, planArtefacts, readSourcePage } from "./artefacts";
+import { BLIND_ROOM_DAYS } from "@/lib/rubrics/blind-room-days";
+import type { BlindDays } from "@/lib/room-access/readers/spine-artefacts";
 import type { ArtefactCounts, ArtefactDraft, ArtefactsMode, ExistingArtefact, SourceRow, SourceTable } from "./artefacts";
 
 export type SpineDb = (text: string, params?: unknown[]) => Promise<unknown[]>;
@@ -30,12 +32,8 @@ function parseCursor(v: unknown): Record<string, string> {
 }
 
 export interface IndexOpts {
-  /** Ids of the held-out windows (room-access blindWindowIds). Default: the real one. A failing lookup throws: the run stops, it never proceeds without the filter. */
-  blindIds?: () => Promise<string[]>;
-}
-async function defaultBlindIds(): Promise<string[]> {
-  const { blindWindowIds } = await import("@/lib/room-access/check");
-  return blindWindowIds();
+  /** The held-out (IST date, room) pairs. Default: BLIND_ROOM_DAYS, the constant every room-access reader uses. */
+  blindDays?: BlindDays;
 }
 
 export async function indexSpineArtefacts(now: Date, db?: SpineDb, opts: IndexOpts = {}): Promise<IndexResult> {
@@ -45,11 +43,11 @@ export async function indexSpineArtefacts(now: Date, db?: SpineDb, opts: IndexOp
   if (mode === "off") return { mode, counts: emptyCounts(), inserted: 0, cursor: {} };
   const cur = (await q(CONFIG_SQL, [CURSOR_KEY])) as Array<{ value: unknown }>;
   const start = parseCursor(cur[0]?.value);
-  const blindIds = await (opts.blindIds ?? defaultBlindIds)();
+  const days = opts.blindDays ?? BLIND_ROOM_DAYS;
   const next: Record<string, string> = {};
   const rows: Array<{ source: SourceTable; row: SourceRow }> = [];
   for (const source of SOURCES) {
-    const page = (await q(sourceSelect(source), sourceParams(source, start[source] ?? "", blindIds))) as Array<SourceRow & { pk: string }>;
+    const page = (await readSourcePage(q, source, start[source] ?? "", days)) as Array<SourceRow & { pk: string }>;
     for (const row of page) rows.push({ source, row });
     next[source] = page.length < ROW_LIMIT ? "" : page[page.length - 1].pk;
   }

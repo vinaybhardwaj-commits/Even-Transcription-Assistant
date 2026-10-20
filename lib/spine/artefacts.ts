@@ -18,13 +18,13 @@
  *
  * SAME KEY, TWO ROWS. A null sha256 never equals another null: when either side has no sha the object_key decides. A key held by another
  * source_table is counted as foreign_conflict, never dropped silently. A catalog object already indexed from consult_index, or from reb for a window actively linked to the SAME encounter, is dup_source.
- * HELD-OUT WINDOWS. The room-table reads are in lib/room-access/readers/spine-artefacts.ts; a blind window's rows come back marked and are counted as blind_excluded, never mapped.
+ * HELD-OUT ROOM-DAYS. The room-table reads are in lib/room-access/readers/spine-artefacts.ts; every source tests its row's (IST date, room) against BLIND_ROOM_DAYS, and a blind row comes back marked and is counted as blind_excluded, never mapped.
  * CURSOR. Each source is read in primary-key order, at most ROW_LIMIT rows per run, from the watermark kept in spine_config.artefacts_cursor.
  * When a source runs out of rows its watermark resets, so the next run sweeps again (late-linked rows get picked up; reruns are idempotent).
  */
 import { createHash } from "node:crypto";
-import { CATALOG_DEF, LINK_CU, NEMOTRON_DEF, REB_DEF } from "@/lib/room-access/readers/spine-artefacts";
-import type { SourceDef } from "@/lib/room-access/readers/spine-artefacts";
+import { LINK_CU, ROOM_SOURCES, blindDaySql, blindParams, readRoomPage, roomPageSql } from "@/lib/room-access/readers/spine-artefacts";
+import type { BlindDays, RoomSource } from "@/lib/room-access/readers/spine-artefacts";
 
 export const SOURCES = ["consult_index", "consult_sarvam_result", "reb_track_index", "diarize_nemotron_window", "freescript_run", "encounter_catalog"] as const;
 export type SourceTable = (typeof SOURCES)[number];
@@ -32,6 +32,14 @@ export type ArtefactStatus = "ok" | "empty" | "failed" | "skipped";
 export type ArtefactStore = "r2" | "neon" | "box";
 export type ArtefactsMode = "off" | "shadow" | "live";
 export const ROW_LIMIT = 2000;
+/** One source's SELECT parts (the sources that are not room tables). */
+export interface SourceDef {
+  columns: string[];
+  from: string;
+  /** Text expression of the source primary key: the cursor and the ORDER BY. Fixed width for numbers, so text order = key order. */
+  pk: string;
+  where?: string;
+}
 export const CURSOR_KEY = "artefacts_cursor";
 
 export interface ArtefactDraft {
@@ -66,7 +74,7 @@ export interface ArtefactCounts {
   foreign_conflict: Record<string, number>;
   /** Catalog objects already indexed from consult_index or reb_track_index, by source table. */
   dup_source: Record<string, number>;
-  /** Rows of a held-out (blind) window, or catalog objects that are its ref: counted, never mapped or indexed, by source table. */
+  /** Rows of a held-out (blind) room-day, or catalog objects that are its ref: counted, never mapped or indexed, by source table. */
   blind_excluded: Record<string, number>;
   unchanged: number;
   to_insert: number;
@@ -92,34 +100,38 @@ export function parseArtefactsMode(value: unknown): ArtefactsMode {
 }
 
 // ── The SELECTs. Column lists are the whole contract: ids, keys, shas, statuses. No body, text, transcript, name or prescription column. ──
-export const SOURCE_DEFS: Record<SourceTable, SourceDef> = {
+/** consult_uid-keyed sources are held out by their consult's room-day (consult_index carries the pair); consult_index itself by its own pair. */
+const BLIND_OWN = blindDaySql("s.ist_date", "s.room_id");
+const BLIND_OF_UID = `EXISTS (SELECT 1 FROM consult_index ci WHERE ci.consult_uid = s.consult_uid AND ${blindDaySql("ci.ist_date", "ci.room_id")})`;
+export type GenericSource = Exclude<SourceTable, RoomSource>;
+export const SOURCE_DEFS: Record<GenericSource, SourceDef> = {
   consult_index: {
-    columns: ["s.consult_uid", "s.cut_version", "s.code_commit", "s.clip_r2_key", "s.source_sha256", "l.encounter_id"],
+    columns: ["s.consult_uid", "s.cut_version", "s.code_commit", "s.clip_r2_key", "s.source_sha256", `${BLIND_OWN} AS blind`, "l.encounter_id"],
     from: `consult_index s ${LINK_CU}`,
     pk: "s.consult_uid",
   },
   consult_sarvam_result: {
-    columns: ["s.consult_uid", "s.cut_version", "s.mode", "s.english", "s.model_rev", "s.pipeline_rev", "s.result_r2_key", "l.encounter_id"],
+    columns: ["s.consult_uid", "s.cut_version", "s.mode", "s.english", "s.model_rev", "s.pipeline_rev", "s.result_r2_key", `${BLIND_OF_UID} AS blind`, "l.encounter_id"],
     from: `consult_sarvam_result s ${LINK_CU}`,
     pk: "lpad(s.id::text, 20, '0')",
   },
-  // The room-table sources live in the room-access reader (held-out windows are marked there).
-  reb_track_index: REB_DEF,
-  diarize_nemotron_window: NEMOTRON_DEF,
   freescript_run: {
-    columns: ["s.id", "s.consult_uid", "s.schema_version", "s.state", "s.input_sha256", "(EXISTS (SELECT 1 FROM freescript_artifact a WHERE a.run_id = s.id)) AS has_artifact", "l.encounter_id"],
+    columns: ["s.id", "s.consult_uid", "s.schema_version", "s.state", "s.input_sha256", "(EXISTS (SELECT 1 FROM freescript_artifact a WHERE a.run_id = s.id)) AS has_artifact", `${BLIND_OF_UID} AS blind`, "l.encounter_id"],
     from: `freescript_run s ${LINK_CU}`,
     pk: "lpad(s.id::text, 20, '0')",
   },
-  encounter_catalog: CATALOG_DEF,
 };
-/** The bound parameters of a source page: the watermark, plus the held-out window ids for a source that marks them. */
-export const sourceParams = (src: SourceTable, cursor: string, blindIds: readonly string[]): unknown[] => (SOURCE_DEFS[src].blind ? [cursor, [...blindIds]] : [cursor]);
-/** One page of a source, in primary-key order after the watermark $1 (use "" for the start). Deterministic: same rows in, same page out. */
+const isRoomSource = (src: SourceTable): src is RoomSource => (ROOM_SOURCES as readonly string[]).includes(src);
+/** One page of a source, in primary-key order after the watermark $1 (use "" for the start). Deterministic: same rows in, same page out. $2 is the held-out set (blindParams). */
 export function sourceSelect(src: SourceTable): string {
+  if (isRoomSource(src)) return roomPageSql(src, ROW_LIMIT);
   const d = SOURCE_DEFS[src];
   const where = [`${d.pk} COLLATE "C" > $1`, ...(d.where ? [d.where] : [])].join(" AND ");
   return `SELECT ${d.columns.join(", ")}, ${d.pk} AS pk FROM ${d.from} WHERE ${where} ORDER BY ${d.pk} COLLATE "C" LIMIT ${ROW_LIMIT}`;
+}
+/** Run one page of a source. The room-table sources are read by the room-access reader's own query; the others by sourceSelect. Every page binds the held-out set as $2. */
+export async function readSourcePage(q: (text: string, params?: unknown[]) => Promise<unknown[]>, src: SourceTable, cursor: string, days: BlindDays): Promise<unknown[]> {
+  return isRoomSource(src) ? readRoomPage(q, src, cursor, days, ROW_LIMIT) : q(sourceSelect(src), [cursor, ...blindParams(days)]);
 }
 /** Every artefact of the encounters in the page, whoever wrote it (so a key held by another source_table is seen). */
 export const EXISTING_SQL = "SELECT encounter_id, stage, engine, version, cfg8, cut_version, sha256, object_key, source_table FROM spine_artefact WHERE encounter_id = ANY($1::text[])";

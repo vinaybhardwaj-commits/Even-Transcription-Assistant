@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { ROOM_STUBS_SQL } from "../support/spine-room-stubs";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
 import { SOURCES, sourceSelect, CONFIG_SQL, hash8, parseArtefactsMode, planArtefacts, mapRow } from "@/lib/spine/artefacts";
 import type { SourceRow } from "@/lib/spine/artefacts";
@@ -10,7 +11,7 @@ import type { SpineDb } from "@/lib/spine/artefacts-store";
 
 const pg = pgContainer("eta-spine-s3r2-oref");
 const mig = (f: string) => readFileSync(`db/migrations/${f}`, "utf8");
-const NO_BLIND = { blindIds: async () => [] as string[] };
+const NO_BLIND = { blindDays: [] as Array<readonly [string, string]> };
 const NOW = new Date("2026-10-19T10:00:00Z");
 const SHA = (c: string) => c.repeat(64);
 const MARK = "PHIMARK";
@@ -47,7 +48,7 @@ const d = dockerAvailable() ? describe : describe.skip;
 d("spine-s3-r2-oref adversarial", () => {
   beforeAll(() => {
     pg.start();
-    pg.exec("CREATE TABLE schema_migrations (version integer PRIMARY KEY, name text NOT NULL); CREATE TABLE diarize_window_label (id serial PRIMARY KEY, engine text);");
+    pg.exec("CREATE TABLE schema_migrations (version integer PRIMARY KEY, name text NOT NULL); CREATE TABLE diarize_window_label (id serial PRIMARY KEY, engine text); " + ROOM_STUBS_SQL);
     for (const f of ["0135_reb_track_index.sql", "0140_diarize_nemotron.sql", "0150_consult_index.sql", "0157_freescript.sql", "0168_encounter_catalog.sql", "0169_encounter_catalog_c4.sql", "0173_spine.sql"]) pg.exec(mig(f));
   });
   afterAll(() => { pg.stop(); });
@@ -169,7 +170,7 @@ d("spine-s3-r2-oref adversarial", () => {
       INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, status, r2_key, sha256) SELECT 'bw_test_q'||g,'2026-10-19','r','stt','e','v'||g,'c','ok','reb/q/'||g||'.json',md5(g::text)||md5(g::text) FROM generate_series(1,60000) g;
       INSERT INTO spine_link (encounter_id, key_kind, value, basis) SELECT '${ENC("c")}','window_id','bw_test_q'||g,'exact' FROM generate_series(1,60000) g;
       ANALYZE;`);
-    const sql = sourceSelect("encounter_catalog").replace("$1", "''").replace(/\$2::varchar\[\]/g, "ARRAY[]::varchar[]");
+    const sql = sourceSelect("encounter_catalog").replace("$1", "''").replace(/\$2::text\[\]/g, "ARRAY[]::text[]");
     const t0 = Date.now(); q1(sql + ";"); const ms = Date.now() - t0;
     const plan = q1(`EXPLAIN (ANALYZE, BUFFERS) ${sql}`);
     console.log(`A8 catalog page ${ms} ms\n${plan.split("\n").filter((l) => /Execution|SubPlan|Seq Scan|Index|Hash|Planning/.test(l)).slice(0, 40).join("\n")}`);

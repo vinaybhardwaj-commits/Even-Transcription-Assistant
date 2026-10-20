@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { ROOM_STUBS_SQL } from "../support/spine-room-stubs";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
 import { SOURCES, sourceSelect, CONFIG_SQL, hash8, parseArtefactsMode, planArtefacts, mapRow } from "@/lib/spine/artefacts";
 import type { SourceRow } from "@/lib/spine/artefacts";
@@ -10,7 +11,7 @@ import type { SpineDb } from "@/lib/spine/artefacts-store";
 
 const pg = pgContainer("eta-spine-artefacts-r2");
 const mig = (f: string) => readFileSync(`db/migrations/${f}`, "utf8");
-const NO_BLIND = { blindIds: async () => [] as string[] };
+const NO_BLIND = { blindDays: [] as Array<readonly [string, string]> };
 const NOW = new Date("2026-10-19T10:00:00Z");
 const SHA = (c: string) => c.repeat(64);
 const MARK = "PHIMARK";
@@ -40,7 +41,7 @@ const d = dockerAvailable() ? describe : describe.skip;
 d("oref adversarial: spine S3 on postgres:16", () => {
   beforeAll(() => {
     pg.start();
-    pg.exec("CREATE TABLE schema_migrations (version integer PRIMARY KEY, name text NOT NULL); CREATE TABLE diarize_window_label (id serial PRIMARY KEY, engine text);");
+    pg.exec("CREATE TABLE schema_migrations (version integer PRIMARY KEY, name text NOT NULL); CREATE TABLE diarize_window_label (id serial PRIMARY KEY, engine text); " + ROOM_STUBS_SQL);
     for (const f of ["0135_reb_track_index.sql", "0140_diarize_nemotron.sql", "0150_consult_index.sql", "0157_freescript.sql", "0168_encounter_catalog.sql", "0169_encounter_catalog_c4.sql", "0173_spine.sql"]) pg.exec(mig(f));
     // Read-only role: SELECT on every source, INSERT only on spine_artefact. Writes on sources explicitly revoked.
     pg.exec(`CREATE ROLE spine_ro LOGIN;
