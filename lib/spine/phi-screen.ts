@@ -5,10 +5,11 @@
  *           room_id has the room_id format; source_key has the format of the id key its proxy keys on (SOURCE_KEY_FORMAT; a proxy with no entry has no valid source_key). A name-plus-digits token (ramesh_9845) or a bare phone-like number fits none of them.
  *
  * FORMAT DERIVATION (each regex lives in phi-rules.json; every id is machine-minted, so each is closed to its minting code):
- *   consult_key    `${enc}@${machine}`                          lib/encounter-windows/compute.ts:252; machine = normalizeHostname lib/encounter-windows/types.ts:113 (letters, digits, . _ -; spaces became -).
+ *   consult_key    `${enc}@${machine}`                          lib/encounter-windows/compute.ts:252. machine is the RAW event machine; it is normalised upstream (letters, digits, . _ -) in lib/encounter-windows/machine-keys.ts:4, so real rows already have that spelling.
  *   consult_uid    pqm rows: "pqm_" + 22 hex                    tools/eta-consult-cutter/tools/pqm_windows.py:20
- *                  Pulse rows: the Pulse encounter_id (= enc)   compute.ts:98, types.ts:23. UNVERIFIED: the Pulse extension is not in this repo, so enc is taken as enc_<alnum 6-40>, a uuid, or alnum 20-40.
- *                  Non-hex forms refuse any run of 7+ digits (a phone-like number); the pqm hex form is exempt (hex ids legitimately hold digit runs).
+ *                  Pulse rows: the Pulse uid, lower-case alnum 20-32   lib/buddy/relay.ts:82 SAFE_CONSULT_UID (enc = the Pulse encounter_id, compute.ts:98, types.ts:23). No other minting code exists in the repo, so no enc_<..> and no uuid form (the R3 enc_ramesh hole).
+ *                  Non-hex forms refuse any run of 7+ digits (a phone-like number); the pqm hex form is exempt (hex ids legitimately hold digit runs). The poster counts a guard refusal as `.digit_run`.
+ *   pulse_enc_id   PENDING-PROBE (fable M2 ruling, 20 Oct): allowed for proxies pulse and pqm only (id_key_proxies). Placeholder format [A-Za-z0-9_-]{8,64} with the 7-digit guard until .bc/PULSE-ENC-PROBE.md fixes the real shape. The placeholder admits a name (ramesh_abcd); only the guard and charset are enforced.
  *   pqm_step_uid   the PQM step uid, copied raw                  pqm_windows.py:55. UNVERIFIED charset: taken as a uuid or 16-64 hex. A row whose step uid is anything else is refused by the poster and counted.
  *   window_id      bench window "bw_<session 8>_<start_ms 13 digits>_<primary|backup>"   lib/bench-window.ts:357 (session id = 8 chars of benchId, lib/room-access/bench.ts:24)
  *                  cutter index: the Neon window id, a small integer (<= 7 digits); pqm rows 10**15 + 48 bits = 16 digits starting 10-12   pqm_windows.py:16-18
@@ -27,6 +28,10 @@ export const WORDS = /text|name|phone|patient|transcript|email|uhid|mrn|mobile|d
 export const ID_KEYS: ReadonlySet<string> = new Set(RULES.id_keys);
 export const FORMATS: Readonly<Record<string, RegExp>> = Object.fromEntries(Object.entries(RULES.formats).map(([k, src]) => [k, new RegExp(src)]));
 export const SOURCE_KEY_FORMAT: Readonly<Record<string, string>> = RULES.source_key_format;
+export const ID_KEY_PROXIES: Readonly<Record<string, readonly string[]>> = RULES.id_key_proxies;
+/** The 7-digit guard clause; a value that fails its format but passes without it was refused by the guard alone. */
+export const DIGIT_GUARD = "(?!.*[0-9]{7})";
+const UNGUARDED: Readonly<Record<string, RegExp>> = Object.fromEntries(Object.entries(RULES.formats).map(([k, src]) => [k, new RegExp(src.replace(DIGIT_GUARD, ""))]));
 
 export const ENUMS: Record<Proxy, { close_reason: ReadonlySet<string>; quality: ReadonlySet<string> }> = Object.fromEntries(
   Object.entries(RULES.enums).map(([p, e]) => [p, { close_reason: new Set(e.close_reason), quality: new Set(e.quality) }]),
@@ -61,17 +66,33 @@ export function refuseKeys(v: unknown, depth = 0): "text_key" | "too_deep" | nul
 
 const fmt = (key: string | undefined, v: unknown): boolean => key !== undefined && typeof v === "string" && FORMATS[key] !== undefined && FORMATS[key]!.test(v);
 
-/** The value screens for one signal whose shape is already checked. -> a refusal code (422) or null. */
-export function refuseValues(proxy: Proxy, o: { source_key: unknown; room_id?: unknown; attrs?: Record<string, unknown> }): string | null {
-  if (!fmt(SOURCE_KEY_FORMAT[proxy], o.source_key)) return "source_key";
-  if (o.room_id !== undefined && o.room_id !== null && !fmt("room_id", o.room_id)) return "room_id";
+/** A refusal: `code` is what the server answers (422), `reason` is the finer code the poster counts. Neither ever holds a value or an unlisted key. */
+export type Refusal = { code: string; reason: string };
+
+const idKeyReason = (k: string, x: unknown, proxy: string): string | null => {
+  if (!ID_KEYS.has(k)) return "attrs_ids.unknown_key";
+  const allowed = ID_KEY_PROXIES[k];
+  if (allowed && !allowed.includes(proxy)) return `attrs_ids.${k}.proxy`;
+  if (fmt(k, x)) return null;
+  return typeof x === "string" && UNGUARDED[k]!.test(x) ? `attrs_ids.${k}.digit_run` : `attrs_ids.${k}`;
+};
+
+/** The value screens for one signal whose shape is already checked. -> a refusal or null. */
+export function refuseValueReason(proxy: Proxy, o: { source_key: unknown; room_id?: unknown; attrs?: Record<string, unknown> }): Refusal | null {
+  if (!fmt(SOURCE_KEY_FORMAT[proxy], o.source_key)) {
+    const k = SOURCE_KEY_FORMAT[proxy];
+    return { code: "source_key", reason: k !== undefined && typeof o.source_key === "string" && UNGUARDED[k]?.test(o.source_key) ? "source_key.digit_run" : "source_key" };
+  }
+  if (o.room_id !== undefined && o.room_id !== null && !fmt("room_id", o.room_id)) return { code: "room_id", reason: "room_id" };
   const a = o.attrs ?? {};
   if (a.ids !== undefined) {
     const ids = a.ids;
-    if (ids === null || typeof ids !== "object" || Array.isArray(ids)) return "attrs_ids";
-    for (const [k, x] of Object.entries(ids)) if (!ID_KEYS.has(k) || !fmt(k, x)) return "attrs_ids";
+    if (ids === null || typeof ids !== "object" || Array.isArray(ids)) return { code: "attrs_ids", reason: "attrs_ids.not_object" };
+    for (const [k, x] of Object.entries(ids)) { const r = idKeyReason(k, x, proxy); if (r) return { code: "attrs_ids", reason: r }; }
   }
-  if (a.close_reason !== undefined && !(typeof a.close_reason === "string" && ENUMS[proxy].close_reason.has(a.close_reason))) return "attrs_close_reason";
-  if (a.quality !== undefined && !(typeof a.quality === "string" && ENUMS[proxy].quality.has(a.quality))) return "attrs_quality";
+  if (a.close_reason !== undefined && !(typeof a.close_reason === "string" && ENUMS[proxy].close_reason.has(a.close_reason))) return { code: "attrs_close_reason", reason: "close_reason" };
+  if (a.quality !== undefined && !(typeof a.quality === "string" && ENUMS[proxy].quality.has(a.quality))) return { code: "attrs_quality", reason: "quality" };
   return null;
 }
+
+export const refuseValues = (proxy: Proxy, o: Parameters<typeof refuseValueReason>[1]): string | null => refuseValueReason(proxy, o)?.code ?? null;

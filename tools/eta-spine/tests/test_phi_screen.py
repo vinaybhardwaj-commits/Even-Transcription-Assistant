@@ -1,5 +1,5 @@
 """The Python PHI screens against the same fixture file the TS tests read (tests/fixtures/spine-phi-cases.json)."""
-import json, os, sys
+import json, os, re, sys
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -80,18 +80,18 @@ def test_fixture_signals_same_verdict_as_ts():
 
 
 def test_a_bad_row_is_skipped_and_counted_not_fatal(tmp_path):
-    good = {"consult_uid": "enc_testaaaaaaaaaaaa", "t_open": 1790000000, "close_reason": "pqm", "quality": "pqm"}
-    bad = {"consult_uid": "enc_testbbbbbbbbbbbb", "t_open": 1790000000, "close_reason": "patient said chest pain"}
+    good = {"consult_uid": "uidtestaaaaaaaaaaaaaaaaa", "t_open": 1790000000, "close_reason": "pqm", "quality": "pqm"}
+    bad = {"consult_uid": "uidtestbbbbbbbbbbbbbbbbb", "t_open": 1790000000, "close_reason": "patient said chest pain"}
     f = tmp_path / "w.jsonl"
     f.write_text(json.dumps(good) + "\n" + json.dumps(bad) + "\n")
     sigs, counts = P.build(str(f), "pqm", "2026-10-18T00:00:00Z")
-    assert counts["signals"] == 1 and counts["refused"] == 1 and sigs[0]["source_key"] == "enc_testaaaaaaaaaaaa"
+    assert counts["signals"] == 1 and counts["refused"] == 1 and sigs[0]["source_key"] == "uidtestaaaaaaaaaaaaaaaaa"
 
 
 def test_post_with_a_refused_row_exits_0_and_reports_it(tmp_path, capsys):
     from unittest import mock
     f = tmp_path / "w.jsonl"
-    f.write_text(json.dumps({"consult_uid": "enc_testaaaaaaaaaaaa", "t_open": 1790000000}) + "\n" + json.dumps({"consult_uid": "enc_testbbbbbbbbbbbb", "t_open": 1790000000, "quality": "Ravi Kumar"}) + "\n")
+    f.write_text(json.dumps({"consult_uid": "uidtestaaaaaaaaaaaaaaaaa", "t_open": 1790000000}) + "\n" + json.dumps({"consult_uid": "uidtestbbbbbbbbbbbbbbbbb", "t_open": 1790000000, "quality": "Ravi Kumar"}) + "\n")
     tok = tmp_path / "tok"
     tok.write_text("t\n")
     os.chmod(tok, 0o600)
@@ -108,6 +108,14 @@ def verdict(s):
         return "ok"
     except P.Refused as e:
         return str(e)
+
+
+def reason(s):
+    try:
+        P.check_signal(s)
+        return None
+    except P.Refused as e:
+        return e.reason
 
 
 def test_rules_json_and_fixture_agree():
@@ -129,7 +137,10 @@ def test_every_producer_format_accepted_as_ids_value():
 
 def test_name_digits_phone_and_malformed_refused_by_every_key():
     for k in P.ID_KEYS:
-        for v in fill(F["formats_refuse_common"] + F["formats_refuse"][k]):
+        common = fill(F["formats_refuse_common"])
+        if k in F["pending_probe"]:       # placeholder format: only the charset, length and the 7-digit guard are enforced (a name like ramesh_9845 fits it; PENDING-PROBE)
+            common = [v for v in common if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", v) or re.search(r"[0-9]{7}", v)]
+        for v in common + fill(F["formats_refuse"][k]):
             assert not P.FORMATS[k].fullmatch(v), (k, v)
             assert verdict(sig("pqm", {"ids": {k: v}})) == "attrs_ids", (k, v)
 
@@ -171,3 +182,9 @@ def test_ported_key_verdicts_equal_ts():
 def test_ported_value_cases_equal_ts_on_all_cases():
     for c in F["value_cases"]:
         assert verdict(fill(c["signal"])) == c["expect"], c["label"]
+
+
+def test_ported_value_cases_carry_the_same_reason_code_as_ts():
+    for c in F["value_cases"]:
+        if "reason" in c:
+            assert reason(fill(c["signal"])) == c["reason"], c["label"]

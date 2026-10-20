@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Spine S1 box poster: turn pqm windows, cutter index rows or CAA scope bundles into spine_signal rows and POST them to /api/spine/signals (bearer token, D10: the box holds no DB credential).
 
-  post_signals.py --kind pqm|cutter|caa --file FILE [--url URL --token-file FILE --post]
+  post_signals.py --kind pqm|cutter|caa|nemotron_window --file FILE [--url URL --token-file FILE --post]
 
-DEFAULT IS --dry-run: it prints counts only (no ids, no names), opens no socket and reads no token. --post needs --url and --token-file, a regular file with mode 0600 holding the token.
+DEFAULT IS --dry-run: it prints counts only (no ids, no names; `refused_by_reason` counts per reason code: source_key, room_id, text_key, attrs_key, attrs_ids.<allowlisted key>[.digit_run|.proxy], attrs_ids.unknown_key, close_reason, quality, too_deep, and never a value), opens no socket and reads no token. --post needs --url and --token-file, a regular file with mode 0600 holding the token.
 The poster sends no source_rev: the server applies the rev rule (a new rev only when t_open, t_close, room_id or the close reason changed), so a re-run is idempotent.
 A key matching the PHI word list at any depth (normalised), an attrs key outside ids / quality / close_reason, or a value outside the closed rules (ids allowlist, enums, tokens) is refused HERE: that row is skipped and counted as `refused`, the rest still go. rc 0 with refused/skipped > 0 is reported in the counts.
 Exit codes: 0 done (refused / skipped rows are in the counts); 1 the server answered non-200; 3 the server reported `conflict` > 0 (a changed signal lost its race and was NOT stored: re-run the same file, the rev rule makes that idempotent). The `conflict` count is always in the post summary.
@@ -12,6 +12,7 @@ No timer is installed by this file.
 Input shapes:
   pqm     JSONL of the windows tools/pqm_windows.py writes (consult_uid, room_id, t_open / t_close epoch seconds, close_reason, quality).
   cutter  index.jsonl (append-only: the latest row per consult_uid wins): consult_uid, room_id, span_start / span_end naive IST "YYYY-MM-DD HH:MM:SS[.fff]", status, window_id.
+  nemotron_window  JSONL of the diarize_nemotron_window rows the box holds (db/migrations/0140): window_id, status ok|empty|failed, audio_ms, optional start_ms. One signal per window_id (the latest row wins); a failed row or one with no audio is skipped. t_open = start_ms, else the 13-digit start in the bw_ id (lib/bench-window.ts:357); t_close = t_open + audio_ms. Only attrs.ids.window_id; no room_id (the row names none); no turns are read.
   caa     JSONL of scope bundles: {consult_uid, scope_path "<scope>/<room dir>/...", manifest: {t0_ms, t1_ms}}. UNVERIFIED shape: taken from tools/eta2freescript/ingest.py bundle_window.
 """
 import argparse, datetime as dt, json, os, re, stat, sys, unicodedata, urllib.error, urllib.request
@@ -20,7 +21,7 @@ IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 WORDS = re.compile(r"text|name|phone|patient|transcript|email|uhid|mrn|mobile|dob|aadhaar|addr|address")
 MAX_DEPTH = 12
 BATCH = 500
-KINDS = ("pqm", "cutter", "caa")
+KINDS = ("pqm", "cutter", "caa", "nemotron_window")
 ATTR_KEYS = {"ids", "quality", "close_reason"}
 # The value rules are shared with lib/spine/phi-screen.ts: ONE json both read (enums, id keys, per-key formats, source_key format per proxy).
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "phi-rules.json"), encoding="utf-8") as _fh:
@@ -28,6 +29,9 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "phi-rules.js
 ID_KEYS = set(_RULES["id_keys"])
 FORMATS = {k: re.compile(v) for k, v in _RULES["formats"].items()}
 SOURCE_KEY_FORMAT = _RULES["source_key_format"]
+ID_KEY_PROXIES = _RULES["id_key_proxies"]
+DIGIT_GUARD = "(?!.*[0-9]{7})"
+_UNGUARDED = {k: re.compile(v.replace(DIGIT_GUARD, "")) for k, v in _RULES["formats"].items()}
 ENUMS = {p: {"close_reason": set(e["close_reason"]), "quality": set(e["quality"])} for p, e in _RULES["enums"].items()}
 _LOOKALIKE = {
     "ı": "i", "а": "a", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c", "т": "t", "у": "y", "х": "x",
@@ -37,7 +41,11 @@ _LOOKALIKE = {
 
 
 class Refused(ValueError):
-    pass
+    """args[0] is the code the server would answer; .reason is the finer code the dry-run counts (never a value, never an unlisted key)."""
+
+    def __init__(self, code, reason=None):
+        super().__init__(code)
+        self.reason = reason or code
 
 
 def norm_key(k):
@@ -68,22 +76,44 @@ def _fmt(key, v):
     return f is not None and isinstance(v, str) and f.fullmatch(v) is not None
 
 
+def _guard_only(key, v):
+    """True when v fails key's format but passes it without the 7-digit guard."""
+    f = _UNGUARDED.get(key) if key is not None else None
+    return f is not None and isinstance(v, str) and f.fullmatch(v) is not None
+
+
+def _id_key_reason(k, x, proxy):
+    if k not in ID_KEYS:
+        return "attrs_ids.unknown_key"
+    if proxy not in ID_KEY_PROXIES.get(k, [proxy]):
+        return f"attrs_ids.{k}.proxy"
+    if _fmt(k, x):
+        return None
+    return f"attrs_ids.{k}.digit_run" if _guard_only(k, x) else f"attrs_ids.{k}"
+
+
 def refuse_values(s):
-    """Mirrors refuseValues in lib/spine/phi-screen.ts; the server would answer 422 for any of these."""
-    if not _fmt(SOURCE_KEY_FORMAT.get(s.get("proxy")), s.get("source_key")):
-        raise Refused("source_key")
+    """Mirrors refuseValueReason in lib/spine/phi-screen.ts; the server would answer 422 for any of these."""
+    proxy = s.get("proxy")
+    skf = SOURCE_KEY_FORMAT.get(proxy)
+    if not _fmt(skf, s.get("source_key")):
+        raise Refused("source_key", "source_key.digit_run" if _guard_only(skf, s.get("source_key")) else "source_key")
     if s.get("room_id") is not None and not _fmt("room_id", s["room_id"]):
         raise Refused("room_id")
     a = s.get("attrs") or {}
     if "ids" in a:                                  # present-but-null is refused, as the server does
         ids = a["ids"]
-        if not isinstance(ids, dict) or any(k not in ID_KEYS or not _fmt(k, x) for k, x in ids.items()):
-            raise Refused("attrs_ids")
-    en = ENUMS.get(s.get("proxy"), {"close_reason": set(), "quality": set()})
+        if not isinstance(ids, dict):
+            raise Refused("attrs_ids", "attrs_ids.not_object")
+        for k, x in ids.items():
+            r = _id_key_reason(k, x, proxy)
+            if r:
+                raise Refused("attrs_ids", r)
+    en = ENUMS.get(proxy, {"close_reason": set(), "quality": set()})
     if "close_reason" in a and not (isinstance(a["close_reason"], str) and a["close_reason"] in en["close_reason"]):
-        raise Refused("attrs_close_reason")
+        raise Refused("attrs_close_reason", "close_reason")
     if "quality" in a and not (isinstance(a["quality"], str) and a["quality"] in en["quality"]):
-        raise Refused("attrs_quality")
+        raise Refused("attrs_quality", "quality")
 
 
 def check_signal(s):
@@ -156,7 +186,30 @@ def from_caa(r, observed):
             "attrs": _attrs({"consult_uid": uid})}
 
 
-MAPPERS = {"pqm": from_pqm, "cutter": from_cutter, "caa": from_caa}
+BW_ID = re.compile(r"^bw_[a-z0-9]{8}_([0-9]{13})_(?:primary|backup)$")
+
+
+def from_nemotron_window(r, observed):
+    wid = r.get("window_id")
+    if not isinstance(wid, str) or r.get("status") not in ("ok", "empty"):
+        return None
+    try:
+        audio = int(r["audio_ms"])
+        if r.get("start_ms") is not None:
+            t0 = int(r["start_ms"])
+        else:
+            m = BW_ID.match(wid)
+            t0 = int(m.group(1)) if m else None
+    except (KeyError, TypeError, ValueError):
+        return None
+    if t0 is None or t0 < 0 or audio <= 0:
+        return None
+    return {"proxy": "nemotron_window", "source_key": wid, "room_id": None, "t_open": iso_epoch_ms(t0), "t_close": iso_epoch_ms(t0 + audio), "observed_at": observed,
+            "attrs": _attrs({"window_id": wid})}
+
+
+MAPPERS = {"pqm": from_pqm, "cutter": from_cutter, "caa": from_caa, "nemotron_window": from_nemotron_window}
+LATEST_BY = {"cutter": "consult_uid", "nemotron_window": "window_id"}
 
 
 def read_rows(path, kind):
@@ -174,19 +227,21 @@ def read_rows(path, kind):
                 rows.append(r)
             else:
                 bad += 1
-    if kind == "cutter":                      # append-only index: the latest row per consult_uid
-        latest = {}
+    if kind in LATEST_BY:                     # append-only: the latest row per key
+        latest, keyless = {}, []
         for r in rows:
-            if r.get("consult_uid"):
-                latest[r["consult_uid"]] = r
-        rows = list(latest.values())
+            if isinstance(r.get(LATEST_BY[kind]), (str, int)) and r.get(LATEST_BY[kind]):
+                latest[r[LATEST_BY[kind]]] = r
+            else:
+                keyless.append(r)             # kept so the mapper counts it as skipped, not silently dropped
+        rows = list(latest.values()) + keyless
     return rows, bad
 
 
 def build(path, kind, observed):
     """-> (signals, counts). Refused rows are dropped and counted; nothing about them is printed."""
     rows, bad = read_rows(path, kind)
-    signals, skipped, refused = [], 0, 0
+    signals, skipped, refused, by_reason = [], 0, 0, {}
     for r in rows:
         s = MAPPERS[kind](r, observed)
         if s is None:
@@ -194,9 +249,10 @@ def build(path, kind, observed):
             continue
         try:
             signals.append(check_signal(s))
-        except Refused:
+        except Refused as e:
             refused += 1
-    return signals, {"read": len(rows) + bad, "bad_lines": bad, "skipped": skipped, "refused": refused, "signals": len(signals)}
+            by_reason[e.reason] = by_reason.get(e.reason, 0) + 1
+    return signals, {"read": len(rows) + bad, "bad_lines": bad, "skipped": skipped, "refused": refused, "refused_by_reason": dict(sorted(by_reason.items())), "signals": len(signals)}
 
 
 def read_token(path):
@@ -245,8 +301,8 @@ def main(argv=None, now=None):
             print(json.dumps({"mode": "post", "kind": a.kind, **counts, "sent": sent, "failed_status": code}))
             return 1
         if body.get("skipped"):
-            print(json.dumps({"mode": "post", "kind": a.kind, **counts, "sent": sent, "server_skipped": body["skipped"]}))
-            return 0
+            print(json.dumps({"mode": "post", "kind": a.kind, **counts, "inserted": sent, "duplicate": dup, "conflict": conflict, "server_skipped": body["skipped"]}))
+            return 3 if conflict > 0 else 0
         sent += body.get("inserted", 0)
         dup += body.get("duplicate", 0)
         conflict += body.get("conflict", 0)

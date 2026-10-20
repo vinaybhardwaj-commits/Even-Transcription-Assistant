@@ -54,14 +54,14 @@ d("spine ingest on postgres:16", () => {
       CREATE TABLE encounter_timeline_shadow (id text PRIMARY KEY, run_id text NOT NULL, room_day_id text NOT NULL, consult_key text NOT NULL, start_ms bigint NOT NULL, end_ms bigint NOT NULL, closed_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
       INSERT INTO room_day VALUES ('rd_abcd2345', 'room_abcd2345');
       INSERT INTO eta_encounter_windows VALUES
-        ('enc_testaaaaaaaaaaaa@mach_test', 'enc_testaaaaaaaaaaaa', 'room_abcd2345', '2026-10-18T04:00:00Z', '2026-10-18T04:10:00Z', 'endConsult', 'clean', '2026-10-18T04:11:00Z'),
-        ('enc_testbbbbbbbbbbbb@mach_test', 'enc_testbbbbbbbbbbbb', 'room_abcd2345', '2026-10-18T04:30:00Z', NULL, 'open', 'unclosed', '2026-10-18T04:31:00Z'),
-        ('enc_testoldoldoldx@mach_test', 'enc_testoldoldoldx', 'room_abcd2345', '2026-10-01T04:00:00Z', '2026-10-01T04:10:00Z', 'endConsult', 'clean', '2026-10-01T04:11:00Z');
+        ('uidtestaaaaaaaaaaaaaaaaa@mach_test', 'uidtestaaaaaaaaaaaaaaaaa', 'room_abcd2345', '2026-10-18T04:00:00Z', '2026-10-18T04:10:00Z', 'endConsult', 'clean', '2026-10-18T04:11:00Z'),
+        ('uidtestbbbbbbbbbbbbbbbbb@mach_test', 'uidtestbbbbbbbbbbbbbbbbb', 'room_abcd2345', '2026-10-18T04:30:00Z', NULL, 'open', 'unclosed', '2026-10-18T04:31:00Z'),
+        ('uidtestoldoldoldoldxx@mach_test', 'uidtestoldoldoldoldxx', 'room_abcd2345', '2026-10-01T04:00:00Z', '2026-10-01T04:10:00Z', 'endConsult', 'clean', '2026-10-01T04:11:00Z');
       INSERT INTO encounter_hypothesis_run VALUES ('hr_test_01', 'rd_abcd2345', 'acoustic', '2026-10-18T04:12:00Z');
       INSERT INTO encounter_hypothesis VALUES ('eh_abcdefghjkmn', 'hr_test_01', 'rd_abcd2345', ${T0}, ${T0 + 600000}, 'non_speech', '2026-10-18T04:12:00Z');
       INSERT INTO encounter_timeline_shadow VALUES
-        ('tl_test_01', 'run_test_01', 'rd_abcd2345', 'enc_testaaaaaaaaaaaa@mach_test', ${T0}, ${T0 + 590000}, 'patient_left', '2026-10-18T04:12:00Z'),
-        ('tl_test_02', 'run_test_02', 'rd_abcd2345', 'enc_testaaaaaaaaaaaa@mach_test', ${T0}, ${T0 + 600000}, 'patient_left', '2026-10-18T05:12:00Z');
+        ('tl_test_01', 'run_test_01', 'rd_abcd2345', 'uidtestaaaaaaaaaaaaaaaaa@mach_test', ${T0}, ${T0 + 590000}, 'patient_left', '2026-10-18T04:12:00Z'),
+        ('tl_test_02', 'run_test_02', 'rd_abcd2345', 'uidtestaaaaaaaaaaaaaaaaa@mach_test', ${T0}, ${T0 + 600000}, 'patient_left', '2026-10-18T05:12:00Z');
     `);
   });
   afterAll(() => { pg.stop(); });
@@ -82,17 +82,17 @@ d("spine ingest on postgres:16", () => {
     expect(await count()).toBe(4);
     const tl = (await q("SELECT source_rev, room_id, t_close, attrs FROM spine_signal WHERE proxy = 'timeline'"))[0];
     expect([tl.source_rev, tl.room_id, new Date(tl.t_close as string).getTime()]).toEqual([1, "room_abcd2345", T0 + 600000]);   // the newest run's row
-    expect(tl.attrs).toEqual({ ids: { shadow_id: "tl_test_02", run_id: "run_test_02", consult_key: "enc_testaaaaaaaaaaaa@mach_test", }, close_reason: "patient_left" });
+    expect(tl.attrs).toEqual({ ids: { shadow_id: "tl_test_02", run_id: "run_test_02", consult_key: "uidtestaaaaaaaaaaaaaaaaa@mach_test", }, close_reason: "patient_left" });
     expect(Number(Object.values((await q("SELECT count(*)::int FROM spine_tick"))[0])[0])).toBe(1);
   });
 
   it("a second pass with nothing changed inserts nothing; a moved t_close and a closing window each add rev 2, and the old rev stays", async () => {
     expect(await ingestSpineSignals(NOW)).toMatchObject({ inserted: { pulse: 0, acoustic: 0, timeline: 0 } });
-    pg.exec("UPDATE eta_encounter_windows SET t_close = '2026-10-18T04:12:00Z' WHERE consult_key = 'enc_testaaaaaaaaaaaa@mach_test'; UPDATE eta_encounter_windows SET t_close = '2026-10-18T04:40:00Z', close_reason = 'endConsult' WHERE consult_key = 'enc_testbbbbbbbbbbbb@mach_test'; UPDATE eta_encounter_windows SET computed_at = now();");
+    pg.exec("UPDATE eta_encounter_windows SET t_close = '2026-10-18T04:12:00Z' WHERE consult_key = 'uidtestaaaaaaaaaaaaaaaaa@mach_test'; UPDATE eta_encounter_windows SET t_close = '2026-10-18T04:40:00Z', close_reason = 'endConsult' WHERE consult_key = 'uidtestbbbbbbbbbbbbbbbbb@mach_test'; UPDATE eta_encounter_windows SET computed_at = now();");
     expect(await ingestSpineSignals(NOW)).toMatchObject({ inserted: { pulse: 2, acoustic: 0, timeline: 0 } });
     expect(await ingestSpineSignals(NOW)).toMatchObject({ inserted: { pulse: 0, acoustic: 0, timeline: 0 } });
     const revs = (await q("SELECT source_key, source_rev FROM spine_signal WHERE proxy = 'pulse' ORDER BY 1, 2")).map((r) => `${r.source_key}:${r.source_rev}`);
-    expect(revs).toEqual(["enc_testaaaaaaaaaaaa@mach_test:1", "enc_testaaaaaaaaaaaa@mach_test:2", "enc_testbbbbbbbbbbbb@mach_test:1", "enc_testbbbbbbbbbbbb@mach_test:2"]);
+    expect(revs).toEqual(["uidtestaaaaaaaaaaaaaaaaa@mach_test:1", "uidtestaaaaaaaaaaaaaaaaa@mach_test:2", "uidtestbbbbbbbbbbbbbbbbb@mach_test:1", "uidtestbbbbbbbbbbbbbbbbb@mach_test:2"]);
   });
 
   it("storeSignals: an explicit rev twice is a duplicate; with no rev the rev rule applies; the attrs CHECK still refuses a stray key", async () => {

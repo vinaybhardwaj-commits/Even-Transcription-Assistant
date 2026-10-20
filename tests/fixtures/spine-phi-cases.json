@@ -102,7 +102,8 @@
   "shadow_id",
   "run_id",
   "pqm_step_uid",
-  "window_id"
+  "window_id",
+  "pulse_enc_id"
  ],
  "refuse_keys": [
   "name",
@@ -175,7 +176,7 @@
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "consult_uid": "enc_testaaaaaaaaaaaa",
+      "consult_uid": "uidtestaaaaaaaaaaaaaaaaa",
       "pqm_step_uid": "a1b2c3d4e5f6a7b8c9d0"
      },
      "quality": "pqm",
@@ -188,12 +189,12 @@
    "expect": "ok",
    "signal": {
     "proxy": "pulse",
-    "source_key": "enc_testaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "consult_key": "enc_testaaaaaaaaaaaa@mach_test"
+      "consult_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test"
      }
     }
    }
@@ -306,7 +307,7 @@
    "expect": "422",
    "signal": {
     "proxy": "pulse",
-    "source_key": "enc_testaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -352,8 +353,8 @@
   }
  ],
  "good_ids": {
-  "consult_uid": "enc_testaaaaaaaaaaaa",
-  "consult_key": "enc_testaaaaaaaaaaaa@mach_test",
+  "consult_uid": "uidtestaaaaaaaaaaaaaaaaa",
+  "consult_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
   "pqm_step_uid": "a1b2c3d4e5f6a7b8c9d0",
   "window_id": "bw_abcd2345_{MS13}_primary",
   "room_id": "room_abcd2345",
@@ -363,29 +364,27 @@
   "shadow_id": "et_0a1b2c3d4e5f6a7b8c"
  },
  "good_source_key": {
-  "pulse": "enc_testaaaaaaaaaaaa@mach_test",
-  "timeline": "enc_testaaaaaaaaaaaa@mach_test",
+  "pulse": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+  "timeline": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
   "acoustic": "eh_abcdefghjkmn",
   "pqm": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
-  "cutter": "enc_testaaaaaaaaaaaa",
-  "caa": "enc_testaaaaaaaaaaaa",
+  "cutter": "uidtestaaaaaaaaaaaaaaaaa",
+  "caa": "uidtestaaaaaaaaaaaaaaaaa",
   "nemotron_window": "bw_abcd2345_{MS13}_primary"
  },
  "formats_accept": {
   "consult_uid": [
    "pqm_a1b2c3d4e5f6a7b8c9d0e1",
    "pqm_0f9e8d7c6b5a4f3e2d1c0b",
-   "enc_testaaaaaaaaaaaa",
-   "enc_abc123",
-   "11111111-2222-4333-8444-555555555555",
+   "uidtestaaaaaaaaaaaaaaaaa",
    "abcdefghij0123abcdef",
-   "enc_x1y2z3"
+   "a1b2c3d4e5f6a7b8c9d0e1f2",
+   "abcdefghjk234567abcdefghjk234567"
   ],
   "consult_key": [
-   "enc_testaaaaaaaaaaaa@mach_test",
-   "enc_abc123@EHRC-TEST1s-Mac-mini",
-   "enc_abc123@opd-1_mini",
-   "11111111-2222-4333-8444-555555555555@m1"
+   "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+   "abcdefghij0123abcdef@EHRC-TEST1s-Mac-mini",
+   "a1b2c3d4e5f6a7b8c9d0e1f2@opd-1_mini"
   ],
   "pqm_step_uid": [
    "a1b2c3d4e5f6a7b8c9d0",
@@ -418,6 +417,11 @@
   ],
   "shadow_id": [
    "et_0a1b2c3d4e5f6a7b8c"
+  ],
+  "pulse_enc_id": [
+   "pulse_enc_test_01",
+   "Abcdefgh-ijkl_mnop",
+   "a1b2c3d4e5f6a7b8c9d0e1f2"
   ]
  },
  "formats_refuse_common": [
@@ -427,8 +431,8 @@
   "{PLUS_PHONE}",
   "Ravi Kumar",
   "",
-  "enc_testaaaaaaaaaaaa\n",
-  "enc_testaaaaaaaaaaaa ",
+  "uidtestaaaaaaaaaaaaaaaaa\n",
+  "uidtestaaaaaaaaaaaaaaaaa ",
   "\uff11\uff12\uff13",
   "enc_test\u200baaaaaaaaaaaa",
   "ENC_TESTAAAAAAAAAAAA",
@@ -436,29 +440,40 @@
  ],
  "formats_refuse": {
   "consult_uid": [
-   "enc_phone{DIG7}x",
-   "enc_abc12{DIG7}",
    "pqm_a1b2c3d4e5f6a7b8c9d0e",
    "pqm_A1B2C3D4E5F6A7B8C9D0E1",
    "pqm_a1b2c3d4e5f6a7b8c9d0e1f",
-   "enc_ab",
-   "tok_{DIG7}abcdefghijklmnop",
+   "enc_ramesh",
+   "enc_ramesh9845",
+   "enc_abc123",
+   "enc_x1y2z3",
+   "enc_phone{DIG7}x",
+   "uidtest_aaaaaaaaaaaaaaaa",
+   "11111111-2222-4333-8444-555555555555",
+   "abcdefghij0123abcde",
+   "abcdefghij0123abcdefghij0123abcde",
+   "ABCDEFGHIJ0123ABCDEF",
+   "abcdefghij{DIG7}abcdef",
    "{DIG7}{DIG7}{DIG7}{DIG7}"
   ],
   "consult_key": [
-   "enc_testaaaaaaaaaaaa",
-   "enc_testaaaaaaaaaaaa@",
+   "uidtestaaaaaaaaaaaaaaaaa",
+   "uidtestaaaaaaaaaaaaaaaaa@",
    "@mach_test",
-   "enc_testaaaaaaaaaaaa@mach test",
-   "enc_testaaaaaaaaaaaa@m_{DIG7}",
+   "uidtestaaaaaaaaaaaaaaaaa@mach test",
+   "uidtestaaaaaaaaaaaaaaaaa@m_{DIG7}",
    "pqm_a1b2c3d4e5f6a7b8c9d0e1@pqm",
-   "11111111-2222-4333-8444-555555555555@m_{DIG7}"
+   "enc_x1y2z3@ramesh-9845",
+   "enc_ramesh@mach_test",
+   "11111111-2222-4333-8444-555555555555@m1"
   ],
   "pqm_step_uid": [
    "step_test_01",
    "0f9e8d7c6b5a4f",
    "A1B2C3D4E5F6A7B8C9D0",
-   "{PHONE10}"
+   "{PHONE10}",
+   "abcdefghijklmnopqrstuvwx",
+   "ramesh98450123abcd"
   ],
   "window_id": [
    "bw_abcd2345_{MS13}_other",
@@ -478,7 +493,12 @@
    "room_ABCD2345",
    "room_abci2345",
    "rm_abcd2345",
-   "room_ramesh98"
+   "room_ramesh98",
+   "room_ramesh",
+   "room_suresh",
+   "room_abcd2340",
+   "room_abcdi234",
+   "ROOM_abcd2345"
   ],
   "room_day_id": [
    "rd_abcd234",
@@ -505,6 +525,15 @@
    "et_0a1b2c3d4e5f6a7b8cd",
    "ets_0a1b2c3d4e5f6a7b8c",
    "tl_test_01"
+  ],
+  "pulse_enc_id": [
+   "short",
+   "has space here",
+   "pe_{DIG7}abcdef",
+   "{PHONE10}",
+   "{PLUS_PHONE}",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "abcd\u200befgh"
   ]
  },
  "keys": {
@@ -796,7 +825,7 @@
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "Consult_uid": "enc_testaaaaaaaaaaaa"
+      "Consult_uid": "uidtestaaaaaaaaaaaaaaaaa"
      }
     }
    }
@@ -811,7 +840,7 @@
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "consult_uid\u200b": "enc_testaaaaaaaaaaaa"
+      "consult_uid\u200b": "uidtestaaaaaaaaaaaaaaaaa"
      }
     }
    }
@@ -821,7 +850,7 @@
    "expect": "ok",
    "signal": {
     "proxy": "pulse",
-    "source_key": "enc_testaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -834,7 +863,7 @@
    "expect": "ok",
    "signal": {
     "proxy": "timeline",
-    "source_key": "enc_testaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -873,7 +902,7 @@
    "expect": "attrs_quality",
    "signal": {
     "proxy": "caa",
-    "source_key": "enc_testaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1002,7 +1031,7 @@
    "expect": "ok",
    "signal": {
     "proxy": "cutter",
-    "source_key": "enc_testaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1016,7 +1045,7 @@
    "expect": "ok",
    "signal": {
     "proxy": "cutter",
-    "source_key": "enc_testaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1029,7 +1058,7 @@
    "expect": "ok",
    "signal": {
     "proxy": "cutter",
-    "source_key": "enc_testaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1091,12 +1120,12 @@
    "expect": "ok",
    "signal": {
     "proxy": "timeline",
-    "source_key": "enc_testaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "consult_key": "enc_testaaaaaaaaaaaa@mach_test",
+      "consult_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
       "shadow_id": "et_0a1b2c3d4e5f6a7b8c",
       "run_id": "ets_0a1b2c3d4e5f6a7b8c"
      },
@@ -1129,12 +1158,12 @@
    "expect": "ok",
    "signal": {
     "proxy": "cutter",
-    "source_key": "enc_testaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "consult_uid": "enc_testaaaaaaaaaaaa",
+      "consult_uid": "uidtestaaaaaaaaaaaaaaaaa",
       "window_id": "{P16}"
      },
      "quality": "cut"
@@ -1147,7 +1176,7 @@
    "expect": "source_key",
    "signal": {
     "proxy": "acoustic",
-    "source_key": "enc_testaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {}
@@ -1158,7 +1187,7 @@
    "expect": "source_key",
    "signal": {
     "proxy": "pulse",
-    "source_key": "enc_testaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {}
@@ -1180,7 +1209,7 @@
    "expect": "source_key",
    "signal": {
     "proxy": "pqm",
-    "source_key": "enc_testaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {}
@@ -1202,7 +1231,7 @@
    "expect": "source_key",
    "signal": {
     "proxy": "doctor_activity",
-    "source_key": "enc_testaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {}
@@ -1224,7 +1253,7 @@
    "expect": "source_key",
    "signal": {
     "proxy": "nemotron_window",
-    "source_key": "enc_testaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {}
@@ -1244,6 +1273,273 @@
      }
     }
    }
+  },
+  {
+   "label": "r4_enc_ramesh_uid",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.consult_uid",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "enc_ramesh"
+     }
+    }
+   }
+  },
+  {
+   "label": "r4_enc_ramesh9845_uid",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.consult_uid",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "enc_ramesh9845"
+     }
+    }
+   }
+  },
+  {
+   "label": "r4_cutter_source_enc_ramesh",
+   "expect": "source_key",
+   "reason": "source_key",
+   "signal": {
+    "proxy": "cutter",
+    "source_key": "enc_ramesh",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "r4_cutter_source_digit_run",
+   "expect": "source_key",
+   "reason": "source_key.digit_run",
+   "signal": {
+    "proxy": "cutter",
+    "source_key": "abcdefghij{DIG7}abcdef",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "r4_pulse_source_enc_ramesh_key",
+   "expect": "source_key",
+   "reason": "source_key",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "enc_ramesh@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "r4_room_ramesh",
+   "expect": "room_id",
+   "reason": "room_id",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {},
+    "room_id": "room_ramesh"
+   }
+  },
+  {
+   "label": "r4_room_suresh",
+   "expect": "room_id",
+   "reason": "room_id",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {},
+    "room_id": "room_suresh"
+   }
+  },
+  {
+   "label": "r4_step_uid_base36",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.pqm_step_uid",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "pqm_step_uid": "abcdefghijklmnopqrstuvwx"
+     }
+    }
+   }
+  },
+  {
+   "label": "r4_step_uid_name_hex",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.pqm_step_uid",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "pqm_step_uid": "ramesh98450123abcd"
+     }
+    }
+   }
+  },
+  {
+   "label": "r4_digit_run_guard",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.pulse_enc_id.digit_run",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "pulse_enc_id": "pe_{DIG7}abcdef"
+     }
+    }
+   }
+  },
+  {
+   "label": "r4_pulse_enc_id_ok_pulse",
+   "expect": "ok",
+   "reason": null,
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "pulse_enc_id": "pulse_enc_test_01"
+     }
+    }
+   }
+  },
+  {
+   "label": "r4_pulse_enc_id_ok_pqm",
+   "expect": "ok",
+   "reason": null,
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "pulse_enc_id": "pulse_enc_test_01"
+     }
+    }
+   }
+  },
+  {
+   "label": "r4_pulse_enc_id_wrong_proxy",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.pulse_enc_id.proxy",
+   "signal": {
+    "proxy": "cutter",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "pulse_enc_id": "pulse_enc_test_01"
+     }
+    }
+   }
+  },
+  {
+   "label": "r4_unknown_ids_key",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.unknown_key",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_id": "x"
+     }
+    }
+   }
+  },
+  {
+   "label": "r4_ids_null",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.not_object",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": null
+    }
+   }
+  },
+  {
+   "label": "r4_bad_close_reason",
+   "expect": "attrs_close_reason",
+   "reason": "close_reason",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "close_reason": "nope"
+    }
+   }
+  },
+  {
+   "label": "r4_bad_quality",
+   "expect": "attrs_quality",
+   "reason": "quality",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "quality": "nope"
+    }
+   }
+  },
+  {
+   "label": "r4_nemotron_window_ok",
+   "expect": "ok",
+   "reason": null,
+   "signal": {
+    "proxy": "nemotron_window",
+    "source_key": "bw_abcd2345_{MS13}_primary",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "window_id": "bw_abcd2345_{MS13}_primary"
+     }
+    }
+   }
   }
+ ],
+ "pending_probe": [
+  "pulse_enc_id"
  ]
 }

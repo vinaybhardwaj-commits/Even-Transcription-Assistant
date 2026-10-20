@@ -1,7 +1,7 @@
 /** Spine S1 R2: the PHI screens (keys and values), driven by tests/fixtures/spine-phi-cases.json, which tools/eta-spine/tests/test_phi_screen.py reads too. Synthetic only. */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import { ENUMS, ID_KEYS, FORMATS, SOURCE_KEY_FORMAT, refuseKeys, normKey } from "@/lib/spine/phi-screen";
+import { ENUMS, ID_KEYS, FORMATS, SOURCE_KEY_FORMAT, refuseKeys, normKey, refuseValueReason } from "@/lib/spine/phi-screen";
 import RULES from "../../tools/eta-spine/phi-rules.json";
 import { validateSignals } from "@/lib/spine/signal-validate";
 import type { Proxy } from "@/lib/spine/ingest";
@@ -10,7 +10,7 @@ const F = JSON.parse(readFileSync("tests/fixtures/spine-phi-cases.json", "utf8")
   enums: Record<string, { close_reason: string[]; quality: string[] }>; id_keys: string[]; refuse_keys: string[]; ok_keys: string[];
   deep: Array<{ nest: number; leaf: unknown; expect: string | null }>; signals: Array<{ label: string; expect: string; signal: Record<string, unknown> }>;
   good_ids: Record<string, string>; good_source_key: Record<string, string>; formats_accept: Record<string, string[]>; formats_refuse: Record<string, string[]>; formats_refuse_common: string[];
-  keys: Record<string, string>; key_verdicts: Record<string, string | null>; value_cases: Array<{ label: string; expect: string; signal: Record<string, unknown> }>;
+  keys: Record<string, string>; key_verdicts: Record<string, string | null>; value_cases: Array<{ label: string; expect: string; reason?: string | null; signal: Record<string, unknown> }>; pending_probe: string[];
 };
 /** Digit runs are built here, never written in the fixture. */
 const FILL: Record<string, string> = { "{MS13}": "17" + "0".repeat(11), "{P16}": "1" + "0".repeat(15), "{PHONE10}": "9".repeat(10), "{PLUS_PHONE}": "+91" + "9".repeat(10), "{DIG7}": "1234567", "{DIG8}": "20260101" };
@@ -86,10 +86,14 @@ describe("per-key id formats (R3 F1)", () => {
     }
   });
   it("name+digits, phone-like and malformed values are refused by EVERY key, as ids.<key>", () => {
-    for (const k of keys) for (const v of fill([...F.formats_refuse_common, ...F.formats_refuse[k]!])) {
+    for (const k of keys) {
+      // a PENDING-PROBE placeholder enforces only charset, length and the 7-digit guard (a name like ramesh_9845 fits it)
+      const common = F.pending_probe.includes(k) ? fill(F.formats_refuse_common).filter((v) => !/^[A-Za-z0-9_-]{8,64}$/.test(v) || /[0-9]{7}/.test(v)) : fill(F.formats_refuse_common);
+      for (const v of [...common, ...fill(F.formats_refuse[k]!)]) {
       expect(FORMATS[k]!.test(v), `${k} ${JSON.stringify(v)}`).toBe(false);
       const r = validateSignals([sig("pqm", { ids: { [k]: v } })]);
       expect(r.ok ? "ok" : r.error, `ids.${k} ${JSON.stringify(v)}`).toBe("attrs_ids");
+      }
     }
   });
   it("anchored: a stray character before or after a good value is refused", () => {
@@ -118,6 +122,15 @@ describe("ported refute cases (R3 F5): key and value verdicts, identical in Pyth
     for (const c of F.value_cases) {
       const v = validateSignals([fill(c.signal)]);
       expect(v.ok ? "ok" : v.error, c.label).toBe(c.expect);
+    }
+  });
+  it("every refusal carries the same reason code as Python, and never a value", () => {
+    for (const c of F.value_cases) {
+      if (!("reason" in c)) continue;
+      const s = fill(c.signal) as { proxy: Proxy; source_key: unknown; room_id?: unknown; attrs?: Record<string, unknown> };
+      const r = refuseValueReason(s.proxy, s);
+      expect(r ? r.reason : null, c.label).toBe(c.reason ?? null);
+      if (r) expect(r.reason, c.label).toMatch(/^[a-z_.]+$/);
     }
   });
 });
