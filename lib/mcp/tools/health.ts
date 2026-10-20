@@ -199,7 +199,7 @@ const scribeSystemMap: McpTool = {
       flags: flagStates,
       env_set: env,
       stores: {
-        app_neon: { env: "APP_DATABASE_URL", driver: "neon http", tables: ["clinician", "encounter", "llm_traces", "trace", "voice_print", "voice_sample", "stt_*", "room", "bench_session", "bench_chunk", "bench_event", "audit_log"] },
+        app_neon: { env: "APP_DATABASE_URL", driver: "neon http", tables: ["clinician", "encounter", "llm_traces", "trace", "voice_print", "voice_sample", "stt_*", "room", "bench_session", "bench_chunk", "bench_event", "audit_log", "eta_encounter_windows", "encounter_catalog", "consult_index", "spine_signal", "spine_encounter", "spine_link", "spine_artefact", "spine_job", "spine_config", "spine_tick"] },
         brain_role: { env: "BRAIN_DATABASE_URL", driver: "neon ws pool", tables: ["room_day", "visit", "speaker_cluster", "cue"] },
         kb_neon: { env: "KB_DATABASE_URL", tables: ["mksap_chunks"] },
         r2: { env: "R2_BUCKET", prefixes: ["encounters/", "whisper-buffer/", "voice-samples/", `${BENCH_PREFIX}{slug}/{UTC-date}/{session_id}/`] },
