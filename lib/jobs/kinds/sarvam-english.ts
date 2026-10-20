@@ -1,7 +1,7 @@
 /**
  * lib/jobs/kinds/sarvam-english.ts — S8A4: the English track of a Sarvam transcription. PURE (no I/O).
  *
- * The English comes from the AUDIO (a second saaras:v3 pass in translate mode), not from trusting the file-level language_code, which saaras sets once per file
+ * The English comes from the AUDIO (a second saaras:v4 pass in translate mode), not from trusting the file-level language_code, which saaras sets once per file
  * (en-IN for a consult that is mostly English even when a Kannada line is in it). The two passes have their own diarized entries and their own timelines:
  *   - the NATIVE entries (transcribe / codemix pass) stay exactly as Sarvam returned them, with the script of their own text recorded;
  *   - the ENGLISH entries (translate pass) are aligned to the native ones by time overlap, each to the native entry it overlaps most;

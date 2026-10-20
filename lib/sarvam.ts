@@ -3,7 +3,7 @@
  *
  * Why: Deepgram (nova-3-medical) is English-only and returns nothing for
  * Kannada/most Indian languages; Whisper large-v3-turbo mistranslates and
- * romanizes Indian-language audio. Sarvam (Saaras v3) handles Indian
+ * romanizes Indian-language audio. Sarvam (Saaras v4) handles Indian
  * languages accurately for both transcription (original script) and
  * translation to English, and accepts the browser's webm/opus directly.
  *
@@ -14,11 +14,13 @@
  *
  * For audio >30s use the Batch API (see sarvamBatch* below).
  *
- * Env: SARVAM_API_KEY (required), SARVAM_STT_MODEL (default 'saaras:v3').
+ * Env: SARVAM_API_KEY (required), SARVAM_STT_MODEL (default 'saaras:v4'; a v3 value is refused, see lib/sarvam-model.ts).
  */
 
+import { resolveSarvamModelEnv, resolveSarvamSttModel } from "@/lib/sarvam-model";
+
 const SARVAM_BASE = "https://api.sarvam.ai";
-const MODEL = process.env.SARVAM_STT_MODEL || "saaras:v3";
+const MODEL = resolveSarvamSttModel(process.env.SARVAM_STT_MODEL);
 const SYNC_TIMEOUT_MS = 60_000;
 
 export type SarvamMode = "transcribe" | "translate";
@@ -175,7 +177,7 @@ async function tfetch(
  */
 type SarvamJobConfig = { jobPath: string; model: string };
 const JOB_TRANSLATE: SarvamJobConfig = { jobPath: "speech-to-text-translate", model: "saaras:v2.5" };
-const JOB_TRANSCRIBE: SarvamJobConfig = { jobPath: "speech-to-text", model: process.env.SARVAM_STT_BATCH_MODEL || "saarika:v2.5" };
+const JOB_TRANSCRIBE: SarvamJobConfig = { jobPath: "speech-to-text", model: resolveSarvamModelEnv(process.env.SARVAM_STT_BATCH_MODEL, "saarika:v2.5") };
 
 async function sarvamBatchJob(
   audio: Buffer | Uint8Array,

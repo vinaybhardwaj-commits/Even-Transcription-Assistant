@@ -7,6 +7,7 @@
  * failed it by code, or it finished ok before the cancel arrived) gets no second one.
  */
 import { appendLedger, refreshContractFiles, type CallLine } from "@/lib/sarvam-lab";
+import { recordedSttModel } from "@/lib/sarvam-model";
 import type { JobRow } from "./types";
 
 const SARVAM_KINDS = ["sarvam_transcribe", "sarvam_translate"] as const;
@@ -35,7 +36,7 @@ export function endedLine(job: Pick<JobRow, "id" | "kind" | "args" | "progress" 
   // set at init, is NOT proof of a start: a job that failed at upload has a request id and was never billed.)
   const started = n(p.sarvam_started_ms) > 0;
   return {
-    ...base, job_id: job.id, request_id: s(p.sarvam_job_id), mode: "batch", task: "transcribe", model: "saaras:v3",
+    ...base, job_id: job.id, request_id: s(p.sarvam_job_id), mode: "batch", task: "transcribe", model: recordedSttModel(p.stt_model),
     audio_s: started ? Math.round(n(p.duration_ms) / 10) / 100 : 0, started_at: s(p.started_at) ?? job.created_at,
   };
 }

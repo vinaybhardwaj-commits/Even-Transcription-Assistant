@@ -312,16 +312,18 @@ describe("1d — the other paths that were checked (nothing to refuse, and the e
 describe("2 — a Sarvam job ended by the runner or cancelled writes one ledger line", () => {
   const job = (over: Row = {}) => ({
     id: "job_s1", kind: "sarvam_transcribe", args: { source: "encounter", encounter_id: "enc_1", mode: "transcribe", english: true }, status: "running", step: "poll",
-    progress: { sarvam_job_id: "sj_9", sarvam_started_ms: Date.now(), duration_ms: 600_000, scope: "encounter", ref: "enc_1", started_at: "2026-10-08T06:00:00.000Z", clip_key: "k" },
+    progress: { sarvam_job_id: "sj_9", stt_model: "saaras:v4", sarvam_started_ms: Date.now(), duration_ms: 600_000, scope: "encounter", ref: "enc_1", started_at: "2026-10-08T06:00:00.000Z", clip_key: "k" },
     result: null, error: null, actor: "mcp:a", created_at: "2026-10-08T05:59:00.000Z", started_at: null, updated_at: "x", finished_at: null, lease_until: null, lease_owner: "r", attempts: 4, failures: 0, ...over,
   }) as never;
 
   it("endedLine: audio_s is the measured seconds when a batch was started, else 0; ids and enums only", () => {
     const j = job() as { id: string; kind: string; args: Row; progress: Row; created_at: string };
     expect(H.endedLine(j, "failed", "2026-10-08T07:00:00.000Z")).toEqual({
-      caller: "scribe-mcp", machine: "vercel", route: "gateway", job_id: "job_s1", request_id: "sj_9", mode: "batch", task: "transcribe", model: "saaras:v3", audio_s: 600,
+      caller: "scribe-mcp", machine: "vercel", route: "gateway", job_id: "job_s1", request_id: "sj_9", mode: "batch", task: "transcribe", model: "saaras:v4", audio_s: 600,
       started_at: "2026-10-08T06:00:00.000Z", finished_at: "2026-10-08T07:00:00.000Z", status: "failed", http_status: null, throttled: false, scope: "encounter", ref: "enc_1", use: "production",
     });
+    const { stt_model: _m, ...noModel } = j.progress; // a job that began before the cutover records no model: it ran on v3
+    expect(H.endedLine({ ...j, progress: noModel }, "failed", "t")).toMatchObject({ model: "saaras:v3" });
     const notStarted = { ...j, progress: { clip_key: "k", scope: "encounter", ref: "enc_1", duration_ms: 600_000, sarvam_job_id: "sj_9" } }; // created at Sarvam, never started
     expect(H.endedLine(notStarted, "cancelled", "t")).toMatchObject({ audio_s: 0, status: "cancelled", request_id: "sj_9" });
     expect(H.endedLine({ ...j, progress: {} }, "cancelled", "t")).toMatchObject({ audio_s: 0, request_id: null, ref: "enc_1", scope: "encounter" });

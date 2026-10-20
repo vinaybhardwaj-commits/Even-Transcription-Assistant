@@ -265,6 +265,16 @@ describe("5. contract v1.2: the whole day file from Neon, the lane by use / scop
     expect(L.lineFromNeon(audit("job_d", { scope: undefined, use: undefined }) as never)).toMatchObject({ scope: "other", use: "production" });
     expect(L.lineFromNeon({ ...audit("job_e:en") } as never)).toMatchObject({ task: "translate" });
   });
+  it("model comes from the job's recorded stt_model: a row WITHOUT one ran before the cutover and reads saaras:v3, a new job reads saaras:v4 (history is never relabelled)", () => {
+    const old = L.lineFromNeon(audit("job_old") as never)!;
+    expect(old.model).toBe("saaras:v3");
+    const neu = L.lineFromNeon({ ...audit("job_new"), job_progress: { started_at: "2026-10-08T06:01:00.000Z", stt_model: "saaras:v4" } } as never)!;
+    expect(neu.model).toBe("saaras:v4");
+    expect(L.lineFromNeon({ ...audit("job_new:en"), job_progress: { stt_model: "saaras:v4", en_stt_model: "saaras:v4" } } as never)!.model).toBe("saaras:v4"); // English pass of a new job
+    expect(L.lineFromNeon({ ...audit("job_mix:en"), job_progress: { en_stt_model: "saaras:v4" } } as never)!.model).toBe("saaras:v4"); // straddling job: init on v3, English pass after the deploy
+    expect(L.lineFromNeon({ ...audit("job_mix2:en"), job_progress: { stt_model: "saaras:v4" } } as never)!.model).toBe("saaras:v3"); // English pass with no en_stt_model reads v3
+    expect(L.lineFromNeon({ ...audit("job_junk"), job_progress: { stt_model: "gpt" } } as never)!.model).toBe("saaras:v3"); // an unrecognised value is not trusted as v4
+  });
   it("two CONCURRENT finishes (each rewrites the day from Neon, with a 412 in between): the file holds both rows, in order, once each", async () => {
     answer = (text) => (/FROM audit_log a LEFT JOIN scribe_job j/.test(text) ? [audit("job_a"), audit("job_b", { scope: "room_segment" })] : []);
     const results = await Promise.all([L.rewriteLedgerDay("2026-10-08"), L.rewriteLedgerDay("2026-10-08")]);

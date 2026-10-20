@@ -16,6 +16,7 @@
  */
 import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { sql } from "@/lib/db";
+import { recordedSttModel } from "@/lib/sarvam-model";
 import { isRebKey } from "@/lib/room-access/keys";
 
 export const LAB_BUCKET = "eta-lab-results";
@@ -278,12 +279,12 @@ async function allTime(store: LabStore, today: string, todayTally: Tally): Promi
 }
 
 // --- the lane -----------------------------------------------------------------------------------------------------------------------------
-type ActiveRow = { id: string; kind: string; step: string | null; duration_ms: string | number | null; scope: string | null; started_at: string | null; created_at: string | Date };
+type ActiveRow = { id: string; kind: string; step: string | null; duration_ms: string | number | null; stt_model?: string | null; en_stt_model?: string | null; scope: string | null; started_at: string | null; created_at: string | Date };
 
 /** The Sarvam jobs in flight now: scribe_job rows of our two kinds, running or queued, past `prepare` (that is, Sarvam has work or is about to). */
 export async function activeJobs(excludeJobId?: string | null): Promise<LaneActive[]> {
   const rows = (await sql`
-    SELECT id, kind, step, progress->>'duration_ms' AS duration_ms, progress->>'scope' AS scope, progress->>'started_at' AS started_at, created_at
+    SELECT id, kind, step, progress->>'duration_ms' AS duration_ms, progress->>'stt_model' AS stt_model, progress->>'en_stt_model' AS en_stt_model, progress->>'scope' AS scope, progress->>'started_at' AS started_at, created_at
       FROM scribe_job
      WHERE kind = ANY(${["sarvam_transcribe", "sarvam_translate"]}::text[]) AND status IN ('queued', 'running')
        AND step IS NOT NULL AND step <> 'prepare' AND updated_at > now() - interval '45 minutes'
@@ -298,7 +299,7 @@ export async function activeJobs(excludeJobId?: string | null): Promise<LaneActi
         job_id: r.id,
         mode: transcribe ? "batch" : "sync",
         task: transcribe ? (String(r.step ?? "").startsWith("en_") ? "translate" : "transcribe") : "text_translate", // the English pass of a transcribe job is task translate
-        model: transcribe ? "saaras:v3" : "mayura:v1",
+        model: transcribe ? recordedSttModel(String(r.step ?? "").startsWith("en_") ? r.en_stt_model : r.stt_model) : "mayura:v1",
         audio_s: transcribe && Number.isFinite(ms) ? Math.round(ms / 10) / 100 : 0,
         started_at: r.started_at ?? new Date(r.created_at).toISOString(),
         scope: r.scope ?? "other",
@@ -360,7 +361,7 @@ export function lineFromNeon(r: NeonCall): CallLine | null {
   const started = typeof (r.job_progress ?? {})[en ? "en_started_at" : "started_at"] === "string" ? String((r.job_progress ?? {})[en ? "en_started_at" : "started_at"]) : new Date(r.created_at).toISOString();
   return {
     caller: CALLER, machine: MACHINE, job_id: jobId, request_id: typeof m.sarvam_job_id === "string" ? m.sarvam_job_id : null, route: "gateway", mode: "batch",
-    task: en ? "translate" : "transcribe", model: "saaras:v3", audio_s: Math.round(((Number(m.duration_ms) || 0) / 1000) * 100) / 100,
+    task: en ? "translate" : "transcribe", model: recordedSttModel((r.job_progress ?? {})[en ? "en_stt_model" : "stt_model"]), audio_s: Math.round(((Number(m.duration_ms) || 0) / 1000) * 100) / 100,
     started_at: started, finished_at: new Date(r.job_finished_at ?? r.created_at).toISOString(), status, http_status: status === "ok" ? 200 : null,
     throttled: (r.job_progress ?? {})[en ? "en_throttled" : "throttled"] === true, scope, ref: typeof m.ref === "string" ? m.ref : jobId.replace(/:en$/, ""), use, chars: null, // D-2: sarvam.call.v1 lists chars; null for an audio call
   };

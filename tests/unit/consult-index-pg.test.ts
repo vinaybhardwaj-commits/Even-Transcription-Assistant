@@ -283,10 +283,10 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
   const withSig = (uid: string, o: Row = {}) => indexRow(uid, { signature: sig(uid), ...o });
   const segs = (n: number, textOf: (i: number) => string) => Array.from({ length: n }, (_, i) => ({ t0_ms: T1 - 120_000 + i * 4000, t1_ms: T1 - 120_000 + i * 4000 + 3500, speaker: `SPEAKER_0${i % 2}`, lang: "hi-IN", text: textOf(i) }));
   /** write a palimpsest track into the (fake) lab bucket and index it in reb_track_index, as palimpsest does */
-  function putTrack(uid: string, layer: "stt" | "translate", o: { dropObject?: boolean; clipSig?: Row; engine?: string; indexEngine?: string; status?: string; shadow?: boolean; shaWrong?: boolean; n?: number; hash?: string } = {}) {
-    const doc = { config: { clip_signature: o.clipSig ?? sig(uid), gateway: "x", job_parameters: {} }, config_hash: o.hash ?? "ab12cd34", engine: o.engine ?? "sarvam-saaras-v3", extras: {}, layer, machine: "m", model: "saaras:v3", reason: null, schema: "reb.track.v1",
-      segments: segs(o.n ?? 3, (i) => (layer === "stt" ? `namaste ${i}` : `hello ${i}`)), status: o.status ?? "ok", version: "saaras-v3", window_id: `consult-${uid}` };
-    const key = `reb/${DAY}/${ROOM}/_consults/${uid}/tracks/${layer}.${doc.engine}__saaras-v3__${doc.config_hash}.json`;
+  function putTrack(uid: string, layer: "stt" | "translate", o: { dropObject?: boolean; clipSig?: Row; engine?: string; gen?: "v3" | "v4"; indexEngine?: string; status?: string; shadow?: boolean; shaWrong?: boolean; n?: number; hash?: string } = {}) {
+    const doc = { config: { clip_signature: o.clipSig ?? sig(uid), gateway: "x", job_parameters: {} }, config_hash: o.hash ?? "ab12cd34", engine: o.engine ?? `sarvam-saaras-${o.gen ?? "v3"}`, extras: {}, layer, machine: "m", model: `saaras:${o.gen ?? "v3"}`, reason: null, schema: "reb.track.v1",
+      segments: segs(o.n ?? 3, (i) => (layer === "stt" ? `namaste ${i}` : `hello ${i}`)), status: o.status ?? "ok", version: `saaras-${o.gen ?? "v3"}`, window_id: `consult-${uid}` };
+    const key = `reb/${DAY}/${ROOM}/_consults/${uid}/tracks/${layer}.${doc.engine}__saaras-${o.gen ?? "v3"}__${doc.config_hash}.json`;
     const body = JSON.stringify(doc);
     if (!o.dropObject) lab.set(key, { body, etag: "t" });
     pg.exec(`INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, shadow, status, r2_key, sha256) VALUES ('consult-${uid}', '${DAY}', '${ROOM}', '${layer}', '${o.indexEngine ?? doc.engine}', 'saaras-v3', '${doc.config_hash}', ${o.shadow ? "true" : "false"}, 'ok', '${key}', '${o.shaWrong ? "0".repeat(64) : sha(body)}');`);
@@ -304,6 +304,76 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     await noJobsNoGateway(calls);
     expect(H.heads).toEqual([]); // not even the clip was probed
     expect(JSON.stringify(out)).not.toMatch(/namaste|hello/);
+  });
+
+  it("a v4 palimpsest track is reused the same way (not re-sent), and v4 is preferred over a v3 track of the same cut", async () => {
+    await backfill([withSig(UA)]);
+    putClips(UA);
+    putTrack(UA, "stt", { hash: "v3old" }); // older v3 result, indexed first
+    putTrack(UA, "stt", { gen: "v4", hash: "v4new", n: 2 });
+    const calls = gwCalls();
+    const out = await tool({ action: "transcribe", consult_uid: UA, english: false });
+    expect(out).toMatchObject({ ok: true, existing: true, source: "palimpsest", billed: false, model_stt: "saaras:v4", model_rev: "saaras-v4", transcript_chars: "namaste 0 namaste 1".length });
+    await noJobsNoGateway(calls);
+  });
+
+  it("a consult that has only a v3 track (nothing re-run) is NOT re-sent, and labels stay v3 on the way out", async () => {
+    await backfill([withSig(UA)]);
+    putClips(UA);
+    putTrack(UA, "stt", { gen: "v3" });
+    const calls = gwCalls();
+    expect(await tool({ action: "transcribe", consult_uid: UA, english: false })).toMatchObject({ ok: true, existing: true, source: "palimpsest", billed: false, model_stt: "saaras:v3", model_rev: "saaras-v3" });
+    await noJobsNoGateway(calls);
+  });
+
+  it("FIX2 F3: an STT result of this cut in ANY options skips the ask: english:true over an english:false row (and the reverse) returns it, note no_rerun, queues nothing, calls nothing", async () => {
+    await backfill([withSig(UA)]);
+    putClips(UA);
+    const row = (await St.getIndexRow(UA))!;
+    await St.recordResult({ consult_uid: UA, cut_version: row.cut_version, mode: "transcribe", english: false, num_speakers: null, job_id: "j_v3", result_r2_key: "mcp-sarvam/j_v3.json", model_stt: "saaras:v3", model_translate: "mayura:v1", model_rev: "saaras-v3", pipeline_rev: "d", language_code: null, duration_s: 1, speaker_count: 1, transcript_chars: 1, english_chars: 0, english_pass: null, t0_ms: row.t0_ms });
+    const calls = gwCalls();
+    expect(await tool({ action: "transcribe", consult_uid: UA, english: true })).toMatchObject({ ok: true, status: "existing", existing: true, note: "no_rerun", job_id: "j_v3", model_stt: "saaras:v3", billed: false });
+    expect(await tool({ action: "transcribe", consult_uid: UA, english: false, mode: "codemix" })).toMatchObject({ ok: true, status: "existing", note: "no_rerun", job_id: "j_v3" });
+    // the same options carry no note (that was already the rule)
+    const same = await tool({ action: "transcribe", consult_uid: UA, english: false });
+    expect(same).toMatchObject({ ok: true, status: "existing", job_id: "j_v3" });
+    expect(same).not.toHaveProperty("note");
+    // through a job and through the batch
+    const j = await submit("sarvam_transcribe", { consult_uid: UA, mode: "transcribe", english: true });
+    await drain();
+    expect(await job(String(j.id))).toMatchObject({ status: "done", result: expect.objectContaining({ existing: true, note: "no_rerun" }) });
+    expect(gwCalls()).toBe(calls);
+    expect(await jobsOfKind("sarvam_transcribe")).toHaveLength(1); // only the job just submitted, which answered existing
+    expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM audit_log WHERE action = 'stt.paid_call'`)[0]!.n).toBe(0);
+    expect(await results()).toHaveLength(1);
+  });
+
+  it("FIX2 F1: a job whose init ran on v3 (progress has no stt_model) stores a v3-labelled result when it finishes after the deploy; a normal job stores v4", async () => {
+    await backfill([withSig(UA), withSig(UE)]);
+    putClips(UA, UE);
+    const stepTo = async (uid: string, stop: string) => {
+      const out = await tool({ action: "transcribe", consult_uid: uid, english: false });
+      const id = String(out.job_id);
+      const { claimJobs, runOneStep } = await runner();
+      for (let i = 0; i < 20; i++) {
+        if ((await job(id)).step === stop) return id;
+        const rid = `r_${Math.random()}`; // the claim and the step share one runner id, as drain() does
+        let got = await claimJobs(1, 240_000, rid);
+        if (!got.length) { pg.exec(`UPDATE scribe_job SET lease_until = now() - interval '1 second' WHERE status = 'running' AND lease_until > now();`); got = await claimJobs(1, 240_000, rid); }
+        if (!got.length) break;
+        await runOneStep(got[0]!, rid);
+      }
+      return id;
+    };
+    const idOld = await stepTo(UA, "upload");
+    expect((await job(idOld)).progress).toMatchObject({ stt_model: "saaras:v4" }); // a new init records it
+    pg.exec(`UPDATE scribe_job SET progress = progress - 'stt_model' WHERE id = '${idOld}';`); // the state of a job whose init ran on the old code
+    await drain();
+    const rows = await results();
+    expect(rows.find((r) => r.consult_uid === UA)).toMatchObject({ model_stt: "saaras:v3", model_rev: "saaras-v3" });
+    await tool({ action: "transcribe", consult_uid: UE, english: false });
+    await drain();
+    expect((await results()).find((r) => r.consult_uid === UE)).toMatchObject({ model_stt: "saaras:v4", model_rev: "saaras-v4" });
   });
 
   it("the same through the JOB (scribe_job_submit): done, existing, source palimpsest, no gateway call, no paid-call row", async () => {
@@ -604,7 +674,7 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     expect(await tool({ action: "consult_result", consult_uid: UA })).toMatchObject({ ok: true, result: null });
   });
 
-  it("only a LIVE ok sarvam-saaras-v3 track counts: another engine, a failed or shadow track, a track whose sha256 is wrong are ignored (Sarvam is called)", async () => {
+  it("only a LIVE ok sarvam-saaras-v4/v3 track counts: another engine, a failed or shadow track, a track whose sha256 is wrong are ignored (Sarvam is called)", async () => {
     await backfill([withSig(UA), withSig(UE)]);
     putClips(UA, UE);
     putTrack(UA, "stt", { engine: "medasr", hash: "m1" });
@@ -749,11 +819,11 @@ describe.skipIf(!HAVE)("scribe_sarvam / sarvam_transcribe on a consult_uid", () 
     await drain();
     const calls = gwCalls();
     const other = await tool({ action: "transcribe", consult_uid: UA, english: false, mode: "codemix" });
-    expect(other.existing).toBeUndefined();
-    expect(other).toMatchObject({ ok: true, status: "queued" });
+    // FIX2 F3 (V: an STT result in ANY options counts): the different-options ask returns what exists, queues nothing, calls nothing
+    expect(other).toMatchObject({ ok: true, status: "existing", existing: true, note: "no_rerun" });
     await drain();
-    expect(gwCalls()).toBeGreaterThan(calls);
-    expect((await results()).map((r) => r.mode)).toEqual(["transcribe", "codemix"]);
+    expect(gwCalls()).toBe(calls);
+    expect((await results()).map((r) => r.mode)).toEqual(["transcribe"]);
     // re-cut: a new cut_version
     await backfill([indexRow(UA, { cut_at: "2026-10-12T09:00:00+0530" })]);
     const again = await tool({ action: "transcribe", consult_uid: UA, english: false });
