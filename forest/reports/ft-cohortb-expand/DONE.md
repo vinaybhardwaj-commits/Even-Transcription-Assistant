@@ -1,0 +1,19 @@
+# ft-cohortb-expand DONE (2026-10-19, model Opus 5.5 on Bedrock). Split D only; H was never read beyond being dropped.
+- CEILING: 306 D flagged-Rx episodes since 9 Sep. 174 have final h14 (25 positive).
+  - Recorded anchor consults: 137. Eligible (>= 18 d): 86, with 12 positives, 86 patients, 16 doctors. Unrecorded: 88 eligible, 13 positive.
+  - ft-audio used 77 eligible with 7 positives (>= 14 d, ft4a labels). Only 49 of its 125 are episode anchors. Its other 76 have 0 positives at >= 18 d.
+- features_all.parquet: 137 rows, same feature columns as ft-audio features.parquet.
+  - Adds: label h14/h90 from labels.parquet v2, `eligible_h14`, Pulse baseline `pulse_*` from features_D.parquet, and source flags (jev_src, role_src, diar_src, emo_src, in_ftaudio).
+  - The 49 overlapping consults match ft-audio exactly on the audio features.
+- Engines run here: Jev v2 gap-fill on 41 consults, Odyssey on the lab box for 50 consults (1,230 windows), 19 tape cuts for external caa consults. Coverage is in COVERAGE.md.
+- LEAKAGE (LEAKAGE_f07.md): f07 asks whether a date, slot or booking step was given, so it measures the decision already made.
+  - On ft-audio's 77: 4 of 7 positives had a date or OT slot fixed in the room; the other 3 had surgery agreed with a booking step.
+  - On the expanded set f07 AUC falls to 0.695 (n 80, 12 positives).
+  - Recommendation: keep f07 out of the headline model.
+- Files: out/ft-cohortb-expand/{features_all.parquet, COVERAGE.md, LEAKAGE_f07.md, LEAKAGE_f07_items.tsv, inventory.parquet, inventory_nonanchor.parquet, base.parquet, audio_feats.parquet, emo_scored.jsonl, jev_gapfill.jsonl, cut_caa.tsv}.
+- Code: ~/wt/ft-cohortb-expand/code/ (inventory, base, jev_gapfill, cut_caa, audio_feats, emo_run, assemble). Tape clips: ~/wt/ft-cohortb-expand/clips (0600).
+- UPDATE (Ale label, newcat-orch): features_all.parquet still holds all 137 consults of any age. New columns: event_date, ale_label (1 = surgery up to 19 Oct; 0 = >= 14 d old, none; NaN = drop), eligible_ale.
+  - Labelled: 99 (20 positives, 79 negatives); dropped 38; 99 patients, 16 doctors.
+  - Positives by age: 13 at >= 18 d, 1 at 14-17 d, 6 under 14 d.
+  - Ceiling under Ale: 217 labelled D episodes since 9 Sep, 54 positive; 20 of the 54 are recorded.
+  - WARNING: consult age alone scores AUC 0.675 under this label, and source flags correlate with it. See COVERAGE.md "selection-bias warning".
