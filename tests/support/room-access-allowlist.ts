@@ -36,6 +36,7 @@ export const ALLOWLIST: Record<string, { max: number; why: string }> = {
   "lib/room-watchdog.ts": { max: 5, why: "live-ops view bound to OPEN sessions or the current IST day by construction (no date argument can name a past held-out pair)" },
   "lib/room-window-reaper.ts": { max: 2, why: "production pipeline writer/reaper/planner: only closes, expires or plans rows, chooses no window for processing; MCP-submitted work is guarded by the job hook" },
   "lib/rooms-live/read.ts": { max: 4, why: "live-ops view bound to OPEN sessions or the current IST day by construction (no date argument can name a past held-out pair)" },
+  "lib/spine/ingest-store.ts": { max: 1, why: "Spine S1 shadow ingest: copies ids, times, close reason and quality of consult windows into spine_signal; no audio, no text, serves no caller" },
   "lib/steward/executor.ts": { max: 2, why: "Room Steward senses and acts on the live fleet (open sessions, today); not a caller-facing reader" },
   "lib/steward/loop.ts": { max: 2, why: "Room Steward senses and acts on the live fleet (open sessions, today); not a caller-facing reader" },
   "lib/steward/sense.ts": { max: 11, why: "steward gates G2/G3 read today's bench_session and end_day command (fleet/steward-gates-main, fable GO #11211); G1 72 h newest audio.devices row (fable ruling 10 Oct)" },
