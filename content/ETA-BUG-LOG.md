@@ -732,3 +732,12 @@ HEAD `f9da77f`, migrations →0036, smoke 9/9.
 - **B27** enc_hndp7k6d4u UNRECOVERABLE — headerless/corrupt WebM (no EBML magic; chunk-0 dropped from submit concat). Prevention: WebM header-integrity guard (`1c3e1be`).
 - **B28** Dr. Chandrika English operative dictation displayed as Tamil — Sarvam transliterates English→Indic script, defeating the English guard → Whisper-English now trumps Sarvam script + dictation English prior (`f9da77f`).
 - Features: Gemini/Vertex hybrid backend + `/api/admin/llm-selftest`; ensemble + Gemini-Pro fusion (`20e8637`); live native + Flash-English toggle (`0e12c25`).
+
+---
+
+## 20 Oct 2026 — two CI failures present on main (logged by spine-deputy for fable)
+
+Both fail identically on main fd871ea1, d37c554e and 82c0d398, and on every spine branch built on them, so they are not caused by spine. Owners to fix; until then CI on main shows "2 failed".
+
+- **B29** `tests/unit/e11-silent-room-window.test.ts` E11(d) THE SWEEP: the live Whisper call-site count is 41 where SITES classifies 34. The extra sites are under `services/eta-*` and `tools/router-fix` (Python `inference` hits). Fix: classify each new site in SITES (and add a PATHS row if it reads a window), or move it out of the sweep's scope with a reason. Owner: whoever added those services (OPEN).
+- **B30** `tests/unit/no-identity-literals.test.ts` CHECK: 19 offenders, all outside `lib/spine`, in `tools/eta-consult-steward/tests` (conftest.py and others) and `tools/ubus/test`. Fix: build the identities with makeFakeClinician / makeFakeOperator. Owners: consult-steward and ubus maintainers (OPEN).
