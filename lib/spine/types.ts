@@ -9,10 +9,10 @@ export const WEAK_PROXIES: readonly Proxy[] = ["acoustic", "timeline", "doctor_a
 export const DERIVED_PROXIES: readonly Proxy[] = ["cutter", "caa"];
 
 export type EncounterStatus = "candidate" | "confirmed" | "rejected" | "merged";
-export type KeyKind = "consult_uid" | "consult_key" | "pqm_uid" | "window_id" | "caa_uid" | "buddy_opaque";
+export type KeyKind = "consult_uid" | "consult_key" | "pqm_uid" | "pulse_enc_id" | "window_id" | "caa_uid" | "buddy_opaque";
 export type LinkBasis = "exact" | "overlap" | "merge";
 
-/** One spine_signal row. attrs holds ids, quality and close_reason only (consult_uid, consult_key, pqm_uid, window_id, caa_uid, buddy_opaque, close_reason, final_reason). */
+/** One spine_signal row. attrs holds ids, quality and close_reason only (consult_uid, consult_key, pqm_uid, ids.pulse_enc_id, window_id, caa_uid, buddy_opaque, close_reason, final_reason). */
 export interface SpineSignal {
   proxy: Proxy;
   source_key: string;
@@ -60,7 +60,7 @@ export interface MergedEncounter {
   boundary_rev: number;
   merge_version: string;
   reason: string;
-  /** multi_machine | pulse_overlap | ambiguous | frozen | clamped | clamp_failed. Not a spine_encounter column. */
+  /** multi_machine | pulse_overlap | ambiguous | frozen | clamped | clamp_failed | covered_by_pulse. Not a spine_encounter column. */
   flags: string[];
   /** True when the boundary moved against prior: the writer enqueues a recut. */
   boundary_moved: boolean;
