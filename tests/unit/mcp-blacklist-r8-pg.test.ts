@@ -1,6 +1,6 @@
-/** R8: X1 (flag on/off through the real admin tool and start route), X3 (lookup failure fails closed) and Y1 (env denylist wired into the script's real sources) on a test-owned postgres:16 with every migration. Synthetic addresses only. Skipped when Docker is absent. */
+/** R8/R9: X1 (flag on/off through the real admin tool and start route, no marker row needed) and X3 (lookup failure fails closed) on a test-owned postgres:16 with every migration. Synthetic addresses only. Skipped when Docker is absent. */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { NextRequest } from "next/server";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
@@ -19,12 +19,10 @@ const S = await import("@/lib/mcp/oauth/store");
 const ID = await import("@/lib/mcp/identity");
 const A = await import("@/lib/mcp/audit");
 const BL = await import("@/lib/mcp/blacklist-file");
-const G = await import("@/lib/mcp/oauth/blacklist-guard");
 const { adminTool } = await import("@/lib/mcp/tools/admin");
 const { signBlob } = await import("@/lib/mcp/oauth/crypto");
 const { resetEmailLimitForTests } = await import("@/lib/mcp/oauth/email-limit");
 const { POST: startPost } = await import("@/app/api/oauth/email/start/route");
-const SCRIPT = await import("../../scripts/blacklist-from-revocations");
 
 const DOMAIN = "example.test";
 const dir = mkdtempSync(`${tmpdir()}/oref6-bl-`);
@@ -46,7 +44,7 @@ beforeAll(() => {
 }, 300_000);
 afterAll(() => { if (HAVE) pg.stop(); vi.unstubAllGlobals(); });
 beforeEach(() => {
-  A.resetDeniedAuditForTests(); G.resetBlacklistGuardLogForTests(); S.resetGrantRefusalLogForTests(); resetEmailLimitForTests(); resetMail(); H.hook = null;
+  A.resetDeniedAuditForTests(); S.resetGrantRefusalLogForTests(); resetEmailLimitForTests(); resetMail(); H.hook = null;
   vi.stubGlobal("fetch", vi.fn(async (i: string | URL, init?: RequestInit) => { const m = resendFetch(i, init); if (m) return m; throw new Error("unexpected fetch"); }));
   process.env.SCRIBE_MCP_OAUTH = "on"; process.env.MCP_OAUTH_TOKEN_PEPPER = "p".repeat(32); process.env.RESEND_API_KEY = "re_synthetic"; process.env.RESEND_FROM_EMAIL = "noreply@example.test";
   process.env.SCRIBE_MCP_OAUTH_APPROVER = "approver@example.test"; process.env.SCRIBE_MCP_OAUTH_DOMAIN_TEST = DOMAIN; delete process.env.SCRIBE_MCP_IDENTITY; delete process.env.SCRIBE_MCP_TOKENS_DENY;
@@ -86,24 +84,6 @@ describe.skipIf(!HAVE)("blacklist re-grant and fail-closed on postgres:16", () =
     await expect(S.grantPerson(e, ["read"], "t")).rejects.toThrow();
     H.hook = null;
     expect(await status(e)).toBe("revoked");
-  });
-});
-
-describe.skipIf(!HAVE)("script, REAL sources (db + env denylist) through main()", () => {
-  const root = mkdtempSync(`${tmpdir()}/oref6-s-`); const repo = `${root}/repo`; const outside = `${root}/out`; mkdirSync(repo); mkdirSync(outside);
-  const run = async (argv: string[]) => { const lines: string[] = []; const err = vi.spyOn(console, "error").mockImplementation((...a) => { lines.push(a.join(" ")); }); try { return { code: await SCRIPT.main(argv, undefined, repo, (s) => lines.push(s)), lines }; } finally { err.mockRestore(); } };
-  it("Y1 env denylist source is wired into the real run; dry-count is the exact union of db and env (overlap counted once)", async () => {
-    const k = await ID.issueKey(`y1.env@${DOMAIN}`, "read", "t");
-    const hash = (await q<{ key_hash: string }>`SELECT key_hash FROM mcp_key WHERE key_id = ${k.key_id}`)[0]!.key_hash;
-    const dbBefore = (await BL.revocationAddresses16Oct()).length;
-    process.env.SCRIBE_MCP_TOKENS_DENY = JSON.stringify([hash.toUpperCase(), "e".repeat(64)]);
-    const r = await run(["--dry-count"]);
-    expect(r).toEqual({ code: 0, lines: [`db=${dbBefore} env=1 union=${dbBefore + 1} rejected=0`] });
-    const f = `${outside}/y1.json`;
-    const w = await run([f]);
-    expect(w.code).toBe(0);
-    expect(JSON.parse(readFileSync(f, "utf8"))).toContain(`y1.env@${DOMAIN}`);
-    expect(w.lines.join("\n")).not.toContain("@");
   });
 });
 

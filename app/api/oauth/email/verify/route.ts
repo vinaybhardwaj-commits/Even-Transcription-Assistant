@@ -11,7 +11,6 @@ import { consentPage, describeClient, type Consent } from "@/lib/mcp/oauth/conse
 import { randomId, safeEqual, signBlob } from "@/lib/mcp/oauth/crypto";
 import { codeDeadPage, codeWrongPage, emailCodeHash } from "@/lib/mcp/oauth/email";
 import { done, originOk, readForm, readPending } from "@/lib/mcp/oauth/flow";
-import { blacklistGuard } from "@/lib/mcp/oauth/blacklist-guard";
 import { htmlError, oauthGate } from "@/lib/mcp/oauth/http";
 import { consumeEmailCode, getPerson, takeEmailAttempt } from "@/lib/mcp/oauth/store";
 import { auditOauthRefused } from "@/lib/mcp/audit";
@@ -22,8 +21,6 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   const blocked = oauthGate({ email: true });
   if (blocked) return blocked.status === 404 ? blocked : htmlError(503, "server_error");
-  const unguarded = await blacklistGuard();
-  if (unguarded) return unguarded;
 
   const pending = readPending(req);
   if (!pending) {

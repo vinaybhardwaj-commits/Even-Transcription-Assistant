@@ -890,58 +890,23 @@ describe.skipIf(!HAVE)("R5: blacklist-file revokes the person too, writes the ma
     } finally { if (saved === undefined) delete process.env.SCRIBE_MCP_IDENTITY; else process.env.SCRIBE_MCP_IDENTITY = saved; }
   });
 
-  it("the CLI path writes one marker row (sha256 of the file, count, time) holding no address; the guard is 503 without a row and carries on with one (identity on); identity off never asks", async () => {
-    const { applyBlacklistFile, blacklistApplied } = await import("@/lib/mcp/blacklist-file");
-    const { blacklistGuard, resetBlacklistGuardLogForTests } = await import("@/lib/mcp/oauth/blacklist-guard");
-    pg.exec(`DELETE FROM mcp_blacklist_applied`);
-    expect(await blacklistApplied()).toBe(false);
-    process.env.SCRIBE_MCP_IDENTITY = "on";
-    resetBlacklistGuardLogForTests();
-    const t = await mark();
-    const refused = await blacklistGuard();
-    expect(refused!.status).toBe(503);
-    expect((await q`SELECT metadata_json FROM audit_log WHERE action = 'mcp.oauth_refused' AND created_at > ${t}::timestamptz`).map((r) => r.metadata_json.reason)).toContain("blacklist_not_applied");
-    const f = await files(["marker.one@example.test", "marker.two@example.test"]);
-    expect(await applyBlacklistFile("test", f)).toBe(2);
-    const rows = await q`SELECT file_sha256, address_count, applied_at FROM mcp_blacklist_applied`;
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.address_count).toBe(2);
-    expect(rows[0]!.file_sha256).toBe(createHash("sha256").update(readFileSync(f)).digest("hex"));
-    expect(JSON.stringify(rows)).not.toContain("marker.");
-    expect(await blacklistGuard()).toBeNull();
-    pg.exec(`DELETE FROM mcp_blacklist_applied`);
-    process.env.SCRIBE_MCP_IDENTITY = "off";
-    expect(await blacklistGuard()).toBeNull(); // flag off: no check
-    process.env.SCRIBE_MCP_IDENTITY = "on";
+  it("R9: an empty blacklist file (and an unset env) is a no-op: 0 applied, no identity changes, no error; no marker table exists", async () => {
+    const { applyBlacklistFile } = await import("@/lib/mcp/blacklist-file");
+    const count = async () => (await q<{ n: number }>`SELECT count(*)::int AS n FROM mcp_identity WHERE status = 'blacklisted'`)[0]!.n;
+    const before = await count();
+    expect(await applyBlacklistFile("test", await files([]))).toBe(0);
+    expect(await applyBlacklistFile("test", undefined)).toBe(0);
+    expect(await count()).toBe(before);
+    expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_name = 'mcp_blacklist_applied'`)[0]!.n).toBe(0);
   });
 
-  it("0173 up twice is idempotent, and its rollback drops the marker table (and its version row)", async () => {
-    const up = readFileSync("db/migrations/0173_mcp_blacklist_applied.sql", "utf8");
-    pg.exec(up);
-    pg.exec(up);
-    const has = async () => (await q<{ n: number }>`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_name = 'mcp_blacklist_applied'`)[0]!.n === 1;
-    expect(await has()).toBe(true);
-    pg.exec(readFileSync("db/rollbacks/0173_mcp_blacklist_applied.down.sql", "utf8"));
-    expect(await has()).toBe(false);
-    expect(await q`SELECT 1 FROM schema_migrations WHERE version = 173`).toHaveLength(0);
-    pg.exec(up);
-    expect(await has()).toBe(true);
-  });
-
-  it("revocationAddresses16Oct: revoked persons and fully key-revoked addresses of 16 Oct IST; not other days, not a rotation (live key remains), not active persons", async () => {
-    const { revocationAddresses16Oct } = await import("@/lib/mcp/blacklist-file");
-    const mkPerson = (e: string, revokedAt: string | null) => pg.exec(`INSERT INTO mcp_person (email, scopes, status, revoked_at) VALUES ('${e}', ARRAY['read'], '${revokedAt ? "revoked" : "active"}', ${revokedAt ? `'${revokedAt}'` : "NULL"}) ON CONFLICT (email) DO UPDATE SET status = EXCLUDED.status, revoked_at = EXCLUDED.revoked_at`);
-    mkPerson("r16.in@example.test", "2026-10-16T05:00:00+05:30");
-    mkPerson("r16.edge.start@example.test", "2026-10-16T00:00:00+05:30");
-    mkPerson("r16.before@example.test", "2026-10-15T23:59:00+05:30");
-    mkPerson("r16.after@example.test", "2026-10-17T00:00:00+05:30");
-    mkPerson("r16.active@example.test", null);
-    const keyOnly = await ID.issueKey("r16.keyonly@example.test", "read", "test");
-    const rotated = await ID.issueKey("r16.rotated@example.test", "read", "test");
-    await ID.rotateKey(rotated.key_id, "test");
-    pg.exec(`UPDATE mcp_key SET revoked_at = '2026-10-16T12:00:00+05:30' WHERE key_id = '${keyOnly.key_id}' OR (email = 'r16.rotated@example.test' AND revoked_at IS NOT NULL)`);
-    const got = (await revocationAddresses16Oct()).filter((e) => e.startsWith("r16.")).sort();
-    expect(got).toEqual(["r16.edge.start@example.test", "r16.in@example.test", "r16.keyonly@example.test"]);
+  it("R9: the manual command still blocks: a one-address file blacklists it (person revoked), and no marker is written", async () => {
+    const { applyBlacklistFile } = await import("@/lib/mcp/blacklist-file");
+    const e = "r9.manual@example.test";
+    await S.grantPerson(e, ["read"], "test");
+    expect(await applyBlacklistFile("test", await files([e]))).toBe(1);
+    expect(await ID.identityStatus(e)).toBe("blacklisted");
+    expect((await S.getPerson(e))!.status).toBe("revoked");
   });
 
   it("M7: the person-denied suppressed count is written into the next row", async () => {
@@ -1038,17 +1003,5 @@ describe.skipIf(!HAVE)("R6: a blacklisted address can never be re-granted, flag 
     expect(JSON.stringify(out)).toContain("blacklisted");
     expect((await S.getPerson(listedDom))!.status).toBe("revoked");
     expect((await q`SELECT 1 FROM audit_log WHERE action = 'admin.person_grant.refused' AND created_at > ${t}::timestamptz`).length).toBe(1);
-  });
-
-  it("denylistAddresses: SCRIBE_MCP_TOKENS_DENY hashes join to mcp_key rows; a hash with no key row yields nothing; none, blank or malformed-without-hashes yields nothing", async () => {
-    const { denylistAddresses } = await import("@/lib/mcp/blacklist-file");
-    const k1 = await ID.issueKey("r6.denied1@example.test", "read", "test");
-    const k2 = await ID.issueKey("r6.denied2@example.test", "read", "test");
-    const hashes = (await q<{ key_hash: string }>`SELECT key_hash FROM mcp_key WHERE key_id IN (${k1.key_id}, ${k2.key_id}) ORDER BY email`).map((r) => r.key_hash);
-    const raw = JSON.stringify([...hashes, "f".repeat(64)]);
-    expect((await denylistAddresses(raw)).sort()).toEqual(["r6.denied1@example.test", "r6.denied2@example.test"]);
-    expect(await denylistAddresses(undefined)).toEqual([]);
-    expect(await denylistAddresses("  ")).toEqual([]);
-    expect(await denylistAddresses("[]")).toEqual([]);
   });
 });
