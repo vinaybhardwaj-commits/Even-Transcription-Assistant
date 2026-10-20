@@ -23,11 +23,36 @@ const withIds = (s: SpineSignal[], r: MergeResult) => s.map((x) => ({ ...x, enco
 const live = (r: MergeResult) => r.encounters.filter((e) => e.status !== "merged");
 
 describe("M2 pulse_enc_id is the cross-machine identity key", () => {
-  it("two machines, one pulse_enc_id, far apart in time: ONE encounter, multi_machine", () => {
-    const r = run([pulse("pa", 0, 10, "u_1", "endConsult", "m1", enc("pe_test_01")), pulse("pb", 60, 70, "u_2", "endConsult", "m2", enc("pe_test_01"))]);
+  it("two machines, one pulse_enc_id, spans within 2 min: ONE encounter, multi_machine", () => {
+    const r = run([pulse("pa", 0, 10, "u_1", "endConsult", "m1", enc("pe_test_01")), pulse("pb", 11, 20, "u_2", "endConsult", "m2", enc("pe_test_01"))]);
     expect(live(r)).toHaveLength(1);
     expect(live(r)[0].flags).toContain("multi_machine");
     expect(idOf(r, "pa")).toBe(idOf(r, "pb"));
+  });
+  it("R5 guard: two machines, one pulse_enc_id, far apart in time: TWO encounters, both enc_conflict", () => {
+    const r = run([pulse("pa", 0, 10, "u_1", "endConsult", "m1", enc("pe_test_01")), pulse("pb", 60, 70, "u_2", "endConsult", "m2", enc("pe_test_01"))]);
+    expect(live(r)).toHaveLength(2);
+    expect(live(r).every((e) => e.flags.includes("enc_conflict"))).toBe(true);
+  });
+  it("R5 guard: a gap just over 2 min does not merge, exactly 2 min does", () => {
+    const gap = (g: number) => run([pulse("pa", 0, 10, "u_1", "endConsult", "m1", enc("pe_test_01")), pulse("pb", 10 + g, 20 + g, "u_2", "endConsult", "m2", enc("pe_test_01"))]);
+    expect(live(gap(2))).toHaveLength(1);
+    expect(live(gap(2.1))).toHaveLength(2);
+  });
+  it("R5 guard: the same machine twice with one enc id never merges, even overlapping", () => {
+    const r = run([pulse("pa", 0, 10, "u_1", "endConsult", "m1", enc("pe_test_01")), pulse("pb", 5, 15, "u_2", "endConsult", "m1", enc("pe_test_01"))]);
+    expect(live(r)).toHaveLength(2);
+    expect(live(r).every((e) => e.flags.includes("enc_conflict"))).toBe(true);
+  });
+  it("R5 guard: two pqm signals sharing an enc id never merge on it", () => {
+    const r = run([sig("pqm", "q1", 0, 10, { pqm_uid: "pq_1", ...enc("pe_test_01") }), sig("pqm", "q2", 5, 15, { pqm_uid: "pq_2", ...enc("pe_test_01") })]);
+    expect(live(r)).toHaveLength(2);
+    expect(live(r).every((e) => e.flags.includes("enc_conflict"))).toBe(true);
+  });
+  it("R5 guard: a shared enc id across rooms never merges and flags enc_conflict", () => {
+    const r = run([pulse("pa", 0, 10, "u_1", "endConsult", "m1", enc("pe_test_01")), sig("pulse", "pb", 0, 10, { consult_uid: "u_2", consult_key: "u_2@m2", close_reason: "endConsult", ...enc("pe_test_01") }, "room_b")]);
+    expect(live(r)).toHaveLength(2);
+    expect(live(r).every((e) => e.flags.includes("enc_conflict"))).toBe(true);
   });
   it("a different pulse_enc_id on the same two machines stays two encounters", () => {
     const r = run([pulse("pa", 0, 10, "u_1", "endConsult", "m1", enc("pe_test_01")), pulse("pb", 0, 10, "u_2", "endConsult", "m2", enc("pe_test_02"))]);
@@ -38,13 +63,18 @@ describe("M2 pulse_enc_id is the cross-machine identity key", () => {
     expect(live(r)).toHaveLength(2);
     expect(live(r).every((e) => e.flags.includes("multi_machine"))).toBe(true);
   });
-  it("a pqm carrying the pulse's pulse_enc_id merges by KEY even when the times are far apart", () => {
-    const r = run([pulse("pa", 0, 10, "u_1", "endConsult", "m1", enc("pe_test_01")), sig("pqm", "q1", 50, 58, { pqm_uid: "pq_1", ...enc("pe_test_01") })]);
+  it("a pqm carrying the pulse's pulse_enc_id merges by KEY when its span is within 2 min of the pulse", () => {
+    const r = run([pulse("pa", 0, 10, "u_1", "endConsult", "m1", enc("pe_test_01")), sig("pqm", "q1", 11, 18, { pqm_uid: "pq_1", ...enc("pe_test_01") })]);
     expect(live(r)).toHaveLength(1);
     expect(r.links.find((l) => l.key_kind === "pulse_enc_id")?.value).toBe("pe_test_01");
   });
+  it("R5 guard: a pqm carrying the pulse's pulse_enc_id 40 min away stays apart, both enc_conflict", () => {
+    const r = run([pulse("pa", 0, 10, "u_1", "endConsult", "m1", enc("pe_test_01")), sig("pqm", "q1", 50, 58, { pqm_uid: "pq_1", ...enc("pe_test_01") })]);
+    expect(live(r)).toHaveLength(2);
+    expect(live(r).every((e) => e.flags.includes("enc_conflict"))).toBe(true);
+  });
   it("the key merge holds on a rerun when the pqm already had its own prior (pulse survives, pqm prior merged)", () => {
-    const p = pulse("pa", 0, 10, "u_1", "endConsult", "m1"), q = sig("pqm", "q1", 50, 58, { pqm_uid: "pq_1" });
+    const p = pulse("pa", 0, 10, "u_1", "endConsult", "m1"), q = sig("pqm", "q1", 11, 18, { pqm_uid: "pq_1" });
     const r1 = run([p, q]);
     expect(live(r1)).toHaveLength(2);
     const q2 = { ...q, source_rev: q.source_rev + 100, attrs: { ...q.attrs, ...enc("pe_test_01") } };
@@ -119,15 +149,18 @@ describe("M13 two pulse rows sharing a consult_key", () => {
 });
 
 describe("R4 mutant killers", () => {
-  it("M13: two pulses merged by one pulse_enc_id that each own a prior: the older survives, the other pulse prior is never marked merged", () => {
+  it("M13/R5-A: two pulses merged by one pulse_enc_id that each own a prior: the older survives, the other pulse prior is marked merged_into it", () => {
     const pa = pulse("pa", 0, 10, "u_1", "endConsult", "m1"), pb = pulse("pb", 1, 9, "u_2", "endConsult", "m2");
     const r1 = run([pa, pb]);
     expect(live(r1)).toHaveLength(2);
     const rs = (x: SpineSignal) => ({ ...x, source_rev: x.source_rev + 100, attrs: { ...x.attrs, ...enc("pe_test_01") } });
     const r2 = run(withIds([rs(pa), rs(pb)], r1), toPrior(r1));
-    expect(r2.encounters.some((e) => e.status === "merged")).toBe(false);
     expect(live(r2)).toHaveLength(1);
     expect(idOf(r2, "pa")).toBe(idOf(r2, "pb"));
+    // R5 defect A: the other pulse prior is retired as merged_into the survivor, never left live and unemitted
+    const merged = r2.encounters.filter((e) => e.status === "merged");
+    expect(merged.map((e) => e.merged_into)).toEqual([idOf(r2, "pa")]);
+    expect(live(r2).map((e) => e.encounter_id)).toEqual([idOf(r2, "pa")]);
   });
   it("N3b: after the horizon a pqm whose link names its frozen pulse encounter stays on it when a late rev regroups it with another pulse", () => {
     const FROZEN = Date.parse("2026-10-22T00:00:00Z");

@@ -60,7 +60,7 @@ export interface MergedEncounter {
   boundary_rev: number;
   merge_version: string;
   reason: string;
-  /** multi_machine | pulse_overlap | ambiguous | frozen | clamped | clamp_failed | covered_by_pulse. Not a spine_encounter column. */
+  /** multi_machine | pulse_overlap | ambiguous | frozen | clamped | clamp_failed | covered_by_pulse | enc_conflict. Not a spine_encounter column. */
   flags: string[];
   /** True when the boundary moved against prior: the writer enqueues a recut. */
   boundary_moved: boolean;
@@ -86,4 +86,6 @@ export interface MergeResult {
   unplaced: number;
   open_deferred: number;
   unattached: string[];
+  /** R5: new strong groups on a past-horizon day, held and not minted (no encounter_id, no assignment). */
+  held_frozen: number;
 }
