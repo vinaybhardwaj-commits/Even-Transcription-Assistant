@@ -1,0 +1,17 @@
+# SPINE-S1-BUILD — signal ingest, shadow (branch spine/s1-signals, off spine/s0-schema 2a21440f)
+Changed: lib/spine/{ingest,config,signal-validate,ingest-store}.ts; app/api/cron/spine/route.ts; app/api/spine/signals/route.ts; tools/eta-spine/{post_signals.py,tests/test_post_signals.py};
+tests/unit/spine-{ingest,signals-route,ingest-pg}.test.ts; lib/encounter-hypotheses.ts (+readHypothesesSince, the one place that may query encounter_hypothesis); tests/support/room-access-allowlist.ts (+lib/spine/ingest-store.ts, max 1). Migration 0173 untouched. No vercel.json entry, no timer.
+Tests (own runs): vitest tests/unit/spine-*: 4 files, 36 passed (incl. S0 schema test; S1: 9 route, 13 pure, 5 postgres:16); pytest tools/eta-spine: 8 passed. typecheck 0, typecheck:tests 0, npm run build 0 (after fixing a non-handler export the build caught).
+Full vitest (.bc/gate.log, --maxWorkers=4 --minWorkers=1): "Test Files 2 failed | 452 passed | 1 skipped (455); Tests 2 failed | 9365 passed | 5 skipped (9372)". The 2 failures are e11-silent-room-window and no-identity-literals, neither touches lib/spine (S0 claimed them pre-existing; not re-run at base by me: UNVERIFIED at base).
+check:silent: "Found 9 silent-failure handler(s)", none in new files (the 9 accepted). swift build/test: N/A on Linux. check-number-words: N/A.
+Mutants (all killed): (1) remove the depth recursion in refuseKeys -> 3 tests fail incl. route depth-3 422; (2) `off` falls through (no mode check in ingestSpineSignals) -> 2 pg tests fail; (3) rev bump on unchanged row -> 1 pure + 1 pg test fail.
+Assumptions:
+- Plain `npx vitest run --maxWorkers=4` fails here with "minThreads and maxThreads must not conflict"; I added --minWorkers=1.
+- Config shapes: ingest = "shadow"|"live" or {mode}; kill_switch = {on:bool} or bool. Present-but-malformed kill_switch = killed; a MISSING kill_switch is not a kill (a missing ingest is already off). Config read error = off.
+- POST route is also gated by the same config (off -> 200 {skipped:"off"}, nothing stored); the spec gated only the cron. Sender simply re-posts later.
+- POST source_rev is optional: omitted -> the server applies the rev rule against the newest stored rev (the box cannot know it). Given -> inserted as sent, repeat = duplicate. Box posters omit it.
+- Text-key refusal is a case-insensitive SUBSTRING match (text|name|phone|patient|transcript), wider than 0168's prefix match, 422; depth > 12 also 422. Other shape failures are 400.
+- Keys: pulse=consult_key, acoustic=hypothesis row id, timeline=consult_key taking the newest run's row (DISTINCT ON). Room for acoustic/timeline comes from room_day via room_day_id. Look-back 72 h (D7), 5000 rows per proxy per pass; one spine_tick row (counts) per non-off pass.
+- attrs.ids hold consult_key/consult_uid/row ids only; doctor_uid and display_name are NOT copied.
+- CAA input shape (JSONL of {consult_uid, scope_path, manifest.t0_ms/t1_ms}) is taken from eta2freescript/ingest.py bundle_window: UNVERIFIED against a real CAA scope file. Cutter uses span_start/span_end of the latest index row per uid.
+Open risks: pg test uses minimal stand-in proxy tables (columns the SQL reads), not the real 0123/0114/0156 migrations. Neon HTTP driver text[]/jsonb param behaviour for jsonb_to_recordset is proven only through the psql harness (UNVERIFIED on Neon). Migration 0173 is absent from origin/main (S0 holds it); live-branch check not repeated by me beyond S0's note.
