@@ -536,7 +536,7 @@ describe("G13 — ledger accuracy", () => {
 
 describe("sarvam_transcribe: poll / finish / ledger", () => {
   const args = { source: "encounter", encounter_id: "enc_1", mode: "transcribe", english: true };
-  const polling = { sarvam_job_id: "sj_9", sarvam_started_ms: Date.now(), clip_key: "clip.webm", duration_ms: 600_000, scope: "encounter", ref: "enc_1", started_at: "2026-10-08T06:00:00.000Z" };
+  const polling = { sarvam_job_id: "sj_9", stt_model: "saaras:v4", sarvam_started_ms: Date.now(), clip_key: "clip.webm", duration_ms: 600_000, scope: "encounter", ref: "enc_1", started_at: "2026-10-08T06:00:00.000Z" };
   const poll = (progress: Row = polling) => T.sarvamTranscribeKind.run(ctx("poll", args, progress));
 
   it("poll: Completed -> finish; Failed -> sarvam_job_failed + a failed ledger line; running -> poll again; a 429 marks throttled", async () => {
@@ -845,8 +845,21 @@ describe("S8A4 — the English track comes from a second Sarvam pass over the au
         { speaker_id: "1", start_s: 9, end_s: 12, text: "मुझे बुखार है", script: "Devanagari", language_code: null },
       ],
     })));
-    return step("en_finish", { ...base, outputs: ["0.json"], en_sarvam_job_id: "sj_en", en_started_at: "2026-10-08T06:05:00.000Z", en_started_ms: Date.now(), en_outputs: ["1.json"], ...over });
+    return step("en_finish", { ...base, outputs: ["0.json"], en_sarvam_job_id: "sj_en", en_stt_model: "saaras:v4", en_started_at: "2026-10-08T06:05:00.000Z", en_started_ms: Date.now(), en_outputs: ["1.json"], ...over });
   }
+
+  it("FIX2 straddle: a job whose init ran on v3 (no stt_model) but whose English pass was initialised after the deploy: native line v3, :en line v4; the stored result says v3", async () => {
+    gw.result.mockResolvedValue({ ok: true, transcript: "x", languageCode: "en-IN", entries: englishEntries });
+    const out = await runEnFinish({ stt_model: undefined });
+    expect(out).toMatchObject({ kind: "done" });
+    expect(ledgerLines().filter((l) => l.job_id === "job_t1:en")).toEqual([expect.objectContaining({ task: "translate", model: "saaras:v4" })]);
+  });
+
+  it("FIX2 reverse: an English pass with no en_stt_model (its init ran on v3) reads v3 on its :en line", async () => {
+    gw.result.mockResolvedValue({ ok: true, transcript: "x", languageCode: "en-IN", entries: englishEntries });
+    await runEnFinish({ en_stt_model: undefined });
+    expect(ledgerLines().filter((l) => l.job_id === "job_t1:en")).toEqual([expect.objectContaining({ task: "translate", model: "saaras:v3" })]);
+  });
 
   it("en_finish: the Kannada and Hindi entries get their English from the translate pass (no mayura), no entry is lost, the drug check proposes Combiflam, the result carries both job ids and both minutes", async () => {
     gw.result.mockResolvedValue({ ok: true, transcript: "x", languageCode: "en-IN", entries: englishEntries });

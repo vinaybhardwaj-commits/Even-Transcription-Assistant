@@ -17,7 +17,7 @@
  * Env: SARVAM_API_KEY (required), SARVAM_STT_MODEL (default 'saaras:v4'; a v3 value is refused, see lib/sarvam-model.ts).
  */
 
-import { resolveSarvamSttModel } from "@/lib/sarvam-model";
+import { resolveSarvamModelEnv, resolveSarvamSttModel } from "@/lib/sarvam-model";
 
 const SARVAM_BASE = "https://api.sarvam.ai";
 const MODEL = resolveSarvamSttModel(process.env.SARVAM_STT_MODEL);
@@ -177,7 +177,7 @@ async function tfetch(
  */
 type SarvamJobConfig = { jobPath: string; model: string };
 const JOB_TRANSLATE: SarvamJobConfig = { jobPath: "speech-to-text-translate", model: "saaras:v2.5" };
-const JOB_TRANSCRIBE: SarvamJobConfig = { jobPath: "speech-to-text", model: process.env.SARVAM_STT_BATCH_MODEL || "saarika:v2.5" };
+const JOB_TRANSCRIBE: SarvamJobConfig = { jobPath: "speech-to-text", model: resolveSarvamModelEnv(process.env.SARVAM_STT_BATCH_MODEL, "saarika:v2.5") };
 
 async function sarvamBatchJob(
   audio: Buffer | Uint8Array,

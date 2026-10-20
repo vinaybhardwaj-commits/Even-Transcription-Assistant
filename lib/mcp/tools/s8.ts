@@ -69,9 +69,9 @@ async function submit(kind: string, args: ToolArgs, ctx: ToolContext): Promise<R
       if (parsed.source === "consult") {
         const pre = await preflightClip(parsed.consult_uid, { mode: parsed.mode, english: parsed.english, force: parsed.force === true });
         if (!pre.ok) return { ok: false, error: pre.error };
-        if (pre.existing) return { ok: true, existing: true, job_id: pre.existing.job_id, ...existingSummary(pre.existing), billed: false };
+        if (pre.existing) return { ok: true, status: "existing", existing: true, job_id: pre.existing.job_id, ...existingSummary(pre.existing), ...(pre.note ? { note: pre.note } : {}), billed: false };
         // the palimpsest already holds this cut's Sarvam track: it is returned (labelled), Sarvam is not called and nothing is queued
-        if (pre.reuse) return { ok: true, existing: true, job_id: null, ...existingSummary(pre.reuse.view.result), billed: false };
+        if (pre.reuse) return { ok: true, status: "existing", existing: true, job_id: null, ...existingSummary(pre.reuse.view.result), billed: false };
       }
     } else {
       const parsed = parseSarvamTranslateArgs(raw, "mcp");
@@ -348,7 +348,7 @@ const sarvam: McpTool = {
   name: "scribe_sarvam",
   description:
     "Sarvam speech AI through the Even AWS gateway (saaras:v4 transcription with speaker labels, mayura:v1 translation); Sarvam is zero-data-retention. Reads and writes the job queue and one R2 result object per job; touches no room; " +
-    "never writes a clinical table. Production sends ONLY ISOLATED CONSULT AUDIO to Sarvam: `action` transcribe takes {encounter_id} (a doctor-recorded encounter; its duration is measured from the audio, max 30 min) or {consult_uid} (a cut clip, resolved by the consult index; refusals consult_not_indexed, consult_sealed, consult_voice_isolated; a result stored for the same cut returns billed:false) or {consult_uids:[<=25]} (one batch job); " +
+    "never writes a clinical table. Production sends ONLY ISOLATED CONSULT AUDIO to Sarvam: `action` transcribe takes {encounter_id} (a doctor-recorded encounter; its duration is measured from the audio, max 30 min) or {consult_uid} (a cut clip, resolved by the consult index; refusals consult_not_indexed, consult_sealed, consult_voice_isolated; a result stored for the same cut, in ANY options or model version, returns status existing, billed:false and, when its options differ, note no_rerun; nothing is queued, english:true over an english:false result included) or {consult_uids:[<=25]} (one batch job); " +
     "consult_clips {ist_date, room_slug?}; consult_result {consult_uid | consult_uids[] | ist_date, include_text?} (a batch or a day returns heads; text and absolute-UTC segments only with include_text, and a day with text is capped at 25); options mode transcribe|codemix, english default true, num_speakers 1-6. MCP research may also send ROOM audio as `room_audio` {window_id} or {session_id | room+date, from, to} (ISO or HH:MM IST, max 30 min); blind room-days are never processed (blind_room_day); results are labelled sarvam_mcp_research. translate takes {encounter_id} or {transcription_run_id} (the run's subject must be an encounter). " +
     "Both queue a job and need invoke scope. status / result {job_id} (include_text returns the stored JSON: transcript, speaker-labelled entries, English); usage {ist_date | days <= 30}: gateway minutes, estimated cost, calls, Sarvam jobs and runs; " +
     "health: configured env names, lab_store_configured, credential check, STS expiry (Sarvam is not called). " +

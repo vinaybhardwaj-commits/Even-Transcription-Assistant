@@ -31,7 +31,7 @@ import { recordResult, type ConsultResult } from "@/lib/room-access/consult-inde
 import { gatewayConfigured } from "@/lib/sarvam-gateway";
 import { chunkText, gwBatchInit, gwBatchResult, gwBatchStartJob, gwBatchStatus, gwBatchUpload, gwTranslateChunk, SARVAM_GW_STT_MODEL, SARVAM_GW_TRANSLATE_MODEL, type Fail } from "@/lib/sarvam-gw";
 import { SARVAM_MEDICAL_PROMPT } from "@/lib/sarvam";
-import { SARVAM_STT_VERSION_LABEL } from "@/lib/sarvam-model";
+import { recordedSttModel, versionLabelOf } from "@/lib/sarvam-model";
 import { appendLedger, touchLane, type CallLine } from "@/lib/sarvam-lab";
 import { JobArgsError, doneWith, failWith, nextStep, type JobKind, type StepContext, type StepOutcome } from "../types";
 import { jobError, type JobErrorCode } from "../errors";
@@ -225,7 +225,7 @@ async function prepareStep(ctx: StepContext): Promise<StepOutcome> {
 async function prepareConsult(ctx: StepContext, a: Extract<SarvamTranscribeArgs, { source: "consult" }>): Promise<StepOutcome> {
   const pre = await preflightClip(a.consult_uid, { mode: a.mode, english: a.english, force: a.force === true });
   if (!pre.ok) return failWith(jobError(pre.error));
-  if (pre.existing) return doneWith(existingSummary(pre.existing));
+  if (pre.existing) return doneWith({ ...existingSummary(pre.existing), ...(pre.note ? { note: pre.note } : {}) });
   if (pre.reuse) return doneWith(existingSummary(pre.reuse.view.result));
   if (!gatewayConfigured()) return failWith(jobError("sarvam_gateway_not_configured"));
   if (await dailyCapRefusal()) return failWith(jobError("sarvam_daily_cap"));
@@ -273,7 +273,7 @@ async function initStep(ctx: StepContext, pass: Pass): Promise<StepOutcome> {
       console.error("[sarvam] english-pass init failed", JSON.stringify({ job: ctx.job.id, err: init.error, transient: init.transient }));
       return init.transient ? bail(init, "sarvam_submit_failed") : enSkip(ctx, "failed");
     }
-    return nextStep(STEPS.enUpload, { ...ctx.progress, [K.job]: init.jobId, [K.startedAt]: new Date().toISOString() });
+    return nextStep(STEPS.enUpload, { ...ctx.progress, [K.job]: init.jobId, en_stt_model: SARVAM_GW_STT_MODEL, [K.startedAt]: new Date().toISOString() });
   }
 
   const bytes = await getObjectBytes(clipKey);
@@ -407,7 +407,7 @@ async function ledgerBatch(ctx: StepContext, status: "ok" | "failed", httpStatus
   const K = KEYS[pass];
   await appendLedger({
     caller: "scribe-mcp", machine: "vercel", job_id: auditJobId(ctx, pass), request_id: typeof ctx.progress[K.job] === "string" ? (ctx.progress[K.job] as string) : null,
-    route: "gateway", mode: "batch", task: pass === "en" ? "translate" : "transcribe", model: SARVAM_GW_STT_MODEL, audio_s: Math.round(num(ctx.progress.duration_ms) / 10) / 100 || 0,
+    route: "gateway", mode: "batch", task: pass === "en" ? "translate" : "transcribe", model: recordedSttModel(ctx.progress[pass === "en" ? "en_stt_model" : "stt_model"]), audio_s: Math.round(num(ctx.progress.duration_ms) / 10) / 100 || 0,
     started_at: typeof ctx.progress[K.startedAt] === "string" ? (ctx.progress[K.startedAt] as string) : new Date().toISOString(), finished_at: new Date().toISOString(),
     status, http_status: httpStatus, throttled, scope: scopeOf(ctx), ref: refOf(ctx), use: useOf(ctx),
   } satisfies CallLine);
@@ -549,7 +549,7 @@ async function recordConsult(ctx: StepContext, doc: ResultDoc): Promise<void> {
   if (a.source !== "consult" || typeof cut !== "string" || !cut) return;
   await recordResult({
     consult_uid: a.consult_uid, cut_version: cut, mode: a.mode, english: a.english, num_speakers: a.num_speakers ?? null, job_id: ctx.job.id, result_r2_key: resultKey(ctx.job.id),
-    model_stt: SARVAM_GW_STT_MODEL, model_translate: SARVAM_GW_TRANSLATE_MODEL, model_rev: SARVAM_STT_VERSION_LABEL, pipeline_rev: PIPELINE_REV, language_code: doc.language_code, duration_s: doc.duration_s,
+    model_stt: recordedSttModel(ctx.progress.stt_model), model_translate: SARVAM_GW_TRANSLATE_MODEL, model_rev: versionLabelOf(recordedSttModel(ctx.progress.stt_model)), pipeline_rev: PIPELINE_REV, language_code: doc.language_code, duration_s: doc.duration_s,
     speaker_count: doc.speakers.length, transcript_chars: doc.transcript.length, english_chars: doc.english?.length ?? 0, english_pass: doc.english_pass ?? "not_requested",
     t0_ms: num(ctx.progress.clip_t0_ms) || 0,
   });

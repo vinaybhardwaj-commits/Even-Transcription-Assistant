@@ -15,13 +15,13 @@ import { headObject } from "@/lib/r2";
 import { signatureVersion } from "@/lib/consult-index/parse";
 import { palimpsestAsResult, type PalimpsestAsResult } from "@/lib/consult-index/palimpsest-view";
 import { findSarvamTracks, readRebRoleFlags, type SarvamTrack } from "@/lib/room-access/readers/reb-consult";
-import { findResult, getIndexRow, type ConsultResult, type StoredIndexRow } from "@/lib/room-access/consult-index-store";
+import { findAnyResultForCut, findResult, getIndexRow, type ConsultResult, type StoredIndexRow } from "@/lib/room-access/consult-index-store";
 
 export type ClipRefusalCode = "consult_not_indexed" | "consult_sealed" | "consult_voice_isolated" | "mirror_minutes_missing" | "reuse_lookup_unavailable" | "track_missing" | "audio_unreadable";
 export type ClipRefusal = { ok: false; error: ClipRefusalCode };
 export type PalimpsestReuse = { source: "palimpsest"; stt: SarvamTrack; translate: SarvamTrack | null; view: PalimpsestAsResult };
 export type ClipOk = { ok: true; existing: null; reuse: null; row: StoredIndexRow; key: string; content_type: string };
-export type ClipExisting = { ok: true; existing: ConsultResult; reuse: null; row: StoredIndexRow };
+export type ClipExisting = { ok: true; existing: ConsultResult; reuse: null; row: StoredIndexRow; note?: "no_rerun" };
 export type ClipReuse = { ok: true; existing: null; reuse: PalimpsestReuse; row: StoredIndexRow };
 
 /**
@@ -51,6 +51,9 @@ export async function preflightClip(consultUid: string, opts: { mode: "transcrib
   if (row.sealed) return { ok: false, error: "consult_sealed" };
   const existing = await findResult(consultUid, row.cut_version, opts.mode, opts.english);
   if (existing) return { ok: true, existing, reuse: null, row };
+  // an STT result of this cut in ANY options counts as done (V): returned with note no_rerun, nothing queued, even english:true over an english:false row
+  const other = await findAnyResultForCut(consultUid, row.cut_version, opts.mode, opts.english);
+  if (other) return { ok: true, existing: other, reuse: null, row, note: "no_rerun" };
   const pal = await palimpsestFor(row);
   if ("unavailable" in pal) return { ok: false, error: "reuse_lookup_unavailable" };
   // the index says the palimpsest HAS an ok track for this consult, but its object is gone from R2, so it cannot be checked against this cut: Sarvam is not silently paid for it. Only force:true goes on.

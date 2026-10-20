@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { REB_STT_ENGINE_PREFERENCE, SARVAM_TRACK_ENGINES } from "@/lib/room-access/readers/reb-consult";
-import { SARVAM_STT_ENGINES_READ, SARVAM_STT_ENGINE_LABEL, SARVAM_STT_MODEL, SARVAM_STT_VERSION_LABEL, resolveSarvamSttModel } from "@/lib/sarvam-model";
+import { SARVAM_STT_ENGINES_READ, SARVAM_STT_ENGINE_LABEL, SARVAM_STT_MODEL, SARVAM_STT_VERSION_LABEL, resolveSarvamModelEnv, resolveSarvamSttModel } from "@/lib/sarvam-model";
 import { SARVAM_GW_STT_MODEL } from "@/lib/sarvam-gw";
 
 describe("saaras:v4 writers", () => {
@@ -29,6 +29,19 @@ describe("saaras:v4 writers", () => {
   });
 });
 
+describe("SARVAM_STT_BATCH_MODEL (FIX2 F2)", () => {
+  it("a v3 value is refused, the saarika:v2.5 default stays, other values pass", () => {
+    for (const v of ["saaras:v3", "SAARAS:V3", "saaras-v3"]) {
+      const log = vi.fn();
+      expect(resolveSarvamModelEnv(v, "saarika:v2.5", log)).toBe("saarika:v2.5");
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(String(log.mock.calls[0]![0])).toMatch(/count=1/);
+    }
+    expect(resolveSarvamModelEnv(undefined, "saarika:v2.5")).toBe("saarika:v2.5");
+    expect(resolveSarvamModelEnv("saaras:v4", "saarika:v2.5")).toBe("saaras:v4");
+  });
+});
+
 describe("lib/sarvam.ts reads the override at load", () => {
   afterEach(() => { vi.unstubAllEnvs(); vi.resetModules(); vi.restoreAllMocks(); });
   it("SARVAM_STT_MODEL=saaras:v3 sends saaras:v4", async () => {
@@ -43,6 +56,21 @@ describe("lib/sarvam.ts reads the override at load", () => {
     vi.unstubAllGlobals();
     expect(bodies.length).toBe(1);
     expect(bodies[0]!.get("model")).toBe("saaras:v4");
+  });
+  it("SARVAM_STT_BATCH_MODEL=saaras:v3 never reaches the batch-job request (saarika:v2.5 default)", async () => {
+    vi.stubEnv("SARVAM_STT_BATCH_MODEL", "saaras:v3");
+    vi.stubEnv("SARVAM_API_KEY", "k");
+    vi.resetModules();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const bodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u: unknown, init: { body?: unknown }) => { bodies.push(String(init?.body ?? "")); return new Response(JSON.stringify({ job_id: "j" }), { status: 200 }); }));
+    const { sarvamBatchTranscribe } = await import("@/lib/sarvam");
+    await sarvamBatchTranscribe(Buffer.from("a"), "audio/webm", {}).catch(() => undefined);
+    vi.unstubAllGlobals();
+    const init = bodies.find((b) => b.includes("job_parameters"));
+    expect(init).toBeDefined();
+    expect(init).toContain("saarika:v2.5");
+    expect(init).not.toMatch(/saaras:v3/);
   });
 });
 

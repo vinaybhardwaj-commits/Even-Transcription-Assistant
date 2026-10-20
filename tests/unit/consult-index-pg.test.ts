@@ -326,6 +326,56 @@ describe.skipIf(!HAVE)("PALIMPSEST REUSE: the track the palimpsest already made 
     await noJobsNoGateway(calls);
   });
 
+  it("FIX2 F3: an STT result of this cut in ANY options skips the ask: english:true over an english:false row (and the reverse) returns it, note no_rerun, queues nothing, calls nothing", async () => {
+    await backfill([withSig(UA)]);
+    putClips(UA);
+    const row = (await St.getIndexRow(UA))!;
+    await St.recordResult({ consult_uid: UA, cut_version: row.cut_version, mode: "transcribe", english: false, num_speakers: null, job_id: "j_v3", result_r2_key: "mcp-sarvam/j_v3.json", model_stt: "saaras:v3", model_translate: "mayura:v1", model_rev: "saaras-v3", pipeline_rev: "d", language_code: null, duration_s: 1, speaker_count: 1, transcript_chars: 1, english_chars: 0, english_pass: null, t0_ms: row.t0_ms });
+    const calls = gwCalls();
+    expect(await tool({ action: "transcribe", consult_uid: UA, english: true })).toMatchObject({ ok: true, status: "existing", existing: true, note: "no_rerun", job_id: "j_v3", model_stt: "saaras:v3", billed: false });
+    expect(await tool({ action: "transcribe", consult_uid: UA, english: false, mode: "codemix" })).toMatchObject({ ok: true, status: "existing", note: "no_rerun", job_id: "j_v3" });
+    // the same options carry no note (that was already the rule)
+    const same = await tool({ action: "transcribe", consult_uid: UA, english: false });
+    expect(same).toMatchObject({ ok: true, status: "existing", job_id: "j_v3" });
+    expect(same).not.toHaveProperty("note");
+    // through a job and through the batch
+    const j = await submit("sarvam_transcribe", { consult_uid: UA, mode: "transcribe", english: true });
+    await drain();
+    expect(await job(String(j.id))).toMatchObject({ status: "done", result: expect.objectContaining({ existing: true, note: "no_rerun" }) });
+    expect(gwCalls()).toBe(calls);
+    expect(await jobsOfKind("sarvam_transcribe")).toHaveLength(1); // only the job just submitted, which answered existing
+    expect((await q<{ n: number }>`SELECT count(*)::int AS n FROM audit_log WHERE action = 'stt.paid_call'`)[0]!.n).toBe(0);
+    expect(await results()).toHaveLength(1);
+  });
+
+  it("FIX2 F1: a job whose init ran on v3 (progress has no stt_model) stores a v3-labelled result when it finishes after the deploy; a normal job stores v4", async () => {
+    await backfill([withSig(UA), withSig(UE)]);
+    putClips(UA, UE);
+    const stepTo = async (uid: string, stop: string) => {
+      const out = await tool({ action: "transcribe", consult_uid: uid, english: false });
+      const id = String(out.job_id);
+      const { claimJobs, runOneStep } = await runner();
+      for (let i = 0; i < 20; i++) {
+        if ((await job(id)).step === stop) return id;
+        const rid = `r_${Math.random()}`; // the claim and the step share one runner id, as drain() does
+        let got = await claimJobs(1, 240_000, rid);
+        if (!got.length) { pg.exec(`UPDATE scribe_job SET lease_until = now() - interval '1 second' WHERE status = 'running' AND lease_until > now();`); got = await claimJobs(1, 240_000, rid); }
+        if (!got.length) break;
+        await runOneStep(got[0]!, rid);
+      }
+      return id;
+    };
+    const idOld = await stepTo(UA, "upload");
+    expect((await job(idOld)).progress).toMatchObject({ stt_model: "saaras:v4" }); // a new init records it
+    pg.exec(`UPDATE scribe_job SET progress = progress - 'stt_model' WHERE id = '${idOld}';`); // the state of a job whose init ran on the old code
+    await drain();
+    const rows = await results();
+    expect(rows.find((r) => r.consult_uid === UA)).toMatchObject({ model_stt: "saaras:v3", model_rev: "saaras-v3" });
+    await tool({ action: "transcribe", consult_uid: UE, english: false });
+    await drain();
+    expect((await results()).find((r) => r.consult_uid === UE)).toMatchObject({ model_stt: "saaras:v4", model_rev: "saaras-v4" });
+  });
+
   it("the same through the JOB (scribe_job_submit): done, existing, source palimpsest, no gateway call, no paid-call row", async () => {
     await backfill([withSig(UA)]);
     putClips(UA);
@@ -769,11 +819,11 @@ describe.skipIf(!HAVE)("scribe_sarvam / sarvam_transcribe on a consult_uid", () 
     await drain();
     const calls = gwCalls();
     const other = await tool({ action: "transcribe", consult_uid: UA, english: false, mode: "codemix" });
-    expect(other.existing).toBeUndefined();
-    expect(other).toMatchObject({ ok: true, status: "queued" });
+    // FIX2 F3 (V: an STT result in ANY options counts): the different-options ask returns what exists, queues nothing, calls nothing
+    expect(other).toMatchObject({ ok: true, status: "existing", existing: true, note: "no_rerun" });
     await drain();
-    expect(gwCalls()).toBeGreaterThan(calls);
-    expect((await results()).map((r) => r.mode)).toEqual(["transcribe", "codemix"]);
+    expect(gwCalls()).toBe(calls);
+    expect((await results()).map((r) => r.mode)).toEqual(["transcribe"]);
     // re-cut: a new cut_version
     await backfill([indexRow(UA, { cut_at: "2026-10-12T09:00:00+0530" })]);
     const again = await tool({ action: "transcribe", consult_uid: UA, english: false });

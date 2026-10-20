@@ -74,7 +74,7 @@ async function fan(ctx: StepContext, a: BatchArgs): Promise<StepOutcome> {
     if (children[uid]) continue; // a replayed claim never queues a consult twice
     const pre = await preflightClip(uid, { mode: a.mode, english: a.english, force: a.force === true });
     if (!pre.ok) { children[uid] = { state: "refused", code: pre.error }; continue; }
-    if (pre.existing) { children[uid] = { state: "existing", job_id: pre.existing.job_id }; continue; }
+    if (pre.existing) { children[uid] = { state: "existing", job_id: pre.existing.job_id, ...(pre.note ? { note: pre.note } : {}) }; continue; }
     if (pre.reuse) { children[uid] = { state: "existing", source: "palimpsest" }; continue; }
     const { submitJob } = await import("../submit"); // lazy: submit imports the kind registry, which imports this file
     const job = await submitJob({

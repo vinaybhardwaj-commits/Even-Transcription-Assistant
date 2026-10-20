@@ -16,7 +16,21 @@ export function recordedSttModel(v: unknown): string {
   return typeof v === "string" && /^saaras:v\d+$/.test(v) ? v : "saaras:v3";
 }
 
+/** `saaras:v3` -> `saaras-v3`: the version label that goes with a recorded model. */
+export const versionLabelOf = (model: string): string => model.replace(":", "-");
+
 const V3_RE = /saaras[:_\-.]?v?3/i;
+
+/** The same refusal for any Sarvam model env (SARVAM_STT_BATCH_MODEL): a v3 value is treated as unset and `fallback` is used. */
+export function resolveSarvamModelEnv(override: string | undefined, fallback: string, log: (line: string) => void = (l) => console.warn(l)): string {
+  const v = (override ?? "").trim();
+  if (!v) return fallback;
+  if (V3_RE.test(v)) {
+    log(`sarvam_model_override_refused count=1 reason=v3_not_selectable using=${fallback}`);
+    return fallback;
+  }
+  return v;
+}
 
 /** An env override of the STT model. A v3 value is refused (treated as unset, one count-only log line); anything else unset or empty gives v4. */
 export function resolveSarvamSttModel(override: string | undefined, log: (line: string) => void = (l) => console.warn(l)): string {

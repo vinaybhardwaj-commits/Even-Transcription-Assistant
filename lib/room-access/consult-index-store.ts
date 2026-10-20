@@ -205,6 +205,22 @@ export async function findResult(uid: string, cutVersion: string, mode: string, 
   return rows[0] ? resultOf(rows[0]) : null;
 }
 
+/**
+ * ANY stored result of this cut, whatever its mode / english / num_speakers (the exact-options row first, else the newest). V's rule: an item with an STT result in any version is
+ * skipped, so a different-options ask is answered with what exists, not re-sent.
+ */
+export async function findAnyResultForCut(uid: string, cutVersion: string, mode: string, english: boolean): Promise<ConsultResult | null> {
+  const rows = (await sql`
+    SELECT consult_uid, cut_version, mode, english, num_speakers, job_id, result_r2_key, model_stt, model_translate, model_rev, pipeline_rev, language_code, duration_s::float8 AS duration_s, speaker_count,
+           transcript_chars, english_chars, english_pass, t0_ms::float8 AS t0_ms, created_at::text AS created_at
+      FROM consult_sarvam_result
+     WHERE consult_uid = ${uid}::text AND cut_version = ${cutVersion}::text
+     ORDER BY (mode = ${mode}::text AND english = ${english}::boolean) DESC, created_at DESC, id DESC
+     LIMIT 1
+  `) as Array<Record<string, unknown>>;
+  return rows[0] ? resultOf(rows[0]) : null;
+}
+
 /** All stored results of one consult, newest first (every cut version). */
 export async function listResults(uid: string): Promise<ConsultResult[]> {
   const rows = (await sql`
