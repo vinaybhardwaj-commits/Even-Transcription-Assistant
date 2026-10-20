@@ -32,6 +32,10 @@
  * - R5: defect A (an enc-joined pulse group retires its other pulse priors as merged_into the survivor), defect B (encGuard: a shared
  *   pulse_enc_id merges only pulses on different machines, or a pulse with a pqm, in one room with spans overlapping or within 2 min;
  *   otherwise both encounters get `enc_conflict`), and a new strong group on a past-horizon day is held (`held_frozen` count), not minted.
+ * - R6: encGuard also rejects when the merged group would hold two different-consult pulses on ONE machine or a pulse whose machine cannot
+ *   be proven (G1); the merge result lists each held group's source_keys in `held` (S7 surfaces them); a new strong signal on a frozen
+ *   day never inherits another consult's frozen home through a time merge, it is held (F1); a pqm whose prior home is retired into the
+ *   survivor of an enc-joined pulse group rides with that group when that group holds its span best (V5).
  * - X3c (R3): when the clamp would leave an empty span the raw span is kept and the flag `clamp_failed` is set.
  * - X5 (R3): strongOwner prefers the identity link (consult_key | pqm_uid) over a stale encounter_id.
  * - X6c (R3): a weak signal with only a consult_uid that exists on more than one machine gets the flag `ambiguous` on its group.
@@ -210,6 +214,10 @@ function encGuard(a: Group, b: Group): boolean {
   const shared = (x: Norm, y: Norm) => x.keys.some(([kx, vx]) => kx === "pulse_enc_id" && y.keys.some(([ky, vy]) => ky === "pulse_enc_id" && vy === vx));
   const pairs = (px: Proxy, py: Proxy) => a.members.flatMap((x) => (x.sig.proxy === px ? b.members.filter((y) => y.sig.proxy === py && shared(x, y)).map((y) => [x, y] as const) : []));
   const conflict = STRONG_PROXIES.filter((p) => hasProxy(a, p) && hasProxy(b, p));
+  // R6 (G1): two pulses of DIFFERENT consults on one machine (or a pulse whose machine cannot be proven) never share an encounter
+  const clash = a.members.some((x) => x.sig.proxy === "pulse" && b.members.some((y) => y.sig.proxy === "pulse" && mkey(x) !== mkey(y) &&
+    (machineOf(x) === null || machineOf(y) === null || machineOf(x) === machineOf(y))));
+  if (clash) return false;
   if (conflict.length) { // the enc id must settle EVERY same-kind conflict: pulses on different machines; two pqm never
     return conflict.every((p) => p === "pulse" && pairs("pulse", "pulse").some(([x, y]) => { const mx = machineOf(x), my = machineOf(y); return mx !== null && my !== null && mx !== my; }));
   }
@@ -329,6 +337,26 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
     owner.set(b, a);
   }
   const live = (): Group[] => groups.filter((g) => !owner.has(g));
+  // R6 (V5): a pqm group whose prior home is shared with a pulse of an enc-joined pulse group (more than one consult) rides with that
+  // group, since its own home is being retired into the survivor; otherwise it would mint a new covered_by_pulse row.
+  const homeOf = (m: Norm): string | undefined => {
+    const v = m.sig.proxy === "pqm" ? attr(m.sig, "pqm_uid") : m.sig.proxy === "pulse" ? attr(m.sig, "consult_key") : null;
+    return v ? pLink.get(`${m.sig.proxy === "pqm" ? "pqm_uid" : "consult_key"}\u0000${v}`) : undefined;
+  };
+  for (const q of live().filter((g) => hasProxy(g, "pqm") && !hasProxy(g, "pulse"))) {
+    const qh = new Set(q.members.map(homeOf).filter((x): x is string => !!x));
+    if (!qh.size) continue;
+    const rooms = live().filter((g) => g.members[0].room === q.members[0].room && hasProxy(g, "pulse"));
+    const best = Math.max(0, ...rooms.map((g) => overlapMs(spanOf(q), spanOf(g))));
+    // only the pulse group that holds the pqm's span best (strictly): a pqm captured by another consult's pulse is not pulled in
+    const to = rooms.find((g) => !hasProxy(g, "pqm") && overlapMs(spanOf(q), spanOf(g)) === best && best > 0 &&
+      new Set(g.members.filter((m) => m.sig.proxy === "pulse").map(mkey)).size > 1 && g.members.some((m) => { const h = homeOf(m); return !!h && qh.has(h); }) &&
+      rooms.filter((o) => overlapMs(spanOf(q), spanOf(o)) === best).length === 1);
+    if (!to) continue;
+    for (const m of q.members) m.via = "merge";
+    to.members.push(...q.members);
+    owner.set(q, to);
+  }
 
   // ---- weak signals: M2 key, M3 time, M7 ambiguity; leftovers seed weak groups
   const ambiguous = new Set<Group>();
@@ -443,7 +471,8 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
   const frozenKept = new Map<string, Group>(); // I4: frozen candidates that lost; their signals keep their assignment
   const groupIds: (string | null)[] = [];
   const idToGroup = new Map<string, Group>();
-  let heldFrozen = 0;
+  const heldNorms = new Set<Norm>();
+  const held: string[][] = []; // R6: source_keys of each held group (mark, never delete)
 
   // F1: a strong-anchored prior is claimed only by the group that holds its anchor signal.
   const strongOwner = new Map<string, Group>();
@@ -472,6 +501,13 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
     const pe = id ? priorById.get(id) : undefined;
     return pe && pe.status !== "merged" && pe.room_id === m.room && frozen(pe) ? pe.encounter_id : null;
   };
+  // R6 (F1): a strong signal with no frozen home of its own that shares no identity key with a group member that has one belongs to
+  // ANOTHER consult (time-merged): it is held, never given that home
+  const foreignStrong = (g: Group, m: Norm): boolean => {
+    if (!isStrong(m) || frozenHomeOf(m)) return false;
+    const mine = new Set(m.keys.filter(([k]) => MATCH_KINDS.includes(k)).map(([k, v]) => `${k}\u0000${v}`));
+    return !g.members.some((o) => frozenHomeOf(o) && o.keys.some(([k, v]) => mine.has(`${k}\u0000${v}`)));
+  };
   const frozenHome = (g: Group): string | null => g.members.map(frozenHomeOf).find((h) => h !== null) ?? null;
   for (const g of finals) {
     const ids = new Set<string>();
@@ -488,12 +524,17 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
       const home = frozenHome(g);
       if (home) {
         groupIds.push(home);
-        for (const m of g.members) assignments.push({ proxy: m.sig.proxy, source_key: m.sig.source_key, source_rev: m.sig.source_rev, encounter_id: home });
+        const heldHere: string[] = [];
+        for (const m of g.members) {
+          if (foreignStrong(g, m)) { heldHere.push(m.sig.source_key); heldNorms.add(m); continue; }
+          assignments.push({ proxy: m.sig.proxy, source_key: m.sig.source_key, source_rev: m.sig.source_rev, encounter_id: frozenHomeOf(m) ?? home });
+        }
+        if (heldHere.length) held.push(heldHere.sort());
         continue;
       }
       // R5 (ruling): a NEW strong group on a past-horizon day is held and counted, never minted (I4)
       if ((hasProxy(g, "pulse") || hasProxy(g, "pqm")) && now >= horizonEnd(istDate(spans.get(g)!.open))) {
-        heldFrozen++;
+        held.push(g.members.map((m) => m.sig.source_key).sort());
         groupIds.push(null);
         continue;
       }
@@ -550,12 +591,15 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
         reason, flags: [...fl].sort(), boundary_moved: moved,
       });
     }
+    const heldHere: string[] = [];
     for (const m of g.members) {
+      if (old && frozen(old) && foreignStrong(g, m)) { heldHere.push(m.sig.source_key); heldNorms.add(m); continue; } // R6 (F1)
       const was = m.sig.encounter_id ? resolve(m.sig.encounter_id) : null;
       const home = frozenHomeOf(m); // R3-B: a strong signal stays on its frozen encounter
       const keep = home ?? (was && was !== id && isWeak(m) && frozenKept.get(was) === g ? was : id); // X4b: weak signals only (R3-C)
       assignments.push({ proxy: m.sig.proxy, source_key: m.sig.source_key, source_rev: m.sig.source_rev, encounter_id: keep });
     }
+    if (heldHere.length) held.push(heldHere.sort());
   }
 
   for (const c of claimed) losers.delete(c); // X1: a claimed prior is never also a loser
@@ -576,7 +620,7 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
   const add = (l: MergedLink, strong = false) => { const k = `${l.key_kind}\u0000${l.value}`; (want.get(k) ?? want.set(k, []).get(k)!).push(l); if (strong) fromStrong.add(l); };
   finals.forEach((g, i) => {
     const gid = groupIds[i];
-    if (gid) for (const m of g.members) for (const [k, v] of m.keys) add({ encounter_id: gid, key_kind: k, value: v, basis: m.via }, isStrong(m));
+    if (gid) for (const m of g.members) if (!heldNorms.has(m)) for (const [k, v] of m.keys) add({ encounter_id: gid, key_kind: k, value: v, basis: m.via }, isStrong(m));
   });
   for (const l of prior.links) {
     const sid = losers.get(resolve(l.encounter_id)) ?? losers.get(l.encounter_id);
@@ -601,5 +645,5 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
   encounters.sort((a, b) => cmp(a.room_id, b.room_id) || cmp(a.t_open, b.t_open) || cmp(a.encounter_id, b.encounter_id));
   assignments.sort((a, b) => cmp(a.proxy, b.proxy) || cmp(a.source_key, b.source_key) || cmp(a.source_rev, b.source_rev));
   unattached.sort();
-  return { merge_version, encounters, links, assignments, unplaced, open_deferred: openDeferred, unattached, held_frozen: heldFrozen };
+  return { merge_version, encounters, links, assignments, unplaced, open_deferred: openDeferred, unattached, held_frozen: held.length, held: held.sort((x, y) => cmp(x.join("\u0000"), y.join("\u0000"))) };
 }
