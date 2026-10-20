@@ -1,0 +1,22 @@
+# NOT INSTALLED. Install only after a refuter PASS:
+#   cp this file ~/.config/systemd/user/ ; write ~/.config/spine-runner/env (SPINE_BASE_URL=, SPINE_BEARER_TOKEN=; mode 600)
+#   systemctl --user daemon-reload ; systemctl --user enable --now spine-runner.service
+# It starts in would_run (no --live): it claims, reports `shadow`, executes nothing. Going live is one edit (add --live) AND spine_config mode.<stage>=live.
+# Exit 2 (bad config) and 3 (live refused) are not restarted.
+[Unit]
+Description=Spine runner (claim spine jobs; would_run by default)
+After=network-online.target
+ConditionPathExists=%h/.config/spine-runner/env
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/spine-runner/env
+ExecStart=/usr/bin/python3 %h/oc/spine/runner.py
+Restart=always
+RestartSec=10
+RestartPreventExitStatus=2 3
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target
