@@ -1,0 +1,15 @@
+# SPINE-S6-R2-BUILD — fix round R2 on spine/s6-free (on top of a0b4798b)
+Fixes (refute .bc/spine-s6-oref-REPORT.md):
+- F1: K lanes refused (transient `hourly_gap`) from :25:00 to :45:00 IST (env SPINE_HOURLY_FROM_MIN/TO_MIN); child timeout = min(840, secs to next :25). executors.py.
+- F2: K-lane child inherits the hourly lock fd (pass_fds); children run in their own process group; SIGTERM/SIGINT kill the group, wait, then exit 143/130 (`--live` only).
+- F3 (interim): no consult_uid -> outcome `blocked` / no_consult_uid: no tick, attempt given back, row held (queued, next_attempt_at infinity, no schema change); `enqueue({unblock:true})` re-queues on link. Report route accepts `blocked`. Proxy-span recut NOT built.
+- F4: enqueue reads the stage mode itself when the key exists and re-queues a `shadow` row when live now (one row; mode read only on the conflict path).
+- F6: object_key gets the 8-digit-run + identity-word (patient, name, phone, uhid, mrn, aadhaar, email, doctor, room, uid, enc) + ISO-date screen.
+- F8: vanished track file = transient artefact_missing; SPINE_DATA_DIR/clip_lanes root + ~/gpu.lock note in the executors.py docstring. Recut rc 2 = permanent usage.
+Gate (own .bc/gate.log, 4 workers): typecheck 0, typecheck:tests 0, vitest 9389 passed, 2 failed, 5 skipped (9396). The 2 (e11-silent-room-window, no-identity-literals) are the base failures the refute proved at 1db61d55; none in spine files.
+Because vitest exited 1 the && chain stopped, so build and check:silent were run separately: build exit 0 (.bc/r2-build.log); check:silent = the 9 accepted findings, none in spine. gate=1 is the 2 base failures only. Swift N/A on Linux.
+pytest tools/eta-spine: 96 passed. Spine vitest (queue, queue-pg, s6-pg, schema-pg, refuter-b): 73 passed.
+Mutants run (all KILLED): drop :25-:45 window, drop cap, drop pass_fds (executor + Popen), drop kill_children on signal, drop start_new_session, drop recut rc 2, drop vanish guard, no_consult_uid permanent, runner without handlers, blocked counted as tick, blocked spends attempt, no hold, drop F4 wiring, drop F6 digit screen, drop F6 word screen.
+NOT RERUN: the refute's own 23 mutants (its /tmp harness was removed and the report does not list them); existing tests are unchanged except where F3/F6 changed behaviour. M2 stays equivalent.
+Assumptions: (1) the cap is literal min(840, secs to next :25), so a start at :24:59 gets 1 s and times out transient; (2) "blocked" reuses status queued + next_attempt_at=infinity because 0173 has no blocked status and I did not alter it; (3) F6 exempts the `__version__cfg8` parts of a track file name from the digit screen (cfg8 is hex and can be all digits by chance); the old test with a version part of 12345678 still passes; (4) the object_key identity-word list is mine.
+Open risks (for fable): D4 proxy-only encounters get NO recut yet (needs cutter --windows-file or a link source); nothing calls enqueue with unblock yet; F5 (two active links) and F7 (non-deterministic FLAC sha, orphan artefact row) unaddressed; the K-lane window assumes hourly at :40 in IST; Jev not available this session.
