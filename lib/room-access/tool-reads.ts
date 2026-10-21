@@ -443,3 +443,25 @@ export async function openEncounterWindowsByRoom(roomIds: readonly string[]): Pr
      GROUP BY w.room_id
   `) as Array<{ room_id: string; t_open: unknown }>;
 }
+
+// --- SPINE S4: scribe_store_stats rows for the spine and encounter-index tables (eta_encounter_windows is a room-data table) -------------------
+/** Fixed names, never caller input. */
+export const SPINE_STORE_TABLES = [
+  "spine_signal", "spine_encounter", "spine_link", "spine_artefact", "spine_job", "spine_config", "spine_tick",
+  "eta_encounter_windows", "encounter_catalog", "consult_index",
+] as const;
+/** Whole-table row counts, one fail-safe query each: a table that is absent or unreadable gives null. */
+export async function spineTableCounts(): Promise<Record<string, number | null>> {
+  const counts: Record<string, number | null> = {};
+  await Promise.all(
+    SPINE_STORE_TABLES.map(async (t) => {
+      try {
+        const rows = (await (sql as unknown as (q: string) => Promise<Array<Record<string, unknown>>>)(`SELECT COUNT(*)::int AS n FROM ${t}`)) as Array<Record<string, unknown>>;
+        counts[t] = Number(rows[0]?.n ?? 0);
+      } catch {
+        counts[t] = null;
+      }
+    }),
+  );
+  return counts;
+}
