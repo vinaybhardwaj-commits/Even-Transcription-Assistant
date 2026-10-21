@@ -14,6 +14,7 @@
  *                                      message after 10 min. With neither poller nor kiosk-health data in the last 2 h: sense_degraded (inputs.missing), never asleep —
  *                                      UNLESS kiosk-health carries a sleep marker (R11 derivation; reachable.sleep_at): then ticket wake even after an overnight sleep.
  *   5  not_recording                   no session, reachable -> scribe_start; room_failing backoff, then max start_retries tries, then message + needs_hands.
+ *                                      Guard: an operator end_day acked in the CURRENT window, with no later start_day or session, holds it (log_only, why_not operator_stopped_today).
  *   6  session_died                    no chunk for 10 min AND (recorder.status stale > 3 min OR recorder session_open=false OR kiosk-health absent/stale: then
  *                                      inputs.recorder_stale = "unknown") -> scribe_restart, then
  *                                      ticket restart_recorder_app (only when the recorder says no session is open), then message.
@@ -589,6 +590,10 @@ function notRecording(c: Ctx): Decision[] {
         session_today: s.day?.session_today ?? null,
       }),
     ];
+  }
+  // an operator stopped this room in the current window and nothing has started it since (sense: no later operator start_day, no later session): the stop is respected until the next window
+  if (s.operator_stop_at && c.win.start_ms !== null && Date.parse(s.operator_stop_at) >= c.win.start_ms) {
+    return [mk(c, "not_recording", "log_only", {}, "inside the window with no session, but an operator ended the day in this window and nothing has started the room since", "operator_stopped_today", "info", {}, { attempts, operator_stop_at: s.operator_stop_at })];
   }
   // G1: the microphone, above the exhausted / backoff / pending checks: a room whose mic is unplugged is never started (not even one attempt)
   const wait = micWait(c);

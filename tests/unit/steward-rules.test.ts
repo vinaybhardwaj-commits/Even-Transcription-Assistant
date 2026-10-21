@@ -416,6 +416,23 @@ describe("not recording: start, backoff, max tries", () => {
     expect(run("14:00", { operator_end_at: new Date(ist("13:50")).toISOString(), session_today: true })).toMatchObject({ action: "scribe_start" });
   });
 
+  it("operator stop guard: an operator end_day in the current window with no session since holds not_recording (operator_stopped_today); a stop from before the window does not", () => {
+    const run = (hhmm: string, operator_stop_at: string | null | undefined) => {
+      const A = ist(hhmm);
+      return decideRoom({ ...idle(A, { reachable: { kh_heartbeat_at: ago(A, 30) }, recording: { recorder_history: readyRecorder(A, 600) } }), operator_stop_at }, DEFAULT_CONFIG, A, EMPTY_RECENT)[0]!;
+    };
+    const stop = new Date(ist("19:20")).toISOString();
+    expect(run("19:27", stop)).toMatchObject({ rule: "not_recording", action: "log_only", why_not: "operator_stopped_today" });
+    expect(run("19:27", stop).action).not.toBe("scribe_start");
+    // sense answers "no stop that still stands" as null / undefined: today's behaviour (a steward stop, an un-acked one, a later start_day or session never reach here)
+    expect(run("19:27", null)).toMatchObject({ action: "scribe_start" });
+    expect(run("19:27", undefined)).toMatchObject({ action: "scribe_start" });
+    // a stop from yesterday's window (before today's 07:30 IST start) does not block today
+    expect(run("09:00", new Date(ist("19:20") - 86_400_000).toISOString())).toMatchObject({ action: "scribe_start" });
+    expect(run("09:00", new Date(ist("07:29")).toISOString())).toMatchObject({ action: "scribe_start" });
+    expect(run("09:00", new Date(ist("07:30")).toISOString())).toMatchObject({ rule: "not_recording", why_not: "operator_stopped_today" });
+  });
+
   it("F20: the hard never-live list: ORB2, ORB3, Home Office and room_scratch_* fail the room_eligible gate whatever the data (every other gate green)", () => {
     const green = (room_id: string) => idle(T, { room_id, reachable: { kh_heartbeat_at: ago(T, 30) }, recording: { recorder_history: readyRecorder(T, 600) } });
     expect(NEVER_LIVE_ROOM_IDS).toEqual(["room_mah3aspr", "room_jwyrr4dc", "room_2qe955hy"]);

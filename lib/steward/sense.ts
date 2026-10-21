@@ -96,6 +96,8 @@ export type RoomSense = {
   day?: { operator_end_at: string | null; session_today: boolean } | null;
   /** newest bench session started this IST day, any status, re-homed sessions excluded (the REHOME note test of main's start schedule); null = none today OR the read failed (an episode is then not closed) */
   session_start_today_at?: string | null;
+  /** created_at of the newest ACKED non-steward end_day (an operator stop) of the last 36 h that no later non-steward start_day and no later bench session has answered; rules.ts keeps it only when it falls in the CURRENT window. null/undefined = none, or the read failed (fail open: today's behaviour) */
+  operator_stop_at?: string | null;
   /** every input that was null (source failed, or the machine simply has no row), by name */
   missing: string[];
 };
@@ -291,7 +293,7 @@ export async function senseAll(
   // 1b — session starts today (any status; a re-homed session after a reap is not a start, the same REHOME note test as main's start schedule). Read every tick: G3 (from 20:30 IST) and the
   //      close of a waiting_for_mic episode both need it. Then the operator end_day, read only from 20:00 IST (G2).
   const lateEvening = A - istMidnightOf(A) >= DAY_GATES_FROM_MS;
-  const [sessionTodayR, operatorEndR] = await Promise.all([
+  const [sessionTodayR, operatorEndR, operatorStopR] = await Promise.all([
     safe("bench_session_today", degraded, async () => (await sql`
       SELECT s.room_id, max(s.started_at) AS started_at FROM bench_session s
        WHERE s.room_id = ANY(${ids}::text[]) AND s.started_at >= ${dayStartIso}::timestamptz AND s.started_at <= ${hi}::timestamptz
@@ -307,7 +309,20 @@ export async function senseAll(
            GROUP BY c.room_id
         `) as unknown as Array<{ room_id: string; acked_at: string | Date | null }>, [] as Array<{ room_id: string; acked_at: string | Date | null }>)
       : Promise.resolve(null),
+    // 1c — the operator stop that still stands (rules.ts notRecording, operator_stopped_today): read every tick. The window start is applied in rules.ts, so the read spans 36 h (an OT window crosses midnight).
+    safe("bench_command_operator_stop", degraded, async () => (await sql`
+      SELECT c.room_id, max(c.created_at) AS stopped_at
+        FROM bench_command c
+       WHERE c.room_id = ANY(${ids}::text[]) AND c.kind = 'end_day' AND c.status = 'acked' AND c.source IS DISTINCT FROM 'steward'
+         AND c.created_at > ${hi}::timestamptz - make_interval(hours => 36) AND c.created_at <= ${hi}::timestamptz
+         AND NOT EXISTS (SELECT 1 FROM bench_command d WHERE d.room_id = c.room_id AND d.kind = 'start_day' AND d.status = 'acked' AND d.source IS DISTINCT FROM 'steward'
+                            AND d.created_at > c.created_at AND d.created_at <= ${hi}::timestamptz)
+         AND NOT EXISTS (SELECT 1 FROM bench_session s WHERE s.room_id = c.room_id AND (s.notes IS NULL OR s.notes NOT LIKE ${REHOME_NOTE_PREFIX + "%"})
+                            AND s.started_at > c.created_at AND s.started_at <= ${hi}::timestamptz)
+       GROUP BY c.room_id
+    `) as unknown as Array<{ room_id: string; stopped_at: string | Date | null }>, [] as Array<{ room_id: string; stopped_at: string | Date | null }>),
   ]);
+  const operatorStopBy = new Map((operatorStopR.v ?? []).map((x) => [x.room_id, toIso(x.stopped_at)] as const));
   const operatorEndBy = new Map((operatorEndR?.v ?? []).map((x) => [x.room_id, toIso(x.acked_at)] as const));
   const sessionStartBy = new Map((sessionTodayR?.v ?? []).map((x) => [x.room_id, toIso(x.started_at)] as const));
 
@@ -733,6 +748,7 @@ export async function senseAll(
         })(),
       },
       start_attempts: startAttempts,
+      operator_stop_at: operatorStopR.ok ? operatorStopBy.get(r.room_id) ?? null : null,
       session_start_today_at: sessionTodayR?.ok ? sessionStartBy.get(r.room_id) ?? null : null,
       ...(lateEvening ? { day: operatorEndR?.ok && sessionTodayR?.ok ? { operator_end_at: operatorEndBy.get(r.room_id) ?? null, session_today: sessionStartBy.has(r.room_id) } : null } : {}),
       missing,

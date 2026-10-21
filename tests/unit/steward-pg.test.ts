@@ -330,6 +330,56 @@ describe.skipIf(!HAVE_DOCKER)("room steward loop over real postgres", () => {
     pg.exec(`DELETE FROM bench_command`);
   }, 120_000);
 
+  it("operator stop through the real sense queries: only an ACKED non-steward end_day with no later operator start_day and no later session stands; steward, un-acked and answered stops do not", async () => {
+    const NIGHT = Date.parse("2026-10-06T19:27:00+05:30");
+    const room = (room_id: string) => ({ room_id, room_name: room_id, machine: null, klass: "clinic" as const, flags: [], kind: "clinic" as const, state_flags: null, device_name: null });
+    const roster = [CLINIC_A, CLINIC_B].map(room);
+    const stopOf = async (id: string) => (await senseAll(sql, NIGHT, roster, [])).get(id)!.operator_stop_at;
+    pg.exec(`DELETE FROM bench_command`);
+    try {
+      // operator end_day acked at 19:20, nothing since: stands
+      pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, source, created_at, acked_at) VALUES
+        ('cmd_s1', '${CLINIC_A}', 'end_day', 'acked', 'mcp', '2026-10-06T19:19:50+05:30', '2026-10-06T19:20:00+05:30')`);
+      expect(await stopOf(CLINIC_A)).toBe("2026-10-06T13:49:50.000Z");
+      // steward end_day: no
+      pg.exec(`DELETE FROM bench_command`);
+      pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, source, created_at, acked_at) VALUES
+        ('cmd_s2', '${CLINIC_A}', 'end_day', 'acked', 'steward', '2026-10-06T19:19:50+05:30', '2026-10-06T19:20:00+05:30')`);
+      expect(await stopOf(CLINIC_A)).toBeNull();
+      // not acked (failed, pending): no
+      pg.exec(`DELETE FROM bench_command`);
+      pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, source, created_at, acked_at) VALUES
+        ('cmd_s3', '${CLINIC_A}', 'end_day', 'failed', 'mcp', '2026-10-06T19:19:50+05:30', NULL),
+        ('cmd_s4', '${CLINIC_B}', 'end_day', 'pending', 'mcp', '2026-10-06T19:19:50+05:30', NULL)`);
+      expect(await stopOf(CLINIC_A)).toBeNull();
+      expect(await stopOf(CLINIC_B)).toBeNull();
+      // a later operator start_day lifts it; a later STEWARD start_day alone does not
+      pg.exec(`DELETE FROM bench_command`);
+      pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, source, created_at, acked_at) VALUES
+        ('cmd_s5', '${CLINIC_A}', 'end_day', 'acked', 'mcp', '2026-10-06T19:19:50+05:30', '2026-10-06T19:20:00+05:30'),
+        ('cmd_s6', '${CLINIC_A}', 'start_day', 'acked', 'mcp', '2026-10-06T19:24:50+05:30', '2026-10-06T19:25:00+05:30')`);
+      expect(await stopOf(CLINIC_A)).toBeNull();
+      pg.exec(`UPDATE bench_command SET source = 'steward' WHERE id = 'cmd_s6'`);
+      expect(await stopOf(CLINIC_A)).not.toBeNull();
+      // a session started after the stop (any path) lifts it: CLINIC_B has the seeded session bs_b (started 60 min before the seed clock); stop it BEFORE and AFTER that start
+      pg.exec(`DELETE FROM bench_command`);
+      const [{ started_at }] = await rows`SELECT started_at FROM bench_session WHERE id = 'bs_b'`;
+      const t = (min: number) => new Date(Date.parse(String(started_at)) + min * 60_000).toISOString();
+      pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, source, created_at, acked_at) VALUES
+        ('cmd_s7', '${CLINIC_B}', 'end_day', 'acked', 'mcp', '${t(-10)}', '${t(-9)}')`);
+      expect(await stopOf(CLINIC_B)).toBeNull();
+      pg.exec(`UPDATE bench_command SET created_at = '${t(10)}', acked_at = '${t(11)}' WHERE id = 'cmd_s7'`);
+      expect(await stopOf(CLINIC_B)).not.toBeNull();
+      // a stop from yesterday's window is returned (rules.ts compares it with the window start) but one older than 36 h is not read
+      pg.exec(`DELETE FROM bench_command`);
+      pg.exec(`INSERT INTO bench_command (id, room_id, kind, status, source, created_at, acked_at) VALUES
+        ('cmd_s8', '${CLINIC_A}', 'end_day', 'acked', 'mcp', '2026-10-04T19:19:50+05:30', '2026-10-04T19:20:00+05:30')`);
+      expect(await stopOf(CLINIC_A)).toBeNull();
+    } finally {
+      pg.exec(`DELETE FROM bench_command`);
+    }
+  }, 120_000);
+
   it("fix-up 10 Oct through the real sense queries: a re-homed session is not a session today (G3, session_start_today_at); an end_day with a NULL source counts as an operator's (G2)", async () => {
     const NIGHT = Date.parse("2026-10-06T21:14:00+05:30");
     pg.exec(`DELETE FROM bench_command`);
