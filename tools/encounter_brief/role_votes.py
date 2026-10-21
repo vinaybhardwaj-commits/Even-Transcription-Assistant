@@ -47,6 +47,7 @@ MARGIN_MIN = 0.05
 MARGIN_EPS = 1e-6  # tools/timbre/slots.py _MARGIN_EPS: a margin that prints as 0.05 passes
 # Recorded-vote decision rule: merge_b.decide == tools/timbre/role_clef.choose_slots.
 P_DOC, DOC_MARGIN, P_PAT = 0.6, 0.2, 0.6
+P_BLOCK = 0.6  # D2: a non-doctor p at or above this on the arm (c) label, in any vote row, blocks arm (c)
 # merge_c / merge_b embedding recipe.
 MIN_SEG_S, MIN_EMB_S, CROP_S, EMB_SR = 1.0, 2.0, 30.0, 16000
 ECAPA_SOURCE = "speechbrain/spkrec-ecapa-voxceleb"
@@ -104,7 +105,7 @@ def voiceprint(vecs, labels, cen, duid):
     ``vecs``: {label: vector} (labels without a vector are absent). ``cen``: {doctor_uid: unit centroid}.
     """
     per = {lab: {"logged_in_doctor_cos": None, "margin_next_label": None, "margin_runner_up_centroid": None,
-                 "status": "absent", "armc": False, "armc_old": False} for lab in labels}
+                 "status": "absent", "armc": False, "armc_old": False, "n1_candidate": False} for lab in labels}
     old = {"treating_label": None, "treating_reason": None, "best_cos": None, "runner_up_cos": None}
     if not duid:
         for p in per.values():
@@ -130,9 +131,12 @@ def voiceprint(vecs, labels, cen, duid):
         old_pass = c >= COS_MIN and (mn is None or margin_ok(mn))
         # No next label passes (merge_c, slots.py); no runner-up centroid abstains (decidePulseRoom, §5.6).
         new_pass = old_pass and margin_ok(mrc)
+        # M1 (fable 20 Oct): the independent N1 candidate set uses cos and the runner-up-centroid margin only. The
+        # next-label margin must not hide a second near-doctor label, so it is not part of this test.
+        n1 = c >= COS_MIN and margin_ok(mrc)
         per[lab].update(logged_in_doctor_cos=round(c, 6), margin_next_label=None if mn is None else round(mn, 6),
                         margin_runner_up_centroid=None if mrc is None else round(mrc, 6),
-                        status="match" if new_pass else "abstain", armc=new_pass, armc_old=old_pass)
+                        status="match" if new_pass else "abstain", armc=new_pass, armc_old=old_pass, n1_candidate=n1)
     sims = sorted(((cos[lab], lab) for lab in have), reverse=True)
     b, top = sims[0]
     r = sims[1][0] if len(sims) > 1 else None
@@ -154,6 +158,15 @@ def per_label_p(rows):
     for r in rows:
         if r.get("p_doctor") is not None and r["slot"] not in out:
             out[r["slot"]] = [r[k] for k in KEYS]
+    return out
+
+
+def max_nondoctor(rows):
+    """{slot: max non-doctor p over EVERY row of the slot} (D2, M2). A row with p_doctor null counts; a null key is 0.0."""
+    out = {}
+    for r in rows:
+        nd = max(0.0 if r.get(k) is None else float(r[k]) for k in KEYS[1:])
+        out[r["slot"]] = max(out.get(r["slot"], 0.0), nd)
     return out
 
 
@@ -284,13 +297,14 @@ def segment_role(seg, role_segs):
 
 # ---------------------------------------------------------------- §6.3 order capability
 
-def order_capable(d3, c, vp_label):
-    """(order-capable labels, conflict codes) from the §6.3 table (M3, M4) plus ruling N1.
+def order_capable(d3, c, cands):
+    """(order-capable labels, conflict codes) from the §6.3 table (M3, M4) plus ruling N1 (M1).
 
     d3: labels decided doctor by rule A (3/3). c: the label named by rule B (arm c), or None.
-    vp_label: the independent voiceprint match (N1); a match on any label other than the order-capable one blocks all.
+    cands: every N1 voiceprint candidate (cos and runner-up-centroid margin, no next-label margin). A candidate
+    outside the order-capable set (outside the 3/3 set when several labels are 3/3) blocks all.
     """
-    d3 = set(d3)
+    d3, cands = set(d3), set(cands)
     conflicts = []
     if not d3:
         out = {c} if c else set()
@@ -310,7 +324,8 @@ def order_capable(d3, c, vp_label):
         else:
             out = set()
             conflicts.append("doctor_conflict")
-    if vp_label is not None and out and vp_label not in out:
+    allowed = d3 if len(d3) > 1 else out
+    if out and cands - allowed:
         out = set()
         conflicts.append("doctor_conflict")
     return out, sorted(set(conflicts))
@@ -351,7 +366,10 @@ def build_layer(*, bundle_segs, role_segs, clef_rows, jev_rows, doctor_uid, vecs
         by_label[s["speaker"]].append(s)
 
     armc_on = clean and not vp_degraded
-    vp_label = next((lab for lab in labels if vp[lab]["armc"]), None)  # N1: at most one label can pass (S2)
+    vp_label = next((lab for lab in labels if vp[lab]["armc"]), None)  # at most one label can pass (S2)
+    cands = {lab for lab in labels if vp[lab]["n1_candidate"]} if armc_on else set()  # M1
+    clef_nd = {lab: max_nondoctor(clef_rows).get(vmap.get(lab), 0.0) for lab in order} if clean else {}
+    jev_nd = {lab: max_nondoctor(jev_rows).get(vmap.get(lab), 0.0) for lab in order} if clean else {}
     out_labels, d3, c = [], [], None
     for lab in labels:
         v1, v1_share = role_majority(by_label[lab], role_segs)
@@ -375,45 +393,87 @@ def build_layer(*, bundle_segs, role_segs, clef_rows, jev_rows, doctor_uid, vecs
     if c is not None:
         rec = next(x for x in out_labels if x["label"] == c)
         # OQ-5: voter 1 or 2 calls the arm (c) label non-doctor -> unknown, no order.
-        if rec["voter1_role_track"]["role"] in NON_DOCTOR or rec["jev"]["role"] in NON_DOCTOR:
+        # D2 (M2): the max non-doctor p over all of the label's rows in either vote also blocks.
+        if (rec["voter1_role_track"]["role"] in NON_DOCTOR or rec["jev"]["role"] in NON_DOCTOR
+                or max(clef_nd[c], jev_nd[c]) >= P_BLOCK):
             conflicts.append("doctor_conflict")
             rec["rule_b"] = False
             rec["unknown"] = True
             c = None
-    oc, more = order_capable(d3, c, vp_label if armc_on else None)
+    oc, more = order_capable(d3, c, cands)
     conflicts = sorted(set(conflicts + more))
     for x in out_labels:
         x["order_capable"] = x["label"] in oc
     return {
         "layer": LAYER, "engine": ENGINE, "version": VERSION, "status": "ok", "label_space": "diar_nemotron",
         "mapping": {"status": mapping["status"], "vote_labels": mapping["vote_labels"], "reason": mapping["reason"]},
-        "armc_on": armc_on, "voiceprint_match_label": vp_label, "rule_a_labels": sorted(d3), "rule_b_label": c,
+        "armc_on": armc_on, "voiceprint_match_label": vp_label, "n1_candidates": sorted(cands), "rule_a_labels": sorted(d3), "rule_b_label": c,
         "order_capable_labels": sorted(oc), "conflicts": conflicts, "degraded": sorted(set(degraded)),
         "labels": out_labels, "reproduction": {"armc_old": old, "first_appearance": order},
         "metadata": meta,
     }
 
 
+def fallback_dir(bundle_dir, eta_root, fallback_root):
+    """W2: fallback_root/<bundle_dir relative to eta_root>, refused if it would leave fallback_root."""
+    rel = os.path.relpath(bundle_dir, eta_root)
+    if os.path.isabs(rel) or rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        raise ValueError("bundle directory is outside the ETA root")
+    d = os.path.normpath(os.path.join(fallback_root, rel))
+    root = os.path.normpath(fallback_root)
+    if d != root and not d.startswith(root + os.sep):
+        raise ValueError("fallback path escapes its root")
+    return d
+
+
+def make_private_dirs(d, root):
+    """W1, W2: create root and each missing level down to d at 0700 (explicit chmod, umask-proof); refuse a symlink."""
+    d, root = os.path.normpath(d), os.path.normpath(root)
+    cur = root
+    parts = [] if d == root else os.path.relpath(d, root).split(os.sep)
+    for part in [None] + parts:
+        if part is not None:
+            cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            raise PermissionError("refusing a symlinked fallback directory")
+        if not os.path.isdir(cur):
+            if cur == root:
+                os.makedirs(os.path.dirname(cur), mode=0o700, exist_ok=True)
+            os.mkdir(cur, 0o700)
+            os.chmod(cur, 0o700)
+
+
 def write_layer(layer, bundle_dir, eta_root=DEFAULT_ETA, fallback_root=DEFAULT_FALLBACK):
     """Write role_votes.v1.json (0600) beside manifest.json, or under fallback_root/<relative path>. Returns (path, fallback)."""
     assert POSTING_ENABLED is False, "phase 0a never posts"
     fallback = not os.access(bundle_dir, os.W_OK)
-    d = os.path.join(fallback_root, os.path.relpath(bundle_dir, eta_root)) if fallback else bundle_dir
-    os.makedirs(d, exist_ok=True)
+    if fallback:
+        d = fallback_dir(bundle_dir, eta_root, fallback_root)
+        make_private_dirs(d, fallback_root)
+    else:
+        d = bundle_dir
     path = os.path.join(d, FILE_NAME)
-    tmp = path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(dict(layer, storage={"fallback": fallback}), f)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    tmp = f"{path}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+    # W3: O_EXCL | O_NOFOLLOW, so a planted file or symlink at the temp name is refused, never followed.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            fd = None
+            json.dump(dict(layer, storage={"fallback": fallback}), f)
+        os.replace(tmp, path)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if os.path.exists(tmp):
+            os.unlink(tmp)
     return path, fallback
 
 
 # ---------------------------------------------------------------- embedding (merge_c recipe; run mode only)
 
 def load_encoder(threads=6):
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")  # weights come from the local savedir only
+    os.environ["HF_HUB_OFFLINE"] = "1"  # weights come from the local savedir only
     import torch
     from speechbrain.inference.speaker import EncoderClassifier
     torch.set_num_threads(threads)
@@ -535,9 +595,13 @@ def cmd_run(args):
 # ---------------------------------------------------------------- repro: score the written layers
 
 def read_layer(bundle_dir, eta_root, fallback_root):
-    for d in (bundle_dir, os.path.join(fallback_root, os.path.relpath(bundle_dir, eta_root))):
-        p = os.path.join(d, FILE_NAME)
-        if os.path.exists(p):
+    try:
+        fb = fallback_dir(bundle_dir, eta_root, fallback_root)
+    except ValueError:
+        fb = None
+    for d in (bundle_dir, fb):
+        p = d and os.path.join(d, FILE_NAME)
+        if p and os.path.exists(p):
             return json.load(open(p))
     return None
 
@@ -636,10 +700,10 @@ def cmd_prereg(args):
             n_lab += len(labels)
             for duid in cen:
                 per, old, _ = voiceprint(labs, labels, cen, duid)
-                vp_match += sum(p["armc"] for p in per.values())
+                vp_match += sum(p["armc"] or p["n1_candidate"] for p in per.values())
                 armc_old += old["treating_label"] is not None
                 vp = next((lab for lab in labels if per[lab]["armc"]), None)
-                got, _ = order_capable(set(), vp, vp)
+                got, _ = order_capable(set(), vp, {lab for lab in labels if per[lab]["n1_candidate"]})
                 oc += len(got)
         out[cond] = {"labels": n_lab, "trials": n_lab * len(cen), "voiceprint_matched": vp_match,
                      "armc_old_treating": armc_old, "order_capable": oc}

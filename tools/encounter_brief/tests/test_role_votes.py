@@ -67,13 +67,14 @@ ROLE = [{"role": "doctor", "speaker": "A", "t0_ms": 0, "t1_ms": 10000}, {"role":
 PS = {"speaker_0": [0.9, 0.05, 0.03, 0.02], "speaker_1": [0.1, 0.8, 0.05, 0.05]}
 
 
-def build(bundle=BUNDLE, role=ROLE, clef=None, jev=None, duid="d0", vecs=None, centroids=None, rename=None):
+def build(bundle=BUNDLE, role=ROLE, clef=None, jev=None, duid="d0", vecs=None, centroids=None, rename=None,
+          extra_clef=(), extra_jev=()):
     C = centroids if centroids is not None else cen("d0", "d1", "d2")
     if vecs is None:
         vecs = {"speaker_0": with_cos(C["d0"], 0.80, 7), "speaker_1": with_cos(C["d0"], 0.30, 6)}
     return R.build_layer(bundle_segs=bundle, role_segs=role,
-                         clef_rows=vote_rows(bundle, PS if clef is None else clef, rename),
-                         jev_rows=slot_rows(PS if jev is None else jev, rename),
+                         clef_rows=vote_rows(bundle, PS if clef is None else clef, rename) + list(extra_clef),
+                         jev_rows=slot_rows(PS if jev is None else jev, rename) + list(extra_jev),
                          doctor_uid=duid, vecs=vecs, cen=C, role_engine="llm-roles", meta={"m": 1})
 
 
@@ -212,19 +213,23 @@ def test_rule_b_alone_makes_order_capable():
     assert L["rule_a_labels"] == [] and L["order_capable_labels"] == ["speaker_0"]
 
 
-@pytest.mark.parametrize("d3,c,vp,want,conf", [
-    (set(), None, None, set(), []),
-    (set(), "x", "x", {"x"}, []),
-    ({"a"}, None, None, {"a"}, []),
-    ({"a"}, "a", "a", {"a"}, []),
-    ({"a"}, "x", "x", set(), ["doctor_conflict"]),
-    ({"a", "b"}, None, None, set(), ["second_doctor"]),
-    ({"a", "b"}, "a", "a", {"a"}, ["second_doctor"]),
-    ({"a", "b"}, "x", "x", set(), ["doctor_conflict", "second_doctor"]),
-    ({"a"}, None, "x", set(), ["doctor_conflict"]),
+@pytest.mark.parametrize("d3,c,cands,want,conf", [
+    (set(), None, set(), set(), []),
+    (set(), "x", {"x"}, {"x"}, []),
+    (set(), "x", {"x", "y"}, set(), ["doctor_conflict"]),  # M1: a second near-doctor label blocks arm (c)
+    ({"a"}, None, set(), {"a"}, []),
+    ({"a"}, "a", {"a"}, {"a"}, []),
+    ({"a"}, "x", {"x"}, set(), ["doctor_conflict"]),
+    ({"a"}, None, {"a", "y"}, set(), ["doctor_conflict"]),  # M1: ... and 3-of-3
+    ({"a", "b"}, None, set(), set(), ["second_doctor"]),
+    ({"a", "b"}, "a", {"a"}, {"a"}, ["second_doctor"]),
+    ({"a", "b"}, "a", {"a", "b"}, {"a"}, ["second_doctor"]),
+    ({"a", "b"}, "a", {"a", "y"}, set(), ["doctor_conflict", "second_doctor"]),
+    ({"a", "b"}, "x", {"x"}, set(), ["doctor_conflict", "second_doctor"]),
+    ({"a"}, None, {"x"}, set(), ["doctor_conflict"]),
 ])
-def test_order_capable_table(d3, c, vp, want, conf):
-    got, conflicts = R.order_capable(d3, c, vp)
+def test_order_capable_table(d3, c, cands, want, conf):
+    got, conflicts = R.order_capable(d3, c, cands)
     assert got == want and conflicts == conf
 
 
@@ -353,3 +358,173 @@ def test_posting_disabled_and_asserted(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "POSTING_ENABLED", True)
     with pytest.raises(AssertionError):
         R.write_layer({}, str(tmp_path), str(tmp_path), str(tmp_path / "fb"))
+
+
+# ---------------------------------------------------------------- M1: N1 candidates ignore the next-label margin
+
+def test_m1_second_near_doctor_label_blocks_3of3_even_when_next_label_margin_fails():
+    C = cen("d0", "d1", "d2")
+    vecs = {"speaker_0": with_cos(C["d0"], 0.80, 7), "speaker_1": with_cos(C["d0"], 0.78, 6)}  # next-label margin 0.02
+    L = build(vecs=vecs, centroids=C)
+    assert L["rule_a_labels"] == ["speaker_0"] and L["voiceprint_match_label"] is None  # neither passes arm (c)
+    assert L["n1_candidates"] == ["speaker_0", "speaker_1"]
+    assert L["order_capable_labels"] == [] and "doctor_conflict" in L["conflicts"]
+
+
+def test_m1_second_near_doctor_label_blocks_arm_c():
+    C = cen("d0", "d1", "d2")
+    vecs = {"speaker_0": with_cos(C["d0"], 0.90, 7), "speaker_1": with_cos(C["d0"], 0.72, 6)}  # arm (c) passes on speaker_0
+    role = [dict(r, role="undecided") for r in ROLE]
+    L = build(role=role, vecs=vecs, centroids=C)
+    assert L["rule_b_label"] == "speaker_0" and L["voiceprint_match_label"] == "speaker_0"
+    assert L["n1_candidates"] == ["speaker_0", "speaker_1"]
+    assert L["order_capable_labels"] == [] and "doctor_conflict" in L["conflicts"]
+
+
+def test_m1_candidate_needs_the_runner_up_centroid_margin():
+    C = cen("d0", "d1", "d2")
+    vecs = {"speaker_0": with_cos(C["d0"], 0.90, 7), "speaker_1": with_cos(C["d0"], 0.72, 1)}  # speaker_1 sits on d1
+    L = build(vecs=vecs, centroids=C)
+    assert lab(L, "speaker_1")["voiceprint"]["n1_candidate"] is False
+    assert L["n1_candidates"] == ["speaker_0"] and L["order_capable_labels"] == ["speaker_0"]
+
+
+# ---------------------------------------------------------------- M2 / D2: max non-doctor p over all rows
+
+@pytest.mark.parametrize("which", ["clef", "jev"])
+def test_m2_non_doctor_p_on_a_later_row_with_null_p_doctor_blocks_arm_c(which):
+    role = [dict(r, role="undecided") for r in ROLE]
+    row = {"consult_id": "c", "t0_ms": 0, "t1_ms": 10000, "slot": "speaker_0", "p_doctor": None, "p_patient": 0.7, "p_attender": None, "p_staff": None}
+    assert build(role=role)["order_capable_labels"] == ["speaker_0"]
+    L = build(role=role, **{"extra_" + which: [row]})
+    assert L["rule_b_label"] is None and L["order_capable_labels"] == [] and "doctor_conflict" in L["conflicts"]
+
+
+def test_m2_max_nondoctor_counts_every_row_and_null_keys_are_zero():
+    rows = [{"slot": "s", "p_doctor": None, "p_patient": None, "p_attender": 0.2, "p_staff": None},
+            {"slot": "s", "p_doctor": 0.9, "p_patient": 0.1, "p_attender": None, "p_staff": 0.4},
+            {"slot": "t", "p_doctor": None, "p_patient": None, "p_attender": None, "p_staff": None}]
+    assert R.max_nondoctor(rows) == {"s": 0.4, "t": 0.0}
+
+
+# ---------------------------------------------------------------- test gaps: rule B needs a Jev rank, coverage, roles
+
+def test_rule_b_requires_jev_doctor_rank_one():
+    role = [dict(r, role="undecided") for r in ROLE]
+    jev = {"speaker_0": [0.5, 0.2, 0.2, 0.1], "speaker_1": [0.9, 0.05, 0.03, 0.02]}  # Jev ranks speaker_1 first
+    L = build(role=role, jev=jev)
+    assert lab(L, "speaker_0")["clef_omni"]["doctor_rank"] == 1 and lab(L, "speaker_0")["jev"]["doctor_rank"] == 2
+    assert lab(L, "speaker_0")["voiceprint"]["armc"] is True
+    assert L["rule_b_label"] is None and L["order_capable_labels"] == []
+
+
+def test_mapping_ambiguous_label_not_covered():
+    bundle = segs(("speaker_0", 0, 10), ("speaker_1", 10, 20), ("speaker_2", 20, 30))
+    votes = [{"slot": "a", "t0_ms": 0, "t1_ms": 10000}, {"slot": "b", "t0_ms": 10000, "t1_ms": 20000}]
+    m = R.map_labels(votes, bundle)
+    assert m["status"] == "ambiguous" and m["reason"] == "label_not_covered"
+    assert m["vote_labels"] == {"speaker_0": "a", "speaker_1": "b"}
+    short = segs(("speaker_0", 0, 10), ("speaker_1", 10, 20), ("speaker_2", 20, 21))  # under 2 s: need not be covered
+    assert R.map_labels(votes, short)["status"] == "clean"
+
+
+def test_role_normalisation():
+    assert [R.norm_role(r) for r in ("attender", "relative", "attendant", "doctor", "patient", "staff", None)] == \
+        ["attendant", "attendant", "attendant", "doctor", "patient", "staff", None]
+    role = [{"role": "attender", "t0_ms": 0, "t1_ms": 6000}, {"role": "relative", "t0_ms": 6000, "t1_ms": 12000},
+            {"role": "patient", "t0_ms": 12000, "t1_ms": 16000}]
+    assert R.role_majority([{"t0_ms": 0, "t1_ms": 16000}], role) == ("attendant", 0.75)
+    assert R.segment_role({"t0_ms": 0, "t1_ms": 5000}, role) == "attendant"
+    assert R.segment_role({"t0_ms": 40000, "t1_ms": 41000}, role) == "undecided"
+
+
+# ---------------------------------------------------------------- W1-W3, offline
+
+def _ro(tmp_path):
+    b = tmp_path / "eta" / "reb" / "x" / "bundle"
+    b.mkdir(parents=True)
+    os.chmod(b, 0o500)
+    return b
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_w1_fallback_dirs_are_0700_under_a_wide_umask(tmp_path):
+    b = _ro(tmp_path)
+    old = os.umask(0)
+    try:
+        path, fb = R.write_layer({"layer": "role_votes"}, str(b), str(tmp_path / "eta"), str(tmp_path / "fb" / "root"))
+    finally:
+        os.umask(old)
+        os.chmod(b, 0o700)
+    assert fb is True
+    d = os.path.dirname(path)
+    while d != str(tmp_path / "fb"):
+        assert stat.S_IMODE(os.stat(d).st_mode) == 0o700, d
+        d = os.path.dirname(d)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_w2_fallback_path_cannot_escape_its_root(tmp_path):
+    outside = tmp_path / "elsewhere" / "bundle"
+    outside.mkdir(parents=True)
+    os.chmod(outside, 0o500)
+    try:
+        with pytest.raises(ValueError):
+            R.write_layer({"layer": "role_votes"}, str(outside), str(tmp_path / "eta"), str(tmp_path / "fb"))
+    finally:
+        os.chmod(outside, 0o700)
+    assert not (tmp_path / "fb").exists() and not (tmp_path / "elsewhere" / "bundle" / R.FILE_NAME).exists()
+    with pytest.raises(ValueError):
+        R.fallback_dir(str(tmp_path / "eta" / ".." / "x"), str(tmp_path / "eta"), str(tmp_path / "fb"))
+    assert R.read_layer(str(outside), str(tmp_path / "eta"), str(tmp_path / "fb")) is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_w2_symlinked_fallback_directory_is_refused(tmp_path):
+    b = _ro(tmp_path)
+    (tmp_path / "target").mkdir()
+    (tmp_path / "fb").mkdir()
+    os.symlink(tmp_path / "target", tmp_path / "fb" / "reb")
+    try:
+        with pytest.raises(PermissionError):
+            R.write_layer({"layer": "role_votes"}, str(b), str(tmp_path / "eta"), str(tmp_path / "fb"))
+    finally:
+        os.chmod(b, 0o700)
+    assert list((tmp_path / "target").iterdir()) == []
+
+
+def test_w3_temp_file_is_exclusive_and_never_follows_a_symlink(tmp_path, monkeypatch):
+    b = tmp_path / "eta" / "reb" / "x" / "bundle"
+    b.mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    monkeypatch.setattr(os, "urandom", lambda n: b"\x00" * n)
+    tmp = f"{b / R.FILE_NAME}.{os.getpid()}.00000000.tmp"
+    os.symlink(victim, tmp)
+    with pytest.raises(OSError):
+        R.write_layer({"layer": "role_votes"}, str(b), str(tmp_path / "eta"), str(tmp_path / "fb"))
+    assert victim.read_text() == "keep"
+
+
+def test_w3_planted_regular_temp_file_is_refused(tmp_path, monkeypatch):
+    b = tmp_path / "eta" / "reb" / "x" / "bundle"
+    b.mkdir(parents=True)
+    monkeypatch.setattr(os, "urandom", lambda n: b"\x00" * n)
+    planted = b / f"{R.FILE_NAME}.{os.getpid()}.00000000.tmp"
+    planted.write_text("planted")
+    with pytest.raises(FileExistsError):
+        R.write_layer({"layer": "role_votes"}, str(b), str(tmp_path / "eta"), str(tmp_path / "fb"))
+    assert planted.read_text() == "planted"
+
+
+def test_hf_hub_offline_is_assigned_not_defaulted(monkeypatch):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setitem(sys.modules, "torch", type(sys)("torch"))
+    monkeypatch.setitem(sys.modules, "speechbrain", type(sys)("speechbrain"))
+    monkeypatch.setitem(sys.modules, "speechbrain.inference", type(sys)("speechbrain.inference"))
+    sp = type(sys)("speechbrain.inference.speaker")
+    sp.EncoderClassifier = type("E", (), {"from_hparams": staticmethod(lambda **k: object())})
+    sys.modules["torch"].set_num_threads = lambda n: None
+    monkeypatch.setitem(sys.modules, "speechbrain.inference.speaker", sp)
+    R.load_encoder()
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
