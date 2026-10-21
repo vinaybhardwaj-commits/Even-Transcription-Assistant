@@ -13,7 +13,9 @@ export const BREAKER_FAIL_RATIO = 0.3;
 export const BREAKER_OPEN_MS = 30 * 60_000;
 
 export type ErrorClass = "transient" | "permanent" | "budget";
-export type Outcome = "done" | "transient" | "permanent" | "budget" | "shadow" | "release";
+/** A released job (box refused it: window, budget, unconfigured) is not re-handed at the head of the queue at once (R4). */
+export const RELEASE_BACKOFF_MS = 60_000;
+export type Outcome = "done" | "transient" | "permanent" | "budget" | "shadow" | "release" | "blocked";
 
 /** `attempts` counts the attempt that just failed (1-based). `rand01` is in [0,1). */
 export function backoffMs(attempts: number, rand01: number): number {
@@ -36,6 +38,8 @@ export type Resolution = {
   attemptsDelta: 0 | -1;
   errorClass: ErrorClass | null;
   doneAt: Date | null;
+  /** blocked: held with next_attempt_at = infinity until something re-enqueues it (a link appeared). */
+  hold?: true;
 };
 
 /** What a report does to a row whose current `attempts` (already counting this claim) is given. */
@@ -48,7 +52,8 @@ export function resolveOutcome(outcome: Outcome, attempts: number, now: Date, ra
       return { status: "queued", nextAttemptAt: new Date(now.getTime() + backoffMs(attempts, rand01)), attemptsDelta: 0, errorClass: "transient", doneAt: null };
     case "budget": return { status: "queued", nextAttemptAt: nextIstDayStart(now), attemptsDelta: -1, errorClass: "budget", doneAt: null };
     case "shadow": return { status: "shadow", nextAttemptAt: null, attemptsDelta: -1, errorClass: null, doneAt: null };
-    case "release": return { status: "queued", nextAttemptAt: null, attemptsDelta: -1, errorClass: null, doneAt: null };
+    case "blocked": return { status: "queued", nextAttemptAt: null, attemptsDelta: -1, errorClass: null, doneAt: null, hold: true };
+    case "release": return { status: "queued", nextAttemptAt: new Date(now.getTime() + RELEASE_BACKOFF_MS), attemptsDelta: -1, errorClass: null, doneAt: null };
   }
 }
 

@@ -34,6 +34,12 @@ describe("resolveOutcome", () => {
   });
 });
 
+describe("resolveOutcome blocked (F3)", () => {
+  it("holds the row, gives the attempt back, records no failure", () => {
+    expect(resolveOutcome("blocked", 1, new Date("2026-10-19T06:00:00Z"), 0.5)).toEqual({ status: "queued", nextAttemptAt: null, attemptsDelta: -1, errorClass: null, doneAt: null, hold: true });
+  });
+});
+
 describe("breakerOpen", () => {
   const now = new Date("2026-10-19T06:00:00Z");
   const rows = (fails: number, total: number, ageMin: number) => Array.from({ length: total }, (_, i) => ({ status: i < fails ? "failed" : "done", done_at: new Date(now.getTime() - (ageMin + i) * 60_000).toISOString() }));
