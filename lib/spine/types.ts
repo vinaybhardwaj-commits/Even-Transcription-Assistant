@@ -88,4 +88,6 @@ export interface MergeResult {
   unattached: string[];
   /** R5: new strong groups on a past-horizon day, held and not minted (no encounter_id, no assignment). */
   held_frozen: number;
+  /** R6: the source_keys of each held group, sorted (S7 surfaces them; mark, never delete). held_frozen === held.length. */
+  held: string[][];
 }
