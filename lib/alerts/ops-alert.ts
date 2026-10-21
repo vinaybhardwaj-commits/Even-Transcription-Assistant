@@ -38,6 +38,8 @@ export type OpsAlert = {
   consult_open?: { window_open_min: number };
   /** recorder_off only: the variant for an OPEN recording session that is delivering nothing (any room, any hour). The kind is unchanged because room_alert_outbox_kind_chk lists the kinds the relay knows; the dedupe key carries the session id, so a new session pages again. */
   session_silent?: { session_id: string };
+  /** dedupe window in minutes; default OPS_ALERT_DEDUPE_MINUTES (spine dead-job alerts use 6 h) */
+  dedupe_minutes?: number;
 };
 
 const SAFE = /[^A-Za-z0-9_.:-]/g;
@@ -75,7 +77,7 @@ export async function queueOpsAlert(a: OpsAlert): Promise<boolean> {
           WHERE o.kind = ${a.kind}::text
             AND o.room_ids = ARRAY[${a.room_id}::text]
             AND o.status_to = ${m.dedupe_key}::text
-            AND o.created_at > now() - (${OPS_ALERT_DEDUPE_MINUTES}::int * INTERVAL '1 minute')
+            AND o.created_at > now() - (${Math.max(1, Math.round(a.dedupe_minutes ?? OPS_ALERT_DEDUPE_MINUTES))}::int * INTERVAL '1 minute')
        )
       RETURNING id
     `) as Array<{ id: unknown }>;
