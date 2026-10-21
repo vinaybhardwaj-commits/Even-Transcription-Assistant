@@ -51,6 +51,7 @@ import { evaluateAndWriteWindows, istDateOf } from "@/lib/bench-window";
 import { ensureRoomDayOpen } from "@/lib/brain/open-day";
 import { ENDED_DISAGREES, CHUNK_DISAGREEMENT_FIELD, chunkDisagreesWithEnd } from "@/lib/bench-bus-constants";
 import { parseMicLevelPair } from "@/lib/bench-levels";
+import { buddyFeed } from "@/lib/buddy/feed";
 import { isReaperNote, rehomeNote, SESSION_REAPED } from "@/lib/bench-reaper-core";
 
 export const runtime = "nodejs";
@@ -355,6 +356,12 @@ export async function POST(req: NextRequest) {
       await evaluateAndWriteWindows(targetSessionId);
     } catch {
       /* non-critical: the next chunk re-evaluates the whole session */
+    }
+    // Buddy shadow feed (BUDDY_FEED, off by default). Last, after the response, the event insert and the window evaluation; never throws.
+    try {
+      await buddyFeed({ roomId: session.room_id, idx: targetIdx, r2Key: key, startedAt, endedAt });
+    } catch {
+      /* the feed never affects the chunk */
     }
   });
 
