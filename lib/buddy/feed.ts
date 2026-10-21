@@ -9,7 +9,7 @@
  * ROOMS. The room must be in BUDDY_RELAY_ROOMS (parsed by relayRooms, as the relay does).
  * SHADOW. buddy_consult_ref records no decision; the relay stores it in the consult_started bench_command args
  * ({opaque_id, window, live}). A shadow session is live = true with window = false. Joined on args->>'opaque_id'.
- * OVERLAP. The ref is open, or closed at most CLOSE_GRACE_MIN before the piece's started_at.
+ * OVERLAP. The ref is open, or closed at most CLOSE_GRACE_MIN before the piece's started_at; and it opened at most OPEN_MAX_MIN before it (a lost close never feeds for the rest of the day).
  * AUTH. Bearer NEWCAT_RELAY_KEY, as lib/buddy/relay.ts reads it.
  *
  * NEVER AFFECTS THE CHUNK. buddyFeed never throws. Logs carry counts and reason codes only: no URL (it holds a signature),
@@ -23,6 +23,8 @@ export const PRESIGN_MAX_S = 900;
 export const POST_TIMEOUT_MS = 5000;
 export const RETRY_DELAY_MS = 1000;
 export const CLOSE_GRACE_MIN = 10;
+/** Refute S1: a ref whose close was never relayed stops feeding once it opened more than this long before the piece (the cutter caps a consult at 90 min too). */
+export const OPEN_MAX_MIN = 90;
 
 export type FeedPiece = { roomId: string; idx: number; r2Key: string; startedAt: Date; endedAt: Date };
 
@@ -51,6 +53,7 @@ const defaultDeps: FeedDeps = {
          AND c.args->>'live' = 'true' AND c.args->>'window' = 'false'
          AND r.opened_at <= ${endedAtIso}::timestamptz
          AND (r.closed_at IS NULL OR r.closed_at >= ${startedAtIso}::timestamptz - make_interval(mins => ${CLOSE_GRACE_MIN}))
+         AND r.opened_at >= ${startedAtIso}::timestamptz - make_interval(mins => ${OPEN_MAX_MIN})
        ORDER BY r.opened_at DESC
        LIMIT 1
     `) as Array<{ opaque_id: string }>,

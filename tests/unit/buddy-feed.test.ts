@@ -8,11 +8,12 @@ const state = vi.hoisted(() => ({ refs: [] as Ref[], calls: [] as Array<{ text: 
 vi.mock("@/lib/db", () => ({
   sql: (strings: TemplateStringsArray, ...values: unknown[]) => {
     state.calls.push({ text: strings.join("?"), values });
-    const [room, ended, started, grace] = values as [string, string, string, number];
+    const [room, ended, started, grace, started2, openMax] = values as [string, string, string, number, string, number];
     const rows = state.refs
       .filter((r) => r.room_id === room && r.live && !r.window)
       .filter((r) => Date.parse(r.opened_at) <= Date.parse(ended))
       .filter((r) => r.closed_at === null || Date.parse(r.closed_at) >= Date.parse(started) - grace * 60_000)
+      .filter((r) => Date.parse(r.opened_at) >= Date.parse(started2) - openMax * 60_000)
       .map((r) => ({ opaque_id: r.opaque_id }));
     return Promise.resolve(rows.slice(0, 1));
   },
@@ -95,6 +96,16 @@ describe("buddyFeed", () => {
     state.refs = [ref({ closed_at: min(-9) })];
     expect(await run()).toBe("posted");
     state.refs = [ref({ closed_at: min(-11) })];
+    expect(await run()).toBe("no_shadow_consult");
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("refute S1: an open ref older than 90 min (lost close) stops feeding", async () => {
+    state.refs = [ref({ opened_at: min(-89) })];
+    expect(await run()).toBe("posted");
+    state.refs = [ref({ opened_at: min(-91) })];
+    expect(await run()).toBe("no_shadow_consult");
+    state.refs = [ref({ opened_at: min(-360), closed_at: null })];
     expect(await run()).toBe("no_shadow_consult");
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
