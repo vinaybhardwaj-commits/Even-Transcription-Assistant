@@ -41,7 +41,7 @@ class LazyBus:
             idn = getattr(self.b, "identity", None)
             if idn != _whoami_logged:                 # the first start of this process, and any change after it: one line
                 _whoami_logged = idn
-                log(f"whoami handle={idn and idn.get('handle')} registered={idn and idn.get('registered')} session={ubus_bus.SESSION}")
+                log(f"whoami handle={idn and idn.get('handle')} session={ubus_bus.SESSION} registered={idn and idn.get('registered')}")
         return self.b
 
     def post(self, *a):
@@ -55,6 +55,21 @@ class LazyBus:
             self.b.close()
 
 
+def startup_check(router, cfg):
+    """FR1 D7-2: at startup, one shim start and the whoami check even with nothing due, so a wrong identity shows at once (the whoami line, or
+    the ROUTER SILENT line through router.identity_alarm). Returns True when the identity is right."""
+    bus = LazyBus(cfg)
+    try:
+        bus._bus()
+        return True
+    except Exception as e:
+        if getattr(e, "identity", None) is not None:
+            router.identity_alarm(e.identity)
+        return False
+    finally:
+        bus.close()
+
+
 def main():
     try:
         ubus_bus.load_cfg()
@@ -65,6 +80,10 @@ def main():
     router = alert_router.Router(store, ubus_bus.UbusBus, time.time, os.path.join(HOME, "data", "router-local.json"),
                                  lambda: alert_router.guardian_size_lines(HOME))
     log(f"router started pid={os.getpid()}")
+    try:
+        startup_check(router, ubus_bus.load_cfg())
+    except Exception as e:                           # never fatal: the loop below retries every tick
+        log(f"startup check failed: {e.__class__.__name__}: {str(e)[:120]}")
     while True:
         try:
             cfg = ubus_bus.load_cfg()

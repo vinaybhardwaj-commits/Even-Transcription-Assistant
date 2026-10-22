@@ -13,9 +13,9 @@ case state untouched, so the pages are simply due again on the next tick, and it
 Crash rule: each page line carries "room-alert-<id> ... [page N]". Before posting, the router reads the day thread; a page whose marker is
 already there is only written to the store. So a crash between post and state write gives neither a duplicate page nor a lost alert.
 The marker read covers today's AND yesterday's day thread, so a page posted just before IST midnight is not paged again just after it.
-ACKs are read from the day threads (today and yesterday) and from each case's own thread room-alert-<first_id>. FR1 D7: only for a case this
-router has paged, at most once per ACK_READ_S per case; a forbidden / not_registered answer is "no ack yet" and backs the case off to
-ACK_DENIED_S. The next-read times are kept IN MEMORY (a restart reads each paged case once more at most).
+ACKs are read from the day threads (today and yesterday); FR1 D7-2: the case thread room-alert-<first_id> is no longer read (the router is
+never a party to it). FR1 D7: only for a case this router has paged, at most once per ACK_READ_S per case; when EVERY read for a case is
+forbidden / not_registered that is "no ack yet" and backs the case off to ACK_DENIED_S. The next-read times are kept IN MEMORY (a restart reads each paged case once more at most).
 
 The 21:00 list ("digest") rides in the same batch send, as one block: header line, one line per unacked case (capped), and once per calendar month
 a size line for backup/_to_delete. The block is atomic: if it does not fit the body cap, or the send fails, it stays due for the next tick.
@@ -114,7 +114,7 @@ class Router:
         self.store, self.bus_factory, self.clock = store, bus_factory, clock
         self.state_path = state_path
         self.size_line_fn = size_line_fn          # () -> str | None: the monthly _to_delete size line; None or an error means no line
-        self.local = {"v_sent": {}, "digest_day": "", "size_month": "", "cleared": {}, "clear_since": None, "digest_note_upto": 0}
+        self.local = {"v_sent": {}, "digest_day": "", "size_month": "", "cleared": {}, "clear_since": None, "digest_note_upto": 0, "silent_at": 0.0}
         self._ack_next, self._denied_logged = {}, set()     # FR1 D7: in memory only
         self._load()
         if self.local["clear_since"] is None:          # first run of the D7 code: no cleared lines for cases that cleared before it
@@ -135,6 +135,8 @@ class Router:
                         self.local["cleared"] = {str(k): float(v) for k, v in d["cleared"].items()}
                     if isinstance(d.get("clear_since"), (int, float)):
                         self.local["clear_since"] = float(d["clear_since"])
+                    if isinstance(d.get("silent_at"), (int, float)):
+                        self.local["silent_at"] = float(d["silent_at"])
                     if isinstance(d.get("digest_note_upto"), int):
                         self.local["digest_note_upto"] = d["digest_note_upto"]
             except (OSError, ValueError):
@@ -310,7 +312,7 @@ class Router:
         own = bus is None
         bus = bus or self.bus_factory()
         out = {"acked": 0, "paged": 0, "v": 0, "digest": 0, "notes": 0, "cleared": 0, "errors": 0}
-        cache = {}
+        cache, ident = {}, []
 
         def read(tid):
             """(messages, denied reason or None) for one thread, read once per tick."""
@@ -344,7 +346,9 @@ class Router:
                             self._denied_logged.add(fid)
                             self._log(f"ack read {why}: case room-alert-{fid}, next read in {ACK_DENIED_S}s")
             except Exception as e:
-                out["errors"] += 1; out["error"] = f"ack read: {e.__class__.__name__}"
+                out["errors"] += 1; out["error"] = f"ack read: {e.__class__.__name__}: {str(e)[:80]}"
+                if getattr(e, "identity", None) is not None:
+                    ident.append(e.identity)
             pages, vcases = [], []
             for c in self.store.list_open():
                 age = now - c["opened_at"]
@@ -369,6 +373,10 @@ class Router:
                     self._flush(bus, now, pages, vcases, cleared, msgs, out, digest)
                 except Exception as e:
                     out["errors"] += 1; out["error"] = f"send: {e.__class__.__name__}: {str(e)[:80]}"
+                    if getattr(e, "identity", None) is not None:
+                        ident.append(e.identity)
+            if ident:
+                self.identity_alarm(ident[0], now)
             try:
                 self.store.prune_routed(now - ROUTED_KEEP_S)
             except Exception as e:
@@ -381,13 +389,37 @@ class Router:
                 bus.close()
         return out
 
+    SILENT_EVERY_S = 3600
+
+    def identity_alarm(self, handle, now=None):
+        """FR1 D7-2 fail loud: ubus_whoami named another handle (or not registered), so nothing can be sent. At most ONE line per SILENT_EVERY_S
+        to stderr and to the gating INBOX file (inbox_path); the stamp is kept in router-local.json. Returns True when a line was written."""
+        import sys
+        now = self.clock() if now is None else now
+        if now - float(self.local.get("silent_at") or 0) < self.SILENT_EVERY_S:
+            return False
+        line = f"- {datetime.fromtimestamp(now, IST).strftime('%d %b %H:%M')} IST room-guardian ROUTER SILENT: identity {str(handle)[:60]}"
+        self.local["silent_at"] = float(now)
+        self._save()
+        try:
+            sys.stderr.write(line + "\n"); sys.stderr.flush()
+        except Exception:
+            pass
+        if self.inbox_path:
+            try:
+                append_inbox_line(self.inbox_path, line)
+            except OSError:
+                pass
+        return True
+
     def _cleared_due(self, now):
         """Paged cases whose first ack or close has no cleared line yet. Only events after clear_since (the first D7 run) and inside ROUTED_KEEP_S."""
         since = max(self.local["clear_since"] or 0.0, now - ROUTED_KEEP_S)
         cands = [c for c in self.store.list_open() if c["acked_at"]]
         if hasattr(self.store, "list_closed_since"):
             cands += self.store.list_closed_since(since)
-        return [c for c in cands if c["page_count"] > 0 and str(c["first_id"]) not in self.local["cleared"] and (c["closed_at"] or c["acked_at"]) >= since]
+        return [c for c in cands if c["page_count"] > 0 and str(c["first_id"]) not in self.local["cleared"] and (c["closed_at"] or c["acked_at"]) >= since
+                and not (c["acked_at"] and c["acked_at"] < (self.local["clear_since"] or 0.0))]     # D7-2: acked before D7 ran: that ack was the clear, no line on recovery
 
     def _prune_local(self, now):
         try:
@@ -448,12 +480,14 @@ class Router:
         return ids
 
     def _read_ack(self, c, now, read):
-        """(acked, denied reason or None). `read(tid)` -> (messages, denied reason or None)."""
-        tids = [f"room-alert-{c['first_id']}", batch_tid(now), batch_tid(now - 86400)]
-        why = None
+        """(acked, denied reason or None). `read(tid)` -> (messages, denied reason or None). FR1 D7-2: only the day threads (today, yesterday),
+        which the router is a party to once it has posted there; the case thread room-alert-<id> is not read. The reason is returned only when
+        EVERY read for the case was denied."""
+        tids = [batch_tid(now), batch_tid(now - 86400)]
+        whys = []
         for tid in tids:
             ms, d = read(tid)
-            why = why or d
+            whys.append(d)
             for m in ms:
                 sender = str(m.get("from", ""))
                 if sender in ACKERS and c["first_id"] in self.ack_ids(m):
@@ -464,8 +498,8 @@ class Router:
                         self.local["v_sent"].pop(str(c["first_id"]), None)
                         self.store.add_note(f"room-alert-{c['first_id']} {c['kind']} in {c['room_id']} CLOSED (acked by {sender}) after {self._age_min(c)} min. "
                                             f"Pages sent {c['page_count']}, duplicates folded {c['suppressed_count']}.", t)
-                    return True, why
-        return False, why
+                    return True, None
+        return False, (whys[0] if all(whys) else None)
 
     # ---- end-of-day list
     def unacked_cases(self):

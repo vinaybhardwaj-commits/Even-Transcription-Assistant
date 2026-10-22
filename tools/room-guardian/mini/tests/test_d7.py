@@ -5,6 +5,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "router"))
 from test_router import ar, FakeBus, Clock, row, TUE_11, SUN_12, ist
 import ubus_bus
+# importing run_router sets Router.inbox_path (the REAL gating inbox) and Router.log_fn for the job: import it ONCE, here, with both patched, so
+# the import can never leak into any test (D7 F0). Every test that needs an inbox uses a scratch file.
+with mock.patch.object(ar.Router, "inbox_path", None), mock.patch.object(ar.Router, "log_fn", None):
+    import run_router
+assert ar.Router.inbox_path is None and ar.Router.log_fn is None
 
 CFG = {"to": ["gating-lead"], "ackers": ["gating-lead"], "subject_prefix": "", "wake": False}
 
@@ -27,8 +32,8 @@ class FakeStdin:
 
 class FakeShim:
     """Stands in for the ubus stdio shim: answers initialize and tools/call with canned results and records every call."""
-    def __init__(self, whoami="room-guardian"):
-        self.whoami, self.calls, self.terminated = whoami, [], False
+    def __init__(self, whoami="room-guardian", registered=True):
+        self.whoami, self.registered, self.calls, self.terminated = whoami, registered, [], False
         self.stdout, self.stdin = FakeStdout(), FakeStdin(self)
     def on_request(self, req):
         if "id" not in req:
@@ -36,7 +41,7 @@ class FakeShim:
         if req["method"] == "tools/call":
             name, args = req["params"]["name"], req["params"]["arguments"]
             self.calls.append((name, args))
-            out = {"ok": True, "handle": self.whoami, "registered": True} if name == "ubus_whoami" else {"ok": True, "messages": []}
+            out = {"ok": True, "handle": self.whoami, "registered": self.registered} if name == "ubus_whoami" else {"ok": True, "messages": []}
             result = {"content": [{"type": "text", "text": json.dumps(out)}]}
         else:
             result = {}
@@ -46,8 +51,8 @@ class FakeShim:
 
 
 class ShimTests(unittest.TestCase):
-    def start(self, whoami="room-guardian", environ=None):
-        shim, seen = FakeShim(whoami), {}
+    def start(self, whoami="room-guardian", environ=None, registered=True):
+        shim, seen = FakeShim(whoami, registered), {}
         def popen(argv, **kw):
             seen.update(kw); return shim
         env = environ if environ is not None else dict(os.environ)
@@ -65,13 +70,19 @@ class ShimTests(unittest.TestCase):
         self.assertIsNone(err)
         env = seen["env"]
         self.assertEqual((env["UBUS_HANDLE"], env["UBUS_SESSION"], env["UBUS_RUNTIME"], env["UBUS_OWNER"], env["UBUS_ORCHESTRATOR"]),
-                         ("room-guardian", "room-guardian/mini-router", "other", "fable", "guardian-lead"))
+                         ("room-guardian", "h:room-guardian", "other", "fable", "guardian-lead"))
         self.assertFalse([k for k in env if k.startswith("HERDR") or k == "CLAUDECODE"])        # no herdr branch in deriveIdentity
         self.assertEqual(env["PATH"], "/usr/bin")
         reg = [a for n, a in shim.calls if n == "ubus_register"][0]
         self.assertEqual((reg["handle"], reg["session"], reg["runtime"], reg["owner"], reg["orchestrator"]),
-                         ("room-guardian", "room-guardian/mini-router", "other", "fable", "guardian-lead"))
+                         ("room-guardian", "h:room-guardian", "other", "fable", "guardian-lead"))
         self.assertEqual([n for n, _ in shim.calls], ["ubus_register", "ubus_whoami"])
+        self.assertFalse({"rename", "exclusive"} & set(reg))                # D7-2: adopt the live row h:room-guardian, never rename it
+
+    def test_registered_false_is_a_mismatch_too(self):
+        bus, shim, seen, err = self.start(registered=False)
+        self.assertIsNone(bus); self.assertIsInstance(err, ubus_bus.UbusIdentityError)
+        self.assertEqual(str(err), "identity room-guardian registered=false"); self.assertNotIn("ubus_send", [n for n, _ in shim.calls])
 
     def test_a_whoami_mismatch_raises_and_sends_nothing(self):
         bus, shim, seen, err = self.start(whoami="ubus-refuter@vinays-mac-mini-3")
@@ -84,11 +95,7 @@ class ShimTests(unittest.TestCase):
         def popen(argv, **kw):
             shims.append(FakeShim("ubus-refuter@vinays-mac-mini-3")); return shims[-1]
         logs = []
-        # importing run_router sets Router.inbox_path (the REAL gating inbox) and Router.log_fn for the job: patch both so the import cannot leak into
-        # any later test, and keep inbox_path None inside this test
-        with mock.patch.object(ar.Router, "inbox_path", None), mock.patch.object(ar.Router, "log_fn", None):
-            import run_router
-            ar.Router.inbox_path, ar.Router.log_fn = None, None
+        if True:
             r = ar.Router(ar.SqliteStore(), None, Clock(TUE_11)); r.on_row(None, row(100, "offline"))
             with mock.patch.object(ubus_bus.subprocess, "Popen", popen), mock.patch.object(ubus_bus.select, "select", lambda a, b, c, t: (a, [], [])), \
                     mock.patch.object(run_router, "log", logs.append):
@@ -109,16 +116,79 @@ class ShimTests(unittest.TestCase):
                 bus.thread_messages("room-alert-1")
 
 
+class SilentBus:
+    """Every bus call fails the way LazyBus does after a whoami mismatch."""
+    def __init__(self): self.calls = 0
+    def _boom(self, *a):
+        self.calls += 1; raise ubus_bus.UbusIdentityError("ubus-refuter@vinays-mac-mini-3", True)
+    post = thread_messages = _boom
+
+
+class FailLoudTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.inbox = os.path.join(self.tmp.name, "INBOX-scratch.md")          # never the real gating inbox
+        self.clock, self.bus = Clock(TUE_11), SilentBus()
+        self.r = ar.Router(ar.SqliteStore(), lambda: self.bus, self.clock, os.path.join(self.tmp.name, "local.json"))
+        self.r.inbox_path = self.inbox
+        self.r.on_row(None, row(100, "offline"))
+
+    def lines(self):
+        return [l for l in open(self.inbox).read().splitlines() if "ROUTER SILENT" in l] if os.path.exists(self.inbox) else []
+
+    def test_a_mismatch_writes_one_line_per_hour(self):
+        import contextlib
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            for _ in range(10):
+                out = self.r.tick(self.bus); self.assertIn("identity", out["error"]); self.clock.adv(30)
+            self.assertEqual(len(self.lines()), 1)
+            self.assertTrue(self.lines()[0].endswith("room-guardian ROUTER SILENT: identity ubus-refuter@vinays-mac-mini-3"))
+            self.clock.t = TUE_11 + 3600; self.r.tick(self.bus)
+            for _ in range(10): self.clock.adv(30); self.r.tick(self.bus)
+        self.assertEqual(len(self.lines()), 2)
+        self.assertEqual(err.getvalue().count("ROUTER SILENT: identity"), 2)
+        self.assertEqual(self.r.store.get_open("r1", "offline")["page_count"], 0)
+
+    def test_the_hourly_stamp_survives_a_restart(self):
+        import contextlib
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.r.tick(self.bus)
+            r2 = ar.Router(self.r.store, lambda: self.bus, self.clock, os.path.join(self.tmp.name, "local.json")); r2.inbox_path = self.inbox
+            self.clock.adv(600); r2.tick(self.bus)
+        self.assertEqual(len(self.lines()), 1)
+
+    def test_the_startup_check_runs_with_no_open_case(self):
+        shims = []
+        def popen(argv, **kw):
+            shims.append(FakeShim(self.who)); return shims[-1]
+        for who, ok in (("room-guardian", True), ("ubus-refuter@vinays-mac-mini-3", False)):
+            self.who, logs = who, []
+            r = ar.Router(ar.SqliteStore(), None, self.clock, os.path.join(self.tmp.name, f"l-{ok}.json")); r.inbox_path = self.inbox
+            self.assertEqual(r.store.list_open(), [])
+            import contextlib
+            with mock.patch.object(ubus_bus.subprocess, "Popen", popen), mock.patch.object(ubus_bus.select, "select", lambda a, b, c, t: (a, [], [])), \
+                    mock.patch.object(run_router, "log", logs.append), mock.patch.object(run_router, "_whoami_logged", None), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(run_router.startup_check(r, CFG), ok)
+            self.assertEqual([n for n, _ in shims[-1].calls], ["ubus_register", "ubus_whoami"])
+            if ok:
+                self.assertIn("whoami handle=room-guardian session=h:room-guardian registered=True", logs)
+        self.assertEqual(len(shims), 2); self.assertEqual(len(self.lines()), 1)
+
+
 class CountingBus(FakeBus):
-    """FakeBus that records every thread read with the clock, and can deny the case threads."""
-    def __init__(self, clock, deny=None):
-        super().__init__(); self.clock, self.deny, self.reads = clock, deny, []
+    """FakeBus that records every thread read with the clock. deny: None, "case" (case threads forbidden), "yesterday" (case threads and
+    yesterday's day thread forbidden: the usual live picture), or "all" + reason (every thread denied with that reason)."""
+    def __init__(self, clock, deny=None, why="forbidden"):
+        super().__init__(); self.clock, self.deny, self.why, self.reads = clock, deny, why, []
     def thread_messages(self, tid):
         self.reads.append((tid, self.clock()))
-        if self.deny and not tid.startswith(ar.BATCH_PREFIX):
-            raise ubus_bus.UbusDenied(f"ubus_thread: {self.deny}")
+        is_case = not tid.startswith(ar.BATCH_PREFIX)
+        if (self.deny == "all") or (self.deny in ("case", "yesterday") and is_case) or (self.deny == "yesterday" and tid == ar.batch_tid(self.clock() - 86400)):
+            raise ubus_bus.UbusDenied(f"ubus_thread: {self.why}")
         return super().thread_messages(tid)
     def case_reads(self, fid): return [t for tid, t in self.reads if tid == f"room-alert-{fid}"]
+    def read_times(self): return sorted({t for _tid, t in self.reads})
 
 
 class AckReadTests(unittest.TestCase):
@@ -128,32 +198,54 @@ class AckReadTests(unittest.TestCase):
     def test_an_unpaged_open_case_is_never_read(self):
         bus = CountingBus(self.clock); bus.fail = True                  # the send fails, so the case stays unpaged
         r = ar.Router(self.store, lambda: bus, self.clock); r.on_row(bus, row(100, "offline"))
+        bus.real.append({"from": "fleet", "subject": "ACK room-alert-100", "body": "", "thread": ar.batch_tid(self.clock())})   # an ack is there, yet unread
         for _ in range(10):
             r.tick(bus); self.clock.adv(30)
         self.assertEqual(self.store.get_open("r1", "offline")["page_count"], 0)
+        self.assertIsNone(self.store.get_open("r1", "offline")["acked_at"])          # no ack read for a case this router has not paged
         self.assertEqual(bus.case_reads(100), [])
         self.assertTrue(all(tid.startswith(ar.BATCH_PREFIX) for tid, _ in bus.reads))   # only the pre-send crash-marker read of the day threads
+
+    def test_the_case_thread_is_never_read(self):
+        bus = CountingBus(self.clock, deny="case"); r = ar.Router(self.store, lambda: bus, self.clock); r.on_row(bus, row(100, "offline"))
+        for _ in range(20):
+            r.tick(bus); self.clock.adv(30)
+        self.assertEqual(bus.case_reads(100), [])                       # D7-2: acks come on the day threads only
 
     def test_a_paged_case_is_read_at_most_once_per_120_s_over_10_ticks(self):
         bus = CountingBus(self.clock); r = ar.Router(self.store, lambda: bus, self.clock); r.on_row(bus, row(100, "offline"))
         t0 = self.clock()
         for _ in range(10):
             r.tick(bus); self.clock.adv(30)
-        reads = bus.case_reads(100)
-        self.assertEqual(reads, [t0 + 30, t0 + 150, t0 + 270])
-        self.assertTrue(all(b - a >= ar.ACK_READ_S for a, b in zip(reads, reads[1:])))
+        reads = bus.read_times()                                         # t0: the crash-marker read before page 1; then the ack reads
+        self.assertEqual(reads, [t0, t0 + 30, t0 + 150, t0 + 270])
+        self.assertTrue(all(b - a >= ar.ACK_READ_S for a, b in zip(reads[1:], reads[2:])))
 
-    def test_forbidden_backs_the_case_off_to_600_s_and_logs_once(self):
+    def test_every_read_denied_backs_the_case_off_to_600_s_and_logs_once(self):
         for why in ("forbidden", "not_registered"):
             with self.subTest(why=why):
-                clock = Clock(TUE_11); bus = CountingBus(clock, deny=why); r = ar.Router(ar.SqliteStore(), lambda: bus, clock)
+                clock = Clock(TUE_11); bus = CountingBus(clock, deny="all", why=why); r = ar.Router(ar.SqliteStore(), lambda: bus, clock)
                 logs = []; r.log_fn = logs.append
                 r.on_row(bus, row(100, "offline")); t0 = clock()
                 for _ in range(42):
                     out = r.tick(bus); self.assertEqual(out["errors"], 0); clock.adv(30)
-                self.assertEqual(bus.case_reads(100), [t0 + 30, t0 + 630, t0 + 1230])
+                self.assertEqual(bus.read_times(), [t0, t0 + 30, t0 + 630, t0 + 1230])
                 self.assertEqual(logs, [f"ack read {why}: case room-alert-100, next read in 600s"])
                 self.assertIsNone(r.store.get_open("r1", "offline")["acked_at"])            # no ack yet
+
+    def test_one_denied_day_thread_does_not_back_off_and_a_batch_ack_is_seen_within_120_s(self):
+        bus = CountingBus(self.clock, deny="yesterday"); r = ar.Router(self.store, lambda: bus, self.clock); r.on_row(bus, row(100, "offline"))
+        logs = []; r.log_fn = logs.append
+        r.tick(bus); t_page = self.clock()
+        self.clock.adv(30); r.tick(bus)                                  # first ack read: yesterday forbidden, today readable: no back-off
+        bus.real.append({"from": "fleet", "subject": "Re: ROOM ALERT", "body": "ACK room-alert-100", "thread": ar.batch_tid(self.clock())})
+        acked_at = None
+        for _ in range(8):
+            self.clock.adv(30)
+            if r.tick(bus)["acked"]:
+                acked_at = self.clock(); break
+        self.assertIsNotNone(acked_at); self.assertLessEqual(acked_at - (t_page + 30), ar.ACK_READ_S)
+        self.assertEqual(logs, []); self.assertEqual(self.store.get_open("r1", "offline")["acked_by"], "fleet")
 
     def test_an_ack_is_still_seen_after_the_backoff(self):
         bus = CountingBus(self.clock); r = ar.Router(self.store, lambda: bus, self.clock); r.on_row(bus, row(100, "offline"))
@@ -195,10 +287,11 @@ class CadenceTests(unittest.TestCase):
                 for i in range(40):
                     clock.adv(30); r.tick(bus)
                     if how == "ack_then_recovered" and i == 20: r.on_row(bus, row(102, "recovered"))
-                lines = [l for m in bus.real for l in m["body"].splitlines() if "[cleared]" in l]
+                posts = [m for m in bus.real if m["from"] == "router"]
+                lines = [l for m in posts for l in m["body"].splitlines() if "[cleared]" in l]
                 self.assertEqual(len(lines), 1, lines); self.assertTrue(lines[0].startswith(f"room-alert-100 {kind} in r1 cleared: "))
-                self.assertEqual([m["subject"] for m in bus.real if "[cleared]" in m["body"]], ["ROOM ALERT: 0 new, 1 cleared, 0 reminder(s)"])
-                self.assertEqual(len(bus.real), 2)                       # the page and the cleared line; no note message
+                self.assertEqual([m["subject"] for m in posts if "[cleared]" in m["body"]], ["ROOM ALERT: 0 new, 1 cleared, 0 reminder(s)"])
+                self.assertEqual(len(posts), 2)                          # the page and the cleared line; no note message
 
     def test_a_case_never_paged_gets_no_cleared_line(self):
         clock, bus = Clock(TUE_11), FakeBus(); r = ar.Router(ar.SqliteStore(), lambda: bus, clock)
@@ -236,6 +329,15 @@ class CadenceTests(unittest.TestCase):
         r.on_row(bus, row(100, "offline")); r.on_row(bus, row(200, "degraded", "r2")); r.tick(bus)
         self.assertEqual(bus.sends, 1); self.assertEqual(bus.real[0]["subject"], "ROOM ALERT: 2 new, 0 cleared, 0 reminder(s)")
         self.assertIn("room-alert-100 offline in r1", bus.real[0]["body"]); self.assertIn("room-alert-200 degraded in r2", bus.real[0]["body"])
+
+    def test_a_case_acked_before_d7_gets_no_cleared_line_when_it_recovers(self):
+        clock, bus, store = Clock(TUE_11), FakeBus(), ar.SqliteStore()
+        store.insert({"first_id": 60, "room_id": "r1", "kind": "offline", "opened_at": clock() - 900, "last_paged_at": clock() - 900, "page_count": 1,
+                      "suppressed_count": 0, "acked_by": "fleet", "acked_at": clock() - 300, "closed_at": None, "close_reason": None})   # acked under the old code
+        r = ar.Router(store, lambda: bus, clock); r.tick(bus)
+        clock.adv(60); r.on_row(bus, row(61, "recovered")); self.assertIsNone(store.get_open("r1", "offline"))
+        for _ in range(5): clock.adv(30); r.tick(bus)
+        self.assertEqual([m for m in bus.real if "[cleared]" in m["body"]], [])
 
     def test_cleared_state_survives_restart_and_pre_d7_closes_are_not_announced(self):
         import tempfile

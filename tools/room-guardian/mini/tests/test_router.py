@@ -25,13 +25,14 @@ class FakeBus:
     thread_messages for the batch thread, so the router's marker check works) and also expands it into per-case pseudo messages on
     room-alert-<id>, so the older assertions about pages / V / CLOSED per case still read naturally."""
     def __init__(self, fail_after=None):
-        self.msgs, self.real, self.fail_after, self.sends, self.fail = [], [], fail_after, 0, False
+        self.msgs, self.real, self.fail_after, self.sends, self.fail, self.pending = [], [], fail_after, 0, False, []
     def post(self, subject, body, priority, thread_id):
         if self.fail:
             raise RuntimeError("rate_limited")
         self.sends += 1
         if thread_id.startswith(ar.BATCH_PREFIX):
             self.real.append({"from": "router", "subject": subject, "body": body, "priority": priority, "thread": thread_id})
+            self.real.extend(dict(p, thread=thread_id) for p in self.pending); self.pending = []
             import re
             for line in body.splitlines():
                 m = re.search(r"room-alert-(\d+) ", line)
@@ -52,7 +53,14 @@ class FakeBus:
         if tid.startswith(ar.BATCH_PREFIX):
             return [m for m in self.real if m["thread"] == tid]
         return [m for m in self.msgs if m["thread"] == tid]
-    def human(self, sender, text, tid): self.msgs.append({"from": sender, "subject": text, "body": "", "thread": tid})
+    def human(self, sender, text, tid):
+        """A person's message. FR1 D7-2: the router reads acks only on the day thread, so an ack aimed at a case thread is ALSO replied on the
+        thread of the latest batch post (or, before any post, on the next one), as people answer the page."""
+        m = {"from": sender, "subject": text, "body": "", "thread": tid}
+        self.msgs.append(m)
+        if tid.startswith("room-alert-") and not tid.startswith(ar.BATCH_PREFIX):
+            if self.real: self.real.append(dict(m, thread=self.real[-1]["thread"]))
+            else: self.pending.append(m)
     def pages(self, tid=None): return [m for m in self.msgs if "[page" in m["subject"] and (tid is None or m["thread"] == tid)]
 
 

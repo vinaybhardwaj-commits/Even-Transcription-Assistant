@@ -1,7 +1,7 @@
 """ubus_bus.py -- router bus over ubus (Phase 0 build; the C4 template posts to the eta-bus). Same interface as router_relay.RouterBus:
 post(subject, body, priority, thread_id), thread_messages(thread_id) -> [{"from","subject","body"}], close().
-Talks to the ubus stdio MCP shim as handle room-guardian, session room-guardian/mini-router (FR1 D7: set, never inherited; checked with
-ubus_whoami before anything is sent). thread_messages raises UbusDenied on forbidden / not_registered. Routing (to, ackers, test label, wake) comes from etc/router.json, read on every
+Talks to the ubus stdio MCP shim as handle room-guardian, session h:room-guardian (FR1 D7-2: the session of the existing live row, so
+nothing is renamed; set, never inherited; checked with ubus_whoami before anything is sent). thread_messages raises UbusDenied on forbidden / not_registered. Routing (to, ackers, test label, wake) comes from etc/router.json, read on every
 construction, so switching from TEST routing to production routing needs no restart. Metadata only is logged, never subject or body text."""
 import hashlib, json, os, select, subprocess, time
 
@@ -12,11 +12,18 @@ MACHINE = os.environ.get("UBUS_MACHINE") or __import__("socket").gethostname().s
 PRIO = {"urgent": "high", "high": "high", "normal": "normal", "low": "low"}   # ubus_send enum is low|normal|high
 
 
-SESSION, RUNTIME, OWNER, ORCHESTRATOR = "room-guardian/mini-router", "other", "fable", "guardian-lead"   # FR1 D7: a fixed session makes the shim identity deterministic (no hook cache read)
+SESSION, RUNTIME, OWNER, ORCHESTRATOR = "h:room-guardian", "other", "fable", "guardian-lead"   # FR1 D7-2: the live row's session; a fixed session makes the shim identity deterministic (no hook cache read)
 
 
 class UbusError(Exception):
     pass
+
+
+class UbusIdentityError(UbusError):
+    """ubus_whoami did not answer handle room-guardian, registered. Nothing is sent; the router raises the ROUTER SILENT line."""
+    def __init__(self, handle, registered):
+        super().__init__(f"identity {str(handle)[:60]}" + (" registered=false" if registered is False else ""))
+        self.identity, self.registered = str(handle)[:60], registered
 
 
 class UbusDenied(UbusError):
@@ -60,8 +67,8 @@ class UbusBus:
             got = self._tool("ubus_whoami", {})
             who = got.get("handle") if isinstance(got, dict) else None
             self.identity = {"handle": who, "registered": got.get("registered") if isinstance(got, dict) else None}
-            if who != HANDLE:            # FR1 D7: never send under another name (the 22 Oct ubus-refuter twin); the tick logs this and nothing goes out
-                raise UbusError(f"identity {str(who)[:60]}")
+            if who != HANDLE or self.identity["registered"] is False:   # FR1 D7: never send under another name (the 22 Oct ubus-refuter twin), nor unregistered
+                raise UbusIdentityError(who, self.identity["registered"])
         except Exception:
             self.close()
             raise
