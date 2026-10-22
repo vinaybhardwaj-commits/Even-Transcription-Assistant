@@ -162,6 +162,21 @@ def note_final(gate: NumberGate, art: dict, c, note_tok: str, *, allowed=None) -
     return N._assemble(out), bad
 
 
+def section_units(art: dict, bad: dict[str, str]) -> list[tuple[str, str, str, tuple]]:
+    """Fix2: the gp_extraction units behind each note section that note_final blanked. A section dropped from the note but kept in gp_extraction would break G6
+    (one line per entry), so the same units are withheld in both."""
+    gx = art.get("gp_extraction") or {}
+    out = []
+    for h, reason in bad.items():
+        fld = HEADING_FIELD.get(h)
+        if not fld:
+            continue
+        for path, f, unit, holder in list(_leaves(gx)):
+            if f == fld and (unit == "entry" or isinstance(holder.get(path[-1]), str)):
+                out.append((f, reason, unit, path))
+    return out
+
+
 def drop_units(art: dict, failed) -> None:
     """Remove the units `gp_final` reported from a TOKENISED artifact (a field is deleted, a list entry removed), and point the provenance items
     of later list entries at their new index; an item of a removed entry becomes kept-out."""

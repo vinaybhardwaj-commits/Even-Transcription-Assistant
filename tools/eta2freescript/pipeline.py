@@ -189,11 +189,13 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         v0 = copy.deepcopy(art)
         failed = v10_final.gp_final(gate, v0, c)
         _final_note, bad = v10_final.note_final(gate, v0, c, note)
+        failed = failed + [u for u in v10_final.section_units(art, bad) if u not in failed]
         v10_final.drop_units(art, failed)
         for fld, reason, _u, _p in failed:
             bl.withhold(fld, reason, [], stage="floor")
         for h, reason in bad.items():
             bl.withhold(next((k for k, v in bl.SECTION.items() if v == h), "plan"), reason, [], stage="floor")
+        art["completion_required"] = bl.completion  # the floor withholds above appended prompts to the builder's list; view_of() projects it again
         log["frx_t1_withheld"] = [{"field": f, "reason": r} for f, r, _u, _p in failed] + [{"section": h, "reason": r} for h, r in bad.items()]
         flags = flags_by_pointer(art)
         note, llm_rem = _fallback_note_ex(art, flags, banned)
@@ -211,7 +213,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     view["generator"]["served_model_id"] = served
     if served:
         view["generator"]["model"] = served  # A52: the id the provider response named, not the alias-table id
-    view["generator"]["model_id_source"] = "provider_response" if served else "request_alias_unverified"
+    view["generator"]["model_id_source"] = "provider_response" if named and len(named) == len([v for v in ids.values() if v]) else "request_alias_unverified"  # every stage named by its response body, or not verified
     view["generator"]["stage_a_version"], view["generator"]["stage_b_version"] = opts.stage_a, opts.stage_b
     art = view
     if llm_rem:  # only when a span was removed, so a consult with none keeps a byte-identical log

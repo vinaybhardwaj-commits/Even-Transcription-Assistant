@@ -163,6 +163,11 @@ class NumberGate:
 
     # --- the posted string ----------------------------------------------------------------------------------------------------
     def check(self, text, fld: str, turns: list[int], *, structured: bool = False) -> Result:
+        from .numbers import force_collisions
+        with force_collisions(bool(set(turns or ()) & self.drug_spans)):
+            return self._check(text, fld, turns, structured=structured)
+
+    def _check(self, text, fld: str, turns: list[int], *, structured: bool = False) -> Result:
         if not isinstance(text, str) or not text:
             return Result(True, text if isinstance(text, str) else "")
         t = norm(text)

@@ -224,7 +224,8 @@ def build_prompts(bl) -> None:
                 v9.update(t for t in names.toks(n or "") if len(t) >= 4 and not t[0].isdigit() and t not in skip)
     bl.v9_tokens = v9
     bl.med_changes = any(p["action"] in ("stop", "hold", "not_given", "change_dose") for p in prompts)
-    bl.med_change_turns = sorted({t for p in bl.prov if p.get("prompt_id") and p.get("status") in ("stopped",) for t in bl._cited_turn_ids(p.get("evidence"))})
+    bl.med_change_turns = sorted({t for p in bl.prov if p.get("prompt_id") and p.get("status") in ("stopped",) for t in bl._cited_turn_ids(p.get("evidence"))}
+                                 | {spans.span_index(x) for pr in prompts if pr["action"] in ("stop", "hold", "not_given", "change_dose") for x in pr.get("cited_spans", [])} - {None})
 
 
 def bl_components(m: dict) -> bool:

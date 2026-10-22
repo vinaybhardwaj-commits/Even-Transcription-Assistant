@@ -2300,11 +2300,12 @@ class Builder:
                         part.pop(k, None)
                 elif part.get("text"):
                     from .validate import _drugish
-                    if _drugish(part["text"]):  # FRX-S1: a slot part holds no drug name (a drug in the class text is a prompt, not a slot part)
+                    red = v10_numbers.redact(part["text"])
+                    if _drugish(red) or _drugish(part["text"]):  # FRX-S1: a slot part holds no drug name (a drug in the class text is a prompt, not a slot part); tested after the number is removed
                         for k in ("text", "value", "unit", "as_heard"):
                             part.pop(k, None)
                     else:
-                        part["text"] = v10_numbers.redact(part["text"])
+                        part["text"] = red
 
     def _scrub_identity(self) -> None:
         """FRX-E3 reads gp_extraction, provenance text, and every string inside slots, including slot quotes."""

@@ -105,7 +105,22 @@
   "steroid",
   "inhaler",
   "insulin",
-  "antibiotic"
+  "antibiotic",
+  "anticoagulant",
+  "antiplatelet",
+  "antihypertensive",
+  "antidiabetic",
+  "antihistamine",
+  "antiviral",
+  "antifungal",
+  "analgesic",
+  "diuretic",
+  "laxative",
+  "sedative",
+  "supplement",
+  "hormone",
+  "lotion",
+  "thinner"
  ],
  "phrases": [
   "before food",
@@ -218,5 +233,5 @@
   "giving"
  ],
  "daily_exempt_note": "rule 10: 'daily' is allowed only inside an exercise frame ('walk 30 minutes daily')",
- "class_words_note": "FIX1 M3 (22 Oct 2026, refuted data change, C1 extension): drug-class words steroid statin antibiotic painkiller antacid ppi insulin inhaler (plural forms by rule)"
+ "class_words_note": "FIX1 M3 (22 Oct 2026, refuted data change, C1 extension): drug-class words steroid statin antibiotic painkiller antacid ppi insulin inhaler (plural forms by rule) FIX2 (22 Oct 2026): + anticoagulant antiplatelet antihypertensive antidiabetic antihistamine antiviral antifungal analgesic diuretic laxative sedative supplement hormone lotion thinner"
 }

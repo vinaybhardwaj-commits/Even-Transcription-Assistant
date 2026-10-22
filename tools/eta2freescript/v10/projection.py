@@ -39,6 +39,8 @@ def split_completion(art: dict) -> None:
         pub = {"kind": kind, "item_id": iid, "prompt_id": c.get("prompt_id") or iid, "prompt": prompt if keep else generic}
         extra = {k: v for k, v in c.items() if k not in PUBLIC_KEYS}
         if (not keep and prompt and prompt != generic) or extra:
-            store.setdefault(str(iid), []).append({"kind": kind, **({"prompt": prompt} if not keep and prompt and prompt != generic else {}), **extra})
+            rec = {"kind": kind, **({"prompt": prompt} if not keep and prompt and prompt != generic else {}), **extra}
+            if rec not in store.setdefault(str(iid), []):
+                store[str(iid)].append(rec)
         out.append(pub)
     art["completion_required"] = out

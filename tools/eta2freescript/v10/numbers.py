@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -124,6 +126,19 @@ def mask_names(t: str) -> str:
     return _SPINE.sub(_blank, t)
 
 
+_FORCE: ContextVar[bool] = ContextVar("collisions_are_numbers", default=False)
+
+
+@contextmanager
+def force_collisions(on: bool):
+    """Within the block every collision word is a number: used by the gate when a cited turn is one Stage A tagged as naming or implying a medicine."""
+    tok = _FORCE.set(bool(on))
+    try:
+        yield
+    finally:
+        _FORCE.reset(tok)
+
+
 _DO_ENGLISH_NEXT = frozenset("not n't you we they i he she it this that the your these those so also please take try keep avoid eat drink exercise come check get go use stop continue "
                              "start rest walk see call visit follow maintain wear apply remember inform report".split())
 _WORD_TOK = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)?")
@@ -153,6 +168,10 @@ def _collisions_as_numbers(t: str) -> str:
             if words.is_dosing_word(low) or words.is_dose_unit(low) or (words.is_latin(toks[j].text) and not words.in_dictionary(low)):
                 near = True
                 break
+        if not near:
+            near = any(a - 3 <= i < b + 3 for a, b in words.dosing_phrase_spans(toks))
+        if not near and _FORCE.get():
+            near = True  # the cited turn is one Stage A tagged as naming or implying a medicine ("for acidity vanda")
         if not near:
             if flags is None:
                 flags = drugs.flags(t)

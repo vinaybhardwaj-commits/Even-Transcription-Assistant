@@ -93,4 +93,4 @@ def test_pipeline_artifact_keeps_stage_a_and_stage_b_ids_apart(tmp_path):
     lg = run_consult(load_consult(CONSULTS, uid), c, tmp_path)
     g = lg["artifact"]["generator"]
     assert g["served_model_ids"] == {"stage_a": "served-a", "stage_b": "unverified:rid2"}
-    assert g["served_model_id"] == "served-a" and g["model_id_source"] == "provider_response"
+    assert g["served_model_id"] == "served-a" and g["model_id_source"] == "request_alias_unverified"  # Fix2 nit: provider_response only when every stage named its model

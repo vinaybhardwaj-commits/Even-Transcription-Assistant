@@ -63,7 +63,7 @@ def test_medicine_becomes_a_prompt_with_no_strength_in_any_posted_field(tmp_path
     pr = a["confirm_prompts"][0]
     assert pr["kind"] == "medicine" and pr["action"] == "start" and pr["drug"]["generic"] == "PARACETAMOL" and pr["drug"]["brand_recognised"] == "Dolo"
     assert "notes_only" in pr["doctor_confirm_reason"]
-    pub = json.dumps({k: v for k, v in a.items() if k != "confirm_internal"})
+    pub = json.dumps({k: v for k, v in a.items() if k not in ("confirm_internal", "generator")})  # a sha is a digit run
     assert "650" not in re.sub(r'"quote[^"]*": "[^"]*"', "", pub)  # no strength outside the verbatim quotes and confirm_internal
     internal = a["confirm_internal"][pr["prompt_id"]]
     assert internal["strength"]["value"] == "650 mg" and internal["frequency"]["value"] == "twice a day"

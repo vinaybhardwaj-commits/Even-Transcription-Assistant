@@ -29,7 +29,7 @@ BASE = {
 FORCE = {"padi", "vanda", "sunna", "dui", "dos", "noy", "nav", "kuri", "koori", "shat", "sola", "pawa", "thees", "vees", "wees", "wis"}  # Indic number words that are also in the SCOWL list
 # Fix2: number words that are also ordinary English. They are kept OUT of the unconditional lexicon (they would read as a number in every sentence) and live in
 # `collision_extra`; with the lexicon words that are in the English dictionary they count as numbers only beside a drug mention, a dosing word, a drug-class word or a dose unit.
-COLLISION_EXTRA = ["do", "be", "so", "don", "ent", "trees", "threes", "tin", "bar", "bay", "cha", "sol", "ter"]
+COLLISION_EXTRA = ["do", "be", "so", "don", "ent", "trees", "threes", "tin", "bar", "bay", "cha", "sol", "ter", "der", "moor"]
 SWAPS = [("oo", "u"), ("aa", "a"), ("ee", "i"), ("th", "t"), ("dh", "d"), ("bh", "b"), ("kk", "k"), ("tt", "t"), ("nn", "n"), ("ch", "chh"), ("ph", "f"), ("zh", "l"), ("w", "v")]
 
 

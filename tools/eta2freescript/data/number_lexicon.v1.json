@@ -1,12 +1,12 @@
 {
- "version": "number-lexicon.v1.1",
+ "version": "number-lexicon.v1.2",
  "built_from": {
   "lib/stt/number-words.json lexicon_sha256": "2849f61aee1d75dd",
   "router_main_sha": "5e841f0",
   "s3_extra": "tools/eta2freescript s3 _EXTRA (b85a8ad9 s2_numbers.py)",
   "guard": "guard.NUM_WORDS, NUM_WORDS_HI"
  },
- "note": "English plus the six Indic languages of the S3 lexicon, unchanged (rule 13). \"sat\" is a number word (the S3 exemption is removed). \"do\" is read only inside a run (\"do sau\") by the detector. FIX1 H1 (22 Oct 2026, refuted data change): +0 romanised forms for te ta mr bn ml gu; 15 variants left out because they are English dictionary words.",
+ "note": "English plus the six Indic languages of the S3 lexicon, unchanged (rule 13). \"sat\" is a number word (the S3 exemption is removed). \"do\" is read only inside a run (\"do sau\") by the detector. FIX1 H1 (22 Oct 2026, refuted data change; FIX2 adds collision_extra): +0 romanised forms for te ta mr bn ml gu; 15 variants left out because they are English dictionary words.",
  "count": 5539,
  "words": [
   "aaaaaaaadhaaaa",
@@ -5562,6 +5562,8 @@
   "bay",
   "cha",
   "sol",
-  "ter"
+  "ter",
+  "der",
+  "moor"
  ]
 }
