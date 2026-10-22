@@ -1,7 +1,7 @@
 /**
  * lib/spine/enqueue-store.ts — SPINE-P2 shadow ENQUEUER. runSpineEnqueue(now): for encounters inside the 72 h horizon, plan the FREE-stage jobs (lib/spine/enqueue.ts) and insert them
  * into spine_job. A stage in `shadow` is inserted with status `shadow` (never claimable); a stage in `live` is inserted `queued` (and a spent `shadow` row of the same key goes back to
- * `queued`). A paid stage is never planned. Idempotent on (encounter_id, stage, cut_version, input_key). Jobs of an older cut_version of the same encounter, and queued / shadow
+ * `queued`; a `superseded` row of the same key is a re-plan and takes the planned status again). A paid stage is never planned. Idempotent on (encounter_id, stage, cut_version, input_key). Jobs of an older cut_version of the same encounter, and queued / shadow
  * jobs of a merged or rejected encounter, are marked `superseded` (never deleted). One spine_tick row (kind `enqueue`) per live pass.
  * Gate: spine_config `jobs` (missing / malformed = off) and `mode.<stage>` per stage (missing = off); kill_switch respected (config.readModes).
  */
@@ -35,8 +35,8 @@ WITH ins AS (
    WHERE x.status = 'shadow' OR NOT EXISTS (
      SELECT 1 FROM unnest(x.needs) n WHERE NOT EXISTS (SELECT 1 FROM spine_job d WHERE d.encounter_id = x.encounter_id AND d.stage = n AND d.cut_version = x.cut_version AND d.status = 'done'))
   ON CONFLICT ON CONSTRAINT spine_job_key_uq DO UPDATE
-     SET status = 'queued', attempts = 0, next_attempt_at = NULL, lease_owner = NULL, lease_until = NULL, last_error_class = NULL, last_error_code = NULL, done_at = NULL
-   WHERE EXCLUDED.status = 'queued' AND spine_job.status = 'shadow'
+     SET status = EXCLUDED.status, attempts = 0, next_attempt_at = NULL, lease_owner = NULL, lease_until = NULL, last_error_class = NULL, last_error_code = NULL, done_at = NULL
+   WHERE (EXCLUDED.status = 'queued' AND spine_job.status = 'shadow') OR spine_job.status = 'superseded'
   RETURNING stage, status
 ) SELECT stage, status, count(*)::int AS n FROM ins GROUP BY stage, status`;
 
@@ -70,7 +70,7 @@ export async function runSpineEnqueue(now: number): Promise<EnqueueCounts> {
     by_stage[String(r.stage)] = (by_stage[String(r.stage)] ?? 0) + n;
     if (r.status === "shadow") shadow += n; else queued += n;
   }
-  const ambiguous_no_freescript = encs.filter((e) => e.status === "confirmed" && e.flags.includes("ambiguous") && stagesFor(e, now).length > 0).length;
+  const ambiguous_no_freescript = encs.filter((e) => (e.status === "confirmed" || e.status === "confirmed_single_proxy") && e.flags.includes("ambiguous") && stagesFor(e, now).length > 0).length;
   const counts = { jobs: m.jobs as "shadow" | "live", encounters: encs.length, planned: plan.length, shadow, queued, superseded: Number(s[0]?.superseded ?? 0), by_stage, ambiguous_no_freescript };
   await q()("INSERT INTO spine_tick (kind, counts) VALUES ($1, $2::jsonb)", ["enqueue", JSON.stringify(counts)]);
   return counts;
