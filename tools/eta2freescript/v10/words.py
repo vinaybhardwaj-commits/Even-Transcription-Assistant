@@ -280,6 +280,14 @@ _CALENDAR = frozenset("monday tuesday wednesday thursday friday saturday sunday 
 _BOUNDARY = ".!?:;\n(\"'"
 
 
+def _run_len(toks, t: str, j: int) -> int:
+    """Length of the run of capitalised words that starts at toks[j]."""
+    n = 1
+    while j + n < len(toks) and (toks[j + n].text[:1].isupper() or t[toks[j + n - 1].end:toks[j + n].start] == "-") and t[toks[j + n - 1].end:toks[j + n].start].strip() in ("", "-"):
+        n += 1
+    return n
+
+
 def possible_name(text: str) -> str | None:
     """Fix3c ruling 3: a capitalised token in the MIDDLE of a posted free-text unit that is not a catalogue token, a drug name, an abbreviation, a clinical-vocabulary word, a dosing word or a
     calendar word may be a person or place name that the dictionary happens to allow (Joy, Daisy, Faith). The unit is withheld, reason `possible_name`. Names that are not English words are
@@ -292,12 +300,20 @@ def possible_name(text: str) -> str | None:
     t = numbers._SPINE.sub(" ", t)
     strong = drugs.strong_names()
     ok_sets = (catalogue_tokens(), extra_whitelist(), whitelist_words(), strong)
-    for tk in tokenize(t):
-        if not tk.is_word or not is_latin(tk.text) or len(tk.text) < 3 or not tk.text[0].isupper() or tk.text.isupper():
+    t = re.sub(r"(?<=[A-Za-z])-(?=[A-Za-z])", "", t)  # X-ray, Mary-Ann: one word
+    toks = [tk for tk in tokenize(t) if tk.is_word]
+    for i, tk in enumerate(toks):
+        if not is_latin(tk.text) or len(tk.text) < 3 or not tk.text[0].isupper() or tk.text.isupper():
             continue
         before = t[:tk.start].rstrip()
-        if not before or before[-1] in _BOUNDARY or (before[-1] == "-" and t[:tk.start][-2:-1] in (" ", "")):
+        if not before or before[-1] in _BOUNDARY or (before[-1] == "-" and before[:-1].endswith(" ")):
             continue  # the first word of a sentence, a list item or a "Hx - " lead is capitalised anyway
+        j = i  # a Title Case phrase of 3+ words that opens the sentence ("Anterior Cruciate Ligament Reconstruction") is a heading, not a name
+        while j > 0 and (toks[j - 1].text[:1].isupper() or t[toks[j - 1].end:toks[j].start] == "-") and t[toks[j - 1].end:toks[j].start].strip() in ("", "-"):
+            j -= 1
+        pre = t[:toks[j].start].rstrip()
+        if (not pre or pre[-1] in _BOUNDARY) and sum(1 for _ in range(j, i + 1)) >= 2 and _run_len(toks, t, j) >= 3:
+            continue
         low = tk.low
         if low in _CALENDAR or any(low in s for s in ok_sets) or is_dosing_word(low) or is_dose_unit(low):
             continue
