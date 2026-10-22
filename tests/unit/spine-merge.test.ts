@@ -113,7 +113,7 @@ describe("M5 status", () => {
   it("two weak proxies at 49% overlap give candidate (two encounters)", () => {
     const r = run([sig("acoustic", "a1", 0, 100), sig("timeline", "t1", 51, 151)]);
     expect(r.encounters).toHaveLength(2);
-    expect(r.encounters.every((e) => e.status === "candidate")).toBe(true);
+    expect(r.encounters.map((e) => e.status).sort()).toEqual(["candidate", "confirmed_single_proxy"]); // the lone timeline group is single_proxy (RULING B), the lone acoustic one a candidate
   });
   it("a 119 s span gives candidate; 120 s gives confirmed", () => {
     const mk = (s: number) => [sig("acoustic", "a1", 0, 0, {}, { t_close: T0 + s * 1000 }), sig("timeline", "t1", 0, 0, {}, { t_close: T0 + s * 1000 })];

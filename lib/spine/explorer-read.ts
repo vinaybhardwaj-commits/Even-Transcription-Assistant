@@ -13,7 +13,7 @@ type Row = Record<string, unknown>;
 type Q = (text: string, params: unknown[]) => Promise<Row[]>;
 const q = (): Q => sql as unknown as Q;
 
-export const STATUSES = ["candidate", "confirmed", "rejected", "merged"] as const;
+export const STATUSES = ["candidate", "confirmed", "confirmed_single_proxy", "rejected", "merged"] as const;
 export const FLAG_COUNTS = ["ambiguous", "multi_machine", "pulse_overlap"] as const;
 export const FLAGS = ["ambiguous", "multi_machine", "pulse_overlap", "clamped", "clamp_failed", "covered_by_pulse", "frozen", "enc_conflict"] as const;
 export const PROXIES = ["pulse", "pqm", "acoustic", "timeline", "doctor_activity", "cutter", "caa", "nemotron_window"] as const;

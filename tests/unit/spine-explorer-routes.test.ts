@@ -72,7 +72,7 @@ describe("empty tables", () => {
     expect(await (await DAY(req("/api/spine/explorer/day?ist_date=2026-10-18"))).json()).toEqual({ ok: true, ist_date: "2026-10-18", rooms: [] });
     const body = await (await DAY(req("/api/spine/explorer/day?ist_date=2026-10-18&room_id=room_x"))).json();
     expect(body.rooms).toEqual([{
-      room_id: "room_x", encounters: { candidate: 0, confirmed: 0, rejected: 0, merged: 0, total: 0 }, flags: { ambiguous: 0, multi_machine: 0, pulse_overlap: 0 },
+      room_id: "room_x", encounters: { candidate: 0, confirmed: 0, confirmed_single_proxy: 0, rejected: 0, merged: 0, total: 0 }, flags: { ambiguous: 0, multi_machine: 0, pulse_overlap: 0 },
       signals_by_proxy: { pulse: 0, pqm: 0, acoustic: 0, timeline: 0, doctor_activity: 0, cutter: 0, caa: 0, nemotron_window: 0 }, jobs_by_stage: {},
     }]);
   });

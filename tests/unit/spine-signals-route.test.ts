@@ -2,8 +2,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("node:crypto", async (orig) => { const c = await orig<typeof import("node:crypto")>(); return { ...c, timingSafeEqual: vi.fn(c.timingSafeEqual) }; });
-const M = vi.hoisted(() => ({ mode: vi.fn(), store: vi.fn(), ingest: vi.fn() }));
+const M = vi.hoisted(() => ({ mode: vi.fn(), store: vi.fn(), ingest: vi.fn(), merge: vi.fn(), enqueue: vi.fn() }));
 vi.mock("@/lib/spine/ingest-store", () => ({ readIngestMode: M.mode, storeSignals: M.store, ingestSpineSignals: M.ingest }));
+vi.mock("@/lib/spine/merge-store", () => ({ runSpineMerge: M.merge }));
+vi.mock("@/lib/spine/enqueue-store", () => ({ runSpineEnqueue: M.enqueue }));
 
 import { POST } from "@/app/api/spine/signals/route";
 import { GET } from "@/app/api/cron/spine/route";
@@ -15,7 +17,7 @@ const sig = (over: Record<string, unknown> = {}) => ({ proxy: "pqm", source_key:
 const post = (body: unknown, auth: string | null = "Bearer tok_test") =>
   new NextRequest("https://x.test/api/spine/signals", { method: "POST", body: typeof body === "string" ? body : JSON.stringify(body), headers: auth ? { authorization: auth } : {} });
 
-beforeEach(() => { M.mode.mockReset().mockResolvedValue("shadow"); M.store.mockReset().mockResolvedValue({ inserted: 1, duplicate: 0, conflict: 0 }); M.ingest.mockReset(); process.env.SPINE_INGEST_TOKEN = "tok_test"; process.env.CRON_SECRET = "cron_test"; });
+beforeEach(() => { M.mode.mockReset().mockResolvedValue("shadow"); M.store.mockReset().mockResolvedValue({ inserted: 1, duplicate: 0, conflict: 0 }); M.ingest.mockReset(); M.merge.mockReset().mockResolvedValue({ skipped: "off" }); M.enqueue.mockReset().mockResolvedValue({ skipped: "off" }); process.env.SPINE_INGEST_TOKEN = "tok_test"; process.env.CRON_SECRET = "cron_test"; });
 afterEach(() => { for (const [k, v] of [["SPINE_INGEST_TOKEN", SAVED.t], ["CRON_SECRET", SAVED.c]] as const) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
 
 describe("POST /api/spine/signals", () => {
@@ -100,11 +102,41 @@ describe("GET /api/cron/spine", () => {
   });
   it("returns the counts, and 500 with a generic code on failure", async () => {
     M.ingest.mockResolvedValue({ skipped: "off" });
-    expect(await (await GET(get("Bearer cron_test"))).json()).toEqual({ ok: true, ingest: { skipped: "off" } });
+    expect(await (await GET(get("Bearer cron_test"))).json()).toEqual({ ok: true, ingest: { skipped: "off" }, merge: { skipped: "off" }, enqueue: { skipped: "off" } });
     vi.spyOn(console, "error").mockImplementation(() => {});
     M.ingest.mockRejectedValue(new Error("boom"));
     const res = await GET(get("Bearer cron_test"));
     expect(res.status).toBe(500);
     expect(JSON.stringify(await res.json())).not.toContain("boom");
+  });
+  it("P2 chain: ingest, then merge, then enqueue, each result in the response; a step that is off reports skipped and the others still run", async () => {
+    M.ingest.mockResolvedValue({ skipped: "off" });
+    M.merge.mockResolvedValue({ mode: "shadow", days: 1 });
+    M.enqueue.mockResolvedValue({ skipped: "off" });
+    expect(await (await GET(get("Bearer cron_test"))).json()).toEqual({ ok: true, ingest: { skipped: "off" }, merge: { mode: "shadow", days: 1 }, enqueue: { skipped: "off" } });
+    const order: string[] = [];
+    M.ingest.mockImplementation(async () => { order.push("ingest"); return {}; });
+    M.merge.mockImplementation(async () => { order.push("merge"); return {}; });
+    M.enqueue.mockImplementation(async () => { order.push("enqueue"); return {}; });
+    await GET(get("Bearer cron_test"));
+    expect(order).toEqual(["ingest", "merge", "enqueue"]);
+  });
+  it("P2 chain: an ingest failure still merges and enqueues; a merge failure skips enqueue (fail closed); both answer 500 with a generic code and the counts that ran", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    M.ingest.mockRejectedValue(new Error("boom_ingest"));
+    M.merge.mockResolvedValue({ mode: "shadow" });
+    const r1 = await GET(get("Bearer cron_test"));
+    const b1 = await r1.json();
+    expect(r1.status).toBe(500);
+    expect(b1).toMatchObject({ ok: false, error: { code: "SPINE_INGEST_FAILED" }, failed: ["ingest"], merge: { mode: "shadow" } });
+    expect(M.enqueue).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(b1)).not.toContain("boom");
+    M.enqueue.mockClear();
+    M.ingest.mockResolvedValue({ skipped: "off" });
+    M.merge.mockRejectedValue(new Error("boom_merge"));
+    const r2 = await GET(get("Bearer cron_test"));
+    expect(r2.status).toBe(500);
+    expect(await r2.json()).toMatchObject({ error: { code: "SPINE_MERGE_FAILED" }, failed: ["merge"] });
+    expect(M.enqueue).not.toHaveBeenCalled();
   });
 });

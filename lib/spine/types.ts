@@ -8,7 +8,7 @@ export const STRONG_PROXIES: readonly Proxy[] = ["pulse", "pqm"];
 export const WEAK_PROXIES: readonly Proxy[] = ["acoustic", "timeline", "doctor_activity", "nemotron_window"];
 export const DERIVED_PROXIES: readonly Proxy[] = ["cutter", "caa"];
 
-export type EncounterStatus = "candidate" | "confirmed" | "rejected" | "merged";
+export type EncounterStatus = "candidate" | "confirmed" | "confirmed_single_proxy" | "rejected" | "merged";
 export type KeyKind = "consult_uid" | "consult_key" | "pqm_uid" | "pulse_enc_id" | "window_id" | "caa_uid" | "buddy_opaque";
 export type LinkBasis = "exact" | "overlap" | "merge";
 
