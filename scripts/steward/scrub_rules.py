@@ -5,6 +5,7 @@ Prints one line per hit: RULE<TAB>PATH:LINE<TAB>COMMIT. Never prints a matched v
 Modes: tree PATH | range REV_RANGE | staged
 """
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -369,12 +370,14 @@ def staff_email_hits(text, domains):
 
 ALLOW_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "steward", "scrub-allow.txt")
 RULE_IDS = {"phi-field", "deny-large-file"}
+ALLOW_PREFIX = "tools/eta2freescript/contract_v1/"
 
 
 def load_rule_allow():
-    """(rule id, exact path or `dir/**` prefix) pairs from steward/scrub-allow.txt lines `<rule-id> <path> # reason`. Gitleaks fingerprint lines
-    (`<commit>:<path>:<rule>:<line>`) are not read here. Off under STEWARD_SCRUB_NO_ALLOW=1. Merge-owner reviewed, like the rest of the file."""
-    out = []
+    """{(rule id, exact path, sha256 of the file's bytes)} from steward/scrub-allow.txt lines `<rule-id> <exact path> <sha256> # reason`. No globs. A path must start with
+    tools/eta2freescript/contract_v1/ (checked here, in code; any other line is ignored and reported on stderr). Gitleaks fingerprint lines are not read here.
+    Off under STEWARD_SCRUB_NO_ALLOW=1. Merge-owner reviewed, like the rest of the file."""
+    out = set()
     if os.environ.get("STEWARD_SCRUB_NO_ALLOW") == "1":
         return out
     try:
@@ -382,19 +385,20 @@ def load_rule_allow():
     except OSError:
         return out
     for ln in lines:
-        ln = ln.split(" #", 1)[0].strip()
-        parts = ln.split()
-        if len(parts) == 2 and parts[0] in RULE_IDS:
-            out.append((parts[0], parts[1]))
+        parts = ln.split(" #", 1)[0].split()
+        if len(parts) == 3 and parts[0] in RULE_IDS:
+            if parts[1].startswith(ALLOW_PREFIX) and "*" not in parts[1] and re.fullmatch(r"[0-9a-f]{64}", parts[2]):
+                out.add((parts[0], parts[1], parts[2]))
+            else:
+                print("scrub: ignored allow line (path outside %s, a glob, or a bad sha256)" % ALLOW_PREFIX, file=sys.stderr)
     return out
 
 
 RULE_ALLOW = load_rule_allow()
 
 
-def rule_allowed(rule, path):
-    p = path.replace("\\", "/")
-    return any(r == rule and (p == a or (a.endswith("/**") and p.startswith(a[:-2]))) for r, a in RULE_ALLOW)
+def rule_allowed(rule, path, data):
+    return (rule, path.replace("\\", "/"), hashlib.sha256(data).hexdigest()) in RULE_ALLOW
 
 
 def check(path, data, commit, hosts, report):
@@ -403,7 +407,7 @@ def check(path, data, commit, hosts, report):
     if allowed_fixture_path(low):
         return
     for r in path_rules(path, size):
-        if not rule_allowed(r, low):
+        if not rule_allowed(r, low, data):
             report(r, path, 0, commit)
     if size > MAX_BYTES:
         return
@@ -424,7 +428,7 @@ def check(path, data, commit, hosts, report):
         for n in env_example_nonempty(text):
             report("env-example-nonempty", path, n, commit)
     if phi_applies(low) and not is_synthetic(low):
-        for n in ([] if rule_allowed("phi-field", low) else phi_hits(low, text)):
+        for n in ([] if rule_allowed("phi-field", low, data) else phi_hits(low, text)):
             report("phi-field", path, n, commit)
     for n in host_hits(strip_range_literals(low, text), hosts):
         report("host-deny", path, n, commit)
