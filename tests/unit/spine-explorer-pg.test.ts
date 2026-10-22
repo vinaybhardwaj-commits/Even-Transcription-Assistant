@@ -105,14 +105,14 @@ d("explorer reads on postgres:16", () => {
       const out = await dayView({ ist_date: "2026-10-18" }, NOW);
       expect(out.rooms.map((r) => r.room_id)).toEqual(["room_r1", "room_r2"]);
       const [r1, r2] = out.rooms;
-      expect(r1!.encounters).toEqual({ candidate: 0, confirmed: 1, rejected: 0, merged: 1, total: 2 });
+      expect(r1!.encounters).toEqual({ candidate: 0, confirmed: 1, confirmed_single_proxy: 0, rejected: 0, merged: 1, total: 2 });
       expect(r1!.flags).toEqual({ ambiguous: 1, multi_machine: 1, pulse_overlap: 0 });
       expect(r1!.signals_by_proxy).toMatchObject({ pulse: 1, pqm: 1, acoustic: 3, cutter: 0 });
       expect(r1!.jobs_by_stage).toEqual({
         transcribe: { queued: 2, leased: 0, done: 0, failed: 0, dead: 0, superseded: 0, shadow: 0, oldest_queued_age_s: 3600 },
         diarize: { queued: 0, leased: 0, done: 0, failed: 0, dead: 0, superseded: 0, shadow: 1, oldest_queued_age_s: null },
       });
-      expect(r2!.encounters).toEqual({ candidate: 1, confirmed: 0, rejected: 0, merged: 0, total: 1 });
+      expect(r2!.encounters).toEqual({ candidate: 1, confirmed: 0, confirmed_single_proxy: 0, rejected: 0, merged: 0, total: 1 });
       expect(r2!.flags).toEqual({ ambiguous: 0, multi_machine: 0, pulse_overlap: 1 });
       expect(r2!.signals_by_proxy).toMatchObject({ cutter: 1, pulse: 0 });
       // IST midnight edges: 17T18:29:59Z is 17 Oct, 17T18:30:00Z and 18T18:29:59Z are 18 Oct, 18T18:30:00Z is 19 Oct. A range off by a day moves these counts.

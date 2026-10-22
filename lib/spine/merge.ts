@@ -576,6 +576,7 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
       // ---- M5 status
       const finalReasons = new Set(g.members.filter((m) => m.sig.proxy === "cutter").map((m) => attr(m.sig, "final_reason")));
       const weakAgree = new Set(g.members.filter((m) => isWeak(m) && meets(span, m)).map((m) => m.sig.proxy)).size;
+      const weakProxies = new Set(g.members.filter((m) => isWeak(m)).map((m) => m.sig.proxy));
       const strong = hasProxy(g, "pulse") ? "pulse" : hasProxy(g, "pqm") ? "pqm" : null;
       let status: MergedEncounter["status"], reason: string;
       if (finalReasons.has("blind_room_day")) { status = "rejected"; reason = "blind_room_day"; }
@@ -583,6 +584,8 @@ export function mergeSignals(signals: SpineSignal[], merge_version: string, prio
       else if (finalReasons.has("silent_audio")) { status = "confirmed"; reason = "silent"; }
       else if (strong) { status = "confirmed"; reason = strong; }
       else if (weakAgree >= 2 && span.close - span.open >= MIN_WEAK_SPAN_MS) { status = "confirmed"; reason = "weak_agree"; }
+      // RULING B (22 Oct): the timeline-only shape (its one weak proxy is timeline, no strong anchor) is its own status, never `confirmed`
+      else if (weakProxies.size === 1 && weakProxies.has("timeline")) { status = "confirmed_single_proxy"; reason = "single_proxy_timeline"; }
       else { status = "candidate"; reason = weakAgree >= 2 ? "weak_short" : "weak_single"; }
       const moved = !!old && (old.t_open !== span.open || old.t_close !== span.close);
       encounters.push({

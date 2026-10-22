@@ -26,7 +26,7 @@ import type { EncounterStatus, KeyKind, MergeResult, PriorEncounter, PriorLink, 
 type Q = (text: string, params: unknown[]) => Promise<Array<Record<string, unknown>>>;
 const q = (): Q => sql as unknown as Q;
 
-export const MERGE_VERSION = "p2-1";
+export const MERGE_VERSION = "p2-2";
 export const MAX_DAYS = 200;
 export const RECENT_MS = 10 * 60_000;
 /** A room-day that failed this many passes in a row stops holding the cursor (3: one transient error or two bad deploys must not skip a day, a poison day must not hold the queue for long). */

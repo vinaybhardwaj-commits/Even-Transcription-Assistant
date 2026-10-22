@@ -96,9 +96,9 @@ describe("oref pure: acoustic absent = unknown, more shapes", () => {
       expect(view(mergeSignals([...sigs, ...ac], "t", { encounters: [], links: [] }, NOWP))).toEqual(view(mergeSignals(sigs, "t", { encounters: [], links: [] }, NOWP)));
     });
   }
-  it("timeline-only consult: candidate (weak_single) without acoustic; confirmed only with it (D4 consequence)", () => {
+  it("timeline-only consult: confirmed_single_proxy without acoustic; confirmed only with it (D4 consequence)", () => {
     const r = mergeSignals([TL("tlonly@mach_test", 0, 12)], "t", { encounters: [], links: [] }, NOWP);
-    expect(r.encounters.map((e) => `${e.status}/${e.reason}`)).toEqual(["candidate/weak_single"]);
+    expect(r.encounters.map((e) => `${e.status}/${e.reason}`)).toEqual(["confirmed_single_proxy/single_proxy_timeline"]);
     const r2 = mergeSignals([TL("tlonly@mach_test", 0, 12), A(9, 0, 12)], "t", { encounters: [], links: [] }, NOWP);
     expect(r2.encounters.map((e) => `${e.status}/${e.reason}`)).toEqual(["confirmed/weak_agree"]);
   });
@@ -314,7 +314,7 @@ d("oref P2 on postgres:16 with all migrations", () => {
     setConfig("merge", '"shadow"'); allStagesShadow();
     timeline("tlkeyaaaaaaaaaaaaaaaaaaa@mach_test", iso(6), iso(6, 5)); timeline("tlkeybbbbbbbbbbbbbbbbbbb@mach_test", iso(6, 6), iso(6, 10));
     await runSpineMerge(NOW); await runSpineEnqueue(NOW);
-    expect(await num("SELECT count(*) FROM spine_job")).toBe(6);
+    expect(await num("SELECT count(*) FROM spine_job")).toBe(10);   // two confirmed_single_proxy encounters x 5 stages (sp: rows, shadow)
     pg.exec("UPDATE spine_job SET status = 'done' WHERE stage = 'recut'; UPDATE spine_job SET status = 'leased' WHERE stage = 'nemotron';");
     pulse(KA, iso(6), iso(6, 10), { received: iso(7, 30) });
     await runSpineMerge(NOW);
@@ -322,7 +322,7 @@ d("oref P2 on postgres:16 with all migrations", () => {
     await runSpineEnqueue(NOW);
     const loser = (await q("SELECT encounter_id FROM spine_encounter WHERE status = 'merged'"))[0].encounter_id;
     expect((await q(`SELECT stage, status FROM spine_job WHERE encounter_id = '${loser}' ORDER BY stage`)).map((r) => `${r.stage}:${r.status}`))
-      .toEqual(["acoustics:superseded", "nemotron:leased", "recut:done"]);
+      .toEqual(["acoustics:superseded", "collector:superseded", "freescript:superseded", "nemotron:leased", "recut:done"]);
     expect(await num("SELECT count(*) FROM spine_job WHERE stage = 'recut' AND status = 'queued' AND cut_version = 'r0'")).toBe(0);
   });
 

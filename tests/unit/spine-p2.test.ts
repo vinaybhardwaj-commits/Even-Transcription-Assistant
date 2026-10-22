@@ -30,10 +30,10 @@ describe("acoustic is optional (fable ruling 22 Oct)", () => {
     expect(without.encounters.every((e) => e.status === "confirmed")).toBe(true);
     expect(without.encounters.every((e) => e.flags.length === 0)).toBe(true);
   });
-  it("acoustic added later only adds evidence: a timeline-only candidate gets confirmed, never the reverse", () => {
+  it("acoustic added later only adds evidence: a timeline-only confirmed_single_proxy gets confirmed, never the reverse", () => {
     const tl = [s("timeline", "kc@m1", 60, 70, { consult_key: "kc@m1" })];
     const before = mergeSignals(tl, "t", empty, NOW);
-    expect(before.encounters[0].status).toBe("candidate");   // one weak proxy: D4, unchanged by P2
+    expect(before.encounters[0].status).toBe("confirmed_single_proxy");   // RULING B (22 Oct): timeline-only is its own status, never `confirmed`
     const after = mergeSignals([...tl, s("acoustic", "rd:a3", 60, 70)], "t", { encounters: [], links: [] }, NOW);
     expect(after.encounters[0].status).toBe("confirmed");
     expect(after.encounters[0].reason).toBe("weak_agree");

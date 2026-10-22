@@ -10,7 +10,7 @@ export const PIPELINE_MEMO_MS = 10_000;
 
 export type StageCounts = { done: number; queued: number; failed: number; dead: number };
 /** Status counts plus one count per merge flag (spine_encounter.flags, S0 R3). */
-export interface EncounterCounts { candidate: number; confirmed: number; rejected: number; merged: number; ambiguous: number; multi_machine: number; pulse_overlap: number; clamped: number; clamp_failed: number; covered_by_pulse: number }
+export interface EncounterCounts { candidate: number; confirmed: number; confirmed_single_proxy: number; rejected: number; merged: number; ambiguous: number; multi_machine: number; pulse_overlap: number; clamped: number; clamp_failed: number; covered_by_pulse: number }
 export interface RoomPipeline {
   signals: Record<string, number>;
   encounters: EncounterCounts;
@@ -33,7 +33,7 @@ const num = (v: unknown): number => {
   return typeof n === "number" && Number.isFinite(n) ? n : 0;
 };
 const NO_ROOM = "_none";
-const ENC_STATUS = ["candidate", "confirmed", "rejected", "merged"] as const;
+const ENC_STATUS = ["candidate", "confirmed", "confirmed_single_proxy", "rejected", "merged"] as const;
 const FLAGS = ["ambiguous", "multi_machine", "pulse_overlap", "clamped", "clamp_failed", "covered_by_pulse"] as const;
 const JOB_BUCKET: Record<string, keyof StageCounts> = { done: "done", queued: "queued", leased: "queued", failed: "failed", dead: "dead" };
 
@@ -41,7 +41,7 @@ export const SIGNALS_SQL = `SELECT room_id, proxy, count(*)::int AS n FROM spine
 export const ENCOUNTERS_SQL = `SELECT room_id, status, count(*)::int AS n, count(*) FILTER (WHERE flags @> ARRAY['ambiguous'])::int AS ambiguous, count(*) FILTER (WHERE flags @> ARRAY['multi_machine'])::int AS multi_machine, count(*) FILTER (WHERE flags @> ARRAY['pulse_overlap'])::int AS pulse_overlap, count(*) FILTER (WHERE flags @> ARRAY['clamped'])::int AS clamped, count(*) FILTER (WHERE flags @> ARRAY['clamp_failed'])::int AS clamp_failed, count(*) FILTER (WHERE flags @> ARRAY['covered_by_pulse'])::int AS covered_by_pulse FROM spine_encounter WHERE ist_date = $1::date GROUP BY room_id, status`;
 export const JOBS_SQL = `SELECT e.room_id, j.stage, j.status, count(*)::int AS n, min(j.created_at) FILTER (WHERE j.status IN ('queued','leased')) AS oldest_queued FROM spine_job j JOIN spine_encounter e ON e.encounter_id = j.encounter_id WHERE e.ist_date = $1::date GROUP BY e.room_id, j.stage, j.status`;
 
-const emptyEncounters = (): EncounterCounts => ({ candidate: 0, confirmed: 0, rejected: 0, merged: 0, ambiguous: 0, multi_machine: 0, pulse_overlap: 0, clamped: 0, clamp_failed: 0, covered_by_pulse: 0 });
+const emptyEncounters = (): EncounterCounts => ({ candidate: 0, confirmed: 0, confirmed_single_proxy: 0, rejected: 0, merged: 0, ambiguous: 0, multi_machine: 0, pulse_overlap: 0, clamped: 0, clamp_failed: 0, covered_by_pulse: 0 });
 const empty = (): RoomPipeline => ({ signals: {}, encounters: emptyEncounters(), stages: {}, oldest_queued_age_s: null });
 
 /** Pure: rows in, view out. `now` is passed in; nothing here reads a clock. Only counts and closed-vocabulary keys leave. */

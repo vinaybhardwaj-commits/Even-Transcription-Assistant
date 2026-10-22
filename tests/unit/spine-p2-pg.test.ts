@@ -27,7 +27,7 @@ import { GET } from "@/app/api/cron/spine/route";
 const HAVE_DOCKER = dockerAvailable();
 const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
 const pg = pgContainer("eta-spine-p2");
-const UP = readFileSync("db/migrations/0173_spine.sql", "utf8");
+const UP = readFileSync("db/migrations/0173_spine.sql", "utf8") + "\n" + readFileSync("db/migrations/0176_spine_encounter_single_proxy.sql", "utf8");   // 0176 widens the status CHECK
 
 describe("REQUIRED PROOF — spine P2 runs against a real postgres", () => {
   it("ran, or was skipped deliberately", () => {
@@ -134,7 +134,7 @@ d("spine P2 writer and enqueuer on postgres:16", () => {
     await runSpineMerge(NOW);
     const two = await encs();
     expect(two).toHaveLength(2);
-    expect(two.map((x) => x.status)).toEqual(["candidate", "candidate"]);
+    expect(two.map((x) => x.status)).toEqual(["confirmed_single_proxy", "confirmed_single_proxy"]);
     pulse(KA, iso(6), iso(6, 10), "endConsult", { received: iso(7, 30) });
     const c = await runSpineMerge(NOW);
     expect(c.links_moved).toBeGreaterThanOrEqual(1);
@@ -218,7 +218,7 @@ d("spine P2 writer and enqueuer on postgres:16", () => {
   });
 
   it("enqueuer: candidates get the free engines only; nothing before the 15 min close grace; kill_switch stops it", async () => {
-    timeline(KA, iso(6), iso(6, 10));
+    acoustic(1, iso(6), iso(6, 10));
     setConfig("merge", '"shadow"'); setConfig("jobs", '"shadow"'); for (const s of ["recut", "acoustics", "nemotron", "collector", "freescript"]) setConfig(`mode.${s}`, '"shadow"');
     await runSpineMerge(NOW);
     expect((await encs())[0].status).toBe("candidate");

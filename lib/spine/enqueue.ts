@@ -3,6 +3,7 @@
  * FREE stages only. A paid stage (config.PAID_STAGES) is never planned: S7 is not built and D4/D5/D9 are V-pending.
  *  - D4: a candidate gets recut, acoustics, nemotron. A confirmed encounter also gets collector and freescript.
  *  - R1: an encounter flagged `ambiguous` never gets freescript.
+ *  - RULING B: `confirmed_single_proxy` (timeline-only) gets the confirmed stage set, but ALWAYS as status `shadow` (hard cap, whatever jobs / mode.<stage> say) with input_key `sp:` + hash. Promotion to confirmed supersedes the sp: rows.
  *  - D6: nothing is planned until CLOSE_GRACE_MS after the encounter closed.
  *  - frozen / rejected / merged encounters get nothing.
  * Job key: (encounter_id, stage, cut_version = r<boundary_rev>, input_key = hash8(stage, stage config)).
@@ -22,6 +23,7 @@ const STAGE_CFG: Readonly<Record<string, string>> = { recut: "v1", acoustics: "v
 export type EncounterRow = { encounter_id: string; status: string; boundary_rev: number; flags: readonly string[]; t_close: number | null };
 export type PlannedJob = { encounter_id: string; stage: string; cut_version: string; input_key: string; status: "shadow" | "queued" };
 
+export const SP_PREFIX = "sp:";
 export const cutVersion = (boundaryRev: number): string => `r${boundaryRev}`;
 export const inputKey = (stage: string): string => createHash("sha256").update(`${stage}\u001f${STAGE_CFG[stage] ?? "v1"}`).digest("hex").slice(0, 8);
 
@@ -36,11 +38,11 @@ export function effectiveModes(jobs: Mode, stages: Readonly<Record<string, Mode>
 }
 
 export function stagesFor(e: EncounterRow, now: number): string[] {
-  if (e.status !== "confirmed" && e.status !== "candidate") return [];
+  if (e.status !== "confirmed" && e.status !== "candidate" && e.status !== "confirmed_single_proxy") return [];
   if (e.flags.includes("frozen")) return [];
   if (e.t_close === null || now < e.t_close + CLOSE_GRACE_MS) return [];
   const out: string[] = [...CANDIDATE_STAGES];
-  if (e.status === "confirmed") {
+  if (e.status === "confirmed" || e.status === "confirmed_single_proxy") {
     out.push("collector");
     if (!e.flags.includes("ambiguous")) out.push("freescript");
   }
@@ -53,7 +55,8 @@ export function planJobs(encs: readonly EncounterRow[], modes: Readonly<Record<s
     for (const stage of stagesFor(e, now)) {
       const m = modes[stage];
       if (m !== "shadow" && m !== "live") continue;
-      out.push({ encounter_id: e.encounter_id, stage, cut_version: cutVersion(e.boundary_rev), input_key: inputKey(stage), status: m === "live" ? "queued" : "shadow" });
+      const sp = e.status === "confirmed_single_proxy";
+      out.push({ encounter_id: e.encounter_id, stage, cut_version: cutVersion(e.boundary_rev), input_key: sp ? SP_PREFIX + inputKey(stage) : inputKey(stage), status: m === "live" && !sp ? "queued" : "shadow" });
     }
   }
   return out;

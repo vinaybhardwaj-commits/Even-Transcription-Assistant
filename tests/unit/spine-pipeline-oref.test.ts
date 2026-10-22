@@ -12,7 +12,7 @@ vi.mock("@/lib/rooms-live/snapshot", () => ({ getSnapshot: async () => ({ genera
 vi.mock("@/lib/micguard-read", () => ({ readMicGuard: async () => ({ byRoom: { room_a: "ok" } }) }));
 vi.mock("@/lib/jev/worker/coverage-view", () => ({ coverageOrNull: async () => ({ c: 1 }) }));
 import * as P from "@/lib/spine/pipeline-view";
-const view = (n: number): P.PipelineView => ({ ist_date: "2026-10-19", rooms: { room_a: { signals: { pulse: n }, encounters: { candidate: 0, confirmed: n, rejected: 0, merged: 0, ambiguous: 0, multi_machine: 0, pulse_overlap: 0, clamped: 0, clamp_failed: 0, covered_by_pulse: 0 }, stages: {}, oldest_queued_age_s: null } } });
+const view = (n: number): P.PipelineView => ({ ist_date: "2026-10-19", rooms: { room_a: { signals: { pulse: n }, encounters: { candidate: 0, confirmed: n, confirmed_single_proxy: 0, rejected: 0, merged: 0, ambiguous: 0, multi_machine: 0, pulse_overlap: 0, clamped: 0, clamp_failed: 0, covered_by_pulse: 0 }, stages: {}, oldest_queued_age_s: null } } });
 beforeEach(() => { P.__resetPipelineMemoForTests(); M.hang.value = false; M.fail.value = false; vi.spyOn(console, "error").mockImplementation(() => {}); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
@@ -53,7 +53,7 @@ describe("pipelineOrNull: single-flight, memo boundary, timeout (refute B1/B2/B7
   });
   it("shapePipeline: unknown status and NaN counts never throw and never add keys", () => {
     const v = P.shapePipeline("d", { signals: [{ room_id: "r", proxy: "pulse", n: "abc" }], encounters: [{ room_id: "r", status: "weird", n: 3, ambiguous: null }], jobs: [{ room_id: "r", stage: "s", status: "nope", n: 1, oldest_queued: "bad" }] }, new Date(0));
-    expect(v.rooms.r).toEqual({ signals: { pulse: 0 }, encounters: { candidate: 0, confirmed: 0, rejected: 0, merged: 0, ambiguous: 0, multi_machine: 0, pulse_overlap: 0, clamped: 0, clamp_failed: 0, covered_by_pulse: 0 }, stages: {}, oldest_queued_age_s: null });
+    expect(v.rooms.r).toEqual({ signals: { pulse: 0 }, encounters: { candidate: 0, confirmed: 0, confirmed_single_proxy: 0, rejected: 0, merged: 0, ambiguous: 0, multi_machine: 0, pulse_overlap: 0, clamped: 0, clamp_failed: 0, covered_by_pulse: 0 }, stages: {}, oldest_queued_age_s: null });
   });
 });
 
