@@ -109,3 +109,20 @@ def test_a_note_line_with_no_provenance_is_judged_against_every_tagged_turn():
     note = "\n".join(f"{h}: {'for BP Calm threes' if h == 'Diagnoses' else ''}".rstrip() for h in finalize.N.HEADINGS)
     out, bad = finalize.note_final(g, art, g.c, note)
     assert "Diagnoses" in bad and "threes" not in out
+
+
+def test_two_letter_fragments_that_are_not_english_are_number_like_in_a_drug_unit():
+    g = gate_of("As told.")
+    for frag in ("ak", "ik", "ch"):
+        assert numbers.number_like(frag), frag
+        assert g.collision_unit(f"Glycomet {frag} as before", [0]), frag
+    assert not numbers.number_like("is") and not g.collision_unit("Glycomet is as before", [0])
+
+
+def test_tagged_unit_reads_a_capitalised_mid_sentence_word_as_a_brand_and_only_there():
+    with numbers.force_collisions(True):
+        s = drugs.english_brand_spans("Take Duo for now")
+        assert len(s) == 1 and "Take Duo for now"[s[0][0]:s[0][1]] == "Duo"
+        assert drugs.english_brand_spans("Duo for now") == []          # sentence-initial
+        assert drugs.english_brand_spans("Take Duo. Rest now") == [(5, 8)]
+    assert drugs.english_brand_spans("Take Duo for now") == []         # not tagged
