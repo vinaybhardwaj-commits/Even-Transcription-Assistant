@@ -9,6 +9,7 @@ from pathlib import Path
 DATA = Path(__file__).resolve().parents[2] / "data"
 EDIT1_MIN_LEN = 3       # every lexicon word of 3+ letters gives one-edit forms (the ruling: one-edit form of ANY number word)
 WORD_MIN, WORD_MAX = 3, 12
+CLINICAL_MIN_LEN = 6
 
 
 _AZ = "abcdefghijklmnopqrstuvwxyz"
@@ -40,6 +41,8 @@ def build() -> dict:
     for w in sorted(words.dictionary() | words.catalogue_tokens()):  # the dictionary T2 allows: English + clinical + catalogue name tokens
         if not (w.isascii() and w.isalpha() and WORD_MIN <= len(w) <= WORD_MAX) or w in numbers._ENGLISH_NUMERALS or w in lex:
             continue
+        if len(w) >= CLINICAL_MIN_LEN and w in words.whitelist_words():
+            continue  # Fix3d ruling 3: a 6+ letter word of the shipped clinical vocabulary (patient, thyroid) is never a homograph; length rule only
         if drugs._skeleton(w) in keys or w in near:
             out.append(w)
     lex_sha = hashlib.sha256((DATA / "number_lexicon.v1.json").read_bytes()).hexdigest()
