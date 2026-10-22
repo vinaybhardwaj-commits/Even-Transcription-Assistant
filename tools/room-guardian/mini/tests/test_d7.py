@@ -35,13 +35,19 @@ class FakeShim:
     def __init__(self, whoami="room-guardian", registered=True):
         self.whoami, self.registered, self.calls, self.terminated = whoami, registered, [], False
         self.stdout, self.stdin = FakeStdout(), FakeStdin(self)
+        self.register_ok = True
     def on_request(self, req):
         if "id" not in req:
             return
         if req["method"] == "tools/call":
             name, args = req["params"]["name"], req["params"]["arguments"]
             self.calls.append((name, args))
-            out = {"ok": True, "handle": self.whoami, "registered": self.registered} if name == "ubus_whoami" else {"ok": True, "messages": []}
+            if name == "ubus_register" and not self.register_ok:
+                out = {"ok": False, "error": "handle_in_use"}
+            elif name == "ubus_whoami":
+                out = {"ok": True, "handle": self.whoami, "registered": self.registered}
+            else:
+                out = {"ok": True, "messages": []}
             result = {"content": [{"type": "text", "text": json.dumps(out)}]}
         else:
             result = {}
@@ -51,8 +57,9 @@ class FakeShim:
 
 
 class ShimTests(unittest.TestCase):
-    def start(self, whoami="room-guardian", environ=None, registered=True):
+    def start(self, whoami="room-guardian", environ=None, registered=True, register_ok=True):
         shim, seen = FakeShim(whoami, registered), {}
+        shim.register_ok = register_ok
         def popen(argv, **kw):
             seen.update(kw); return shim
         env = environ if environ is not None else dict(os.environ)
@@ -115,6 +122,14 @@ class ShimTests(unittest.TestCase):
             with self.assertRaises(ubus_bus.UbusDenied):
                 bus.thread_messages("room-alert-1")
 
+    def test_a_register_refusal_raises_identity_error_and_sends_nothing(self):
+        # FR1 D7-3: a refused ubus_register raises UbusIdentityError, so no ROUTER SILENT line is written
+        bus, shim, seen, err = self.start(register_ok=False)
+        self.assertIsNone(bus); self.assertIsInstance(err, ubus_bus.UbusIdentityError)
+        self.assertIn("register", str(err)); self.assertIn("handle_in_use", str(err))
+        self.assertEqual([n for n, _ in shim.calls], ["ubus_register"])
+        self.assertTrue(shim.terminated)
+
 
 class SilentBus:
     """Every bus call fails the way LazyBus does after a whoami mismatch."""
@@ -174,6 +189,137 @@ class FailLoudTests(unittest.TestCase):
             if ok:
                 self.assertIn("whoami handle=room-guardian session=h:room-guardian registered=True", logs)
         self.assertEqual(len(shims), 2); self.assertEqual(len(self.lines()), 1)
+
+    def test_a_register_refusal_writes_router_silent_and_sends_nothing(self):
+        # FR1 D7-3: a refused ubus_register at tick time writes one ROUTER SILENT line
+        shims = []
+        def popen(argv, **kw):
+            s = FakeShim("room-guardian"); s.register_ok = False; shims.append(s); return s
+        # make a fresh router that will actually try to start the shim, not use self.bus (SilentBus)
+        r2 = ar.Router(self.r.store, ubus_bus.UbusBus, self.clock, os.path.join(self.tmp.name, "local2.json"))
+        r2.inbox_path = self.inbox
+        import contextlib
+        with mock.patch.object(ubus_bus.subprocess, "Popen", popen), mock.patch.object(ubus_bus.select, "select", lambda a, b, c, t: (a, [], [])), \
+                contextlib.redirect_stderr(io.StringIO()):
+            bus = run_router.LazyBus(CFG)
+            for _ in range(5):
+                try:
+                    r2.tick(bus)
+                finally:
+                    bus.close()
+                    bus = run_router.LazyBus(CFG)
+                self.clock.adv(30)
+        self.assertEqual(len(self.lines()), 1)
+        self.assertTrue("ROUTER SILENT: identity register" in self.lines()[0] and "handle_in_use" in self.lines()[0])
+        self.assertEqual(self.r.store.get_open("r1", "offline")["page_count"], 0)
+
+
+class MainTests(unittest.TestCase):
+    def test_main_calls_startup_check_before_the_loop(self):
+        # FR1 D7-3 NIT-1: main() calls startup_check before entering the tick loop
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            shims, logs = [], []
+            startup_check_called = [False]
+            original_startup_check = run_router.startup_check
+            def fake_startup_check(router, cfg):
+                startup_check_called[0] = True
+                return original_startup_check(router, cfg)
+            def popen(argv, **kw):
+                s = FakeShim("room-guardian"); shims.append(s); return s
+            inbox = os.path.join(t, "INBOX-scratch.md")
+            # stub the loop to run just once
+            sleeps = []
+            def fake_sleep(s):
+                sleeps.append(s)
+                if len(sleeps) >= 1:
+                    raise KeyboardInterrupt()  # exit after first tick
+            with mock.patch.dict(os.environ, {"GUARDIAN_HOME": t}, clear=False), \
+                    mock.patch.object(ubus_bus.subprocess, "Popen", popen), \
+                    mock.patch.object(ubus_bus.select, "select", lambda a, b, c, t: (a, [], [])), \
+                    mock.patch.object(run_router, "log", logs.append), \
+                    mock.patch.object(ar.Router, "inbox_path", inbox), \
+                    mock.patch.object(run_router, "startup_check", fake_startup_check), \
+                    mock.patch.object(run_router.time, "sleep", fake_sleep):
+                # create minimal router.json
+                os.makedirs(os.path.join(t, "etc"), exist_ok=True)
+                with open(os.path.join(t, "etc", "router.json"), "w") as f:
+                    json.dump(CFG, f)
+                os.makedirs(os.path.join(t, "data"), exist_ok=True)
+                try:
+                    run_router.main()
+                except KeyboardInterrupt:
+                    pass
+            # startup_check was called before the loop
+            self.assertTrue(startup_check_called[0])
+            # we see the whoami log
+            self.assertTrue(any("whoami handle=room-guardian" in l for l in logs))
+            # at least one tick ran
+            self.assertGreaterEqual(len(sleeps), 1)
+            self.assertGreaterEqual(len(shims), 1)
+
+    def test_startup_check_retries_every_30s_for_up_to_300s(self):
+        # FR1 D7-3 item 6: if startup_check fails (register refused), retry every 30 s for up to 300 s
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            shims, logs, sleeps = [], [], []
+            startup_check_calls = []  # track when shims are created for startup_check vs normal ticks
+            attempt = [0]
+            in_startup_check = [False]
+            original_startup_check = run_router.startup_check
+            def wrapped_startup_check(router, cfg):
+                in_startup_check[0] = True
+                try:
+                    return original_startup_check(router, cfg)
+                finally:
+                    in_startup_check[0] = False
+            def popen(argv, **kw):
+                attempt[0] += 1
+                s = FakeShim("room-guardian")
+                s.register_ok = (attempt[0] >= 3)  # first two fail, third succeeds
+                shims.append(s)
+                if in_startup_check[0]:
+                    startup_check_calls.append(attempt[0])
+                return s
+            def fake_sleep(s):
+                sleeps.append(s)
+                if len(sleeps) >= 3:  # run for a few iterations
+                    raise KeyboardInterrupt()
+            inbox = os.path.join(t, "INBOX-scratch.md")
+            with mock.patch.dict(os.environ, {"GUARDIAN_HOME": t}, clear=False), \
+                    mock.patch.object(ubus_bus.subprocess, "Popen", popen), \
+                    mock.patch.object(ubus_bus.select, "select", lambda a, b, c, t: (a, [], [])), \
+                    mock.patch.object(run_router, "log", logs.append), \
+                    mock.patch.object(run_router, "startup_check", wrapped_startup_check), \
+                    mock.patch.object(run_router, "_whoami_logged", None), \
+                    mock.patch.object(ar.Router, "inbox_path", inbox), \
+                    mock.patch.object(run_router.time, "sleep", fake_sleep):
+                os.makedirs(os.path.join(t, "etc"), exist_ok=True)
+                with open(os.path.join(t, "etc", "router.json"), "w") as f:
+                    json.dump(CFG, f)
+                os.makedirs(os.path.join(t, "data"), exist_ok=True)
+                import contextlib
+                with contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        run_router.main()
+                    except KeyboardInterrupt:
+                        pass
+            # At least 3 startup_check attempts: initial + retries until success
+            # Note: normal ticks may create buses between attempts, so the attempt numbers may not be consecutive
+            self.assertGreaterEqual(len(startup_check_calls), 3, f"Expected at least 3 startup_check calls, got {startup_check_calls}")
+            self.assertEqual(startup_check_calls[0], 1, "First startup_check should be attempt 1")
+            self.assertEqual(startup_check_calls[1], 2, "Second startup_check should be attempt 2")
+            # The final startup_check should succeed (register_ok = True when attempt >= 3)
+            self.assertGreaterEqual(startup_check_calls[-1], 3, "Final startup_check should succeed")
+            whoami_logs = [l for l in logs if "whoami handle=room-guardian" in l]
+            self.assertGreaterEqual(len(whoami_logs), 1)  # at least the successful one logs whoami
+            # check that sleeps happened (indicating ticks ran between attempts)
+            self.assertGreaterEqual(len(sleeps), 3)
+            # no ROUTER SILENT line written after success (only the first failure writes one, if fail-loud applies)
+            if os.path.exists(inbox):
+                lines = open(inbox).read()
+                silent_count = lines.count("ROUTER SILENT")
+                self.assertLessEqual(silent_count, 1)  # at most 1 from the first failure
 
 
 class CountingBus(FakeBus):

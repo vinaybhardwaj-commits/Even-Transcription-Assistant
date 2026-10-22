@@ -80,11 +80,22 @@ def main():
     router = alert_router.Router(store, ubus_bus.UbusBus, time.time, os.path.join(HOME, "data", "router-local.json"),
                                  lambda: alert_router.guardian_size_lines(HOME))
     log(f"router started pid={os.getpid()}")
+    # FR1 D7-3 item 6: retry startup_check every 30 s for up to 300 s (an old shim's claim can stay live for 3 min after SIGKILL)
+    startup_ok, startup_first_fail = False, None
     try:
-        startup_check(router, ubus_bus.load_cfg())
-    except Exception as e:                           # never fatal: the loop below retries every tick
+        startup_ok = startup_check(router, ubus_bus.load_cfg())
+        if not startup_ok:
+            startup_first_fail = time.time()
+    except Exception as e:                           # never fatal: the loop below retries
         log(f"startup check failed: {e.__class__.__name__}: {str(e)[:120]}")
+        startup_first_fail = time.time()
     while True:
+        # retry startup_check if it has not yet succeeded, and we are within 300 s of the first failure
+        if not startup_ok and startup_first_fail is not None and (time.time() - startup_first_fail) < 300:
+            try:
+                startup_ok = startup_check(router, ubus_bus.load_cfg())
+            except Exception as e:
+                log(f"startup check retry: {e.__class__.__name__}: {str(e)[:120]}")
         try:
             cfg = ubus_bus.load_cfg()
             alert_router.ACKERS = set(cfg["ackers"])
