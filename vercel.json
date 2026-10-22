@@ -96,6 +96,10 @@
     {
       "path": "/api/cron/ops-alerts",
       "schedule": "*/2 * * * *"
+    },
+    {
+      "path": "/api/cron/spine",
+      "schedule": "*/5 * * * *"
     }
   ],
   "headers": [
