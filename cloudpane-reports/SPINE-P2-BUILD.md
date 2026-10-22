@@ -1,0 +1,23 @@
+# SPINE-P2-BUILD — merge WRITER + shadow ENQUEUER (branch spine/p2-writer, base e6754a37)
+## What changed
+- NEW `lib/spine/merge-store.ts` runSpineMerge(now): picks changed room-days, loads signals + prior, calls pure mergeSignals, writes ONE statement (data-modifying CTEs; the Neon HTTP driver has no interactive tx): upsert spine_encounter (only when a column differs), spine_link (old active row set inactive, new active row inserted; ordered by data flow so the partial unique index never sees two), spine_signal.encounter_id. Never deletes (loser = status merged). Gate `merge` (+kill_switch) in config.ts `parseMergeMode`.
+- NEW `lib/spine/enqueue.ts` (pure plan) + `enqueue-store.ts` runSpineEnqueue(now): free stages only (recut, acoustics, nemotron, collector, freescript). status `shadow` when the stage is shadow, `queued` when live (live also needs the upstream free stage `done`; a spent shadow row goes back to queued). Idempotent on the spine_job unique key. Older cut_version / merged / rejected encounters: queued+shadow rows -> `superseded`.
+- `app/api/cron/spine/route.ts`: ingest -> merge -> enqueue, each separately gated, counts per step, one spine_tick row per live step (kinds ingest/merge/enqueue).
+- Tests: `tests/unit/spine-p2-pg.test.ts` (12, postgres:16), `spine-p2.test.ts` (10, pure), `spine-signals-route.test.ts` (+2 chain tests, 2 edited).
+## Gate (own .bc/gate.log)
+- typecheck, typecheck:tests: clean. `Test Files  515 passed | 1 skipped (516)` / `Tests  10363 passed | 7 skipped (10370)`. `npm run build`: OK.
+- check:silent: `Found 9 silent-failure handler(s)` = the 9 accepted pre-existing, none in spine files (script exits 1 as at base).
+- swift build/test: N/A on Linux. check-number-words.sh: not run (not touched).
+## Mutants (all killed)
+guard `IS DISTINCT FROM` -> `WHERE true` (killed by rerun + late-signal tests); freescript allowed for ambiguous (killed, unit + pg); a paid stage added to the plan (killed, unit).
+## FINDINGS (please read)
+1. **Attrs shape bug between S1 and merge.** Stored attrs (0173 CHECK) keep `consult_key/consult_uid/...` under `attrs.ids`, but mergeSignals reads them from the TOP level of attrs (merge.ts keysOf/attr; only pulse_enc_id is read from ids). Fed raw rows, no consult_key link would exist and a pulse and its timeline would never key-match. Fixed in the store, not in merge.ts: `liftAttrs` copies ids.{consult_uid,consult_key,pqm_uid,caa_uid,buddy_opaque,window_id} up. Tested.
+2. **Acoustic optional: no penalty found in mergeSignals.** Strong-anchored groups confirm at merge.ts:584 without weak evidence; acoustic only matters at :585 (two weak proxies). Proven: pulse+timeline with vs without acoustic gives identical ids/status/reason/flags (unit + pg, store level); adding acoustic later only attaches signals. Nothing in merge.ts changed. NOTE: a timeline-ONLY group stays `candidate` (weak_single) until a 2nd weak proxy agrees (acoustic, or nemotron/doctor_activity): that is D4, unchanged, not a P2 penalty, but with acoustic absent such groups cannot reach `confirmed` on their own.
+## Assumptions
+- `held` (R6) persisted as a COUNT in the merge tick (`held_frozen`), no key list: 0173 has no column, the flags CHECK is frozen and a held group has no encounter row; held groups are re-derivable from stored signals.
+- Cursor = keyset (max received_at, room_id, ist_date) in the last merge tick; also re-merged: days with a signal received in the last 10 min (received_at is tx start, so a slow ingest commit can land under the cursor) and days with an open signal in the 72 h horizon (capped after 90 min with no new row). Max 200 days per pass; the cursor stops before the first failed day.
+- jobs=shadow caps every stage at shadow even if mode.<stage>=live. cut_version = `r<boundary_rev>`, input_key = sha256(stage|config "v1")[:8]. Enqueue waits 15 min after t_close (D6). Candidates: recut, acoustics, nemotron (D4); confirmed adds collector, freescript; ambiguous never freescript (R1). Live-gating ignores paid upstreams (none can be enqueued).
+- Migration (item 4): NOT written. No seed; merge/jobs stay off until fable approves a separate numbered seed (next free is 0176 on origin/main and all remote branches seen).
+## Open risks / UNVERIFIED
+- The failed-day / cursor-holds-on-failure path has no test. The recent-window overlap is argued, not proven under real commit skew. spine_signal full-scan for day discovery (no index on received_at) is fine at today's volume, not measured. Prod Neon behaviour of the one-statement write (jsonb text[] cast, CTE ordering) is proven on postgres:16 only.
+- Cron response shape changed on failure (now `{ok:false,error,failed,...counts}`); the success shape gained `merge`/`enqueue`.
