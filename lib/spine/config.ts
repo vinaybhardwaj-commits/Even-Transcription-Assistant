@@ -1,6 +1,6 @@
 /**
  * lib/spine/config.ts — spine_config modes. A missing, malformed or unknown value means OFF.
- * Keys: `kill_switch` (true => everything off), `ingest` (S1 signal ingest), `jobs` (the queue), `mode.<stage>` (per stage). Value: "off"|"shadow"|"live" or {"mode": ...}.
+ * Keys: `kill_switch` (true => everything off), `ingest` (S1 signal ingest), `producers` (SPINE-P1 encounter-shadow cron), `jobs` (the queue), `mode.<stage>` (per stage). Value: "off"|"shadow"|"live" or {"mode": ...}.
  * ingest alone is read from a jsonb that the driver may hand back as text; kill_switch is never decoded (a string there is malformed, i.e. killed).
  */
 import { sql } from "@/lib/db";
@@ -31,6 +31,13 @@ export function parseIngestMode(rows: ReadonlyArray<{ key: string; value: unknow
   const m = new Map(rows.map((r) => [r.key, r.key === "ingest" ? val(r.value) : r.value] as const));
   if (m.has("kill_switch") && isKilled(m.get("kill_switch"))) return "off";
   return parseMode(m.get("ingest"));
+}
+
+/** SPINE-P1 gate (the producer cron). Same rules as parseIngestMode, key `producers`: kill_switch as isKilled, a missing or malformed value means off. */
+export function parseProducersMode(rows: ReadonlyArray<{ key: string; value: unknown }>): Mode {
+  const m = new Map(rows.map((r) => [r.key, r.key === "producers" ? val(r.value) : r.value] as const));
+  if (m.has("kill_switch") && isKilled(m.get("kill_switch"))) return "off";
+  return parseMode(m.get("producers"));
 }
 
 /** Pure: modes for `stages` from the config rows. */
