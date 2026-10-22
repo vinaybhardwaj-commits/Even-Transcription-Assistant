@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { catalogPageSql, blindDaySql } from "@/lib/room-access/readers/spine-artefacts";
 import { ROOM_STUBS_SQL } from "../support/spine-room-stubs";
 import { dockerAvailable, pgContainer } from "../support/s1-pg";
 import { SOURCES, sourceSelect, CONFIG_SQL, hash8, parseArtefactsMode, planArtefacts, mapRow } from "@/lib/spine/artefacts";
@@ -162,23 +163,89 @@ d("spine-s3-r2-oref adversarial", () => {
     expect(q1(`SELECT count(*) FROM spine_artefact WHERE encounter_id='${ENC("k")}'`)).toBe("2");
   });
 
-  it("A8 cost: the catalog page (2000 consults x 3 layers, dup probe) against 60k reb rows and 2000 consult_index rows", async () => {
+  it("A8 cost: the catalog page (2000 consults x 3 layers, dup probe) against 60k reb rows and 2000 consult_index rows; same rows as the old query, bounded plan work, also at 2x data", async () => {
     wipe(); setMode('"shadow"');
-    ex(`INSERT INTO encounter_catalog (consult_uid, clip, layers) SELECT 'cu_test_q'||lpad(g::text,5,'0'), jsonb_build_object('r2_key','consult-clips/q'||g||'.flac'),
+    ex(`${enc("c")}
+      INSERT INTO encounter_catalog (consult_uid, clip, layers) SELECT 'cu_test_q'||lpad(g::text,5,'0'), jsonb_build_object('r2_key','consult-clips/q'||g||'.flac'),
         jsonb_build_object('stt', jsonb_build_object('r2_key','reb/q/'||g||'.json','status','ok'), 'diar', jsonb_build_object('r2_key','reb/q/d'||g||'.json','status','ok')) FROM generate_series(1,2000) g;
       INSERT INTO consult_index (consult_uid, room_id, room_slug, ist_date, t0_ms, t1_ms, clip_r2_key, cut_version, code_commit, source_sha256) SELECT 'cu_test_q'||lpad(g::text,5,'0'),'r','rs','2026-10-19',1,2,'consult-clips/q'||g||'.flac','cv1','c1',md5(g::text)||md5(g::text) FROM generate_series(1,2000) g;
-      INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, status, r2_key, sha256) SELECT 'bw_test_q'||g,'2026-10-19','r','stt','e','v'||g,'c','ok','reb/q/'||g||'.json',md5(g::text)||md5(g::text) FROM generate_series(1,60000) g;
+      INSERT INTO spine_link (encounter_id, key_kind, value, basis) SELECT '${ENC("c")}','consult_uid','cu_test_q'||lpad(g::text,5,'0'),'exact' FROM generate_series(1,1000) g;
+      INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, status, r2_key, sha256) SELECT 'bw_test_q'||g,'2026-10-19',CASE WHEN g <= 100 THEN 'rb' ELSE 'r' END,'stt','e','v'||g,'c','ok','reb/q/'||g||'.json',md5(g::text)||md5(g::text) FROM generate_series(1,60000) g;
       INSERT INTO spine_link (encounter_id, key_kind, value, basis) SELECT '${ENC("c")}','window_id','bw_test_q'||g,'exact' FROM generate_series(1,60000) g;
       ANALYZE;`);
-    const sql = sourceSelect("encounter_catalog").replace("$1", "''").replace(/\$2::text\[\]/g, "ARRAY[]::text[]");
-    const t0 = Date.now(); q1(sql + ";"); const ms = Date.now() - t0;
-    const plan = q1(`EXPLAIN (ANALYZE, BUFFERS) ${sql}`);
-    console.log(`A8 catalog page ${ms} ms\n${plan.split("\n").filter((l) => /Execution|SubPlan|Seq Scan|Index|Hash|Planning/.test(l)).slice(0, 40).join("\n")}`);
-    // The guard is on WORK, not the clock: a wall-clock bound flakes under a parallel suite (4.3 s alone, over 5 s loaded).
-    // A per-row correlated probe would Seq Scan a big table once per consult (loops in the thousands); the hash plan scans each a handful of times.
-    const bigScans = plan.split("\n").filter((l) => /Seq Scan on (reb_track_index|spine_link)\b/.test(l)).map((l) => Number(/actual time=\S+ rows=\d+ loops=(\d+)/.exec(l)?.[1] ?? NaN));
-    expect(bigScans.length).toBeGreaterThan(0);
-    expect(bigScans.every((n) => n <= 10), `loops per big-table Seq Scan: ${bigScans.join(",")}`).toBe(true);
-    expect(ms).toBeLessThan(60000); // a gross-hang net only
+    const PAGE = 2000; // ROW_LIMIT of the index
+    const bind = (sql: string, blind: string[]) => sql.replace("$1", "''").replace(/\$2::text\[\]/g, `ARRAY[${blind.map((b) => `'${b}'`).join(",")}]::text[]`);
+    const rowsOf = (sql: string) => q1(`SELECT count(*) || ' ' || md5(coalesce(string_agg(t::text, E'\\n' ORDER BY t.pk COLLATE "C"), '')) FROM (${sql}) t`);
+    /** Plan work from EXPLAIN (ANALYZE): the worst "Rows Removed by Join Filter" of any node, and the work summed over all nodes: rows x loops of every node plus the rows each node discarded (scan "Rows Removed by Filter" and "Rows Removed by Join Filter", both reported per loop, so x loops). No wall clock. */
+    const cost = (sql: string) => {
+      const lines = q1(`EXPLAIN (ANALYZE) ${sql}`).split("\n");
+      const removed = lines.map((l) => Number(/Rows Removed by Join Filter: (\d+)/.exec(l)?.[1] ?? 0));
+      let work = 0, loops = 1;
+      for (const l of lines) {
+        const m = /actual time=\S+ rows=(\d+) loops=(\d+)/.exec(l);
+        if (m) { loops = Number(m[2]); work += Number(m[1]) * loops; continue; }
+        // Detail lines belong to the node header above them. A correlated Seq Scan with empty output still reads and discards every row on every loop, so its discards count as work.
+        const d = /Rows Removed by (?:Join )?Filter: (\d+)/.exec(l);
+        if (d) work += Number(d[1]) * loops;
+      }
+      return { maxJoinFilterRemoved: Math.max(0, ...removed), work };
+    };
+    // K: a page may discard up to 10 rows per output row by join filter (a hash join with a residual condition discards a few; the old nested loop discarded 50k per output row).
+    const K = 10 * PAGE;
+    // Work: each node's rows x loops summed. The index scans (reb 60k, link 60k, hash builds, sorts) are linear in the TABLES, not the page, so the bound is 400 x page = 800k at 60k reb rows (the fixed plan measures ~550k), scaled with the table; the old plan did 10^8.
+    const WORK_BOUND = (rebRows: number) => 400 * PAGE * (rebRows / 60000);
+    // The pre-fix query, kept verbatim as the negative control: the joins sit under ORDER BY/LIMIT with no fence.
+    const pk = "(c.consult_uid || chr(31) || c.kind)";
+    const OLD_SQL = `SELECT s.consult_uid, c.layer, c.r2_key, c.sha256, c.status, c.dup_source, c.blind, l.encounter_id, ${pk} AS pk
+    FROM (SELECT k.consult_uid, 'clip' AS layer, 'c' AS kind, k.clip->>'r2_key' AS r2_key, k.clip->>'sha256' AS sha256, NULL::text AS status FROM encounter_catalog k
+            WHERE jsonb_typeof(k.clip) = 'object' AND k.clip->>'r2_key' IS NOT NULL
+          UNION ALL
+          SELECT k.consult_uid, e.key, 'l' || chr(31) || e.key, e.value->>'r2_key', NULL::text, e.value->>'status' FROM encounter_catalog k
+            CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(k.layers) = 'object' THEN k.layers ELSE '{}'::jsonb END) e
+            WHERE jsonb_typeof(e.value) = 'object' AND e.value->>'r2_key' IS NOT NULL) c0
+         JOIN encounter_catalog s ON s.consult_uid = c0.consult_uid
+         LEFT JOIN spine_link l ON l.key_kind = 'consult_uid' AND l.value = c0.consult_uid AND l.active
+         LEFT JOIN (SELECT rt.r2_key, array_agg(DISTINCT wl.encounter_id) AS encs FROM reb_track_index rt JOIN spine_link wl ON wl.key_kind = 'window_id' AND wl.value = rt.window_id AND wl.active
+                     WHERE NOT ${blindDaySql("rt.ist_date", "rt.room_id")} GROUP BY rt.r2_key) rd ON rd.r2_key = c0.r2_key
+         LEFT JOIN (SELECT DISTINCT rb.r2_key FROM reb_track_index rb WHERE ${blindDaySql("rb.ist_date", "rb.room_id")}) rbl ON rbl.r2_key = c0.r2_key
+         CROSS JOIN LATERAL (SELECT c0.consult_uid, c0.layer, c0.kind, c0.r2_key, c0.sha256, c0.status,
+            (COALESCE(l.encounter_id = ANY(rd.encs), false) OR EXISTS (SELECT 1 FROM consult_index ci WHERE ci.consult_uid = c0.consult_uid AND ci.clip_r2_key = c0.r2_key)) AS dup_source,
+            (rbl.r2_key IS NOT NULL OR ${blindDaySql("s.ist_date", "s.room_id")}
+              OR EXISTS (SELECT 1 FROM consult_index cb WHERE cb.consult_uid = c0.consult_uid AND ${blindDaySql("cb.ist_date", "cb.room_id")})) AS blind) c
+    WHERE ${pk} COLLATE "C" > $1 ORDER BY ${pk} COLLATE "C" LIMIT ${PAGE}`;
+
+    for (const blind of [[], ["2026-10-19|rb"]]) {
+      const fixed = bind(catalogPageSql(PAGE), blind);
+      expect(rowsOf(fixed), `same rows as the old query, blind=${blind.length}`).toBe(rowsOf(bind(OLD_SQL, blind)));
+      expect(rowsOf(fixed).startsWith(`${PAGE} `)).toBe(true);
+    }
+    expect(q1(`SELECT count(*) FROM (${bind(catalogPageSql(PAGE), [])}) t WHERE dup_source`)).not.toBe("0");
+    expect(q1(`SELECT count(*) FROM (${bind(catalogPageSql(PAGE), ["2026-10-19|rb"])}) t WHERE blind`)).not.toBe("0");
+
+    // Production binds a default blind list (at least 2 entries), so the plan is measured with it too: a join that is hashable with an empty list may not be with a non-empty one.
+    const BLIND2 = ["2026-10-19|rb", "2026-10-18|rb"];
+    const fixed1 = cost(bind(catalogPageSql(PAGE), []));
+    const fixed1b = cost(bind(catalogPageSql(PAGE), BLIND2));
+    console.log(`A8 catalog page fixed: ${JSON.stringify(fixed1)} blind: ${JSON.stringify(fixed1b)} old: ${JSON.stringify(cost(bind(OLD_SQL, [])))}`);
+    expect(fixed1.maxJoinFilterRemoved, "fixed: join-filter discards").toBeLessThanOrEqual(K);
+    expect(fixed1.work, "fixed: total plan rows").toBeLessThanOrEqual(WORK_BOUND(60000));
+    expect(fixed1b.maxJoinFilterRemoved, "fixed, blind set: join-filter discards").toBeLessThanOrEqual(K);
+    expect(fixed1b.work, "fixed, blind set: total plan rows").toBeLessThanOrEqual(WORK_BOUND(60000));
+    // Negative control: the guard must reject the old plan.
+    const old1 = cost(bind(OLD_SQL, []));
+    expect(old1.maxJoinFilterRemoved > K || old1.work > WORK_BOUND(60000), `the guard failed to flag the old plan: ${JSON.stringify(old1)}`).toBe(true);
+
+    // 2x data: the fixed plan stays inside the bound (scaled to the table), the old one stays out.
+    ex(`INSERT INTO reb_track_index (window_id, ist_date, room_id, layer, engine, version, config_hash, status, r2_key, sha256) SELECT 'bw_test_q'||g,'2026-10-19','r','stt','e','v'||g,'c','ok','reb/q/'||g||'.json',md5(g::text)||md5(g::text) FROM generate_series(60001,120000) g;
+      INSERT INTO spine_link (encounter_id, key_kind, value, basis) SELECT '${ENC("c")}','window_id','bw_test_q'||g,'exact' FROM generate_series(60001,120000) g;
+      ANALYZE;`);
+    const fixed2 = cost(bind(catalogPageSql(PAGE), []));
+    expect(fixed2.maxJoinFilterRemoved, "fixed 2x: join-filter discards").toBeLessThanOrEqual(K);
+    expect(fixed2.work, "fixed 2x: total plan rows").toBeLessThanOrEqual(WORK_BOUND(120000));
+    const fixed2b = cost(bind(catalogPageSql(PAGE), BLIND2));
+    expect(fixed2b.maxJoinFilterRemoved, "fixed 2x, blind set: join-filter discards").toBeLessThanOrEqual(K);
+    expect(fixed2b.work, "fixed 2x, blind set: total plan rows").toBeLessThanOrEqual(WORK_BOUND(120000));
+    const old2 = cost(bind(OLD_SQL, []));
+    expect(old2.maxJoinFilterRemoved > K || old2.work > WORK_BOUND(120000), `the guard failed to flag the old plan at 2x: ${JSON.stringify(old2)}`).toBe(true);
   }, 300000);
 });

@@ -63,10 +63,13 @@ export function nemotronPageSql(limit: number): string {
  * The catalog's ref fields only, picked out of its json columns by key: the clip key, and each layer's key and status. `kind` makes the page key unique: the clip row is 'c', a layer row is
  * 'l' + separator + its key, so a layer named "clip" cannot tie with the clip row. dup_source: the object is already indexed from consult_index (same consult), or is a reb ref of a non-blind
  * day with an ACTIVE link to the SAME encounter as this consult.
+ * The joins sit inside an OFFSET 0 fence and the ORDER BY/LIMIT outside it. Without the fence the planner sees LIMIT, expects to stop early, and joins the pre-aggregated rd by a
+ * Nested Loop over a Materialize (one filtered pass over every rd row per output row: ~10^8 rows removed per 2000-row page). Fenced, it plans the whole join and hashes rd on r2_key.
  */
 export function catalogPageSql(limit: number): string {
   const pk = "(c.consult_uid || chr(31) || c.kind)";
-  return `SELECT s.consult_uid, c.layer, c.r2_key, c.sha256, c.status, c.dup_source, c.blind, l.encounter_id, ${pk} AS pk
+  return `SELECT p.consult_uid, p.layer, p.r2_key, p.sha256, p.status, p.dup_source, p.blind, p.encounter_id, p.pk FROM (
+    SELECT s.consult_uid, c.layer, c.r2_key, c.sha256, c.status, c.dup_source, c.blind, l.encounter_id, ${pk} AS pk
     FROM (SELECT k.consult_uid, 'clip' AS layer, 'c' AS kind, k.clip->>'r2_key' AS r2_key, k.clip->>'sha256' AS sha256, NULL::text AS status FROM encounter_catalog k
             WHERE jsonb_typeof(k.clip) = 'object' AND k.clip->>'r2_key' IS NOT NULL
           UNION ALL
@@ -82,7 +85,8 @@ export function catalogPageSql(limit: number): string {
             (COALESCE(l.encounter_id = ANY(rd.encs), false) OR EXISTS (SELECT 1 FROM consult_index ci WHERE ci.consult_uid = c0.consult_uid AND ci.clip_r2_key = c0.r2_key)) AS dup_source,
             (rbl.r2_key IS NOT NULL OR ${blindDaySql("s.ist_date", "s.room_id")}
               OR EXISTS (SELECT 1 FROM consult_index cb WHERE cb.consult_uid = c0.consult_uid AND ${blindDaySql("cb.ist_date", "cb.room_id")})) AS blind) c
-    WHERE ${pk} COLLATE "C" > $1 ORDER BY ${pk} COLLATE "C" LIMIT ${limit}`;
+    WHERE ${pk} COLLATE "C" > $1 OFFSET 0) p
+    ORDER BY p.pk COLLATE "C" LIMIT ${limit}`;
 }
 
 export const roomPageSql = (src: RoomSource, limit: number): string =>
