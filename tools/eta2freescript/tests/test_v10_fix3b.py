@@ -180,3 +180,35 @@ def test_mut_a_change_prompt_feeds_the_plan_line_with_a_cited_turn():
     a = build_artifact(c, empty_encounter(prescription=[_rx("Glizid", "change")]))
     assert names.PLAN_LINE in a["gp_extraction"]["plan_of_management"]["management_plan"]
     assert [e for e in check(a) if "FRX-P2" in e] == [], check(a)
+
+
+# --- the final check (gp and note path) has its own tests: reason codes pin which rule fired ----------------------------------------------------------------
+def _gp_art(field, text, turn=0):
+    return {"confirm_prompts": [], "confirm_internal": {}, "provenance": [{"json_pointer": f"/{field}", "evidence": [{"segment_ref": f"synth-unit:{turn}"}]}],
+            "gp_extraction": {field: text}}
+
+
+def test_h1_the_forced_collision_word_reads_as_a_number_on_both_final_paths():
+    g = gate_of("As told.", drug_spans={0})
+    _o, bad = finalize.note_final(g, _art_with_advice_turn(0), g.c, _note("Rest well, don only"))
+    assert bad.get("General Advice") == "unslotted"                         # 'don' is read as a number in a tagged turn: no slot covers it
+    assert [f[1] for f in finalize.gp_final(g, _gp_art("general_advice", "Rest well, don only"), g.c)] == ["unslotted"]
+    g2 = gate_of("As told.")
+    assert not finalize.note_final(g2, _art_with_advice_turn(0), g2.c, _note("Rest well, don only"))[1]
+    assert finalize.gp_final(g2, _gp_art("general_advice", "Rest well, don only"), g2.c) == []
+
+
+def test_h3_final_check_holds_out_homographs_in_a_drug_unit_on_both_paths():
+    g = gate_of("As told.", drug_spans={0})
+    _o, bad = finalize.note_final(g, _art_with_advice_turn(0), g.c, _note("Rest well, mood good"))
+    assert bad.get("General Advice") == "collision"
+    assert [f[1] for f in finalize.gp_final(g, _gp_art("general_advice", "Rest well, mood good"), g.c)] == ["collision"]
+    g2 = gate_of("As told.")
+    assert not finalize.note_final(g2, _art_with_advice_turn(0), g2.c, _note("Rest well, mood good"))[1]
+
+
+def test_m2_final_check_withholds_other_person_cues_on_both_paths():
+    g = gate_of("As told.")
+    _o, bad = finalize.note_final(g, _art_with_advice_turn(0), g.c, _note("Previous patient Rose had fever"))
+    assert bad.get("General Advice") == "other_person"
+    assert [f[1] for f in finalize.gp_final(g, _gp_art("general_advice", "Kamala's wife has cough"), g.c)] == ["other_person"]

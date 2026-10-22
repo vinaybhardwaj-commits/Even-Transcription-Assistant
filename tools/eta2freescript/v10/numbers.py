@@ -185,7 +185,7 @@ def _collisions_as_numbers(t: str) -> str:
             if flags is None:
                 flags = drugs.flags(t)
             a, b = toks[lo].start, toks[hi - 1].end
-            near = any(f.start < b and f.end > a for f in flags) or any(s < b and e > a for s, e in drugs.english_brand_spans(t)) or any(e <= tk.start and len(words.tokenize(t[e:tk.start])) <= 1 for s, e in drugs.english_brand_spans(t, initial=True, short_ok=True))  # a brand that opens a short unit or is not a common word
+            near = any(f.start < b and f.end > a for f in flags) or any(e <= tk.start and len(words.tokenize(t[e:tk.start])) <= 1 for s, e in drugs.english_brand_spans(t, initial=True, short_ok=True))  # a brand that opens a short unit or is not a common word
         if near:
             out = out[:tk.start] + W * (tk.end - tk.start) + out[tk.end:]
     return out
