@@ -31,7 +31,9 @@ import datetime as dt
 import glob
 import hashlib
 import json
+import math
 import os
+import stat
 import subprocess
 import sys
 
@@ -44,7 +46,7 @@ POSTING_ENABLED = False  # N3: phase 0a never posts. Asserted on every write; th
 # Preregistered values, not tuned on real60: tools/timbre/slots.py:40-42 and lib/diarize-nemotron/identity.ts.
 COS_MIN = 0.65
 MARGIN_MIN = 0.05
-MARGIN_EPS = 1e-6  # tools/timbre/slots.py _MARGIN_EPS: a margin that prints as 0.05 passes
+MARGIN_EPS = 1e-9  # float slack for cos and margins: an exact 0.65 / 0.05 computed as 0.6499999999 still passes (fix1 L6)
 # Recorded-vote decision rule: merge_b.decide == tools/timbre/role_clef.choose_slots.
 P_DOC, DOC_MARGIN, P_PAT = 0.6, 0.2, 0.6
 P_BLOCK = 0.6  # D2: a non-doctor p at or above this on the arm (c) label, in any vote row, blocks arm (c)
@@ -60,7 +62,9 @@ MAP_MIN_SPEECH_MS = 2000
 KEYS = ["p_doctor", "p_patient", "p_attender", "p_staff"]
 ROLES = ["doctor", "patient", "attender", "staff"]
 CLEF_SET = "timbre-role-v1"
-NON_DOCTOR = {"patient", "attender", "attendant", "relative", "staff"}
+NON_DOCTOR = {"patient", "attender", "attendant", "relative", "staff", "other", "unknown"}
+# fix1 M2: a decided role that is not "doctor" blocks arm (c); these are the values that are not a decision.
+NOT_DECIDED = {None, "", "undecided"}
 
 DEFAULT_ETA = os.path.expanduser("~/eta-data")
 DEFAULT_FALLBACK = os.path.expanduser("~/eta-data/role-votes")
@@ -69,7 +73,15 @@ DEFAULT_CLIPS = os.path.expanduser("~/eta-data/consult/clips")
 
 
 def norm_role(r):
+    if isinstance(r, str):
+        r = r.strip().lower()
     return {"attender": "attendant", "relative": "attendant"}.get(r, r)
+
+
+def blocks_arm_c(role):
+    """M2 (fix1): any decided role that is not doctor (case and whitespace folded) blocks arm (c)."""
+    r = norm_role(role)
+    return r not in NOT_DECIDED and r != "doctor"
 
 
 def sha256_file(path):
@@ -97,6 +109,10 @@ def load_centroids(path):
 
 def margin_ok(m):
     return m is not None and m >= MARGIN_MIN - MARGIN_EPS
+
+
+def cos_ok(c):
+    return c >= COS_MIN - MARGIN_EPS
 
 
 def voiceprint(vecs, labels, cen, duid):
@@ -128,12 +144,13 @@ def voiceprint(vecs, labels, cen, duid):
         nxt = [cos[o] for o in have if o != lab]
         mn = c - max(nxt) if nxt else None
         mrc = c - max(float(unit(vecs[lab]) @ cen[u]) for u in others) if others else None
-        old_pass = c >= COS_MIN and (mn is None or margin_ok(mn))
+        old_pass = cos_ok(c) and (mn is None or margin_ok(mn))
         # No next label passes (merge_c, slots.py); no runner-up centroid abstains (decidePulseRoom, §5.6).
         new_pass = old_pass and margin_ok(mrc)
         # M1 (fable 20 Oct): the independent N1 candidate set uses cos and the runner-up-centroid margin only. The
         # next-label margin must not hide a second near-doctor label, so it is not part of this test.
-        n1 = c >= COS_MIN and margin_ok(mrc)
+        # fix1 L3: with one enrolled centroid there is no runner-up (mrc None): count the label, so it can still block.
+        n1 = cos_ok(c) and (mrc is None or margin_ok(mrc))
         per[lab].update(logged_in_doctor_cos=round(c, 6), margin_next_label=None if mn is None else round(mn, 6),
                         margin_runner_up_centroid=None if mrc is None else round(mrc, 6),
                         status="match" if new_pass else "abstain", armc=new_pass, armc_old=old_pass, n1_candidate=n1)
@@ -141,7 +158,7 @@ def voiceprint(vecs, labels, cen, duid):
     b, top = sims[0]
     r = sims[1][0] if len(sims) > 1 else None
     old.update(best_cos=round(b, 6), runner_up_cos=None if r is None else round(r, 6))
-    if b < COS_MIN:
+    if not cos_ok(b):
         old["treating_reason"] = "below_cos_min"
     elif r is not None and not margin_ok(b - r):
         old["treating_reason"] = "inside_margin"
@@ -162,10 +179,10 @@ def per_label_p(rows):
 
 
 def max_nondoctor(rows):
-    """{slot: max non-doctor p over EVERY row of the slot} (D2, M2). A row with p_doctor null counts; a null key is 0.0."""
+    """{slot: max non-doctor p over EVERY row of the slot} (D2, M2). A row with p_doctor null counts; a null key is 0.0; NaN is 1.0."""
     out = {}
     for r in rows:
-        nd = max(0.0 if r.get(k) is None else float(r[k]) for k in KEYS[1:])
+        nd = max(0.0 if r.get(k) is None else (1.0 if math.isnan(float(r[k])) else float(r[k])) for k in KEYS[1:])
         out[r["slot"]] = max(out.get(r["slot"], 0.0), nd)
     return out
 
@@ -302,7 +319,7 @@ def order_capable(d3, c, cands):
 
     d3: labels decided doctor by rule A (3/3). c: the label named by rule B (arm c), or None.
     cands: every N1 voiceprint candidate (cos and runner-up-centroid margin, no next-label margin). A candidate
-    outside the order-capable set (outside the 3/3 set when several labels are 3/3) blocks all.
+    outside the returned order-capable set blocks all (two 3/3 labels that are both near-doctor: none is order-capable).
     """
     d3, cands = set(d3), set(cands)
     conflicts = []
@@ -324,8 +341,8 @@ def order_capable(d3, c, cands):
         else:
             out = set()
             conflicts.append("doctor_conflict")
-    allowed = d3 if len(d3) > 1 else out
-    if out and cands - allowed:
+    # fix1 M1: any near-doctor candidate outside the returned set blocks (the more conservative reading).
+    if out and cands - out:
         out = set()
         conflicts.append("doctor_conflict")
     return out, sorted(set(conflicts))
@@ -394,7 +411,7 @@ def build_layer(*, bundle_segs, role_segs, clef_rows, jev_rows, doctor_uid, vecs
         rec = next(x for x in out_labels if x["label"] == c)
         # OQ-5: voter 1 or 2 calls the arm (c) label non-doctor -> unknown, no order.
         # D2 (M2): the max non-doctor p over all of the label's rows in either vote also blocks.
-        if (rec["voter1_role_track"]["role"] in NON_DOCTOR or rec["jev"]["role"] in NON_DOCTOR
+        if (blocks_arm_c(rec["voter1_role_track"]["role"]) or blocks_arm_c(rec["jev"]["role"])
                 or max(clef_nd[c], jev_nd[c]) >= P_BLOCK):
             conflicts.append("doctor_conflict")
             rec["rule_b"] = False
@@ -436,7 +453,13 @@ def make_private_dirs(d, root):
             cur = os.path.join(cur, part)
         if os.path.islink(cur):
             raise PermissionError("refusing a symlinked fallback directory")
-        if not os.path.isdir(cur):
+        if os.path.isdir(cur):
+            st = os.lstat(cur)
+            if stat.S_IMODE(st.st_mode) != 0o700:  # fix1 L5: tighten an existing directory, or refuse one we do not own
+                if st.st_uid != os.getuid():
+                    raise PermissionError("refusing a fallback directory owned by another user")
+                os.chmod(cur, 0o700)
+        else:
             if cur == root:
                 os.makedirs(os.path.dirname(cur), mode=0o700, exist_ok=True)
             os.mkdir(cur, 0o700)

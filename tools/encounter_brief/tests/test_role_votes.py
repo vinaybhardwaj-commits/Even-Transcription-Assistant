@@ -223,7 +223,9 @@ def test_rule_b_alone_makes_order_capable():
     ({"a"}, None, {"a", "y"}, set(), ["doctor_conflict"]),  # M1: ... and 3-of-3
     ({"a", "b"}, None, set(), set(), ["second_doctor"]),
     ({"a", "b"}, "a", {"a"}, {"a"}, ["second_doctor"]),
-    ({"a", "b"}, "a", {"a", "b"}, {"a"}, ["second_doctor"]),
+    ({"a", "b"}, "a", {"a", "b"}, set(), ["doctor_conflict", "second_doctor"]),  # fix1 M1: both 3/3 and both near-doctor
+    ({"a", "b"}, None, {"a", "b"}, set(), ["second_doctor"]),
+    (set(), "x", {"x", "y"}, set(), ["doctor_conflict"]),
     ({"a", "b"}, "a", {"a", "y"}, set(), ["doctor_conflict", "second_doctor"]),
     ({"a", "b"}, "x", {"x"}, set(), ["doctor_conflict", "second_doctor"]),
     ({"a"}, None, {"x"}, set(), ["doctor_conflict"]),
@@ -528,3 +530,131 @@ def test_hf_hub_offline_is_assigned_not_defaulted(monkeypatch):
     monkeypatch.setitem(sys.modules, "speechbrain.inference.speaker", sp)
     R.load_encoder()
     assert os.environ["HF_HUB_OFFLINE"] == "1"
+
+
+# ---------------------------------------------------------------- fix1 (Opus refute findings M1-M2, L3-L7)
+
+def test_fix1_m1_two_3of3_near_doctor_labels_order_nothing():
+    # build_layer cannot yet produce two 3/3 labels (choose_slots names one doctor), so the function is pinned directly.
+    assert R.order_capable({"a", "b"}, "a", {"a", "b"}) == (set(), ["doctor_conflict", "second_doctor"])
+    assert R.order_capable({"a", "b"}, "a", {"a"}) == ({"a"}, ["second_doctor"])
+    assert R.order_capable({"a"}, "a", {"a", "b"}) == (set(), ["doctor_conflict"])
+
+
+@pytest.mark.parametrize("role", ["other", "unknown", "Patient", " PATIENT ", "Other", "UNKNOWN", "attender", "relative"])
+def test_fix1_m2_any_decided_non_doctor_role_blocks_arm_c(role):
+    assert R.blocks_arm_c(role) is True
+    r = [dict(x, role=role) for x in ROLE]
+    L = build(role=r)
+    assert L["rule_b_label"] is None and L["order_capable_labels"] == [] and "doctor_conflict" in L["conflicts"]
+
+
+@pytest.mark.parametrize("role", ["doctor", "Doctor", " doctor ", "undecided", "", None])
+def test_fix1_m2_doctor_and_undecided_do_not_block(role):
+    assert R.blocks_arm_c(role) is False
+
+
+def test_fix1_m2_role_normalisation_folds_case_and_space():
+    assert R.norm_role(" Attender ") == "attendant" and R.norm_role("DOCTOR") == "doctor" and R.norm_role(None) is None
+
+
+def test_fix1_l3_one_centroid_still_counts_a_second_near_doctor_label_as_candidate():
+    C = cen("d0")
+    vecs = {"speaker_0": with_cos(C["d0"], 0.90, 7), "speaker_1": with_cos(C["d0"], 0.80, 6)}
+    per, _, _ = R.voiceprint(vecs, ["speaker_0", "speaker_1"], C, "d0")
+    assert per["speaker_1"]["margin_runner_up_centroid"] is None
+    assert per["speaker_1"]["n1_candidate"] is True and per["speaker_1"]["armc"] is False
+    L = build(vecs=vecs, centroids=C)
+    assert L["n1_candidates"] == ["speaker_0", "speaker_1"]
+    assert L["order_capable_labels"] == [] and "doctor_conflict" in L["conflicts"]
+    below = {"speaker_0": with_cos(C["d0"], 0.90, 7), "speaker_1": with_cos(C["d0"], 0.60, 6)}
+    assert not R.voiceprint(below, ["speaker_0", "speaker_1"], C, "d0")[0]["speaker_1"]["n1_candidate"]
+
+
+def test_fix1_l4_nan_counts_as_one():
+    rows = [{"slot": "s", "p_doctor": 0.1, "p_patient": float("nan"), "p_attender": 0.9, "p_staff": None},
+            {"slot": "t", "p_doctor": 0.1, "p_patient": 0.2, "p_attender": None, "p_staff": float("nan")}]
+    assert R.max_nondoctor(rows) == {"s": 1.0, "t": 1.0}
+    role = [dict(r, role="undecided") for r in ROLE]
+    row = {"consult_id": "c", "t0_ms": 0, "t1_ms": 10000, "slot": "speaker_0", "p_doctor": None, "p_patient": float("nan"),
+           "p_attender": None, "p_staff": None}
+    L = build(role=role, extra_clef=[row])
+    assert L["rule_b_label"] is None and "doctor_conflict" in L["conflicts"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_fix1_l5_existing_fallback_root_is_tightened_to_0700(tmp_path):
+    root = tmp_path / "fb"
+    root.mkdir(mode=0o755)
+    os.chmod(root, 0o755)
+    b = _ro(tmp_path)
+    try:
+        path, fb = R.write_layer({"layer": "role_votes"}, str(b), str(tmp_path / "eta"), str(root))
+    finally:
+        os.chmod(b, 0o700)
+    assert fb is True and stat.S_IMODE(os.stat(root).st_mode) == 0o700
+
+
+def test_fix1_l5_existing_fallback_root_owned_by_another_user_is_refused(tmp_path, monkeypatch):
+    root = tmp_path / "fb"
+    root.mkdir()
+    os.chmod(root, 0o755)
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(root).st_uid + 1)
+    with pytest.raises(PermissionError):
+        R.make_private_dirs(str(root / "a"), str(root))
+    assert stat.S_IMODE(os.stat(root).st_mode) == 0o755
+
+
+def test_fix1_l6_exact_boundaries_pass_despite_float_error():
+    C = cen("d0", "d1")
+    # 0.65 reached by float arithmetic that lands just under it
+    c = 0.65 - 5e-11
+    per, old, _ = R.voiceprint({"speaker_0": with_cos(C["d0"], c, 7)}, ["speaker_0"], C, "d0")
+    assert per["speaker_0"]["armc"] is True and per["speaker_0"]["n1_candidate"] is True and old["treating_reason"] == "ok"
+    per, old, _ = R.voiceprint({"speaker_0": with_cos(C["d0"], 0.65 - 1e-6, 7)}, ["speaker_0"], C, "d0")
+    assert per["speaker_0"]["armc"] is False and old["treating_reason"] == "below_cos_min"
+    assert R.margin_ok(0.05 - 5e-11) is True and R.margin_ok(0.05 - 1e-6) is False
+
+
+# mutant m01: n1 cos threshold must be inclusive at 0.65, not "> 0.651"
+def test_fix1_l7_m01_n1_candidate_at_cos_0650_and_0651():
+    C = cen("d0", "d1", "d2")
+    for c in (0.65, 0.6505):
+        vecs = {"speaker_0": with_cos(C["d0"], 0.90, 7), "speaker_1": with_cos(C["d0"], c, 6)}
+        L = build(vecs=vecs, centroids=C)
+        assert L["n1_candidates"] == ["speaker_0", "speaker_1"], c
+        assert L["order_capable_labels"] == [], c
+
+
+# mutant m04: D2 is inclusive at P_BLOCK
+@pytest.mark.parametrize("which", ["clef", "jev"])
+def test_fix1_l7_m04_non_doctor_p_exactly_at_p_block_blocks(which):
+    role = [dict(r, role="undecided") for r in ROLE]
+    mk = lambda p: {"consult_id": "c", "t0_ms": 0, "t1_ms": 10000, "slot": "speaker_0", "p_doctor": None, "p_patient": p,
+                    "p_attender": None, "p_staff": None}
+    assert build(role=role, **{"extra_" + which: [mk(R.P_BLOCK - 1e-6)]})["order_capable_labels"] == ["speaker_0"]
+    L = build(role=role, **{"extra_" + which: [mk(R.P_BLOCK)]})
+    assert R.P_BLOCK == 0.6 and L["order_capable_labels"] == [] and "doctor_conflict" in L["conflicts"]
+
+
+# mutant m10: the temp file is removed when the write fails
+def test_fix1_l7_m10_temp_file_removed_when_the_write_fails(tmp_path, monkeypatch):
+    b = tmp_path / "eta" / "bundle"
+    b.mkdir(parents=True)
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(R.json, "dump", boom)
+    with pytest.raises(OSError):
+        R.write_layer({"layer": "role_votes"}, str(b), str(tmp_path / "eta"), str(tmp_path / "fb"))
+    assert os.listdir(b) == []
+
+
+# mutant m12: a label with exactly 2000 ms of speech must be covered
+def test_fix1_l7_m12_coverage_required_at_exactly_2000_ms():
+    votes = [{"slot": "a", "t0_ms": 0, "t1_ms": 10000}, {"slot": "b", "t0_ms": 10000, "t1_ms": 20000}]
+    for dur_ms, status in ((1999, "clean"), (2000, "ambiguous"), (2001, "ambiguous")):
+        bundle = segs(("speaker_0", 0, 10), ("speaker_1", 10, 20))
+        bundle.append({"speaker": "speaker_2", "t0_ms": 20000, "t1_ms": 20000 + dur_ms})
+        assert R.map_labels(votes, bundle)["status"] == status, dur_ms
