@@ -139,11 +139,16 @@ def voiceprint(vecs, labels, cen, duid):
         return per, old, ["no_vectors"]
     others = [u for u in cen if u != duid]
     cos = {lab: float(unit(vecs[lab]) @ cen[duid]) for lab in have}
+    # fix2 LOW-9: any non-finite cosine makes every label's neighbourhood unknown: no arm (c) pass, whatever the row order.
+    unknown = any(not math.isfinite(c) for c in cos.values())
     for lab in have:
         c = cos[lab]
         nxt = [cos[o] for o in have if o != lab]
         mn = c - max(nxt) if nxt else None
         mrc = c - max(float(unit(vecs[lab]) @ cen[u]) for u in others) if others else None
+        if unknown or not math.isfinite(c) or (mrc is not None and not math.isfinite(mrc)):
+            per[lab].update(status="abstain")
+            continue
         old_pass = cos_ok(c) and (mn is None or margin_ok(mn))
         # No next label passes (merge_c, slots.py); no runner-up centroid abstains (decidePulseRoom, §5.6).
         new_pass = old_pass and margin_ok(mrc)
@@ -154,6 +159,9 @@ def voiceprint(vecs, labels, cen, duid):
         per[lab].update(logged_in_doctor_cos=round(c, 6), margin_next_label=None if mn is None else round(mn, 6),
                         margin_runner_up_centroid=None if mrc is None else round(mrc, 6),
                         status="match" if new_pass else "abstain", armc=new_pass, armc_old=old_pass, n1_candidate=n1)
+    if unknown:
+        old["treating_reason"] = "non_finite_cos"
+        return per, old, []
     sims = sorted(((cos[lab], lab) for lab in have), reverse=True)
     b, top = sims[0]
     r = sims[1][0] if len(sims) > 1 else None
@@ -192,6 +200,9 @@ def choose_slots(ps, order):
     ok = [lab for lab in order if ps.get(lab)]
     if not ok:
         return None, None, "no_input"
+    # fix2 LOW-8: a non-finite p_doctor cannot be doctor and cannot pass the margin; fail closed.
+    if any(not math.isfinite(float(ps[lab][0])) for lab in ok):
+        return None, None, "non_finite_p"
     ranked = sorted(ok, key=lambda k: (-ps[k][0], order.index(k)))
     best = ranked[0]
     second = ps[ranked[1]][0] if len(ranked) > 1 else 0.0
@@ -297,10 +308,12 @@ def role_majority(label_segs, role_segs):
         for r in role_segs:
             o = ov(s["t0_ms"], s["t1_ms"], r["t0_ms"], r["t1_ms"])
             if o > 0:
-                tot[norm_role(r["role"])] += o
+                tot[norm_role(r["role"]) or "undecided"] += o  # fix2 LOW-10: a None role is "undecided"
     if not tot:
         return None, None
     role, ms = max(tot.items(), key=lambda kv: (kv[1], kv[0]))
+    if sum(1 for v in tot.values() if v == ms) > 1 and "undecided" in tot and tot["undecided"] == ms:
+        role = "undecided"  # a tie that includes the unknown role fails closed
     return role, round(ms / sum(tot.values()), 4)
 
 

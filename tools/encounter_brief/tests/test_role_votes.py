@@ -658,3 +658,42 @@ def test_fix1_l7_m12_coverage_required_at_exactly_2000_ms():
         bundle = segs(("speaker_0", 0, 10), ("speaker_1", 10, 20))
         bundle.append({"speaker": "speaker_2", "t0_ms": 20000, "t1_ms": 20000 + dur_ms})
         assert R.map_labels(votes, bundle)["status"] == status, dur_ms
+
+
+# ---- fix2 (LOW-8, LOW-9, LOW-10): non-finite and None fail closed
+_NAN = float("nan")
+
+
+def test_low8_nan_p_doctor_does_not_name_a_doctor():
+    ps = {"speaker_0": [_NAN, 0.1, 0.1, 0.1], "speaker_1": [0.1, 0.8, 0.05, 0.05]}
+    doc, _, code = R.choose_slots(ps, ["speaker_0", "speaker_1"])
+    assert doc is None, code
+
+
+def test_low8_nan_runner_up_p_doctor_does_not_bypass_margin():
+    ps = {"speaker_0": [0.7, 0.1, 0.1, 0.1], "speaker_1": [_NAN, 0.8, 0.05, 0.05]}
+    doc, _, code = R.choose_slots(ps, ["speaker_0", "speaker_1"])
+    assert doc is None, code
+
+
+@pytest.mark.parametrize("nanlab", ["speaker_1", "speaker_2"])
+def test_low9_nan_vector_next_label_order_independent(nanlab):
+    C = cen("d0", "d1", "d2")
+    vecs = {"speaker_0": with_cos(C["d0"], 0.9, 7), "speaker_1": with_cos(C["d0"], 0.3, 6),
+            "speaker_2": with_cos(C["d0"], 0.3, 5)}
+    vecs[nanlab] = np.full(DIM, _NAN)
+    per, old, _ = R.voiceprint(vecs, sorted(vecs), C, "d0")
+    assert all(p["armc"] is False for p in per.values())
+    assert old["treating_label"] is None
+
+
+def test_low10_role_none_tie_does_not_crash_and_fails_closed():
+    role = [{"role": None, "t0_ms": 0, "t1_ms": 5000}, {"role": "doctor", "t0_ms": 5000, "t1_ms": 10000}]
+    r, _ = R.role_majority([{"t0_ms": 0, "t1_ms": 10000}], role)
+    assert r == "undecided"
+
+
+def test_low10_role_none_majority_is_undecided_not_a_role():
+    role = [{"role": None, "t0_ms": 0, "t1_ms": 6000}, {"role": "doctor", "t0_ms": 6000, "t1_ms": 10000}]
+    r, _ = R.role_majority([{"t0_ms": 0, "t1_ms": 10000}], role)
+    assert r == "undecided"
