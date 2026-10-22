@@ -259,3 +259,18 @@ def n1_phrase(text: str, fld: str | None) -> str | None:
     if fld in ("follow_up", "investigations", "procedures", "referrals") and validate._D2.search(t):
         return "n1_phrase"
     return None
+
+
+_OTHER_PERSON = re.compile(r"\b(?:previous|last|next|earlier|other)\s+patient\b|\b[A-Z][a-z]+(?:['\u2019]s)\s+(?:mother|wife|husband|son|daughter|father|brother|sister)\b|\bpatient\s+before\b", re.I)
+
+
+def other_person(text: str) -> str | None:
+    """Fix3b M2: a cue that the words are about another person ("previous patient", "<name>'s wife / son"), found in ONE posted unit; the unit is withheld (reason other_person)."""
+    t = unicodedata.normalize("NFKC", text or "")
+    m = _OTHER_PERSON.search(t)
+    if not m:
+        return None
+    s = m.group(0)
+    if "'" in s or "\u2019" in s:
+        return "other_person" if s[:1].isupper() else None  # the possessive form needs a capitalised name before it
+    return "other_person"

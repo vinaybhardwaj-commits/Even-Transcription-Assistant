@@ -1,7 +1,7 @@
 {
  "version": "whitelist-extra.v1",
  "spec": "FRX-T2 (Fix2 H2 ruling, eta2freescript 22 Oct 2026): curated counselling vocabulary the English list lacks. No person names, no place names, no number words, no drug names. Max 300 entries.",
- "count": 179,
+ "count": 143,
  "entries": [
   {
    "word": "roti",
@@ -17,10 +17,6 @@
   },
   {
    "word": "paratha",
-   "category": "staple_food"
-  },
-  {
-   "word": "puri",
    "category": "staple_food"
   },
   {
@@ -49,10 +45,6 @@
   },
   {
    "word": "sooji",
-   "category": "staple_food"
-  },
-  {
-   "word": "rava",
    "category": "staple_food"
   },
   {
@@ -104,10 +96,6 @@
    "category": "staple_food"
   },
   {
-   "word": "thepla",
-   "category": "staple_food"
-  },
-  {
    "word": "khakhra",
    "category": "staple_food"
   },
@@ -132,15 +120,7 @@
    "category": "staple_food"
   },
   {
-   "word": "atta",
-   "category": "staple_food"
-  },
-  {
    "word": "maida",
-   "category": "staple_food"
-  },
-  {
-   "word": "sattu",
    "category": "staple_food"
   },
   {
@@ -172,23 +152,11 @@
    "category": "dairy_and_fat"
   },
   {
-   "word": "makhan",
-   "category": "dairy_and_fat"
-  },
-  {
    "word": "khoya",
    "category": "dairy_and_fat"
   },
   {
    "word": "chai",
-   "category": "drink"
-  },
-  {
-   "word": "kadha",
-   "category": "drink"
-  },
-  {
-   "word": "kashayam",
    "category": "drink"
   },
   {
@@ -202,10 +170,6 @@
   {
    "word": "nariyal",
    "category": "drink"
-  },
-  {
-   "word": "namkeen",
-   "category": "snack_sweet"
   },
   {
    "word": "pakora",
@@ -224,10 +188,6 @@
    "category": "snack_sweet"
   },
   {
-   "word": "mithai",
-   "category": "snack_sweet"
-  },
-  {
    "word": "laddu",
    "category": "snack_sweet"
   },
@@ -237,10 +197,6 @@
   },
   {
    "word": "halwa",
-   "category": "snack_sweet"
-  },
-  {
-   "word": "gulab",
    "category": "snack_sweet"
   },
   {
@@ -284,47 +240,11 @@
    "category": "spice_herb_home_remedy"
   },
   {
-   "word": "methi",
-   "category": "spice_herb_home_remedy"
-  },
-  {
    "word": "hing",
    "category": "spice_herb_home_remedy"
   },
   {
-   "word": "dhania",
-   "category": "spice_herb_home_remedy"
-  },
-  {
-   "word": "pudina",
-   "category": "spice_herb_home_remedy"
-  },
-  {
    "word": "laung",
-   "category": "spice_herb_home_remedy"
-  },
-  {
-   "word": "dalchini",
-   "category": "spice_herb_home_remedy"
-  },
-  {
-   "word": "mulethi",
-   "category": "spice_herb_home_remedy"
-  },
-  {
-   "word": "giloy",
-   "category": "spice_herb_home_remedy"
-  },
-  {
-   "word": "neem",
-   "category": "spice_herb_home_remedy"
-  },
-  {
-   "word": "amla",
-   "category": "spice_herb_home_remedy"
-  },
-  {
-   "word": "triphala",
    "category": "spice_herb_home_remedy"
   },
   {
@@ -340,23 +260,7 @@
    "category": "vegetable_fruit"
   },
   {
-   "word": "tinda",
-   "category": "vegetable_fruit"
-  },
-  {
    "word": "karela",
-   "category": "vegetable_fruit"
-  },
-  {
-   "word": "palak",
-   "category": "vegetable_fruit"
-  },
-  {
-   "word": "gobi",
-   "category": "vegetable_fruit"
-  },
-  {
-   "word": "aloo",
    "category": "vegetable_fruit"
   },
   {
@@ -368,10 +272,6 @@
    "category": "vegetable_fruit"
   },
   {
-   "word": "kaddu",
-   "category": "vegetable_fruit"
-  },
-  {
    "word": "tamatar",
    "category": "vegetable_fruit"
   },
@@ -380,23 +280,7 @@
    "category": "vegetable_fruit"
   },
   {
-   "word": "kela",
-   "category": "vegetable_fruit"
-  },
-  {
    "word": "amrud",
-   "category": "vegetable_fruit"
-  },
-  {
-   "word": "papita",
-   "category": "vegetable_fruit"
-  },
-  {
-   "word": "chikoo",
-   "category": "vegetable_fruit"
-  },
-  {
-   "word": "anaar",
    "category": "vegetable_fruit"
   },
   {
@@ -425,14 +309,6 @@
   },
   {
    "word": "anulom",
-   "category": "activity"
-  },
-  {
-   "word": "vilom",
-   "category": "activity"
-  },
-  {
-   "word": "surya",
    "category": "activity"
   },
   {
@@ -512,10 +388,6 @@
    "category": "body_counselling"
   },
   {
-   "word": "seena",
-   "category": "body_counselling"
-  },
-  {
    "word": "namak",
    "category": "household"
   },
@@ -528,19 +400,11 @@
    "category": "household"
   },
   {
-   "word": "shakkar",
-   "category": "household"
-  },
-  {
    "word": "tel",
    "category": "household"
   },
   {
    "word": "masala",
-   "category": "household"
-  },
-  {
-   "word": "achar",
    "category": "household"
   },
   {
@@ -640,10 +504,6 @@
    "category": "clinical_abbreviation"
   },
   {
-   "word": "turp",
-   "category": "clinical_abbreviation"
-  },
-  {
    "word": "nsaid",
    "category": "clinical_abbreviation"
   },
@@ -681,10 +541,6 @@
   },
   {
    "word": "ogd",
-   "category": "clinical_abbreviation"
-  },
-  {
-   "word": "pcod",
    "category": "clinical_abbreviation"
   },
   {

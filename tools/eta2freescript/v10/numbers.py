@@ -54,7 +54,7 @@ _ENGLISH_NUMERALS = frozenset(("zero one two three four five six seven eight nin
 
 
 # Hindi numbers that are English words too but are read as numbers everywhere (S3 lexicon, unconditional): "bees" (20), "teen" (3)
-_STAYS_A_NUMBER = frozenset({"bees", "teen"})
+_STAYS_A_NUMBER = frozenset({"bees", "teen", "ek", "tin", "dui", "noy", "nav", "dos", "bis", "saw", "wis"})  # Fix3b H2: the S3 lexicon numbers stay numbers everywhere
 
 
 @lru_cache(maxsize=1)
@@ -66,7 +66,7 @@ def collision_words() -> frozenset[str]:
     lex = {w for w in d["words"] if isinstance(w, str) and w.isascii() and w.isalpha()}
     common = words.common_english()
     # a lexicon word that is ordinary, common English (bees, saw, tin, don, be, so, do) is conditional; one that is in the big list only by accident (vanda, tees, padi) stays a number
-    col = {w for w in lex if words.in_dictionary(w) and w not in _ENGLISH_NUMERALS and (w in common or len(w) <= 3) and w not in _STAYS_A_NUMBER}
+    col = {w for w in lex if words.in_dictionary(w) and w not in _ENGLISH_NUMERALS and w in common and w not in _STAYS_A_NUMBER}
     return frozenset(col | {w.lower() for w in d.get("collision_extra", [])})
 
 
@@ -185,7 +185,7 @@ def _collisions_as_numbers(t: str) -> str:
             if flags is None:
                 flags = drugs.flags(t)
             a, b = toks[lo].start, toks[hi - 1].end
-            near = any(f.start < b and f.end > a for f in flags)
+            near = any(f.start < b and f.end > a for f in flags) or any(s < b and e > a for s, e in drugs.english_brand_spans(t)) or any(e <= tk.start and len(words.tokenize(t[e:tk.start])) <= 1 for s, e in drugs.english_brand_spans(t, initial=True, short_ok=True))  # a brand that opens a short unit or is not a common word
         if near:
             out = out[:tk.start] + W * (tk.end - tk.start) + out[tk.end:]
     return out
@@ -303,3 +303,41 @@ def redact(text) -> str:
         cur = n.end + (m.end() if m else 0)
     out.append(t[cur:])
     return re.sub(r"[ \t]{2,}", " ", "".join(out)).strip(" ,;-")
+
+
+# --- Fix3b H3: number homographs inside a unit that is about a medicine ------------------------------------------------------------------------------
+# Structural, not a word list of homographs: in a drug-tagged or drug-flagged unit ANY token that is a lexicon word, a collision word, or within one edit of a non-English lexicon word
+# (mood ~ moodu, path ~ pathu, dash ~ dosh, teas ~ tees, basso ~ baso, ond ~ ondu, vandal ~ vandalu) is held out, whether or not the dictionary allows it. The only exemption is a closed
+# list of everyday function words (the list can only SHRINK the withholding, never extend what posts).
+_FUNCTION_WORDS = frozenset("the and are has her his was were been done data same made each other either after before with from that this they them then than have here there what when where "
+                            "which while will would your you for not can may but all any per one are our its out use new own off who how why too yet few due via nor day days dose did does pain".split())
+
+
+@lru_cache(maxsize=1)
+def _near_buckets() -> dict[int, frozenset[str]]:
+    base = [w for w in (lexicon_set() | collision_words()) if w.isascii() and w.isalpha() and len(w) >= 4 and w not in _ENGLISH_NUMERALS]
+    out: dict[int, set[str]] = {}
+    for w in base:
+        out.setdefault(len(w), set()).add(w)
+    return {k: frozenset(v) for k, v in out.items()}
+
+
+def number_like(low: str) -> bool:
+    """A token that is, or is one edit away from, a (non-English) number word of the lexicon."""
+    low = low.lower()
+    if not low.isalpha() or not low.isascii() or low in _FUNCTION_WORDS:
+        return False
+    if low in lexicon_set() or low in collision_words() or low in _STAYS_A_NUMBER:
+        return True
+    if len(low) < 3:
+        return False
+    L, B = len(low), _near_buckets()
+    for w in B.get(L, ()):
+        if sum(a != b for a, b in zip(low, w)) <= 1:
+            return True
+    for l in (L - 1, L + 1):
+        for w in B.get(l, ()):
+            s, lg = (low, w) if L < l else (w, low)
+            if any(lg[:i] + lg[i + 1:] == s for i in range(len(lg))):
+                return True
+    return False

@@ -16,6 +16,12 @@ IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 ROLE_OUT = {"doctor": "treating_doctor", "patient": "patient", "attendant": "attender", "staff": "staff", "other": "unknown", "unknown": "unknown"}
 
 
+def _prompt_action(act) -> str:
+    """Fix3b M3: only a start or a continue is ever a start prompt; a change is change_dose, anything else (not_given, hold, unknown) is not_given."""
+    a = str(act or "start").lower()
+    return "start" if a in ("start", "continue") else ("change_dose" if a == "change" else "not_given")
+
+
 def _is_generic(name: str) -> bool:
     b = names.base_of(name)
     return bool(b) and (b in ms.GENERICS or any(w in ms.GENERICS for w in b.split()) or bool(ms.molecules(name) and not ms.BRANDS.get(names._key(name))))
@@ -181,7 +187,7 @@ def build_prompts(bl) -> None:
             gen = next((n for n in nm if _is_generic(n)), None)
             drug = names.drug_block({"brand_as_said": brand, "generic": gen})
             r = ["not_order_capable"] if txt.startswith("[held_back_inferred_order]") else []
-            add("start", drug, p, turns, dec, r, {}, stage="mapper")
+            add(_prompt_action(bl.rx_actions.get(p.get("item_id"))), drug, p, turns, dec, r, {}, stage="mapper")
             p["names"] = []
     # unnamed regimen slots (pick_drug): a prompt with no drug, the class as said
     for s in bl.slots:
@@ -192,7 +198,7 @@ def build_prompts(bl) -> None:
         turns = bl._cited_turn_ids(s.get("evidence"))
         dec = (s.get("decision") or {}).get("turn")
         before = len(prompts)
-        pr = add("start", drug, None, turns, dec, ["untaped"], {"strength": (s.get("strength") or {}).get("text"), "frequency": (s.get("frequency") or {}).get("text"),
+        pr = add(_prompt_action(bl.slot_actions.get(s.get("slot_id"))), drug, None, turns, dec, ["untaped"], {"strength": (s.get("strength") or {}).get("text"), "frequency": (s.get("frequency") or {}).get("text"),
                                                                "duration": (s.get("duration") or {}).get("text"), "instruction": (s.get("timing") or {}).get("text")})
         if len(prompts) > before:  # a slot whose class is a drug already prompted adds nothing (Fix1 M2 dedup)
             pr["slot_id"] = s.get("slot_id")

@@ -9,7 +9,7 @@ import copy
 import re
 
 from .. import note as N
-from . import drugs, meds, words
+from . import drugs, meds, numbers, spans as v10_spans, words
 from . import names as names_mod
 from .gate import HEADING_FIELD, TOKEN, NumberGate, Violation
 
@@ -63,6 +63,38 @@ STRING_KEYS = {"symptoms", "examination", "management_plan", "general_advice", "
                "instruction", "notes", "speciality"}
 
 
+_PTR = {"symptoms": "/presenting_complaints/symptoms", "examination": "/examination", "plan": "/plan_of_management/management_plan", "advice": "/general_advice",
+        "follow_up": "/follow_up", "comorbidities": "/comorbidities", "diagnoses": "/presenting_complaints/diagnoses",
+        "procedures": "/plan_of_management/surgery_or_procedure_recommendations", "investigations": "/further_investigations", "referrals": "/referrals"}
+
+
+def field_turns(art: dict, fld: str, ptr: str | None = None) -> set[int]:
+    """The turns the provenance items behind a field (or one entry, `ptr`) cite. Used to ask whether a unit is about a turn Stage A tagged as a medicine."""
+    base = ptr or _PTR.get(fld)
+    out: set[int] = set()
+    if not base:
+        return out
+    for p in art.get("provenance") or []:
+        q = str(p.get("json_pointer") or "")
+        if q == base or q.startswith(base + "/") or (ptr is None and q.startswith(base)):
+            for ev in p.get("evidence") or []:
+                try:
+                    out.add(int(str(ev.get("segment_ref") or "").rsplit(":", 1)[1]))
+                except (IndexError, ValueError):
+                    pass
+    return out
+
+
+def _unit_violations(gate: NumberGate, txt: str, turns: set[int]) -> list[Violation]:
+    """Fix3b: other-person cues and number homographs in a drug unit, on the final text of one unit."""
+    out = []
+    if words.other_person(txt):
+        out.append(Violation("other_person", "op"))
+    if gate.collision_unit(txt, turns):
+        out.append(Violation("collision", "col"))
+    return out
+
+
 def gp_final(gate: NumberGate, art: dict, c, *, remove: bool = True) -> list[tuple[str, str, str, tuple]]:
     """Write back and check gp_extraction in place. Returns [(field, reason, unit, path)] for each unit that failed; the failing leaf is removed."""
     gx = art.get("gp_extraction") or {}
@@ -77,8 +109,11 @@ def gp_final(gate: NumberGate, art: dict, c, *, remove: bool = True) -> list[tup
             if not isinstance(v, str):
                 continue
             txt, pos, errs = gate.writeback(v)
-            viol = gate.final_check(txt, fld, pos, allowed_drug_tokens=None) if not errs else [Violation("frame", e) for e in errs]
+            lt = field_turns(art, fld, "/" + "/".join(str(k) for k in path)) if unit == "entry" else field_turns(art, fld)
+            with numbers.force_collisions(bool(lt & gate.drug_spans)):  # Fix3b H1: the Stage A drug-turn rule holds on the final check too
+                viol = gate.final_check(txt, fld, pos, allowed_drug_tokens=None) if not errs else [Violation("frame", e) for e in errs]
             viol += _unknown_drug_tokens(txt, allowed)
+            viol += _unit_violations(gate, txt, lt)
             if viol:
                 bad = bad or viol[0].code
             else:
@@ -152,8 +187,11 @@ def note_final(gate: NumberGate, art: dict, c, note_tok: str, *, allowed=None) -
                     line = _date_slot(gate, art, line)
                 line = N.scrub_identity(line)  # Fix2 M2: the PHI name masker runs on the final Stage B note too (the repair path ends here as well)
                 txt, pos, errs = gate.writeback(line)
-                viol = [Violation("frame", e) for e in errs] or gate.final_check(txt, fld, pos)
+                st = field_turns(art, fld)
+                with numbers.force_collisions(bool(st & gate.drug_spans)):  # Fix3b H1: the Stage A drug-turn rule holds on the note path too
+                    viol = [Violation("frame", e) for e in errs] or gate.final_check(txt, fld, pos)
                 viol += _unknown_drug_tokens(txt, allowed)
+                viol += _unit_violations(gate, txt, st)
                 if v9 & set(names_mod.toks(txt)):  # Fix2 M4: a stop / not-given / change drug is named in the confirm prompts only
                     viol.append(Violation("v9_named_drug", "v9"))
                 lines.append(txt)

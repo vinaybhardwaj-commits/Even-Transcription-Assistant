@@ -156,6 +156,19 @@ class NumberGate:
                 return None
         return worst
 
+    def drugish(self, text: str, turns) -> bool:
+        """A unit is about a medicine when a cited turn is one Stage A tagged, or the detector flags a drug in it (an English-word brand counts), or it names an English-word brand."""
+        if set(turns or ()) & self.drug_spans:
+            return True
+        return any(f.reason != "catalogue_english_word" for f in drugs.flags(text)) or bool(drugs.english_brand_spans(text, initial=True, short_ok=True))
+
+    def collision_unit(self, text: str, turns) -> bool:
+        """Fix3b H3: inside a drug-tagged or drug-flagged unit, any lexicon, collision or near-lexicon number word (dictionary-allowed homographs included) withholds the unit."""
+        from .numbers import number_like
+        if not isinstance(text, str) or not self.drugish(text, turns):
+            return False
+        return any(tk.is_word and words.is_latin(tk.text) and number_like(tk.low) for tk in words.tokenize(re.sub(r"\u27e6S\d+\u27e7", " ", text)))
+
     # --- Fix3 C3 / C4: quote-side support by head + value ------------------------------------------------------------------------------------------------
     def _relaxed(self, sl: Slot, en: str) -> bool:
         """True when the cited quote `en` says the posted frame `sl` loosely: its head word, then (hedges) and the same value (and unit, for a time frame).

@@ -236,7 +236,7 @@ def test_collision_words_are_numbers_beside_a_drug_dosing_word_class_word_or_uni
     assert find_numbers(text), text
 
 
-@pytest.mark.parametrize("text", ["You should be careful", "rest so that you recover", "Don is the name", "he has a tin roof", "Do you smoke", "so far so good"])
+@pytest.mark.parametrize("text", ["You should be careful", "rest so that you recover", "Don is the name", "he has a bar of soap", "Do you smoke", "so far so good"])
 def test_collision_words_are_plain_english_elsewhere(text):
     assert not find_numbers(text), text
 
@@ -354,8 +354,8 @@ def test_collision_word_is_a_number_in_a_turn_stage_a_tagged_as_a_medicine():
     from tools.eta2freescript.v10.gate import NumberGate
     lines = [(0, 4, "0", "Tell me."), (5, 9, "1", "I have acidity."), (10, 14, "0", "Take the acidity one tin days.")]
     c = mk_consult(lines, roles={"0": "doctor", "1": "patient"})
-    assert NumberGate(c, visit=VISIT).check("rest for tin days", "advice", [2]).ok            # no drug in sight: plain English
-    forced = NumberGate(c, visit=VISIT, drug_spans={2}).check("rest for tin days", "advice", [2])
+    assert NumberGate(c, visit=VISIT).check("rest for don days", "advice", [2]).ok            # no drug in sight: plain English
+    forced = NumberGate(c, visit=VISIT, drug_spans={2}).check("rest for don days", "advice", [2])
     assert not forced.ok                                                                     # the turn names or implies a medicine
 
 

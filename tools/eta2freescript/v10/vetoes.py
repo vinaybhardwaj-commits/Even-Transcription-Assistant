@@ -63,6 +63,7 @@ def window_vetoes(text: str, num_span: tuple[int, int], slots: list[Slot] | None
     labs = [(s.frame_start, s.frame_end) for s in slots if s.kind == "lab"]
     dailies = [s.meta["daily_word"] for s in slots if s.meta.get("daily_word")]
     flags = drugs.flags(text) if flags is None else flags
+    brands = drugs.english_brand_spans(text, initial=True)  # Dart, Candid, Relent, Lite anywhere; Pan, Alex mid-sentence
     out: list[Veto] = []
     lows = [tk.low for tk in toks]
     for i in range(lo, hi):
@@ -86,6 +87,9 @@ def window_vetoes(text: str, num_span: tuple[int, int], slots: list[Slot] | None
                 out.append(Veto("veto_dosing_word", tk.text, tk.start, tk.end))
             continue
         if inside:
+            continue
+        if any(s < tk.end and e > tk.start for s, e in brands):  # Fix3b M1: an English-word brand written as a brand is a drug beside a duration or a count
+            out.append(Veto("veto_detector", tk.text, tk.start, tk.end))
             continue
         for f in flags:
             if f.start < tk.end and f.end > tk.start:

@@ -440,6 +440,7 @@ class Builder:
         self.confirm_prompts: list[dict] = []
         self.cond_plan: list[tuple[str, dict]] = []
         self.rx_actions: dict[str, str] = {}
+        self.slot_actions: dict[str, str] = {}
         self.confirm_internal: dict = {}
         self.med_changes = False
         self.red_flag_items: list = []
@@ -602,6 +603,12 @@ class Builder:
             return None
         r = self.gate.check(text, fld, cited)
         if r.ok:
+            if v10_words.other_person(r.text):
+                self.withhold(fld, "other_person", cited, red_flag=red_flag)
+                return None
+            if self.gate.collision_unit(r.text, cited):  # Fix3b H3
+                self.withhold(fld, "collision", cited, red_flag=red_flag)
+                return None
             if v10_words.n1_phrase(r.text, fld):
                 self.withhold(fld, "n1_phrase", cited, red_flag=red_flag)
                 return None
@@ -724,7 +731,7 @@ class Builder:
             return text
         return ""
 
-    def _unsafe_slot(self, rx: dict, turns, lead, flags: list[str]) -> None:
+    def _unsafe_slot(self, rx: dict, turns, lead, flags: list[str], action: str = "start") -> None:
         key = self._heard_name(rx)
         shown = None if not key or drugish_token(key) else key
         self.slot({"dosage_form": rx.get("dosage_form"), "frequency": rx.get("frequency"), "duration": rx.get("duration"),
@@ -732,6 +739,8 @@ class Builder:
                    "source_turns": turns, "confidence": min(float(rx.get("confidence") or 0.5), 0.5),
                    "quote_turn": lead if isinstance(lead, int) else None, "_flags": flags,
                    "_drug_key": key, "_heard_name": key}, lead=lead)
+        if self.slots:
+            self.slot_actions[self.slots[-1]["slot_id"]] = action
 
     conf_of = staticmethod(lambda it: 0.8 if it.get("basis") == "said" else 0.55)
 
@@ -1038,9 +1047,10 @@ class Builder:
             if dose_conflict_hold:
                 hard.add("dose_binding_conflict")
             if hard & set(safety):
-                self._unsafe_slot(rx, turns, dec, safety)
-                self.P("medicine", f"[held_back_unsafe_medicine] {label}", "discussed_only", turns, 0.5, None,
-                       safety, names=[x for x in names if x], lead=dec)
+                self._unsafe_slot(rx, turns, dec, safety, action)
+                held_u = self.P("medicine", f"[held_back_unsafe_medicine] {label}", "discussed_only", turns, 0.5, None,
+                                safety, names=[x for x in names if x], lead=dec)
+                self.rx_actions[held_u["item_id"]] = action  # Fix3b M3: a change / not-given / hold row on an unresolved name is never a start prompt
                 continue
             parts = components_of(rx)
             if parts and len(parts) >= 2:

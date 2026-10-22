@@ -81,6 +81,10 @@ def _known() -> tuple[frozenset[str], frozenset[str], re.Pattern, frozenset[str]
     # ordinary English words among the curated names are weak (cue-dependent), the rest strong
     for w in extra:
         (weak if w in eng else strong).add(w)
+    # Fix3b M4: herbal medicines are drug names for the detector (never counselling vocabulary), strong whatever the dictionary says
+    herbal = {h.lower() for h in data.load(data.DOSING_WORDS).get("herbal_names", [])}
+    strong |= herbal
+    weak -= herbal
     # words that must never join the strong set: the dosage-form words (they are dosing words already) and short fragments
     strong -= {w for w in strong if len(w) < data.thresholds()["min_catalogue_token_len"]}
     return frozenset(strong), frozenset(weak), stems, frozenset()
@@ -104,7 +108,7 @@ def _skeleton(w: str) -> str:
 @lru_cache(maxsize=1)
 def _skeleton_index() -> dict[str, tuple[str, ...]]:
     idx: dict[str, list[str]] = {}
-    for n in strong_names():
+    for n in sorted(strong_names()):  # sorted: the first name of a skeleton must not depend on the hash seed
         if len(n) >= 5:
             idx.setdefault(_skeleton(n), []).append(n)
     return {k: tuple(v) for k, v in idx.items()}
@@ -113,7 +117,7 @@ def _skeleton_index() -> dict[str, tuple[str, ...]]:
 @lru_cache(maxsize=1)
 def _by_len() -> dict[int, tuple[str, ...]]:
     out: dict[int, list[str]] = {}
-    for n in strong_names():
+    for n in sorted(strong_names()):
         out.setdefault(len(n), []).append(n)
     return {k: tuple(v) for k, v in out.items()}
 
@@ -187,3 +191,27 @@ def flags(text: str) -> list[Flag]:
 
 def names_in(text: str) -> list[str]:
     return [f.token for f in flags(text)]
+
+
+def english_brand_spans(text: str, *, initial: bool = False, short_ok: bool = False) -> list[tuple[int, int]]:
+    """Fix3b M1 / H2: the spans of an English-word catalogue brand written the way a brand is (Pan, Dart, Alex, Candid, Relent, Lite): a capitalised catalogue head that is an ordinary
+    English word (rule 7 list), not a clinical-vocabulary word (cough, oral), and not the first word of a sentence. Such a brand counts as a drug mention for the collision rule and for a
+    slot duration beside it, with no dosing word needed. `initial=True` also returns a sentence-initial one that is NOT a common English word (Dart, Candid, Relent, Lite); `short_ok=True`
+    also returns a sentence-initial one in a unit of at most 4 words (the refuter's "Pan don"). A common word (Water, New, Continue) opening a longer unit never counts."""
+    t = unicodedata.normalize("NFKC", text or "")
+    _strong, weak, _stems, _ = _known()
+    clinical = words.whitelist_words() | words.extra_whitelist()
+    common = words.common_english()
+    toks = words.tokenize(t)
+    n_words = sum(1 for tk in toks if tk.is_word)
+    out = []
+    for tk in toks:
+        if not tk.is_word or not words.is_latin(tk.text) or len(tk.text) < 3 or not tk.text[0].isupper() or tk.text.isupper() or tk.low not in weak or tk.low in clinical:
+            continue
+        before = t[:tk.start].rstrip()
+        if not before or before[-1] in ".!?:;\n(\"'":
+            if (initial and tk.low not in common) or (short_ok and n_words <= 4):
+                out.append((tk.start, tk.end))
+            continue
+        out.append((tk.start, tk.end))
+    return out
