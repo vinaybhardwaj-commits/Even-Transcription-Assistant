@@ -120,3 +120,22 @@ def test_gateway_chat_retries(monkeypatch):
     assert calls["n"] == 3
 
 
+
+
+def test_instructions_naming_a_kept_out_drug_do_not_fail_c4(tmp_path):
+    """Restored for v10 (Fix1 M4): the patient's home drug is kept out; the doctor's instruction that names it posts nowhere, and C4 does not fail."""
+    lines = [(0, 4, "1", "I take Dolo 650 at home."), (5, 12, "0", "Take paracetamol 1 g three times a day for three days, and take it when Dolo 650 is not working.")]
+    c = mk_consult(lines, roles=DOC)
+    enc = empty_encounter(
+        examination=[{"performed": "Throat", "finding": "red", "basis": "said", "source_turns": [1]}],
+        drug_history=[{"name_as_said": "Dolo 650", "text": "Takes Dolo 650 at home", "current": True, "reported_by": "patient", "source_turns": [0]}],
+        prescription=[{"action": "start", "decision_turn": 1, "generic": "paracetamol", "brand_as_said": None, "strength": "1 g",
+                       "frequency": "three times a day", "duration": "3 days", "instructions": "take when Dolo 650 is not working",
+                       "basis": "said", "confidence": 0.9, "source_quote_turn": 1, "source_turns": [1]}])
+    art = build_artifact(c, enc)
+    assert check(art) == [], check(art)
+    assert "dolo" not in art["note_text"].lower() and "dolo" not in json.dumps(art["gp_extraction"]).lower()
+    fake = FakeClient({"stageA": json.dumps(enc | {"speaker_roles": [], "schema": "even.encounter.v2"})})
+    log = run_consult(c, fake, tmp_path, Options(stage_b_enabled=False))
+    assert log["written"] and log["final_valid"], log.get("final_errors")
+    assert "dolo" not in log["artifact"]["note_text"].lower()

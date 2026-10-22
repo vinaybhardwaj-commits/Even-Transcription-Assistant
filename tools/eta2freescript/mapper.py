@@ -128,6 +128,8 @@ RX_TEXT = ("generic", "brand_as_said", "strength", "route", "frequency", "durati
            "drug_class_said", "name_interpretation", "brand_as_said_as_heard", "generic_as_heard")
 SOCIAL_TYPES = {"social", "place", "travel", "occupation"}
 ORDER_KINDS = {"medicine", "investigation", "procedure", "referral"}
+QUARANTINED_QUOTE = "held out: another patient"  # Fix1 H2: what a quarantined turn leaves in evidence and decision (the schema wants a non-empty quote)
+
 SPEAKERS = {"doctor", "patient", "attendant", "staff", "other", "unknown"}
 ICD_RE = re.compile(r"^[A-Z][0-9]{2}(\.[0-9A-Z]{1,4})?$")
 CONDITIONAL_PROC = re.compile(r"\bif\b|may be needed later", re.I)
@@ -472,9 +474,10 @@ class Builder:
         for t in self._pick_turns(turns, lead, cap):
             s = self.c.turns[t]
             spk = s.role if s.role in SPEAKERS else "unknown"
+            q = t in self.b.quarantined  # Fix1 H2: another patient's words are never stored, only the span id (segment_ref) and the reason
             ev = {"segment_ref": f"{self.c.uid}:{t}", "t0": iso(s.t0_ms), "t1": iso(s.t1_ms),
-                  "quote_en": s.text, "quote": s.text, "lang": s.lang, "speaker": spk, "speaker_source": src}
-            if s.native_text:
+                  "quote_en": QUARANTINED_QUOTE if q else s.text, "quote": QUARANTINED_QUOTE if q else s.text, "lang": s.lang, "speaker": spk, "speaker_source": src}
+            if s.native_text and not q:
                 ev["quote_native"] = s.native_text
             out.append(ev)
         return out
@@ -502,7 +505,7 @@ class Builder:
         if t is None:
             return None
         s = self.c.turns[t]
-        return {"turn": t, "speaker": s.role if s.role in SPEAKERS else "unknown", "quote": (s.text or "")[:400]}
+        return {"turn": t, "speaker": s.role if s.role in SPEAKERS else "unknown", "quote": QUARANTINED_QUOTE if t in self.b.quarantined else (s.text or "")[:400]}
 
     def speaker(self, turns, lead=None):
         order = ([lead] if isinstance(lead, int) else []) + [t for t in turns if t != lead]
@@ -590,6 +593,9 @@ class Builder:
         if not isinstance(text, str) or not text:
             return text
         cited = self._pick_turns(self.unquarantined(list(turns or [])), lead, cap=8)
+        if fld in ("plan", "advice") and getattr(self, "v9_tokens", None) and self.v9_tokens & set(v10_names.toks(text)):
+            self.withhold(fld, "v9_named_drug", cited, red_flag=red_flag)  # Fix1 M4: a drug with a stop / not-given / change prompt is named only in the prompt
+            return None
         r = self.gate.check(text, fld, cited)
         if r.ok:
             return r.text
@@ -636,7 +642,7 @@ class Builder:
         return out
 
     def quarantine(self, kind, text, turns, names=None, lead=None) -> dict:
-        return self.P(kind, f"[boundary_quarantine] {text}", "discussed_only", turns, 0.5, None, ["boundary_quarantined"], names=names, lead=lead)
+        return self.P(kind, f"[boundary_quarantine] {kind} item held out", "discussed_only", turns, 0.5, None, ["boundary_quarantined"], names=None, lead=lead)
 
     def by_non_doctor(self, turn) -> bool:
         """A patient / attendant / staff / other decision is held out even when the role was inferred, not tracked.
@@ -2304,14 +2310,21 @@ class Builder:
             if not nm or it.get("basis", "said") != "said":
                 continue
             tl = self.unquarantined(self.turns(it))
-            allergies.append({"name": nm[:80]})
+            allergies.append({"name": (v10_numbers.redact(nm) or nm)[:80]})
             item = self.P("allergy", nm, "discussed_only", tl, 0.8, None)
             self.review("allergy_check", item, "Check this allergy", nm)
         for it in self.enc.get("vitals") or []:
             if not isinstance(it, dict) or not (it.get("name") or it.get("value")):
                 continue
-            vitals.append({"name": str(it.get("name") or "")[:40], "value": str(it.get("value") or "")[:40]})
-            self.P("vital", f"{it.get('name') or 'vital'} {it.get('value') or ''}".strip(), "discussed_only", self.turns(it), 0.8, None)
+            nm_, val_ = str(it.get("name") or "")[:40], str(it.get("value") or "")[:40]
+            tl_ = self.unquarantined(self.turns(it))
+            if v10_numbers.has_number(val_):  # Fix1 H2: a vital value must pass the vital slot and span support, or it is dropped (a record and a prompt)
+                g = self.gate.check(f"{nm_} {val_}".strip(), "examination", tl_)
+                if not g.ok:
+                    self.withhold("examination", g.reason or "unslotted", tl_)
+                    continue
+            vitals.append({"name": nm_, "value": val_})
+            self.P("vital", f"{nm_ or 'vital'} {val_}".strip(), "discussed_only", tl_, 0.8, None)
         self.facts = {"allergies": allergies, "vitals": vitals}
 
     def lab_dx_conflicts(self) -> None:
@@ -2453,6 +2466,9 @@ def build(c: Consult, enc: dict, b: Boundary, model_id: str, prompt_sha: str, co
     cited |= {x for pr in bl.confirm_prompts for x in pr.get("cited_spans", [])} | {x for w in bl.withheld for x in w["span_ids"]}
     cited |= {x for r in art_red(bl) for x in r["cited_spans"]}
     art["roster"], art["spans"] = reg["roster"], [sp for sp in reg["spans"] if sp["span_id"] in cited]
+    for sp in art["spans"]:
+        if sp["boundary_quarantined"]:  # Fix1 H2: a quarantined span keeps its id and the reason, not the words
+            sp["quote_en"], sp["quote_native"], sp["reason"] = "", "", "boundary_quarantined"
     art["confirm_prompts"], art["confirm_internal"] = bl.confirm_prompts, bl.confirm_internal
     art["withheld"] = bl.withheld
     art["kept_out"] = kept_out_records(bl.prov)

@@ -86,3 +86,14 @@ def test_support_a_non_doctor_saying_the_same_thing_never_supports_an_order_numb
     assert g.check_structured("followup", 2.0, "weeks", "follow_up", [1]) == "frame"
     assert g.check_structured("followup", 2.0, "weeks", "follow_up", [2]) is None
     assert g.check_date("2026-11-05", "follow_up", [1]) == "frame"
+
+
+def test_m7_for_plus_analyte_is_never_a_posted_lab_value():
+    """Fix1 M7: 'for <analyte> ... value' reads as a drug course for the analyte (rule 2); the veto in vetoes.for_analyte_frame must hold on the posted string
+    and on the heard turn."""
+    cases = ["for Hb report 9 g/dL", "for B12 report 300 pg/mL", "for calcium report 9.2 mg/dL", "for Vitamin D report 18 ng/mL"]
+    lines = [(0, 4, "0", "Tell me.")] + [(5 + 5 * i, 9 + 5 * i, "0", t) for i, t in enumerate(cases)]
+    g = NumberGate(mk_consult(lines, roles={"0": "doctor"}), visit=VISIT)
+    for i, t in enumerate(cases, start=1):
+        assert not g.check(t, "examination", [i]).ok, t
+    assert g.check("Hb 9.5 g/dL", "examination", [1]).ok is False  # not heard in that turn

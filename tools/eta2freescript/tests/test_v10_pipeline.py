@@ -160,8 +160,8 @@ def test_brand_names_are_never_erased_by_the_medication_renderer():
     for i in range(600):
         b = brands[i % len(brands)] + ("" if i % 3 else " tab")
         line = names.med_line(names.drug_block({"brand_as_said": b, "generic": None}))
-        head = re.sub(r"\d", "", b.replace(" tab", "")).split()[0].lower()
-        erased += head not in line.lower()
+        head = re.sub(r"[\d\-\s]", "", b.replace(" tab", "").split()[0]).lower()  # the catalogue spells Glycomet-GP "Glycomet GP"
+        erased += head not in re.sub(r"[\-\s]", "", line.lower())
     assert erased == 0
 
 

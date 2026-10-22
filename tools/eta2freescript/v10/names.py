@@ -52,6 +52,46 @@ def spoken_brand(brand: str | None) -> str | None:
     return b or None
 
 
+def _clean_spoken(s: str) -> str:
+    """No number token, no standalone Hindi "do", no slash residue, and the PHI name masker (Fix1 M2, L3)."""
+    from . import numbers
+    s = numbers.redact(s)
+    s = re.sub(r"(?<![A-Za-z])do(?![A-Za-z])", " ", s, flags=re.I)
+    s = re.sub(r"\s*/\s*", " ", s)
+    s = re.sub(r"\s+", " ", s).strip(" -/.,;")
+    try:
+        from tools.timbre.phi_mask import mask_phi
+        s = mask_phi(s).text
+    except Exception:  # noqa: BLE001 - the masker is an addition; a missing module leaves the detector-token rule as the guard
+        pass
+    return s
+
+
+def detector_tokens(text: str, limit: int = 3) -> str | None:
+    """Fix1 M2: the drug span tokens the detector flags in `text`, at most `limit` tokens. Never the rest of the string ("Glizid for Ramesh Kumar" -> "Glizid").
+    With no flag, the first word that is not a number, a dosing word or a function word."""
+    from . import drugs, words
+    t = unicodedata.normalize("NFKC", text or "")
+    out: list[str] = []
+    fl = drugs.flags(t)
+    strong = [f for f in fl if f.reason in ("catalogue", "catalogue_english_word", "denylist")]
+    for f in sorted(strong or fl, key=lambda f: f.start):
+        for m in re.finditer(r"[^\W\d_]+(?:['’][^\W\d_]+)?", t[f.start:f.end]):
+            if m.group().lower() not in {x.lower() for x in out}:
+                out.append(m.group())
+    if not out:
+        for m in re.finditer(r"[^\W\d_]{2,}", t):
+            low = m.group().lower()
+            if low not in _FORM_WORDS and not words.is_dosing_word(low) and not words.is_dose_unit(low) and low not in _FILLER:
+                out.append(m.group())
+                break
+    return _clean_spoken(" ".join(out[:limit])) or None
+
+
+_FORM_WORDS = {"tab", "tablet", "tablets", "cap", "capsule", "syp", "syrup", "inj", "injection", "same", "the", "and", "for", "with", "this", "that", "his", "her", "old", "new"}
+_FILLER = {"is", "was", "on", "of", "to", "do", "ok", "okay", "keep", "take", "start", "continue", "give", "giving", "again", "only", "also", "karo", "kar", "hai"}
+
+
 def base_of(text: str) -> str:
     L = _lists()
     a = [t for t in toks(text) if not t[0].isdigit() and t not in L["forms"] and t not in L["units"]]
@@ -65,6 +105,15 @@ def base_of(text: str) -> str:
 
 def _key(text: str) -> str:
     return base_of(text).replace(" ", "")
+
+
+def catalogue_brand(brand: str | None) -> str | None:
+    """The catalogue's own spelling of an attested brand, never the heard string."""
+    k = _key(brand or "")
+    for e in _lists()["brands"]:
+        if k and (k == e["key"] or k == _key(e["brand"])) and e.get("status") == "attested":
+            return spoken_brand(e["brand"])
+    return None
 
 
 def attested_generic(brand: str | None) -> tuple[str | None, list[str]]:
@@ -96,8 +145,8 @@ def drug_block(rx: dict) -> dict:
     """The contract's `drug` block for one Stage A prescription row (no strength: that lives in confirm_internal)."""
     brand_raw = (rx.get("brand_as_said") or "").strip()
     generic_raw = (rx.get("generic") or "").strip()
-    brand = spoken_brand(brand_raw)
-    spoken = brand or spoken_brand(generic_raw) or ""
+    brand = detector_tokens(spoken_brand(brand_raw) or "") if brand_raw else None
+    spoken = brand or detector_tokens(spoken_brand(generic_raw) or "") or ""
     comps = combinations.components_of(rx) or []
     generic, components = None, []
     if len(comps) >= 2:
@@ -105,9 +154,11 @@ def drug_block(rx: dict) -> dict:
         generic = " + ".join(components)
     else:
         att, att_comps = attested_generic(brand_raw) if brand_raw else (None, [])
+        if not att and brand:
+            att, att_comps = attested_generic(brand)  # the detector's drug tokens, when the heard string carries other words
         if att:
-            generic = _upper(att)
             components = [_upper(c) for c in att_comps]
+            generic = " + ".join(components) if len(components) >= 2 else _upper(att)
         elif generic_raw and not brand_raw:
             generic = _upper(generic_raw)
         elif generic_raw and brand_raw and _key(generic_raw) == _key(brand_raw):
@@ -116,7 +167,7 @@ def drug_block(rx: dict) -> dict:
     pair, note = lasa_for(base) if generic else (None, "brand with no attested row: generic unresolved")
     shown_brand = None
     if brand and generic and _key(brand) not in {_key(g) for g in generic.split(" + ")} and _key(brand) != _key(generic):
-        shown_brand = brand
+        shown_brand = catalogue_brand(brand_raw) or brand
     return {"spoken": spoken, "brand_recognised": shown_brand, "generic": generic or None, "components": components, "base_molecule": base,
             "form": (rx.get("dosage_form") or None), "lasa_risk": {"pair_with": pair, "note": note}}
 

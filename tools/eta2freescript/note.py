@@ -172,6 +172,11 @@ def scrub_identity(text: str) -> str:
         return " "
 
     s = EMAIL.sub(_em, s)
+    try:  # Fix1 M2: the PHI name masker (tools/timbre/phi_mask.py, F5 drug allowlist) on every posted free-text string; its tags are removed, a bracket fails FRX-N1
+        from tools.timbre.phi_mask import mask_phi
+        s = re.sub(r"\[(?:PATIENT_NAME|PHONE|ID|ADDRESS|DOB|EMAIL|AGE)\]", " ", mask_phi(s).text)
+    except Exception:  # noqa: BLE001 - a missing masker leaves the regex scrub above
+        pass
     return re.sub(r"[ \t]{2,}", " ", s).strip()
 
 

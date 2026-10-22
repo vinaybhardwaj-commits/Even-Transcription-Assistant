@@ -23,7 +23,7 @@ _EDGE_AFTER = rf"(?![{_LETTERS}])"
 W = "\ue000"  # a number-word run is replaced by this char repeated, so spans stay aligned with the NFKC text
 
 _A_GRAM = re.compile(r"(?<![A-Za-z])an?\s+(?:grams?|gms?|milli?grams?|micro\s?grams?)(?![A-Za-z])", re.I)
-_NOT_A_NUMBER = re.compile(r"(?<![A-Za-z])double\s+(?:vision|barrel|blind|check)(?![A-Za-z])", re.I)
+_NOT_A_NUMBER = re.compile(r"(?<![A-Za-z])(?:double\s+(?:vision|barrel|blind|check)|at\s+once|once\s+(?:more|again))(?![A-Za-z])", re.I)
 # a spinal level is a name, not a number: L4, L4-L5, C5-6, L5-S1, T12
 _SPINE = re.compile(r"(?<![A-Za-z0-9])[CTLS]\d{1,2}(?:\s?[-–]\s?[CTLS]?\d{1,2})?(?![A-Za-z0-9])")
 _VULGAR = {"½": 0.5, "¼": 0.25, "¾": 0.75}
@@ -106,12 +106,51 @@ def mask_names(t: str) -> str:
     return _SPINE.sub(_blank, t)
 
 
+_DO_ENGLISH_NEXT = frozenset("not n't you we they i he she it this that the your these those so also please take try keep avoid eat drink exercise come check get go use stop continue "
+                             "start rest walk see call visit follow maintain wear apply remember inform report".split())
+_DO = re.compile(r"(?<![A-Za-z0-9])do(?![A-Za-z0-9])", re.I)
+
+
+def _do_as_two(t: str) -> str:
+    """Fix1 M1: Hindi "do" (two) is a number when a drug mention, a dosing word, a dose unit or an out-of-dictionary token sits within 3 tokens of it
+    (the run rule above already reads "do sau"). Plain English "do you ..." has none of these beside it."""
+    if not _DO.search(t):
+        return t
+    from . import drugs, words
+    toks = words.tokenize(t)
+    flags = None
+    out = t
+    for i, tk in enumerate(toks):
+        if tk.text.lower() != "do" or W in t[tk.start:tk.end]:
+            continue
+        if i + 1 < len(toks) and toks[i + 1].low in _DO_ENGLISH_NEXT:
+            continue  # English "do not / do you / do take rest": the auxiliary or the imperative, not Hindi two
+        lo, hi = max(0, i - 3), min(len(toks), i + 4)
+        near = False
+        for j in range(lo, hi):
+            if j == i or not toks[j].is_word:
+                continue
+            low = toks[j].low
+            if words.is_dosing_word(low) or words.is_dose_unit(low) or (words.is_latin(toks[j].text) and not words.in_dictionary(low)):
+                near = True
+                break
+        if not near:
+            if flags is None:
+                flags = drugs.flags(t)
+            a, b = toks[lo].start, toks[hi - 1].end
+            near = any(f.start < b and f.end > a for f in flags)
+        if near:
+            out = out[:tk.start] + W * (tk.end - tk.start) + out[tk.end:]
+    return out
+
+
 def prep(t: str) -> str:
     """`t` (already NFKC) with name digits blanked and number-word runs turned into W characters, same length."""
     t = mask_names(t)
     t = _NOT_A_NUMBER.sub(lambda m: "x" * len(m.group()), t)
     t = _A_GRAM.sub(lambda m: W * len(m.group()), t)
     t = _run_rx().sub(lambda m: W * len(m.group()), t)
+    t = _do_as_two(t)
     return _GLUED_WORD_RX.sub(lambda m: W * len(m.group()) if _glued(m.group().lower()) else m.group(), t)
 
 

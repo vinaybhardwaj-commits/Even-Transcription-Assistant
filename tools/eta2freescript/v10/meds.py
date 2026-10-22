@@ -99,9 +99,18 @@ def build_prompts(bl) -> None:
         groups.append(grp)
 
     def add(action: str, drug: dict, item: dict | None, turns: list[int], dec: int | None, reasons: list[str], rx_vals: dict, stage: str = "mapper") -> dict:
-        pid = f"p{len(prompts) + 1}"
         who = _who(c, dec if isinstance(dec, int) else (turns[0] if turns else None))
         reasons = list(dict.fromkeys(reasons + ["notes_only"]))
+        dkey = (action, names._key(drug.get("generic") or "") or names._key(drug.get("spoken") or ""))
+        if dkey[1]:  # Fix1 M2: one prompt and one line per drug and action; a second mention only adds its spans
+            for old in prompts:
+                if (old["action"], names._key(old["drug"].get("generic") or "") or names._key(old["drug"].get("spoken") or "")) == dkey and not old.get("slot_id"):
+                    old["cited_spans"] = list(dict.fromkeys(old["cited_spans"] + [spans.span_id(t) for t in dict.fromkeys(turns)]))[:6]
+                    old["doctor_confirm_reason"] = list(dict.fromkeys(old["doctor_confirm_reason"] + reasons))
+                    if item is not None:
+                        item["prompt_id"] = old["prompt_id"]
+                    return old
+        pid = f"p{len(prompts) + 1}"
         if not any(rx_vals.get(k) for k in ("strength",)):
             reasons.append("strength_unstated")
         if drug.get("lasa_risk", {}).get("pair_with"):
@@ -178,9 +187,11 @@ def build_prompts(bl) -> None:
                 "form": (s.get("form") or {}).get("text"), "lasa_risk": {"pair_with": None, "note": "no drug name was spoken"}}
         turns = bl._cited_turn_ids(s.get("evidence"))
         dec = (s.get("decision") or {}).get("turn")
+        before = len(prompts)
         pr = add("start", drug, None, turns, dec, ["untaped"], {"strength": (s.get("strength") or {}).get("text"), "frequency": (s.get("frequency") or {}).get("text"),
                                                                "duration": (s.get("duration") or {}).get("text"), "instruction": (s.get("timing") or {}).get("text")})
-        pr["slot_id"] = s.get("slot_id")
+        if len(prompts) > before:  # a slot whose class is a drug already prompted adds nothing (Fix1 M2 dedup)
+            pr["slot_id"] = s.get("slot_id")
     # the heard parts of a medicine item and of a regimen slot are internal now
     for p in bl.prov:
         if isinstance(p.get("medicine"), dict):
@@ -194,6 +205,20 @@ def build_prompts(bl) -> None:
     bl.completion[:] = [e for e in bl.completion if e.get("kind") != "dose_unstated"]
     bl.prov[:] = [p for p in bl.prov if not str(p.get("text") or "").startswith("[dose_unstated]")]
     bl.confirm_prompts, bl.confirm_internal = prompts, internal
+    # Fix1 M4 / V9: the names of a drug with a stop, hold, not-given or change prompt; the mapper withholds any Plan or General Advice item that names one
+    lists = names._lists()
+    skip = lists["forms"] | lists["qual"] | lists["units"]
+    v9 = set()
+    for p in prompts:
+        if p["action"] in ("stop", "hold", "not_given", "change_dose"):
+            d = p["drug"]
+            for txt in [d.get("generic"), d.get("spoken"), d.get("brand_recognised"), d.get("base_molecule"), *(d.get("components") or [])]:
+                v9.update(t for t in names.toks(txt or "") if len(t) >= 4 and not t[0].isdigit() and t not in skip)
+    for p in bl.prov:
+        if p.get("kind") == "medicine" and p.get("status") == "stopped":
+            for n in p.get("names") or []:
+                v9.update(t for t in names.toks(n or "") if len(t) >= 4 and not t[0].isdigit() and t not in skip)
+    bl.v9_tokens = v9
     bl.med_changes = any(p["action"] in ("stop", "hold", "not_given", "change_dose") for p in prompts)
     bl.med_change_turns = sorted({t for p in bl.prov if p.get("prompt_id") and p.get("status") in ("stopped",) for t in bl._cited_turn_ids(p.get("evidence"))})
 

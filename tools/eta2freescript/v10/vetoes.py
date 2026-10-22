@@ -31,6 +31,9 @@ def _native_dosing() -> list[str]:
     return [w for w in data.load(data.DOSING_WORDS).get("native_script_words", [])]
 
 
+_TAKE_FORMS = frozenset({"take", "takes", "taking", "took", "taken"})
+
+
 def _in(rng: tuple[int, int] | None, tk) -> bool:
     return bool(rng) and tk.start >= rng[0] and tk.end <= rng[1]
 
@@ -45,9 +48,18 @@ def window_vetoes(text: str, num_span: tuple[int, int], slots: list[Slot] | None
     idx = [i for i, tk in enumerate(toks) if tk.start < num_span[1] and tk.end > num_span[0]]
     if not idx:
         idx = [min(range(len(toks)), key=lambda i: abs(toks[i].start - num_span[0]))]
-    lo, hi = max(0, idx[0] - n), min(len(toks), idx[-1] + n + 1)
     slots = slots or []
     frames = [(s.frame_start, s.frame_end) for s in slots]
+    # Fix1 M3: the 3-token window is counted from the edges of the frame the number sits in ("for the past 3 months" is one frame), so a drug-class word
+    # before "for the last 4 years" is as near as one before "4 years"
+    for fa, fb in frames:
+        if fa <= num_span[0] and num_span[1] <= fb:
+            inside_f = [i for i, tk in enumerate(toks) if tk.start >= fa and tk.end <= fb]
+            if inside_f:
+                idx = sorted(set(idx) | {inside_f[0], inside_f[-1]})
+                idx = list(range(idx[0], idx[-1] + 1))
+            break
+    lo, hi = max(0, idx[0] - n), min(len(toks), idx[-1] + n + 1)
     labs = [(s.frame_start, s.frame_end) for s in slots if s.kind == "lab"]
     dailies = [s.meta["daily_word"] for s in slots if s.meta.get("daily_word")]
     flags = drugs.flags(text) if flags is None else flags
@@ -63,6 +75,8 @@ def window_vetoes(text: str, num_span: tuple[int, int], slots: list[Slot] | None
         inside = any(_in(fr, tk) for fr in frames)
         if any(_in(d, tk) for d in dailies):
             continue
+        if low in _TAKE_FORMS and i + 1 < len(toks) and lows[i + 1] == "care":
+            continue  # "take care" is a farewell, not a dosing instruction (Fix1 L2)
         if words.is_dosing_word(low):
             if not inside:
                 out.append(Veto("veto_dosing_word", tk.text, tk.start, tk.end))
