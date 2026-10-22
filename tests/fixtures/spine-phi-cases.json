@@ -1,5 +1,5 @@
 {
- "_comment": "Shared by tests/unit/spine-phi.test.ts (TS) and tools/eta-spine/tests/test_phi_screen.py (Python). Synthetic only. Placeholders {MS13} {P16} {PHONE10} {PLUS_PHONE} {DIG7} {DIG8} are filled by both tests at run time, so no digit run of 8+ sits in this file. R3: per-key id formats, value cases and key cases ported from the Opus refute (.bc/oref-r2-tests).",
+ "_comment": "Shared by tests/unit/spine-phi.test.ts (TS) and tools/eta-spine/tests/test_phi_screen.py (Python). Synthetic only. Placeholders {MS13} {P16} {PHONE10} {PLUS_PHONE} {DIG7} {DIG8} {DIG9} are filled by both tests at run time, so no digit run of 8+ sits in this file. R3: per-key id formats, value cases and key cases ported from the Opus refute (.bc/oref-r2-tests).",
  "enums": {
   "pulse": {
    "close_reason": [
@@ -426,9 +426,13 @@
    "et_0a1b2c3d4e5f6a7b8c"
   ],
   "pulse_enc_id": [
-   "pulse_enc_test_01",
-   "Abcdefgh-ijkl_mnop",
-   "a1b2c3d4e5f6a7b8c9d0e1f2"
+   "k3m9x2a7q1z8w5v4b6n0c2d4ef",
+   "abcdefghijklmnopqrstuvwxyz",
+   "ab{DIG7}abcdefghijklmnopq",
+   "ab{DIG8}abcdefghijklmnop",
+   "ab{DIG9}abcdefghijklmno",
+   "a{DIG9}b{DIG9}cdefgh",
+   "{DIG9}abcdefgh{DIG9}"
   ]
  },
  "formats_refuse_common": [
@@ -549,11 +553,30 @@
   "pulse_enc_id": [
    "short",
    "has space here",
-   "pe_{DIG7}abcdef",
    "{PHONE10}",
    "{PLUS_PHONE}",
    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-   "abcd\u200befgh"
+   "abcd\u200befgh",
+   "ab{PHONE10}abcdefghijklmn",
+   "abc{PHONE10}abcdefghijklm",
+   "abcdefghijklmnop{PHONE10}",
+   "{PHONE10}abcdefghijklmnop",
+   "{DIG8}{DIG8}{DIG8}12",
+   "{PHONE10}{PHONE10}123456",
+   "k3m9x2a7q1z8w5v4b6n0c2d4e",
+   "k3m9x2a7q1z8w5v4b6n0c2d4efg",
+   "K3M9X2A7Q1Z8W5V4B6N0C2D4EF",
+   "k3m9x2a7q1z8W5v4b6n0c2d4ef",
+   "k3m9x2a7q1z8w5_4b6n0c2d4ef",
+   "k3m9x2a7q1z8w5-4b6n0c2d4ef",
+   "ramesh_abcdefghijklmnopq",
+   "pulse_enc_test_01",
+   "Abcdefgh-ijkl_mnop",
+   "{DIG7}",
+   "EHRC{DIG8}",
+   "uhid{DIG8}",
+   "UH-{DIG8}",
+   "a1b2c3d4e5f6a7b8c9d0e1f2"
   ]
  },
  "keys": {
@@ -1442,7 +1465,7 @@
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "pulse_enc_id": "pe_{DIG7}abcdef"
+      "pulse_enc_id": "ab{PHONE10}abcdefghijklmn"
      }
     }
    }
@@ -1458,7 +1481,7 @@
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "pulse_enc_id": "pulse_enc_test_01"
+      "pulse_enc_id": "k3m9x2a7q1z8w5v4b6n0c2d4ef"
      }
     }
    }
@@ -1474,7 +1497,7 @@
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "pulse_enc_id": "pulse_enc_test_01"
+      "pulse_enc_id": "k3m9x2a7q1z8w5v4b6n0c2d4ef"
      }
     }
    }
@@ -1490,7 +1513,7 @@
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "pulse_enc_id": "pulse_enc_test_01"
+      "pulse_enc_id": "k3m9x2a7q1z8w5v4b6n0c2d4ef"
      }
     }
    }
@@ -1570,7 +1593,5 @@
    }
   }
  ],
- "pending_probe": [
-  "pulse_enc_id"
- ]
+ "pending_probe": []
 }

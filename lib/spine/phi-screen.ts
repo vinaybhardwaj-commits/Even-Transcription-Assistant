@@ -9,7 +9,7 @@
  *   consult_uid    pqm rows: "pqm_" + 22 hex                    tools/eta-consult-cutter/tools/pqm_windows.py:20
  *                  Pulse rows: the Pulse uid, lower-case alnum 20-32   lib/buddy/relay.ts:82 SAFE_CONSULT_UID (enc = the Pulse encounter_id, compute.ts:98, types.ts:23). No other minting code exists in the repo, so no enc_<..> and no uuid form (the R3 enc_ramesh hole).
  *                  Non-hex forms refuse any run of 7+ digits (a phone-like number); the pqm hex form is exempt (hex ids legitimately hold digit runs). The poster counts a guard refusal as `.digit_run`.
- *   pulse_enc_id   PENDING-PROBE (fable M2 ruling, 20 Oct): allowed for proxies pulse and pqm only (id_key_proxies). Placeholder format [A-Za-z0-9_-]{8,64} with the 7-digit guard until .bc/PULSE-ENC-PROBE.md fixes the real shape. The placeholder admits a name (ramesh_abcd); only the guard and charset are enforced.
+ *   pulse_enc_id   Allowed for proxies pulse and pqm only (id_key_proxies). Shape from the gating-lead production probe (23 Oct 2026): exactly 26 chars of [a-z0-9]. It needs at least one letter (an all-digit string is not a minted id) and uses a PHONE-LENGTH guard, no run of 10+ digits (Indian mobile = 10, +91 form = 12), not the 7-digit guard: a uniformly random 26-char id holds a 7-9 digit run about 0.19% of the time, and the 10-run rule refuses about 0.0034%. The poster counts a guard refusal as `.digit_run`. The format still admits a name-shaped token of 26 lowercase chars; only the charset, length, letter and phone guards are enforced.
  *   pqm_step_uid   the PQM step uid, copied raw                  pqm_windows.py:55. UNVERIFIED charset: taken as a uuid or 16-64 hex. A row whose step uid is anything else is refused by the poster and counted.
  *   window_id      bench window "bw_<session 8>_<start_ms 13 digits>_<primary|backup>"   lib/bench-window.ts:357 (session id = 8 chars of benchId, lib/room-access/bench.ts:24)
  *                  cutter index: the Neon window id, a small integer (<= 7 digits); pqm rows 10**15 + 48 bits = 16 digits starting 10-12   pqm_windows.py:16-18
@@ -32,7 +32,9 @@ export const SOURCE_KEY_FORMAT: Readonly<Record<string, string>> = RULES.source_
 export const ID_KEY_PROXIES: Readonly<Record<string, readonly string[]>> = RULES.id_key_proxies;
 /** The 7-digit guard clause; a value that fails its format but passes without it was refused by the guard alone. */
 export const DIGIT_GUARD = "(?!.*[0-9]{7})";
-const UNGUARDED: Readonly<Record<string, RegExp>> = Object.fromEntries(Object.entries(RULES.formats).map(([k, src]) => [k, new RegExp(src.replace(DIGIT_GUARD, ""))]));
+/** pulse_enc_id's phone-length guard (10+ digits); stripped too when asking whether the guard alone refused a value. */
+export const PHONE_GUARD = "(?!.*[0-9]{10})";
+const UNGUARDED: Readonly<Record<string, RegExp>> = Object.fromEntries(Object.entries(RULES.formats).map(([k, src]) => [k, new RegExp(src.replace(DIGIT_GUARD, "").replace(PHONE_GUARD, ""))]));
 
 export const ENUMS: Record<Proxy, { close_reason: ReadonlySet<string>; quality: ReadonlySet<string> }> = Object.fromEntries(
   Object.entries(RULES.enums).map(([p, e]) => [p, { close_reason: new Set(e.close_reason), quality: new Set(e.quality) }]),

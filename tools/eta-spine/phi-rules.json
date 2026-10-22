@@ -1,5 +1,5 @@
 {
- "_comment": "Spine PHI value rules, read by lib/spine/phi-screen.ts AND tools/eta-spine/post_signals.py. formats: one fullmatch regex per id key (ASCII classes only, no flags, syntax common to JS and Python); source_key_format: proxy -> the id key whose format its source_key must have (a proxy absent here is refused). pulse_enc_id is PENDING-PROBE: a placeholder format until .bc/PULSE-ENC-PROBE.md (gating-lead's shape probe) exists; id_key_proxies limits an id key to the listed proxies. Derivation with file:line is in lib/spine/phi-screen.ts.",
+ "_comment": "Spine PHI value rules, read by lib/spine/phi-screen.ts AND tools/eta-spine/post_signals.py. formats: one fullmatch regex per id key (ASCII classes only, no flags, syntax common to JS and Python); source_key_format: proxy -> the id key whose format its source_key must have (a proxy absent here is refused). pulse_enc_id is closed to the production shape (gating-lead probe, 23 Oct: exactly 26 chars of [a-z0-9]); it needs one letter (an all-digit string is not a minted id) and refuses any run of 10+ digits, the length of an Indian mobile (10; +91 form 12), instead of the 7-digit guard the other keys use, because a random 26-char id holds a 7-9 digit run about 0.19% of the time and a real id must not be refused for that (the 10-run rule refuses about 0.0034% of uniformly random ids); id_key_proxies limits an id key to the listed proxies. Derivation with file:line is in lib/spine/phi-screen.ts.",
  "enums": {
   "pulse": {
    "close_reason": [
@@ -117,7 +117,7 @@
   "acoustic_key": "^rd_[a-hjkmnp-z2-9]{8}:[0-9a-z]{4,6}$",
   "run_id": "^(?:ehr_[a-hjkmnp-z2-9]{12}|ets_[0-9a-f]{18})$",
   "shadow_id": "^et_[0-9a-f]{18}$",
-  "pulse_enc_id": "^(?!.*[0-9]{7})[A-Za-z0-9_-]{8,64}$"
+  "pulse_enc_id": "^(?=.*[a-z])(?!.*[0-9]{10})[a-z0-9]{26}$"
  },
  "source_key_format": {
   "pulse": "consult_key",

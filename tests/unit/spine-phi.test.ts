@@ -13,7 +13,7 @@ const F = JSON.parse(readFileSync("tests/fixtures/spine-phi-cases.json", "utf8")
   keys: Record<string, string>; key_verdicts: Record<string, string | null>; value_cases: Array<{ label: string; expect: string; reason?: string | null; signal: Record<string, unknown> }>; pending_probe: string[];
 };
 /** Digit runs are built here, never written in the fixture. */
-const FILL: Record<string, string> = { "{MS13}": "17" + "0".repeat(11), "{P16}": "1" + "0".repeat(15), "{PHONE10}": "9".repeat(10), "{PLUS_PHONE}": "+91" + "9".repeat(10), "{DIG7}": "1234567", "{DIG8}": "20260101" };
+const FILL: Record<string, string> = { "{MS13}": "17" + "0".repeat(11), "{P16}": "1" + "0".repeat(15), "{PHONE10}": "9".repeat(10), "{PLUS_PHONE}": "+91" + "9".repeat(10), "{DIG7}": "1234567", "{DIG8}": "20260101", "{DIG9}": "123456789" };
 const fill = <T,>(v: T): T => JSON.parse(JSON.stringify(v).replace(/\{[A-Z0-9_]+\}/g, (m) => FILL[m] ?? m));
 const nest = (n: number, leaf: unknown): unknown => (n === 0 ? leaf : [nest(n - 1, leaf)]);
 const sig = (proxy: string, attrs: Record<string, unknown>) => ({ proxy, source_key: F.good_source_key[proxy] ?? "x", t_open: "2026-10-18T04:00:00Z", observed_at: "2026-10-18T04:20:00Z", attrs });
@@ -87,8 +87,7 @@ describe("per-key id formats (R3 F1)", () => {
   });
   it("name+digits, phone-like and malformed values are refused by EVERY key, as ids.<key>", () => {
     for (const k of keys) {
-      // a PENDING-PROBE placeholder enforces only charset, length and the 7-digit guard (a name like ramesh_9845 fits it)
-      const common = F.pending_probe.includes(k) ? fill(F.formats_refuse_common).filter((v) => !/^[A-Za-z0-9_-]{8,64}$/.test(v) || /[0-9]{7}/.test(v)) : fill(F.formats_refuse_common);
+      const common = fill(F.formats_refuse_common);
       for (const v of [...common, ...fill(F.formats_refuse[k]!)]) {
       expect(FORMATS[k]!.test(v), `${k} ${JSON.stringify(v)}`).toBe(false);
       const r = validateSignals([sig("pqm", { ids: { [k]: v } })]);
