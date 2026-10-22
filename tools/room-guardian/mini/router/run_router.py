@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""run_router.py -- launchd job com.eta.guardian.router. Runs Router.tick (ack reads, re-pages, V notices, 21:00 list and the monthly _to_delete size line, all in one batch send) every TICK_S on the
+"""run_router.py -- launchd job com.eta.guardian.router. Runs Router.tick (ack reads, pages, reminders, cleared lines, V notices, 21:00 list and the monthly _to_delete size line, all in one batch send) every TICK_S on the
 Mini-local SQLite case store shared with the subscriber. Does NOT run the server-outbox relay (router_relay.py): that would take the relay lock
 and post real server alerts, which is not Phase 0. Routing and ackers come from etc/router.json (re-read every tick)."""
 import os, sys, time
@@ -15,14 +15,33 @@ def log(msg):
     print(time.strftime("%Y-%m-%dT%H:%M:%S%z"), msg, flush=True)
 
 
+alert_router.Router.log_fn = staticmethod(log)      # FR1 D7: denied ack reads, once per case (metadata only)
+
+
+_whoami_logged = None
+
+
 class LazyBus:
-    """Starts the ubus shim only when the tick has something to say or read (most ticks: nothing open)."""
+    """Starts the ubus shim only when the tick has something to say or read (most ticks: nothing open). A failed start (FR1 D7: an identity
+    mismatch on ubus_whoami) is remembered for the rest of the tick, so one tick starts the shim at most once and sends nothing."""
     def __init__(self, cfg):
-        self.cfg, self.b = cfg, None
+        self.cfg, self.b, self.err = cfg, None, None
 
     def _bus(self):
+        if self.err is not None:
+            raise self.err
         if self.b is None:
-            self.b = ubus_bus.UbusBus(self.cfg)
+            try:
+                self.b = ubus_bus.UbusBus(self.cfg)
+            except Exception as e:
+                self.err = e
+                log(f"bus start failed: {e.__class__.__name__}: {str(e)[:120]}")
+                raise
+            global _whoami_logged
+            idn = getattr(self.b, "identity", None)
+            if idn != _whoami_logged:                 # the first start of this process, and any change after it: one line
+                _whoami_logged = idn
+                log(f"whoami handle={idn and idn.get('handle')} registered={idn and idn.get('registered')} session={ubus_bus.SESSION}")
         return self.b
 
     def post(self, *a):

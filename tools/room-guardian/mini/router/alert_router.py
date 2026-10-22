@@ -1,22 +1,26 @@
 """alert_router.py -- durable room-alert router (FR-1 C4, A6 design). Pure logic; the clock, store and bus are injected.
 
-A CASE is one open alert for (room, kind). Opened by the first outbox row, paged at once, re-paged every REPAGE_CLINIC_S in clinic
-hours / REPAGE_OFF_S outside, until a person acks ("ACK room-alert-<first_id>" on the bus, sent by gating-lead or fleet). Ack stops
-re-pages; the case stays open until recovery closes it. A duplicate row while open bumps suppressed_count; a late duplicate after
+A CASE is one open alert for (room, kind). Opened by the first outbox row, paged at once, reminded at most once per REMIND_S (clinic hours
+and outside alike, FR1 D7), until a person acks ("ACK room-alert-<first_id>" on the bus, sent by gating-lead or fleet). Ack stops
+reminders; the case stays open until recovery closes it. The first ack or close of a paged case sends ONE "cleared" line. A duplicate row while open bumps suppressed_count; a late duplicate after
 close opens a new case.
 
 R2 (Phase 0 fix round): opening and closing a case NEVER touches the bus. on_row only writes the store; close_room writes the store and queues a
-note (store.add_note). All sending happens in tick(): ONE ubus send per tick carries every due page, V notice and queued note, on the day
+note (store.add_note). All sending happens in tick(): ONE ubus send per tick carries every due page, reminder, cleared line and V notice, on the day
 thread room-alert-batch-<YYYY-MM-DD> (IST). ubus caps sends per machine, so one send per tick is the budget. A failed send leaves every
 case state untouched, so the pages are simply due again on the next tick, and it never blocks the digest, the routed-id prune or the ack read.
 
 Crash rule: each page line carries "room-alert-<id> ... [page N]". Before posting, the router reads the day thread; a page whose marker is
 already there is only written to the store. So a crash between post and state write gives neither a duplicate page nor a lost alert.
 The marker read covers today's AND yesterday's day thread, so a page posted just before IST midnight is not paged again just after it.
-ACKs are read from the day threads (today and yesterday) and from each case's own thread room-alert-<first_id>.
+ACKs are read from the day threads (today and yesterday) and from each case's own thread room-alert-<first_id>. FR1 D7: only for a case this
+router has paged, at most once per ACK_READ_S per case; a forbidden / not_registered answer is "no ack yet" and backs the case off to
+ACK_DENIED_S. The next-read times are kept IN MEMORY (a restart reads each paged case once more at most).
 
 The 21:00 list ("digest") rides in the same batch send, as one block: header line, one line per unacked case (capped), and once per calendar month
 a size line for backup/_to_delete. The block is atomic: if it does not fit the body cap, or the send fails, it stays due for the next tick.
+FR1 D7: queued notes are sent ONLY with the digest (after the block, as many as fit); a note is dropped once a sent digest carried it. Notes that
+did not fit go out on the next ticks of the same evening ("ROOM DIGEST <date> (cont.)"); notes queued after the digest wait for the next one.
 
 Store interface (see SqliteStore): get_open(room, kind) -> case|None, list_open(), insert(case), update(first_id, **f), add_note(text, now),
 list_notes(), drop_notes(ids).
@@ -27,7 +31,8 @@ from datetime import datetime, timedelta, timezone
 
 IST = timezone(timedelta(hours=5, minutes=30))
 ACKERS = {"gating-lead", "fleet"}
-REPAGE_CLINIC_S, REPAGE_OFF_S = 600, 1800
+REMIND_S = 7200                  # FR1 D7: one reminder per 2 h while a case stays open and unacked, in clinic hours and outside
+ACK_READ_S, ACK_DENIED_S = 120, 600     # FR1 D7: ack reads per paged case; a forbidden / not_registered answer backs that case off
 CA_KINDS = {"capture_dead", "capture_muted", "coreaudio_heal_failed", "recorder_disturbed"}     # coreaudio heal rule alerts (kiosk kiosk/<room>/heal lines)
 USB_KINDS = {"usb_reboot_failed", "usb_power_off_recurring"}        # FR1 2.4 d': URGENT V kinds, the V window of the coreaudio kinds, ACK closes; usb_device_missing is URGENT only
 START_DAY_KINDS = {"start_day_failed"}      # FR1 2.4 d': URGENT, V kind, same V window as the coreaudio kinds
@@ -51,6 +56,16 @@ RECOVERY_KEEP_KINDS = ACK_ONLY_KINDS | {"usb_device_missing"} | CANARY_KINDS    
 _ACK_RE = re.compile(r"^ACK\s+room-alert-(\d+)\b", re.I)
 _ID_RE = re.compile(r"room-alert-(\d+)\b", re.I)
 _MARK_RE = re.compile(r"room-alert-(\d+) .*\[page (\d+)\]")
+_CLEAR_RE = re.compile(r"room-alert-(\d+) .*\[cleared\]")
+NOTE_CAP = 500
+
+
+def _denied(e):
+    """forbidden / not_registered from a thread read (ubus_bus.UbusDenied, or the bare error text from another bus)."""
+    t = str(e)
+    if getattr(e, "denied", False) or "forbidden" in t or "not_registered" in t:
+        return "not_registered" if "not_registered" in t else "forbidden"
+    return None
 BATCH_PREFIX = "room-alert-batch-"
 BODY_CAP = 3800
 
@@ -94,12 +109,16 @@ def is_clinic(now):
 
 class Router:
     inbox_path = None        # set by run_router.py: the router job appends queued HEAL action lines there. None (subscriber's router, tests): the queue is only written.
+    log_fn = None            # set by run_router.py (staticmethod(log)): metadata lines only, never message text
     def __init__(self, store, bus_factory, clock, state_path=None, size_line_fn=None):
         self.store, self.bus_factory, self.clock = store, bus_factory, clock
         self.state_path = state_path
         self.size_line_fn = size_line_fn          # () -> str | None: the monthly _to_delete size line; None or an error means no line
-        self.local = {"v_sent": {}, "digest_day": "", "size_month": ""}
+        self.local = {"v_sent": {}, "digest_day": "", "size_month": "", "cleared": {}, "clear_since": None, "digest_note_upto": 0}
+        self._ack_next, self._denied_logged = {}, set()     # FR1 D7: in memory only
         self._load()
+        if self.local["clear_since"] is None:          # first run of the D7 code: no cleared lines for cases that cleared before it
+            self.local["clear_since"] = float(self.clock())
 
     # ---- local state: V notices and the digest day. Losing it repeats a V notice at worst.
     def _load(self):
@@ -112,6 +131,12 @@ class Router:
                     self.local["v_sent"] = {str(k): list(v) for k, v in d.get("v_sent", {}).items()}
                     self.local["digest_day"] = str(d.get("digest_day", ""))
                     self.local["size_month"] = str(d.get("size_month", ""))
+                    if isinstance(d.get("cleared"), dict):
+                        self.local["cleared"] = {str(k): float(v) for k, v in d["cleared"].items()}
+                    if isinstance(d.get("clear_since"), (int, float)):
+                        self.local["clear_since"] = float(d["clear_since"])
+                    if isinstance(d.get("digest_note_upto"), int):
+                        self.local["digest_note_upto"] = d["digest_note_upto"]
             except (OSError, ValueError):
                 pass
 
@@ -173,16 +198,21 @@ class Router:
     def _age_min(self, c):
         return int((self.clock() - c["opened_at"]) // 60)
 
-    def _flush(self, bus, now, pages, vcases, notes, msgs, out, digest=None):
-        """One send for everything due. State is written only after the send succeeded. `digest` is (unacked cases, size lines, day, month|None) or None."""
+    def _flush(self, bus, now, pages, vcases, cleared, msgs, out, digest=None):
+        """One send for everything due. State is written only after the send succeeded. `digest` is (unacked cases, size lines, day, month|None,
+        notes, continuation) or None."""
         tid = batch_tid(now)
-        done = set()
-        for mt_tid in (tid, batch_tid(now - 86400)):          # yesterday's thread too: a page posted before IST midnight is not repeated after it
-            for m in msgs(mt_tid):
-                for line in f"{m.get('subject', '')}\n{m.get('body', '')}".splitlines():
-                    mt = _MARK_RE.search(line)
-                    if mt:
-                        done.add((int(mt.group(1)), int(mt.group(2))))
+        done, cdone = set(), set()
+        if pages or cleared:                                   # the crash markers matter only for page and cleared lines
+            for mt_tid in (tid, batch_tid(now - 86400)):      # yesterday's thread too: a page posted before IST midnight is not repeated after it
+                for m in msgs(mt_tid):
+                    for line in f"{m.get('subject', '')}\n{m.get('body', '')}".splitlines():
+                        mt = _MARK_RE.search(line)
+                        if mt:
+                            done.add((int(mt.group(1)), int(mt.group(2))))
+                        mc = _CLEAR_RE.search(line)
+                        if mc:
+                            cdone.add(int(mc.group(1)))
         lines, send, already = [], [], []
         for c, v in pages:
             n = c["page_count"] + 1
@@ -192,32 +222,54 @@ class Router:
             line = (f"room-alert-{c['first_id']} {c['kind']} in {c['room_id']}.{src} open {self._age_min(c)} min, duplicates folded "
                     f"{c['suppressed_count']}. [page {n}]" + (" V: patient-impacting, past the V threshold. gating-lead tells V." if v else ""))
             lines.append(line); send.append((c, n, v))
+        clines, cleared_already = [], []
+        for c in cleared:
+            if c["first_id"] in cdone:
+                cleared_already.append(c); continue
+            ended = c["closed_at"] or c["acked_at"]
+            why = (f"CLOSED (acked by {c['acked_by']})" if c["close_reason"] == "acked" and c["acked_by"] else f"CLOSED ({c['close_reason']})") if c["closed_at"] \
+                else f"ACKED by {c['acked_by']}"
+            clines.append((c, f"room-alert-{c['first_id']} {c['kind']} in {c['room_id']} cleared: {why} after {int((ended - c['opened_at']) // 60)} min. "
+                              f"Pages sent {c['page_count']}. [cleared]"))
         vlines = [(c, f"V room-alert-{c['first_id']} {c['kind']} in {c['room_id']} open {self._age_min(c)} min, "
                       f"{'acked but' if c['acked_at'] else 'unacked,'} not recovered. gating-lead tells V.") for c in vcases]
         # trim to the body cap: what does not fit stays due for the next tick
-        head = "Reply 'ACK room-alert-<id>' (one line per case) in this thread to stop re-pages.\n"
+        head = "Reply 'ACK room-alert-<id>' (one line per case) in this thread to stop reminders.\n" if send else ""
         budget = BODY_CAP - len(head)
-        keep_pages, keep_v, keep_notes, used = [], [], [], 0
+        keep_pages, keep_clear, keep_v, used = [], [], [], 0
         for (c, n, v), line in zip(send, lines):
             if used + len(line) + 1 <= budget: keep_pages.append((c, n, v, line)); used += len(line) + 1
+        for c, line in clines:
+            if used + len(line) + 1 <= budget: keep_clear.append((c, line)); used += len(line) + 1
         for c, line in vlines:
             if used + len(line) + 1 <= budget: keep_v.append((c, line)); used += len(line) + 1
-        for nid, text in notes:
-            if used + len(text) + 1 <= budget: keep_notes.append((nid, text)); used += len(text) + 1
-        keep_digest = None
-        if digest:                                            # last in line: pages, V notices and notes come first; the digest is atomic
+        keep_digest, keep_notes = None, []
+        if digest:                                            # last in line: pages, cleared lines and V notices come first; the digest block is atomic
             paged_now = {c["first_id"]: n for c, n, _v, _l in keep_pages}
             paged_now.update({c["first_id"]: n for c, n in already})
             dlines = self._render_digest(digest[0], digest[1], paged_now)
             dtext = "\n".join(dlines)
             if used + len(dtext) + 1 <= budget:
                 keep_digest = (dlines, digest[2], digest[3]); used += len(dtext) + 1
-        if keep_pages or keep_v or keep_notes or keep_digest:
-            body = head + "\n".join([l for *_, l in keep_pages] + [l for _, l in keep_v] + [t for _, t in keep_notes]
+                hdr = f"Notes since the last digest ({len(digest[4])}):" if not digest[5] else f"Notes, continued ({len(digest[4])}):"
+                used += len(hdr) + 1
+                for nid, text in digest[4]:                   # the notes ride only with the digest: as many as fit, the rest on the next ticks
+                    text = text[:NOTE_CAP]
+                    if used + len(text) + 1 <= budget: keep_notes.append((nid, text)); used += len(text) + 1
+                if keep_notes:
+                    keep_digest = (dlines + [hdr] + [t for _, t in keep_notes], digest[2], digest[3])
+                elif not dlines:                              # a continuation with nothing that fits: nothing to send
+                    keep_digest = None
+        if keep_pages or keep_clear or keep_v or keep_digest:
+            body = head + "\n".join([l for *_, l in keep_pages] + [l for _, l in keep_clear] + [l for _, l in keep_v]
                                     + (list(keep_digest[0]) if keep_digest else []))
-            anyv = any(v for *_, v, _l in keep_pages) or bool(keep_v)
-            subject = (f"ROOM ALERT{' V' if anyv else ''}: {len(keep_pages)} page(s), {len(keep_v)} V, {len(keep_notes)} note(s)"
-                       + (", 21:00 list" if keep_digest else ""))[:120]
+            nv = len(keep_v) + sum(1 for *_, v, _l in keep_pages if v)
+            dname = f"ROOM DIGEST {digest[2]}" + (" (cont.)" if digest[5] else "") if keep_digest else ""
+            if keep_pages or keep_clear or keep_v:
+                subject = (f"ROOM ALERT: {sum(1 for _c, n, *_ in keep_pages if n == 1)} new, {len(keep_clear)} cleared, "
+                           f"{sum(1 for _c, n, *_ in keep_pages if n > 1)} reminder(s)" + (f", {nv} V" if nv else "") + (f"; {dname}" if dname else ""))[:120]
+            else:
+                subject = dname
             urgent = any(c["kind"] in URGENT for c, *_ in keep_pages) or bool(keep_v)
             bus.post(subject, body, "urgent" if urgent else "normal", tid)
         t = self.clock()
@@ -227,70 +279,125 @@ class Router:
                 self._v_due(c, now - c["opened_at"], now, mark=True)
         for c, n in already:
             self.store.update(c["first_id"], last_paged_at=t, page_count=n)
+        for c in [c for c, _l in keep_clear] + cleared_already:
+            self.local["cleared"][str(c["first_id"])] = t
         for c, _l in keep_v:
             self._v_due(c, now - c["opened_at"], now, mark=True)
         if keep_notes:
             self.store.drop_notes([nid for nid, _ in keep_notes])
         if keep_digest:
-            self.local["digest_day"] = keep_digest[1]
-            if keep_digest[2]:
-                self.local["size_month"] = keep_digest[2]
+            if not digest[5]:
+                self.local["digest_day"] = keep_digest[1]
+                self.local["digest_note_upto"] = max([nid for nid, _ in digest[4]] or [0])
+                if keep_digest[2]:
+                    self.local["size_month"] = keep_digest[2]
             out["digest"] += 1
         out["paged"] += len(keep_pages) + len(already); out["v"] += len(keep_v) + sum(1 for *_, v, _l in keep_pages if v)
+        out["cleared"] += len(keep_clear) + len(cleared_already)
         out["notes"] += len(keep_notes)
 
+    def _log(self, msg):
+        if self.log_fn:
+            try:
+                self.log_fn(msg)
+            except Exception:
+                pass
+
     def tick(self, bus=None):
-        """One cycle: read acks, then ONE send for every due page / V notice / queued note, then the 21:00 list. Each stage is isolated:
-        a bus failure in one never stops the others. Returns a count dict (for logs and tests); out["errors"] counts failed stages."""
+        """One cycle: read acks (paged cases only, throttled), then ONE send for every due page / reminder / cleared line / V notice, and the 21:00
+        list with the queued notes. Each stage is isolated: a bus failure in one never stops the others. Returns a count dict (for logs and tests);
+        out["errors"] counts failed stages."""
         own = bus is None
         bus = bus or self.bus_factory()
-        out = {"acked": 0, "paged": 0, "v": 0, "digest": 0, "notes": 0, "errors": 0}
+        out = {"acked": 0, "paged": 0, "v": 0, "digest": 0, "notes": 0, "cleared": 0, "errors": 0}
         cache = {}
 
-        def msgs(tid):
+        def read(tid):
+            """(messages, denied reason or None) for one thread, read once per tick."""
             if tid not in cache:
-                cache[tid] = list(bus.thread_messages(tid))
+                try:
+                    cache[tid] = (list(bus.thread_messages(tid)), None)
+                except Exception as e:
+                    why = _denied(e)
+                    if not why:
+                        raise
+                    cache[tid] = ([], why)
             return cache[tid]
+
+        def msgs(tid):
+            return read(tid)[0]
         try:
             now = self.clock()
             opens = self.store.list_open()
             try:
                 for c in opens:
-                    if not c["acked_at"] and self._read_ack(c, now, msgs):
+                    fid = c["first_id"]
+                    if c["acked_at"] or c["last_paged_at"] is None or now < self._ack_next.get(fid, 0):
+                        continue                              # D7: never read a case this router has not paged; at most once per ACK_READ_S
+                    self._ack_next[fid] = now + ACK_READ_S
+                    acked, why = self._read_ack(c, now, read)
+                    if acked:
                         out["acked"] += 1
+                    elif why:
+                        self._ack_next[fid] = now + ACK_DENIED_S
+                        if fid not in self._denied_logged:
+                            self._denied_logged.add(fid)
+                            self._log(f"ack read {why}: case room-alert-{fid}, next read in {ACK_DENIED_S}s")
             except Exception as e:
                 out["errors"] += 1; out["error"] = f"ack read: {e.__class__.__name__}"
             pages, vcases = [], []
             for c in self.store.list_open():
                 age = now - c["opened_at"]
                 if not c["acked_at"]:
-                    gap = REPAGE_CLINIC_S if is_clinic(now) else REPAGE_OFF_S
-                    if c["last_paged_at"] is None or now - c["last_paged_at"] >= gap:
+                    if c["last_paged_at"] is None or now - c["last_paged_at"] >= REMIND_S:
                         pages.append((c, self._v_due(c, age, now, mark=False)))
                         continue
                 if self._v_due(c, age, now, mark=False):
                     vcases.append(c)
-            notes = self.store.list_notes()
+            cleared = []
+            try:
+                cleared = self._cleared_due(now)
+            except Exception as e:
+                out["errors"] += 1; out["error"] = f"cleared: {e.__class__.__name__}"
             digest = None
             try:
                 digest = self._digest_block(now)
             except Exception as e:
                 out["errors"] += 1; out["error"] = f"digest: {e.__class__.__name__}"
-            if pages or vcases or notes or digest:
+            if pages or vcases or cleared or digest:
                 try:
-                    self._flush(bus, now, pages, vcases, notes, msgs, out, digest)
+                    self._flush(bus, now, pages, vcases, cleared, msgs, out, digest)
                 except Exception as e:
                     out["errors"] += 1; out["error"] = f"send: {e.__class__.__name__}: {str(e)[:80]}"
             try:
                 self.store.prune_routed(now - ROUTED_KEEP_S)
             except Exception as e:
                 out["errors"] += 1; out["error"] = f"prune: {e.__class__.__name__}"
+            self._prune_local(now)
             self._save()
             self._inbox_stage(now, out)
         finally:
             if own and hasattr(bus, "close"):
                 bus.close()
         return out
+
+    def _cleared_due(self, now):
+        """Paged cases whose first ack or close has no cleared line yet. Only events after clear_since (the first D7 run) and inside ROUTED_KEEP_S."""
+        since = max(self.local["clear_since"] or 0.0, now - ROUTED_KEEP_S)
+        cands = [c for c in self.store.list_open() if c["acked_at"]]
+        if hasattr(self.store, "list_closed_since"):
+            cands += self.store.list_closed_since(since)
+        return [c for c in cands if c["page_count"] > 0 and str(c["first_id"]) not in self.local["cleared"] and (c["closed_at"] or c["acked_at"]) >= since]
+
+    def _prune_local(self, now):
+        try:
+            open_ids = {str(c["first_id"]) for c in self.store.list_open()}
+        except Exception:
+            return
+        for k in [k for k, t in self.local["cleared"].items() if t < now - ROUTED_KEEP_S and k not in open_ids]:
+            del self.local["cleared"][k]
+        for fid in [f for f in self._ack_next if str(f) not in open_ids]:
+            self._ack_next.pop(fid, None)
 
     def _inbox_stage(self, now, out):
         """CA-C6: append every queued HEAL action line to the gating INBOX file; alarm (heal_inbox_stuck) if one waits more than INBOX_DEADLINE_S.
@@ -340,10 +447,14 @@ class Router:
                 ids.update(int(x) for x in _ID_RE.findall(line))
         return ids
 
-    def _read_ack(self, c, now, msgs):
+    def _read_ack(self, c, now, read):
+        """(acked, denied reason or None). `read(tid)` -> (messages, denied reason or None)."""
         tids = [f"room-alert-{c['first_id']}", batch_tid(now), batch_tid(now - 86400)]
+        why = None
         for tid in tids:
-            for m in msgs(tid):
+            ms, d = read(tid)
+            why = why or d
+            for m in ms:
                 sender = str(m.get("from", ""))
                 if sender in ACKERS and c["first_id"] in self.ack_ids(m):
                     t = self.clock()
@@ -353,8 +464,8 @@ class Router:
                         self.local["v_sent"].pop(str(c["first_id"]), None)
                         self.store.add_note(f"room-alert-{c['first_id']} {c['kind']} in {c['room_id']} CLOSED (acked by {sender}) after {self._age_min(c)} min. "
                                             f"Pages sent {c['page_count']}, duplicates folded {c['suppressed_count']}.", t)
-                    return True
-        return False
+                    return True, why
+        return False, why
 
     # ---- end-of-day list
     def unacked_cases(self):
@@ -379,13 +490,17 @@ class Router:
     DIGEST_LINES_CAP = 30
 
     def _digest_block(self, now):
-        """The 21:00 block for this day, or None (not yet 21:00, already sent today, or nothing to say). Returns (unacked cases, size lines, day, month|None);
-        _flush renders it (see _render_digest) and records the day and month only after the batch send succeeded. The size lines (backup, data and logs
-        _to_delete) go out with the first digest run of each calendar month; size_line_fn may return one string or a list of strings."""
+        """The 21:00 block for this day, or None (not yet 21:00, already sent today, or nothing to say). Returns (unacked cases, size lines, day, month|None,
+        notes, continuation); _flush renders it (see _render_digest) and records the day and month only after the batch send succeeded. The size lines (backup,
+        data and logs _to_delete) go out with the first digest run of each calendar month; size_line_fn may return one string or a list of strings.
+        After the day's digest went out, notes it could not carry (ids up to digest_note_upto) come back as a continuation on the same evening."""
         ist = datetime.fromtimestamp(now, IST)
         day, month = ist.strftime("%Y-%m-%d"), ist.strftime("%Y-%m")
-        if ist.hour < DIGEST_HOUR_IST or self.local["digest_day"] == day:
+        if ist.hour < DIGEST_HOUR_IST:
             return None
+        if self.local["digest_day"] == day:
+            left = [n for n in self.store.list_notes() if n[0] <= self.local["digest_note_upto"]]
+            return ([], [], day, None, left, True) if left else None
         cases, tail = self.unacked_cases(), []
         size_month = None
         if self.size_line_fn and self.local["size_month"] != month:
@@ -396,10 +511,12 @@ class Router:
             tail = [x for x in ([sl] if isinstance(sl, str) else list(sl or [])) if x]
             if tail:
                 size_month = month
-        if not cases and not tail:
+        notes = self.store.list_notes()
+        if not cases and not tail and not notes:
             self.local["digest_day"] = day          # nothing to say today: do not look again until tomorrow
+            self.local["digest_note_upto"] = 0
             return None
-        return cases, tail, day, size_month
+        return cases, tail, day, size_month, notes, False
 
 
 def guardian_size_lines(home):
@@ -470,6 +587,9 @@ class SqliteStore:
 
     def add_note(self, text, now):
         self.db.execute("INSERT INTO outbox_notes (text, created_at) VALUES (?, ?)", (text, now))
+
+    def list_closed_since(self, since):
+        return [dict(r) for r in self.db.execute("SELECT * FROM room_alert_case WHERE closed_at IS NOT NULL AND closed_at >= ? AND page_count > 0 ORDER BY first_id", (since,))]
 
     def list_notes(self):
         return [(r[0], r[1]) for r in self.db.execute("SELECT id, text FROM outbox_notes ORDER BY id")]

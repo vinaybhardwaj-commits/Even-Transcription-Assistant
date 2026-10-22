@@ -39,8 +39,10 @@ class MF1CaseBeforeBus(unittest.TestCase):
             self.assertIsNone(router.store.get_open("r1", "guardian_quiet"))
             self.assertEqual(len(router.store.list_notes()), 1)
             bus = FakeBus(); router.tick(bus)
+            self.assertEqual((len(router.store.list_notes()), bus.sends), (1, 0))     # FR1 D7: notes ride only with the 21:00 digest
+            clock.t = ist(2026, 10, 13, 21, 1); router.tick(bus)
             self.assertEqual(router.store.list_notes(), [])
-            self.assertEqual(len([m for m in bus.msgs if "CLOSED" in m["body"]]), 1)
+            self.assertEqual(len([m for m in bus.real if "CLOSED" in m["body"]]), 1)
 
 
 class MF2Batching(unittest.TestCase):
@@ -57,12 +59,12 @@ class MF2Batching(unittest.TestCase):
         for i in range(10):
             self.assertIn(f"room-alert-{100 + i} offline in r{i}", body); self.assertIn("[page 1]", body)
         self.assertTrue(self.bus.real[0]["thread"].startswith(ar.BATCH_PREFIX))
-        self.clock.adv(600); self.r.tick(self.bus)
-        self.assertEqual(self.bus.sends, 2)                                # re-page of all ten is one more send
+        self.clock.adv(ar.REMIND_S); self.r.tick(self.bus)
+        self.assertEqual(self.bus.sends, 2)                                # the reminder for all ten is one more send
 
     def test_pages_notes_and_v_share_one_send(self):
         self.r.on_row(self.bus, row(100, "recorder_off")); self.r.on_row(self.bus, row(200, "offline", "r2")); self.r.tick(self.bus)
-        self.clock.adv(1860)
+        self.clock.adv(ar.REMIND_S)
         self.r.on_row(self.bus, row(300, "recovered", "r2"))
         before = self.bus.sends; self.r.tick(self.bus)
         self.assertEqual(self.bus.sends, before + 1)
@@ -237,13 +239,14 @@ class SF2DigestInBatch(unittest.TestCase):
         self.r = ar.Router(self.store, lambda: self.bus, self.clock)
 
     def test_digest_and_due_page_are_one_send_on_the_day_thread(self):
+        self.clock.t = ist_s(2026, 10, 13, 19, 0)                           # FR1 D7: page 1 at 19:00, so the 2 h reminder is due at 21:01
         self.r.on_row(self.bus, row(100)); self.r.tick(self.bus)
         self.r.on_row(self.bus, row(200, "offline", "r2"))
         self.clock.t = ist_s(2026, 10, 13, 21, 1); before = self.bus.sends
         out = self.r.tick(self.bus)
         self.assertEqual((self.bus.sends - before, out["digest"], out["paged"]), (1, 1, 2))
         m = self.bus.real[-1]
-        self.assertEqual(m["thread"], ar.batch_tid(self.clock())); self.assertIn("21:00 list", m["subject"])
+        self.assertEqual(m["thread"], ar.batch_tid(self.clock())); self.assertIn("ROOM DIGEST 2026-10-13", m["subject"])
         self.assertIn("ROOM ALERTS unacked at 21:00: 2", m["body"]); self.assertIn("[page 1]", m["body"])
         self.assertEqual([x for x in self.bus.msgs if x["thread"].startswith("room-alert-digest")], [])
 
@@ -337,12 +340,12 @@ def _pgdump_script():
 
 class FUDigestPagesCount(unittest.TestCase):
     def test_pages_in_the_digest_is_not_one_behind_when_the_same_batch_pages_the_case(self):
-        clock, bus, store = Clock(ist_s(2026, 10, 13, 20, 50)), FakeBus(), ar.SqliteStore()
-        r = ar.Router(store, lambda: bus, clock); r.on_row(bus, row(100)); r.tick(bus)                     # page 1 at 20:50
-        clock.t = ist_s(2026, 10, 13, 21, 1); r.on_row(bus, row(200, "offline", "r2"))                      # 100 is due again (page 2); 200 is new (page 1)
+        clock, bus, store = Clock(ist_s(2026, 10, 13, 18, 50)), FakeBus(), ar.SqliteStore()
+        r = ar.Router(store, lambda: bus, clock); r.on_row(bus, row(100)); r.tick(bus)                     # page 1 at 18:50
+        clock.t = ist_s(2026, 10, 13, 21, 1); r.on_row(bus, row(200, "offline", "r2"))                      # 100 is due again (page 2, the D7 reminder); 200 is new (page 1)
         r.tick(bus); body = bus.real[-1]["body"]
         self.assertIn("room-alert-100 recorder_off in r1.", body); self.assertIn("[page 2]", body)
-        self.assertIn("room-alert-100 recorder_off r1 open 11 min, pages 2", body)
+        self.assertIn("room-alert-100 recorder_off r1 open 131 min, pages 2", body)
         self.assertIn("room-alert-200 offline r2 open 0 min, pages 1", body)
 
     def test_digest_alone_shows_the_stored_count(self):

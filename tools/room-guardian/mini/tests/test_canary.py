@@ -168,6 +168,7 @@ class OutputAbsent(unittest.TestCase):
     def test_ack_closes_all_three_kinds_and_a_server_recovered_row_closes_none(self):
         e = Env(); e.canary(line("no_local_rise", night="20261015")); e.canary(line("inconclusive:output_absent", night="20261015")); e.canary(line("inconclusive:output_absent", night="20261016"))
         n = len(e.kinds()); e.router.on_row(None, {"id": 9001, "kind": "recovered", "room_ids": ["r1"]}); self.assertEqual(len(e.kinds()), n)
+        e.router.tick(e.bus)                                                                  # FR1 D7: acks are read only for cases this router has paged
         for c in list(e.open().values()):
             e.bus.human("gating-lead", f"ACK room-alert-{c['first_id']}", f"room-alert-{c['first_id']}")
         e.clock.adv(30); e.router.tick(e.bus); self.assertEqual(e.kinds(), [])
