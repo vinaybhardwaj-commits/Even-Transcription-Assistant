@@ -165,3 +165,34 @@ def test_b1_the_view_drops_units_with_their_pointers_so_g1_g6_do_not_cascade(tmp
     from tools.eta2freescript.validate import check
     lg, a, _ = _b1_run(tmp_path, "no headings here")
     assert [e for e in check(a) if e.startswith(("G1", "G6"))] == []
+
+
+def test_c3_age_unit_must_be_years():
+    # "25 days old" is a newborn's age in days, not 25 years: the unit after the number must be years (or absent)
+    assert not gate_of("The baby is 25 months old.").check("25 years old", "symptoms", [0]).ok
+    assert gate_of("The patient is 25 years old.").check("25 years old", "symptoms", [0]).ok
+
+
+def test_b1_a_gp_unit_dropped_at_the_floor_leaves_no_dangling_pointer(tmp_path):
+    from test_v10_pipeline import LINES, base_enc, run
+    from tools.eta2freescript.validate import check
+    lines = LINES[:3] + [(20, 24, "0", "Get a CBC and a paracetamol level done.")] + LINES[3:]
+    enc = base_enc(investigations=[{"name": "Paracetamol level", "order_status": "ordered", "decision_turn": 3, "basis": "said", "source_turns": [3]},
+                                   {"name": "CBC", "order_status": "ordered", "decision_turn": 3, "basis": "said", "source_turns": [3]}])
+    lg, a, _ = run(tmp_path, lines, enc, stage_b="no headings here")
+    assert [e for e in check(a) if e.startswith(("G1", "G6", "FRX-P1"))] == [], check(a)
+    assert [x["name"] for x in a["gp_extraction"].get("further_investigations", [])] == ["CBC"]   # the withheld assay does not take the CBC with it
+
+
+def test_b1_view_of_repoints_provenance_so_a_valid_llm_note_is_not_rejected_for_a_dangling_pointer(tmp_path):
+    from test_v10_pipeline import LINES, base_enc, run
+    from tools.eta2freescript.note import HEADINGS
+    lines = LINES[:3] + [(20, 24, "0", "Get a CBC and a paracetamol level done.")] + LINES[3:]
+    enc = base_enc(investigations=[{"name": "Paracetamol level", "order_status": "ordered", "decision_turn": 3, "basis": "said", "source_turns": [3]},
+                                   {"name": "CBC", "order_status": "ordered", "decision_turn": 3, "basis": "said", "source_turns": [3]}])
+    body = {h: "" for h in HEADINGS}
+    body["Further Investigation"] = "CBC"
+    note = "\n".join(f"{h}: {body[h]}".rstrip() for h in HEADINGS)
+    lg, a, _ = run(tmp_path, lines, enc, stage_b=note)
+    assert lg["note_source"].startswith("llm_"), lg["llm_note_errors"]       # G1 / G6 from a dangling pointer would have sent it to the fallback
+    assert [x["name"] for x in a["gp_extraction"].get("further_investigations", [])] == ["CBC"]

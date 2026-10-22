@@ -133,6 +133,15 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     ctx: dict = {}
     art = build(c, enc, bnd, model_id, sha(*prompts), sha(*code_paths()), specialty, ctx)
     gate, bl = ctx.get("gate"), ctx.get("builder")
+    if bl is not None:
+        # Fix3 B1: a gp unit that fails FRX-T1/T2 at the final check is withheld (record, provenance, prompt) BEFORE Stage B reads gp_extraction, so the model's note is written from what
+        # will be posted and a failing gp unit no longer marks a valid note invalid.
+        pre = v10_final.gp_final(gate, copy.deepcopy(art), c)
+        if pre:
+            v10_final.drop_units(art, pre)
+            for fld, reason, _u, _p in pre:
+                bl.withhold(fld, reason, [], stage="floor")
+            art["completion_required"] = bl.completion
     flags = flags_by_pointer(art)
     banned = [n for p in art["provenance"] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
     det, det_rem = _fallback_note_ex(art, flags, banned)
@@ -210,11 +219,21 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     if t1errs and bl is not None:
         v0 = copy.deepcopy(art)
         failed = v10_final.gp_final(gate, v0, c)
-        _final_note, bad = v10_final.note_final(gate, v0, c, note)
-        failed = failed + [u for u in v10_final.section_units(art, bad) if u not in failed]
         v10_final.drop_units(art, failed)
         for fld, reason, _u, _p in failed:
             bl.withhold(fld, reason, [], stage="floor")
+        # the note is rendered again from what is left; only a section that STILL fails takes its gp units with it (a surviving entry such as the CBC next to a withheld assay is kept)
+        flags = flags_by_pointer(art)
+        note, llm_rem = _fallback_note_ex(art, flags, banned)
+        v1 = copy.deepcopy(art)
+        failed2 = v10_final.gp_final(gate, v1, c)
+        _final_note, bad = v10_final.note_final(gate, v1, c, note)
+        extra = [u for u in v10_final.section_units(art, bad) if u not in failed2] + failed2
+        if extra:
+            v10_final.drop_units(art, extra)
+            for fld, reason, _u, _p in failed2:
+                bl.withhold(fld, reason, [], stage="floor")
+            failed = failed + failed2
         for h, reason in bad.items():
             bl.withhold(next((k for k, v in bl.SECTION.items() if v == h), "plan"), reason, [], stage="floor")
         art["completion_required"] = bl.completion  # the floor withholds above appended prompts to the builder's list; view_of() projects it again
