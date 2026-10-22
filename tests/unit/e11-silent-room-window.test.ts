@@ -586,6 +586,15 @@ const SITES: Array<{ file: string; counts: Record<string, number>; role: SiteCla
   { file: "lib/mcp/tools/health.ts", counts: { WHISPER_BASE_URL: 1 }, role: "not_a_window_reader", why: "lists env var NAMES only" },
   { file: "lib/emotion/client.ts", counts: { inference: 1 }, role: "not_a_window_reader", why: "the emotion service's /inference/wavlm, not Whisper" },
   { file: "lib/stt/adapters/indicconformer.ts", counts: { inference: 1 }, role: "not_a_window_reader", why: "IndicConformer's own /inference, not Whisper" },
+  // Box-side services (Python/sh). They SERVE or FORWARD /inference; none reads a window's Whisper result into the app's
+  // pipeline. The router's reader on the app side is routeTranscribe, named in the sweep header as E19's, not this file's.
+  { file: "services/eta-emotion/app.py", counts: { inference: 9 }, role: "not_a_window_reader", why: "the emotion service's own /inference, /inference/wavlm and /inference/emotion2vec routes, not Whisper" },
+  { file: "services/eta-indic/indic_server.py", counts: { inference: 2 }, role: "not_a_window_reader", why: "IndicConformer server's own /inference route, not Whisper" },
+  { file: "services/eta-indic/install-indic-launchd.sh", counts: { inference: 1 }, role: "not_a_window_reader", why: "install smoke curl against the Indic server's /inference" },
+  { file: "services/eta-router/router_server.py", counts: { inference: 3 }, role: "not_a_window_reader", why: "the router POSTs to Whisper, Indic and Sravaani servers; it is the server side, the app reads it via routeTranscribe (E19)" },
+  { file: "services/eta-router/test_stt_hygiene.py", counts: { inference: 2 }, role: "not_a_window_reader", why: "the router's own unit test, asserts the /inference URL; nothing ships" },
+  { file: "tools/router-fix/router_server.py", counts: { inference: 3 }, role: "not_a_window_reader", why: "copy of the router server (fix staging), same calls as services/eta-router" },
+  { file: "tools/router-fix/test_stt_hygiene.py", counts: { inference: 2 }, role: "not_a_window_reader", why: "copy of the router's unit test; nothing ships" },
 ];
 
 describe("E11(d) — every call site that can reach Whisper is classified, by count", () => {

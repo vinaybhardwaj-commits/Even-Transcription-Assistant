@@ -174,6 +174,11 @@ d("spine-s3-r2-oref adversarial", () => {
     const t0 = Date.now(); q1(sql + ";"); const ms = Date.now() - t0;
     const plan = q1(`EXPLAIN (ANALYZE, BUFFERS) ${sql}`);
     console.log(`A8 catalog page ${ms} ms\n${plan.split("\n").filter((l) => /Execution|SubPlan|Seq Scan|Index|Hash|Planning/.test(l)).slice(0, 40).join("\n")}`);
-    expect(ms).toBeLessThan(5000);
+    // The guard is on WORK, not the clock: a wall-clock bound flakes under a parallel suite (4.3 s alone, over 5 s loaded).
+    // A per-row correlated probe would Seq Scan a big table once per consult (loops in the thousands); the hash plan scans each a handful of times.
+    const bigScans = plan.split("\n").filter((l) => /Seq Scan on (reb_track_index|spine_link)\b/.test(l)).map((l) => Number(/actual time=\S+ rows=\d+ loops=(\d+)/.exec(l)?.[1] ?? NaN));
+    expect(bigScans.length).toBeGreaterThan(0);
+    expect(bigScans.every((n) => n <= 10), `loops per big-table Seq Scan: ${bigScans.join(",")}`).toBe(true);
+    expect(ms).toBeLessThan(60000); // a gross-hang net only
   }, 300000);
 });
