@@ -347,3 +347,33 @@ def test_d1_gp_final_withholds_the_other_diagnoses_when_the_primary_fails():
                                                                   {"diagnosis_or_impression": "Acidity", "raw_name": "Acidity"}]}}}
     failed = finalize.gp_final(g, art, g.c)
     assert {f[1] for f in failed} >= {"ood_word", "primary_withheld"} and not art["gp_extraction"]["presenting_complaints"]["diagnoses"]
+
+
+def test_collision_word_is_a_number_in_a_turn_stage_a_tagged_as_a_medicine():
+    from test_v10_core import VISIT
+    from tools.eta2freescript.v10.gate import NumberGate
+    lines = [(0, 4, "0", "Tell me."), (5, 9, "1", "I have acidity."), (10, 14, "0", "Take the acidity one tin days.")]
+    c = mk_consult(lines, roles={"0": "doctor", "1": "patient"})
+    assert NumberGate(c, visit=VISIT).check("rest for tin days", "advice", [2]).ok            # no drug in sight: plain English
+    forced = NumberGate(c, visit=VISIT, drug_spans={2}).check("rest for tin days", "advice", [2])
+    assert not forced.ok                                                                     # the turn names or implies a medicine
+
+
+def test_completion_required_is_the_public_shape_and_the_heard_detail_is_internal():
+    c = _consult("Start the sugar tablet twice a day for five days after food.")
+    a = build_artifact(c, empty_encounter(regimen_slots=[{"class": "sugar tablet", "frequency": "twice a day", "duration": "five days", "timing": "after food", "quote_turn": 2,
+                                                          "basis": "said", "source_turns": [2]}]))
+    assert a["completion_required"] and all(set(x) == {"kind", "item_id", "prompt_id", "prompt"} for x in a["completion_required"])
+    pick = [x for x in a["completion_required"] if x["kind"] == "pick_drug"]
+    assert pick and pick[0]["prompt"] == "Name this drug"
+    assert "twice" not in json.dumps(a["completion_required"]) and "five" not in json.dumps(a["completion_required"])
+    internal = a["confirm_internal"]["completion"][pick[0]["item_id"]]
+    assert any("twice" in str(x.get("detail")) for x in internal)
+
+
+def test_n1_phrase_is_a_final_check_violation_too():
+    from test_v10_core import gate
+    g = gate()
+    assert [v.code for v in g.final_check("see the doctor to get this done", "plan", [])][:1] == ["n1_phrase"]
+    assert [v.code for v in g.final_check("confirm the report", "follow_up", [])][:1] == ["n1_phrase"]   # d2 request word in an order section
+    assert g.final_check("rest well", "plan", []) == []

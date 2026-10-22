@@ -97,3 +97,9 @@ def test_m7_for_plus_analyte_is_never_a_posted_lab_value():
     for i, t in enumerate(cases, start=1):
         assert not g.check(t, "examination", [i]).ok, t
     assert g.check("Hb 9.5 g/dL", "examination", [1]).ok is False  # not heard in that turn
+
+
+def test_bound_spo2_is_50_to_100_percent():
+    from test_v10_core import slots
+    assert slots("SpO2 97%", "examination") == [("vital", "97%")]
+    assert slots("SpO2 150%", "examination") == [] and slots("SpO2 20%", "examination") == [] and slots("SpO2 500%", "examination") == []
