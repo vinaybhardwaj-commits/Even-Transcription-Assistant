@@ -5,9 +5,12 @@
  * spine_signal.encounter_id (the assignment), and one spine_tick row (kind `merge`) per live pass. Gated on spine_config `merge` (missing / malformed = off; kill_switch respected).
  *
  * WHICH ROOM-DAYS. A room-day is (room_id, IST date of t_open). It is merged when (A) a signal of it was received after the tick cursor (a keyset on
- * (max received_at, room_id, ist_date), kept in the last merge tick), (B) any signal of it arrived in the last RECENT_MS (received_at is the transaction START, so a slow
- * ingest commit can land under the cursor; the rerun is idempotent and writes nothing), or (C) it still has an open signal inside the 72 h horizon (an open signal is capped
+ * (max received_at, room_id, ist_date), kept in the last merge tick), (B) it has a signal not yet assigned to an encounter that was received since RECENT_MS before the CURSOR
+ * (received_at is the transaction START, so a slow ingest commit can land under the cursor; anchored to the cursor, not to now, so a skipped or failed pass cannot lose it; the merge assigns
+ * every signal it places, so a swept day drops out of B and a quiet system re-merges nothing; the rerun is idempotent and writes nothing), or (C) it still has an open signal inside the 72 h horizon (an open signal is capped
  * after CAP_MS with no new row). At most MAX_DAYS per pass; the cursor stops at the last A day processed before the first failure, so a failed day is retried.
+ * A day that has failed MAX_FAILS passes in a row no longer holds the cursor (it would starve every newer day behind the MAX_DAYS limit): the cursor passes it, and its key and count
+ * are kept in the merge tick (`failing`, `skipped_days`); it is retried whenever a later signal, the recent window or the open horizon selects it, and cleared by one success.
  *
  * ACOUSTIC IS OPTIONAL. Nothing here reads or requires an acoustic signal: the writer passes every stored signal to mergeSignals, and mergeSignals confirms a strong-anchored
  * group (pulse|pqm) with or without weak evidence (lib/spine/merge.ts M5, :584). A room-day with no acoustic signal is "acoustic unknown", never negative evidence.
@@ -26,6 +29,10 @@ const q = (): Q => sql as unknown as Q;
 export const MERGE_VERSION = "p2-1";
 export const MAX_DAYS = 200;
 export const RECENT_MS = 10 * 60_000;
+/** A room-day that failed this many passes in a row stops holding the cursor (3: one transient error or two bad deploys must not skip a day, a poison day must not hold the queue for long). */
+export const MAX_FAILS = 3;
+/** Cap on the failing-day list kept in the tick (oldest dropped); the list holds opaque room ids and IST dates only. */
+export const MAX_FAILING = 100;
 
 export async function readMergeMode(): Promise<Mode> {
   try {
@@ -71,7 +78,7 @@ const DAY_SQL = `SELECT room_id, ((t_open AT TIME ZONE 'Asia/Kolkata')::date)::t
  WHERE room_id IS NOT NULL AND (received_at >= least($1::timestamptz, $2::timestamptz) OR (t_close IS NULL AND t_open >= $3::timestamptz))
  GROUP BY 1, 2
 HAVING (max(received_at), room_id, ((t_open AT TIME ZONE 'Asia/Kolkata')::date)::text) > ($1::timestamptz, $4::text, $5::text)
-    OR max(received_at) >= $2::timestamptz
+    OR bool_or(received_at >= $2::timestamptz AND encounter_id IS NULL)
     OR bool_or(t_close IS NULL AND t_open >= $3::timestamptz)
  ORDER BY max(received_at), room_id, 2
  LIMIT $6::int`;
@@ -89,7 +96,7 @@ async function readCursor(): Promise<Cursor | null> {
 
 async function changedDays(now: number, cur: Cursor | null): Promise<Day[]> {
   const rows = await q()(DAY_SQL, [
-    cur?.mx ?? "1970-01-01T00:00:00Z", new Date(now - RECENT_MS).toISOString(), new Date(now - HORIZON_MS).toISOString(),
+    cur?.mx ?? "1970-01-01T00:00:00Z", cur ? new Date(Date.parse(cur.mx) - RECENT_MS).toISOString() : "1970-01-01T00:00:00Z", new Date(now - HORIZON_MS).toISOString(),
     cur?.room_id ?? "", cur?.ist_date ?? "0001-01-01", MAX_DAYS,
   ]);
   return rows.map((r) => ({ room_id: String(r.room_id), ist_date: String(r.ist_date), mx: String(r.mx) }));
@@ -98,7 +105,7 @@ async function changedDays(now: number, cur: Cursor | null): Promise<Day[]> {
 async function loadDay(room_id: string, ist_date: string): Promise<{ signals: SpineSignal[]; prior: SpinePrior }> {
   const sigs = await q()(
     `SELECT proxy, source_key, source_rev, room_id, t_open, t_close, encounter_id, attrs FROM spine_signal
-      WHERE room_id = $1::text AND (t_open AT TIME ZONE 'Asia/Kolkata')::date = $2::date ORDER BY proxy, source_key, source_rev`, [room_id, ist_date]);
+      WHERE room_id = $1::text AND t_open >= (($2::date)::timestamp AT TIME ZONE 'Asia/Kolkata') AND t_open < ((($2::date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata') ORDER BY proxy, source_key, source_rev`, [room_id, ist_date]);
   const encs = await q()(
     "SELECT encounter_id, ist_date::text AS ist_date, room_id, t_open, t_close, status, merged_into, anchor_proxy, boundary_rev, reason, created_at FROM spine_encounter WHERE room_id = $1::text AND ist_date = $2::date", [room_id, ist_date]);
   const links = await q()(
@@ -112,7 +119,8 @@ async function loadDay(room_id: string, ist_date: string): Promise<{ signals: Sp
 /**
  * One statement = one transaction. The link move is ordered by data flow: `moved` deactivates the old active row and RETURNS the key, and the insert reads `moved`,
  * so the partial unique index spine_link_active_uq never sees two active rows for one (key_kind, value). A key with no active row yet is inserted directly;
- * a key already active under the same encounter is left alone. spine_encounter is written only when a column differs (a rerun writes 0 rows).
+ * a key already active under the same encounter is left alone. A move only takes a link from an encounter of THE SAME room-day ($4, $5): a key held by an encounter of another
+ * day (a consult across IST midnight, a frozen encounter, I4) is left with its holder, so a re-merge of either day writes 0 rows. The first day to claim a cross-day key keeps it. spine_encounter is written only when a column differs (a rerun writes 0 rows).
  */
 export const WRITE_SQL = `
 WITH enc AS (
@@ -129,6 +137,7 @@ WITH enc AS (
 ), moved AS (
   UPDATE spine_link l SET active = false FROM want w
    WHERE l.active AND l.key_kind = w.key_kind AND l.value = w.value AND l.encounter_id <> w.encounter_id
+     AND EXISTS (SELECT 1 FROM spine_encounter o WHERE o.encounter_id = l.encounter_id AND o.room_id = $4::text AND o.ist_date = $5::date)
   RETURNING w.encounter_id, w.key_kind, w.value, w.basis
 ), lnk AS (
   INSERT INTO spine_link (encounter_id, key_kind, value, basis)
@@ -148,12 +157,12 @@ SELECT (SELECT count(*) FROM enc WHERE inserted)::int AS enc_inserted, (SELECT c
 
 export type WriteCounts = { enc_inserted: number; enc_updated: number; links_written: number; links_moved: number; assigned: number };
 
-export async function writeMerge(r: MergeResult): Promise<WriteCounts> {
+export async function writeMerge(r: MergeResult, room_id: string, ist_date: string): Promise<WriteCounts> {
   const encounters = r.encounters.map((e) => ({
     encounter_id: e.encounter_id, ist_date: e.ist_date, room_id: e.room_id, t_open: new Date(e.t_open).toISOString(), t_close: new Date(e.t_close).toISOString(), status: e.status,
     merged_into: e.merged_into, anchor_proxy: e.anchor_proxy, boundary_rev: e.boundary_rev, merge_version: e.merge_version, reason: e.reason, flags: e.flags,
   }));
-  const res = await q()(WRITE_SQL, [JSON.stringify(encounters), JSON.stringify(r.links), JSON.stringify(r.assignments)]);
+  const res = await q()(WRITE_SQL, [JSON.stringify(encounters), JSON.stringify(r.links), JSON.stringify(r.assignments), room_id, ist_date]);
   const n = (k: string) => Number(res[0]?.[k] ?? 0);
   return { enc_inserted: n("enc_inserted"), enc_updated: n("enc_updated"), links_written: n("links_written"), links_moved: n("links_moved"), assigned: n("assigned") };
 }
@@ -161,16 +170,26 @@ export async function writeMerge(r: MergeResult): Promise<WriteCounts> {
 export type MergeCounts =
   | { skipped: "off" }
   | {
-    mode: "shadow" | "live"; days: number; failed_days: number; encounters: number; enc_inserted: number; enc_updated: number; links_written: number; links_moved: number; assigned: number;
+    mode: "shadow" | "live"; days: number; failed_days: number; skipped_days: number; encounters: number; enc_inserted: number; enc_updated: number; links_written: number; links_moved: number; assigned: number;
     held_frozen: number; unplaced: number; open_deferred: number; unattached: number; ambiguous: number;
   };
+
+type Failing = Array<{ k: string; n: number }>;
+const dayKey = (d: { room_id: string; ist_date: string }) => `${d.room_id}|${d.ist_date}`;
+/** The consecutive-failure list kept in the newest merge tick (malformed = empty). */
+async function readFailing(): Promise<Failing> {
+  const rows = await q()("SELECT counts FROM spine_tick WHERE kind = 'merge' ORDER BY id DESC LIMIT 1", []);
+  const f = obj(rows[0]?.counts).failing;
+  return Array.isArray(f) ? f.filter((x): x is { k: string; n: number } => !!x && typeof x.k === "string" && Number.isFinite(x.n)).map((x) => ({ k: x.k, n: x.n })) : [];
+}
 
 export async function runSpineMerge(now: number): Promise<MergeCounts> {
   const mode = await readMergeMode();
   if (mode !== "shadow" && mode !== "live") return { skipped: "off" };
   const cur = await readCursor();
   const days = await changedDays(now, cur);
-  const c = { mode, days: days.length, failed_days: 0, encounters: 0, enc_inserted: 0, enc_updated: 0, links_written: 0, links_moved: 0, assigned: 0, held_frozen: 0, unplaced: 0, open_deferred: 0, unattached: 0, ambiguous: 0 };
+  const failing = new Map((await readFailing()).map((f) => [f.k, f.n]));
+  const c = { mode, days: days.length, failed_days: 0, skipped_days: 0, encounters: 0, enc_inserted: 0, enc_updated: 0, links_written: 0, links_moved: 0, assigned: 0, held_frozen: 0, unplaced: 0, open_deferred: 0, unattached: 0, ambiguous: 0 };
   // A-days (beyond the cursor) form a prefix of `days`; the cursor moves to the last one processed before the first failure.
   const after = (d: Day) => !cur || d.mx > cur.mx || (d.mx === cur.mx && (d.room_id > cur.room_id || (d.room_id === cur.room_id && d.ist_date > cur.ist_date)));
   let next: Cursor | null = cur;
@@ -179,18 +198,26 @@ export async function runSpineMerge(now: number): Promise<MergeCounts> {
     try {
       const { signals, prior } = await loadDay(d.room_id, d.ist_date);
       const r = mergeSignals(signals, MERGE_VERSION, prior, now);
-      const w = await writeMerge(r);
+      const w = await writeMerge(r, d.room_id, d.ist_date);
       c.encounters += r.encounters.length; c.enc_inserted += w.enc_inserted; c.enc_updated += w.enc_updated; c.links_written += w.links_written; c.links_moved += w.links_moved; c.assigned += w.assigned;
       c.held_frozen += r.held_frozen; c.unplaced += r.unplaced; c.open_deferred += r.open_deferred; c.unattached += r.unattached.length;
       c.ambiguous += r.encounters.filter((e) => e.flags.includes("ambiguous")).length;
+      failing.delete(dayKey(d));
       if (!blocked && after(d)) next = { mx: d.mx, room_id: d.room_id, ist_date: d.ist_date };
     } catch (e) {
       c.failed_days += 1;
-      blocked = true;
+      const n = (failing.get(dayKey(d)) ?? 0) + 1;
+      failing.delete(dayKey(d));
+      failing.set(dayKey(d), n);   // re-insert: the Map stays ordered oldest-failure first
+      if (n >= MAX_FAILS) {
+        c.skipped_days += 1;
+        if (!blocked && after(d)) next = { mx: d.mx, room_id: d.room_id, ist_date: d.ist_date };
+      } else blocked = true;
       console.error("spine merge: room-day failed", (e as { code?: string }).code ?? "unknown");
     }
   }
-  const tick = { ...c, cursor_mx: next?.mx ?? null, cursor_room: next?.room_id ?? null, cursor_date: next?.ist_date ?? null };
+  const failingList: Failing = [...failing].map(([k, n]) => ({ k, n })).slice(-MAX_FAILING);
+  const tick = { ...c, failing: failingList, skipped_keys: failingList.filter((f) => f.n >= MAX_FAILS).map((f) => f.k), cursor_mx: next?.mx ?? null, cursor_room: next?.room_id ?? null, cursor_date: next?.ist_date ?? null };
   await q()("INSERT INTO spine_tick (kind, counts) VALUES ($1, $2::jsonb)", ["merge", JSON.stringify(tick)]);
   return c;
 }

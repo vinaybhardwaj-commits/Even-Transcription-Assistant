@@ -18,12 +18,12 @@ const READ_LIMIT = 2000;
 const SELECT_SQL = `SELECT encounter_id, status, boundary_rev, flags, t_close FROM spine_encounter
  WHERE ist_date >= (($1::timestamptz) AT TIME ZONE 'Asia/Kolkata')::date ORDER BY t_open DESC LIMIT ${READ_LIMIT}`;
 
-/** Older cuts (and every queued / shadow job of an encounter that is merged / rejected: cut_version null) become superseded. */
+/** Older cuts, stages the encounter no longer plans (ambiguous loses freescript; candidate loses collector / freescript), and every queued / shadow job of an encounter that is merged / rejected (cut_version null), become superseded. */
 export const SUPERSEDE_SQL = `
-WITH c AS (SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(encounter_id text, cut_version text)),
+WITH c AS (SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(encounter_id text, cut_version text, stages text[])),
 u AS (
   UPDATE spine_job j SET status = 'superseded', done_at = now()
-    FROM c WHERE j.encounter_id = c.encounter_id AND j.status IN ('queued', 'shadow') AND (c.cut_version IS NULL OR j.cut_version <> c.cut_version)
+    FROM c WHERE j.encounter_id = c.encounter_id AND j.status IN ('queued', 'shadow') AND (c.cut_version IS NULL OR j.cut_version <> c.cut_version OR j.stage <> ALL (c.stages))
   RETURNING 1
 ) SELECT count(*)::int AS superseded FROM u`;
 
@@ -56,7 +56,11 @@ export async function runSpineEnqueue(now: number): Promise<EnqueueCounts> {
   }));
   const plan = planJobs(encs, modes, now);
   const sup = encs.filter((e) => e.status === "merged" || e.status === "rejected" || e.status === "confirmed" || e.status === "candidate")
-    .map((e) => ({ encounter_id: e.encounter_id, cut_version: e.status === "confirmed" || e.status === "candidate" ? cutVersion(e.boundary_rev) : null }));
+    .map((e) => ({
+      encounter_id: e.encounter_id, cut_version: e.status === "confirmed" || e.status === "candidate" ? cutVersion(e.boundary_rev) : null,
+      // the stages the encounter plans once its close grace has passed (the grace is time, not status: a queued job is not superseded by it)
+      stages: stagesFor({ ...e, t_close: 0 }, Number.MAX_SAFE_INTEGER),
+    }));
   const s = await q()(SUPERSEDE_SQL, [JSON.stringify(sup)]);
   const ins = plan.length ? await q()(INSERT_SQL, [JSON.stringify(plan.map((p) => ({ ...p, needs: STAGE_NEEDS[p.stage] ?? [] })))]) : [];
   const by_stage: Record<string, number> = {};
