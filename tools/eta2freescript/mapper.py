@@ -625,6 +625,9 @@ class Builder:
     def withhold(self, fld: str, reason: str, turns, *, red_flag: bool = False, stage: str = "floor") -> dict:
         sec = self.SECTION.get(fld, fld)
         sids = [v10_spans.span_id(t) for t in dict.fromkeys(turns or [])][:6]
+        if not hasattr(self, "held_turns"):
+            self.held_turns = {}
+        self.held_turns.setdefault(fld, set()).update(int(t) for t in (turns or []) if isinstance(t, int))  # Fix3c: the final check of the note still needs the turns a withheld unit cited
         text = f"[field_withheld] {sec} {'red flag ' if red_flag else ''}item withheld ({reason})"
         item = self.P(self.PROV_KIND.get(fld, fld), text, "discussed_only", list(turns or []), 0.5, None, ["field_withheld"])
         if red_flag:
@@ -2509,7 +2512,7 @@ def build(c: Consult, enc: dict, b: Boundary, model_id: str, prompt_sha: str, co
     for sp in art["spans"]:
         if sp["boundary_quarantined"]:  # Fix1 H2: a quarantined span keeps its id and the reason, not the words
             sp["quote_en"], sp["quote_native"], sp["reason"] = "", "", "boundary_quarantined"
-    art["confirm_prompts"], art["confirm_internal"] = bl.confirm_prompts, dict(bl.confirm_internal, v9_tokens=sorted(getattr(bl, "v9_tokens", set())))
+    art["confirm_prompts"], art["confirm_internal"] = bl.confirm_prompts, dict(bl.confirm_internal, v9_tokens=sorted(getattr(bl, "v9_tokens", set())), held_turns={k: sorted(v) for k, v in getattr(bl, "held_turns", {}).items()})
     art["withheld"] = bl.withheld
     art["kept_out"] = kept_out_records(bl.prov)
     art["doctor_words"] = bl.doctor_words_out

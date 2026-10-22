@@ -89,3 +89,15 @@ FOODS = "rava thepla atta sattu makhan namkeen mithai methi dhania pudina dalchi
 @pytest.mark.parametrize("w", FOODS)
 def test_removed_food_words_withhold_as_out_of_dictionary(w):
     assert w not in words.extra_whitelist() and words.ood_tokens(f"eat {w}") == [w]
+
+
+def test_a_unit_withheld_in_the_mapper_still_marks_its_note_section_as_about_a_tagged_turn():
+    """The refuter's t2blind: the gp unit 'Grace threes' was withheld by the mapper, so no provenance pointer was left, and the note (written by Stage B) kept the same words."""
+    c = mk_consult([(0, 4, "0", "Tell me."), (5, 9, "1", "I feel giddy."), (10, 14, "0", "Grace threes")], roles={"0": "doctor", "1": "patient"})
+    a = build_artifact(c, empty_encounter(hpi=[{"text": "Grace threes", "basis": "said", "source_turns": [2]}], drug_mention_spans=[2]))
+    assert 2 in a["confirm_internal"]["held_turns"].get("symptoms", []) or any(2 in v for v in a["confirm_internal"]["held_turns"].values())
+    g = gate_of("a", "b", "Grace threes", drug_spans={2})
+    art = {"confirm_prompts": [], "confirm_internal": a["confirm_internal"], "gp_extraction": {}, "provenance": []}
+    note = "\n".join(f"{h}: {'Grace threes' if h == 'Presenting Complaint' else ''}".rstrip() for h in finalize.N.HEADINGS)
+    out, bad = finalize.note_final(g, art, g.c, note)
+    assert "Presenting Complaint" in bad and "threes" not in out  # held out by the force rule (reason unslotted or collision, whichever fires first)

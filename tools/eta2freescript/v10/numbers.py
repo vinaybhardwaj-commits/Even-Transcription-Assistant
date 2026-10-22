@@ -311,7 +311,7 @@ def redact(text) -> str:
 # out, whether or not the dictionary allows it. Exemptions can only SHRINK the withholding: a closed list of everyday function words and the dosing words / dose units
 # (those have their own veto). Clinical-vocabulary words are NOT exempt (ond, mri, echo are number homographs too).
 _FUNCTION_WORDS = frozenset("the and are has her his was were been done data same made each other either after before with from that this they them then than have here there what when where "
-                            "which while will would your you for not can may but all any per one are our its out use new own off who how why too yet few due via nor day days dose did does pain".split())
+                            "which while will would your you for not can may but all any per one are our its out use new own off who how why too yet few due via day days dose did does pain".split())
 _TWO_LETTER_ENGLISH = frozenset("am an as at be by do go he hi if in is it me my no of ok on or so to up us we oh ye yo".split()) - {"do", "be", "so"}
 
 

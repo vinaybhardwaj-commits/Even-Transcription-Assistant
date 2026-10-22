@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 DATA = Path(__file__).resolve().parents[2] / "data"
-EDIT1_MIN_LEN = 4       # a lexicon word shorter than this gives no one-edit form (too many English words)
+EDIT1_MIN_LEN = 3       # every lexicon word of 3+ letters gives one-edit forms (the ruling: one-edit form of ANY number word)
 WORD_MIN, WORD_MAX = 3, 12
 
 

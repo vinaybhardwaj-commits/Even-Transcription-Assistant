@@ -74,6 +74,8 @@ def field_turns(art: dict, fld: str, ptr: str | None = None) -> set[int]:
     out: set[int] = set()
     if not base:
         return out
+    if ptr is None:  # Fix3c: turns of gp units already dropped (their provenance pointer is cleared) still count for the note section
+        out |= set(((art.get("confirm_internal") or {}).get("held_turns") or {}).get(fld) or [])
     for p in art.get("provenance") or []:
         q = str(p.get("json_pointer") or "")
         if q == base or q.startswith(base + "/") or (ptr is None and q.startswith(base)):
@@ -218,6 +220,24 @@ def section_units(art: dict, bad: dict[str, str]) -> list[tuple[str, str, str, t
     return out
 
 
+def _remember_turns(art: dict, p: dict) -> None:
+    """Before a dropped unit's provenance pointer is cleared, keep the turns it cited under its field, so the final check of the note still knows the section was about a tagged turn."""
+    q = str(p.get("json_pointer") or "")
+    for fld, base in _PTR.items():
+        if q == base or q.startswith(base):
+            ts = set()
+            for ev in p.get("evidence") or []:
+                try:
+                    ts.add(int(str(ev.get("segment_ref") or "").rsplit(":", 1)[1]))
+                except (IndexError, ValueError):
+                    pass
+            if ts:
+                ci = art.setdefault("confirm_internal", {})
+                held = ci.setdefault("held_turns", {})
+                held[fld] = sorted(set(held.get(fld) or []) | ts)
+            return
+
+
 def drop_units(art: dict, failed) -> None:
     """Remove the units `gp_final` reported from a TOKENISED artifact (a field is deleted, a list entry removed), and point the provenance items
     of later list entries at their new index; an item of a removed entry becomes kept-out."""
@@ -238,6 +258,7 @@ def drop_units(art: dict, failed) -> None:
             ptr = "/" + "/".join(str(k) for k in path)
             for p in art.get("provenance") or []:
                 if p.get("json_pointer") == ptr:
+                    _remember_turns(art, p)
                     p["json_pointer"], p["status"] = None, "discussed_only"
                     p["flags"] = sorted(set(p.get("flags") or []) | {"field_withheld"})
         else:
@@ -258,6 +279,7 @@ def drop_units(art: dict, failed) -> None:
                 continue
             nxt = new_at.get(int(m.group(1)))
             if nxt is None:
+                _remember_turns(art, p)
                 p["json_pointer"], p["status"] = None, "discussed_only"
                 p["flags"] = sorted(set(p.get("flags") or []) | {"field_withheld"})
             else:
