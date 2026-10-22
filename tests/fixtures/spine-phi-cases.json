@@ -98,6 +98,7 @@
   "consult_key",
   "consult_uid",
   "hypothesis_id",
+  "acoustic_key",
   "room_day_id",
   "shadow_id",
   "run_id",
@@ -360,13 +361,14 @@
   "room_id": "room_abcd2345",
   "room_day_id": "rd_abcd2345",
   "hypothesis_id": "eh_abcdefghjkmn",
+  "acoustic_key": "rd_abcd2345:z9x8k",
   "run_id": "ehr_abcdefghjkmn",
   "shadow_id": "et_0a1b2c3d4e5f6a7b8c"
  },
  "good_source_key": {
   "pulse": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
   "timeline": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
-  "acoustic": "eh_abcdefghjkmn",
+  "acoustic": "rd_abcd2345:z9x8k",
   "pqm": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
   "cutter": "uidtestaaaaaaaaaaaaaaaaa",
   "caa": "uidtestaaaaaaaaaaaaaaaaa",
@@ -410,6 +412,11 @@
   "hypothesis_id": [
    "eh_abcdefghjkmn",
    "eh_23456789zyxw"
+  ],
+  "acoustic_key": [
+   "rd_abcd2345:z9x8k",
+   "rd_23456789:abcd",
+   "rd_abcd2345:zzzzzz"
   ],
   "run_id": [
    "ehr_abcdefghjkmn",
@@ -505,6 +512,19 @@
    "rd_abcd23456",
    "rd_scratch_abcd2345_{DIG8}",
    "rd_abci2345"
+  ],
+  "acoustic_key": [
+   "rd_abcd2345",
+   "rd_abcd2345:",
+   "rd_abcd2345:abc",
+   "rd_abcd2345:abcdefg",
+   "rd_abcd2345:1234567",
+   "rd_abcd2345:ABCDE",
+   "rd_abcd2345:abc-de",
+   "rd_abcd2345:abcde:abcde",
+   "eh_abcdefghjkmn",
+   "rd_abci2345:abcde",
+   "ramesh_9845:abcde"
   ],
   "hypothesis_id": [
    "eh_abcdefghjkm",
@@ -872,11 +892,22 @@
    }
   },
   {
+   "label": "sk_acoustic_old_hypothesis_id",
+   "expect": "source_key",
+   "signal": {
+    "proxy": "acoustic",
+    "source_key": "eh_abcdefghjkmn",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
    "label": "acoustic_cap90",
    "expect": "ok",
    "signal": {
     "proxy": "acoustic",
-    "source_key": "eh_abcdefghjkmn",
+    "source_key": "rd_abcd2345:z9x8k",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1101,7 +1132,7 @@
    "expect": "ok",
    "signal": {
     "proxy": "acoustic",
-    "source_key": "eh_abcdefghjkmn",
+    "source_key": "rd_abcd2345:z9x8k",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1198,7 +1229,7 @@
    "expect": "source_key",
    "signal": {
     "proxy": "timeline",
-    "source_key": "eh_abcdefghjkmn",
+    "source_key": "rd_abcd2345:z9x8k",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {}
@@ -1220,7 +1251,7 @@
    "expect": "source_key",
    "signal": {
     "proxy": "cutter",
-    "source_key": "eh_abcdefghjkmn",
+    "source_key": "rd_abcd2345:z9x8k",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {}

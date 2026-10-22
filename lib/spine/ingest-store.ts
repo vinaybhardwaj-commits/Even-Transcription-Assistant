@@ -8,7 +8,7 @@
 import { sql } from "@/lib/db";
 import { readHypothesesSince } from "@/lib/encounter-hypotheses";
 import { parseIngestMode, type IngestMode } from "./config";
-import { hashOfSignal, nextRev, toSignals, type IngestProxy, type Prior, type SignalRow, type Time } from "./ingest";
+import { acousticKey, hashOfSignal, nextRev, toSignals, type IngestProxy, type Prior, type SignalRow, type Time } from "./ingest";
 import type { PostedSignal } from "./signal-validate";
 
 type Q = (text: string, params: unknown[]) => Promise<Array<Record<string, unknown>>>;
@@ -140,7 +140,7 @@ export async function ingestSpineSignals(now: number): Promise<IngestCounts> {
     const src = SOURCES[proxy];
     const rows = proxy === "acoustic" ? await readHypothesesSince(now - HORIZON_MS, READ_LIMIT) : await q()(src.sql, src.params(now));
     read[proxy] = rows.length;
-    const keyOf = (r: Record<string, unknown>) => String(proxy === "acoustic" ? r.id : r.consult_key);
+    const keyOf = (r: Record<string, unknown>) => String(proxy === "acoustic" ? acousticKey(r) : r.consult_key);
     const prior = await loadPrior(proxy, [...new Set(rows.map(keyOf))]);
     inserted[proxy] = (await insertRows(toSignals(rows, proxy, prior))).size;
   }

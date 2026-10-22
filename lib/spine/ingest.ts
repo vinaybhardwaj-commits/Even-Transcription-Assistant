@@ -2,8 +2,13 @@
  * lib/spine/ingest.ts — Spine S1: pure mapping of the Neon proxy tables onto spine_signal rows (SPINE-PLAN §2, M1). No clock, no randomness, no I/O.
  *
  *   pulse    <- eta_encounter_windows (I2)        source_key = consult_key
- *   acoustic <- encounter_hypothesis (I5)         source_key = the hypothesis row id
+ *   acoustic <- encounter_hypothesis (I5)         source_key = `<room_day_id>:<minute>` (acousticKey): STABLE across producer reruns
  *   timeline <- encounter_timeline_shadow (I6)    source_key = consult_key (the caller passes the newest run's row per consult_key)
+ *
+ * ACOUSTIC KEY. Every producer run mints new hypothesis row ids, so keying on the id made each rerun a new signal (R2 F1: 16 rows for 4 intervals).
+ * The key is the room-day plus the interval's start rounded DOWN to a 60 s bucket, written as the epoch minute in base 36 (4-6 chars, so no run of 7+ digits):
+ * an unchanged interval maps to the same key on every rerun; a boundary that moves inside its bucket keeps the key and gets a new rev (hash of t_open/t_close changes);
+ * a start that crosses a minute boundary is a new key. Two intervals of one run in the same bucket collapse to the first. The hypothesis id and run_id stay in attrs.ids.
  *
  * REV RULE. source_rev changes only when t_open, t_close, room_id or the close reason changes: `signalHash` is a stable hash of exactly those four.
  * `prior` carries the newest stored rev and its hash per source_key; an unchanged row keeps that rev (the insert then conflicts and is a no-op),
@@ -55,6 +60,14 @@ export function hashOfSignal(s: { room_id: string | null; t_open: Time; t_close:
 }
 
 type Raw = Record<string, unknown>;
+
+/** The stable acoustic source_key: `<room_day_id>:<epoch minute, base 36>`; null when the row has no room_day_id or start. */
+export function acousticKey(r: { room_day_id?: unknown; start_ms?: unknown }): string | null {
+  const rd = typeof r.room_day_id === "string" && r.room_day_id !== "" ? r.room_day_id : null;
+  const start = msOfBig(r.start_ms);
+  if (!rd || start === null || r.start_ms === null || r.start_ms === "") return null;
+  return `${rd}:${Math.floor(start / 60_000).toString(36)}`;
+}
 const str = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
 
 function build(proxy: Proxy, key: string, room: string | null, open: Time, close: Time, observed: Time, attrs: SignalAttrs, prior: Prior): SignalRow | null {
@@ -73,6 +86,7 @@ function build(proxy: Proxy, key: string, room: string | null, open: Time, close
  */
 export function toSignals(rows: ReadonlyArray<Raw>, proxy: IngestProxy, prior: Prior = new Map()): SignalRow[] {
   const out: SignalRow[] = [];
+  const seenAcoustic = new Set<string>();
   for (const r of rows) {
     let s: SignalRow | null = null;
     if (proxy === "pulse") {
@@ -80,12 +94,13 @@ export function toSignals(rows: ReadonlyArray<Raw>, proxy: IngestProxy, prior: P
         { ids: { consult_key: str(r.consult_key), consult_uid: str(r.consult_uid) }, ...(str(r.quality) ? { quality: str(r.quality)! } : {}), ...(str(r.close_reason) ? { close_reason: str(r.close_reason)! } : {}) }, prior);
     } else if (proxy === "acoustic") {
       const id = str(r.id);
-      s = build("acoustic", id ?? "", str(r.room_id), msOfBig(r.start_ms), msOfBig(r.end_ms), r.created_at as Time,
+      s = build("acoustic", acousticKey(r) ?? "", str(r.room_id), msOfBig(r.start_ms), msOfBig(r.end_ms), r.created_at as Time,
         { ids: { hypothesis_id: id, room_day_id: str(r.room_day_id), run_id: str(r.run_id) }, ...(str(r.closed_by) ? { close_reason: str(r.closed_by)! } : {}) }, prior);
     } else {
       s = build("timeline", str(r.consult_key) ?? "", str(r.room_id), msOfBig(r.start_ms), msOfBig(r.end_ms), r.created_at as Time,
         { ids: { consult_key: str(r.consult_key), shadow_id: str(r.id), run_id: str(r.run_id) }, ...(str(r.closed_by) ? { close_reason: str(r.closed_by)! } : {}) }, prior);
     }
+    if (s && proxy === "acoustic") { if (seenAcoustic.has(s.source_key)) s = null; else seenAcoustic.add(s.source_key); }
     if (s) out.push(s);
   }
   return out;

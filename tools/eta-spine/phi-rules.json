@@ -98,6 +98,7 @@
   "consult_key",
   "consult_uid",
   "hypothesis_id",
+  "acoustic_key",
   "room_day_id",
   "shadow_id",
   "run_id",
@@ -113,6 +114,7 @@
   "room_id": "^room_[a-hjkmnp-z2-9]{8}$",
   "room_day_id": "^rd_[a-hjkmnp-z2-9]{8}$",
   "hypothesis_id": "^eh_[a-hjkmnp-z2-9]{12}$",
+  "acoustic_key": "^rd_[a-hjkmnp-z2-9]{8}:[0-9a-z]{4,6}$",
   "run_id": "^(?:ehr_[a-hjkmnp-z2-9]{12}|ets_[0-9a-f]{18})$",
   "shadow_id": "^et_[0-9a-f]{18}$",
   "pulse_enc_id": "^(?!.*[0-9]{7})[A-Za-z0-9_-]{8,64}$"
@@ -120,7 +122,7 @@
  "source_key_format": {
   "pulse": "consult_key",
   "timeline": "consult_key",
-  "acoustic": "hypothesis_id",
+  "acoustic": "acoustic_key",
   "pqm": "consult_uid",
   "cutter": "consult_uid",
   "caa": "consult_uid",
