@@ -367,13 +367,44 @@ def staff_email_hits(text, domains):
     return out
 
 
+ALLOW_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "steward", "scrub-allow.txt")
+RULE_IDS = {"phi-field", "deny-large-file"}
+
+
+def load_rule_allow():
+    """(rule id, exact path or `dir/**` prefix) pairs from steward/scrub-allow.txt lines `<rule-id> <path> # reason`. Gitleaks fingerprint lines
+    (`<commit>:<path>:<rule>:<line>`) are not read here. Off under STEWARD_SCRUB_NO_ALLOW=1. Merge-owner reviewed, like the rest of the file."""
+    out = []
+    if os.environ.get("STEWARD_SCRUB_NO_ALLOW") == "1":
+        return out
+    try:
+        lines = open(ALLOW_FILE, encoding="utf-8").read().split("\n")
+    except OSError:
+        return out
+    for ln in lines:
+        ln = ln.split(" #", 1)[0].strip()
+        parts = ln.split()
+        if len(parts) == 2 and parts[0] in RULE_IDS:
+            out.append((parts[0], parts[1]))
+    return out
+
+
+RULE_ALLOW = load_rule_allow()
+
+
+def rule_allowed(rule, path):
+    p = path.replace("\\", "/")
+    return any(r == rule and (p == a or (a.endswith("/**") and p.startswith(a[:-2]))) for r, a in RULE_ALLOW)
+
+
 def check(path, data, commit, hosts, report):
     size = len(data)
     low = path.replace("\\", "/")
     if allowed_fixture_path(low):
         return
     for r in path_rules(path, size):
-        report(r, path, 0, commit)
+        if not rule_allowed(r, low):
+            report(r, path, 0, commit)
     if size > MAX_BYTES:
         return
     if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
@@ -393,7 +424,7 @@ def check(path, data, commit, hosts, report):
         for n in env_example_nonempty(text):
             report("env-example-nonempty", path, n, commit)
     if phi_applies(low) and not is_synthetic(low):
-        for n in phi_hits(low, text):
+        for n in ([] if rule_allowed("phi-field", low) else phi_hits(low, text)):
             report("phi-field", path, n, commit)
     for n in host_hits(strip_range_literals(low, text), hosts):
         report("host-deny", path, n, commit)
