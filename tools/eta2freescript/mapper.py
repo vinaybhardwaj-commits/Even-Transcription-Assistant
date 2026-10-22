@@ -436,6 +436,7 @@ class Builder:
         self.oc = v10_spans.order_capable_turns(c)
         self.withheld: list[dict] = []
         self.confirm_prompts: list[dict] = []
+        self.cond_plan: list[tuple[str, dict]] = []
         self.confirm_internal: dict = {}
         self.med_changes = False
         self.red_flag_items: list = []
@@ -1955,6 +1956,7 @@ class Builder:
             plan_txt.append((sentence, tl))
             item = self.P("procedure", sentence[:300], "conditional", tl, 0.8, None, names=[nm], lead=dec)
             item["procedure"] = {"advised_kind": "conditional"}
+            self.cond_plan.append((sentence, item))
             self.review("surgery_confirm", item, f"Confirm {nm}", nm)
 
         def add(nm: str, tl, dec, notes=None, scheduled=None, kind="advised", raw=None):
@@ -2066,6 +2068,13 @@ class Builder:
             g = self.nm(t_, "plan", tl_)
             if g is not None:
                 gated.append((g, tl_))
+            for s_, it_ in self.cond_plan:  # a conditional procedure's provenance text is the gated plan string (FRX-PR2), or it is no longer "conditional"
+                if s_ == t_ and it_.get("status") == "conditional":
+                    if g is not None:
+                        it_["text"] = g.replace(":", " -")[:300]
+                    else:  # Fix1 (real-text run): the plan unit was withheld, so the procedure is not in management_plan; the withheld record and the surgery_confirm prompt remain
+                        it_["status"], it_["procedure"] = "discussed_only", None
+                        it_["text"] = "[conditional_procedure_withheld] procedure held out of the plan"
         plan_txt[:] = gated
         if plan_txt:
             self.gx.setdefault("plan_of_management", {})["management_plan"] = " ".join(

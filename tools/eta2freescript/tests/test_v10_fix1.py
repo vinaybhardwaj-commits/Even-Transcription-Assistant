@@ -146,3 +146,42 @@ def test_h2_quarantined_turns_are_not_stored_in_spans_or_provenance():
     assert "SENTINELQ" not in blob and "998877" not in blob
     q = [s for s in a["spans"] if s["span_id"] == "s0"]
     assert not q or (q[0]["boundary_quarantined"] and not q[0].get("quote_en") and q[0].get("reason"))
+
+
+# --- real-text run findings (tuning bundles): a withheld plan unit must not reject the consult ------------------------------------------------------
+def _proc_consult(text):
+    return mk_consult([(0, 4, "0", "Tell me."), (5, 9, "1", "My knee hurts."), (10, 20, "0", text)], roles={"0": "doctor", "1": "patient"})
+
+
+def _cond(sentence_notes):
+    return {"name": "knee arthroscopy", "raw_name": "knee arthroscopy", "advised_kind": "conditional", "notes": sentence_notes, "decision_turn": 2,
+            "basis": "said", "source_turns": [2]}
+
+
+def test_pr2_conditional_procedure_text_matches_the_gated_plan_string():
+    c = _proc_consult("If the pain stays after three weeks we will consider knee arthroscopy.")
+    a = build_artifact(c, empty_encounter(procedures=[_cond("if the pain stays after three weeks")]))
+    from tools.eta2freescript.validate import check
+    assert [e for e in check(a) if "PR2" in e] == [], check(a)
+
+
+def test_pr2_a_withheld_plan_unit_does_not_reject_the_consult():
+    c = _proc_consult("If the pain stays consider knee arthroscopy.")
+    a = build_artifact(c, empty_encounter(procedures=[_cond("if the pain stays after 9 weeks")]))  # 9 weeks was not said: the plan unit is withheld
+    from tools.eta2freescript.validate import check
+    assert not (a["gp_extraction"].get("plan_of_management") or {}).get("management_plan")
+    assert [e for e in check(a) if "PR2" in e] == [], check(a)
+    assert [w for w in a["withheld"] if w["field_pointer"] == "/plan_of_management/management_plan"]
+    assert any(x["kind"] == "surgery_confirm" for x in a["completion_required"])
+
+
+def test_a1_red_flags_are_not_counted_against_the_advice_budget():
+    c = mk_consult([(0, 4, "0", "Tell me."), (5, 9, "1", "I have a cough."), (10, 30, "0", "Rest, drink water, avoid dust, steam twice, gargle, sleep early. Come at once if breathless or if you cough blood.")],
+                   roles={"0": "doctor", "1": "patient"})
+    adv = [{"text": t, "basis": "said", "source_turns": [2]} for t in ("rest well at home", "drink plenty of water", "avoid dust and smoke", "do steam inhalation", "gargle with warm salt water", "sleep early at night")]
+    reds = [{"text": "Come to the hospital at once if you become breathless", "basis": "said", "source_turns": [2]},
+            {"text": "Come to the hospital if you cough up blood or have chest pain", "basis": "said", "source_turns": [2]}]
+    a = build_artifact(c, empty_encounter(advice=adv, red_flags_safety_net=reds))
+    from tools.eta2freescript.validate import check
+    assert len(a["gp_extraction"]["general_advice"]) > 300 or len(a["red_flags"]) == 2
+    assert [e for e in check(a) if "FRX-A1" in e] == [], check(a)

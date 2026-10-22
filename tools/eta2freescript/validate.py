@@ -685,6 +685,10 @@ def frx(art: dict) -> list[str]:
     advice = gx.get("general_advice")
     if isinstance(advice, str):
         items = [x for x in advice.split("; ") if x != ""]
+        reds = [str(r.get("text_en") or "").replace(":", " -").strip() for r in (art.get("red_flags") or []) if isinstance(r, dict)]
+        while items and reds and items[0].strip() in reds:  # Fix1: red flags come first and are never cut by the budget (spec Stage B v10), so they do not count against it
+            reds.remove(items.pop(0).strip())
+        advice = "; ".join(items)
         if len(advice) > 300 or len(items) > 5:
             e.append("FRX-A1 general_advice must be at most 300 characters and 5 items")
         owners = pointed.get("/general_advice") or []
