@@ -47,7 +47,7 @@ d("spine ingest on the real migrations", () => {
         VALUES ('tr_test_01', 'rd_abcd2345', 'm', 'q', 'p', 'c', 'g', 'f', '{}');
       INSERT INTO encounter_timeline_shadow (id, run_id, room_day_id, consult_key, start_ms, end_ms, reason_codes, closed_by, jev_used, cache_hit, cache_key, features)
         VALUES ('tl_test_01', 'tr_test_01', 'rd_abcd2345', 'uidtestaaaaaaaaaaaaaaaaa@mach_test', ${T0}, ${T0 + 590000}, ARRAY['patient_left'], 'patient_left', false, false, 'ck', '[]');
-      INSERT INTO spine_config (key, value) VALUES ('ingest', '"shadow"');
+      INSERT INTO spine_config (key, value) VALUES ('ingest', '"shadow"') ON CONFLICT (key) DO NOTHING;
     `);
   }, 300_000);
   afterAll(() => pg.stop());

@@ -1,5 +1,5 @@
 /**
- * GET /api/cron/spine — the Spine cron (S1: signal ingest only). NOT scheduled: there is no vercel.json entry; the schedule is set at go-live.
+ * GET /api/cron/spine — the Spine cron (S1: signal ingest only). Scheduled every 5 minutes in vercel.json; a no-op unless spine_config ingest is shadow or live (kill_switch respected).
  * BEARER, as the other cron routes: `Authorization: Bearer $CRON_SECRET`. CRON_SECRET unset -> 503 and nothing runs; wrong bearer -> 401.
  * Gated by spine_config (kill_switch / ingest): off, missing or malformed -> a no-op that returns { skipped: "off" } and writes nothing.
  * Response: counts only. A failure returns 500 { error: { code: "SPINE_INGEST_FAILED" } }.
