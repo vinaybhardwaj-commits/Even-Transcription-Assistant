@@ -167,7 +167,17 @@ class NumberGate:
         from .numbers import number_like
         if not isinstance(text, str) or not self.drugish(text, turns):
             return False
-        return any(tk.is_word and words.is_latin(tk.text) and number_like(tk.low) for tk in words.tokenize(re.sub(r"\u27e6S\d+\u27e7", " ", text)))
+        from .numbers import _DO_ENGLISH_NEXT, _MODALS
+        toks = words.tokenize(re.sub(r"\u27e6S\d+\u27e7", " ", text))
+        for i, tk in enumerate(toks):
+            if not tk.is_word or not words.is_latin(tk.text) or not number_like(tk.low):
+                continue
+            if tk.low in ("be", "do") and i and toks[i - 1].low in _MODALS:
+                continue  # English syntax after a modal (B3)
+            if tk.low == "do" and i + 1 < len(toks) and toks[i + 1].low in _DO_ENGLISH_NEXT:
+                continue
+            return True
+        return False
 
     # --- Fix3 C3 / C4: quote-side support by head + value ------------------------------------------------------------------------------------------------
     def _relaxed(self, sl: Slot, en: str) -> bool:

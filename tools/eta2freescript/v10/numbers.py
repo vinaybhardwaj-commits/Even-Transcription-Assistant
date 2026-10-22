@@ -313,6 +313,9 @@ _FUNCTION_WORDS = frozenset("the and are has her his was were been done data sam
                             "which while will would your you for not can may but all any per one are our its out use new own off who how why too yet few due via nor day days dose did does pain".split())
 
 
+_TWO_LETTER_ENGLISH = frozenset("am an as at be by do go he hi if in is it me my no of ok on or so to up us we oh ye yo".split()) - {"do", "be", "so"}
+
+
 @lru_cache(maxsize=1)
 def _near_buckets() -> dict[int, frozenset[str]]:
     base = [w for w in (lexicon_set() | collision_words()) if w.isascii() and w.isalpha() and len(w) >= 4 and w not in _ENGLISH_NUMERALS]
@@ -330,7 +333,7 @@ def number_like(low: str) -> bool:
     if low in lexicon_set() or low in collision_words() or low in _STAYS_A_NUMBER:
         return True
     if len(low) < 3:
-        return False
+        return low not in _TWO_LETTER_ENGLISH  # "ak", "ik", "ek"-like fragments: the dictionary allows every 1-2 letter token, so inside a drug unit only real English ones stay
     L, B = len(low), _near_buckets()
     for w in B.get(L, ()):
         if sum(a != b for a, b in zip(low, w)) <= 1:
