@@ -377,3 +377,9 @@ def test_n1_phrase_is_a_final_check_violation_too():
     assert [v.code for v in g.final_check("see the doctor to get this done", "plan", [])][:1] == ["n1_phrase"]
     assert [v.code for v in g.final_check("confirm the report", "follow_up", [])][:1] == ["n1_phrase"]   # d2 request word in an order section
     assert g.final_check("rest well", "plan", []) == []
+
+
+def test_m2_a_phonetic_drug_hit_that_sounds_like_a_number_word_is_not_a_drug_token():
+    assert names.detector_tokens("baara") is None and names.detector_tokens("Mazetol baara") != "baara"
+    d = names.drug_block({"brand_as_said": "baara", "generic": None})
+    assert "baara" not in json.dumps(d).lower()

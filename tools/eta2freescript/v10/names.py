@@ -68,6 +68,21 @@ def _clean_spoken(s: str) -> str:
     return s
 
 
+def _skeleton(w: str) -> str:
+    return re.sub(r"(.)\1+", r"\1", re.sub(r"[aeiouyh]", "", w.lower()))
+
+
+@lru_cache(maxsize=1)
+def _number_skeletons() -> frozenset[str]:
+    from . import numbers
+    return frozenset(s for s in (_skeleton(w) for w in numbers.lexicon_set() if w.isascii() and w.isalpha() and len(w) >= 3) if len(s) >= 2)
+
+
+def _number_like(tok: str) -> bool:
+    """A phonetic drug hit whose consonant skeleton is that of a number word of the lexicon ("baara" ~ "bara") is a number word, not a drug."""
+    return _skeleton(tok) in _number_skeletons()
+
+
 _NAME_CUES = frozenset({"for", "mr", "mrs", "ms", "miss", "shri", "shree", "smt", "sri", "dr", "patient", "of", "name", "named"})
 
 
@@ -91,7 +106,7 @@ def detector_tokens(text: str, limit: int = 3, fallback: bool = True) -> str | N
     for f in sorted(fl, key=lambda f: f.start):
         for m in toks:
             if m.start() >= f.start and m.end() <= f.end and not after_cue(m):
-                ok = (f.start, f.end) in strong or words.t2_allowed(m.group())
+                ok = ((f.start, f.end) in strong and not _number_like(m.group())) or words.t2_allowed(m.group())
                 if ok and m.group().lower() not in {x.lower() for x in out}:
                     out.append(m.group())
     if not out and fallback:
