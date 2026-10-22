@@ -799,4 +799,52 @@ def test_fix3_b_three_way_tie_doctor_patient_none_is_patient():
 
 def test_fix3_b_a_non_tied_none_does_not_override():
     assert R.role_majority(_SEG, _rr(("doctor", 6000), (None, 2000), ("patient", 2000)))[0] == "doctor"
-    assert R.role_majority(_SEG, _rr((None, 6000), ("patient", 4000)))[0] == "undecided"
+    assert R.role_majority(_SEG, _rr((None, 6000), ("patient", 4000)))[0] == "patient"  # fix4 LOW-13
+
+
+# ---------------------------------------------------------------- fix4: LOW-T1, LOW-14, LOW-13
+def _t1_layer(nan_centroid=True, second_cos=0.85):
+    """refuter c06/c20 shape: 3/3 doctor on speaker_0, a second near-doctor label, NaN runner-up centroid d2."""
+    C = cen("d0", "d1", "d2")
+    bundle = segs(("speaker_0", 0, 10), ("speaker_1", 10, 20), ("speaker_2", 20, 30), ("speaker_0", 30, 40))
+    role = [{"role": "doctor", "t0_ms": 0, "t1_ms": 10000}, {"role": "doctor", "t0_ms": 30000, "t1_ms": 40000},
+            {"role": "patient", "t0_ms": 10000, "t1_ms": 30000}]
+    ps = {"speaker_0": [0.9, 0.05, 0.03, 0.02], "speaker_1": [0.1, 0.8, 0.05, 0.05], "speaker_2": [0.1, 0.3, 0.3, 0.3]}
+    vecs = {"speaker_0": with_cos(C["d0"], 0.88, 7), "speaker_1": with_cos(C["d0"], second_cos, 6),
+            "speaker_2": with_cos(C["d0"], 0.2, 5)}
+    if nan_centroid:
+        C = dict(C)
+        C["d2"] = np.full(DIM, float("nan"))
+    return build(bundle=bundle, role=role, clef=ps, jev=ps, vecs=vecs, centroids=C)
+
+
+def test_fix4_t1_nan_runner_up_with_second_near_doctor_label_orders_nothing():
+    assert _t1_layer()["order_capable_labels"] == []
+    assert _t1_layer()["n1_candidates"] == ["speaker_0", "speaker_1"]
+
+
+def test_fix4_t1_controls():
+    # d2 removed: the second near-doctor label still blocks; a far second label with NaN d2 may order
+    assert _t1_layer(nan_centroid=False)["order_capable_labels"] == []
+    assert _t1_layer(second_cos=0.3)["n1_candidates"] == ["speaker_0"]
+
+
+@pytest.mark.parametrize("x", ["patient", "attender", "attendant", "staff", "other", "unknown"])
+def test_fix4_low14_doctor_tie_with_decided_non_doctor_is_non_doctor(x):
+    for spec in ((("doctor", 5000), (x, 5000)), ((x, 5000), ("doctor", 5000))):
+        r = R.role_majority(_SEG, _rr(*spec))[0]
+        assert R.blocks_arm_c(r), (spec, r)
+        assert r != "doctor"
+
+
+@pytest.mark.parametrize("y", [None, "", "undecided"])
+def test_fix4_low13_undecided_top_with_decided_non_doctor_takes_it(y):
+    assert R.role_majority(_SEG, _rr((y, 6000), ("patient", 4000)))[0] == "patient"
+    assert R.role_majority(_SEG, _rr((y, 3000), ("", 3000), ("patient", 1000), ("staff", 3000)))[0] == "staff"
+    assert R.role_majority(_SEG, _rr((y, 5000), ("doctor", 3000), ("staff", 2000)))[0] == "staff"
+
+
+@pytest.mark.parametrize("y", [None, "", "undecided"])
+def test_fix4_low13_only_doctor_and_undecided_stays_undecided(y):
+    assert R.role_majority(_SEG, _rr((y, 6000), ("doctor", 4000)))[0] == "undecided"
+    assert R.role_majority(_SEG, _rr((y, 10000)))[0] == "undecided"

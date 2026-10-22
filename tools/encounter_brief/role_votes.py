@@ -333,12 +333,17 @@ def role_majority(label_segs, role_segs):
         return None, None
     role, ms = max(tot.items(), key=lambda kv: (kv[1], kv[0]))
     tied = [r for r, v in tot.items() if v == ms]
-    if len(tied) > 1 and "undecided" in tied:
-        # fix3 MEDIUM-B: in a top tie that includes the unknown role, a tied decided non-doctor role wins (it blocks
-        # arm (c)); the unknown role never wins. A tie of unknown with doctor only is "undecided".
+    if len(tied) > 1:
+        # fix3 MEDIUM-B / fix4 LOW-14: in a top tie a tied decided non-doctor role wins whatever the sort order (it
+        # blocks arm (c)); the unknown role never wins. A tie of unknown with doctor only is "undecided".
         blockers = [r for r in tied if blocks_arm_c(r)]
-        role = max(blockers) if blockers else "undecided"
-    return role, round(ms / sum(tot.values()), 4)
+        role = max(blockers) if blockers else ("undecided" if "undecided" in tied else role)
+    if role == "undecided":
+        # fix4 LOW-13 (fail closed): an undecided top role does not hide a decided non-doctor share on the label.
+        decided = {r: v for r, v in tot.items() if v > 0 and blocks_arm_c(r)}
+        if decided:
+            role = max(decided.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    return role, round(tot[role] / sum(tot.values()), 4)
 
 
 def segment_role(seg, role_segs):
