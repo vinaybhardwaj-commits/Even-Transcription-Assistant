@@ -9,7 +9,7 @@ import copy
 import re
 
 from .. import note as N
-from . import config, drugs, meds, words
+from . import drugs, meds, words
 from .gate import HEADING_FIELD, TOKEN, NumberGate, Violation
 
 DRUG_REASONS = {"catalogue", "denylist", "fuzzy", "phonetic"}
@@ -107,6 +107,16 @@ def writeback_tree(gate: NumberGate, node):
     return node
 
 
+def _date_slot(gate: NumberGate, art: dict, line: str) -> str:
+    """Rule 27: the date worked out from a follow-up interval said aloud (or a date said aloud) was checked where it was made (mapper.follow_up). It is the
+    only computed value, and it posts only here, through a follow-up date slot: the ISO date of gp_extraction.follow_up is turned into its slot token."""
+    iso = ((art.get("gp_extraction") or {}).get("follow_up") or {}).get("followup_date")
+    if not isinstance(iso, str) or iso not in line:
+        return line
+    r = gate.check(iso, "follow_up", [], structured=True)
+    return line.replace(iso, r.text, 1) if r.ok else line
+
+
 def note_final(gate: NumberGate, art: dict, c, note_tok: str, *, allowed=None) -> tuple[str, dict[str, str]]:
     """(final note, {heading: first reason}) from a tokenised note. Medication is rendered from the prompts, never taken from `note_tok`."""
     allowed = allowed_drug_tokens(art, c, gate.drug_spans) if allowed is None else allowed
@@ -114,7 +124,7 @@ def note_final(gate: NumberGate, art: dict, c, note_tok: str, *, allowed=None) -
     if [l.partition(":")[0] for l in note_tok.split("\n") if l.partition(":")[0] in N.HEADINGS] != N.HEADINGS:
         bad["(structure)"] = "frame"  # the 11 headings, once each, in order: re-assembling must not hide a note that lacks them
     secs = N._split_sections(note_tok)
-    secs["Medication"] = meds.medication_lines(art.get("confirm_prompts") or []) if config.ACTIVE else secs["Medication"]
+    secs["Medication"] = meds.medication_lines(art.get("confirm_prompts") or [])
     out: dict[str, list[str]] = {}
     for h in N.HEADINGS:
         fld = HEADING_FIELD[h]
@@ -124,6 +134,8 @@ def note_final(gate: NumberGate, art: dict, c, note_tok: str, *, allowed=None) -
                 viol = gate.final_check(line, None, [])
                 lines.append(line)
             else:
+                if h == "Follow up":
+                    line = _date_slot(gate, art, line)
                 txt, pos, errs = gate.writeback(line)
                 viol = [Violation("frame", e) for e in errs] or gate.final_check(txt, fld, pos)
                 viol += _unknown_drug_tokens(txt, allowed)

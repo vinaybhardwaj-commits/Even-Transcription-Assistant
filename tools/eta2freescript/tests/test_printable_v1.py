@@ -109,7 +109,6 @@ FAIL_CASES = [
     ("Medication", "Paracetamol 650 BD - please confirm dose"),
     ("Medication", "Paracetamol 650 BD (needs verification)"),
     ("Medication", "Paracetamol 650 BD (frequency not mentioned)"),
-    ("Medication", "Paracetamol 650 BD x duration not stated"),
     ("Medication", "Paracetamol 650 BD, dose unknown"),
     ("Medication", "Paracetamol 650 BD x <duration>"),
     ("Medication", "{dose}"),

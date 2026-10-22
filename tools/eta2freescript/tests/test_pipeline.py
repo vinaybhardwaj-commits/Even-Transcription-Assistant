@@ -26,12 +26,12 @@ def test_fever_doctor_dose_and_follow_up(replay_out):
     art = logs["synth-fever-dose"]["artifact"]
     gx = art["gp_extraction"]
     assert logs["synth-fever-dose"]["note_source"] == "llm_stageB-v10"
-    assert [m["name"] for m in gx["medicines"]] == ["paracetamol 1 g"]
+    assert "medicines" not in gx and [pr["drug"]["generic"] for pr in art["confirm_prompts"]] == ["PARACETAMOL"]
     assert gx["follow_up"]["followup_type"] == "FOLLOW_UP_WITH_REPORTS" and gx["follow_up"]["followup_date"] == "2026-10-12"
     assert [d["diagnosis_or_impression"] for d in gx["presenting_complaints"]["diagnoses"]] == ["Viral fever"]
     assert "market" not in gx["presenting_complaints"]["symptoms"]
     assert gx["general_advice"].lower().count("water") == 1
-    assert [c["kind"] for c in art["completion_required"]] == ["inferred_confirm"] and not art["clip_boundary"]["suspected"]
+    assert sorted(c["kind"] for c in art["completion_required"]) == ["field_withheld"] * 3 + ["inferred_confirm"] and not art["clip_boundary"]["suspected"]
 
 
 def test_knee_boundary_quarantine_and_fallback(replay_out):
@@ -43,8 +43,8 @@ def test_knee_boundary_quarantine_and_fallback(replay_out):
     assert art["clip_boundary"]["quarantined_turns"] == [0, 1, 2]
     assert {"role_track_two_consults", "second_patient_voice", "stage_a_topic"} <= set(art["clip_boundary"]["reasons"])
     assert sorted(c["kind"] for c in art["completion_required"]) == [
-        "boundary_review", "drug_history", "exam_missing", "inferred_confirm", "pick_drug"]
-    assert art["gp_extraction"]["comorbidities"][0]["duration"] == {"value": 60, "unit": "MONTHS"}
+        "boundary_review", "drug_history", "exam_missing", "field_withheld", "inferred_confirm", "pick_drug"]
+    assert "duration" not in art["gp_extraction"]["comorbidities"][0]  # v10: a duration nobody said in the cited turn is withheld (a record is written)
     assert art["gp_extraction"]["follow_up"]["followup_type"] == "IF_REQUIRED"
     assert art["encounter"]["transcript"]["role_track"]["two_consults"] is True
     assert any(p["speaker"] == "attendant" for p in art["provenance"])
@@ -57,9 +57,9 @@ def test_native_consult_without_role_track(replay_out):
     assert lg["speaker_source"] == "model_inferred" and lg["english_source"] == "none:native-hi"
     assert lg["note_source"] == "deterministic_fallback" and lg["llm_note_errors"] == ["stageB call failed: FileNotFoundError"]
     assert art["encounter"]["transcript"]["role_track"] is None
-    assert [m["name"] for m in art["gp_extraction"]["medicines"]] == ["Ascoril 5 ml"]
-    assert art["gp_extraction"]["follow_up"]["followup_date"] == "2026-10-19"
-    assert [c["kind"] for c in art["completion_required"]] == ["inferred_confirm", "pick_drug"]
+    assert "medicines" not in art["gp_extraction"] and len(art["confirm_prompts"]) == 2
+    assert "followup_date" not in art["gp_extraction"]["follow_up"]  # v10: the interval was not said in the cited turn, so no date is computed
+    assert sorted(c["kind"] for c in art["completion_required"]) == ["field_withheld"] * 3 + ["follow_up_unstated", "inferred_confirm", "pick_drug"]
 
 
 def test_fake_client_drives_both_stages(tmp_path):

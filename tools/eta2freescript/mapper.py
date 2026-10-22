@@ -42,7 +42,6 @@ from .medication_safety import (
     norm_tokens, number_tokens, plausible_strength, resolvable, spoken_catalogue_name,
 )
 from .validate import CLASS_WORDS as V_CLASS, DEPT, DR_NAME, SLOT_STOP, V
-from .v10 import config as V10
 from .v10 import meds as v10_meds
 from .v10 import numbers as v10_numbers
 from .v10 import names as v10_names
@@ -526,7 +525,7 @@ class Builder:
         fl = set(flags)
         if unsure:
             fl.add("speaker_uncertain")
-        if V10.ACTIVE and self._negation_split(turns, lead):
+        if self._negation_split(turns, lead):
             fl.add("negation_cue_nearby")
         if evidence_state is None:
             evidence_state = "heard_in_room" if ev else "not_said_in_room"
@@ -537,10 +536,10 @@ class Builder:
             conf = min(conf, 0.5)
         if conf < 0.6:
             fl.add("low_confidence")
-        if V10.ACTIVE and kind == "medicine":
+        if kind == "medicine":
             text = v10_numbers.redact(text)  # C4: no heard strength, frequency or duration outside confirm_internal
         item = {"item_id": f"{kind[:3]}{self.n}", "kind": kind, "text": text[:300], "evidence_state": evidence_state}
-        if V10.ACTIVE and kind == "medicine" and names is not None:
+        if kind == "medicine" and names is not None:
             names = [v10_numbers.redact(x) or x for x in names if isinstance(x, str)]  # C4: a name carries no strength
         if names is not None and kind in ORDER_KINDS:
             item["names"] = [x for x in dict.fromkeys(names) if x][:6]
@@ -569,9 +568,8 @@ class Builder:
         return bool(self._NEG_TAIL.search((prev.text or "").strip()) and not self._NEG_ANY.search(cur.text or ""))
 
     def review(self, kind: str, item: dict, prompt: str, detail: str | None = None) -> None:
-        if V10.ACTIVE:
-            prompt = v10_numbers.redact(prompt) if kind != "field_withheld" else prompt
-            detail = v10_numbers.redact(detail) if detail and not re.fullmatch(r"[a-z]+\d+", detail) else detail
+        prompt = v10_numbers.redact(prompt) if kind != "field_withheld" else prompt
+        detail = v10_numbers.redact(detail) if detail and not re.fullmatch(r"[a-z]+\d+", detail) else detail
         e = {"kind": kind, "item_id": item["item_id"], "prompt": prompt}
         if detail:
             e["detail"] = detail[:200]
@@ -589,7 +587,7 @@ class Builder:
     def nm(self, text, fld: str, turns, lead=None, *, red_flag: bool = False):
         """FRX-V10: gate one posted string (spec "Numbers by provenance"). The string comes back with each number as a slot token, or None when the
         unit is withheld: a record, a kept-out provenance item and a prompt are written, never a silent drop (rule 8)."""
-        if not V10.ACTIVE or not isinstance(text, str) or not text:
+        if not isinstance(text, str) or not text:
             return text
         cited = self._pick_turns(self.unquarantined(list(turns or [])), lead, cap=8)
         r = self.gate.check(text, fld, cited)
@@ -643,9 +641,7 @@ class Builder:
     def by_non_doctor(self, turn) -> bool:
         """A patient / attendant / staff / other decision is held out even when the role was inferred, not tracked.
         FRX-V10 (D7): an order needs an ORDER-CAPABLE decision turn, the role track's doctor label. A consult with no doctor label posts no orders."""
-        if V10.ACTIVE:
-            return not (isinstance(turn, int) and turn in self.oc)
-        return isinstance(turn, int) and 0 <= turn < len(self.c.turns) and self.c.turns[turn].role in NON_DOCTOR
+        return not (isinstance(turn, int) and turn in self.oc)
 
     def _doctor_spoken(self, turns) -> bool:
         roles = [self.c.turns[t].role for t in turns if isinstance(t, int) and 0 <= t < len(self.c.turns)]
@@ -656,7 +652,7 @@ class Builder:
         if all(r in NON_DOCTOR for r in roles):
             return False
         # Addendum A F1 (cases db8a5mu7, 7s815msg): on a diarised track an all-unknown set of turns is not the doctor speaking
-        return not (V10.ACTIVE and self.c.diarised)
+        return not self.c.diarised
 
     def _medicine_safety(self, rx: dict, name: str, turns, lead) -> tuple[dict, list[str]]:
         """Return a copy with unsafe dose fields removed, plus flags that hold out the name."""
@@ -744,7 +740,7 @@ class Builder:
                 continue
             e = {"name": gn, "raw_name": gn}
             d, note = duration(it.get("duration"))
-            if d and V10.ACTIVE:
+            if d:
                 unit = {"DAYS": "days", "WEEKS": "weeks", "MONTHS": "months", "YEARS": "years"}.get(d["unit"])
                 bad = self.gate.check_structured("illness", float(d["value"]), unit, "comorbidities", keep, months_equiv=True) if unit else "frame"
                 if bad:
@@ -901,7 +897,7 @@ class Builder:
             elif e.get("performed"):
                 missing.append((e, tl))
         if ex:
-            self.gx["examination"] = "; ".join((e["_piece"] if V10.ACTIVE else (f"{e['performed']} - {e['finding']}" if e.get("performed") else e["finding"])) for e, _ in ex).replace(":", " -")
+            self.gx["examination"] = "; ".join(e["_piece"] for e, _ in ex).replace(":", " -")
             self.P("examination", self.gx["examination"], "prescribed", sum((tl for _, tl in ex), []), min(self.conf_of(e) for e, _ in ex), "/examination")
         for e, tl in missing:
             it = self.P("examination", f"[exam_missing] {e['performed']} examined - finding not said aloud", "discussed_only", tl, 0.5, None)
@@ -932,8 +928,6 @@ class Builder:
             if action == "stop":
                 names = [label, generic, brand]
                 self.P("medicine", f"Stop {label}", "stopped", turns, rx.get("confidence") or 0.5, None, fl + ["negation_cue_nearby"], names=names, negated=True, lead=dec)
-                if not V10.ACTIVE:
-                    plan_txt.append((f"Stop {label}.", turns))
                 continue
             if not is_named(rx):
                 form = rx.get("dosage_form")
@@ -965,7 +959,7 @@ class Builder:
                 if state == "inferred":
                     self.review("inferred_confirm", held, f"Confirm {label}", label)
                 continue
-            if V10.ACTIVE and self._is_investigation_name(name, rx):
+            if self._is_investigation_name(name, rx):
                 # Addendum A F3 (cases gtmjp8kd, ahpierb3): "zinc" / "electrolytes" is a lab to test, not a drug to give
                 kept = self.P("medicine", f"[medicine_is_investigation] {label}", "discussed_only", turns, 0.5, None, names=[], lead=dec)
                 self.review("inferred_confirm", kept, f"Confirm {label}", label)
@@ -985,8 +979,6 @@ class Builder:
             if self._withdrawn_here(rx, turns, dec):
                 self.P("medicine", f"Stop {label}", "stopped", turns, rx.get("confidence") or 0.5, None,
                        fl + ["negation_cue_nearby"], names=[x for x in (label, generic, brand) if x], negated=True, lead=dec)
-                if not V10.ACTIVE:
-                    plan_txt.append((f"Stop {label}.", turns))
                 continue
             if self._unchanged_medicine(rx, turns, dec):
                 self.P("medicine", f"[drug_history] {label} - not a new prescription", "drug_history",
@@ -1100,10 +1092,9 @@ class Builder:
         if meds:
             self.gx["medicines"] = meds
         self.drug_history()
-        if V10.ACTIVE:
-            v10_meds.build_prompts(self)
-            if self.med_changes:
-                plan_txt.append((v10_names.PLAN_LINE, [t for t in getattr(self, "med_change_turns", []) if t not in self.b.quarantined]))
+        v10_meds.build_prompts(self)
+        if self.med_changes:
+            plan_txt.append((v10_names.PLAN_LINE, [t for t in getattr(self, "med_change_turns", []) if t not in self.b.quarantined]))
 
     def _is_investigation_name(self, name: str, rx: dict) -> bool:
         """The medicine's name is a lab analyte (analytes.v1) or the name of an investigation Stage A lists in this consult."""
@@ -1793,7 +1784,7 @@ class Builder:
     def investigations(self, plan_txt):
         inv = []
         for it in self.enc.get("investigations") or []:
-            if V10.ACTIVE and (it.get("name") or "").strip() and self._inside_longer_investigation(
+            if str(it.get("name") or "").strip() and self._inside_longer_investigation(
                     str(it["name"]), self.turns(it), self.enc.get("investigations") or []):
                 kept = self.P("investigation", f"[investigation_inside_longer_name] {str(it['name']).strip()}", "discussed_only", self.turns(it), 0.5, None, names=[])
                 continue
@@ -1982,10 +1973,7 @@ class Builder:
             seen.add(key)
             e = {"name": g_nm, "raw_name": g_raw}
             if isinstance(scheduled, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", scheduled):
-                if V10.ACTIVE:
-                    self.withhold("procedures", "frame", tl)  # a calendar date posts only in Follow up (slot table)
-                else:
-                    e["scheduled_date"] = scheduled
+                self.withhold("procedures", "frame", tl)  # a calendar date posts only in Follow up (slot table)
             if notes:
                 e["notes"] = g_notes
             recs.append(e)
@@ -2067,13 +2055,12 @@ class Builder:
                 continue
             said.append((p["text"].rstrip(".") + ".", self.unquarantined(tl)))
         plan_txt[:0] = said
-        if V10.ACTIVE:
-            gated = []
-            for t_, tl_ in plan_txt:
-                g = self.nm(t_, "plan", tl_)
-                if g is not None:
-                    gated.append((g, tl_))
-            plan_txt[:] = gated
+        gated = []
+        for t_, tl_ in plan_txt:
+            g = self.nm(t_, "plan", tl_)
+            if g is not None:
+                gated.append((g, tl_))
+        plan_txt[:] = gated
         if plan_txt:
             self.gx.setdefault("plan_of_management", {})["management_plan"] = " ".join(
                 (t if t == v10_names.PLAN_LINE else t.replace(":", " -")) for t, _ in plan_txt)
@@ -2100,12 +2087,11 @@ class Builder:
                 if not self._doctor_spoken(keep):
                     self.P("advice", f"[advice_not_by_doctor] {txt}", "discussed_only", keep, 0.5, None)
                     continue
-                if V10.ACTIVE:
-                    g = self.nm(txt.replace(":", " -").strip(), "advice", keep, red_flag=is_red)
-                    if g is None:
-                        continue
-                    txt = g
-                if is_red and V10.ACTIVE:
+                g = self.nm(txt.replace(":", " -").strip(), "advice", keep, red_flag=is_red)
+                if g is None:
+                    continue
+                txt = g
+                if is_red:
                     if not any(near_duplicate(txt, k) for k, _ in reds):
                         reds.append((txt.replace(":", " -").strip(), keep))
                     continue
@@ -2213,24 +2199,23 @@ class Builder:
                 mapped["followup_date"] = got.isoformat()
         if mapped.get("followup_type") == "IF_REQUIRED":
             mapped.pop("followup_date", None)
-        if V10.ACTIVE:
-            keep_tl = self.unquarantined(tl)
-            if mapped.get("followup_date"):
-                why = (self.gate.check_structured("followup", float(iv["value"]), iv["unit"].lower(), "follow_up", keep_tl) if iv
-                       else self.gate.check_date(mapped["followup_date"], "follow_up", keep_tl))
-                if why:
-                    mapped.pop("followup_date", None)
-                    iv = None
-                    self.withhold("follow_up", why, keep_tl)
-                    if "interval_unstated" not in notes and mapped.get("followup_type") != "IF_REQUIRED":
-                        notes = list(notes) + ["interval_unstated"]
-            if mapped.get("follow_up_instructions"):
-                g = self.nm(mapped["follow_up_instructions"], "follow_up", keep_tl)
-                if g is None:
-                    mapped.pop("follow_up_instructions", None)
-                else:
-                    mapped["follow_up_instructions"] = g
-                text = g or mapped["followup_type"].replace("_", " ").lower()
+        keep_tl = self.unquarantined(tl)
+        if mapped.get("followup_date"):
+            why = (self.gate.check_structured("followup", float(iv["value"]), iv["unit"].lower(), "follow_up", keep_tl) if iv
+                   else self.gate.check_date(mapped["followup_date"], "follow_up", keep_tl))
+            if why:
+                mapped.pop("followup_date", None)
+                iv = None
+                self.withhold("follow_up", why, keep_tl)
+                if "interval_unstated" not in notes and mapped.get("followup_type") != "IF_REQUIRED":
+                    notes = list(notes) + ["interval_unstated"]
+        if mapped.get("follow_up_instructions"):
+            g = self.nm(mapped["follow_up_instructions"], "follow_up", keep_tl)
+            if g is None:
+                mapped.pop("follow_up_instructions", None)
+            else:
+                mapped["follow_up_instructions"] = g
+            text = g or mapped["followup_type"].replace("_", " ").lower()
         self.gx["follow_up"] = mapped
         item = self.P("follow_up", f"{mapped['followup_type']}" + (f" {mapped['followup_date']}" if mapped.get("followup_date") else "") + f" - {text}",
                       "prescribed", self.unquarantined(tl), 0.8, "/follow_up")
@@ -2266,16 +2251,14 @@ class Builder:
         self.plan(plan_txt)
         self.referrals()
         self.advice()
-        if V10.ACTIVE:
-            self.doctor_words()
+        self.doctor_words()
         self.follow_up()
         self.boundary()
         self.room_facts()
         self.lab_dx_conflicts()
         self._scrub_free_text()
         self._scrub_identity()
-        if V10.ACTIVE:
-            self._blank_slot_values()
+        self._blank_slot_values()
         return self.gx, self.prov
 
     def _blank_slot_values(self) -> None:
@@ -2461,21 +2444,20 @@ def build(c: Consult, enc: dict, b: Boundary, model_id: str, prompt_sha: str, co
         "completion_required": bl.completion, "clip_boundary": b.as_json(),
         "slots": bl.slots, "room_facts": bl.facts,
     }
-    if V10.ACTIVE:
-        from .v10 import data as v10_data
-        reg = v10_spans.registry(c, b.quarantined)
-        art["generator"]["data_files"] = v10_data.provenance()
-        art["generator"]["profile_version"] = None
-        art["policy"] = {"medicine_policy": "notes_only", "advice_budget": {"items": ADVICE_MAX_ITEMS, "chars": ADVICE_MAX_CHARS}, "inputs_mode": "current"}
-        cited = {v10_spans.span_id(t) for p in bl.prov for t in bl._cited_turn_ids(p.get("evidence"))}
-        cited |= {x for pr in bl.confirm_prompts for x in pr.get("cited_spans", [])} | {x for w in bl.withheld for x in w["span_ids"]}
-        cited |= {x for r in art_red(bl) for x in r["cited_spans"]}
-        art["roster"], art["spans"] = reg["roster"], [sp for sp in reg["spans"] if sp["span_id"] in cited]
-        art["confirm_prompts"], art["confirm_internal"] = bl.confirm_prompts, bl.confirm_internal
-        art["withheld"] = bl.withheld
-        art["kept_out"] = kept_out_records(bl.prov)
-        art["doctor_words"] = bl.doctor_words_out
-        art["red_flags"] = [{"text_en": t, "cited_spans": [v10_spans.span_id(x) for x in tl][:6], "must_carry": True} for t, tl in bl.red_flag_items]
+    from .v10 import data as v10_data
+    reg = v10_spans.registry(c, b.quarantined)
+    art["generator"]["data_files"] = v10_data.provenance()
+    art["generator"]["profile_version"] = None
+    art["policy"] = {"medicine_policy": "notes_only", "advice_budget": {"items": ADVICE_MAX_ITEMS, "chars": ADVICE_MAX_CHARS}, "inputs_mode": "current"}
+    cited = {v10_spans.span_id(t) for p in bl.prov for t in bl._cited_turn_ids(p.get("evidence"))}
+    cited |= {x for pr in bl.confirm_prompts for x in pr.get("cited_spans", [])} | {x for w in bl.withheld for x in w["span_ids"]}
+    cited |= {x for r in art_red(bl) for x in r["cited_spans"]}
+    art["roster"], art["spans"] = reg["roster"], [sp for sp in reg["spans"] if sp["span_id"] in cited]
+    art["confirm_prompts"], art["confirm_internal"] = bl.confirm_prompts, bl.confirm_internal
+    art["withheld"] = bl.withheld
+    art["kept_out"] = kept_out_records(bl.prov)
+    art["doctor_words"] = bl.doctor_words_out
+    art["red_flags"] = [{"text_en": t, "cited_spans": [v10_spans.span_id(x) for x in tl][:6], "must_carry": True} for t, tl in bl.red_flag_items]
     from .recover import recover_medicine_rules, soften_f2_m3
     soften_f2_m3(art)
     recover_medicine_rules(art)

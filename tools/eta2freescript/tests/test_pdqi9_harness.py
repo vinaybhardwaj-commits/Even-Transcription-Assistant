@@ -291,24 +291,6 @@ def floors_row(**kw):
     return {**base, **kw}
 
 
-def test_invented_numbers_breaking_and_passing(fever):
-    c, art = fever
-    ok = {"medicines": [{"name": "Paracetamol", "strength": "1 g", "frequency": "three times a day"}]}
-    assert floors.invented_numbers(ok, art, c)["count"] == 0
-    assert floors.invented_numbers({"medicines": [{"name": "Paracetamol", "strength": "5 g"}]}, art, c) == {"offending_runs": 1, "unmatched_medicines": 0, "count": 1}
-    assert floors.invented_numbers({"medicines": [{"name": "Zorbex", "strength": "10 mg"}]}, art, c)["unmatched_medicines"] == 1
-    assert floors.invented_numbers({"medicines": [{"name": "Paracetamol", "strength": "1 g"}]}, None, c)["unmatched_medicines"] == 1
-    assert floors.invented_numbers({"medicines": [{"name": "Dolo", "frequency": "twice a day"}]}, art, c)["count"] == 0  # brand match, no digits
-
-
-def test_dose_precedence_breaking_and_passing(fever):
-    _, art = fever
-    assert any("doctor_dose_precedence" in p["flags"] for p in art["provenance"])
-    assert floors.dose_precedence({"medicines": [{"name": "Paracetamol", "strength": "1 g"}]}, art) == 0
-    assert floors.dose_precedence({"medicines": [{"name": "Paracetamol", "strength": "1000 mg"}]}, art) == 1
-    assert floors.dose_precedence({"medicines": [{"name": "Paracetamol", "strength": "650 mg"}]}, art) == 1
-    assert floors.dose_precedence({"medicines": [{"name": "Paracetamol"}]}, art) == 1
-    assert floors.dose_precedence({"medicines": []}, art) == 1
 
 
 def test_printable_floor_counts_note_text_and_replayed_fields(fever):

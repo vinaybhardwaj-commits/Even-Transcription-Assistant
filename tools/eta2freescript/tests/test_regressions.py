@@ -14,27 +14,6 @@ from tools.eta2freescript.validate import check
 DOC = {"0": "doctor", "1": "patient"}
 
 
-def test_instructions_naming_a_kept_out_drug_do_not_fail_c4(tmp_path):
-    lines = [(0, 4, "1", "I take Dolo 650 at home."), (5, 12, "0", "Take paracetamol 1 g three times a day for three days, and take it when Dolo 650 is not working.")]
-    c = mk_consult(lines, roles=DOC)
-    enc = empty_encounter(
-        examination=[{"performed": "Throat", "finding": "red", "basis": "said", "source_turns": [1]}],
-        drug_history=[{"name_as_said": "Dolo 650", "text": "Takes Dolo 650 at home", "current": True, "reported_by": "patient", "source_turns": [0]}],
-        prescription=[{"action": "start", "decision_turn": 1, "generic": "paracetamol", "brand_as_said": None, "strength": "1 g",
-                       "frequency": "three times a day", "duration": "3 days", "instructions": "take when Dolo 650 is not working",
-                       "basis": "said", "confidence": 0.9, "source_quote_turn": 1, "source_turns": [1]}])
-    art = build_artifact(c, enc)
-    assert check(art) == [], check(art)
-    assert "dolo" not in art["note_text"].lower()
-    assert "dolo" not in (art["gp_extraction"]["medicines"][0].get("instructions") or "").lower()
-    fake = FakeClient({"stageA": json.dumps(enc | {"speaker_roles": [], "schema": "even.encounter.v2"})})
-    # The encounter above is enough for Stage A replay of this consult only through the mapper path.
-    # Drive the real fallback: Stage B disabled, so a C4 failure would refuse to write the artifact.
-    log = run_consult(c, fake, tmp_path, Options(stage_b_enabled=False))
-    assert log["written"] and log["final_valid"], log.get("final_errors")
-    assert "dolo" not in log["artifact"]["note_text"].lower()
-
-
 def test_class_word_and_no_name_note_become_a_slot_with_strength():
     c = mk_consult([(0, 6, "0", "Take a cholesterol medicine, 10 mg, at night for one month.")], roles=DOC)
     rx = {"action": "start", "decision_turn": 0, "generic": "statin", "brand_as_said": None, "name_interpretation": "no name was spoken",
@@ -65,7 +44,7 @@ def test_near_miss_brand_is_not_a_second_continue_prompt():
         drug_history=[{"name_as_said": "Concord 2.5", "text": "Takes Concord 2.5", "current": True, "reported_by": "patient", "source_turns": [0]}]))
     prompts = [x["prompt"] for x in art["completion_required"]]
     assert not any(p.startswith("Continue") for p in prompts)
-    assert any("bisoprolol" in m["name"] for m in art["gp_extraction"]["medicines"])
+    assert not art["gp_extraction"].get("medicines") and len(art["confirm_prompts"]) == 1 and "bisoprolol" in (art["confirm_prompts"][0]["drug"].get("generic") or "").lower()
 
 
 def test_continue_prompt_only_when_plausible_and_garbled_names_collapse():

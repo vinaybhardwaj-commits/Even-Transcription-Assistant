@@ -94,9 +94,9 @@ FEVER_A = {
     "consult_boundary": {"suspected": False, "foreign_turns": [], "reason": None},
     "uncertainties": [],
 }
-FEVER_B = ("Co-morbidities:\nPresenting Complaint: Fever (3 days). Body pain.\nExamination: Temperature - 101 F; Throat - red; Chest - clear\n"
-           "Diagnoses: ?Viral fever\nPlan of Management:\nSurgery or Procedure:\nMedication: paracetamol 1 g three times a day x 3 days\n"
-           "Further Investigation: CBC (today)\nFollow up: follow up with reports; 2026-10-12; After 1 week with CBC report\nRefer to:\n"
+FEVER_B = ("Co-morbidities:\nPresenting Complaint: Body pain.\nExamination: Throat - red; Chest - clear\n"
+           "Diagnoses: ?Viral fever\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nPARACETAMOL — confirm\n"
+           "Further Investigation: CBC (today)\nFollow up: follow up with reports; 2026-10-12; After ⟦S1⟧ with CBC report\nRefer to:\n"
            "General Advice: Drink plenty of water; Take rest\n")
 FEVER_SIGNED = {"medicines": [{"name": "Paracetamol 1000 mg", "strength": "1000 mg", "frequency": "TDS", "duration": "3 days"}],
                 "diagnoses": ["Viral fever"], "icd_codes": ["B34.9"], "investigations": ["CBC"], "comorbidities": [],
@@ -164,8 +164,8 @@ KNEE_A = {
     "consult_boundary": {"suspected": True, "foreign_turns": [0, 1, 2], "reason": "goodbye to a previous patient before a new greeting"},
     "uncertainties": [],
 }
-KNEE_B = ("Co-morbidities: Diabetes mellitus\nPresenting Complaint: Right knee pain (2 months). Worse on stairs.\nExamination:\n"
-          "Diagnoses: ?Osteoarthritis of right knee\nPlan of Management:\nSurgery or Procedure:\nMedication: pantoprazole 40 mg once daily x 2 weeks\n"
+KNEE_B = ("Co-morbidities: Diabetes mellitus\nPresenting Complaint: Right knee pain (⟦S1⟧). Worse on stairs.\nExamination:\n"
+          "Diagnoses:\nPlan of Management:\nSurgery or Procedure:\nMedication:\n"
           "Further Investigation: X-ray right knee\nFollow up: if required; Come back if the pain does not settle\nRefer to:\nGeneral Advice: Avoid climbing stairs\n")
 KNEE_SIGNED = {"medicines": [{"name": "Diclofenac gel", "frequency": "BD", "duration": "10 days"}, {"name": "Metformin 500 mg", "frequency": "BD", "duration": "continue"}],
                "diagnoses": ["Osteoarthritis knee"], "icd_codes": ["M17.1"], "investigations": ["X-ray knee AP/lateral"],

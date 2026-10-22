@@ -1,10 +1,10 @@
 Co-morbidities: Diabetes mellitus
-Presenting Complaint: Right knee pain (2 months). Worse on stairs.
+Presenting Complaint: Right knee pain (⟦S1⟧). Worse on stairs.
 Examination:
-Diagnoses: ?Osteoarthritis of right knee
+Diagnoses:
 Plan of Management:
 Surgery or Procedure:
-Medication: pantoprazole 40 mg once daily x 2 weeks
+Medication:
 Further Investigation: X-ray right knee
 Follow up: if required; Come back if the pain does not settle
 Refer to:

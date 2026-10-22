@@ -43,11 +43,12 @@ def art_of(c=None, b=None, **enc):
 
 def test_said_order_with_doctor_decision_is_emitted():
     a = art_of(prescription=[rx()])
-    assert [m["name"] for m in a["gp_extraction"]["medicines"]] == ["paracetamol 500 mg"]
-    assert kinds(a) == ["follow_up_missing"]
+    assert "medicines" not in a["gp_extraction"]  # FRX-V10: a confirm prompt, never a posted row
+    assert [p["drug"]["base_molecule"] for p in a["confirm_prompts"]] == ["paracetamol"] and a["confirm_prompts"][0]["action"] == "start"
+    assert "500" not in a["note_text"] and "follow_up_missing" in kinds(a)
 
 
-@pytest.mark.parametrize("change,why", [({"basis": "inferred"}, "no doctor decision turn"), ({"decision_turn": None}, "no doctor decision turn"),
+@pytest.mark.parametrize("change,why", [({"basis": "inferred"}, "no doctor decision turn"), ({"decision_turn": None}, "decision not spoken by the doctor"),
                                          ({"decision_turn": 2, "source_turns": [2]}, "decision not spoken by the doctor")])
 def test_hold_back(change, why):
     a = art_of(prescription=[rx(**change)])
@@ -56,23 +57,12 @@ def test_hold_back(change, why):
     assert len(held) == 1 and why in held[0]["text"]
 
 
-def test_unresolved_role_keeps_the_drug_and_reviews_a_carried_over_regimen():
-    """Amlodipine 5 mg is this drug's dose. Twice a day / three days belong to the other line, so only that regimen is reviewed."""
-    c = mk_consult(LINES, role_track=False)
-    a = build_artifact(c, empty_encounter(examination=EXAM, prescription=[rx(decision_turn=2, source_turns=[2], strength="5 mg", generic="amlodipine",
-                                                                                 frequency=None, duration=None)]))
-    med = a["gp_extraction"]["medicines"][0]
-    owner = next(p for p in a["provenance"] if p.get("json_pointer") == "/medicines/0")
-    assert med["name"] == "amlodipine 5 mg" and "frequency" not in med and "duration" not in med
-    assert any(c["kind"] == "dose_unstated" for c in a["completion_required"])
-    assert check(a) == []
-
 
 def test_stopped_drug_negated_and_kept_out():
     a = art_of(prescription=[rx(action="stop")])
     p = [x for x in a["provenance"] if x["status"] == "stopped"]
     assert p and p[0]["negated"] and "medicines" not in a["gp_extraction"]
-    assert "Stop paracetamol." in a["gp_extraction"]["plan_of_management"]["management_plan"]
+    assert [pr["action"] for pr in a["confirm_prompts"]] == ["stop"]
 
 
 def dx(label, rank="secondary", named=False, turns=(1,)):
@@ -135,14 +125,6 @@ def test_exam_missing_when_nothing_said():
     assert kinds(a) == ["exam_missing", "follow_up_missing"] and a["completion_required"][0]["detail"] == "Abdomen"
     assert "examination" not in a["gp_extraction"]
 
-
-def test_dose_unstated_review():
-    c = mk_consult([(0, 3, "1", "Fever."), (4, 9, "0", "Take paracetamol twice a day.")], roles=DOC)
-    a = art_of(c=c, examination=[{"performed": "Throat", "finding": "red", "basis": "said", "source_turns": [1]}],
-               prescription=[rx(strength=None, duration=None, decision_turn=1, source_quote_turn=1, source_turns=[1])])
-    assert a["gp_extraction"]["medicines"][0]["name"] == "paracetamol"
-    c = a["completion_required"]
-    assert kinds(a) == ["dose_unstated", "follow_up_missing"] and "strength, duration" in c[0]["prompt"]
 
 
 def test_unnamed_drug_becomes_regimen_slot_never_a_medicine():
@@ -208,12 +190,13 @@ def test_years_become_months_and_cap():
     assert duration({"value": 90, "unit": "YEARS"})[0] is None
     assert duration({"value": "5", "unit": "DAYS"}) == (None, None)
     a = art_of(comorbidities=[{"name": "Hypertension", "duration": {"value": 2, "unit": "YEARS"}, "basis": "said", "source_turns": [2]}])
-    assert a["gp_extraction"]["comorbidities"][0]["duration"] == {"value": 24, "unit": "MONTHS"}
+    # FRX-V10: a duration posts only when a cited span says it; turn 2 does not, so it is withheld and recorded
+    assert "duration" not in a["gp_extraction"]["comorbidities"][0] and a["withheld"]
 
 
 def test_speaker_and_source_on_provenance():
     a = art_of(prescription=[rx()])
-    med = next(p for p in a["provenance"] if p["json_pointer"] == "/medicines/0")
+    med = next(p for p in a["provenance"] if p["kind"] == "medicine")
     assert med["speaker"] == "doctor" and med["speaker_source"] == "role_track" and "speaker_uncertain" not in med["flags"]
     assert a["encounter"]["transcript"]["speaker_source"] == "role_track"
 
@@ -252,37 +235,6 @@ def test_a_past_operation_is_not_advised_surgery():
     assert a["gp_extraction"].get("plan_of_management", {}).get("requires_surgery_or_procedure") is not True
 
 
-def test_combination_brand_splits_into_components_and_keeps_the_brand():
-    lines = [(0, 8, "0", "Take Augmentin 625 twice a day for five days.")]
-    c = mk_consult(lines, roles=DOC)
-    a = art_of(c=c, examination=[], prescription=[rx(
-        generic=None, brand_as_said="Augmentin 625", strength="625 mg", frequency="twice a day", duration="5 days",
-        decision_turn=0, source_quote_turn=0, source_turns=[0])])
-    meds = a["gp_extraction"]["medicines"]
-    assert [m["name"] for m in meds] == ["amoxicillin", "clavulanic acid"]
-    assert all(m["raw_name"] == "Augmentin 625" and m["aliases"] == ["Augmentin 625"] for m in meds)
-    assert "dose_unstated" in kinds(a)
-
-
-def test_telma_am_and_a_generic_plus_split_and_ascoril_stays_one():
-    lines = [(0, 6, "0", "Take Telma-AM once a day.")]
-    c = mk_consult(lines, roles=DOC)
-    a = art_of(c=c, examination=[], prescription=[rx(
-        generic=None, brand_as_said="Telma-AM", strength=None, frequency="once a day", duration=None,
-        decision_turn=0, source_quote_turn=0, source_turns=[0])])
-    assert [m["name"] for m in a["gp_extraction"]["medicines"]] == ["telmisartan", "amlodipine"]
-    assert all(m["raw_name"] == "Telma-AM" for m in a["gp_extraction"]["medicines"])
-    assert "dose_unstated" in kinds(a)
-    lines = [(0, 6, "0", "Take amoxicillin and clavulanic acid twice a day.")]
-    a = art_of(c=mk_consult(lines, roles=DOC), examination=[], prescription=[rx(
-        generic="amoxicillin and clavulanic acid", brand_as_said=None, strength=None, frequency="twice a day", duration=None,
-        decision_turn=0, source_quote_turn=0, source_turns=[0])])
-    assert [m["name"] for m in a["gp_extraction"]["medicines"]] == ["amoxicillin", "clavulanic acid"]
-    lines = [(0, 6, "0", "Take Ascoril 5 ml twice a day for five days.")]
-    a = art_of(c=mk_consult(lines, roles=DOC), examination=[], prescription=[rx(
-        generic=None, brand_as_said="Ascoril", strength="5 ml", frequency="twice a day", duration="5 days",
-        decision_turn=0, source_quote_turn=0, source_turns=[0])])
-    assert [m["name"] for m in a["gp_extraction"]["medicines"]] == ["Ascoril 5 ml"]
 
 
 def test_over_split_diagnosis_keeps_the_coarser_parent():
@@ -305,23 +257,6 @@ def test_unspoken_routine_panel_is_dropped_and_a_spoken_one_stays():
     assert a["gp_extraction"]["further_investigations"][0]["name"] == "CBC"
 
 
-def test_spoken_regimen_is_carried_and_a_missing_one_is_completion_required():
-    lines = [(0, 8, "0", "Take telmisartan twice a day for five days.")]
-    c = mk_consult(lines, roles=DOC)
-    a = art_of(c=c, examination=[], prescription=[rx(
-        generic="telmisartan", brand_as_said=None, strength=None, frequency="BD", duration=None,
-        decision_turn=0, source_quote_turn=0, source_turns=[0])])
-    m = a["gp_extraction"]["medicines"][0]
-    assert m["frequency"] == "twice a day" and m["duration"] == "for five days"
-    dose = [c for c in a["completion_required"] if c["kind"] == "dose_unstated"]
-    assert len(dose) == 1 and dose[0]["prompt"] == "Enter strength for telmisartan"
-    lines = [(0, 4, "0", "Take telmisartan.")]
-    a = art_of(c=mk_consult(lines, roles=DOC), examination=[], prescription=[rx(
-        generic="telmisartan", brand_as_said=None, strength=None, frequency=None, duration=None,
-        decision_turn=0, source_quote_turn=0, source_turns=[0])])
-    dose = [c for c in a["completion_required"] if c["kind"] == "dose_unstated"]
-    assert len(dose) == 1 and "strength, frequency, duration" in dose[0]["prompt"]
-
 
 def test_stage_a_prompt_names_surgery_combinations_and_routine_panels():
     from pathlib import Path
@@ -331,7 +266,7 @@ def test_stage_a_prompt_names_surgery_combinations_and_routine_panels():
     assert "NATIVE text first" in text and "turn 40 into 940" in text
 
 
-def test_weekday_follow_up_is_the_next_occurrence():
+def test_weekday_follow_up_posts_no_derived_date():
     lines = [(0, 6, "0", "Come back on Friday."), (7, 12, "0", "Get a chest X-ray.")]
     c = mk_consult(lines, roles=DOC)
     a = art_of(c=c, examination=[], follow_up={
@@ -339,7 +274,7 @@ def test_weekday_follow_up_is_the_next_occurrence():
     }, investigations=[{
         "name": "Chest X-ray", "order_status": "ordered", "basis": "said", "decision_turn": 1, "source_turns": [1],
     }])
-    assert a["gp_extraction"]["follow_up"]["followup_date"] == "2026-09-25"
+    assert "followup_date" not in a["gp_extraction"]["follow_up"]  # FRX-V10: a derived calendar date no span says is withheld
     assert a["gp_extraction"]["further_investigations"][0]["name"] == "Chest X-ray"
 
 
@@ -357,24 +292,6 @@ def test_unresolvable_follow_up_date_is_blanked_and_the_plan_stays():
     assert a["gp_extraction"]["further_investigations"][0]["name"] == "Chest X-ray"
 
 
-def test_m3_blanks_an_unsupported_number_and_keeps_the_investigation():
-    from tools.eta2freescript.note import flags_by_pointer, render_note
-    from tools.eta2freescript.recover import soften_f2_m3
-    from tools.eta2freescript.validate import frx
-    lines = [(0, 8, "0", "Take paracetamol twice a day."), (9, 14, "0", "Get a chest X-ray.")]
-    c = mk_consult(lines, roles=DOC)
-    a = build_artifact(c, empty_encounter(examination=[], prescription=[rx(
-        strength=None, frequency="twice a day", duration=None, decision_turn=0, source_turns=[0])],
-        investigations=[{"name": "Chest X-ray", "order_status": "ordered", "basis": "said", "decision_turn": 1, "source_turns": [1]}]))
-    a["gp_extraction"]["medicines"][0]["frequency"] = "9 times a day"
-    assert any(e.startswith("FRX-M3") for e in frx(a))
-    assert soften_f2_m3(a)
-    a["note_text"] = render_note(a["gp_extraction"], flags_by_pointer(a))
-    assert "frequency" not in a["gp_extraction"]["medicines"][0]
-    assert a["gp_extraction"]["further_investigations"][0]["name"] == "Chest X-ray"
-    assert any(c["kind"] == "dose_unstated" for c in a["completion_required"])
-    assert check(a) == []
-
 
 def test_slots_keep_spoken_regimen_and_collapse_the_same_drug():
     lines = [(0, 10, "0", "Take Zzyzx twice daily for 7 days.")]
@@ -386,7 +303,7 @@ def test_slots_keep_spoken_regimen_and_collapse_the_same_drug():
     a = art_of(c=c, examination=[], prescription=[row, again])
     assert len(a["slots"]) == 1
     slot = a["slots"][0]
-    assert "twice" in slot["frequency"]["text"] and "7" in slot["duration"]["text"]
+    assert "text" not in slot["frequency"] and "text" not in slot["duration"]  # C4: the heard regimen of an unnamed drug is in confirm_internal
     assert kinds(a).count("pick_drug") == 1
 
 
@@ -413,14 +330,3 @@ def test_specific_procedure_name_wins_over_a_generic_one():
     ])
     recs = a["gp_extraction"]["plan_of_management"]["surgery_or_procedure_recommendations"]
     assert [r["name"].lower() for r in recs] == ["septoplasty"]
-
-
-def test_dose_precedence_flag_and_raw_name():
-    lines = [(0, 3, "1", "I took Dolo 650."), (4, 9, "0", "Take paracetamol 1 g three times a day for three days.")]
-    c = mk_consult(lines, roles=DOC)
-    a = art_of(c=c, examination=[], prescription=[rx(decision_turn=1, source_turns=[0, 1], brand_as_said="Dolo 650", strength="650 mg",
-                                                     frequency="three times a day", duration="3 days")])
-    m = a["gp_extraction"]["medicines"][0]
-    assert m["name"] == "paracetamol 1 g" and m["raw_name"] == "paracetamol" and "aliases" not in m
-    p = next(x for x in a["provenance"] if x["json_pointer"] == "/medicines/0")
-    assert "doctor_dose_precedence" in p["flags"]

@@ -54,8 +54,15 @@ def build_artifact(c, enc, boundary=None):
     from tools.eta2freescript.mapper import build
     from tools.eta2freescript.note import flags_by_pointer, render_note
     enc = guard(copy.deepcopy(enc), c.turns)
-    art = build(c, enc, boundary or Boundary(), "anthropic.claude-test", "0" * 64, "0" * 64)
-    art["note_text"] = render_note(art["gp_extraction"], flags_by_pointer(art))
+    ctx: dict = {}
+    art = build(c, enc, boundary or Boundary(), "anthropic.claude-test", "0" * 64, "0" * 64, None, ctx)
+    from tools.eta2freescript.v10 import finalize, meds
+    gate = ctx["gate"]
+    note = render_note(art["gp_extraction"], flags_by_pointer(art), med_lines=meds.medication_lines(art.get("confirm_prompts") or []))
+    finalize.gp_final(gate, art, c)
+    for key in ("provenance", "completion_required", "slots", "doctor_words", "red_flags"):
+        art[key] = finalize.writeback_tree(gate, art[key])
+    art["note_text"], _bad = finalize.note_final(gate, art, c, note)
     return art
 
 
@@ -68,21 +75,3 @@ def replay_out(tmp_path):
     client = ReplayClient(MODEL)
     logs = {u: run_consult(load_consult(CONSULTS, u), client, tmp_path) for u in list_consults(CONSULTS)}
     return tmp_path, logs
-
-
-# FRX-V10: pipeline 3.0.0 posts no medicine and no strength (confirm prompts instead). These test modules pin the retired 2.5.0 behaviour of the
-# mapper's medicine rows; they run with the module constant v10.config.ACTIVE off. The constant is read by nothing in production
-# (no env, no CLI option, no Options field sets it); test_v10_no_strength_path.py proves that.
-LEGACY_V10_MODULES = {
-    "test_frx", "test_brand_first", "test_medication_safety", "test_mapper", "test_visit_keep", "test_rescore_s3", "test_sanitize_span_reject",
-    "test_exact_release", "test_pipeline", "test_reject_fixes", "test_pdqi9_attribution", "test_frx_pass", "test_schema_notes", "test_pdqi9_harness",
-    "test_regressions", "test_printable_v1", "test_stage_a_from", "test_fixtures", "test_frxn1_source", "test_floor_scope", "test_floor_strict",
-    "test_floor_ordered_not_supported", "test_pulse_replay", "test_oracle_fixtures",
-}
-
-
-@pytest.fixture(autouse=True)
-def _legacy_medicine_path(request, monkeypatch):
-    if request.module.__name__.split(".")[-1] in LEGACY_V10_MODULES:
-        from tools.eta2freescript.v10 import config
-        monkeypatch.setattr(config, "ACTIVE", False)

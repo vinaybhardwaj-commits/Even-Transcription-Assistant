@@ -36,33 +36,15 @@ def test_a1_colon_replacement_cannot_push_past_300():
     assert check(a) == []
 
 
-def test_p3_decision_turn_is_one_of_the_cited_spans():
-    rx = {"action": "start", "decision_turn": 6, "generic": "paracetamol", "basis": "said", "confidence": 0.9,
-          "frequency": "twice a day", "source_turns": [0, 1, 2, 3]}
-    a = art_of(prescription=[rx])
-    owner = next(p for p in a["provenance"] if p.get("json_pointer") == "/medicines/0")
-    cited = [int(ev["segment_ref"].rsplit(":", 1)[1]) for ev in owner["evidence"]]
-    assert owner["decision"]["turn"] in cited
-    assert check(a) == []
-
-
-def test_m3_brand_number_absent_from_the_tape_is_stripped():
-    lines = list(LINES)
-    lines[4] = (21, 30, "0", "Take Crocin twice a day for three days.")
-    c = mk_consult(lines, roles=DOC)
-    rx = {"action": "start", "decision_turn": 4, "generic": None, "brand_as_said": "Crocin 500", "strength": "500 mg",
-          "frequency": "twice a day", "duration": "3 days", "basis": "said", "confidence": 0.9, "source_turns": [4]}
-    a = art_of(c=c, prescription=[rx])
-    assert "500" not in a["gp_extraction"]["medicines"][0]["name"]
-    assert check(a) == []
-
-
 def test_f2_followup_date_is_the_visit_plus_the_interval():
     visit = dt.datetime.fromtimestamp(T0 / 1000, IST).date()
     wrong = (visit + dt.timedelta(days=3)).isoformat()
-    a = art_of(follow_up={"type": "MANDATORY_FOLLOW_UP", "interval": {"value": 2, "unit": "WEEKS"}, "date": wrong,
+    a = art_of(follow_up={"type": "MANDATORY_FOLLOW_UP", "interval": {"value": 1, "unit": "WEEKS"}, "date": wrong,
                           "basis": "said", "source_turns": [6]})
-    assert a["gp_extraction"]["follow_up"]["followup_date"] == add_interval(visit, 2, "WEEKS").isoformat()
+    assert a["gp_extraction"]["follow_up"]["followup_date"] == add_interval(visit, 1, "WEEKS").isoformat()
+    # rule 27: the computed date posts in the Follow up line through the follow-up date slot; nothing is withheld and the artifact is clean
+    follow = a["note_text"].split("Follow up:")[1].split("\n")[0]
+    assert a["gp_extraction"]["follow_up"]["followup_date"] in follow and not a["withheld"]
     assert check(a) == []
 
 
@@ -72,11 +54,9 @@ def test_m1_form_prefix_stripped_and_class_word_becomes_a_slot():
     vitamin = {"action": "start", "decision_turn": 4, "generic": "Vitamin D", "basis": "said", "confidence": 0.8, "source_turns": [4]}
     klass = {"action": "start", "decision_turn": 4, "generic": "painkiller", "basis": "said", "confidence": 0.8, "source_turns": [4]}
     a = art_of(prescription=[named, vitamin, klass])
-    names = [m["name"] for m in a["gp_extraction"]["medicines"]]
-    assert len(names) == 1 and names[0].lower().startswith("paracetamol") and "500" in names[0]
-    assert not names[0].lower().startswith("tab")
-    heard = " ".join(str((s.get(f) or {}).get("text") or "") for s in a["slots"] for f in ("class", "form"))
-    assert "painkiller" in heard.lower() or "vitamin" in heard.lower()
+    assert "medicines" not in a["gp_extraction"]
+    spoken = [p["drug"]["spoken"].lower() for p in a["confirm_prompts"]]
+    assert not any(x.startswith("tab") for x in spoken) and any(x.startswith("paracetamol") for x in spoken)
     assert check(a) == []
 
 

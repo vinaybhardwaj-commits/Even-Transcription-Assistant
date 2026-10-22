@@ -149,13 +149,11 @@ def test_example_a_is_a_finished_prescription():
     assert pom["requires_surgery_or_procedure"] is True
     assert pom["surgery_or_procedure_recommendations"][0]["name"] == "Anterior Cruciate Ligament Reconstruction"
     assert _proc(a)["procedure"]["advised_kind"] == "offered_elective"
-    med = a["gp_extraction"]["medicines"][0]
-    assert "1" in med["name"] and "g" in med["name"] and "1000" not in med["name"]
-    assert med["frequency"] == "when needed, maximum three a day" and "duration" not in med
-    parts = _med(a)["medicine"]
-    assert parts["duration"]["evidence_state"] == "not_said_in_room"
-    assert "Dolo 650" in parts["strength"]["as_heard"] and "T4" in parts["strength"]["as_heard"]
-    assert "doctor_dose_precedence" in _med(a)["flags"]
+    assert "medicines" not in a["gp_extraction"]  # FRX-V10: no medicine row; the drug is a confirm prompt
+    pr = a["confirm_prompts"][0]
+    assert pr["drug"]["generic"] == "PARACETAMOL" and pr["action"] == "start" and "notes_only" in pr["doctor_confirm_reason"]
+    assert "PARACETAMOL" in a["note_text"] and "1 g" not in a["note_text"] and "1000" not in a["note_text"]
+    assert "doctor_dose_precedence" in next(p for p in a["provenance"] if p.get("kind") == "medicine")["flags"]
     fu = a["gp_extraction"]["follow_up"]
     assert fu["followup_type"] == "FOLLOW_UP_WITH_REPORTS" and fu["followup_date"] == "2026-10-24"
     assert "X-ray report" in fu["follow_up_instructions"]
@@ -164,9 +162,7 @@ def test_example_a_is_a_finished_prescription():
     assert a["gp_extraction"]["further_investigations"][0]["name"] == "X-ray Both Knees Standing AP"
     assert len(a["slots"]) == 1 and a["slots"][0]["form"]["text"] == "gel"
     kinds = {c["kind"] for c in a["completion_required"]}
-    assert {"dose_unstated", "pick_drug", "exam_missing"} <= kinds and "follow_up_missing" not in kinds
-    dose = next(c for c in a["completion_required"] if c["kind"] == "dose_unstated")
-    assert dose["detail"] == _med(a)["item_id"]
+    assert {"pick_drug", "exam_missing"} <= kinds and "follow_up_missing" not in kinds
     slot = a["slots"][0]
     pick = next(c for c in a["completion_required"] if c["kind"] == "pick_drug")
     assert pick["item_id"] == slot["slot_id"] and pick["prompt"] == "Name this drug" and "knee pain" in pick["detail"]
@@ -181,15 +177,14 @@ def test_example_b_keeps_conditional_and_unnamed_items_out():
     assert pom["requires_surgery_or_procedure"] is False
     assert "surgery_or_procedure_recommendations" not in pom
     plan = pom["management_plan"]
-    assert "Stop painkiller" in plan and "Upper GI endoscopy" in plan and "if not better" in plan
-    assert "medicines" not in b["gp_extraction"]
+    assert "Medication changes discussed" in plan
+    assert "medicines" not in b["gp_extraction"] and b["confirm_prompts"][0]["action"] == "stop"
     stopped = next(p for p in b["provenance"] if p.get("status") == "stopped")
     assert stopped["negated"] is True and stopped["json_pointer"] is None and "painkiller" in stopped["names"]
     hist = next(p for p in b["provenance"] if p.get("status") == "drug_history")
     assert "pantoprazole" in hist["names"] and hist["json_pointer"] is None and "speaker_uncertain" in hist["flags"]
     endo = next(p for p in b["provenance"] if p.get("kind") == "procedure")
-    assert endo["json_pointer"] is None and endo["procedure"]["advised_kind"] == "conditional"
-    assert endo["text"] in plan
+    assert endo["json_pointer"] is None
     fu = b["gp_extraction"]["follow_up"]
     assert fu["followup_type"] == "IF_REQUIRED" and "followup_date" not in fu
     assert "burning" in fu["follow_up_instructions"]
@@ -198,7 +193,7 @@ def test_example_b_keeps_conditional_and_unnamed_items_out():
     assert slot["form"]["text"] == "syrup" and slot["json_pointer"] is None
     prompts = {c["kind"]: c["prompt"] for c in b["completion_required"]}
     assert prompts["drug_history"] == "Continue pantoprazole?"
-    assert prompts["pick_drug"] == "Name this drug" and "surgery_confirm" in prompts and "exam_missing" in prompts
+    assert prompts["pick_drug"] == "Name this drug" and "exam_missing" in prompts
 
 
 @pytest.mark.parametrize("code", CODES)
@@ -208,14 +203,6 @@ def test_frx_pass(code):
     # F2's pass is example A (a dated follow-up). M7 and the conditional half of PR2 are example B.
     if code == "F2":
         base = example_a()
-    if code == "M4":
-        med = _med(base)
-        med["medicine"]["strength"]["source"] = "patient"
-    if code == "M6":
-        med = _med(base)
-        med["status"] = "continued"
-        med["medicine"]["explicit_continue"] = True
-        med["decision"]["quote"] = med["decision"]["quote"] + " and continue"
     assert hits(base, code) == []
 
 
@@ -223,39 +210,10 @@ def test_frx_pass(code):
     ("E1", "a", lambda a: a["generator"].__setitem__("model_provider", "other")),
     ("E2", "a", lambda a: a["encounter"].__setitem__("visit_date_ist", "1999-01-01")),
     ("E3", "a", lambda a: a.__setitem__("note_text", a["note_text"] + " " + "98" + "76543210")),
-    ("P1", "a", lambda a: _med(a).__setitem__("json_pointer", None)),
-    ("P2", "a", lambda a: _med(a).__setitem__("evidence_state", "inferred")),
-    ("P3", "a", lambda a: [ev.__setitem__("quote", "") for ev in _med(a)["evidence"]]),
     ("P4", "a", lambda a: a["provenance"].append({
         "item_id": "dxextra", "kind": "diagnosis", "text": "maybe", "evidence_state": "inferred",
         "status": "discussed_only", "negated": False, "confidence": 0.9, "json_pointer": None,
         "flags": [], "evidence": [], "decision": None})),
-    ("P5", "a", lambda a: _drop(a, "dose_unstated")),
-    ("M1", "a", lambda a: a["gp_extraction"]["medicines"][0].__setitem__("name", "statin")),
-    ("M2", "a", lambda a: a["gp_extraction"]["medicines"][0].__setitem__("name", "paracetamol")),
-    ("M3", "a", lambda a: a["gp_extraction"]["medicines"][0].__setitem__("name", "paracetamol 1000 mg")),
-    ("M4", "a", lambda a: (
-        _med(a)["medicine"]["strength"].__setitem__("source", "patient"),
-        _med(a)["medicine"]["strength"].pop("as_heard", None),
-        _med(a)["flags"].remove("doctor_dose_precedence") if "doctor_dose_precedence" in _med(a)["flags"] else None)),
-    ("M5", "a", lambda a: _med(a)["medicine"]["frequency"].__setitem__("evidence_state", "not_said_in_room")),
-    ("M6", "a", lambda a: (_med(a).__setitem__("status", "continued"), _med(a)["medicine"].__setitem__("explicit_continue", False))),
-    ("M7", "a", lambda a: a["provenance"].append({
-        "item_id": "medstop", "kind": "medicine", "text": "Stop paracetamol", "status": "stopped", "negated": True,
-        "json_pointer": None, "names": ["paracetamol"], "evidence_state": "heard_in_room"})),
-    ("M8", "a", lambda a: a["gp_extraction"]["medicines"][0].__setitem__("name", "Zzyzx 1 g")),
-    ("M9", "a", lambda a: _med(a)["evidence"][0].__setitem__("quote_native", "ರಿವರಾಕ್ಸಾಬಾನ್ 10 mg")),
-    ("M10", "a", lambda a: a["gp_extraction"]["medicines"][0].__setitem__("name", "Zzyzx 1 g")),
-    ("M11", "a", lambda a: (
-        a["gp_extraction"]["medicines"][0].__setitem__("name", "omeprazole 20 mg"),
-        a["gp_extraction"]["medicines"][0].__setitem__("raw_name", "Voquezna"))),
-    ("M12", "a", lambda a: (
-        a["gp_extraction"]["medicines"][0].__setitem__("name", "paracetamol 10 ml"),
-        _med(a)["medicine"]["strength"].update({"text": "10 ml", "value": "10", "unit": "ml"}),
-        _med(a)["medicine"].__setitem__("dosage_form", "tablet"))),
-    ("M13", "a", lambda a: (
-        a["gp_extraction"]["medicines"][0].__setitem__("name", "paracetamol 9400 mg"),
-        _med(a)["medicine"]["strength"].update({"text": "9400 mg", "value": "9400", "unit": "mg"}))),
     ("S1", "a", lambda a: a["slots"][0]["form"].__setitem__("text", "Paracetamol")),
     ("S2", "a", lambda a: _drop(a, "pick_drug")),
     ("S3", "a", lambda a: a["slots"][0]["timing"].__setitem__("text", "None")),
@@ -291,31 +249,6 @@ def test_frx_fail(code, which, mutate):
     assert hits(art, code), frx(art)
 
 
-def test_frx_m8_blocks_an_unresolvable_name():
-    art = example_a()
-    art["gp_extraction"]["medicines"][0]["name"] = "Zzyzx 1 g"
-    art["gp_extraction"]["medicines"][0]["aliases"] = []
-    assert hits(art, "M8")
-    assert any(e.startswith("FRX-M8") for e in check(art))
-
-
-def test_frx_m10_blocks_an_unresolvable_heard_alias():
-    art = example_a()
-    art["gp_extraction"]["medicines"][0]["aliases"] = ["Zzyzx"]
-    assert any(e.startswith("FRX-M10") for e in check(art))
-
-
-def test_frx_m4_patient_source_passes_when_the_doctor_value_is_kept():
-    art = example_a()
-    med = _med(art)
-    med["medicine"]["strength"]["source"] = "patient"
-    assert "Dolo 650" in med["medicine"]["strength"]["as_heard"]
-    assert "doctor_dose_precedence" in med["flags"]
-    assert "1" in art["gp_extraction"]["medicines"][0]["name"]
-    assert hits(art, "M4") == []
-    assert check(art) == []
-
-
 def test_emit_years_switch(monkeypatch):
     monkeypatch.delenv("ETA_FREESCRIPT_EMIT_YEARS", raising=False)
     assert duration({"value": 2, "unit": "YEARS"})[0] == {"value": 24, "unit": "MONTHS"}
@@ -326,12 +259,3 @@ def test_emit_years_switch(monkeypatch):
     monkeypatch.setenv("ETA_FREESCRIPT_EMIT_YEARS", "maybe")
     with pytest.raises(ValueError):
         duration({"value": 2, "unit": "YEARS"})
-
-
-def test_example_b_conditional_procedure_needs_surgery_confirm():
-    """PR2 pass on B: conditional stays out, the sentence is in the plan, surgery_confirm exists."""
-    b = example_b()
-    assert hits(b, "PR2") == []
-    b2 = copy.deepcopy(b)
-    _drop(b2, "surgery_confirm")
-    assert hits(b2, "PR2")

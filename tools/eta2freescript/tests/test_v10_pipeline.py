@@ -11,7 +11,7 @@ from conftest import empty_encounter, mk_consult
 from tools.eta2freescript import PIPELINE_VERSION, STAGE_A_VERSION, STAGE_B_VERSION
 from tools.eta2freescript.models import FakeClient
 from tools.eta2freescript.pipeline import Options, run_consult
-from tools.eta2freescript.v10 import config, data, meds, names
+from tools.eta2freescript.v10 import data, meds, names
 
 DOC = {"0": "doctor", "1": "patient"}
 HEADINGS = ["Co-morbidities", "Presenting Complaint", "Examination", "Diagnoses", "Plan of Management", "Surgery or Procedure", "Medication",
@@ -216,7 +216,6 @@ def test_no_env_or_config_makes_v10_post_a_strength_or_a_medicine(tmp_path, monk
     src = "\n".join(p.read_text(encoding="utf-8") for p in Path(__file__).resolve().parents[1].glob("*.py"))
     assert "POST_STRENGTH" not in src and "NOTES_ONLY" not in src
     assert {f for f in Options.__dataclass_fields__} == {"model", "stage_a", "stage_b", "stage_b_enabled", "write_v01"}
-    mod = __import__("tools.eta2freescript.v10.config", fromlist=["x"])
-    assert mod.ACTIVE is True and not re.search(r"environ|getenv|argv", Path(mod.__file__).read_text(encoding="utf-8").split('"""')[2])
     prod = [p for p in Path(__file__).resolve().parents[1].rglob("*.py") if "tests" not in p.parts and "contract_v1" not in p.parts]
-    assert not [p.name for p in prod if re.search(r"config\.ACTIVE\s*=|V10\.ACTIVE\s*=", p.read_text(encoding="utf-8"))]
+    assert not (Path(__file__).resolve().parents[1] / "v10" / "config.py").exists()  # ruling 4: no switch that could re-enable a medicine path
+    assert not [p.name for p in prod if re.search(r"\bACTIVE\b|v10\.config|v10 import config", p.read_text(encoding="utf-8"))]

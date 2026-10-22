@@ -36,7 +36,7 @@ def test_k1_reject_keeps_the_artifact_beside_the_validation_file(tmp_path, monke
     assert not (od / "artifact.json").exists() and not (od / "artifact.v0.1.json").exists()
     rej = json.loads((od / "artifact.rejected.json").read_text())
     assert rej == json.loads(json.dumps(lg["artifact"], ensure_ascii=False))
-    assert rej["note_text"] and rej["gp_extraction"]["medicines"] and "completion_required" in rej
+    assert rej["note_text"] and rej["confirm_prompts"] and not rej["gp_extraction"].get("medicines") and "completion_required" in rej
     assert stat.S_IMODE((od / "artifact.rejected.json").stat().st_mode) == 0o600
     assert (od / "note_text.llm.txt").read_text().endswith("\n") and "Medication:" in (od / "note_text.llm.txt").read_text()
     v = json.loads((od / "artifact.validation.json").read_text())
@@ -291,31 +291,6 @@ def test_k3_raw_name_or_falls_back_in_order():
 
 def _meds(art):
     return art["gp_extraction"].get("medicines") or []
-
-
-@pytest.mark.parametrize("uid", ["synth-fever-dose", "synth-cough-native", "synth-boundary-knee"])
-def test_k3_every_emitted_medicine_has_a_non_empty_raw_name(uid):
-    c = load_consult(CONSULTS, uid)
-    base = stage_a(uid)
-    r = random.Random(uid)
-    seen = 0
-    for _ in range(40):
-        enc = copy.deepcopy(base)
-        for rx in enc.get("prescription") or []:
-            for k in ("generic", "brand_as_said", "name_interpretation"):
-                if r.random() < 0.5:
-                    rx[k] = r.choice([None, ""])
-                elif r.random() < 0.2:
-                    rx.pop(k, None)
-            if r.random() < 0.3:
-                rx["brand_as_said"] = r.choice(["Dolo 650", "Ascoril", "Augmentin 625"])
-            if r.random() < 0.3:
-                rx["generic"] = r.choice(["paracetamol", "amoxicillin + clavulanic acid"])
-        art = build_artifact(c, enc)
-        for m in _meds(art):
-            seen += 1
-            assert isinstance(m["raw_name"], str) and m["raw_name"].strip(), (uid, m)
-    assert seen
 
 
 def test_k3_a_heard_name_only_medicine_gets_its_spoken_name():

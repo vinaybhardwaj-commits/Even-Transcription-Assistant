@@ -149,7 +149,7 @@ def test_years_unit_is_accepted_on_v03_and_projects_to_months():
                         "source_turns": [0]}],
         examination=[{"performed": "General", "finding": "well", "basis": "said", "source_turns": [1]}]))
     art["note_text"] = render_note(art["gp_extraction"], flags_by_pointer(art))
-    assert art["gp_extraction"]["comorbidities"][0]["duration"]["unit"] == "MONTHS"
+    assert "duration" not in art["gp_extraction"]["comorbidities"][0]  # FRX-V10: "for years" names no number, so the duration is withheld
     bad = copy.deepcopy(art)
     bad["gp_extraction"]["comorbidities"][0]["duration"] = {"value": 5, "unit": "YEARS"}
     assert check(bad) == [], check(bad)

@@ -925,11 +925,6 @@ def _has_content(node) -> bool:
     return node is not None and node is not False and node != 0
 
 
-def V10_ACTIVE() -> bool:
-    from .v10 import config
-    return config.ACTIVE
-
-
 def _whole_meta(body: str) -> bool:
     """FRX-N1 on doctor speech (newcat-orch 16 Oct F2 ruling): a missing-value phrase withholds a field only when the whole value is a meta-statement
     ("dose not stated"), not when the phrase sits inside a longer sentence the doctor said."""
@@ -966,7 +961,7 @@ def printable_errors(text: str, prompts: list[str]) -> list[str]:
             e.append(f"FRX-N1 '?' outside the Diagnoses differential prefix ({where})")
         if FILLER.match(body):
             e.append(f"FRX-N1 filler line body ({where})")
-        if sec in _D2_SECTIONS and (not V10_ACTIVE() or _whole_meta(body)):
+        if sec in _D2_SECTIONS and _whole_meta(body):
             for m in _D1.finditer(body):
                 e.append(f"FRX-N1 d1 missing-value phrase '{m.group(0).lower()}' ({where})")
         if sec in _D2_SECTIONS:

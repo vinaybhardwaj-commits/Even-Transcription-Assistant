@@ -21,32 +21,7 @@ def test_catalogue_strength_not_in_the_note_is_pulse_catalogue(fever):
     assert r["count"] == 1 and r["sources"] == ["pulse_catalogue"]
 
 
-def test_strength_in_eta_note_or_on_a_non_catalogue_row_is_eta(fever):
-    c, art = fever
-    note500 = {**art, "note_text": art["note_text"].replace("paracetamol 1 g", "paracetamol 500 mg")}
-    assert floors._invented_core({"medicines": [{**CAT, "strength": "500 mg"}]}, note500, c)["sources"] == ["eta"]
-    free = {"name": "Paracetamol", "strength": "500 mg", "other": True}
-    assert floors._invented_core({"medicines": [free]}, art, c)["sources"] == ["eta"]
 
-
-def test_dose_precedence_sources(fever):
-    _, art = fever
-    assert floors.dose_precedence_sources({"medicines": [{**CAT, "strength": "500 mg"}]}, art) == ["pulse_catalogue"]
-    # a doctor strength in the note that the rx does not carry, or a non-catalogue rx strength, stays with ETA
-    assert floors.dose_precedence_sources({"medicines": [{"name": "Paracetamol", "strength": "650 mg", "other": True}]}, art) == ["eta"]
-    assert floors.dose_precedence_sources({"medicines": []}, art) == ["eta"]
-    assert floors.dose_precedence_sources({"medicines": [{**CAT, "strength": "1 g"}]}, art) == []
-    assert floors.dose_precedence({"medicines": [{**CAT, "strength": "500 mg"}]}, art) == 1
-    # 650 occurs in ETA's own provenance (the patient's home drug): the lead rule makes it ETA's
-    assert floors.dose_precedence_sources({"medicines": [{**CAT, "strength": "650 mg"}]}, art) == ["eta"]
-
-
-def test_frequency_and_duration_digits_are_pulse_extraction_unless_eta_wrote_them(fever):
-    c, art = fever
-    rx = {"medicines": [{**CAT, "strength": "1 g", "frequency": "7 times a day", "duration": "three days"}]}
-    assert floors._invented_core(rx, art, c)["sources"] == ["pulse_extraction"]
-    note7 = {**art, "note_text": art["note_text"].replace("three times a day", "7 times a day")}
-    assert floors._invented_core(rx, note7, c)["sources"] == ["eta"]
 
 
 def test_unmatched_digitless_medicine_is_not_a_hit_and_is_counted(fever):

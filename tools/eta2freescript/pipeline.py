@@ -27,7 +27,6 @@ from .models import ModelClient, cost_for_uid
 from .note import FILLER, HEADINGS, combination_groups, flags_by_pointer, render_note, repair_note, sanitize_note_ex, span_errors
 from .prompts import clean_text, code_paths, load_prompt, parse_json, prompt_path, sha
 from .validate import check, to_v01
-from .v10 import config as V10
 from .v10 import finalize as v10_final
 from .v10 import meds as v10_meds
 from .v10 import spans as v10_spans
@@ -43,8 +42,8 @@ class Options:
 
 
 def _med_lines(art: dict):
-    """FRX-V10: the Medication section, rendered from the confirm prompts. None keeps the retired 2.5.0 rendering of gp_extraction.medicines."""
-    return v10_meds.medication_lines(art.get("confirm_prompts") or []) if V10.ACTIVE else None
+    """FRX-V10: the Medication section, rendered from the confirm prompts."""
+    return v10_meds.medication_lines(art.get("confirm_prompts") or [])
 
 
 def _fallback_note(art: dict, flags: dict, banned: list[str]) -> str:
@@ -102,8 +101,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     raw = client.chat(opts.model, user, system, max_tokens=16000, tag=f"{opts.stage_a}:{c.uid}")
     (od / "stageA.raw.txt").write_text(raw, encoding="utf-8")
     enc = parse_json(raw)
-    if V10.ACTIVE:
-        enc = v10_spans.cite_to_turns(enc)  # Stage A v3 cites span ids ("s12"); the mapper reads the integer turn index
+    enc = v10_spans.cite_to_turns(enc)  # Stage A v3 cites span ids ("s12"); the mapper reads the integer turn index
     if not c.role_track:
         apply_inferred_roles(c.turns, enc.get("speaker_roles") or [])
     bnd = B.detect(c, enc.get("consult_boundary"))
@@ -125,8 +123,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
 
     prompts = [prompt_path(opts.stage_a)] + ([prompt_path(opts.stage_b)] if opts.stage_b_enabled else [])
     ctx: dict = {}
-    art = (build(c, enc, bnd, model_id, sha(*prompts), sha(*code_paths()), specialty, ctx) if V10.ACTIVE
-           else build(c, enc, bnd, model_id, sha(*prompts), sha(*code_paths()), specialty))
+    art = build(c, enc, bnd, model_id, sha(*prompts), sha(*code_paths()), specialty, ctx)
     gate, bl = ctx.get("gate"), ctx.get("builder")
     flags = flags_by_pointer(art)
     banned = [n for p in art["provenance"] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
@@ -136,11 +133,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
            "guard_issues": enc["_guard"]["issues"]}
 
     def view_of(note: str) -> tuple[dict, list[str]]:
-        """The artifact as it would be written with this note: slot values written back and FRX-T1 run (rules 4 and 12). Returns (artifact, FRX-T1 errors).
-        With V10 off it is the artifact itself with `note_text` set."""
-        if not V10.ACTIVE:
-            art["note_text"] = note
-            return art, []
+        """The artifact as it would be written with this note: slot values written back and FRX-T1 run (rules 4 and 12). Returns (artifact, FRX-T1 errors)."""
         v = copy.deepcopy(art)
         failed = v10_final.gp_final(gate, v, c)
         v["provenance"] = v10_final.writeback_tree(gate, v["provenance"])
@@ -190,7 +183,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         log["field_recovery"] = recovered
     # FRX-V10: whatever still fails FRX-T1 on the deterministic note is withheld (rule 8): the unit is blanked and a record, a provenance item and a prompt written
     view, t1errs = view_of(note)
-    if V10.ACTIVE and t1errs and bl is not None:
+    if t1errs and bl is not None:
         v0 = copy.deepcopy(art)
         failed = v10_final.gp_final(gate, v0, c)
         _final_note, bad = v10_final.note_final(gate, v0, c, note)
@@ -204,13 +197,12 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         note, llm_rem = _fallback_note_ex(art, flags, banned)
         view, t1errs = view_of(note)
     final = check(view) + span_errors(llm_rem)
-    if V10.ACTIVE:
-        served = (getattr(client, "served_ids", {}) or {}).get(opts.model)
-        view["generator"]["served_model_id"] = served
-        if served:
-            view["generator"]["model"] = served  # A52: the id the provider response named, not the alias-table id
-        view["generator"]["model_id_source"] = "provider_response" if served else "request_alias_unverified"
-        view["generator"]["stage_a_version"], view["generator"]["stage_b_version"] = opts.stage_a, opts.stage_b
+    served = (getattr(client, "served_ids", {}) or {}).get(opts.model)
+    view["generator"]["served_model_id"] = served
+    if served:
+        view["generator"]["model"] = served  # A52: the id the provider response named, not the alias-table id
+    view["generator"]["model_id_source"] = "provider_response" if served else "request_alias_unverified"
+    view["generator"]["stage_a_version"], view["generator"]["stage_b_version"] = opts.stage_a, opts.stage_b
     art = view
     if llm_rem:  # only when a span was removed, so a consult with none keeps a byte-identical log
         log["sanitize_removed"] = len(llm_rem)
