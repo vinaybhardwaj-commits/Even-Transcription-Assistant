@@ -145,9 +145,15 @@ def voiceprint(vecs, labels, cen, duid):
         c = cos[lab]
         nxt = [cos[o] for o in have if o != lab]
         mn = c - max(nxt) if nxt else None
-        mrc = c - max(float(unit(vecs[lab]) @ cen[u]) for u in others) if others else None
+        # fix3 LOW-12: any non-finite runner-up centroid value makes the margin unknown whatever the dict order
+        # (max() over a NaN is order-dependent): arm (c) abstains. cos is finite here, so the label still counts as
+        # an N1 candidate when it clears the cos floor: an unknown margin cannot rule out a second near-doctor voice.
+        rcs = [float(unit(vecs[lab]) @ cen[u]) for u in others]
+        mrc = None if not rcs else (c - max(rcs) if all(math.isfinite(x) for x in rcs) else float("nan"))
         if unknown or not math.isfinite(c) or (mrc is not None and not math.isfinite(mrc)):
             per[lab].update(status="abstain")
+            if not unknown and math.isfinite(c) and cos_ok(c):
+                per[lab]["n1_candidate"] = True
             continue
         old_pass = cos_ok(c) and (mn is None or margin_ok(mn))
         # No next label passes (merge_c, slots.py); no runner-up centroid abstains (decidePulseRoom, §5.6).
@@ -257,7 +263,21 @@ def decide_c(labels, ps, T):
 def doctor_ranks(ps, order):
     """{label: rank by p_doctor, 1 = top}; ties break by first appearance in the backbone. Labels without p are absent."""
     ok = [lab for lab in order if ps.get(lab)]
-    return {lab: i + 1 for i, lab in enumerate(sorted(ok, key=lambda k: (-ps[k][0], order.index(k))))}
+    # fix3 LOW-11: a non-finite p_doctor ranks last (NaN would make sorted() order-dependent).
+    return {lab: i + 1 for i, lab in enumerate(sorted(ok, key=lambda k: (not _finite(ps[k][0]), -ps[k][0] if _finite(ps[k][0]) else 0.0,
+                                                                         order.index(k))))}
+
+
+def _finite(x):
+    try:
+        return math.isfinite(float(x))
+    except (TypeError, ValueError):
+        return False
+
+
+def ranks_finite(ps):
+    """True when every label's p_doctor is finite; rule B abstains for the consult otherwise (fix3 LOW-11)."""
+    return all(_finite(p[0]) for p in ps.values() if p)
 
 
 # ---------------------------------------------------------------- time overlap
@@ -312,8 +332,12 @@ def role_majority(label_segs, role_segs):
     if not tot:
         return None, None
     role, ms = max(tot.items(), key=lambda kv: (kv[1], kv[0]))
-    if sum(1 for v in tot.values() if v == ms) > 1 and "undecided" in tot and tot["undecided"] == ms:
-        role = "undecided"  # a tie that includes the unknown role fails closed
+    tied = [r for r, v in tot.items() if v == ms]
+    if len(tied) > 1 and "undecided" in tied:
+        # fix3 MEDIUM-B: in a top tie that includes the unknown role, a tied decided non-doctor role wins (it blocks
+        # arm (c)); the unknown role never wins. A tie of unknown with doctor only is "undecided".
+        blockers = [r for r in tied if blocks_arm_c(r)]
+        role = max(blockers) if blockers else "undecided"
     return role, round(ms / sum(tot.values()), 4)
 
 
@@ -385,11 +409,17 @@ def build_layer(*, bundle_segs, role_segs, clef_rows, jev_rows, doctor_uid, vecs
 
     vp, old, vp_degraded = voiceprint(vecs, labels, cen, doctor_uid)
     degraded += vp_degraded
+    # fix3 MEDIUM-A: a non-finite cosine anywhere makes every label's neighbourhood unknown: nothing is order-capable
+    # in this consult. Not routed through vp_degraded, which would also empty cands.
+    non_finite_vec = old["treating_reason"] == "non_finite_cos"
+    if non_finite_vec:
+        degraded.append("non_finite_vector")
 
     clef_doc, clef_pat, clef_code = choose_slots(clef_ps, order) if clean else (None, None, "absent")
     clef_rec = decide_recorded(clef_ps, order) if clean else {}
     jev_rec = decide_recorded(jev_ps, order) if clean else {}
     clef_rank, jev_rank = (doctor_ranks(clef_ps, order), doctor_ranks(jev_ps, order)) if clean else ({}, {})
+    ranks_ok = clean and ranks_finite(clef_ps) and ranks_finite(jev_ps)  # fix3 LOW-11
 
     by_label = collections.defaultdict(list)
     for s in bundle_segs:
@@ -412,7 +442,7 @@ def build_layer(*, bundle_segs, role_segs, clef_rows, jev_rows, doctor_uid, vecs
                 "reason_code": clef_code if cp else None, "decision": clef_rec.get(lab) if cp else None,
                 "p_doctor_rank": clef_rank.get(lab), "p": dict(zip(KEYS, cp)) if cp else None}
         rule_a = clean and v1 == "doctor" and jev["role"] == "doctor" and clef["role"] == "doctor"
-        rule_b = armc_on and vp[lab]["armc"] and clef["doctor_rank"] == 1 and jev["doctor_rank"] == 1
+        rule_b = armc_on and ranks_ok and vp[lab]["armc"] and clef["doctor_rank"] == 1 and jev["doctor_rank"] == 1
         if rule_a:
             d3.append(lab)
         if rule_b:
@@ -431,6 +461,8 @@ def build_layer(*, bundle_segs, role_segs, clef_rows, jev_rows, doctor_uid, vecs
             rec["unknown"] = True
             c = None
     oc, more = order_capable(d3, c, cands)
+    if non_finite_vec:
+        oc = set()
     conflicts = sorted(set(conflicts + more))
     for x in out_labels:
         x["order_capable"] = x["label"] in oc

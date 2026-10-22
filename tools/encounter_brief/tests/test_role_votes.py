@@ -697,3 +697,106 @@ def test_low10_role_none_majority_is_undecided_not_a_role():
     role = [{"role": None, "t0_ms": 0, "t1_ms": 6000}, {"role": "doctor", "t0_ms": 6000, "t1_ms": 10000}]
     r, _ = R.role_majority([{"t0_ms": 0, "t1_ms": 10000}], role)
     assert r == "undecided"
+
+
+# ---------------------------------------------------------------- fix3 (MEDIUM-A, MEDIUM-B, LOW-11, LOW-12)
+_SEG = [{"t0_ms": 0, "t1_ms": 10000}]
+
+
+def _rr(*spec):
+    t, out = 0, []
+    for role, ms in spec:
+        out.append({"role": role, "t0_ms": t, "t1_ms": t + ms})
+        t += ms
+    return out
+
+
+def _m1_setup(nan_on_third, bad=_NAN):
+    C = cen("d0", "d1", "d2")
+    bundle = segs(("speaker_0", 0, 10), ("speaker_1", 10, 20), ("speaker_2", 20, 30), ("speaker_0", 30, 40))
+    role = [{"role": "doctor", "t0_ms": 0, "t1_ms": 10000}, {"role": "patient", "t0_ms": 10000, "t1_ms": 30000},
+            {"role": "doctor", "t0_ms": 30000, "t1_ms": 40000}]
+    ps = {"speaker_0": [0.9, 0.05, 0.03, 0.02], "speaker_1": [0.1, 0.8, 0.05, 0.05], "speaker_2": [0.1, 0.3, 0.3, 0.3]}
+    vecs = {"speaker_0": with_cos(C["d0"], 0.88, 7), "speaker_1": with_cos(C["d0"], 0.85, 6),
+            "speaker_2": np.full(DIM, bad) if nan_on_third else with_cos(C["d0"], 0.2, 5)}
+    return build(bundle=bundle, role=role, clef=ps, jev=ps, vecs=vecs, centroids=C)
+
+
+def test_fix3_a_control_n1_blocks_without_nan():
+    L = _m1_setup(False)
+    assert L["rule_a_labels"] == ["speaker_0"] and "speaker_1" in L["n1_candidates"] and L["order_capable_labels"] == []
+
+
+@pytest.mark.parametrize("bad", [_NAN, float("inf"), -float("inf")])
+def test_fix3_a_nan_on_a_third_label_orders_nothing_and_records_the_code(bad):
+    L = _m1_setup(True, bad)
+    assert L["rule_a_labels"] == ["speaker_0"]  # rule A is untouched; only order capability is withdrawn
+    assert L["order_capable_labels"] == []
+    assert "non_finite_vector" in L["degraded"]
+    assert all(not x["order_capable"] for x in L["labels"])
+    assert L["armc_on"] is True  # not routed through vp_degraded
+
+
+def test_fix3_a_finite_consult_has_no_non_finite_code():
+    assert "non_finite_vector" not in _m1_setup(False)["degraded"]
+    assert "non_finite_vector" not in build()["degraded"]
+
+
+@pytest.mark.parametrize("who", ["jev", "clef"])
+def test_fix3_low11_nan_p_doctor_in_a_vote_blocks_rule_b(who):
+    bad = {"speaker_0": [_NAN, 0.05, 0.03, 0.02], "speaker_1": [0.1, 0.8, 0.05, 0.05]}
+    bad_other = {"speaker_0": [0.9, 0.05, 0.03, 0.02], "speaker_1": [_NAN, 0.8, 0.05, 0.05]}
+    for ps in (bad, bad_other):
+        L = build(**{who: ps})
+        assert L["order_capable_labels"] == [] and L["rule_b_label"] is None
+
+
+def test_fix3_low11_doctor_ranks_puts_non_finite_last():
+    r = R.doctor_ranks({"a": [_NAN, 0, 0, 0], "b": [0.2, 0, 0, 0], "c": [0.9, 0, 0, 0]}, ["a", "b", "c"])
+    assert r == {"c": 1, "b": 2, "a": 3}
+    r = R.doctor_ranks({"a": [0.9, 0, 0, 0], "b": [float("inf"), 0, 0, 0]}, ["a", "b"])
+    assert r["b"] == 2 and r["a"] == 1
+
+
+def test_fix3_low12_nan_runner_up_centroid_abstains_in_any_order():
+    for names in (("d0", "d1", "d2"), ("d2", "d1", "d0")):
+        C = cen(*names)
+        C["d2"] = np.full(DIM, _NAN)
+        v = {"speaker_0": with_cos(C["d0"], 0.9, 7), "speaker_1": with_cos(C["d0"], 0.3, 6)}
+        per, _, _ = R.voiceprint(v, ["speaker_0", "speaker_1"], C, "d0")
+        assert not any(p["armc"] for p in per.values())
+
+
+@pytest.mark.parametrize("x,y", [("patient", None), ("unknown", None), ("staff", None), ("patient", ""), ("other", None),
+                                 ("attender", None)])
+@pytest.mark.parametrize("flip", [False, True])
+def test_fix3_b_unknown_tie_with_decided_non_doctor_blocks_arm_c(x, y, flip):
+    spec = ((y, 5000), (x, 5000)) if flip else ((x, 5000), (y, 5000))
+    role, _ = R.role_majority(_SEG, _rr(*spec))
+    assert role not in (None, "", "undecided") and R.blocks_arm_c(role)
+    rl = []
+    for t0 in (0, 20000):
+        rl += [{"role": x, "t0_ms": t0, "t1_ms": t0 + 5000}, {"role": y, "t0_ms": t0 + 5000, "t1_ms": t0 + 10000}]
+    rl += [{"role": "patient", "t0_ms": 10000, "t1_ms": 20000}, {"role": "patient", "t0_ms": 30000, "t1_ms": 40000}]
+    assert build(role=rl)["order_capable_labels"] == []
+
+
+@pytest.mark.parametrize("y", [None, "", "undecided"])
+def test_fix3_b_none_never_wins_a_tie_with_a_decided_non_doctor(y):
+    assert R.role_majority(_SEG, _rr((y, 5000), ("patient", 5000)))[0] == "patient"
+
+
+@pytest.mark.parametrize("y", [None, "", "undecided"])
+def test_fix3_b_none_with_doctor_only_is_undecided(y):
+    assert R.role_majority(_SEG, _rr((y, 5000), ("doctor", 5000)))[0] == "undecided"
+    assert R.role_majority(_SEG, _rr(("doctor", 5000), (y, 5000)))[0] == "undecided"
+
+
+def test_fix3_b_three_way_tie_doctor_patient_none_is_patient():
+    r = R.role_majority([{"t0_ms": 0, "t1_ms": 9000}], _rr(("doctor", 3000), ("patient", 3000), (None, 3000)))[0]
+    assert r == "patient"
+
+
+def test_fix3_b_a_non_tied_none_does_not_override():
+    assert R.role_majority(_SEG, _rr(("doctor", 6000), (None, 2000), ("patient", 2000)))[0] == "doctor"
+    assert R.role_majority(_SEG, _rr((None, 6000), ("patient", 4000)))[0] == "undecided"
