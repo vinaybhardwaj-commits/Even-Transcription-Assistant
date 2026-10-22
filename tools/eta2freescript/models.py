@@ -86,6 +86,18 @@ def served_model_id(resp) -> str | None:
 class ModelClient:
     ledger: UsageLedger = UsageLedger(None)
     served_ids: dict = {}  # alias -> the model id read back from the last response (never the alias-table id)
+    served_calls: dict = {}  # call tag (`stageA-v3:<uid>`) -> {"id": id read from that response body or None, "request_id": provider request id or None}
+
+    def served_for(self, tag: str):
+        """The served-id record of one call, keyed by its tag, so Stage A is never overwritten by Stage B (M5)."""
+        return (self.served_calls or {}).get(tag)
+
+    def served_label(self, tag: str) -> str:
+        """The id the response named, else "unverified:<request id>" ("unverified" when there is no record at all)."""
+        rec = self.served_for(tag) or {}
+        if rec.get("id"):
+            return rec["id"]
+        return "unverified:" + rec["request_id"] if rec.get("request_id") else "unverified"
 
     def resolve(self, alias: str) -> tuple[str, str]:
         raise NotImplementedError
@@ -100,17 +112,19 @@ class ModelClient:
 
 
 class BedrockClient(ModelClient):
-    """boto3 bedrock-runtime converse. AWS credentials and region come from the usual AWS env / profile."""
+    """boto3 bedrock-runtime InvokeModel with an Anthropic messages body. The served model id is the `model` field of each response body (M5, A52/D8).
+    AWS credentials and region come from the usual AWS env / profile."""
 
     def __init__(self, ledger: UsageLedger | None = None, region: str | None = None):
         self.ledger = ledger or UsageLedger(None)
         self.served_ids = {}
+        self.served_calls = {}
         self.region = region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
         self._rt = None
 
     def resolve(self, alias: str) -> tuple[str, str]:
         mid = os.environ.get(f"ETA2FS_BEDROCK_{alias.upper()}") or DEFAULT_BEDROCK_IDS.get(alias) or alias
-        return mid, "converse"
+        return mid, "invoke_model"
 
     def _runtime(self):
         if self._rt is None:
@@ -121,21 +135,26 @@ class BedrockClient(ModelClient):
     def _chat(self, alias, prompt, system, max_tokens, temperature, tag):
         mid, _ = self.resolve(alias)
         t0 = time.time()
+        body = json.dumps({"anthropic_version": "bedrock-2023-05-31", "max_tokens": max_tokens, "temperature": temperature, "system": system,
+                           "messages": [{"role": "user", "content": prompt}]})
         for attempt in range(3):
             try:
-                resp = self._runtime().converse(
-                    modelId=mid, system=[{"text": system}],
-                    messages=[{"role": "user", "content": [{"text": prompt}]}],
-                    inferenceConfig={"maxTokens": max_tokens, "temperature": temperature})
+                raw = self._runtime().invoke_model(modelId=mid, body=body, contentType="application/json", accept="application/json")
+                data = json.loads(raw["body"].read())
                 break
             except Exception:
                 if attempt == 2:
                     raise
                 time.sleep(10 * (attempt + 1))
-        text = "".join(c.get("text", "") for c in resp["output"]["message"]["content"])
-        u = resp.get("usage", {})
-        self.ledger.record(alias, tag, time.time() - t0, u.get("inputTokens", 0), u.get("outputTokens", 0), resp.get("stopReason"))
-        self.served_ids[alias] = served_model_id(resp)
+        text = "".join(c.get("text", "") for c in data.get("content") or [] if isinstance(c, dict))
+        u = data.get("usage") or {}
+        self.ledger.record(alias, tag, time.time() - t0, u.get("input_tokens", 0), u.get("output_tokens", 0), data.get("stop_reason"))
+        meta = raw.get("ResponseMetadata") or {}
+        hdr = {str(k).lower(): v for k, v in (meta.get("HTTPHeaders") or {}).items()}
+        rid = meta.get("RequestId") or hdr.get("x-amzn-requestid")
+        sid = data.get("model") if isinstance(data.get("model"), str) and data.get("model").strip() else None
+        self.served_ids[alias] = sid
+        self.served_calls[tag] = {"id": sid, "request_id": rid if isinstance(rid, str) and rid else None}
         return text
 
 
@@ -145,6 +164,7 @@ class GatewayClient(ModelClient):
     def __init__(self, ledger: UsageLedger | None = None, path: str | None = None):
         self.ledger = ledger or UsageLedger(None)
         self.served_ids = {}
+        self.served_calls = {}
         p = path or os.environ.get("ETA2FS_EVENGW_PATH")
         if p and p not in sys.path:
             sys.path.insert(0, p)
@@ -167,6 +187,7 @@ class GatewayClient(ModelClient):
         u = resp.get("usage", {})
         self.ledger.record(alias, tag, time.time() - t0, u.get("inputTokens", 0), u.get("outputTokens", 0), resp.get("stopReason"))
         self.served_ids[alias] = served_model_id(resp)
+        self.served_calls[tag] = {"id": self.served_ids[alias], "request_id": None}
         return text
 
 
@@ -177,6 +198,8 @@ class FakeClient(ModelClient):
                  served_id: str | None = None):
         self.responder, self.model_id, self.route = responder, model_id, route
         self.served_ids = {"sonnet": served_id} if served_id else {}
+        self.served_id = served_id
+        self.served_calls = {}
         self.calls: list[dict] = []
 
     def resolve(self, alias):
@@ -184,6 +207,7 @@ class FakeClient(ModelClient):
 
     def _chat(self, alias, prompt, system, max_tokens, temperature, tag):
         self.calls.append({"alias": alias, "tag": tag, "prompt": prompt, "system": system})
+        self.served_calls[tag] = {"id": self.served_id, "request_id": None}
         if callable(self.responder):
             return self.responder(tag, prompt, system)
         for k, v in self.responder.items():

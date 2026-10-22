@@ -1,0 +1,3 @@
+{"id": "msg_synthetic_b", "type": "message", "role": "assistant",
+ "content": [{"type": "text", "text": "Co-morbidities:\nPresenting Complaint:"}], "stop_reason": "end_turn", "stop_sequence": null,
+ "usage": {"input_tokens": 900, "output_tokens": 120}}

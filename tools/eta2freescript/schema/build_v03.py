@@ -124,6 +124,9 @@ def build() -> dict:
     s["properties"]["generator"]["properties"]["data_files"] = {"type": "object", "additionalProperties": {"type": "string"}}
     s["properties"]["generator"]["properties"]["profile_version"] = {"type": ["string", "null"]}
     s["properties"]["generator"]["properties"]["served_model_id"] = {"type": ["string", "null"]}
+    s["properties"]["generator"]["properties"]["served_model_ids"] = {
+        "type": "object", "description": "The model id each stage's response body named, or unverified:<request id> when it named none (M5).",
+        "additionalProperties": False, "properties": {"stage_a": {"type": ["string", "null"]}, "stage_b": {"type": ["string", "null"]}}}
     s["properties"]["generator"]["properties"]["model_id_source"] = {"enum": ["provider_response", "request_alias_unverified"]}
     s["properties"]["generator"]["properties"]["stage_a_version"] = {"type": "string"}
     s["properties"]["generator"]["properties"]["stage_b_version"] = {"type": "string"}

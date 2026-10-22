@@ -197,7 +197,15 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         note, llm_rem = _fallback_note_ex(art, flags, banned)
         view, t1errs = view_of(note)
     final = check(view) + span_errors(llm_rem)
-    served = (getattr(client, "served_ids", {}) or {}).get(opts.model)
+    sa, sb = f"{opts.stage_a}:{c.uid}", f"{opts.stage_b}:{c.uid}"
+    if getattr(client, "served_for", None) and (client.served_for(sa) or client.served_for(sb)):
+        ids = {"stage_a": client.served_label(sa), "stage_b": client.served_label(sb) if opts.stage_b_enabled else None}
+    else:  # a client with no per-call record (gateway / double without one): the last id read back for the alias
+        last = (getattr(client, "served_ids", {}) or {}).get(opts.model)
+        ids = {"stage_a": last or "unverified", "stage_b": (last or "unverified") if opts.stage_b_enabled else None}
+    view["generator"]["served_model_ids"] = ids
+    named = [v for v in ids.values() if v and not v.startswith("unverified")]
+    served = named[0] if named else None
     view["generator"]["served_model_id"] = served
     if served:
         view["generator"]["model"] = served  # A52: the id the provider response named, not the alias-table id

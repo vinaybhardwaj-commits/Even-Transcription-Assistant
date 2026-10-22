@@ -106,6 +106,25 @@
             "null"
           ]
         },
+        "served_model_ids": {
+          "type": "object",
+          "description": "The model id each stage's response body named, or unverified:<request id> when it named none (M5).",
+          "additionalProperties": false,
+          "properties": {
+            "stage_a": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stage_b": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
         "model_id_source": {
           "enum": [
             "provider_response",

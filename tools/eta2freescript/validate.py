@@ -206,7 +206,7 @@ def to_v01(art: dict) -> dict:
     for key in ("completion_required", "clip_boundary", "slots", "room_facts", "roster", "spans", "confirm_prompts", "confirm_internal", "withheld", "red_flags",
                 "policy", "doctor_words", "kept_out"):
         a.pop(key, None)
-    for k in ("data_files", "profile_version", "served_model_id", "model_id_source", "stage_a_version", "stage_b_version"):
+    for k in ("data_files", "profile_version", "served_model_id", "served_model_ids", "model_id_source", "stage_a_version", "stage_b_version"):
         (a.get("generator") or {}).pop(k, None)
     if "confirm_prompts" in art:  # FRX-V10: Medication is a confirm list; v0.1 has no such section, so the projection leaves it empty
         a["note_text"] = re.sub(r"(?ms)^Medication:.*?(?=^Further Investigation:)", "Medication:\n", a["note_text"])
