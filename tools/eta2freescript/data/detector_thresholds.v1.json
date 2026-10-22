@@ -1,0 +1,17 @@
+{
+ "version": "detector-thresholds.v1",
+ "window_tokens": 3,
+ "adjacent_segment_gap_s": 2.0,
+ "fuzzy": {
+  "min_len_similarity": 6,
+  "similarity": 0.85,
+  "short_len_min": 4,
+  "short_len_max": 5,
+  "short_max_edits": 1,
+  "exact_only_max_len": 3
+ },
+ "english_word_brand_cue_window": 3,
+ "min_catalogue_token_len": 3,
+ "max_short_dictionary_len": 2,
+ "note": "the thresholds are the contract's V9 matching limits (similarity 0.85 for names of 6+ letters, one edit for 4-5, exact for 3 or fewer)"
+}

@@ -1,0 +1,202 @@
+"""FRX-V10 number detector (spec "Numbers by provenance", step 1; rule 13, rule 20).
+
+Finds every number token in a string: digits in any script, digits glued to letters ("500mg", "60K"), English and Indic number words in the six
+languages of the S3 lexicon, number words glued together ("fivehundred"), fractions ("half", "½") and "a gram". The lexicon is the S3 lexicon,
+unchanged, as data/number_lexicon.v1.json; "sat" is a number word again (rule 13). Digits that sit inside a NAME (B12, T4, HbA1c, S1S2, T2DM,
+OMEGA-3, L4-L5, C5-6, COVID-19, H1N1) are not numbers (rule 20): the names come from the whitelist data file and a spinal-level shape.
+
+Pure functions. Offsets are into the NFKC-normalised text, which `norm` returns; callers keep that string.
+"""
+from __future__ import annotations
+
+import re
+import unicodedata
+from dataclasses import dataclass
+from functools import lru_cache
+
+from . import data
+
+INF = float("inf")
+_LETTERS = r"A-Za-zऀ-෿"  # Latin plus the Indic blocks the lexicon covers
+_EDGE_BEFORE = rf"(?<![{_LETTERS}])"
+_EDGE_AFTER = rf"(?![{_LETTERS}])"
+W = "\ue000"  # a number-word run is replaced by this char repeated, so spans stay aligned with the NFKC text
+
+_A_GRAM = re.compile(r"(?<![A-Za-z])an?\s+(?:grams?|gms?|milli?grams?|micro\s?grams?)(?![A-Za-z])", re.I)
+_NOT_A_NUMBER = re.compile(r"(?<![A-Za-z])double\s+(?:vision|barrel|blind|check)(?![A-Za-z])", re.I)
+# a spinal level is a name, not a number: L4, L4-L5, C5-6, L5-S1, T12
+_SPINE = re.compile(r"(?<![A-Za-z0-9])[CTLS]\d{1,2}(?:\s?[-–]\s?[CTLS]?\d{1,2})?(?![A-Za-z0-9])")
+_VULGAR = {"½": 0.5, "¼": 0.25, "¾": 0.75}
+_DIGITS = r"(?:\d+(?:[.,]\d+)*|\.\d+)"
+_NUMBER_RX = re.compile(rf"\d+\s?⁄\s?\d+|{_DIGITS}|{W}+")
+_GLUED_WORD_RX = re.compile(r"(?<![A-Za-z])[A-Za-z]{6,40}(?![A-Za-z])")
+
+
+@dataclass(frozen=True)
+class Num:
+    start: int
+    end: int
+    text: str
+    value: float  # INF when it cannot be read: a bound then always fails
+    kind: str  # digit | word | glued | agram | fraction
+
+
+def norm(text) -> str:
+    return unicodedata.normalize("NFKC", text if isinstance(text, str) else "")
+
+
+@lru_cache(maxsize=1)
+def _lex() -> tuple[str, ...]:
+    words = data.load(data.NUMBER_LEXICON)["words"]
+    return tuple(sorted({w for w in words if isinstance(w, str) and w.strip()}, key=len, reverse=True))
+
+
+@lru_cache(maxsize=1)
+def lexicon_set() -> frozenset[str]:
+    return frozenset(_lex())
+
+
+@lru_cache(maxsize=1)
+def _run_rx() -> re.Pattern:
+    alt = "|".join(re.escape(x) for x in _lex())
+    w = f"{_EDGE_BEFORE}(?:{alt}){_EDGE_AFTER}"
+    # "do" is Hindi "two" and English "do": it is a number only inside a run ("do sau")
+    wd = rf"(?:{w}|{_EDGE_BEFORE}do(?=[\s-]+(?:{w[len(_EDGE_BEFORE):]})){_EDGE_AFTER})"
+    return re.compile(rf"{wd}(?:[\s-]+(?:and\s+)?{wd})*", re.I)
+
+
+@lru_cache(maxsize=1)
+def _word_set() -> frozenset[str]:
+    return frozenset({w for w in lexicon_set() if len(w) >= 3 and w.isascii() and w.isalpha()}
+                     | {"so", "sho", "she", "shey", "sau", "saw", "noor", "nooru", "ooru", "uru", "vandalu", "mg", "mcg", "ml", "gm", "gms"})
+
+
+def _glued(tok: str) -> bool:
+    """`tok` is two or more number words written together ("fivehundred", "paanchsau"), pieces of 3+ letters."""
+    words, n = _word_set(), len(tok)
+    best = [0] * (n + 1)
+    ok = [False] * (n + 1)
+    ok[0] = True
+    for i in range(1, n + 1):
+        for j in range(max(0, i - 12), i - 1):
+            if ok[j] and tok[j:i] in words:
+                ok[i] = True
+                best[i] = best[j] + 1 if best[i] == 0 else min(best[i], best[j] + 1)
+    return ok[n] and best[n] >= 2
+
+
+@lru_cache(maxsize=1)
+def _name_rx() -> re.Pattern | None:
+    names = [n for n in data.load(data.WHITELIST).get("name_tokens", []) if isinstance(n, str) and n.strip()]
+    if not names:
+        return None
+    alt = "|".join(re.escape(unicodedata.normalize("NFKC", n)).replace(r"\ ", r"\s?") for n in sorted(names, key=len, reverse=True))
+    return re.compile(rf"(?<![A-Za-z0-9])(?:{alt})(?![A-Za-z0-9])", re.I)
+
+
+def _blank(m: re.Match) -> str:
+    return re.sub(r"\d", "x", m.group())
+
+
+def mask_names(t: str) -> str:
+    """Digits inside a listed name or a spinal level become 'x' (same length). A name token is never a number."""
+    rx = _name_rx()
+    if rx is not None:
+        t = rx.sub(_blank, t)
+    return _SPINE.sub(_blank, t)
+
+
+def prep(t: str) -> str:
+    """`t` (already NFKC) with name digits blanked and number-word runs turned into W characters, same length."""
+    t = mask_names(t)
+    t = _NOT_A_NUMBER.sub(lambda m: "x" * len(m.group()), t)
+    t = _A_GRAM.sub(lambda m: W * len(m.group()), t)
+    t = _run_rx().sub(lambda m: W * len(m.group()), t)
+    return _GLUED_WORD_RX.sub(lambda m: W * len(m.group()) if _glued(m.group().lower()) else m.group(), t)
+
+
+# --- values -------------------------------------------------------------------------------------------------------------------
+_EN = {w: float(i) for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen "
+                                         "eighteen nineteen".split())}
+_EN.update({"once": 1.0, "twice": 2.0, "thrice": 3.0, "twenty": 20.0, "thirty": 30.0, "forty": 40.0, "fifty": 50.0, "sixty": 60.0, "seventy": 70.0,
+            "eighty": 80.0, "ninety": 90.0, "half": 0.5, "quarter": 0.25, "double": 2.0, "dozen": 12.0, "a": 1.0, "an": 1.0})
+_HI = {"ek": 1.0, "do": 2.0, "teen": 3.0, "char": 4.0, "chaar": 4.0, "paanch": 5.0, "panch": 5.0, "chhe": 6.0, "chhah": 6.0, "cheh": 6.0, "saat": 7.0,
+       "aath": 8.0, "nau": 9.0, "das": 10.0, "dus": 10.0, "dedh": 1.5, "dhai": 2.5, "adha": 0.5, "aadha": 0.5}
+_SCALE = {"hundred": 100.0, "thousand": 1000.0, "sau": 100.0, "hazaar": 1000.0, "hazar": 1000.0, "lakh": 100000.0}
+
+
+def value(tok: str) -> float:
+    """The numeric value of a digit string or a number-word run; INF when it cannot be read (an Indic word outside the small table, a glued form)."""
+    t = unicodedata.normalize("NFKC", tok or "").strip().lower()
+    if t in _VULGAR:
+        return _VULGAR[t]
+    t = "".join(str(unicodedata.digit(c)) if c.isdigit() and not c.isascii() else c for c in t)
+    m = re.fullmatch(r"(\d+)\s?⁄\s?(\d+)", t)
+    if m:
+        return int(m.group(1)) / int(m.group(2)) if int(m.group(2)) else INF
+    m = re.fullmatch(r"(\d+(?:[.,]\d+)*|\.\d+)[^\W\d_]*", t)
+    if m:
+        d = m.group(1)
+        try:
+            if "," in d:
+                return float(d.replace(",", "")) if re.fullmatch(r"\d{1,3}(?:,\d{3})+", d) else float(d.replace(",", "."))
+            return float(d)
+        except ValueError:
+            return INF
+    total = cur = 0.0
+    seen = False
+    for w in [x for x in re.split(r"[\s-]+", t) if x and x != "and"]:
+        seen = True
+        if w in _EN:
+            cur += _EN[w]
+        elif w in _HI:
+            cur += _HI[w]
+        elif w in _SCALE:
+            if _SCALE[w] >= 1000:
+                total += (cur or 1) * _SCALE[w]
+                cur = 0.0
+            else:
+                cur = (cur or 1) * _SCALE[w]
+        else:
+            return INF
+    return total + cur if seen else INF
+
+
+def _kind(piece: str) -> str:
+    if "⁄" in piece:
+        return "fraction"
+    if re.search(r"\d", piece):
+        return "digit"
+    return "word"
+
+
+def find_numbers(text) -> list[Num]:
+    """Every number token of `text`. Offsets are into norm(text)."""
+    t = norm(text)
+    out: list[Num] = []
+    for ch, v in _VULGAR.items():
+        for m in re.finditer(re.escape(ch), t):
+            out.append(Num(m.start(), m.end(), ch, v, "fraction"))
+    t2 = t
+    for ch in _VULGAR:
+        t2 = t2.replace(ch, "x")
+    pt = prep(t2)
+    for m in _NUMBER_RX.finditer(pt):
+        a, b = m.span()
+        piece = t2[a:b]
+        if m.group().startswith(W) and (_A_GRAM.fullmatch(piece) or piece.lower().startswith(("a ", "an "))):
+            kind = "agram"
+        elif m.group().startswith(W):
+            kind = "glued" if _GLUED_WORD_RX.fullmatch(piece) and " " not in piece and "-" not in piece else "word"
+        else:
+            kind = _kind(piece)
+        out.append(Num(a, b, t[a:b], value(piece) if kind != "agram" else 1.0, kind))
+    return sorted(out, key=lambda n: n.start)
+
+
+def has_number(text) -> bool:
+    return isinstance(text, str) and bool(find_numbers(text))
+
+
+def words_only(num: Num) -> bool:
+    return num.kind in ("word", "glued", "agram")

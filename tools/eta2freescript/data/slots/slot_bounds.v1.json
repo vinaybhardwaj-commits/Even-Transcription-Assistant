@@ -1,0 +1,92 @@
+{
+ "version": "slot-bounds.v1",
+ "spec": "the slot table; rules 10, 11, 17",
+ "vital": {
+  "bp_sys": [
+   50,
+   260
+  ],
+  "bp_dia": [
+   30,
+   160
+  ],
+  "pulse": [
+   20,
+   250
+  ],
+  "pulse_implied": [
+   40,
+   200
+  ],
+  "spo2": [
+   50,
+   100
+  ],
+  "temp_f": [
+   90,
+   110
+  ],
+  "temp_f_implied": [
+   95,
+   108
+  ],
+  "temp_c": [
+   32,
+   43
+  ],
+  "rr": [
+   4,
+   60
+  ],
+  "weight_kg": [
+   1,
+   300
+  ],
+  "height_cm": [
+   30,
+   230
+  ]
+ },
+ "followup_interval_max": {
+  "days": 365,
+  "weeks": 52,
+  "months": 24,
+  "years": 5
+ },
+ "date_years_ahead": 2,
+ "illness_duration_years_max": 80,
+ "advice_duration_days_max": 365,
+ "age": [
+  0,
+  120
+ ],
+ "lifting_kg": [
+  1,
+  50
+ ],
+ "daily": {
+  "glasses": 20,
+  "litres": 6,
+  "meals": 8,
+  "minutes": 180,
+  "km": 20,
+  "steps": 20000,
+  "ml_water": 5000
+ },
+ "inr": [
+  0.5,
+  10
+ ],
+ "pain_score": [
+  0,
+  10
+ ],
+ "stage": [
+  1,
+  5
+ ],
+ "grade": [
+  1,
+  4
+ ]
+}

@@ -1,0 +1,636 @@
+{
+  "schema_version": "eta.freescript.v1.0",
+  "artifact_id": "00000000-0000-4000-8000-000000000001",
+  "supersedes": null,
+  "created_at": "2026-10-15T10:30:00+05:30",
+  "emission": {
+    "state": "full",
+    "reasons": []
+  },
+  "policy": {
+    "medicine_policy": "notes_only",
+    "advice_budget": {
+      "items": 5,
+      "chars": 300
+    },
+    "inputs_mode": "current"
+  },
+  "generator": {
+    "name": "hand-authored-example",
+    "version": "1.0",
+    "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "prompt_sha256s": {
+      "stageA": "0000000000000000000000000000000000000000000000000000000000000000",
+      "stageB": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "models": [
+      {
+        "role": "stageA",
+        "served_model_id": "example-model-a-2026-10",
+        "provider": "example-provider",
+        "zdr": true
+      },
+      {
+        "role": "stageB",
+        "served_model_id": "example-model-b-2026-10",
+        "provider": "example-provider",
+        "zdr": true
+      }
+    ],
+    "temperature": 0,
+    "run_id": "EXAMPLE-RUN-1"
+  },
+  "encounter": {
+    "eta_encounter_id": "EXAMPLE-ENC-1",
+    "room": "EXAMPLE-ROOM",
+    "visit_date_ist": "2026-10-15",
+    "window_start": "2026-10-15T10:00:00+05:30",
+    "window_end": "2026-10-15T10:15:00+05:30",
+    "languages": [
+      "en",
+      "hi"
+    ],
+    "transcript": {
+      "segment_count": 14,
+      "diarised": true,
+      "english_source": "mt:example-mt-model",
+      "stt_engines": [
+        "example-stt-a"
+      ]
+    },
+    "doctor": {
+      "pulse_doctor_uid": null,
+      "specialty": "General Practitioner"
+    }
+  },
+  "pulse_link": {
+    "type_of_prescription": "HOSPITAL_GP",
+    "individual_uid": null,
+    "hospital_uid": null,
+    "consult_uid": null,
+    "prescription_uid": null,
+    "draft_exists": "unknown",
+    "link_status": "none",
+    "link_basis": null
+  },
+  "roster": [
+    {
+      "label": "speaker_0",
+      "talk_s": 410,
+      "role": "treating_doctor",
+      "role_votes": {
+        "role_track": "treating_doctor",
+        "clef": "treating_doctor",
+        "jev": "treating_doctor"
+      },
+      "three_of_three": true,
+      "armc": {
+        "state": "pass",
+        "cos": 0.84,
+        "margin_next_label": 0.21,
+        "margin_runner_up_centroid": 0.17,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": true,
+      "translator_of": null,
+      "order_capable": true
+    },
+    {
+      "label": "speaker_1",
+      "talk_s": 260,
+      "role": "patient",
+      "role_votes": {
+        "role_track": "patient",
+        "clef": "patient",
+        "jev": "patient"
+      },
+      "three_of_three": false,
+      "armc": {
+        "state": "fail",
+        "cos": 0.22,
+        "margin_next_label": null,
+        "margin_runner_up_centroid": null,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": false,
+      "translator_of": null,
+      "order_capable": false
+    }
+  ],
+  "spans": [
+    {
+      "span_id": "s1",
+      "segment_refs": [
+        "EXAMPLE-W1:1"
+      ],
+      "t0": "2026-10-15T10:00:40+05:30",
+      "t1": "2026-10-15T10:00:48+05:30",
+      "label": "speaker_1",
+      "lang": "hi",
+      "quote_native": "do din se bukhar hai aur badan dard ho raha hai",
+      "quote_en": "I have had fever for two days and body pain",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s2",
+      "segment_refs": [
+        "EXAMPLE-W1:2"
+      ],
+      "t0": "2026-10-15T10:00:50+05:30",
+      "t1": "2026-10-15T10:00:55+05:30",
+      "label": "speaker_1",
+      "lang": "hi",
+      "quote_native": "aur koi bimari nahi hai",
+      "quote_en": "no other illness as such",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s3",
+      "segment_refs": [
+        "EXAMPLE-W1:3"
+      ],
+      "t0": "2026-10-15T10:01:05+05:30",
+      "t1": "2026-10-15T10:01:10+05:30",
+      "label": "speaker_1",
+      "lang": "hi",
+      "quote_native": "kal raat ek Crocin li thi",
+      "quote_en": "I took one Crocin last night",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s4",
+      "segment_refs": [
+        "EXAMPLE-W1:4"
+      ],
+      "t0": "2026-10-15T10:01:11+05:30",
+      "t1": "2026-10-15T10:01:12+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "okay, fine",
+      "quote_en": "okay, fine",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s5",
+      "segment_refs": [
+        "EXAMPLE-W1:5"
+      ],
+      "t0": "2026-10-15T10:01:20+05:30",
+      "t1": "2026-10-15T10:01:28+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "so fever for two days with body ache",
+      "quote_en": "so fever for two days with body ache",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s6",
+      "segment_refs": [
+        "EXAMPLE-W1:6"
+      ],
+      "t0": "2026-10-15T10:03:10+05:30",
+      "t1": "2026-10-15T10:03:30+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "temperature is 100.2, throat is a little red, chest is clear",
+      "quote_en": "temperature is 100.2, throat is a little red, chest is clear",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s7",
+      "segment_refs": [
+        "EXAMPLE-W1:7"
+      ],
+      "t0": "2026-10-15T10:04:00+05:30",
+      "t1": "2026-10-15T10:04:05+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "looks like a viral fever",
+      "quote_en": "looks like a viral fever",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s8",
+      "segment_refs": [
+        "EXAMPLE-W1:8"
+      ],
+      "t0": "2026-10-15T10:04:10+05:30",
+      "t1": "2026-10-15T10:04:22+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "take Dolo 650 three times a day after food for three days, only if there is fever",
+      "quote_en": "take Dolo 650 three times a day after food for three days, only if there is fever",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s9",
+      "segment_refs": [
+        "EXAMPLE-W1:9"
+      ],
+      "t0": "2026-10-15T10:04:25+05:30",
+      "t1": "2026-10-15T10:04:28+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "get a CBC done",
+      "quote_en": "get a CBC done",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": true,
+      "relay_of": null
+    },
+    {
+      "span_id": "s10",
+      "segment_refs": [
+        "EXAMPLE-W1:10"
+      ],
+      "t0": "2026-10-15T10:04:40+05:30",
+      "t1": "2026-10-15T10:04:45+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "drink plenty of water and take rest",
+      "quote_en": "drink plenty of water and take rest",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s11",
+      "segment_refs": [
+        "EXAMPLE-W1:11"
+      ],
+      "t0": "2026-10-15T10:05:00+05:30",
+      "t1": "2026-10-15T10:05:06+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "if the fever does not go in three days, come back",
+      "quote_en": "if the fever does not go in three days, come back",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    }
+  ],
+  "gp_extraction": {
+    "presenting_complaints": {
+      "symptoms": "Fever for 2 days with body ache.",
+      "diagnoses": [
+        {
+          "diagnosis_or_impression": "Acute viral fever",
+          "is_differential_diagnosis": true,
+          "raw_name": "viral fever",
+          "aliases": [
+            "Viral fever"
+          ]
+        }
+      ]
+    },
+    "examination": "Temperature 100.2 F. Throat mildly congested. Chest clear.",
+    "medicines": [],
+    "further_investigations": [
+      {
+        "name": "Complete Blood Count",
+        "urgent": false,
+        "instruction": "",
+        "raw_name": "CBC",
+        "aliases": [
+          "CBC",
+          "Haemogram"
+        ]
+      }
+    ],
+    "follow_up": {
+      "followup_type": "IF_REQUIRED",
+      "follow_up_instructions": "Come back if the fever lasts beyond 3 days."
+    },
+    "general_advice": "Drink plenty of water and take rest."
+  },
+  "confirm_prompts": [
+    {
+      "prompt_id": "p1",
+      "kind": "medicine",
+      "action": "start",
+      "drug": {
+        "spoken": "Dolo 650",
+        "brand_recognised": "Dolo 650",
+        "generic": "PARACETAMOL",
+        "components": [],
+        "base_molecule": "paracetamol",
+        "form": "tablet",
+        "strength_heard": "650",
+        "lasa_risk": {
+          "pair_with": null,
+          "note": "not on the curated LASA list"
+        }
+      },
+      "attributes": {
+        "strength": {
+          "value": "650",
+          "cited_spans": [
+            "s8"
+          ],
+          "support": "supported"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": "three times a day",
+          "cited_spans": [
+            "s8"
+          ],
+          "support": "supported"
+        },
+        "duration": {
+          "value": "three days",
+          "cited_spans": [
+            "s8"
+          ],
+          "support": "supported"
+        },
+        "instruction": {
+          "value": "after food, only if there is fever",
+          "cited_spans": [
+            "s8"
+          ],
+          "support": "supported"
+        }
+      },
+      "who_said": {
+        "label": "speaker_0",
+        "role": "treating_doctor"
+      },
+      "doctor_confirm_reason": [
+        "notes_only"
+      ]
+    }
+  ],
+  "doctor_words": [
+    {
+      "instruction_id": "dw1",
+      "category": "lifestyle",
+      "text_en": "Drink plenty of water and take rest.",
+      "cited_spans": [
+        "s10"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 1,
+      "counselling": true
+    },
+    {
+      "instruction_id": "dw2",
+      "category": "follow_up",
+      "text_en": "If the fever does not go in three days, come back.",
+      "cited_spans": [
+        "s11"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 1,
+      "counselling": false
+    }
+  ],
+  "red_flags": [],
+  "provenance": [
+    {
+      "item_id": "e1-sym",
+      "kind": "symptoms",
+      "text": "fever 2 days, body ache",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s1",
+        "s5"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/presenting_complaints/symptoms",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": [
+        "translation_uncertain"
+      ]
+    },
+    {
+      "item_id": "e1-com",
+      "kind": "comorbidity",
+      "text": "whole-value missing statement about other illness",
+      "status": "prescribed",
+      "negated": false,
+      "support": "not_stated",
+      "cited_spans": [
+        "s2"
+      ],
+      "alignment": "aligned_llm",
+      "span_source": "none",
+      "json_pointer": null,
+      "prompt_id": null,
+      "withheld_reason": "missing_value",
+      "flags": [
+        "field_withheld"
+      ]
+    },
+    {
+      "item_id": "e1-home",
+      "kind": "medicine",
+      "text": "Crocin taken at home by the patient",
+      "names": [
+        "Crocin",
+        "paracetamol"
+      ],
+      "status": "discussed_only",
+      "negated": false,
+      "support": "affirmed_from_patient",
+      "cited_spans": [
+        "s3",
+        "s4"
+      ],
+      "alignment": "aligned_llm",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": [
+        "affirmed_from_patient",
+        "strength_unstated"
+      ]
+    },
+    {
+      "item_id": "e1-exam",
+      "kind": "examination",
+      "text": "temp 100.2 F, throat congested, chest clear",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s6"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/examination",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e1-dx",
+      "kind": "diagnosis",
+      "text": "likely viral fever",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s7"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/presenting_complaints/diagnoses/0",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e1-med",
+      "kind": "medicine",
+      "text": "Dolo 650 three times a day for 3 days",
+      "names": [
+        "Dolo 650",
+        "paracetamol"
+      ],
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s8"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": "p1",
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e1-cbc",
+      "kind": "investigation",
+      "text": "CBC",
+      "names": [
+        "CBC",
+        "Complete Blood Count"
+      ],
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s9"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/further_investigations/0",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e1-fu",
+      "kind": "follow_up",
+      "text": "return if fever beyond 3 days",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s11"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/follow_up",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e1-adv",
+      "kind": "advice",
+      "text": "fluids and rest",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s10"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/general_advice",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    }
+  ],
+  "note_text": "Co-morbidities:\nPresenting Complaint: Fever for 2 days with body ache.\nExamination: Temperature 100.2 F. Throat mildly congested. Chest clear.\nDiagnoses: ?Acute viral fever\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nPARACETAMOL (Dolo 650) — confirm\nFurther Investigation: Complete Blood Count\nFollow up: Come back if the fever lasts beyond 3 days.\nRefer to:\nGeneral Advice: Drink plenty of water and take rest.",
+  "qa": {
+    "floors": {
+      "untaped_drugs": 0,
+      "invented_doses": 0,
+      "dose_precedence_errors": 0,
+      "clip_leakage": 0,
+      "placeholders": 0,
+      "red_flags_missing": 0,
+      "hallucinations_est": 0.0,
+      "validator_pass": true
+    },
+    "counts": {
+      "posted": 6,
+      "prompts": 1,
+      "withheld": 1,
+      "h_unattrib": 0,
+      "unaligned": 0,
+      "affirmed_from_patient": 1
+    },
+    "inputs": {
+      "mode": "current",
+      "role_votes_present": true,
+      "armc_gate": "on",
+      "case7": false
+    },
+    "models_served": [
+      "example-model-a-2026-10",
+      "example-model-b-2026-10"
+    ],
+    "render_template": "neutral-11h-v1"
+  }
+}

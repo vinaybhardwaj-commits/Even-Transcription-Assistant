@@ -1,0 +1,1107 @@
+{
+ "version": "analytes.v1",
+ "spec": "rule 16 (list), rule 28 (magnesium, zinc, folate), rule 2 and C2 (shadow analytes), rule 17 (INR), rule 18 (units)",
+ "result_words": [
+  "report",
+  "level",
+  "levels",
+  "came",
+  "value",
+  "result",
+  "results"
+ ],
+ "fillers": [
+  "is",
+  "was",
+  "of",
+  ":",
+  "="
+ ],
+ "shadow_note": "A shadow analyte also names a drug. It posts only with a unit AND a result word, and the frame 'for <analyte>' is always vetoed (rule 2, C2). In a full lab frame (analyte + unit + result word) the detector's catalogue hit on the analyte word is ignored (rule 21).",
+ "shadow_aliases_only": [
+  "sugar",
+  "glucose",
+  "blood sugar",
+  "blood glucose",
+  "fasting blood sugar",
+  "fasting sugar",
+  "fasting glucose",
+  "random blood sugar",
+  "random sugar",
+  "post prandial sugar",
+  "postprandial sugar"
+ ],
+ "inr_rule": "INR posts only as INR + a result word + a value from 0.5 to 10; no unit needed (rule 17)",
+ "analytes": [
+  {
+   "key": "hb",
+   "name": "Hb",
+   "aliases": [
+    "hb",
+    "hgb",
+    "haemoglobin",
+    "hemoglobin"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "g/dL",
+     "spell": [
+      "g/dl",
+      "gm/dl",
+      "g per dl",
+      "gm per dl",
+      "gm%",
+      "g%"
+     ],
+     "range": [
+      1,
+      25
+     ]
+    }
+   ],
+   "bare_range": [
+    1,
+    25
+   ]
+  },
+  {
+   "key": "hba1c",
+   "name": "HbA1c",
+   "aliases": [
+    "hba1c",
+    "hb a1c",
+    "a1c",
+    "glycated haemoglobin",
+    "glycated hemoglobin"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "%",
+     "spell": [
+      "%",
+      "percent",
+      "per cent"
+     ],
+     "range": [
+      3,
+      20
+     ]
+    },
+    {
+     "canon": "mmol/mol",
+     "spell": [
+      "mmol/mol",
+      "mmol per mol"
+     ],
+     "range": [
+      10,
+      200
+     ]
+    }
+   ],
+   "bare_range": [
+    3,
+    20
+   ]
+  },
+  {
+   "key": "glucose",
+   "name": "Blood glucose",
+   "aliases": [
+    "fbs",
+    "ppbs",
+    "rbs",
+    "ppg",
+    "fbg",
+    "rbg",
+    "fasting blood sugar",
+    "fasting sugar",
+    "fasting glucose",
+    "post prandial sugar",
+    "postprandial sugar",
+    "random blood sugar",
+    "random sugar",
+    "blood sugar",
+    "blood glucose",
+    "sugar",
+    "glucose"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mg/dL",
+     "spell": [
+      "mg/dl",
+      "mg per dl",
+      "mg per deciliter",
+      "milligram per deciliter",
+      "milligrams per deciliter",
+      "mg%"
+     ],
+     "range": [
+      20,
+      1000
+     ]
+    },
+    {
+     "canon": "mmol/L",
+     "spell": [
+      "mmol/l",
+      "mmol per l",
+      "mmol per litre"
+     ],
+     "range": [
+      1,
+      55
+     ]
+    }
+   ],
+   "bare_range": [
+    20,
+    1000
+   ]
+  },
+  {
+   "key": "tsh",
+   "name": "TSH",
+   "aliases": [
+    "tsh"
+   ],
+   "shadow": true,
+   "units": [
+    {
+     "canon": "mIU/L",
+     "spell": [
+      "miu/l",
+      "miu per l",
+      "uiu/ml",
+      "µiu/ml",
+      "μiu/ml",
+      "miu/ml"
+     ],
+     "range": [
+      0.005,
+      500
+     ]
+    }
+   ],
+   "bare_range": [
+    0.005,
+    500
+   ]
+  },
+  {
+   "key": "t3",
+   "name": "T3",
+   "aliases": [
+    "t3"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "ng/dL",
+     "spell": [
+      "ng/dl",
+      "ng per dl"
+     ],
+     "range": [
+      10,
+      800
+     ]
+    },
+    {
+     "canon": "pg/mL",
+     "spell": [
+      "pg/ml",
+      "pg per ml"
+     ],
+     "range": [
+      0.5,
+      30
+     ]
+    },
+    {
+     "canon": "nmol/L",
+     "spell": [
+      "nmol/l"
+     ],
+     "range": [
+      0.3,
+      12
+     ]
+    }
+   ],
+   "bare_range": [
+    10,
+    800
+   ]
+  },
+  {
+   "key": "t4",
+   "name": "T4",
+   "aliases": [
+    "t4"
+   ],
+   "shadow": true,
+   "units": [
+    {
+     "canon": "µg/dL",
+     "spell": [
+      "µg/dl",
+      "μg/dl",
+      "mcg/dl",
+      "ug/dl",
+      "mcg per dl"
+     ],
+     "range": [
+      0.3,
+      40
+     ]
+    },
+    {
+     "canon": "ng/dL",
+     "spell": [
+      "ng/dl",
+      "ng per dl"
+     ],
+     "range": [
+      0.1,
+      8
+     ]
+    }
+   ],
+   "bare_range": [
+    0.3,
+    40
+   ]
+  },
+  {
+   "key": "creatinine",
+   "name": "Creatinine",
+   "aliases": [
+    "creatinine",
+    "creat"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mg/dL",
+     "spell": [
+      "mg/dl",
+      "mg per dl",
+      "mg per deciliter",
+      "milligram per deciliter",
+      "milligrams per deciliter",
+      "mg%"
+     ],
+     "range": [
+      0.1,
+      30
+     ]
+    }
+   ],
+   "bare_range": [
+    0.1,
+    30
+   ]
+  },
+  {
+   "key": "urea",
+   "name": "Urea",
+   "aliases": [
+    "urea",
+    "blood urea"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mg/dL",
+     "spell": [
+      "mg/dl",
+      "mg per dl",
+      "mg per deciliter",
+      "milligram per deciliter",
+      "milligrams per deciliter",
+      "mg%"
+     ],
+     "range": [
+      3,
+      600
+     ]
+    }
+   ],
+   "bare_range": [
+    3,
+    600
+   ]
+  },
+  {
+   "key": "egfr",
+   "name": "eGFR",
+   "aliases": [
+    "egfr",
+    "gfr"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mL/min",
+     "spell": [
+      "ml/min",
+      "ml per min",
+      "ml per minute"
+     ],
+     "range": [
+      1,
+      200
+     ]
+    }
+   ],
+   "bare_range": [
+    1,
+    200
+   ]
+  },
+  {
+   "key": "sodium",
+   "name": "Sodium",
+   "aliases": [
+    "sodium",
+    "na"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mEq/L",
+     "spell": [
+      "meq/l",
+      "meq per l",
+      "mmol/l"
+     ],
+     "range": [
+      90,
+      200
+     ]
+    }
+   ],
+   "bare_range": [
+    90,
+    200
+   ]
+  },
+  {
+   "key": "potassium",
+   "name": "Potassium",
+   "aliases": [
+    "potassium"
+   ],
+   "shadow": true,
+   "units": [
+    {
+     "canon": "mEq/L",
+     "spell": [
+      "meq/l",
+      "meq per l",
+      "mmol/l"
+     ],
+     "range": [
+      1,
+      12
+     ]
+    }
+   ],
+   "bare_range": [
+    1,
+    12
+   ]
+  },
+  {
+   "key": "platelets",
+   "name": "Platelets",
+   "aliases": [
+    "platelets",
+    "platelet count",
+    "plt"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "/cumm",
+     "spell": [
+      "/cumm",
+      "/cu mm",
+      "per cumm",
+      "per cu mm",
+      "/mm3",
+      "/µl",
+      "/μl"
+     ],
+     "range": [
+      1000,
+      3000000
+     ]
+    },
+    {
+     "canon": "lakh",
+     "spell": [
+      "lakh",
+      "lakhs"
+     ],
+     "range": [
+      0.1,
+      30
+     ]
+    }
+   ],
+   "bare_range": [
+    1000,
+    3000000
+   ]
+  },
+  {
+   "key": "tlc",
+   "name": "TLC",
+   "aliases": [
+    "tlc",
+    "wbc",
+    "wbc count",
+    "total leucocyte count",
+    "total leukocyte count",
+    "white cell count"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "/cumm",
+     "spell": [
+      "/cumm",
+      "/cu mm",
+      "per cumm",
+      "per cu mm",
+      "/mm3",
+      "/µl",
+      "/μl"
+     ],
+     "range": [
+      300,
+      500000
+     ]
+    },
+    {
+     "canon": "×10³/µL",
+     "spell": [
+      "×10³/µl",
+      "x10^3/ul",
+      "x10³/µl",
+      "x10^3/µl"
+     ],
+     "range": [
+      0.3,
+      500
+     ]
+    }
+   ],
+   "bare_range": [
+    300,
+    500000
+   ]
+  },
+  {
+   "key": "esr",
+   "name": "ESR",
+   "aliases": [
+    "esr"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mm/hr",
+     "spell": [
+      "mm/hr",
+      "mm/h",
+      "mm per hour",
+      "mm in first hour",
+      "mm/hour"
+     ],
+     "range": [
+      0,
+      200
+     ]
+    }
+   ],
+   "bare_range": [
+    0,
+    200
+   ]
+  },
+  {
+   "key": "crp",
+   "name": "CRP",
+   "aliases": [
+    "crp"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mg/L",
+     "spell": [
+      "mg/l",
+      "mg per l"
+     ],
+     "range": [
+      0,
+      700
+     ]
+    }
+   ],
+   "bare_range": [
+    0,
+    700
+   ]
+  },
+  {
+   "key": "inr",
+   "name": "INR",
+   "aliases": [
+    "inr"
+   ],
+   "shadow": false,
+   "units": [],
+   "bare_range": [
+    0.5,
+    10
+   ]
+  },
+  {
+   "key": "ldl",
+   "name": "LDL",
+   "aliases": [
+    "ldl",
+    "ldl cholesterol"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mg/dL",
+     "spell": [
+      "mg/dl",
+      "mg per dl",
+      "mg per deciliter",
+      "milligram per deciliter",
+      "milligrams per deciliter",
+      "mg%"
+     ],
+     "range": [
+      5,
+      600
+     ]
+    }
+   ],
+   "bare_range": [
+    5,
+    600
+   ]
+  },
+  {
+   "key": "hdl",
+   "name": "HDL",
+   "aliases": [
+    "hdl",
+    "hdl cholesterol"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mg/dL",
+     "spell": [
+      "mg/dl",
+      "mg per dl",
+      "mg per deciliter",
+      "milligram per deciliter",
+      "milligrams per deciliter",
+      "mg%"
+     ],
+     "range": [
+      5,
+      200
+     ]
+    }
+   ],
+   "bare_range": [
+    5,
+    200
+   ]
+  },
+  {
+   "key": "triglycerides",
+   "name": "Triglycerides",
+   "aliases": [
+    "triglycerides",
+    "triglyceride",
+    "tg"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mg/dL",
+     "spell": [
+      "mg/dl",
+      "mg per dl",
+      "mg per deciliter",
+      "milligram per deciliter",
+      "milligrams per deciliter",
+      "mg%"
+     ],
+     "range": [
+      10,
+      5000
+     ]
+    }
+   ],
+   "bare_range": [
+    10,
+    5000
+   ]
+  },
+  {
+   "key": "cholesterol",
+   "name": "Total cholesterol",
+   "aliases": [
+    "total cholesterol",
+    "cholesterol"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mg/dL",
+     "spell": [
+      "mg/dl",
+      "mg per dl",
+      "mg per deciliter",
+      "milligram per deciliter",
+      "milligrams per deciliter",
+      "mg%"
+     ],
+     "range": [
+      30,
+      1000
+     ]
+    }
+   ],
+   "bare_range": [
+    30,
+    1000
+   ]
+  },
+  {
+   "key": "uric_acid",
+   "name": "Uric acid",
+   "aliases": [
+    "uric acid"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mg/dL",
+     "spell": [
+      "mg/dl",
+      "mg per dl",
+      "mg per deciliter",
+      "milligram per deciliter",
+      "milligrams per deciliter",
+      "mg%"
+     ],
+     "range": [
+      0.5,
+      30
+     ]
+    }
+   ],
+   "bare_range": [
+    0.5,
+    30
+   ]
+  },
+  {
+   "key": "bilirubin",
+   "name": "Bilirubin",
+   "aliases": [
+    "bilirubin",
+    "total bilirubin"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "mg/dL",
+     "spell": [
+      "mg/dl",
+      "mg per dl",
+      "mg per deciliter",
+      "milligram per deciliter",
+      "milligrams per deciliter",
+      "mg%"
+     ],
+     "range": [
+      0.05,
+      60
+     ]
+    }
+   ],
+   "bare_range": [
+    0.05,
+    60
+   ]
+  },
+  {
+   "key": "alt",
+   "name": "SGPT/ALT",
+   "aliases": [
+    "sgpt",
+    "alt"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "U/L",
+     "spell": [
+      "u/l",
+      "iu/l",
+      "units per litre",
+      "u per l"
+     ],
+     "range": [
+      1,
+      10000
+     ]
+    }
+   ],
+   "bare_range": [
+    1,
+    10000
+   ]
+  },
+  {
+   "key": "ast",
+   "name": "SGOT/AST",
+   "aliases": [
+    "sgot",
+    "ast"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "U/L",
+     "spell": [
+      "u/l",
+      "iu/l",
+      "units per litre",
+      "u per l"
+     ],
+     "range": [
+      1,
+      10000
+     ]
+    }
+   ],
+   "bare_range": [
+    1,
+    10000
+   ]
+  },
+  {
+   "key": "albumin",
+   "name": "Albumin",
+   "aliases": [
+    "albumin",
+    "serum albumin"
+   ],
+   "shadow": true,
+   "units": [
+    {
+     "canon": "g/dL",
+     "spell": [
+      "g/dl",
+      "gm/dl",
+      "g per dl",
+      "gm per dl",
+      "gm%",
+      "g%"
+     ],
+     "range": [
+      0.5,
+      8
+     ]
+    }
+   ],
+   "bare_range": [
+    0.5,
+    8
+   ]
+  },
+  {
+   "key": "vitamin_d",
+   "name": "Vitamin D",
+   "aliases": [
+    "vitamin d",
+    "vit d",
+    "25 oh vitamin d",
+    "25-oh vitamin d"
+   ],
+   "shadow": true,
+   "units": [
+    {
+     "canon": "ng/mL",
+     "spell": [
+      "ng/ml",
+      "ng per ml"
+     ],
+     "range": [
+      1,
+      500
+     ]
+    },
+    {
+     "canon": "nmol/L",
+     "spell": [
+      "nmol/l"
+     ],
+     "range": [
+      2.5,
+      1250
+     ]
+    }
+   ],
+   "bare_range": [
+    1,
+    500
+   ]
+  },
+  {
+   "key": "b12",
+   "name": "Vitamin B12",
+   "aliases": [
+    "b12",
+    "vitamin b12",
+    "vit b12"
+   ],
+   "shadow": true,
+   "units": [
+    {
+     "canon": "pg/mL",
+     "spell": [
+      "pg/ml",
+      "pg per ml"
+     ],
+     "range": [
+      20,
+      10000
+     ]
+    },
+    {
+     "canon": "pmol/L",
+     "spell": [
+      "pmol/l"
+     ],
+     "range": [
+      15,
+      7500
+     ]
+    }
+   ],
+   "bare_range": [
+    20,
+    10000
+   ]
+  },
+  {
+   "key": "ferritin",
+   "name": "Ferritin",
+   "aliases": [
+    "ferritin"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "ng/mL",
+     "spell": [
+      "ng/ml",
+      "ng per ml",
+      "µg/l",
+      "μg/l",
+      "mcg/l"
+     ],
+     "range": [
+      1,
+      20000
+     ]
+    }
+   ],
+   "bare_range": [
+    1,
+    20000
+   ]
+  },
+  {
+   "key": "calcium",
+   "name": "Calcium",
+   "aliases": [
+    "calcium",
+    "serum calcium"
+   ],
+   "shadow": true,
+   "units": [
+    {
+     "canon": "mg/dL",
+     "spell": [
+      "mg/dl",
+      "mg per dl",
+      "mg per deciliter",
+      "milligram per deciliter",
+      "milligrams per deciliter",
+      "mg%"
+     ],
+     "range": [
+      3,
+      20
+     ]
+    },
+    {
+     "canon": "mmol/L",
+     "spell": [
+      "mmol/l"
+     ],
+     "range": [
+      0.7,
+      5
+     ]
+    }
+   ],
+   "bare_range": [
+    3,
+    20
+   ]
+  },
+  {
+   "key": "psa",
+   "name": "PSA",
+   "aliases": [
+    "psa"
+   ],
+   "shadow": false,
+   "units": [
+    {
+     "canon": "ng/mL",
+     "spell": [
+      "ng/ml",
+      "ng per ml"
+     ],
+     "range": [
+      0,
+      2000
+     ]
+    }
+   ],
+   "bare_range": [
+    0,
+    2000
+   ]
+  },
+  {
+   "key": "magnesium",
+   "name": "Magnesium",
+   "aliases": [
+    "magnesium",
+    "serum magnesium"
+   ],
+   "shadow": true,
+   "units": [
+    {
+     "canon": "mg/dL",
+     "spell": [
+      "mg/dl",
+      "mg per dl",
+      "mg per deciliter",
+      "milligram per deciliter",
+      "milligrams per deciliter",
+      "mg%"
+     ],
+     "range": [
+      0.3,
+      10
+     ]
+    },
+    {
+     "canon": "mEq/L",
+     "spell": [
+      "meq/l"
+     ],
+     "range": [
+      0.3,
+      8
+     ]
+    }
+   ],
+   "bare_range": [
+    0.3,
+    10
+   ]
+  },
+  {
+   "key": "zinc",
+   "name": "Zinc",
+   "aliases": [
+    "zinc",
+    "serum zinc"
+   ],
+   "shadow": true,
+   "units": [
+    {
+     "canon": "µg/dL",
+     "spell": [
+      "µg/dl",
+      "μg/dl",
+      "mcg/dl",
+      "ug/dl"
+     ],
+     "range": [
+      5,
+      600
+     ]
+    }
+   ],
+   "bare_range": [
+    5,
+    600
+   ]
+  },
+  {
+   "key": "folate",
+   "name": "Folate",
+   "aliases": [
+    "folate",
+    "folic acid",
+    "serum folate"
+   ],
+   "shadow": true,
+   "units": [
+    {
+     "canon": "ng/mL",
+     "spell": [
+      "ng/ml",
+      "ng per ml"
+     ],
+     "range": [
+      0.3,
+      100
+     ]
+    }
+   ],
+   "bare_range": [
+    0.3,
+    100
+   ]
+  }
+ ]
+}

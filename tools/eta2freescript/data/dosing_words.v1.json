@@ -1,0 +1,213 @@
+{
+ "version": "dosing-words.v1",
+ "spec": "global vetoes bullet 3, precise rule 3, C1; matching uses stems and plurals",
+ "dose_units": [
+  "mg",
+  "mgs",
+  "mcg",
+  "mcgs",
+  "µg",
+  "μg",
+  "ug",
+  "g",
+  "gm",
+  "gms",
+  "gram",
+  "grams",
+  "gramme",
+  "milligram",
+  "milligrams",
+  "microgram",
+  "micrograms",
+  "iu",
+  "unit",
+  "units",
+  "u",
+  "k",
+  "ml",
+  "mls",
+  "millilitre",
+  "millilitres",
+  "milliliter",
+  "milliliters",
+  "cc"
+ ],
+ "lab_unit_exempt_note": "rule 6/18: mg/dL, g/dL, mL/min, mmol/L, mEq/L, %, mIU/L, µIU/mL, pg/mL, ng/mL, U/L, IU/L, mg/L, mm/hr, /cumm, lakh and ×10³/µL are exempt from the dose-unit veto only when attached to an analyte; bare mg, g, IU, units, K never are",
+ "words": [
+  "daily",
+  "od",
+  "bd",
+  "tds",
+  "morning",
+  "night",
+  "subah",
+  "raat",
+  "tablet",
+  "tab",
+  "capsule",
+  "syrup",
+  "injection",
+  "drops",
+  "drop",
+  "puff",
+  "sachet",
+  "dose",
+  "wali",
+  "waali",
+  "take",
+  "le",
+  "lena",
+  "apply",
+  "use",
+  "weekly",
+  "once",
+  "twice",
+  "thrice",
+  "hs",
+  "sos",
+  "qid",
+  "bedtime",
+  "breakfast",
+  "lunch",
+  "dinner",
+  "give",
+  "dena",
+  "wala",
+  "goli",
+  "dawa",
+  "dawai",
+  "inj",
+  "cap",
+  "spray",
+  "strip",
+  "gram",
+  "maatre",
+  "beligge",
+  "ratri",
+  "medicine",
+  "medication",
+  "pill",
+  "drug",
+  "tabs",
+  "caps",
+  "dosage",
+  "prn",
+  "tid",
+  "bid",
+  "syp",
+  "ointment",
+  "cream",
+  "gel"
+ ],
+ "phrases": [
+  "before food",
+  "after food",
+  "khane ke baad",
+  "khane se pehle",
+  "empty stomach",
+  "on waking",
+  "alternate day",
+  "alternate days",
+  "ki goli",
+  "ki dawa",
+  "ki dawai",
+  "before meals",
+  "after meals",
+  "with food",
+  "at night",
+  "per day",
+  "a day"
+ ],
+ "irregular_forms": {
+  "take": [
+   "takes",
+   "taking",
+   "taken",
+   "took"
+  ],
+  "give": [
+   "gives",
+   "giving",
+   "given",
+   "gave"
+  ],
+  "use": [
+   "uses",
+   "used",
+   "using"
+  ],
+  "apply": [
+   "applies",
+   "applied",
+   "applying"
+  ],
+  "dose": [
+   "doses",
+   "dosed",
+   "dosing"
+  ],
+  "continue": [
+   "continues",
+   "continued",
+   "continuing"
+  ],
+  "prescribe": [
+   "prescribes",
+   "prescribed",
+   "prescribing"
+  ],
+  "night": [
+   "nights",
+   "nightly",
+   "overnight"
+  ],
+  "morning": [
+   "mornings"
+  ],
+  "tablet": [
+   "tablets"
+  ],
+  "capsule": [
+   "capsules"
+  ],
+  "medicine": [
+   "medicines"
+  ],
+  "pill": [
+   "pills"
+  ],
+  "drug": [
+   "drugs"
+  ],
+  "medication": [
+   "medications"
+  ],
+  "injection": [
+   "injections"
+  ],
+  "sachet": [
+   "sachets"
+  ],
+  "puff": [
+   "puffs"
+  ],
+  "daily": [
+   "everyday"
+  ]
+ },
+ "stems_extra": [
+  "continue",
+  "prescribe",
+  "prescription",
+  "regimen"
+ ],
+ "brand_cue_words": [
+  "took",
+  "prescribed",
+  "taking",
+  "started",
+  "start",
+  "giving"
+ ],
+ "daily_exempt_note": "rule 10: 'daily' is allowed only inside an exercise frame ('walk 30 minutes daily')"
+}

@@ -1,0 +1,695 @@
+{
+  "schema_version": "eta.freescript.v1.0",
+  "artifact_id": "00000000-0000-4000-8000-000000000002",
+  "supersedes": null,
+  "created_at": "2026-10-15T10:30:00+05:30",
+  "emission": {
+    "state": "full",
+    "reasons": []
+  },
+  "policy": {
+    "medicine_policy": "notes_only",
+    "advice_budget": {
+      "items": 5,
+      "chars": 300
+    },
+    "inputs_mode": "current"
+  },
+  "generator": {
+    "name": "hand-authored-example",
+    "version": "1.0",
+    "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "prompt_sha256s": {
+      "stageA": "0000000000000000000000000000000000000000000000000000000000000000",
+      "stageB": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "models": [
+      {
+        "role": "stageA",
+        "served_model_id": "example-model-a-2026-10",
+        "provider": "example-provider",
+        "zdr": true
+      },
+      {
+        "role": "stageB",
+        "served_model_id": "example-model-b-2026-10",
+        "provider": "example-provider",
+        "zdr": true
+      }
+    ],
+    "temperature": 0,
+    "run_id": "EXAMPLE-RUN-2"
+  },
+  "encounter": {
+    "eta_encounter_id": "EXAMPLE-ENC-2",
+    "room": "EXAMPLE-ROOM",
+    "visit_date_ist": "2026-10-15",
+    "window_start": "2026-10-15T10:00:00+05:30",
+    "window_end": "2026-10-15T10:15:00+05:30",
+    "languages": [
+      "en"
+    ],
+    "transcript": {
+      "segment_count": 11,
+      "diarised": true,
+      "english_source": "native",
+      "stt_engines": [
+        "example-stt-a"
+      ]
+    },
+    "doctor": {
+      "pulse_doctor_uid": null,
+      "specialty": "General Practitioner"
+    }
+  },
+  "pulse_link": {
+    "type_of_prescription": "HOSPITAL_GP",
+    "individual_uid": null,
+    "hospital_uid": null,
+    "consult_uid": null,
+    "prescription_uid": null,
+    "draft_exists": "unknown",
+    "link_status": "none",
+    "link_basis": null
+  },
+  "roster": [
+    {
+      "label": "speaker_0",
+      "talk_s": 380,
+      "role": "treating_doctor",
+      "role_votes": {
+        "role_track": "treating_doctor",
+        "clef": "treating_doctor",
+        "jev": "treating_doctor"
+      },
+      "three_of_three": true,
+      "armc": {
+        "state": "pass",
+        "cos": 0.84,
+        "margin_next_label": 0.21,
+        "margin_runner_up_centroid": 0.17,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": true,
+      "translator_of": null,
+      "order_capable": true
+    },
+    {
+      "label": "speaker_1",
+      "talk_s": 220,
+      "role": "patient",
+      "role_votes": {
+        "role_track": "patient",
+        "clef": "patient",
+        "jev": "patient"
+      },
+      "three_of_three": false,
+      "armc": {
+        "state": "fail",
+        "cos": 0.22,
+        "margin_next_label": null,
+        "margin_runner_up_centroid": null,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": false,
+      "translator_of": null,
+      "order_capable": false
+    }
+  ],
+  "spans": [
+    {
+      "span_id": "s1",
+      "segment_refs": [
+        "EXAMPLE-W2:1"
+      ],
+      "t0": "2026-10-15T10:00:40+05:30",
+      "t1": "2026-10-15T10:00:50+05:30",
+      "label": "speaker_1",
+      "lang": "en",
+      "quote_native": "cough for five days, dry",
+      "quote_en": "cough for five days, dry",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s2",
+      "segment_refs": [
+        "EXAMPLE-W2:2"
+      ],
+      "t0": "2026-10-15T10:00:55+05:30",
+      "t1": "2026-10-15T10:01:02+05:30",
+      "label": "speaker_1",
+      "lang": "en",
+      "quote_native": "no fever, no chest pain, no problem breathing",
+      "quote_en": "no fever, no chest pain, no problem breathing",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s3",
+      "segment_refs": [
+        "EXAMPLE-W2:3"
+      ],
+      "t0": "2026-10-15T10:01:05+05:30",
+      "t1": "2026-10-15T10:01:15+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "so dry cough five days, no fever, no chest pain, no breathlessness",
+      "quote_en": "so dry cough five days, no fever, no chest pain, no breathlessness",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s4",
+      "segment_refs": [
+        "EXAMPLE-W2:4"
+      ],
+      "t0": "2026-10-15T10:02:10+05:30",
+      "t1": "2026-10-15T10:02:20+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "chest is clear, saturation 98",
+      "quote_en": "chest is clear, saturation 98",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s5",
+      "segment_refs": [
+        "EXAMPLE-W2:5"
+      ],
+      "t0": "2026-10-15T10:03:00+05:30",
+      "t1": "2026-10-15T10:03:04+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "this is a simple URTI",
+      "quote_en": "this is a simple URTI",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s6",
+      "segment_refs": [
+        "EXAMPLE-W2:6"
+      ],
+      "t0": "2026-10-15T10:03:05+05:30",
+      "t1": "2026-10-15T10:03:08+05:30",
+      "label": "speaker_1",
+      "lang": "en",
+      "quote_native": "can you give me azithromycin",
+      "quote_en": "can you give me azithromycin",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s7",
+      "segment_refs": [
+        "EXAMPLE-W2:7"
+      ],
+      "t0": "2026-10-15T10:03:09+05:30",
+      "t1": "2026-10-15T10:03:15+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "you don't need an antibiotic now, no azithromycin",
+      "quote_en": "you don't need an antibiotic now, no azithromycin",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s8",
+      "segment_refs": [
+        "EXAMPLE-W2:8"
+      ],
+      "t0": "2026-10-15T10:03:16+05:30",
+      "t1": "2026-10-15T10:03:22+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "no need for a chest X-ray right now",
+      "quote_en": "no need for a chest X-ray right now",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s9",
+      "segment_refs": [
+        "EXAMPLE-W2:9"
+      ],
+      "t0": "2026-10-15T10:03:30+05:30",
+      "t1": "2026-10-15T10:03:40+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "take levocetirizine 5 at night for five days",
+      "quote_en": "take levocetirizine 5 at night for five days",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s10",
+      "segment_refs": [
+        "EXAMPLE-W2:10"
+      ],
+      "t0": "2026-10-15T10:03:45+05:30",
+      "t1": "2026-10-15T10:03:52+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "do steam twice a day and warm water gargles",
+      "quote_en": "do steam twice a day and warm water gargles",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s11",
+      "segment_refs": [
+        "EXAMPLE-W2:11"
+      ],
+      "t0": "2026-10-15T10:03:53+05:30",
+      "t1": "2026-10-15T10:03:56+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "symptomatic treatment for now",
+      "quote_en": "symptomatic treatment for now",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    }
+  ],
+  "gp_extraction": {
+    "presenting_complaints": {
+      "symptoms": "Dry cough for 5 days. No fever. No chest pain. No breathlessness.",
+      "diagnoses": [
+        {
+          "diagnosis_or_impression": "Acute upper respiratory tract infection",
+          "is_differential_diagnosis": false,
+          "raw_name": "URTI",
+          "aliases": [
+            "Upper respiratory tract infection"
+          ]
+        }
+      ]
+    },
+    "examination": "Chest clear on auscultation. SpO2 98%.",
+    "medicines": [],
+    "plan_of_management": {
+      "management_plan": "Symptomatic treatment. Medication changes discussed: see the confirm list.",
+      "requires_surgery_or_procedure": false
+    },
+    "general_advice": "Do steam twice a day and warm water gargles."
+  },
+  "confirm_prompts": [
+    {
+      "prompt_id": "p1",
+      "kind": "medicine",
+      "action": "start",
+      "drug": {
+        "spoken": "levocetirizine 5",
+        "brand_recognised": null,
+        "generic": "LEVOCETIRIZINE",
+        "components": [],
+        "base_molecule": "levocetirizine",
+        "form": "tablet",
+        "strength_heard": "5",
+        "lasa_risk": {
+          "pair_with": null,
+          "note": "not on the curated LASA list"
+        }
+      },
+      "attributes": {
+        "strength": {
+          "value": "5",
+          "cited_spans": [
+            "s9"
+          ],
+          "support": "supported"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": "at night",
+          "cited_spans": [
+            "s9"
+          ],
+          "support": "supported"
+        },
+        "duration": {
+          "value": "five days",
+          "cited_spans": [
+            "s9"
+          ],
+          "support": "supported"
+        },
+        "instruction": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        }
+      },
+      "who_said": {
+        "label": "speaker_0",
+        "role": "treating_doctor"
+      },
+      "doctor_confirm_reason": [
+        "notes_only"
+      ]
+    },
+    {
+      "prompt_id": "p2",
+      "kind": "medicine",
+      "action": "not_given",
+      "drug": {
+        "spoken": "azithromycin",
+        "brand_recognised": null,
+        "generic": "AZITHROMYCIN",
+        "components": [],
+        "base_molecule": "azithromycin",
+        "form": "tablet",
+        "strength_heard": null,
+        "lasa_risk": {
+          "pair_with": null,
+          "note": "not on the curated LASA list"
+        }
+      },
+      "attributes": {
+        "strength": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "duration": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "instruction": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        }
+      },
+      "who_said": {
+        "label": "speaker_0",
+        "role": "treating_doctor"
+      },
+      "doctor_confirm_reason": [
+        "notes_only",
+        "not_given"
+      ]
+    },
+    {
+      "prompt_id": "p3",
+      "kind": "investigation",
+      "action": "not_given",
+      "name": "Chest X-ray",
+      "attributes": {
+        "strength": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "duration": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "instruction": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        }
+      },
+      "who_said": {
+        "label": "speaker_0",
+        "role": "treating_doctor"
+      },
+      "doctor_confirm_reason": [
+        "not_given"
+      ]
+    }
+  ],
+  "doctor_words": [
+    {
+      "instruction_id": "dw1",
+      "category": "lifestyle",
+      "text_en": "Do steam twice a day and warm water gargles.",
+      "cited_spans": [
+        "s10"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 1,
+      "counselling": true
+    }
+  ],
+  "red_flags": [],
+  "provenance": [
+    {
+      "item_id": "e2-sym",
+      "kind": "symptoms",
+      "text": "dry cough 5 days; denies fever, chest pain, breathlessness",
+      "status": "prescribed",
+      "negated": true,
+      "support": "supported",
+      "cited_spans": [
+        "s1",
+        "s2",
+        "s3"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/presenting_complaints/symptoms",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e2-exam",
+      "kind": "examination",
+      "text": "chest clear, SpO2 98",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s4"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/examination",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e2-dx",
+      "kind": "diagnosis",
+      "text": "URTI",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s5"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/presenting_complaints/diagnoses/0",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e2-abx",
+      "kind": "medicine",
+      "text": "Azithromycin",
+      "names": [
+        "azithromycin",
+        "Azithromycin 500",
+        "Azithral",
+        "Zithromax"
+      ],
+      "status": "not_given",
+      "negated": true,
+      "support": "supported",
+      "cited_spans": [
+        "s6",
+        "s7"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": "p2",
+      "withheld_reason": null,
+      "flags": [
+        "negation_cue_nearby"
+      ]
+    },
+    {
+      "item_id": "e2-cxr",
+      "kind": "investigation",
+      "text": "Chest X-ray",
+      "names": [
+        "Chest X-ray",
+        "CXR",
+        "X-ray chest PA view"
+      ],
+      "status": "not_given",
+      "negated": true,
+      "support": "supported",
+      "cited_spans": [
+        "s8"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": "p3",
+      "withheld_reason": null,
+      "flags": [
+        "negation_cue_nearby"
+      ]
+    },
+    {
+      "item_id": "e2-plan",
+      "kind": "management_plan",
+      "text": "symptomatic; medication changes on the confirm list",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s11",
+        "s7"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/plan_of_management/management_plan",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e2-med",
+      "kind": "medicine",
+      "text": "Levocetirizine 5 mg at night for 5 days",
+      "names": [
+        "levocetirizine"
+      ],
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s9"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": "p1",
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e2-adv",
+      "kind": "advice",
+      "text": "steam inhalation, gargles",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s10"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/general_advice",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    }
+  ],
+  "note_text": "Co-morbidities:\nPresenting Complaint: Dry cough for 5 days. No fever. No chest pain. No breathlessness.\nExamination: Chest clear on auscultation. SpO2 98%.\nDiagnoses: Acute upper respiratory tract infection\nPlan of Management: Symptomatic treatment. Medication changes discussed: see the confirm list.\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nLEVOCETIRIZINE 5 — confirm\nFurther Investigation:\nFollow up:\nRefer to:\nGeneral Advice: Do steam twice a day and warm water gargles.",
+  "qa": {
+    "floors": {
+      "untaped_drugs": 0,
+      "invented_doses": 0,
+      "dose_precedence_errors": 0,
+      "clip_leakage": 0,
+      "placeholders": 0,
+      "red_flags_missing": 0,
+      "hallucinations_est": 0.0,
+      "validator_pass": true
+    },
+    "counts": {
+      "posted": 5,
+      "prompts": 3,
+      "withheld": 0,
+      "h_unattrib": 0,
+      "unaligned": 0,
+      "affirmed_from_patient": 0
+    },
+    "inputs": {
+      "mode": "current",
+      "role_votes_present": true,
+      "armc_gate": "on",
+      "case7": false
+    },
+    "models_served": [
+      "example-model-a-2026-10",
+      "example-model-b-2026-10"
+    ],
+    "render_template": "neutral-11h-v1"
+  }
+}

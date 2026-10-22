@@ -1,0 +1,182 @@
+"""FRX-V10 tokens, dictionary and dosing words (spec "Global vetoes", rules 3, 6, 7, C1).
+
+Tokens: runs of letters (an inner apostrophe stays), runs of digits (decimal and thousands separators stay) and the signs % and °. Punctuation is
+not a token, so "a window of 3 tokens" reaches over commas and full stops.
+
+The dictionary is the English word list plus the clinical whitelist, minus every catalogue name that is not an ordinary English word (the whitelist
+wins over the catalogue for analyte names). A single-token catalogue brand that IS an English word (Dart, Alex, Pan) stays in the dictionary: the
+exception relaxes only the dictionary veto (rule 28); the drug detector still counts it as a drug near a dosing word, "took" or "prescribed" (rule 7).
+"""
+from __future__ import annotations
+
+import re
+import unicodedata
+from dataclasses import dataclass
+from functools import lru_cache
+
+from . import data
+
+TOKEN_RX = re.compile(r"\d+(?:[.,]\d+)*|[^\W\d_]+(?:['’][^\W\d_]+)?|[%°]")
+_LATIN = re.compile(r"^[A-Za-z]+(?:['’][A-Za-z]+)?$")
+
+
+@dataclass(frozen=True)
+class Tok:
+    text: str
+    start: int
+    end: int
+
+    @property
+    def low(self) -> str:
+        return self.text.lower().replace("’", "'")
+
+    @property
+    def is_number(self) -> bool:
+        return self.text[:1].isdigit()
+
+    @property
+    def is_word(self) -> bool:
+        return self.text[:1].isalpha()
+
+
+def tokenize(text: str) -> list[Tok]:
+    return [Tok(m.group(), m.start(), m.end()) for m in TOKEN_RX.finditer(text)]
+
+
+def is_latin(w: str) -> bool:
+    return bool(_LATIN.match(w))
+
+
+def _fold(w: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", w.lower()) if not unicodedata.combining(c))
+
+
+# --- dosing words, with stems and plurals ---------------------------------------------------------------------------------------
+@lru_cache(maxsize=1)
+def _dosing() -> tuple[frozenset[str], tuple[tuple[str, ...], ...], frozenset[str]]:
+    d = data.load(data.DOSING_WORDS)
+    base = {w.lower() for w in d["words"]} | {w.lower() for w in d.get("stems_extra", [])}
+    forms = set(base)
+    for w in list(base):
+        if not w.isascii() or len(w) < 3:
+            continue
+        forms.update({w + "s", w + "es"})
+        stem = w[:-1] if w.endswith("e") else w
+        forms.update({stem + "ed", stem + "ing", w + "ed", w + "ing"})
+        if w.endswith("y"):
+            forms.update({w[:-1] + "ies", w[:-1] + "ied"})
+    for k, vs in d.get("irregular_forms", {}).items():
+        forms.add(k)
+        forms.update(vs)
+    # 3-letter and shorter words never take a suffix (it would turn "use" into "uses/used" only; "od" into "ods" is harmless but "le" must stay exact)
+    for w in base:
+        if len(w) <= 2:
+            forms.discard(w + "s")
+            forms.discard(w + "es")
+    phrases = tuple(tuple(p.lower().split()) for p in d["phrases"])
+    units = frozenset(u.lower() for u in d["dose_units"])
+    return frozenset(forms), phrases, units
+
+
+def is_dosing_word(low: str) -> bool:
+    return low in _dosing()[0]
+
+
+def is_dose_unit(low: str) -> bool:
+    return low in _dosing()[2]
+
+
+def dosing_phrase_spans(toks: list[Tok]) -> list[tuple[int, int]]:
+    """Token index ranges [i, j) where a multi-word dosing phrase ("before food", "khane ke baad", "ki goli") sits."""
+    out = []
+    lows = [t.low for t in toks]
+    for ph in _dosing()[1]:
+        n = len(ph)
+        for i in range(0, len(lows) - n + 1):
+            if tuple(lows[i:i + n]) == ph:
+                out.append((i, i + n))
+    return out
+
+
+def brand_cue(low: str) -> bool:
+    return low in {w.lower() for w in data.load(data.DOSING_WORDS).get("brand_cue_words", [])} or is_dosing_word(low)
+
+
+# --- dictionary -----------------------------------------------------------------------------------------------------------------
+def _split_words(items) -> set[str]:
+    out = set()
+    for it in items:
+        for m in re.finditer(r"[^\W\d_]+(?:['’][^\W\d_]+)?", str(it).lower()):
+            out.add(m.group().replace("’", "'"))
+    return out
+
+
+@lru_cache(maxsize=1)
+def english() -> frozenset[str]:
+    s = set(data.load(data.CONTRACT / "scowl_words.json")["words"]) | set(data.load(data.CONTRACT / "english_words_min.json")["words"])
+    return frozenset(w.lower() for w in s)
+
+
+@lru_cache(maxsize=1)
+def whitelist_words() -> frozenset[str]:
+    wl = data.load(data.WHITELIST)
+    ex = data.load(data.CONTRACT / "clinical_vocab_extra.json")
+    ab = data.load(data.CONTRACT / "clinical_abbreviations.json")
+    s = _split_words(ex["words"]) | _split_words(ab["words"]) | _split_words(ex.get("abbreviations", []))
+    for key in ("analyte_words", "vital_words", "unit_words", "time_words", "clinical_abbreviations", "name_tokens"):
+        s |= _split_words(wl.get(key, []))
+    return frozenset(s)
+
+
+@lru_cache(maxsize=1)
+def indic_function_words() -> frozenset[str]:
+    return frozenset(w.lower() for w in data.load(data.WHITELIST)["indic_romanized_function_words"])
+
+
+def norm_name(s: str) -> str:
+    s = unicodedata.normalize("NFKC", s or "").lower()
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", s)).strip()
+
+
+@lru_cache(maxsize=1)
+def catalogue_names() -> tuple[str, ...]:
+    return tuple(n for n in data.load(data.CATALOGUE_FILE)["names"] if isinstance(n, str))
+
+
+@lru_cache(maxsize=1)
+def catalogue_single_tokens() -> frozenset[str]:
+    """Catalogue names that are one alphabetic token of 3+ letters ("Warf", "Dart"): brands subtracted as whole names."""
+    out = set()
+    for n in catalogue_names():
+        k = norm_name(n)
+        if re.fullmatch(r"[a-z]{3,}", k):
+            out.add(k)
+    return frozenset(out)
+
+
+@lru_cache(maxsize=1)
+def dictionary() -> frozenset[str]:
+    eng = english()
+    wl = whitelist_words()
+    # a catalogue brand that is an ordinary English word stays (relaxes only the dictionary veto); one that is not leaves the dictionary
+    # unless the whitelist names it (analytes: calcium, iron, B12 ...)
+    sub = {w for w in catalogue_single_tokens() if w not in eng and w not in wl_analytes()}
+    return frozenset((eng | wl) - sub)
+
+
+@lru_cache(maxsize=1)
+def wl_analytes() -> frozenset[str]:
+    return frozenset(_split_words(data.load(data.WHITELIST).get("analyte_words", [])))
+
+
+def in_dictionary(low: str) -> bool:
+    """A Latin alphabetic token the dictionary allows. Tokens of 1-2 letters are allowed unless they are dosing words or dose units."""
+    low = _fold(low)
+    if len(low) <= data.thresholds()["max_short_dictionary_len"]:
+        return not (is_dosing_word(low) or is_dose_unit(low))
+    if low in dictionary():
+        return True
+    # possessive and simple plural of an allowed word
+    if low.endswith("'s") and low[:-2] in dictionary():
+        return True
+    return False

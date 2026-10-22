@@ -1,0 +1,249 @@
+{
+ "note": "Invented clean notes measured once each and never used to tune: batch1 was written after the in-sample tuning (it then informed the move to the larger SCOWL list); batch2 was written after that move. Reported, not gated. batch3 was written after fix round 4's rules were final and measured once without tuning.",
+ "batch1": [
+  {
+   "symptoms": "Swelling of both feet for 10 days, worse by evening. Mild breathlessness on walking.",
+   "examination": "Pitting oedema up to mid-shin. Jugular venous pressure raised. Bilateral basal crepitations.",
+   "diagnosis": "Suspected heart failure",
+   "plan": "Echocardiogram, renal function and electrolytes ordered.",
+   "advice": "Weigh yourself every morning. Limit salt in food.",
+   "follow_up": "Return at once if breathlessness at rest."
+  },
+  {
+   "symptoms": "Recurrent mouth ulcers for 3 months. Painful while eating spicy food.",
+   "examination": "Two shallow aphthous ulcers on the inner lip. No lymph nodes felt.",
+   "diagnosis": "Recurrent aphthous stomatitis",
+   "plan": "Blood count and vitamin B12 level ordered.",
+   "advice": "Avoid very spicy and sour food. Use a soft toothbrush.",
+   "follow_up": "Review with reports."
+  },
+  {
+   "symptoms": "Heel pain on first steps in the morning for 2 months.",
+   "examination": "Tenderness at the medial heel. Tight calf muscles.",
+   "diagnosis": "Plantar fasciitis",
+   "plan": "Stretching programme explained.",
+   "advice": "Wear cushioned footwear. Roll the foot over a cold bottle.",
+   "follow_up": "Review in six weeks."
+  },
+  {
+   "symptoms": "Scaly itchy patches on the elbows and scalp for a year.",
+   "examination": "Well demarcated silvery plaques on both elbows. Nail pitting.",
+   "diagnosis": "Plaque psoriasis",
+   "plan": "Dermatology referral discussed.",
+   "advice": "Keep the skin moisturised. Avoid scratching.",
+   "follow_up": "Review after the dermatology visit."
+  },
+  {
+   "symptoms": "Snoring and daytime sleepiness for 6 months. Wakes up with a dry mouth.",
+   "examination": "Neck circumference 43 cm. Crowded oropharynx.",
+   "diagnosis": "Suspected obstructive sleep apnoea",
+   "plan": "Sleep study referral.",
+   "advice": "Avoid alcohol in the evening. Sleep on your side.",
+   "follow_up": "Review with the sleep study report."
+  },
+  {
+   "symptoms": "Painful swelling in the groin on the right side when coughing for 1 month.",
+   "examination": "Reducible right inguinal swelling with a cough impulse.",
+   "diagnosis": "Right inguinal hernia",
+   "plan": "Surgical referral for repair.",
+   "advice": "Avoid lifting heavy objects.",
+   "follow_up": "Go to the emergency department at once if the swelling becomes hard and painful and does not go back."
+  },
+  {
+   "symptoms": "Tingling and numbness in the right thumb and index finger at night for 2 months.",
+   "examination": "Positive Tinel sign at the right wrist. Grip normal.",
+   "diagnosis": "Right carpal tunnel syndrome",
+   "plan": "Nerve conduction study ordered. Wrist splint at night.",
+   "advice": "Avoid repetitive wrist bending.",
+   "follow_up": "Review with the nerve conduction report."
+  },
+  {
+   "symptoms": "Hair fall for 3 months after a febrile illness.",
+   "examination": "Diffuse thinning. Pull test positive. Scalp normal.",
+   "diagnosis": "Telogen effluvium",
+   "plan": "Thyroid profile and ferritin ordered.",
+   "advice": "Eat a protein rich diet. Be gentle while combing.",
+   "follow_up": "Review in three months."
+  },
+  {
+   "symptoms": "Child with barking cough and hoarse voice since last night. Mild fever.",
+   "examination": "Inspiratory stridor only when crying. Chest clear.",
+   "diagnosis": "Mild croup",
+   "plan": "Supportive care explained to the parents.",
+   "advice": "Keep the child calm. Offer fluids often.",
+   "follow_up": "Return at once if the child struggles to breathe or the lips turn blue."
+  },
+  {
+   "symptoms": "Irregular periods and acne for a year. Weight gain.",
+   "examination": "Acne on the face. Excess hair on the chin. BMI 31.",
+   "diagnosis": "Suspected polycystic ovary syndrome",
+   "plan": "Pelvic ultrasound and hormone profile ordered.",
+   "advice": "Regular exercise and a balanced diet.",
+   "follow_up": "Review with reports."
+  }
+ ],
+ "batch2": [
+  {
+   "symptoms": "Burning feet and numbness in both soles for 4 months, worse at night.",
+   "examination": "Reduced vibration sense at both ankles. Ankle reflexes absent.",
+   "diagnosis": "Suspected peripheral neuropathy",
+   "plan": "Blood sugar, vitamin B12 and thyroid tests ordered.",
+   "advice": "Check your feet daily for cuts. Wear soft footwear.",
+   "follow_up": "Review with reports."
+  },
+  {
+   "symptoms": "Yellow eyes and dark urine for 1 week with loss of appetite.",
+   "examination": "Scleral icterus. Liver palpable two fingers below the costal margin, tender.",
+   "diagnosis": "Suspected acute viral hepatitis",
+   "plan": "Liver function tests and hepatitis serology ordered.",
+   "advice": "Avoid alcohol completely. Eat a light diet.",
+   "follow_up": "Return at once if confused or very drowsy."
+  },
+  {
+   "symptoms": "Painful swelling under the right jaw while eating for 2 weeks.",
+   "examination": "Tender swollen right submandibular gland. Dry mouth.",
+   "diagnosis": "Suspected submandibular sialadenitis",
+   "plan": "Ultrasound of the neck ordered.",
+   "advice": "Suck on lemon drops sparingly and drink plenty of water.",
+   "follow_up": "Review with the scan."
+  },
+  {
+   "symptoms": "Recurrent nosebleeds from the left side for 2 weeks.",
+   "examination": "Prominent vessels on the left anterior septum. Blood pressure 132/84.",
+   "diagnosis": "Anterior epistaxis",
+   "plan": "ENT referral for cautery discussed.",
+   "advice": "Pinch the soft part of the nose for ten minutes if it bleeds. Avoid picking the nose.",
+   "follow_up": "Go to the emergency department if bleeding does not stop after twenty minutes."
+  },
+  {
+   "symptoms": "Pain at the outer elbow on gripping for 6 weeks.",
+   "examination": "Tenderness over the lateral epicondyle. Pain on resisted wrist extension.",
+   "diagnosis": "Lateral epicondylitis",
+   "plan": "Activity modification and a forearm strap.",
+   "advice": "Rest the arm from gripping tasks.",
+   "follow_up": "Review in six weeks."
+  },
+  {
+   "symptoms": "Palpitations off and on for 1 month, lasting a few minutes. No fainting.",
+   "examination": "Pulse regular, 96 per minute. Fine tremor of the hands.",
+   "diagnosis": "Suspected hyperthyroidism",
+   "plan": "Thyroid function tests and ECG ordered.",
+   "advice": "Cut down on tea and coffee.",
+   "follow_up": "Return at once if chest pain or fainting."
+  },
+  {
+   "symptoms": "Itchy scalp with white flakes for 3 months.",
+   "examination": "Greasy scales over the scalp and eyebrows.",
+   "diagnosis": "Seborrhoeic dermatitis",
+   "plan": "Scalp care explained.",
+   "advice": "Wash the hair regularly. Avoid oily hair products.",
+   "follow_up": "Review in one month."
+  },
+  {
+   "symptoms": "Pain in the right lower abdomen since this morning with nausea and loss of appetite.",
+   "examination": "Tenderness and guarding in the right iliac fossa. Rebound tenderness.",
+   "diagnosis": "Suspected acute appendicitis",
+   "plan": "Urgent surgical referral and ultrasound.",
+   "advice": "Do not eat or drink until the surgeon sees you.",
+   "follow_up": "Go to the emergency department now."
+  },
+  {
+   "symptoms": "Forgetfulness for 1 year noticed by the family. Gets lost in familiar places.",
+   "examination": "Mini mental state score 21 out of 30. Gait normal.",
+   "diagnosis": "Suspected mild cognitive impairment",
+   "plan": "Neurology referral and blood tests ordered.",
+   "advice": "Keep a daily routine and a written diary.",
+   "follow_up": "Review after the neurology visit."
+  },
+  {
+   "symptoms": "Child with a limp for 2 days after a fall. No fever.",
+   "examination": "Pain on rotating the left hip. Able to stand.",
+   "diagnosis": "Suspected transient synovitis of the left hip",
+   "plan": "Hip ultrasound ordered.",
+   "advice": "Rest and avoid running for a week.",
+   "follow_up": "Return at once if fever develops or the child cannot stand."
+  }
+ ],
+ "batch3": [
+  {
+   "symptoms": "Bleeding gums while brushing for 1 month. No other bleeding.",
+   "examination": "Swollen, red gums with plaque. No ulcers.",
+   "diagnosis": "Gingivitis",
+   "plan": "Dental referral for scaling.",
+   "advice": "Brush twice a day gently. Use dental floss daily.",
+   "follow_up": "Review after the dental visit."
+  },
+  {
+   "symptoms": "Pain and stiffness in the neck for 5 days after sleeping awkwardly.",
+   "examination": "Spasm of the right trapezius. Full neurological examination normal.",
+   "diagnosis": "Acute neck strain",
+   "plan": "Posture advice and gentle neck exercises.",
+   "advice": "Apply a warm compress twice a day. Take breaks from the screen.",
+   "follow_up": "Return if arm weakness or numbness appears."
+  },
+  {
+   "symptoms": "Itchy red rash in the groin for 3 weeks.",
+   "examination": "Well defined red patch with a raised scaly edge in both groins.",
+   "diagnosis": "Tinea cruris",
+   "plan": "Skin care explained.",
+   "advice": "Keep the area dry. Wear loose cotton underwear.",
+   "follow_up": "Review in two weeks."
+  },
+  {
+   "symptoms": "Cough at night for 6 weeks after a cold. No fever, no weight loss.",
+   "examination": "Chest clear. Peak flow normal.",
+   "diagnosis": "Post-infectious cough",
+   "plan": "Chest X-ray if not settling.",
+   "advice": "Have warm fluids and honey at night. Avoid cold drinks.",
+   "follow_up": "Review in three weeks."
+  },
+  {
+   "symptoms": "Swelling and pain in the big toe joint since last night. Unable to wear shoes.",
+   "examination": "Hot, red, tender first metatarsophalangeal joint.",
+   "diagnosis": "Suspected acute gout",
+   "plan": "Serum uric acid ordered.",
+   "advice": "Rest the foot and keep it raised. Avoid red meat and alcohol.",
+   "follow_up": "Review with the report."
+  },
+  {
+   "symptoms": "Recurrent burning in the chest after spicy food for 2 months.",
+   "examination": "Abdomen soft, mild epigastric tenderness.",
+   "diagnosis": "Dyspepsia",
+   "plan": "Lifestyle changes discussed.",
+   "advice": "Eat dinner three hours before bed. Avoid spicy and fried food.",
+   "follow_up": "Review in four weeks."
+  },
+  {
+   "symptoms": "Child with a red, weeping rash around the mouth for 4 days.",
+   "examination": "Honey-coloured crusts around the mouth and nose.",
+   "diagnosis": "Impetigo",
+   "plan": "Hygiene measures explained to the parents.",
+   "advice": "Keep the child's nails short. Use a separate towel for the child.",
+   "follow_up": "Return if the rash spreads or fever starts."
+  },
+  {
+   "symptoms": "Ringing in both ears for 2 months, worse at night.",
+   "examination": "Ear canals clear. Tuning fork tests normal.",
+   "diagnosis": "Tinnitus",
+   "plan": "Audiometry ordered.",
+   "advice": "Avoid loud noise. Keep a fan on at night.",
+   "follow_up": "Review with the audiometry report."
+  },
+  {
+   "symptoms": "Lump in the left breast noticed 2 weeks ago. Not painful.",
+   "examination": "Firm, mobile 2 cm lump in the upper outer quadrant of the left breast. No skin change.",
+   "diagnosis": "Left breast lump for evaluation",
+   "plan": "Breast ultrasound and surgical referral.",
+   "advice": "Bring the scan report to the surgeon.",
+   "follow_up": "Review with the scan."
+  },
+  {
+   "symptoms": "Low mood, poor sleep and loss of interest for 6 weeks.",
+   "examination": "Flat affect. No thoughts of self-harm.",
+   "diagnosis": "Moderate depressive episode",
+   "plan": "Counselling referral and safety plan discussed.",
+   "advice": "Keep a daily routine. Stay in touch with family.",
+   "follow_up": "Return at once or call the emergency number if you feel unsafe."
+  }
+ ]
+}

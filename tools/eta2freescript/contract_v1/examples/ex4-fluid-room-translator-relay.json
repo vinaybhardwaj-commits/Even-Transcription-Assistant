@@ -1,0 +1,677 @@
+{
+  "schema_version": "eta.freescript.v1.0",
+  "artifact_id": "00000000-0000-4000-8000-000000000004",
+  "supersedes": null,
+  "created_at": "2026-10-15T10:30:00+05:30",
+  "emission": {
+    "state": "full",
+    "reasons": []
+  },
+  "policy": {
+    "medicine_policy": "notes_only",
+    "advice_budget": {
+      "items": 5,
+      "chars": 300
+    },
+    "inputs_mode": "current"
+  },
+  "generator": {
+    "name": "hand-authored-example",
+    "version": "1.0",
+    "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "prompt_sha256s": {
+      "stageA": "0000000000000000000000000000000000000000000000000000000000000000",
+      "stageB": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "models": [
+      {
+        "role": "stageA",
+        "served_model_id": "example-model-a-2026-10",
+        "provider": "example-provider",
+        "zdr": true
+      },
+      {
+        "role": "stageB",
+        "served_model_id": "example-model-b-2026-10",
+        "provider": "example-provider",
+        "zdr": true
+      }
+    ],
+    "temperature": 0,
+    "run_id": "EXAMPLE-RUN-4"
+  },
+  "encounter": {
+    "eta_encounter_id": "EXAMPLE-ENC-4",
+    "room": "EXAMPLE-ROOM",
+    "visit_date_ist": "2026-10-15",
+    "window_start": "2026-10-15T10:00:00+05:30",
+    "window_end": "2026-10-15T10:15:00+05:30",
+    "languages": [
+      "en",
+      "kn"
+    ],
+    "transcript": {
+      "segment_count": 24,
+      "diarised": true,
+      "english_source": "mt:example-mt-model",
+      "stt_engines": [
+        "example-stt-a"
+      ]
+    },
+    "doctor": {
+      "pulse_doctor_uid": null,
+      "specialty": "General Practitioner"
+    }
+  },
+  "pulse_link": {
+    "type_of_prescription": "HOSPITAL_GP",
+    "individual_uid": null,
+    "hospital_uid": null,
+    "consult_uid": null,
+    "prescription_uid": null,
+    "draft_exists": "unknown",
+    "link_status": "none",
+    "link_basis": null
+  },
+  "roster": [
+    {
+      "label": "speaker_0",
+      "talk_s": 420,
+      "role": "treating_doctor",
+      "role_votes": {
+        "role_track": "treating_doctor",
+        "clef": "treating_doctor",
+        "jev": "treating_doctor"
+      },
+      "three_of_three": true,
+      "armc": {
+        "state": "pass",
+        "cos": 0.84,
+        "margin_next_label": 0.21,
+        "margin_runner_up_centroid": 0.17,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": true,
+      "translator_of": null,
+      "order_capable": true
+    },
+    {
+      "label": "speaker_1",
+      "talk_s": 90,
+      "role": "patient",
+      "role_votes": {
+        "role_track": "patient",
+        "clef": "patient",
+        "jev": "patient"
+      },
+      "three_of_three": false,
+      "armc": {
+        "state": "fail",
+        "cos": 0.22,
+        "margin_next_label": null,
+        "margin_runner_up_centroid": null,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": false,
+      "translator_of": null,
+      "order_capable": false
+    },
+    {
+      "label": "speaker_2",
+      "talk_s": 160,
+      "role": "attender",
+      "role_votes": {
+        "role_track": "attender",
+        "clef": "attender",
+        "jev": "patient"
+      },
+      "three_of_three": false,
+      "armc": {
+        "state": "fail",
+        "cos": 0.31,
+        "margin_next_label": null,
+        "margin_runner_up_centroid": null,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": false,
+      "translator_of": null,
+      "order_capable": false
+    },
+    {
+      "label": "speaker_3",
+      "talk_s": 210,
+      "role": "translator",
+      "role_votes": {
+        "role_track": "translator",
+        "clef": "translator",
+        "jev": "unknown"
+      },
+      "three_of_three": false,
+      "armc": {
+        "state": "fail",
+        "cos": 0.36,
+        "margin_next_label": null,
+        "margin_runner_up_centroid": null,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": false,
+      "translator_of": "speaker_0",
+      "order_capable": false
+    }
+  ],
+  "spans": [
+    {
+      "span_id": "s1",
+      "segment_refs": [
+        "EXAMPLE-W4:1"
+      ],
+      "t0": "2026-10-15T10:00:30+05:30",
+      "t1": "2026-10-15T10:00:40+05:30",
+      "label": "speaker_2",
+      "lang": "kn",
+      "quote_native": "ivarige mooru dinadinda moothra maaduvaaga uri",
+      "quote_en": "she has burning when passing urine for three days",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s2",
+      "segment_refs": [
+        "EXAMPLE-W4:2"
+      ],
+      "t0": "2026-10-15T10:00:41+05:30",
+      "t1": "2026-10-15T10:00:50+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "burning while passing urine for three days, no fever",
+      "quote_en": "burning while passing urine for three days, no fever",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s3",
+      "segment_refs": [
+        "EXAMPLE-W4:3"
+      ],
+      "t0": "2026-10-15T10:02:00+05:30",
+      "t1": "2026-10-15T10:02:12+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "abdomen soft, mild tenderness above the pubic bone",
+      "quote_en": "abdomen soft, mild tenderness above the pubic bone",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s4",
+      "segment_refs": [
+        "EXAMPLE-W4:4"
+      ],
+      "t0": "2026-10-15T10:03:00+05:30",
+      "t1": "2026-10-15T10:03:05+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "likely a urinary tract infection",
+      "quote_en": "likely a urinary tract infection",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s5",
+      "segment_refs": [
+        "EXAMPLE-W4:5"
+      ],
+      "t0": "2026-10-15T10:03:06+05:30",
+      "t1": "2026-10-15T10:03:12+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "get a urine routine and culture done",
+      "quote_en": "get a urine routine and culture done",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s6",
+      "segment_refs": [
+        "EXAMPLE-W4:6"
+      ],
+      "t0": "2026-10-15T10:03:20+05:30",
+      "t1": "2026-10-15T10:03:30+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "nitrofurantoin 100 twice a day for five days after food",
+      "quote_en": "nitrofurantoin 100 twice a day for five days after food",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s7",
+      "segment_refs": [
+        "EXAMPLE-W4:7"
+      ],
+      "t0": "2026-10-15T10:03:31+05:30",
+      "t1": "2026-10-15T10:03:42+05:30",
+      "label": "speaker_3",
+      "lang": "kn",
+      "quote_native": "doctor heLtidaare nitrofurantoin nooru, dinakke eradu sala, aidu dina, oota aada mele",
+      "quote_en": "doctor says nitrofurantoin 100, twice a day, five days, after food",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": "s6"
+    },
+    {
+      "span_id": "s8",
+      "segment_refs": [
+        "EXAMPLE-W4:8"
+      ],
+      "t0": "2026-10-15T10:03:43+05:30",
+      "t1": "2026-10-15T10:03:45+05:30",
+      "label": "speaker_1",
+      "lang": "kn",
+      "quote_native": "dinakke eradu sala?",
+      "quote_en": "twice a day?",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s9",
+      "segment_refs": [
+        "EXAMPLE-W4:9"
+      ],
+      "t0": "2026-10-15T10:03:50+05:30",
+      "t1": "2026-10-15T10:03:56+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "drink at least three litres of water a day",
+      "quote_en": "drink at least three litres of water a day",
+      "span_source": "both",
+      "order_capable": true,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s10",
+      "segment_refs": [
+        "EXAMPLE-W4:10"
+      ],
+      "t0": "2026-10-15T10:03:57+05:30",
+      "t1": "2026-10-15T10:04:04+05:30",
+      "label": "speaker_3",
+      "lang": "kn",
+      "quote_native": "doctor heLtidaare dinakke mooru litre neeru kudiyiri",
+      "quote_en": "doctor says drink at least three litres of water a day",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": "s9"
+    },
+    {
+      "span_id": "s11",
+      "segment_refs": [
+        "EXAMPLE-W4:11"
+      ],
+      "t0": "2026-10-15T10:04:05+05:30",
+      "t1": "2026-10-15T10:04:10+05:30",
+      "label": "speaker_3",
+      "lang": "kn",
+      "quote_native": "kidney scan kooda maadisi",
+      "quote_en": "also get a kidney scan done",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    }
+  ],
+  "gp_extraction": {
+    "presenting_complaints": {
+      "symptoms": "Burning while passing urine for 3 days. No fever.",
+      "diagnoses": [
+        {
+          "diagnosis_or_impression": "Urinary tract infection",
+          "is_differential_diagnosis": true,
+          "raw_name": "urinary tract infection",
+          "aliases": [
+            "UTI"
+          ]
+        }
+      ]
+    },
+    "examination": "Abdomen soft. Mild suprapubic tenderness.",
+    "medicines": [],
+    "further_investigations": [
+      {
+        "name": "Urine Routine and Culture",
+        "urgent": false,
+        "instruction": "",
+        "raw_name": "urine routine and culture",
+        "aliases": [
+          "Urine R/M",
+          "Urine C/S"
+        ]
+      }
+    ],
+    "general_advice": "Drink at least three litres of water a day."
+  },
+  "confirm_prompts": [
+    {
+      "prompt_id": "p1",
+      "kind": "medicine",
+      "action": "start",
+      "drug": {
+        "spoken": "nitrofurantoin 100",
+        "brand_recognised": null,
+        "generic": "NITROFURANTOIN",
+        "components": [],
+        "base_molecule": "nitrofurantoin",
+        "form": "tablet",
+        "strength_heard": "100",
+        "lasa_risk": {
+          "pair_with": null,
+          "note": "not on the curated LASA list"
+        }
+      },
+      "attributes": {
+        "strength": {
+          "value": "100",
+          "cited_spans": [
+            "s6",
+            "s7"
+          ],
+          "support": "supported"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": "twice a day",
+          "cited_spans": [
+            "s6",
+            "s7"
+          ],
+          "support": "supported"
+        },
+        "duration": {
+          "value": "five days",
+          "cited_spans": [
+            "s6",
+            "s7"
+          ],
+          "support": "supported"
+        },
+        "instruction": {
+          "value": "after food",
+          "cited_spans": [
+            "s6",
+            "s7"
+          ],
+          "support": "supported"
+        }
+      },
+      "who_said": {
+        "label": "speaker_0",
+        "role": "treating_doctor"
+      },
+      "doctor_confirm_reason": [
+        "notes_only",
+        "translator_relay"
+      ]
+    },
+    {
+      "prompt_id": "p2",
+      "kind": "investigation",
+      "action": "start",
+      "name": "Kidney scan",
+      "attributes": {
+        "strength": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "duration": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "instruction": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        }
+      },
+      "who_said": {
+        "label": "speaker_3",
+        "role": "translator"
+      },
+      "doctor_confirm_reason": [
+        "translator_relay",
+        "not_order_capable"
+      ]
+    }
+  ],
+  "doctor_words": [
+    {
+      "instruction_id": "dw1",
+      "category": "diet",
+      "text_en": "Drink at least three litres of water a day.",
+      "cited_spans": [
+        "s9",
+        "s10"
+      ],
+      "firmness": "firm",
+      "final_position": true,
+      "superseded_by": null,
+      "emphasis_count": 2,
+      "counselling": true
+    }
+  ],
+  "red_flags": [],
+  "provenance": [
+    {
+      "item_id": "e4-sym",
+      "kind": "symptoms",
+      "text": "dysuria 3 days, no fever",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s1",
+        "s2"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/presenting_complaints/symptoms",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": [
+        "translation_uncertain"
+      ]
+    },
+    {
+      "item_id": "e4-exam",
+      "kind": "examination",
+      "text": "abdomen soft, suprapubic tenderness",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s3"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/examination",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e4-dx",
+      "kind": "diagnosis",
+      "text": "likely UTI",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s4"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/presenting_complaints/diagnoses/0",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e4-urine",
+      "kind": "investigation",
+      "text": "urine routine and culture",
+      "names": [
+        "Urine Routine and Culture"
+      ],
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s5"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/further_investigations/0",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e4-med",
+      "kind": "medicine",
+      "text": "nitrofurantoin 100 BD x 5 days",
+      "names": [
+        "nitrofurantoin"
+      ],
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s6",
+        "s7"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": null,
+      "prompt_id": "p1",
+      "withheld_reason": null,
+      "flags": [
+        "translator_relay"
+      ]
+    },
+    {
+      "item_id": "e4-scan",
+      "kind": "investigation",
+      "text": "kidney scan raised by the translator",
+      "names": [
+        "Kidney scan"
+      ],
+      "status": "discussed_only",
+      "negated": false,
+      "support": "h_unattrib",
+      "cited_spans": [
+        "s11"
+      ],
+      "alignment": "unaligned",
+      "span_source": "none",
+      "json_pointer": null,
+      "prompt_id": "p2",
+      "withheld_reason": null,
+      "flags": [
+        "translator_relay",
+        "not_order_capable"
+      ]
+    },
+    {
+      "item_id": "e4-adv",
+      "kind": "advice",
+      "text": "fluids",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s9",
+        "s10"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "both",
+      "json_pointer": "/general_advice",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    }
+  ],
+  "note_text": "Co-morbidities:\nPresenting Complaint: Burning while passing urine for 3 days. No fever.\nExamination: Abdomen soft. Mild suprapubic tenderness.\nDiagnoses: ?Urinary tract infection\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nNITROFURANTOIN 100 — confirm\nFurther Investigation: Urine Routine and Culture\nFollow up:\nRefer to:\nGeneral Advice: Drink at least three litres of water a day.",
+  "qa": {
+    "floors": {
+      "untaped_drugs": 0,
+      "invented_doses": 0,
+      "dose_precedence_errors": 0,
+      "clip_leakage": 0,
+      "placeholders": 0,
+      "red_flags_missing": 0,
+      "hallucinations_est": 0.0,
+      "validator_pass": true
+    },
+    "counts": {
+      "posted": 5,
+      "prompts": 2,
+      "withheld": 0,
+      "h_unattrib": 1,
+      "unaligned": 1,
+      "affirmed_from_patient": 0
+    },
+    "inputs": {
+      "mode": "current",
+      "role_votes_present": true,
+      "armc_gate": "on",
+      "case7": false
+    },
+    "models_served": [
+      "example-model-a-2026-10",
+      "example-model-b-2026-10"
+    ],
+    "render_template": "neutral-11h-v1"
+  }
+}

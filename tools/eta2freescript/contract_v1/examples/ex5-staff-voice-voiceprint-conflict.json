@@ -1,0 +1,551 @@
+{
+  "schema_version": "eta.freescript.v1.0",
+  "artifact_id": "00000000-0000-4000-8000-000000000005",
+  "supersedes": null,
+  "created_at": "2026-10-15T10:30:00+05:30",
+  "emission": {
+    "state": "full",
+    "reasons": []
+  },
+  "policy": {
+    "medicine_policy": "notes_only",
+    "advice_budget": {
+      "items": 5,
+      "chars": 300
+    },
+    "inputs_mode": "current"
+  },
+  "generator": {
+    "name": "hand-authored-example",
+    "version": "1.0",
+    "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "prompt_sha256s": {
+      "stageA": "0000000000000000000000000000000000000000000000000000000000000000",
+      "stageB": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "models": [
+      {
+        "role": "stageA",
+        "served_model_id": "example-model-a-2026-10",
+        "provider": "example-provider",
+        "zdr": true
+      },
+      {
+        "role": "stageB",
+        "served_model_id": "example-model-b-2026-10",
+        "provider": "example-provider",
+        "zdr": true
+      }
+    ],
+    "temperature": 0,
+    "run_id": "EXAMPLE-RUN-5"
+  },
+  "encounter": {
+    "eta_encounter_id": "EXAMPLE-ENC-5",
+    "room": "EXAMPLE-ROOM",
+    "visit_date_ist": "2026-10-15",
+    "window_start": "2026-10-15T10:00:00+05:30",
+    "window_end": "2026-10-15T10:15:00+05:30",
+    "languages": [
+      "en"
+    ],
+    "transcript": {
+      "segment_count": 16,
+      "diarised": true,
+      "english_source": "native",
+      "stt_engines": [
+        "example-stt-a"
+      ]
+    },
+    "doctor": {
+      "pulse_doctor_uid": null,
+      "specialty": "General Practitioner"
+    }
+  },
+  "pulse_link": {
+    "type_of_prescription": "HOSPITAL_GP",
+    "individual_uid": null,
+    "hospital_uid": null,
+    "consult_uid": null,
+    "prescription_uid": null,
+    "draft_exists": "unknown",
+    "link_status": "none",
+    "link_basis": null
+  },
+  "roster": [
+    {
+      "label": "speaker_0",
+      "talk_s": 200,
+      "role": "patient",
+      "role_votes": {
+        "role_track": "patient",
+        "clef": "patient",
+        "jev": "patient"
+      },
+      "three_of_three": false,
+      "armc": {
+        "state": "fail",
+        "cos": 0.22,
+        "margin_next_label": null,
+        "margin_runner_up_centroid": null,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": false,
+      "translator_of": null,
+      "order_capable": false
+    },
+    {
+      "label": "speaker_1",
+      "talk_s": 140,
+      "role": "staff",
+      "role_votes": {
+        "role_track": "treating_doctor",
+        "clef": "treating_doctor",
+        "jev": "treating_doctor"
+      },
+      "three_of_three": true,
+      "armc": {
+        "state": "fail",
+        "cos": 0.31,
+        "margin_next_label": null,
+        "margin_runner_up_centroid": null,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": false,
+      "translator_of": null,
+      "order_capable": false
+    },
+    {
+      "label": "speaker_2",
+      "talk_s": 330,
+      "role": "treating_doctor",
+      "role_votes": {
+        "role_track": "other_clinician",
+        "clef": "treating_doctor",
+        "jev": "treating_doctor"
+      },
+      "three_of_three": false,
+      "armc": {
+        "state": "pass",
+        "cos": 0.82,
+        "margin_next_label": 0.21,
+        "margin_runner_up_centroid": 0.17,
+        "gate_flag": "on"
+      },
+      "voiceprint_match": true,
+      "translator_of": null,
+      "order_capable": false
+    }
+  ],
+  "spans": [
+    {
+      "span_id": "s1",
+      "segment_refs": [
+        "EXAMPLE-W5:1"
+      ],
+      "t0": "2026-10-15T10:00:30+05:30",
+      "t1": "2026-10-15T10:00:40+05:30",
+      "label": "speaker_0",
+      "lang": "en",
+      "quote_native": "my knee has been paining for two weeks since I slipped",
+      "quote_en": "my knee has been paining for two weeks since I slipped",
+      "span_source": "none",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s2",
+      "segment_refs": [
+        "EXAMPLE-W5:2"
+      ],
+      "t0": "2026-10-15T10:00:41+05:30",
+      "t1": "2026-10-15T10:00:50+05:30",
+      "label": "speaker_2",
+      "lang": "en",
+      "quote_native": "right knee pain for two weeks after a slip, no swelling",
+      "quote_en": "right knee pain for two weeks after a slip, no swelling",
+      "span_source": "armc",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null,
+      "segcheck": {
+        "cos": 0.79,
+        "rank_first": true
+      }
+    },
+    {
+      "span_id": "s3",
+      "segment_refs": [
+        "EXAMPLE-W5:3"
+      ],
+      "t0": "2026-10-15T10:02:00+05:30",
+      "t1": "2026-10-15T10:02:10+05:30",
+      "label": "speaker_2",
+      "lang": "en",
+      "quote_native": "mild tenderness on the inner side, full range of movement",
+      "quote_en": "mild tenderness on the inner side, full range of movement",
+      "span_source": "armc",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null,
+      "segcheck": {
+        "cos": 0.77,
+        "rank_first": true
+      }
+    },
+    {
+      "span_id": "s4",
+      "segment_refs": [
+        "EXAMPLE-W5:4"
+      ],
+      "t0": "2026-10-15T10:03:00+05:30",
+      "t1": "2026-10-15T10:03:04+05:30",
+      "label": "speaker_2",
+      "lang": "en",
+      "quote_native": "this looks like a sprain",
+      "quote_en": "this looks like a sprain",
+      "span_source": "armc",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null,
+      "segcheck": {
+        "cos": 0.8,
+        "rank_first": true
+      }
+    },
+    {
+      "span_id": "s5",
+      "segment_refs": [
+        "EXAMPLE-W5:5"
+      ],
+      "t0": "2026-10-15T10:03:10+05:30",
+      "t1": "2026-10-15T10:03:20+05:30",
+      "label": "speaker_1",
+      "lang": "en",
+      "quote_native": "take aceclofenac 100 twice a day after food for five days",
+      "quote_en": "take aceclofenac 100 twice a day after food for five days",
+      "span_source": "3of3",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s6",
+      "segment_refs": [
+        "EXAMPLE-W5:6"
+      ],
+      "t0": "2026-10-15T10:03:21+05:30",
+      "t1": "2026-10-15T10:03:25+05:30",
+      "label": "speaker_1",
+      "lang": "en",
+      "quote_native": "and get an X-ray of the right knee",
+      "quote_en": "and get an X-ray of the right knee",
+      "span_source": "3of3",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null
+    },
+    {
+      "span_id": "s7",
+      "segment_refs": [
+        "EXAMPLE-W5:7"
+      ],
+      "t0": "2026-10-15T10:03:30+05:30",
+      "t1": "2026-10-15T10:03:36+05:30",
+      "label": "speaker_2",
+      "lang": "en",
+      "quote_native": "apply ice for fifteen minutes three times a day",
+      "quote_en": "apply ice for fifteen minutes three times a day",
+      "span_source": "armc",
+      "order_capable": false,
+      "boundary_quarantined": false,
+      "relay_of": null,
+      "segcheck": {
+        "cos": 0.81,
+        "rank_first": true
+      }
+    }
+  ],
+  "gp_extraction": {
+    "presenting_complaints": {
+      "symptoms": "Right knee pain for 2 weeks after a slip. No swelling.",
+      "diagnoses": [
+        {
+          "diagnosis_or_impression": "Knee sprain",
+          "is_differential_diagnosis": true,
+          "raw_name": "sprain",
+          "aliases": [
+            "Sprain of knee"
+          ]
+        }
+      ]
+    },
+    "examination": "Mild medial joint line tenderness. Full range of movement.",
+    "medicines": []
+  },
+  "confirm_prompts": [
+    {
+      "prompt_id": "p1",
+      "kind": "medicine",
+      "action": "start",
+      "drug": {
+        "spoken": "aceclofenac 100",
+        "brand_recognised": null,
+        "generic": "ACECLOFENAC",
+        "components": [],
+        "base_molecule": "aceclofenac",
+        "form": "tablet",
+        "strength_heard": "100",
+        "lasa_risk": {
+          "pair_with": null,
+          "note": "not on the curated LASA list"
+        }
+      },
+      "attributes": {
+        "strength": {
+          "value": "100",
+          "cited_spans": [
+            "s5"
+          ],
+          "support": "h_unattrib"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": "twice a day",
+          "cited_spans": [
+            "s5"
+          ],
+          "support": "h_unattrib"
+        },
+        "duration": {
+          "value": "five days",
+          "cited_spans": [
+            "s5"
+          ],
+          "support": "h_unattrib"
+        },
+        "instruction": {
+          "value": "after food",
+          "cited_spans": [
+            "s5"
+          ],
+          "support": "h_unattrib"
+        }
+      },
+      "who_said": {
+        "label": "speaker_1",
+        "role": "staff"
+      },
+      "doctor_confirm_reason": [
+        "notes_only",
+        "not_order_capable"
+      ]
+    },
+    {
+      "prompt_id": "p2",
+      "kind": "investigation",
+      "action": "start",
+      "name": "X-ray right knee",
+      "attributes": {
+        "strength": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "dose": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "route": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "frequency": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "duration": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        },
+        "instruction": {
+          "value": null,
+          "cited_spans": [],
+          "support": "not_stated"
+        }
+      },
+      "who_said": {
+        "label": "speaker_1",
+        "role": "staff"
+      },
+      "doctor_confirm_reason": [
+        "not_order_capable"
+      ]
+    }
+  ],
+  "doctor_words": [],
+  "red_flags": [],
+  "provenance": [
+    {
+      "item_id": "e5-sym",
+      "kind": "symptoms",
+      "text": "right knee pain 2 weeks after a slip",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s1",
+        "s2"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "none",
+      "json_pointer": "/presenting_complaints/symptoms",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e5-exam",
+      "kind": "examination",
+      "text": "medial tenderness, full ROM",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s3"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "armc",
+      "json_pointer": "/examination",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e5-dx",
+      "kind": "diagnosis",
+      "text": "?knee sprain",
+      "status": "prescribed",
+      "negated": false,
+      "support": "supported",
+      "cited_spans": [
+        "s4"
+      ],
+      "alignment": "aligned_code",
+      "span_source": "armc",
+      "json_pointer": "/presenting_complaints/diagnoses/0",
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": []
+    },
+    {
+      "item_id": "e5-med",
+      "kind": "medicine",
+      "text": "aceclofenac 100 BD x 5 days, said by a non-order-capable voice",
+      "names": [
+        "aceclofenac"
+      ],
+      "status": "prescribed",
+      "negated": false,
+      "support": "h_unattrib",
+      "cited_spans": [
+        "s5"
+      ],
+      "alignment": "unaligned",
+      "span_source": "3of3",
+      "json_pointer": null,
+      "prompt_id": "p1",
+      "withheld_reason": null,
+      "flags": [
+        "not_order_capable"
+      ]
+    },
+    {
+      "item_id": "e5-xr",
+      "kind": "investigation",
+      "text": "X-ray right knee, said by a non-order-capable voice",
+      "names": [
+        "X-ray right knee"
+      ],
+      "status": "prescribed",
+      "negated": false,
+      "support": "h_unattrib",
+      "cited_spans": [
+        "s6"
+      ],
+      "alignment": "unaligned",
+      "span_source": "3of3",
+      "json_pointer": null,
+      "prompt_id": "p2",
+      "withheld_reason": null,
+      "flags": [
+        "not_order_capable"
+      ]
+    },
+    {
+      "item_id": "e5-ice",
+      "kind": "advice",
+      "text": "ice three times a day; no order-capable voice in the room",
+      "status": "discussed_only",
+      "negated": false,
+      "support": "h_unattrib",
+      "cited_spans": [
+        "s7"
+      ],
+      "alignment": "unaligned",
+      "span_source": "armc",
+      "json_pointer": null,
+      "prompt_id": null,
+      "withheld_reason": null,
+      "flags": [
+        "not_order_capable"
+      ]
+    }
+  ],
+  "note_text": "Co-morbidities:\nPresenting Complaint: Right knee pain for 2 weeks after a slip. No swelling.\nExamination: Mild medial joint line tenderness. Full range of movement.\nDiagnoses: ?Knee sprain\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nACECLOFENAC — confirm\nFurther Investigation:\nFollow up:\nRefer to:\nGeneral Advice:",
+  "qa": {
+    "floors": {
+      "untaped_drugs": 0,
+      "invented_doses": 0,
+      "dose_precedence_errors": 0,
+      "clip_leakage": 0,
+      "placeholders": 0,
+      "red_flags_missing": 0,
+      "hallucinations_est": 0.0,
+      "validator_pass": true
+    },
+    "counts": {
+      "posted": 3,
+      "prompts": 2,
+      "withheld": 0,
+      "h_unattrib": 3,
+      "unaligned": 3,
+      "affirmed_from_patient": 0
+    },
+    "inputs": {
+      "mode": "current",
+      "role_votes_present": true,
+      "armc_gate": "on",
+      "case7": false
+    },
+    "models_served": [
+      "example-model-a-2026-10",
+      "example-model-b-2026-10"
+    ],
+    "render_template": "neutral-11h-v1"
+  }
+}

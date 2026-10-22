@@ -1,0 +1,165 @@
+{
+ "note": "20 invented clean GP notes (no medicine named) written before the vocabulary was tuned; V18 must pass all of them.",
+ "notes": [
+  {
+   "symptoms": "Sore throat for 3 days with mild fever. No cough. No difficulty swallowing.",
+   "examination": "Throat congested. Tonsils not enlarged. Temperature 99.6 F.",
+   "diagnosis": "Acute pharyngitis",
+   "plan": "Symptomatic care. Review if worse.",
+   "advice": "Warm salt water gargles. Drink warm fluids.",
+   "follow_up": "Return if fever persists beyond 3 days."
+  },
+  {
+   "symptoms": "Lower back pain for 1 week after lifting a heavy box. No leg numbness.",
+   "examination": "Paraspinal muscle tenderness. Straight leg raise negative.",
+   "diagnosis": "Mechanical low back pain",
+   "plan": "Physiotherapy referral discussed.",
+   "advice": "Avoid lifting heavy weights. Apply a warm compress.",
+   "follow_up": "Review in two weeks."
+  },
+  {
+   "symptoms": "Headache on and off for 2 weeks, worse in the evening. No vomiting. No blurred vision.",
+   "examination": "Neurological examination normal. Blood pressure 124/80.",
+   "diagnosis": "Tension-type headache",
+   "plan": "Sleep hygiene and screen breaks.",
+   "advice": "Sleep at a fixed time. Limit screen time at night.",
+   "follow_up": "Come back if the headache wakes you from sleep."
+  },
+  {
+   "symptoms": "Loose stools 4 times a day since yesterday. Mild abdominal cramps. No blood in stool.",
+   "examination": "Abdomen soft, mild periumbilical tenderness. Mild dehydration.",
+   "diagnosis": "Acute gastroenteritis",
+   "plan": "Oral fluids and a light diet.",
+   "advice": "Drink plenty of clean water. Eat light home food.",
+   "follow_up": "Return at once if there is blood in the stool or you cannot keep fluids down."
+  },
+  {
+   "symptoms": "Itchy rash on both forearms for 5 days after gardening.",
+   "examination": "Erythematous papules on both forearms. No pus.",
+   "diagnosis": "Contact dermatitis",
+   "plan": "Identify and avoid the trigger.",
+   "advice": "Wear gloves while gardening. Do not scratch.",
+   "follow_up": "Review in one week if not better."
+  },
+  {
+   "symptoms": "Burning in the upper abdomen after meals for 1 month. Worse on lying down.",
+   "examination": "Mild epigastric tenderness. No guarding.",
+   "diagnosis": "Gastro-oesophageal reflux disease",
+   "plan": "Lifestyle changes discussed.",
+   "advice": "Eat small meals. Do not lie down soon after eating. Raise the head end of the bed.",
+   "follow_up": "Review in four weeks."
+  },
+  {
+   "symptoms": "Pain and swelling in the right ankle after a twist while walking yesterday.",
+   "examination": "Swelling over the lateral malleolus. Able to bear weight.",
+   "diagnosis": "Right ankle sprain",
+   "plan": "Rest, ice, compression and elevation.",
+   "advice": "Keep the foot raised. Apply ice for fifteen minutes three times a day.",
+   "follow_up": "Return if you cannot walk on it."
+  },
+  {
+   "symptoms": "Runny nose and sneezing every morning for 2 months. Itchy eyes.",
+   "examination": "Pale, swollen nasal mucosa. Clear discharge.",
+   "diagnosis": "Allergic rhinitis",
+   "plan": "Allergen avoidance discussed.",
+   "advice": "Keep the bedroom free of dust. Wash bed sheets weekly.",
+   "follow_up": "Review in one month."
+  },
+  {
+   "symptoms": "Fatigue and weight gain for 3 months. Feels cold often.",
+   "examination": "Dry skin. Pulse 62 per minute.",
+   "diagnosis": "Suspected hypothyroidism",
+   "plan": "Thyroid function tests ordered.",
+   "advice": "Bring the report at the next visit.",
+   "follow_up": "Follow up with reports."
+  },
+  {
+   "symptoms": "Frequent urination and increased thirst for 1 month.",
+   "examination": "BMI 29. Random blood sugar 248 mg/dL.",
+   "diagnosis": "Suspected type 2 diabetes mellitus",
+   "plan": "Fasting and post-meal sugar and HbA1c ordered.",
+   "advice": "Cut down on sweets and sugary drinks. Walk thirty minutes daily.",
+   "follow_up": "Review with reports in one week."
+  },
+  {
+   "symptoms": "Ear pain on the left side for 2 days with reduced hearing.",
+   "examination": "Left tympanic membrane red and bulging.",
+   "diagnosis": "Left acute otitis media",
+   "plan": "Keep the ear dry.",
+   "advice": "Do not put anything inside the ear. Keep water out of the ear while bathing.",
+   "follow_up": "Return if discharge appears from the ear."
+  },
+  {
+   "symptoms": "Chest tightness on climbing stairs for 2 weeks, relieved by rest.",
+   "examination": "Heart sounds normal. Blood pressure 148/92.",
+   "diagnosis": "Suspected stable angina",
+   "plan": "ECG and lipid profile ordered. Cardiology referral discussed.",
+   "advice": "Stop smoking. Avoid heavy exertion until reviewed.",
+   "follow_up": "Go to the emergency department at once if the chest pain lasts more than ten minutes."
+  },
+  {
+   "symptoms": "Painful red eye on the right side since this morning with watering.",
+   "examination": "Right conjunctival congestion. Vision normal.",
+   "diagnosis": "Right conjunctivitis",
+   "plan": "Eye hygiene discussed.",
+   "advice": "Wash hands often. Do not share towels.",
+   "follow_up": "Return if vision becomes blurred."
+  },
+  {
+   "symptoms": "Knee pain on both sides for 6 months, worse on climbing stairs. Morning stiffness for 10 minutes.",
+   "examination": "Crepitus in both knees. No effusion.",
+   "diagnosis": "Osteoarthritis of both knees",
+   "plan": "Weight loss and quadriceps exercises.",
+   "advice": "Do the knee exercises daily. Avoid squatting.",
+   "follow_up": "Review in six weeks."
+  },
+  {
+   "symptoms": "Cough with yellow sputum for 1 week and fever for 3 days. Breathlessness on exertion.",
+   "examination": "Crackles at the right lung base. SpO2 95 percent.",
+   "diagnosis": "Suspected community acquired pneumonia",
+   "plan": "Chest X-ray and complete blood count ordered.",
+   "advice": "Rest and drink fluids.",
+   "follow_up": "Come to the emergency department at once if breathing gets worse."
+  },
+  {
+   "symptoms": "Missed period for 6 weeks. Mild nausea in the mornings.",
+   "examination": "Abdomen soft. Blood pressure 110/70.",
+   "diagnosis": "Suspected early pregnancy",
+   "plan": "Urine pregnancy test and ultrasound ordered.",
+   "advice": "Eat small frequent meals. Avoid alcohol and smoking.",
+   "follow_up": "Return at once if there is bleeding or severe pain."
+  },
+  {
+   "symptoms": "Anxiety and poor sleep for 2 months after a job change.",
+   "examination": "Alert and oriented. Pulse 88 per minute.",
+   "diagnosis": "Adjustment disorder with anxiety",
+   "plan": "Counselling referral discussed.",
+   "advice": "Keep a regular sleep routine. Take a daily walk.",
+   "follow_up": "Review in two weeks."
+  },
+  {
+   "symptoms": "Child with fever for 1 day and two episodes of vomiting. Playful between fevers.",
+   "examination": "Temperature 101 F. Throat mildly red. Well hydrated.",
+   "diagnosis": "Acute viral illness",
+   "plan": "Tepid sponging and fluids.",
+   "advice": "Give plenty of fluids. Sponge with lukewarm water.",
+   "follow_up": "Return at once if the child is drowsy or not drinking."
+  },
+  {
+   "symptoms": "Dizziness on standing up for 1 week. No fainting.",
+   "examination": "Lying blood pressure 122/78, standing 104/70.",
+   "diagnosis": "Orthostatic hypotension",
+   "plan": "Hydration and slow position changes.",
+   "advice": "Stand up slowly. Drink more water during the day.",
+   "follow_up": "Review in one week."
+  },
+  {
+   "symptoms": "Painful urination and lower abdominal pain for 2 days. No fever.",
+   "examination": "Suprapubic tenderness. No renal angle tenderness.",
+   "diagnosis": "Suspected urinary tract infection",
+   "plan": "Urine routine and culture ordered.",
+   "advice": "Drink at least three litres of water a day.",
+   "follow_up": "Return if fever or back pain develops."
+  }
+ ]
+}
