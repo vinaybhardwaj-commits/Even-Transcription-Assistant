@@ -1,11 +1,12 @@
 /** SPINE-P1: GET /api/cron/encounter-shadow, the producer orchestration and the `producers` gate. Runners are mocked at the module boundary. Synthetic ids only. */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const M = vi.hoisted(() => ({ cfg: vi.fn(), days: vi.fn(), acoustic: vi.fn(), timeline: vi.fn(), blindDay: vi.fn(), tlFlag: vi.fn(), gate: vi.fn() }));
+const M = vi.hoisted(() => ({ cfg: vi.fn(), days: vi.fn(), acoustic: vi.fn(), timeline: vi.fn(), leave: vi.fn(), blindDay: vi.fn(), tlFlag: vi.fn(), gate: vi.fn() }));
 vi.mock("@/lib/db", () => ({ sql: (..._a: unknown[]) => M.cfg() }));
 vi.mock("@/lib/room-access/room-days-for-date", () => ({ listRoomDaysForDate: M.days }));
 vi.mock("@/lib/encounter-clock/shadow-io", () => ({ runShadowForRoomDay: M.acoustic }));
 vi.mock("@/lib/encounter-clock/shadow-v3", () => ({ runTimelineShadowForRoomDay: M.timeline }));
+vi.mock("@/lib/encounter-clock/shadow-leave", () => ({ runTimelineLeaveForRoomDay: M.leave }));
 vi.mock("@/lib/room-access/check", () => ({ roomDayIsBlind: M.blindDay }));
 vi.mock("@/lib/encounter-clock/flag", async () => {
   const f = await vi.importActual<typeof import("@/lib/flags")>("@/lib/flags");
@@ -27,6 +28,7 @@ beforeEach(() => {
   M.days.mockReset().mockResolvedValue([day(1), day(2)]);
   M.acoustic.mockReset().mockResolvedValue({ ok: true });
   M.timeline.mockReset().mockResolvedValue({ ok: true });
+  M.leave.mockReset().mockResolvedValue({ ok: true });
   M.blindDay.mockReset().mockResolvedValue(false);
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -75,7 +77,7 @@ describe("producers run", () => {
     const body = await (await GET(req())).json();
     expect(M.acoustic.mock.calls.map((c) => c[0])).toEqual([{ room_id: "room_test1", room_day_id: "rd_test1", ist_date: "2026-10-22" }, { room_id: "room_test2", room_day_id: "rd_test2", ist_date: "2026-10-22" }]);
     expect(M.timeline).not.toHaveBeenCalled();
-    expect(body).toEqual({ mode: "shadow", room_days: 2, acoustic_ok: 2, acoustic_err: 0, timeline_ok: 0, timeline_err: 0, blind_skipped: 0, timeline_enabled: false, timeline_flag_invalid: 0 });
+    expect(body).toEqual({ mode: "shadow", room_days: 2, acoustic_ok: 2, acoustic_err: 0, timeline_ok: 0, timeline_err: 0, leave_ok: 0, leave_err: 0, blind_skipped: 0, timeline_enabled: false, timeline_flag_invalid: 0 });
   });
   it("a blind room-day is never run (static pair or placement)", async () => {
     M.blindDay.mockImplementation(async (id: string) => id === "rd_test1");
@@ -102,10 +104,36 @@ describe("producers run", () => {
     expect(body.timeline_enabled).toBe(true);
     expect(body.timeline_ok).toBe(2);
   });
+  it("leave runs with the voice.ts arguments when the flag is truthy, after v3", async () => {
+    process.env.ENCOUNTER_TIMELINE_SHADOW = "1"; process.env.ENCOUNTER_GATE_DIAR = "1";
+    const body = await (await GET(req())).json();
+    expect(M.leave.mock.calls.map((c) => c[0])).toEqual([
+      { room_id: "room_test1", room_day_id: "rd_test1", ist_date: "2026-10-22", gate_diar: true },
+      { room_id: "room_test2", room_day_id: "rd_test2", ist_date: "2026-10-22", gate_diar: true },
+    ]);
+    expect(M.timeline.mock.invocationCallOrder[0]).toBeLessThan(M.leave.mock.invocationCallOrder[0]);
+    expect(body).toMatchObject({ leave_ok: 2, leave_err: 0 });
+  });
+  it("a leave throw or failure is counted; acoustic and v3 still run for every day", async () => {
+    process.env.ENCOUNTER_TIMELINE_SHADOW = "1";
+    M.leave.mockRejectedValueOnce(new Error("boom rd_test1")).mockResolvedValueOnce({ ok: false, error: "no_anchors" });
+    const body = await (await GET(req())).json();
+    expect(body).toMatchObject({ acoustic_ok: 2, timeline_ok: 2, leave_ok: 0, leave_err: 2 });
+    expect(M.leave).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(console.error).mock.calls.map((c) => c.join(" ")).join("\n")).not.toMatch(/rd_test|boom/);
+  });
+  it("a blind day gets no leave call", async () => {
+    process.env.ENCOUNTER_TIMELINE_SHADOW = "1";
+    M.blindDay.mockResolvedValueOnce(true);
+    await GET(req());
+    expect(M.leave).toHaveBeenCalledTimes(1);
+    expect(M.leave.mock.calls[0][0].room_day_id).toBe("rd_test2");
+  });
   it.each(["0", "off", ""])("timeline does not run when the flag is %j", async (v) => {
     process.env.ENCOUNTER_TIMELINE_SHADOW = v;
     await GET(req());
     expect(M.timeline).not.toHaveBeenCalled();
+    expect(M.leave).not.toHaveBeenCalled();
     expect(M.acoustic).toHaveBeenCalledTimes(2);
   });
   it("an unrecognised flag value: acoustic still runs, timeline skipped, counted", async () => {
@@ -115,6 +143,7 @@ describe("producers run", () => {
     expect(r.status).toBe(200);
     expect(M.acoustic).toHaveBeenCalledTimes(2);
     expect(M.timeline).not.toHaveBeenCalled();
+    expect(M.leave).not.toHaveBeenCalled();
     expect(body).toMatchObject({ acoustic_ok: 2, timeline_enabled: false, timeline_flag_invalid: 1 });
   });
   it("counts failures per runner, one log line per class, with no id in the log", async () => {
@@ -143,7 +172,7 @@ describe("producers run", () => {
 });
 
 describe("runProducers bounds", () => {
-  const base = (now: () => number) => ({ now, isBlind: async () => false, acoustic: vi.fn(async () => ({ ok: true })), timeline: vi.fn(async () => ({ ok: true })), timelineEnabled: () => false, gateDiar: () => false });
+  const base = (now: () => number) => ({ now, isBlind: async () => false, acoustic: vi.fn(async () => ({ ok: true })), timeline: vi.fn(async () => ({ ok: true })), leave: vi.fn(async () => ({ ok: true })), timelineEnabled: () => false, gateDiar: () => false });
   it("default max is 12; a bad SPINE_PRODUCERS_MAX falls back to it", () => {
     expect(DEFAULT_MAX).toBe(12);
     for (const v of [undefined, "", "0", "-1", "abc", "1.5", "999"]) expect(parseMax(v), String(v)).toBe(12);
