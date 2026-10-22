@@ -45,10 +45,28 @@ def norm(text) -> str:
     return unicodedata.normalize("NFKC", text if isinstance(text, str) else "")
 
 
+# English number words and the one S3 exemption that is a number everywhere (rule 13: "sat")
+_ENGLISH_NUMERALS = frozenset(("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty "
+                               "fifty sixty seventy eighty ninety hundred thousand million billion crore lakh lakhs half quarter once twice thrice double triple single dozen first second "
+                               "third fourth fifth sixth seventh eighth ninth tenth sat").split())
+
+
+@lru_cache(maxsize=1)
+def collision_words() -> frozenset[str]:
+    """Fix2: lexicon words that are also ordinary English (do, be, so, don, tin, ...): the dictionary words of the lexicon minus the English numerals, plus `collision_extra`.
+    A collision word is a number only beside a drug mention, a dosing word, a drug-class word, a dose unit or an out-of-dictionary word; in a Medication line it is always dropped."""
+    from . import words
+    d = data.load(data.NUMBER_LEXICON)
+    lex = {w for w in d["words"] if isinstance(w, str) and w.isascii() and w.isalpha()}
+    col = {w for w in lex if words.in_dictionary(w) and w not in _ENGLISH_NUMERALS}
+    return frozenset(col | {w.lower() for w in d.get("collision_extra", [])})
+
+
 @lru_cache(maxsize=1)
 def _lex() -> tuple[str, ...]:
     words = data.load(data.NUMBER_LEXICON)["words"]
-    return tuple(sorted({w for w in words if isinstance(w, str) and w.strip()}, key=len, reverse=True))
+    col = collision_words()
+    return tuple(sorted({w for w in words if isinstance(w, str) and w.strip() and w not in col}, key=len, reverse=True))
 
 
 @lru_cache(maxsize=1)
@@ -108,22 +126,23 @@ def mask_names(t: str) -> str:
 
 _DO_ENGLISH_NEXT = frozenset("not n't you we they i he she it this that the your these those so also please take try keep avoid eat drink exercise come check get go use stop continue "
                              "start rest walk see call visit follow maintain wear apply remember inform report".split())
-_DO = re.compile(r"(?<![A-Za-z0-9])do(?![A-Za-z0-9])", re.I)
+_WORD_TOK = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)?")
 
 
-def _do_as_two(t: str) -> str:
-    """Fix1 M1: Hindi "do" (two) is a number when a drug mention, a dosing word, a dose unit or an out-of-dictionary token sits within 3 tokens of it
-    (the run rule above already reads "do sau"). Plain English "do you ..." has none of these beside it."""
-    if not _DO.search(t):
+def _collisions_as_numbers(t: str) -> str:
+    """Fix2 (generalises Fix1 M1): a collision word is a number when a drug mention, a dosing word, a drug-class word, a dose unit or an out-of-dictionary token sits within
+    3 tokens of it. Plain English around it ("do you", "so that", "be careful") has none of these."""
+    col = collision_words()
+    if not any(m.group().lower() in col for m in _WORD_TOK.finditer(t)):
         return t
     from . import drugs, words
     toks = words.tokenize(t)
     flags = None
     out = t
     for i, tk in enumerate(toks):
-        if tk.text.lower() != "do" or W in t[tk.start:tk.end]:
+        if not tk.is_word or tk.low not in col or W in t[tk.start:tk.end]:
             continue
-        if i + 1 < len(toks) and toks[i + 1].low in _DO_ENGLISH_NEXT:
+        if tk.low == "do" and i + 1 < len(toks) and toks[i + 1].low in _DO_ENGLISH_NEXT:
             continue  # English "do not / do you / do take rest": the auxiliary or the imperative, not Hindi two
         lo, hi = max(0, i - 3), min(len(toks), i + 4)
         near = False
@@ -150,7 +169,7 @@ def prep(t: str) -> str:
     t = _NOT_A_NUMBER.sub(lambda m: "x" * len(m.group()), t)
     t = _A_GRAM.sub(lambda m: W * len(m.group()), t)
     t = _run_rx().sub(lambda m: W * len(m.group()), t)
-    t = _do_as_two(t)
+    t = _collisions_as_numbers(t)
     return _GLUED_WORD_RX.sub(lambda m: W * len(m.group()) if _glued(m.group().lower()) else m.group(), t)
 
 

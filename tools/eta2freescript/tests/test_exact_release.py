@@ -21,7 +21,8 @@ def slot_text(art):
             part = slot.get(field) if isinstance(slot.get(field), dict) else {}
             if part.get("text"):
                 bits.append(str(part["text"]))
-    for item in art["completion_required"]:
+    from tools.eta2freescript.validate import completion_rows
+    for item in completion_rows(art):  # the heard detail lives in confirm_internal (Fix2 H2)
         if item.get("kind") == "pick_drug" and item.get("detail"):
             bits.append(str(item["detail"]))
     return " ".join(bits).lower()
@@ -58,7 +59,7 @@ def test_a_held_drug_keeps_the_heard_name():
     assert "drug" not in slot_text(a).split()
 
 
-def test_a_declined_operation_and_a_pap_smear_do_not_flag_and_septoplasty_advised_does():
+def test_a_declined_operation_and_a_pap_smear_do_not_flag_and_rhinoplasty_advised_does():
     lines = [(0, 6, "0", "The patient declined surgery.")]
     a = art_of(c=mk_consult(lines, roles=DOC), examination=[], procedures=[{
         "name": "surgery", "basis": "said", "decision_turn": 0, "source_turns": [0], "advised_kind": "ordered",
@@ -69,8 +70,8 @@ def test_a_declined_operation_and_a_pap_smear_do_not_flag_and_septoplasty_advise
         "name": "Pap smear", "basis": "said", "decision_turn": 0, "source_turns": [0], "advised_kind": "ordered",
     }])
     assert a["gp_extraction"].get("plan_of_management", {}).get("requires_surgery_or_procedure") is not True
-    lines = [(0, 6, "0", "Septoplasty advised.")]
+    lines = [(0, 6, "0", "Rhinoplasty advised.")]
     a = art_of(c=mk_consult(lines, roles=DOC), examination=[])
     assert a["gp_extraction"]["plan_of_management"]["requires_surgery_or_procedure"] is True
     recs = a["gp_extraction"]["plan_of_management"]["surgery_or_procedure_recommendations"]
-    assert recs[0]["name"].lower() == "septoplasty"
+    assert recs[0]["name"].lower() == "rhinoplasty"

@@ -29,6 +29,7 @@ from .prompts import clean_text, code_paths, load_prompt, parse_json, prompt_pat
 from .validate import check, to_v01
 from .v10 import finalize as v10_final
 from .v10 import meds as v10_meds
+from .v10 import projection as v10_projection
 from .v10 import spans as v10_spans
 
 
@@ -135,6 +136,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     def view_of(note: str) -> tuple[dict, list[str]]:
         """The artifact as it would be written with this note: slot values written back and FRX-T1 run (rules 4 and 12). Returns (artifact, FRX-T1 errors)."""
         v = copy.deepcopy(art)
+        v10_projection.split_completion(v)  # recover.py may have added entries since build()
         failed = v10_final.gp_final(gate, v, c)
         v["provenance"] = v10_final.writeback_tree(gate, v["provenance"])
         v["completion_required"] = v10_final.writeback_tree(gate, v["completion_required"])

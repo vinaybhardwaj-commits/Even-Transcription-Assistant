@@ -185,3 +185,165 @@ def test_a1_red_flags_are_not_counted_against_the_advice_budget():
     from tools.eta2freescript.validate import check
     assert len(a["gp_extraction"]["general_advice"]) > 300 or len(a["red_flags"]) == 2
     assert [e for e in check(a) if "FRX-A1" in e] == [], check(a)
+
+
+# =============================== Fix2 ===============================
+from tools.eta2freescript.v10 import words as v10_words, numbers as v10_numbers  # noqa: E402
+
+
+# --- FRX-T2: words by dictionary ---------------------------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("text", ["Prednivex panthrandu", "Rabepra yenimidi night", "If chest pain keep Formoflo yezhu under tongue", "Mazetol pathu karo", "Mr Suresh Babu has fever",
+                                  "avoid Sunita Devi", "take hatthu ippathu saavra", "eksho panchash duii ordhek", "anpathu anchooru pakuthi onnarai", "pansau pacchis assee dhed"])
+def test_t2_an_out_of_dictionary_word_is_called_ood(text):
+    assert v10_words.ood_tokens(text), text
+
+
+@pytest.mark.parametrize("text", ["Drink plenty of water and eat roti with dal", "Walk 30 minutes daily after chai", "Hb ⟦S1⟧, HbA1c ⟦S2⟧ and L4-L5 tenderness", "x-ray knee AP view",
+                                  "fever and cough for ⟦S1⟧", "ACL reconstruction, physiotherapy and yoga", "no tobacco or alcohol", "Review in the OPD after the MRI"])
+def test_t2_ordinary_clinical_and_counselling_words_pass(text):
+    assert not v10_words.ood_tokens(text), (text, v10_words.ood_tokens(text))
+
+
+def test_t2_the_extra_list_is_curated_not_names_or_numbers_or_drugs():
+    import json
+    d = json.load(open(v10_words.data.WHITELIST_EXTRA, encoding="utf-8"))
+    assert d["count"] == len(d["entries"]) <= 300 and all(e["category"] and e["word"].islower() for e in d["entries"])
+    ws = [e["word"] for e in d["entries"]]
+    assert not [w for w in ws if find_numbers(w)] and not [w for w in ws if w in v10_numbers.collision_words()]
+    assert not [w for w in ws if w in v10_words.catalogue_tokens()]  # no drug names
+
+
+def test_t2_withholds_the_unit_with_a_record_and_a_prompt():
+    c = _consult("Take Prednivex panthrandu at night.")
+    a = build_artifact(c, empty_encounter(advice=[{"text": "Prednivex panthrandu at night", "basis": "said", "source_turns": [2]},
+                                                   {"text": "drink plenty of water", "basis": "said", "source_turns": [2]}]))
+    assert "panthrandu" not in json.dumps(a["gp_extraction"]) + a["note_text"] and "water" in a["gp_extraction"]["general_advice"]
+    assert [w for w in a["withheld"] if w["reason_code"] == "ood_word" and w["prompt_id"]]
+
+
+def test_t2_final_check_withholds_a_stage_b_note_line_with_an_ood_word():
+    from test_v10_core import gate
+    g = gate()
+    r = g.check("Fever since 3 days", "symptoms", [1])
+    txt, pos, errs = g.writeback(r.text)
+    assert g.final_check(txt, "symptoms", pos) == []
+    assert "ood_word" in [v.code for v in g.final_check(txt + " and yezhu", "symptoms", pos)]
+
+
+# --- collision words (generalises M1) -----------------------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("text", ["statins ent daily", "Gemer be subah", "Prednisolone so tablet", "Mazetol don goli", "Glizid tin mg", "Metformin do tablets"])
+def test_collision_words_are_numbers_beside_a_drug_dosing_word_class_word_or_unit(text):
+    assert find_numbers(text), text
+
+
+@pytest.mark.parametrize("text", ["You should be careful", "rest so that you recover", "Don is the name", "he has a tin roof", "Do you smoke", "so far so good"])
+def test_collision_words_are_plain_english_elsewhere(text):
+    assert not find_numbers(text), text
+
+
+def test_collision_words_never_survive_in_a_medication_line():
+    for brand in ("statins ent daily", "Glizid so", "Glizid be daily", "Dolo do"):
+        line = names.med_line(names.drug_block({"brand_as_said": brand, "generic": None}))
+        assert not [w for w in line.lower().replace("—", " ").split() if w in v10_numbers.collision_words()], line
+
+
+# --- M2: names, slot prompts, dedup ---------------------------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("text,expect", [("Zylorvex for Sunita Devi only", None), ("Metabrin Priya Sharma continue", None), ("Glizid for Ramesh Kumar", "Glizid"),
+                                         ("Previous patient Venkatesh Dolo", None), ("Ramesh's wife Kamala Glizid", None)])
+def test_m2_detector_tokens_refuse_names(text, expect):
+    got = names.detector_tokens(text)
+    assert got == expect or (expect is None and got in (None, "Glizid")), (text, got)
+    assert not (got and any(n in got for n in ("Sunita", "Devi", "Priya", "Sharma", "Ramesh", "Venkatesh", "Kamala")))
+
+
+def test_m2_an_unrecognised_brand_is_not_echoed_in_the_medication_line():
+    line = names.med_line(names.drug_block({"brand_as_said": "Same Glycomit Ordhek", "generic": "Same Glycomit Ordhek"}))
+    assert "Ordhek" not in line and "Glycomit" not in line and line.endswith("— confirm generic")
+
+
+def test_m2_slot_prompt_spoken_is_not_the_heard_class_text_and_slot_and_rx_prompts_dedup():
+    c = _consult("Start Zylorvex twice a day for five days.")
+    enc = empty_encounter(prescription=[_rx("Zylorvex", 2)],
+                          regimen_slots=[{"class": "Zylorvex for Sunita Devi only", "frequency": "twice a day", "duration": "five days", "timing": "after food", "quote_turn": 2,
+                                          "basis": "said", "source_turns": [2]}])
+    a = build_artifact(c, enc)
+    assert "Sunita" not in json.dumps({k: a[k] for k in ("confirm_prompts", "completion_required", "note_text", "gp_extraction", "slots") if k in a}).replace("confirm_internal", "")
+
+
+# --- M4: change / not-given never read as a new order; V9 on note_text -----------------------------------------------------------------------------------
+@pytest.mark.parametrize("action", ["change", "not_given", "hold"])
+def test_m4_change_and_not_given_are_never_a_start_prompt(action):
+    c = _consult("Change Glizid to a lower dose.")
+    a = build_artifact(c, empty_encounter(prescription=[_rx("Glizid", 2, action)]))
+    acts = {p["action"] for p in a["confirm_prompts"]}
+    assert "start" not in acts and acts & {"change_dose", "not_given", "hold"}
+    assert "glizid" not in json.dumps(a["gp_extraction"]).lower()
+
+
+def test_m4_v9_on_the_final_note_text():
+    from test_v10_core import gate
+    g = gate()
+    from tools.eta2freescript.v10 import finalize
+    art = {"confirm_prompts": [], "confirm_internal": {"v9_tokens": ["ointment"]}, "gp_extraction": {}}
+    note = "\n".join(f"{h}:" for h in finalize.N.HEADINGS).replace("General Advice:", "General Advice: do not apply the ointment before the surgery")
+    out, bad = finalize.note_final(g, art, g.c, note)
+    assert bad.get("General Advice") == "v9_named_drug" and "ointment" not in out
+
+
+# --- M2 / mutants m10, m13, m14: the masker and the allergy redaction have a test that dies without them ---------------------------------------------------
+def test_m14_scrub_identity_masks_a_cued_name_in_free_text():
+    from tools.eta2freescript.note import scrub_identity
+    for t in ("Mr Ramesh Kumar has giddiness", "my name is Suresh Rao and fever", "Mrs Lakshmi Devi has fever", "Smt Kamala Bai has fever"):
+        out = scrub_identity(t)
+        assert not any(n in out for n in ("Ramesh", "Kumar", "Suresh", "Rao", "Lakshmi", "Devi", "Kamala", "Bai")), out
+
+
+def test_m10_allergy_names_carry_no_number():
+    c = mk_consult([(0, 4, "0", "Tell me."), (5, 9, "1", "I am allergic to Ecosprin 75.")], roles={"0": "doctor", "1": "patient"})
+    a = build_artifact(c, empty_encounter(allergy_history=[{"name": "Ecosprin 75", "basis": "said", "source_turns": [1]}]))
+    assert a["room_facts"]["allergies"] and not any(find_numbers(x["name"]) for x in a["room_facts"]["allergies"])
+
+
+def test_m13_spoken_masker_removes_a_cued_name_from_the_drug_block():
+    d = names.drug_block({"brand_as_said": "Glizid Mr Ramesh", "generic": None})
+    assert "Ramesh" not in json.dumps(d) and "Mr" not in d["spoken"].split()
+    assert names._clean_spoken("Glizid Mr Ramesh Kumar") == "Glizid Mr" or "Ramesh" not in names._clean_spoken("Glizid Mr Ramesh Kumar")
+
+
+# --- real-text run: a validator phrase / slot drug name / withheld primary diagnosis must not reject the consult --------------------------------------
+def test_n1_a_doctor_to_phrase_withholds_the_unit_not_the_consult():
+    from tools.eta2freescript.validate import check
+    c = _consult("Go back to the doctor to get the report checked. Drink plenty of water.")
+    a = build_artifact(c, empty_encounter(plan=[{"text": "see the doctor to get the report checked", "basis": "said", "source_turns": [2]}],
+                                          advice=[{"text": "drink plenty of water", "basis": "said", "source_turns": [2]}]))
+    assert [e for e in check(a) if "FRX-N1" in e] == [], check(a)
+    assert [w for w in a["withheld"] if w["reason_code"] == "n1_phrase" and w["prompt_id"]] and "water" in a["gp_extraction"]["general_advice"]
+
+
+def test_s1_a_drug_in_a_slot_class_is_not_a_slot_part():
+    from tools.eta2freescript.validate import check
+    c = _consult("Start Glycomet twice a day.")
+    a = build_artifact(c, empty_encounter(regimen_slots=[{"class": "Glycomet tablet", "frequency": "twice a day", "quote_turn": 2, "basis": "said", "source_turns": [2]}]))
+    assert [e for e in check(a) if "FRX-S1" in e] == [], check(a)
+
+
+def test_d1_a_withheld_primary_diagnosis_takes_the_others_with_it():
+    from tools.eta2freescript.validate import check
+    c = _consult("Looks like viral fever. Also mild acidity.")
+    dx = [{"label": "Viral fever Zorbexitis", "rank": "primary", "doctor_named": True, "status": "provisional", "basis": "said", "source_turns": [2]},
+          {"label": "Acidity", "rank": "secondary", "doctor_named": True, "status": "provisional", "basis": "said", "source_turns": [2]}]
+    a = build_artifact(c, empty_encounter(diagnoses=dx))
+    assert [e for e in check(a) if "FRX-D1" in e] == [], check(a)
+
+
+def test_d1_gp_final_withholds_the_other_diagnoses_when_the_primary_fails():
+    from test_v10_core import gate
+    from tools.eta2freescript.v10 import finalize
+    g = gate()
+    art = {"confirm_prompts": [], "confirm_internal": {}, "provenance": [
+        {"json_pointer": "/presenting_complaints/diagnoses/0", "diagnosis": {"is_primary": True}},
+        {"json_pointer": "/presenting_complaints/diagnoses/1", "diagnosis": {"is_primary": False}}],
+        "gp_extraction": {"presenting_complaints": {"diagnoses": [{"diagnosis_or_impression": "Zorbexitis", "raw_name": "Zorbexitis"},
+                                                                  {"diagnosis_or_impression": "Acidity", "raw_name": "Acidity"}]}}}
+    failed = finalize.gp_final(g, art, g.c)
+    assert {f[1] for f in failed} >= {"ood_word", "primary_withheld"} and not art["gp_extraction"]["presenting_complaints"]["diagnoses"]

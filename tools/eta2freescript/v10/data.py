@@ -20,6 +20,7 @@ NUMBER_LEXICON = DATA / "number_lexicon.v1.json"
 THRESHOLDS = DATA / "detector_thresholds.v1.json"
 DOSING_WORDS = DATA / "dosing_words.v1.json"
 WHITELIST = DATA / "clinical_whitelist.v1.json"
+WHITELIST_EXTRA = DATA / "whitelist_extra.v1.json"
 ANALYTES = DATA / "slots" / "analytes.v1.json"
 SLOT_BOUNDS = DATA / "slots" / "slot_bounds.v1.json"
 DICTIONARY_FILES = (CONTRACT / "scowl_words.json", CONTRACT / "english_words_min.json",
@@ -53,6 +54,7 @@ def provenance() -> dict:
     return {
         "dictionary_sha256": files_sha(DICTIONARY_FILES),
         "clinical_whitelist_sha256": file_sha(WHITELIST),
+        "whitelist_extra_sha256": file_sha(WHITELIST_EXTRA),
         "catalogue_snapshot_sha256": file_sha(CATALOGUE_FILE),
         "catalogue_snapshot_date": str(cat.get("version") or ""),
         "dosing_words_sha256": file_sha(DOSING_WORDS),

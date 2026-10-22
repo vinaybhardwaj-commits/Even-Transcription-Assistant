@@ -2,6 +2,7 @@
 import pytest
 from conftest import build_artifact, empty_encounter, mk_consult
 
+from tools.eta2freescript.validate import completion_rows
 from tools.eta2freescript.boundary import Boundary
 from tools.eta2freescript.mapper import ADVICE_MAX_CHARS, MAX_SECONDARY_DX, duration, near_duplicate
 from tools.eta2freescript.validate import check
@@ -107,8 +108,8 @@ def test_advice_merge_cap_and_said_aloud():
 
 
 def test_advice_char_cap():
-    long = "x" * 200
-    a = art_of(advice=[adv("Rest at home " + long), adv("Walk daily " + long)])
+    long1, long2 = ("rest and drink warm water " * 8).strip(), ("sleep early and walk slowly " * 7).strip()  # real words: FRX-T2 withholds a unit with an out-of-dictionary word
+    a = art_of(advice=[adv("Rest at home " + long1), adv("Walk daily " + long2)])
     assert len(a["gp_extraction"]["general_advice"]) <= ADVICE_MAX_CHARS and kept(a, "[advice_capped]")
 
 
@@ -122,7 +123,7 @@ def test_exam_missing_when_nothing_said():
     a = art_of(examination=[])
     assert kinds(a) == ["exam_missing", "follow_up_missing"] and kept(a, "[exam_missing]")
     a = art_of(examination=[{"performed": "Abdomen", "finding": None, "basis": "said", "source_turns": [3]}])
-    assert kinds(a) == ["exam_missing", "follow_up_missing"] and a["completion_required"][0]["detail"] == "Abdomen"
+    assert kinds(a) == ["exam_missing", "follow_up_missing"] and completion_rows(a)[0]["detail"] == "Abdomen"
     assert "examination" not in a["gp_extraction"]
 
 
@@ -139,13 +140,13 @@ def test_unnamed_drug_becomes_regimen_slot_never_a_medicine():
 def test_drug_history_continue_prompt_for_an_unaddressed_current_drug():
     mentioned = [{"name_as_said": "amlodipine", "text": "Takes amlodipine", "current": True, "reported_by": "attendant", "source_turns": [2]}]
     a = art_of(drug_history=mentioned)
-    assert any(c["kind"] == "drug_history" and c["prompt"] == "Continue amlodipine?" for c in a["completion_required"])
+    assert any(c["kind"] == "drug_history" and c["prompt"] == "Continue amlodipine?" for c in completion_rows(a))
     discussed = [{"name_as_said": "amlodipine", "text": "Continue amlodipine", "current": True, "reported_by": "doctor", "source_turns": [4]}]
     lines = [(0, 4, "0", "What is the problem?"), (5, 10, "1", "Fever."), (11, 15, "2", "He takes amlodipine."),
              (16, 20, "0", "Throat is red."), (21, 30, "0", "Continue the amlodipine.")]
     a = art_of(c=mk_consult(lines, roles=DOC), examination=[{"performed": "Throat", "finding": "red", "basis": "said", "source_turns": [3]}],
                drug_history=discussed)
-    assert any(c["kind"] == "drug_history" and c["prompt"] == "Continue amlodipine?" for c in a["completion_required"])
+    assert any(c["kind"] == "drug_history" and c["prompt"] == "Continue amlodipine?" for c in completion_rows(a))
     lines = LINES[:4] + [(21, 30, "0", "Continue Amlong 5 mg once a day.")] + LINES[5:]
     a = art_of(c=mk_consult(lines, roles=DOC), drug_history=mentioned,
                prescription=[rx(generic="amlodipine", brand_as_said="Amlong", strength="5 mg",
@@ -322,11 +323,11 @@ def test_surgery_flag_skips_dressing_physio_and_tmt_and_keeps_an_ordered_endosco
 
 
 def test_specific_procedure_name_wins_over_a_generic_one():
-    lines = [(0, 8, "0", "I advise septoplasty rather than nasal surgery.")]
+    lines = [(0, 8, "0", "I advise rhinoplasty rather than nasal surgery.")]
     c = mk_consult(lines, roles=DOC)
     a = art_of(c=c, examination=[], procedures=[
         {"name": "nasal surgery", "raw_name": "nasal surgery", "basis": "said", "decision_turn": 0, "source_turns": [0]},
-        {"name": "septoplasty", "raw_name": "septoplasty", "basis": "said", "decision_turn": 0, "source_turns": [0]},
+        {"name": "rhinoplasty", "raw_name": "rhinoplasty", "basis": "said", "decision_turn": 0, "source_turns": [0]},
     ])
     recs = a["gp_extraction"]["plan_of_management"]["surgery_or_procedure_recommendations"]
-    assert [r["name"].lower() for r in recs] == ["septoplasty"]
+    assert [r["name"].lower() for r in recs] == ["rhinoplasty"]

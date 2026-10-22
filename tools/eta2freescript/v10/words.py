@@ -180,3 +180,55 @@ def in_dictionary(low: str) -> bool:
     if low.endswith("'s") and low[:-2] in dictionary():
         return True
     return False
+
+
+# --- FRX-T2 "words by dictionary" (Fix2 ruling): the word analogue of FRX-T1 ---------------------------------------------------------------------------------
+_SLOT_TOKEN = re.compile(r"\u27e6S\d+\u27e7")
+
+
+@lru_cache(maxsize=1)
+def extra_whitelist() -> frozenset[str]:
+    """data/whitelist_extra.v1.json: curated counselling vocabulary (food, activity, home remedy). No names, places, number words or drug names."""
+    return frozenset(e["word"].lower() for e in data.load(data.WHITELIST_EXTRA)["entries"])
+
+
+@lru_cache(maxsize=1)
+def catalogue_tokens() -> frozenset[str]:
+    """The alphabetic tokens (3+ letters) of every Pulse catalogue drug name: a posted drug name is whole-name or nothing, and FRX-T1 already holds the drug detector."""
+    out = set()
+    for n in catalogue_names():
+        out.update(t for t in norm_name(n).split() if re.fullmatch(r"[a-z]{3,}", t))
+    return frozenset(out)
+
+
+def t2_allowed(tok: str) -> bool:
+    """English list + clinical whitelist + catalogue drug name tokens + the extra counselling list. Non-Latin letters, and every other Latin token, are out of dictionary."""
+    if not is_latin(tok):
+        return False
+    low = tok.lower().replace("\u2019", "'")
+    if low.endswith("'s"):
+        low = low[:-2]
+    return in_dictionary(low) or low in extra_whitelist() or low in catalogue_tokens()
+
+
+def ood_tokens(text: str) -> list[str]:
+    """Word tokens of `text` that FRX-T2 does not allow. Slot tokens, numbers and punctuation are not words."""
+    from . import numbers
+    t = _SLOT_TOKEN.sub(" ", unicodedata.normalize("NFKC", text or ""))
+    rx = numbers._name_rx()  # HbA1c, B12, T2DM, COVID-19 ... are whitelisted names; L4-L5 is a spinal level
+    if rx is not None:
+        t = rx.sub(" ", t)
+    t = numbers._SPINE.sub(" ", t)
+    return [tk.text for tk in tokenize(t) if tk.is_word and not t2_allowed(tk.text)]
+
+
+def n1_phrase(text: str, fld: str | None) -> str | None:
+    """FRX-N1 d3 / d2 phrases ("doctor to ...", "confirm ...") found in ONE posted unit. The validator rejects the whole consult on them; here the unit is withheld instead
+    (a record and a prompt), so a phrase in the tape never costs the consult."""
+    from .. import validate
+    t = unicodedata.normalize("NFKC", text or "")
+    if validate._D3.search(t):
+        return "n1_phrase"
+    if fld in ("follow_up", "investigations", "procedures", "referrals") and validate._D2.search(t):
+        return "n1_phrase"
+    return None

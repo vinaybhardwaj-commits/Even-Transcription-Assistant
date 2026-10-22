@@ -1,0 +1,723 @@
+{
+ "version": "whitelist-extra.v1",
+ "spec": "FRX-T2 (Fix2 H2 ruling, eta2freescript 22 Oct 2026): curated counselling vocabulary the English list lacks. No person names, no place names, no number words, no drug names. Max 300 entries.",
+ "count": 179,
+ "entries": [
+  {
+   "word": "roti",
+   "category": "staple_food"
+  },
+  {
+   "word": "chapati",
+   "category": "staple_food"
+  },
+  {
+   "word": "phulka",
+   "category": "staple_food"
+  },
+  {
+   "word": "paratha",
+   "category": "staple_food"
+  },
+  {
+   "word": "puri",
+   "category": "staple_food"
+  },
+  {
+   "word": "naan",
+   "category": "staple_food"
+  },
+  {
+   "word": "dal",
+   "category": "staple_food"
+  },
+  {
+   "word": "dhal",
+   "category": "staple_food"
+  },
+  {
+   "word": "chawal",
+   "category": "staple_food"
+  },
+  {
+   "word": "khichdi",
+   "category": "staple_food"
+  },
+  {
+   "word": "dalia",
+   "category": "staple_food"
+  },
+  {
+   "word": "sooji",
+   "category": "staple_food"
+  },
+  {
+   "word": "rava",
+   "category": "staple_food"
+  },
+  {
+   "word": "poha",
+   "category": "staple_food"
+  },
+  {
+   "word": "upma",
+   "category": "staple_food"
+  },
+  {
+   "word": "idli",
+   "category": "staple_food"
+  },
+  {
+   "word": "dosa",
+   "category": "staple_food"
+  },
+  {
+   "word": "uttapam",
+   "category": "staple_food"
+  },
+  {
+   "word": "appam",
+   "category": "staple_food"
+  },
+  {
+   "word": "puttu",
+   "category": "staple_food"
+  },
+  {
+   "word": "rasam",
+   "category": "staple_food"
+  },
+  {
+   "word": "sambar",
+   "category": "staple_food"
+  },
+  {
+   "word": "sabzi",
+   "category": "staple_food"
+  },
+  {
+   "word": "sabji",
+   "category": "staple_food"
+  },
+  {
+   "word": "bhaji",
+   "category": "staple_food"
+  },
+  {
+   "word": "thepla",
+   "category": "staple_food"
+  },
+  {
+   "word": "khakhra",
+   "category": "staple_food"
+  },
+  {
+   "word": "bhakri",
+   "category": "staple_food"
+  },
+  {
+   "word": "jowar",
+   "category": "staple_food"
+  },
+  {
+   "word": "bajra",
+   "category": "staple_food"
+  },
+  {
+   "word": "ragi",
+   "category": "staple_food"
+  },
+  {
+   "word": "besan",
+   "category": "staple_food"
+  },
+  {
+   "word": "atta",
+   "category": "staple_food"
+  },
+  {
+   "word": "maida",
+   "category": "staple_food"
+  },
+  {
+   "word": "sattu",
+   "category": "staple_food"
+  },
+  {
+   "word": "murmura",
+   "category": "staple_food"
+  },
+  {
+   "word": "ghee",
+   "category": "dairy_and_fat"
+  },
+  {
+   "word": "dahi",
+   "category": "dairy_and_fat"
+  },
+  {
+   "word": "lassi",
+   "category": "dairy_and_fat"
+  },
+  {
+   "word": "chaas",
+   "category": "dairy_and_fat"
+  },
+  {
+   "word": "paneer",
+   "category": "dairy_and_fat"
+  },
+  {
+   "word": "malai",
+   "category": "dairy_and_fat"
+  },
+  {
+   "word": "makhan",
+   "category": "dairy_and_fat"
+  },
+  {
+   "word": "khoya",
+   "category": "dairy_and_fat"
+  },
+  {
+   "word": "chai",
+   "category": "drink"
+  },
+  {
+   "word": "kadha",
+   "category": "drink"
+  },
+  {
+   "word": "kashayam",
+   "category": "drink"
+  },
+  {
+   "word": "nimbu",
+   "category": "drink"
+  },
+  {
+   "word": "sharbat",
+   "category": "drink"
+  },
+  {
+   "word": "nariyal",
+   "category": "drink"
+  },
+  {
+   "word": "namkeen",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "pakora",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "samosa",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "bhujia",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "papad",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "mithai",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "laddu",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "jalebi",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "halwa",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "gulab",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "jamun",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "barfi",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "kheer",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "payasam",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "chivda",
+   "category": "snack_sweet"
+  },
+  {
+   "word": "adrak",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "lehsun",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "pyaz",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "jeera",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "ajwain",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "methi",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "hing",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "dhania",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "pudina",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "laung",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "dalchini",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "mulethi",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "giloy",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "neem",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "amla",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "triphala",
+   "category": "spice_herb_home_remedy"
+  },
+  {
+   "word": "bhindi",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "baingan",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "lauki",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "tinda",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "karela",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "palak",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "gobi",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "aloo",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "mooli",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "arbi",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "kaddu",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "tamatar",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "mirchi",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "kela",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "amrud",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "papita",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "chikoo",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "anaar",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "santra",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "mosambi",
+   "category": "vegetable_fruit"
+  },
+  {
+   "word": "yoga",
+   "category": "activity"
+  },
+  {
+   "word": "pranayama",
+   "category": "activity"
+  },
+  {
+   "word": "asana",
+   "category": "activity"
+  },
+  {
+   "word": "kapalbhati",
+   "category": "activity"
+  },
+  {
+   "word": "anulom",
+   "category": "activity"
+  },
+  {
+   "word": "vilom",
+   "category": "activity"
+  },
+  {
+   "word": "surya",
+   "category": "activity"
+  },
+  {
+   "word": "namaskar",
+   "category": "activity"
+  },
+  {
+   "word": "bhastrika",
+   "category": "activity"
+  },
+  {
+   "word": "tadasana",
+   "category": "activity"
+  },
+  {
+   "word": "vajrasana",
+   "category": "activity"
+  },
+  {
+   "word": "shavasana",
+   "category": "activity"
+  },
+  {
+   "word": "walk",
+   "category": "activity"
+  },
+  {
+   "word": "jog",
+   "category": "activity"
+  },
+  {
+   "word": "cycling",
+   "category": "activity"
+  },
+  {
+   "word": "swimming",
+   "category": "activity"
+  },
+  {
+   "word": "stretching",
+   "category": "activity"
+  },
+  {
+   "word": "physiotherapy",
+   "category": "activity"
+  },
+  {
+   "word": "exercise",
+   "category": "activity"
+  },
+  {
+   "word": "meditation",
+   "category": "activity"
+  },
+  {
+   "word": "pet",
+   "category": "body_counselling"
+  },
+  {
+   "word": "sar",
+   "category": "body_counselling"
+  },
+  {
+   "word": "peeth",
+   "category": "body_counselling"
+  },
+  {
+   "word": "ghutna",
+   "category": "body_counselling"
+  },
+  {
+   "word": "kamar",
+   "category": "body_counselling"
+  },
+  {
+   "word": "gala",
+   "category": "body_counselling"
+  },
+  {
+   "word": "seena",
+   "category": "body_counselling"
+  },
+  {
+   "word": "namak",
+   "category": "household"
+  },
+  {
+   "word": "cheeni",
+   "category": "household"
+  },
+  {
+   "word": "gur",
+   "category": "household"
+  },
+  {
+   "word": "shakkar",
+   "category": "household"
+  },
+  {
+   "word": "tel",
+   "category": "household"
+  },
+  {
+   "word": "masala",
+   "category": "household"
+  },
+  {
+   "word": "achar",
+   "category": "household"
+  },
+  {
+   "word": "pickle",
+   "category": "household"
+  },
+  {
+   "word": "bidi",
+   "category": "household"
+  },
+  {
+   "word": "gutka",
+   "category": "household"
+  },
+  {
+   "word": "paan",
+   "category": "household"
+  },
+  {
+   "word": "tambaku",
+   "category": "household"
+  },
+  {
+   "word": "zarda",
+   "category": "household"
+  },
+  {
+   "word": "khaini",
+   "category": "household"
+  },
+  {
+   "word": "hookah",
+   "category": "household"
+  },
+  {
+   "word": "sharab",
+   "category": "habit_substance"
+  },
+  {
+   "word": "daaru",
+   "category": "habit_substance"
+  },
+  {
+   "word": "tobacco",
+   "category": "habit_substance"
+  },
+  {
+   "word": "smoking",
+   "category": "habit_substance"
+  },
+  {
+   "word": "cigarette",
+   "category": "habit_substance"
+  },
+  {
+   "word": "acl",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "pcl",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "mcl",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "lcl",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "tkr",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "thr",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "orif",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "prp",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "ncv",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "cabg",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "ptca",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "turp",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "nsaid",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "pid",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "sle",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "hbv",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "aso",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "tft",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "mrcp",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "ercp",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "egd",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "ogd",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "pcod",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "iud",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "lmp",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "edd",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "pnc",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "nicu",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "picu",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "cpr",
+   "category": "clinical_abbreviation"
+  },
+  {
+   "word": "aed",
+   "category": "clinical_abbreviation"
+  }
+ ]
+}

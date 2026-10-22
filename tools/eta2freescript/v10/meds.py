@@ -143,7 +143,10 @@ def build_prompts(bl) -> None:
         dec = (item.get("decision") or {}).get("turn")
         vals = {"strength": _heard(item, "strength"), "frequency": _heard(item, "frequency"), "duration": _heard(item, "duration"),
                 "instruction": _heard(item, "timing"), "spoken": re.sub(r"\s+", " ", f"{brand or ''} {generic or ''}").strip()}
-        action = "continue" if item.get("status") == "continued" else "start"
+        # Fix2 M4: only a start or a continue is listed in Medication; a change, a not-given or any other action is a confirm prompt that never reads as a new order
+        act = str(bl.rx_actions.get(item.get("item_id")) or "start").lower()
+        action = "continue" if item.get("status") == "continued" and act in ("start", "continue", "change") else (
+            "start" if act in ("start", "continue") else ("change_dose" if act == "change" else "not_given"))
         reasons = ["translator_relay"] if False else []
         if len(grp) >= 2 and not drug.get("components"):
             reasons.append("combination_unexpanded")
@@ -183,7 +186,8 @@ def build_prompts(bl) -> None:
     # unnamed regimen slots (pick_drug): a prompt with no drug, the class as said
     for s in bl.slots:
         cls = (s.get("class") or {}).get("text") or None
-        drug = {"spoken": re.sub(r"\d", "", cls or "unnamed drug"), "brand_recognised": None, "generic": None, "components": [], "base_molecule": "",
+        # Fix2 H2: a slot's class text is a heard word (C4): only a drug the detector names is shown, everything else stays in confirm_internal
+        drug = {"spoken": names.detector_tokens(cls or "", fallback=False) or "unnamed drug", "brand_recognised": None, "generic": None, "components": [], "base_molecule": "",
                 "form": (s.get("form") or {}).get("text"), "lasa_risk": {"pair_with": None, "note": "no drug name was spoken"}}
         turns = bl._cited_turn_ids(s.get("evidence"))
         dec = (s.get("decision") or {}).get("turn")

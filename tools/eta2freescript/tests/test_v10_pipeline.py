@@ -144,7 +144,7 @@ def test_unmapped_brand_reads_confirm_generic(tmp_path):
     lines = LINES + [(60, 64, "0", "Start Warf at night.")]
     enc = base_enc(prescription=[rx(None, "Warf", 5, None, None, None)])
     lg, a, _ = run(tmp_path, lines, enc)
-    assert "Warf — confirm generic" in a["note_text"] and a["confirm_prompts"][0]["drug"]["generic"] is None
+    assert "Unrecognised drug — confirm generic" in a["note_text"] and "Warf" not in a["note_text"] and a["confirm_prompts"][0]["drug"]["generic"] is None  # Fix2: an out-of-dictionary brand is not echoed
     assert "brand_unmapped" in a["confirm_prompts"][0]["doctor_confirm_reason"]
 
 

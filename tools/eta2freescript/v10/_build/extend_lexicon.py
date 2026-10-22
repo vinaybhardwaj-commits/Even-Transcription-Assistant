@@ -27,6 +27,9 @@ BASE = {
           "panchso hajar hazar adhi aadhu ardhu sava dedh",
 }
 FORCE = {"padi", "vanda", "sunna", "dui", "dos", "noy", "nav", "kuri", "koori", "shat", "sola", "pawa", "thees", "vees", "wees", "wis"}  # Indic number words that are also in the SCOWL list
+# Fix2: number words that are also ordinary English. They are kept OUT of the unconditional lexicon (they would read as a number in every sentence) and live in
+# `collision_extra`; with the lexicon words that are in the English dictionary they count as numbers only beside a drug mention, a dosing word, a drug-class word or a dose unit.
+COLLISION_EXTRA = ["do", "be", "so", "don", "ent", "trees", "threes", "tin", "bar", "bay", "cha", "sol", "ter"]
 SWAPS = [("oo", "u"), ("aa", "a"), ("ee", "i"), ("th", "t"), ("dh", "d"), ("bh", "b"), ("kk", "k"), ("tt", "t"), ("nn", "n"), ("ch", "chh"), ("ph", "f"), ("zh", "l"), ("w", "v")]
 
 
@@ -55,9 +58,10 @@ def main() -> None:
                     continue
                 (dropped if words.in_dictionary(v) and v not in FORCE else add).add(v)
     d["words"] = sorted(have | add)
+    d["collision_extra"] = COLLISION_EXTRA
     d["count"] = len(d["words"])
-    d["version"] = "number-lexicon.v1.1"
-    d["note"] = d["note"].split(" FIX1")[0] + (f" FIX1 H1 (22 Oct 2026, refuted data change): +{len(add)} romanised forms for te ta mr bn ml gu; "
+    d["version"] = "number-lexicon.v1.2"
+    d["note"] = d["note"].split(" FIX1")[0] + (f" FIX1 H1 (22 Oct 2026, refuted data change; FIX2 adds collision_extra): +{len(add)} romanised forms for te ta mr bn ml gu; "
                                                f"{len(dropped)} variants left out because they are English dictionary words.")
     p.write_text(json.dumps(d, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print(len(add), "added;", len(dropped), "left out:", " ".join(sorted(dropped)[:60]))

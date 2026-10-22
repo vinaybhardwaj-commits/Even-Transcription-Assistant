@@ -45,6 +45,8 @@ from .validate import CLASS_WORDS as V_CLASS, DEPT, DR_NAME, SLOT_STOP, V
 from .v10 import meds as v10_meds
 from .v10 import numbers as v10_numbers
 from .v10 import names as v10_names
+from .v10 import words as v10_words
+from .v10 import projection as v10_projection
 from .v10 import spans as v10_spans
 from .v10.gate import NumberGate
 
@@ -437,6 +439,7 @@ class Builder:
         self.withheld: list[dict] = []
         self.confirm_prompts: list[dict] = []
         self.cond_plan: list[tuple[str, dict]] = []
+        self.rx_actions: dict[str, str] = {}
         self.confirm_internal: dict = {}
         self.med_changes = False
         self.red_flag_items: list = []
@@ -599,6 +602,12 @@ class Builder:
             return None
         r = self.gate.check(text, fld, cited)
         if r.ok:
+            if v10_words.n1_phrase(r.text, fld):
+                self.withhold(fld, "n1_phrase", cited, red_flag=red_flag)
+                return None
+            if v10_words.ood_tokens(r.text):  # FRX-T2: a word outside the dictionary withholds the unit (this catches a romanised number word in any language, a person name, an unknown brand)
+                self.withhold(fld, "ood_word", cited, red_flag=red_flag)
+                return None
             return r.text
         self.withhold(fld, r.reason or "unslotted", cited, red_flag=red_flag)
         return None
@@ -1087,6 +1096,7 @@ class Builder:
                           "continued" if explicit else "prescribed", turns, rx.get("confidence") or 0.5,
                           f"/medicines/{len(meds) - 1}", fl, names=names, lead=dec)
             item["medicine"] = self._medicine_parts(rx, turns, explicit)
+            self.rx_actions[item["item_id"]] = action
             missing = [f for f in ("strength", "frequency", "duration") if not rx.get(f)]
             if missing:
                 r = self.P("medicine", f"[dose_unstated] {name} - {', '.join(missing)} not said aloud", "discussed_only", turns, 0.5, None,
@@ -1394,6 +1404,7 @@ class Builder:
                       "continued" if explicit else "prescribed", turns, rx.get("confidence") or 0.5,
                       f"/medicines/{len(meds) - 1}", names=names + [generic, spoken], lead=dec)
         item["medicine"] = self._medicine_parts(part_rx, turns, explicit)
+        self.rx_actions[item["item_id"]] = action
         missing = [f for f, present in (("strength", strength), ("frequency", part_rx.get("frequency")), ("duration", part_rx.get("duration"))) if not present]
         if missing:
             r = self.P("medicine", f"[dose_unstated] {name} - {', '.join(missing)} not said aloud", "discussed_only", turns, 0.5, None,
@@ -2073,7 +2084,8 @@ class Builder:
                     if g is not None:
                         it_["text"] = g.replace(":", " -")[:300]
                     else:  # Fix1 (real-text run): the plan unit was withheld, so the procedure is not in management_plan; the withheld record and the surgery_confirm prompt remain
-                        it_["status"], it_["procedure"] = "discussed_only", None
+                        it_["status"] = "discussed_only"
+                        it_.pop("procedure", None)
                         it_["text"] = "[conditional_procedure_withheld] procedure held out of the plan"
         plan_txt[:] = gated
         if plan_txt:
@@ -2287,7 +2299,12 @@ class Builder:
                     for k in ("text", "value", "unit", "as_heard"):
                         part.pop(k, None)
                 elif part.get("text"):
-                    part["text"] = v10_numbers.redact(part["text"])
+                    from .validate import _drugish
+                    if _drugish(part["text"]):  # FRX-S1: a slot part holds no drug name (a drug in the class text is a prompt, not a slot part)
+                        for k in ("text", "value", "unit", "as_heard"):
+                            part.pop(k, None)
+                    else:
+                        part["text"] = v10_numbers.redact(part["text"])
 
     def _scrub_identity(self) -> None:
         """FRX-E3 reads gp_extraction, provenance text, and every string inside slots, including slot quotes."""
@@ -2478,7 +2495,7 @@ def build(c: Consult, enc: dict, b: Boundary, model_id: str, prompt_sha: str, co
     for sp in art["spans"]:
         if sp["boundary_quarantined"]:  # Fix1 H2: a quarantined span keeps its id and the reason, not the words
             sp["quote_en"], sp["quote_native"], sp["reason"] = "", "", "boundary_quarantined"
-    art["confirm_prompts"], art["confirm_internal"] = bl.confirm_prompts, bl.confirm_internal
+    art["confirm_prompts"], art["confirm_internal"] = bl.confirm_prompts, dict(bl.confirm_internal, v9_tokens=sorted(getattr(bl, "v9_tokens", set())))
     art["withheld"] = bl.withheld
     art["kept_out"] = kept_out_records(bl.prov)
     art["doctor_words"] = bl.doctor_words_out
@@ -2486,4 +2503,5 @@ def build(c: Consult, enc: dict, b: Boundary, model_id: str, prompt_sha: str, co
     from .recover import recover_medicine_rules, soften_f2_m3
     soften_f2_m3(art)
     recover_medicine_rules(art)
+    v10_projection.split_completion(art)
     return art

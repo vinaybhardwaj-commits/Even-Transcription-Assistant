@@ -4,6 +4,7 @@ import json
 import pytest
 from conftest import build_artifact, empty_encounter, mk_consult
 
+from tools.eta2freescript.validate import completion_rows
 from tools.eta2freescript.eval.aggregate import COMPLETION_KINDS, head
 from tools.eta2freescript.eval.judge import metrics
 from tools.eta2freescript.models import FakeClient, GatewayClient, UsageLedger
@@ -42,7 +43,7 @@ def test_near_miss_brand_is_not_a_second_continue_prompt():
                        "strength": "2.5 mg", "frequency": "once a day", "duration": None, "basis": "said", "confidence": 0.9,
                        "source_quote_turn": 1, "source_turns": [0, 1]}],
         drug_history=[{"name_as_said": "Concord 2.5", "text": "Takes Concord 2.5", "current": True, "reported_by": "patient", "source_turns": [0]}]))
-    prompts = [x["prompt"] for x in art["completion_required"]]
+    prompts = [x["prompt"] for x in completion_rows(art)]
     assert not any(p.startswith("Continue") for p in prompts)
     assert not art["gp_extraction"].get("medicines") and len(art["confirm_prompts"]) == 1 and "bisoprolol" in (art["confirm_prompts"][0]["drug"].get("generic") or "").lower()
 
@@ -59,7 +60,7 @@ def test_continue_prompt_only_when_plausible_and_garbled_names_collapse():
             {"name_as_said": "xzqpl", "text": "some xzqpl tablet", "current": True, "reported_by": "patient", "source_turns": [2]},
             {"name_as_said": "the one from last time", "text": "the one from last time", "current": True, "reported_by": "patient", "source_turns": [2]},
         ]))
-    prompts = [x["prompt"] for x in art["completion_required"]]
+    prompts = [x["prompt"] for x in completion_rows(art)]
     assert prompts.count("Continue metformin?") == 1
     assert prompts.count("Patient mentioned other medicines") == 1
     assert sum(p.startswith("Continue") for p in prompts) == 1

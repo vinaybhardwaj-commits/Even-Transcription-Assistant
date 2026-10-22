@@ -46,13 +46,13 @@ def test_surgery_negation_and_a_scan_conditional_do_not_confirm():
         "name": "surgery", "basis": "said", "decision_turn": 0, "source_turns": [0], "advised_kind": "ordered",
     }])
     assert a["gp_extraction"].get("plan_of_management", {}).get("requires_surgery_or_procedure") is not True
-    lines = [(0, 8, "0", "No surgery. I advise septoplasty.")]
+    lines = [(0, 8, "0", "No surgery. I advise rhinoplasty.")]
     a = art_of(c=mk_consult(lines, roles=DOC), examination=[], procedures=[
         {"name": "surgery", "basis": "said", "decision_turn": 0, "source_turns": [0], "advised_kind": "ordered"},
-        {"name": "septoplasty", "basis": "said", "decision_turn": 0, "source_turns": [0], "advised_kind": "ordered"},
+        {"name": "rhinoplasty", "basis": "said", "decision_turn": 0, "source_turns": [0], "advised_kind": "ordered"},
     ])
     recs = a["gp_extraction"]["plan_of_management"]["surgery_or_procedure_recommendations"]
-    assert [r["name"].lower() for r in recs] == ["septoplasty"]
+    assert [r["name"].lower() for r in recs] == ["rhinoplasty"]
     assert a["gp_extraction"]["plan_of_management"]["requires_surgery_or_procedure"] is True
     lines = [(0, 8, "0", "EVLT if the Doppler shows reflux.")]
     a = art_of(c=mk_consult(lines, roles=DOC), examination=[], procedures=[{
@@ -63,12 +63,12 @@ def test_surgery_negation_and_a_scan_conditional_do_not_confirm():
     assert pom.get("requires_surgery_or_procedure") is not True
     assert "surgery_or_procedure_recommendations" not in pom
     assert any(c["kind"] == "surgery_confirm" for c in a["completion_required"])
-    lines = [(0, 6, "0", "I advise septoplasty.")]
+    lines = [(0, 6, "0", "I advise rhinoplasty.")]
     a = art_of(c=mk_consult(lines, roles=DOC), examination=[])
     assert a["gp_extraction"]["plan_of_management"]["requires_surgery_or_procedure"] is True
-    lines = [(0, 6, "0", "I do not advise septoplasty.")]
+    lines = [(0, 6, "0", "I do not advise rhinoplasty.")]
     a = art_of(c=mk_consult(lines, roles=DOC), examination=[], procedures=[{
-        "name": "septoplasty", "basis": "said", "decision_turn": 0, "source_turns": [0], "advised_kind": "ordered",
+        "name": "rhinoplasty", "basis": "said", "decision_turn": 0, "source_turns": [0], "advised_kind": "ordered",
     }])
     assert a["gp_extraction"].get("plan_of_management", {}).get("requires_surgery_or_procedure") is not True
 

@@ -121,6 +121,7 @@ def build() -> dict:
     props["prompt_id"] = {"type": ["string", "null"]}
     props["flags"]["items"]["enum"] += ["field_withheld", "combination_unexpanded"]
     s["properties"]["completion_required"]["items"]["properties"]["kind"] = {"enum": COMPLETION_KINDS + ["field_withheld"]}
+    s["properties"]["completion_required"]["items"]["properties"]["prompt_id"] = {"type": ["string", "null"]}  # Fix2 H2: the public entry is {kind, item_id, prompt_id, prompt}
     s["properties"]["generator"]["properties"]["data_files"] = {"type": "object", "additionalProperties": {"type": "string"}}
     s["properties"]["generator"]["properties"]["profile_version"] = {"type": ["string", "null"]}
     s["properties"]["generator"]["properties"]["served_model_id"] = {"type": ["string", "null"]}

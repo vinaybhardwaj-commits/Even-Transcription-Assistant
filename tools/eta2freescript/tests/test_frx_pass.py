@@ -29,7 +29,7 @@ def test_a1_blob_is_split_then_capped_at_item_boundaries():
 
 
 def test_a1_colon_replacement_cannot_push_past_300():
-    piece = "Do this: " + ("qz" * 28)  # filler that reads as no number word (a run of "ab" glues into new lexicon words)
+    piece = "Do this: " + "drink warm water and rest well at home today " * 2  # real words: FRX-T2 withholds a unit with an out-of-dictionary word
     a = art_of(advice=[{"text": "; ".join([piece] * 6), "basis": "said", "source_turns": [5]}])
     ga = a["gp_extraction"]["general_advice"]
     assert len(ga) <= ADVICE_MAX_CHARS and ":" not in ga

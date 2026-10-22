@@ -355,8 +355,24 @@ def _by_pointer(prov):
     return out
 
 
-def _covered(art, owner, kinds) -> bool:
+def completion_rows(art: dict) -> list[dict]:
+    """completion_required with each entry's internal detail / original prompt put back (Fix2 H2 moved them to confirm_internal.completion)."""
+    store = ((art.get("confirm_internal") or {}).get("completion") or {}) if isinstance(art.get("confirm_internal"), dict) else {}
+    rows = []
     for c in art.get("completion_required") or []:
+        if not isinstance(c, dict):
+            continue
+        row = dict(c)
+        for x in store.get(str(c.get("item_id")), []):
+            if isinstance(x, dict) and x.get("kind") == c.get("kind"):
+                row = {**x, **row, **{k: v for k, v in x.items() if k in ("detail", "prompt")}}
+                break
+        rows.append(row)
+    return rows
+
+
+def _covered(art, owner, kinds) -> bool:
+    for c in completion_rows(art):
         if c.get("kind") not in kinds:
             continue
         if c.get("item_id") == owner:
@@ -528,7 +544,7 @@ def frx(art: dict) -> list[str]:
                 e.append(f"FRX-M2 /medicines/{i}/name must contain the heard strength value and unit")
         elif re.search(r"\d", name):
             e.append(f"FRX-M2 /medicines/{i}/name contains a strength number that was not heard")
-            if not any(c.get("kind") == "dose_unstated" and (c.get("item_id") == (owners[0].get("item_id") if owners else None) or (owners and owners[0].get("item_id") in str(c.get("detail") or ""))) for c in comp):
+            if not any(c.get("kind") == "dose_unstated" and (c.get("item_id") == (owners[0].get("item_id") if owners else None) or (owners and owners[0].get("item_id") in str(c.get("detail") or ""))) for c in completion_rows(art)):
                 e.append(f"FRX-M2 /medicines/{i} needs completion dose_unstated")
         elif owners and not _covered(art, owners[0].get("item_id"), {"dose_unstated"}):
             e.append(f"FRX-M2 /medicines/{i} needs completion dose_unstated")

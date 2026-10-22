@@ -10,6 +10,7 @@ import re
 
 from .. import note as N
 from . import drugs, meds, words
+from . import names as names_mod
 from .gate import HEADING_FIELD, TOKEN, NumberGate, Violation
 
 DRUG_REASONS = {"catalogue", "denylist", "fuzzy", "phonetic"}
@@ -88,6 +89,17 @@ def gp_final(gate: NumberGate, art: dict, c) -> list[tuple[str, str, str, tuple]
                 holder.pop(path[-1], None)
             else:
                 drop_entries.append((path, fld))
+    # FRX-D1 (found on real text): when the primary diagnosis is withheld, the others are not promoted; they are withheld with it
+    dx_path = ("presenting_complaints", "diagnoses")
+    gone_dx = {p[-1] for p, _f in drop_entries if tuple(p[:-1]) == dx_path}
+    if gone_dx:
+        prim = {int(m.group(1)) for p in art.get("provenance") or [] if (p.get("diagnosis") or {}).get("is_primary") is True
+                for m in [re.fullmatch(r"/presenting_complaints/diagnoses/(\d+)", str(p.get("json_pointer") or ""))] if m}
+        if prim & gone_dx or (prim and not (prim - gone_dx)):
+            for i in range(len(((gx.get("presenting_complaints") or {}).get("diagnoses")) or [])):
+                if i not in gone_dx:
+                    drop_entries.append(((*dx_path, i), "diagnoses"))
+                    failed.append(("diagnoses", "primary_withheld", "entry", (*dx_path, i)))
     for path, _fld in sorted(drop_entries, key=lambda x: -x[0][-1]):
         node = gx
         for k in path[:-1]:
@@ -120,6 +132,7 @@ def _date_slot(gate: NumberGate, art: dict, line: str) -> str:
 def note_final(gate: NumberGate, art: dict, c, note_tok: str, *, allowed=None) -> tuple[str, dict[str, str]]:
     """(final note, {heading: first reason}) from a tokenised note. Medication is rendered from the prompts, never taken from `note_tok`."""
     allowed = allowed_drug_tokens(art, c, gate.drug_spans) if allowed is None else allowed
+    v9 = set(((art.get("confirm_internal") or {}).get("v9_tokens")) or [])
     bad: dict[str, str] = {}
     if [l.partition(":")[0] for l in note_tok.split("\n") if l.partition(":")[0] in N.HEADINGS] != N.HEADINGS:
         bad["(structure)"] = "frame"  # the 11 headings, once each, in order: re-assembling must not hide a note that lacks them
@@ -136,9 +149,12 @@ def note_final(gate: NumberGate, art: dict, c, note_tok: str, *, allowed=None) -
             else:
                 if h == "Follow up":
                     line = _date_slot(gate, art, line)
+                line = N.scrub_identity(line)  # Fix2 M2: the PHI name masker runs on the final Stage B note too (the repair path ends here as well)
                 txt, pos, errs = gate.writeback(line)
                 viol = [Violation("frame", e) for e in errs] or gate.final_check(txt, fld, pos)
                 viol += _unknown_drug_tokens(txt, allowed)
+                if v9 & set(names_mod.toks(txt)):  # Fix2 M4: a stop / not-given / change drug is named in the confirm prompts only
+                    viol.append(Violation("v9_named_drug", "v9"))
                 lines.append(txt)
             if viol:
                 bad.setdefault(h, viol[0].code)

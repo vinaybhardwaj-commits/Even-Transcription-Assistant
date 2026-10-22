@@ -51,12 +51,12 @@ def test_surgery_flag_skips_ift_and_microscopy_and_still_finds_a_biopsy():
 
 
 def test_a_second_advised_procedure_is_not_dropped():
-    lines = [(0, 8, "0", "We will do an endoscopy. I advise septoplasty.")]
+    lines = [(0, 8, "0", "We will do an endoscopy. I advise rhinoplasty.")]
     a = art_of(c=mk_consult(lines, roles=DOC), examination=[], procedures=[
         {"name": "Endoscopy", "basis": "said", "decision_turn": 0, "source_turns": [0], "advised_kind": "ordered"},
     ])
     got = {r["name"].lower() for r in a["gp_extraction"]["plan_of_management"]["surgery_or_procedure_recommendations"]}
-    assert "endoscopy" in got and "septoplasty" in got
+    assert "endoscopy" in got and "rhinoplasty" in got
 
 
 def test_conditional_procedure_failure_keeps_the_rest_of_the_visit():

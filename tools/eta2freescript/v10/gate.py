@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from ..ingest import Consult
-from . import drugs, spans, vetoes
+from . import drugs, spans, vetoes, words
 from .numbers import INF, Num, find_numbers, norm, value
 from .slots import ALLOWED, Ctx, Slot, find_slots
 
@@ -317,6 +317,15 @@ class NumberGate:
             vs = vetoes.window_vetoes(t, (match.nums[0][0], match.nums[-1][1]), slots, mode="posted")
             if vs:
                 v.append(Violation(vs[0].code, vs[0].token))
+        # FRX-T2 (words by dictionary): every word of a posted unit is English, clinical, a catalogue name or on the counselling list. Slot canonicals are not words.
+        blank = list(t)
+        for a, b, _sid in positions:
+            blank[a:b] = " " * (b - a)
+        for tok in words.ood_tokens("".join(blank)):
+            v.append(Violation("ood_word", tok))
+            break
+        if words.n1_phrase(t, fld):
+            v.append(Violation("n1_phrase", "n1"))
         if allowed_drug_tokens is not None:
             for f in drugs.flags(t):
                 if f.token.lower() not in allowed_drug_tokens:

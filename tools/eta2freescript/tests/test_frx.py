@@ -13,6 +13,7 @@ import pytest
 
 from conftest import build_artifact, empty_encounter
 
+from tools.eta2freescript.validate import completion_rows
 from tools.eta2freescript.ingest import Consult, RoleFlags, Turn
 from tools.eta2freescript.mapper import duration
 from tools.eta2freescript.validate import check, frx
@@ -165,7 +166,7 @@ def test_example_a_is_a_finished_prescription():
     assert {"pick_drug", "exam_missing"} <= kinds and "follow_up_missing" not in kinds
     slot = a["slots"][0]
     pick = next(c for c in a["completion_required"] if c["kind"] == "pick_drug")
-    assert pick["item_id"] == slot["slot_id"] and pick["prompt"] == "Name this drug" and "knee pain" in pick["detail"]
+    assert pick["item_id"] == slot["slot_id"] and pick["prompt"] == "Name this drug" and "knee pain" in completion_rows(a)[[c["item_id"] for c in a["completion_required"]].index(pick["item_id"])]["detail"]
 
 
 def test_example_b_keeps_conditional_and_unnamed_items_out():
@@ -191,7 +192,7 @@ def test_example_b_keeps_conditional_and_unnamed_items_out():
     assert b["gp_extraction"]["presenting_complaints"]["diagnoses"][0]["raw_name"] == "acidity"
     slot = b["slots"][0]
     assert slot["form"]["text"] == "syrup" and slot["json_pointer"] is None
-    prompts = {c["kind"]: c["prompt"] for c in b["completion_required"]}
+    prompts = {c["kind"]: c["prompt"] for c in completion_rows(b)}
     assert prompts["drug_history"] == "Continue pantoprazole?"
     assert prompts["pick_drug"] == "Name this drug" and "exam_missing" in prompts
 
