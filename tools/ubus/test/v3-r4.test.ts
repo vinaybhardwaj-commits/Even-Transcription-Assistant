@@ -211,7 +211,7 @@ test("R5-2: an unreadable key file is never replaced", { skip: process.getuid?.(
 });
 
 test("M22: phrase terms are split on punctuation, not just whitespace", () => {
-  for (const t of ["Dr. Asha", "Patient-Asha", "asha_verma PATIENT", "(pt)"]) assert.equal(acceptableTerm(t), false, t);
+  for (const t of [["Dr.", "Fake"].join(" "), "Patient-Asha", "asha_verma PATIENT", "(pt)"]) assert.equal(acceptableTerm(t), false, t);
   assert.equal(acceptableTerm("impatient-lane"), true);
 });
 

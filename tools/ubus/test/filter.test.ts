@@ -39,8 +39,8 @@ test("filter allows operational notes and rejects phi, secrets, transcripts, and
   assert.equal(rule(filterText("token=sk-SUPERSECRETTOKENVALUE999999")), "secret.openai");
   assert.equal(reason(filterText(PEM)), "secret");
   assert.equal(rule(filterText(PEM)), "secret.private_key");
-  assert.equal(reason(filterText("postgres://ubus:s3cr3tpass@db.internal/bus")), "secret");
-  assert.equal(rule(filterText("postgres://ubus:s3cr3tpass@db.internal/bus")), "secret.connection_uri");
+  assert.equal(reason(filterText("postgres://ubus:s3cr3tpass@example.test/bus")), "secret");
+  assert.equal(rule(filterText("postgres://ubus:s3cr3tpass@example.test/bus")), "secret.connection_uri");
   const prose = [
     "The patient described a long week of poor sleep and morning headaches.",
     "The clinician asked about medicines taken during the previous month.",

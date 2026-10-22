@@ -314,7 +314,8 @@ describe("shadow rows are used by nothing; the bench CLI refuses without argumen
 
   it("scripts/jev-bench.ts with no arguments prints its usage and exits 2 (it touches nothing)", () => {
     let code = 0, err = "";
-    try { execFileSync("npx", ["tsx", "scripts/jev-bench.ts"], { stdio: "pipe", timeout: 90_000, env: { ...process.env, DATABASE_URL: "" } }); } catch (e) { code = (e as { status?: number }).status ?? -1; err = String((e as { stderr?: Buffer }).stderr ?? ""); }
+    // tsx is not a dependency: `npx tsx` fetches it from the network, which hangs or fails on an offline runner. vite-node is installed, and the repo config gives it the "@/" alias.
+    try { execFileSync("npx", ["--no-install", "vite-node", "-c", "vitest.config.ts", "scripts/jev-bench.ts"], { stdio: "pipe", timeout: 90_000, env: { ...process.env, DATABASE_URL: "" } }); } catch (e) { code = (e as { status?: number }).status ?? -1; err = String((e as { stderr?: Buffer }).stderr ?? ""); }
     expect(code).toBe(2);
     expect(err).toMatch(/usage: --use <use> --set <id@version> --subjects/);
   });

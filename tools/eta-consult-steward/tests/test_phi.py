@@ -1,8 +1,9 @@
 import pytest
 from steward import phi, report
+from fake_identity import fake_label, fake_email
 
 
-@pytest.mark.parametrize("t", ["id 1234567 here", "mail a.b@x.org", "call +91 98765 43210", "9876543210", "080-1234-5678"])
+@pytest.mark.parametrize("t", ["id 1234567 here", "mail " + fake_email(1), "call +91 98765 43210", "9876543210", "080-1234-5678"])
 def test_blocks(t):
     with pytest.raises(phi.PhiGuardError):
         phi.check(t)
@@ -36,7 +37,7 @@ def test_report_drops_bad_items(data):
 
 def test_report_summary_phi_raises(data):
     with pytest.raises(phi.PhiGuardError):
-        report.validate({"summary_md": "mail me@x.org", "items": []})
+        report.validate({"summary_md": "mail " + fake_email(2), "items": []})
 
 
 def test_dates_next_to_counts_allowed():

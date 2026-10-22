@@ -1,6 +1,7 @@
 import json
 import pytest
 from steward import tools
+from fake_identity import fake_label, fake_email
 
 
 def test_index_latest_row_wins_and_no_names(data):
@@ -8,7 +9,7 @@ def test_index_latest_row_wins_and_no_names(data):
     assert r["total"] == 2 and r["by_status"] == {"cut": 2}
     assert r["by_room"] == {"OPD 1 (room_aaa)": 2} and r["rows"][0]["room_label"] == "OPD 1"
     assert "room-a" not in json.dumps(r) and "room_slug" not in json.dumps(r)
-    assert "doctor_name" not in json.dumps(r) and "Secret" not in json.dumps(r)
+    assert "doctor_name" not in json.dumps(r) and fake_label(1) not in json.dumps(r)
 
 
 def test_index_filter_room_slug_and_id(data):
@@ -30,14 +31,14 @@ def test_recon_fallback(data):
     assert r["source"] == "fallback_index_encounters"
     assert r["rooms"]["room_aaa"]["visits"] == 2 and r["rooms"]["unplaced"]["visits"] == 1
     assert r["rooms"]["room_aaa"]["cut"] == 2
-    assert "Secret" not in json.dumps(r) and "room-a" not in json.dumps(r)
+    assert fake_label(1) not in json.dumps(r) and "room-a" not in json.dumps(r)
     assert r["rooms"]["room_aaa"]["room_label"] == "OPD 1"
 
 
 def test_recon_file_preferred_and_stripped(data):
     d = data / "consult" / "recon"
     d.mkdir()
-    (d / "2026-10-12.json").write_text(json.dumps({"rooms": {"room_r": {"visits": 3, "doctor_name": "Dr X", "note": "free text, with punctuation!", "where": "room-a", "room_slug": "room-a"}}}))
+    (d / "2026-10-12.json").write_text(json.dumps({"rooms": {"room_r": {"visits": 3, "doctor_name": fake_label(6), "note": "free text, with punctuation!", "where": "room-a", "room_slug": "room-a"}}}))
     r = tools.recon_get("2026-10-12")
     assert r["source"] == "recon" and r["recon"]["rooms"]["room_r"]["visits"] == 3
     assert "doctor_name" not in r["recon"]["rooms"]["room_r"]
