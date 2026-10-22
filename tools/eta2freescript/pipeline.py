@@ -27,6 +27,10 @@ from .models import ModelClient, cost_for_uid
 from .note import FILLER, HEADINGS, combination_groups, flags_by_pointer, render_note, repair_note, sanitize_note_ex, span_errors
 from .prompts import clean_text, code_paths, load_prompt, parse_json, prompt_path, sha
 from .validate import check, to_v01
+from .v10 import config as V10
+from .v10 import finalize as v10_final
+from .v10 import meds as v10_meds
+from .v10 import spans as v10_spans
 
 
 @dataclass
@@ -38,6 +42,11 @@ class Options:
     write_v01: bool = True
 
 
+def _med_lines(art: dict):
+    """FRX-V10: the Medication section, rendered from the confirm prompts. None keeps the retired 2.5.0 rendering of gp_extraction.medicines."""
+    return v10_meds.medication_lines(art.get("confirm_prompts") or []) if V10.ACTIVE else None
+
+
 def _fallback_note(art: dict, flags: dict, banned: list[str]) -> str:
     return _fallback_note_ex(art, flags, banned)[0]
 
@@ -45,7 +54,7 @@ def _fallback_note(art: dict, flags: dict, banned: list[str]) -> str:
 def _fallback_note_ex(art: dict, flags: dict, banned: list[str]) -> tuple[str, list]:
     """Deterministic note, and the spans the sanitiser removed from it. If carried-over free text still names a kept-out order, drop that free text and render again.
     The fallback must not fail C4: a C4 failure used to mean no artifact was written at all."""
-    det, rem = sanitize_note_ex(render_note(art["gp_extraction"], flags, banned, combination_groups(art)))
+    det, rem = sanitize_note_ex(render_note(art["gp_extraction"], flags, banned, combination_groups(art), _med_lines(art)))
     shadow = dict(art)
     shadow["note_text"] = det
     if not any(e.startswith("C4") for e in check(shadow)):
@@ -57,7 +66,7 @@ def _fallback_note_ex(art: dict, flags: dict, banned: list[str]) -> tuple[str, l
         inv.pop("instruction", None)
     for ref in gx.get("referrals") or []:
         ref.pop("notes", None)
-    return sanitize_note_ex(render_note(gx, flags, groups=combination_groups(art)))
+    return sanitize_note_ex(render_note(gx, flags, groups=combination_groups(art), med_lines=_med_lines(art)))
 
 
 def spoken_brands_text(art: dict) -> str:
@@ -78,7 +87,7 @@ def role_context(c: Consult) -> str:
 
 def stage_a_prompt(c: Consult, pre: B.Boundary, version: str) -> tuple[str, str]:
     system, user = load_prompt(version)
-    return system, (user.replace("{{TRANSCRIPT}}", format_transcript(c, pre.quarantined)).replace("{{ROLE_CONTEXT}}", role_context(c)))
+    return system, (user.replace("{{TRANSCRIPT}}", format_transcript(c, pre.quarantined, spans=version.startswith("stageA-v3"))).replace("{{ROLE_CONTEXT}}", role_context(c)))
 
 
 def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | None = None, specialty: str | None = None) -> dict:
@@ -93,6 +102,8 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     raw = client.chat(opts.model, user, system, max_tokens=16000, tag=f"{opts.stage_a}:{c.uid}")
     (od / "stageA.raw.txt").write_text(raw, encoding="utf-8")
     enc = parse_json(raw)
+    if V10.ACTIVE:
+        enc = v10_spans.cite_to_turns(enc)  # Stage A v3 cites span ids ("s12"); the mapper reads the integer turn index
     if not c.role_track:
         apply_inferred_roles(c.turns, enc.get("speaker_roles") or [])
     bnd = B.detect(c, enc.get("consult_boundary"))
@@ -113,13 +124,34 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     (od / "encounter.json").write_text(json.dumps(enc, indent=1, ensure_ascii=False), encoding="utf-8")
 
     prompts = [prompt_path(opts.stage_a)] + ([prompt_path(opts.stage_b)] if opts.stage_b_enabled else [])
-    art = build(c, enc, bnd, model_id, sha(*prompts), sha(*code_paths()), specialty)
+    ctx: dict = {}
+    art = (build(c, enc, bnd, model_id, sha(*prompts), sha(*code_paths()), specialty, ctx) if V10.ACTIVE
+           else build(c, enc, bnd, model_id, sha(*prompts), sha(*code_paths()), specialty))
+    gate, bl = ctx.get("gate"), ctx.get("builder")
     flags = flags_by_pointer(art)
     banned = [n for p in art["provenance"] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
     det, det_rem = _fallback_note_ex(art, flags, banned)
     log = {"uid": c.uid, "speaker_source": c.speaker_source, "english_source": c.english_source,
            "boundary": art["clip_boundary"], "completion_required": len(art["completion_required"]),
            "guard_issues": enc["_guard"]["issues"]}
+
+    def view_of(note: str) -> tuple[dict, list[str]]:
+        """The artifact as it would be written with this note: slot values written back and FRX-T1 run (rules 4 and 12). Returns (artifact, FRX-T1 errors).
+        With V10 off it is the artifact itself with `note_text` set."""
+        if not V10.ACTIVE:
+            art["note_text"] = note
+            return art, []
+        v = copy.deepcopy(art)
+        failed = v10_final.gp_final(gate, v, c)
+        v["provenance"] = v10_final.writeback_tree(gate, v["provenance"])
+        v["completion_required"] = v10_final.writeback_tree(gate, v["completion_required"])
+        v["slots"] = v10_final.writeback_tree(gate, v["slots"])
+        for key in ("doctor_words", "red_flags"):
+            v[key] = v10_final.writeback_tree(gate, v[key])
+        final, bad = v10_final.note_final(gate, v, c, note)
+        v["note_text"] = final
+        return v, [f"FRX-T1 gp {f}:{r}" for f, r, _u, _p in failed] + [f"FRX-T1 note {h}:{r}" for h, r in bad.items()]
+
     t1 = time.time()
     llm_errs = None
     if opts.stage_b_enabled:
@@ -131,21 +163,19 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
             (od / "note_text.llm.txt").write_text(txt + "\n", encoding="utf-8")
             log["raw_llm_note_has_filler"] = any(FILLER.match(l.partition(":")[2]) for l in txt.split("\n")
                                                  if l.partition(":")[0] in HEADINGS and l.partition(":")[2].strip())
-            art["note_text"], llm_rem = sanitize_note_ex(txt)
-            llm_errs = check(art) + span_errors(llm_rem)
+            note, llm_rem = sanitize_note_ex(txt)
+            view, t1errs = view_of(note)
+            llm_errs = check(view) + span_errors(llm_rem) + t1errs
             if llm_errs and not span_errors(llm_rem):  # a note that lost a span on an order line is not repaired: it goes to the fallback
-                art["note_text"], llm_rem = sanitize_note_ex(repair_note(txt, art["gp_extraction"], flags, banned, combination_groups(art)))
-                repaired = check(art) + span_errors(llm_rem)
+                note, llm_rem = sanitize_note_ex(repair_note(txt, art["gp_extraction"], flags, banned, combination_groups(art), _med_lines(art)))
+                view, t1errs = view_of(note)
+                repaired = check(view) + span_errors(llm_rem) + t1errs
                 log["note_repaired"] = not repaired
-                if not repaired:
-                    llm_errs = []
-                else:
-                    llm_errs = repaired
+                llm_errs = [] if not repaired else repaired
         except Exception as e:  # a failed Stage B call falls back like an invalid note
             llm_errs = [f"stageB call failed: {type(e).__name__}"]
     if llm_errs is None or llm_errs:
-        art["note_text"] = det
-        llm_rem = det_rem
+        note, llm_rem = det, det_rem
     log["llm_note_errors"] = llm_errs
     log["llm_note_valid"] = llm_errs == []
     log["note_source"] = f"llm_{opts.stage_b}" if llm_errs == [] else "deterministic_fallback"
@@ -156,9 +186,32 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
     if recovered:
         flags = flags_by_pointer(art)
         banned = [n for p in art["provenance"] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
-        art["note_text"], llm_rem = _fallback_note_ex(art, flags, banned)
+        note, llm_rem = _fallback_note_ex(art, flags, banned)
         log["field_recovery"] = recovered
-    final = check(art) + span_errors(llm_rem)
+    # FRX-V10: whatever still fails FRX-T1 on the deterministic note is withheld (rule 8): the unit is blanked and a record, a provenance item and a prompt written
+    view, t1errs = view_of(note)
+    if V10.ACTIVE and t1errs and bl is not None:
+        v0 = copy.deepcopy(art)
+        failed = v10_final.gp_final(gate, v0, c)
+        _final_note, bad = v10_final.note_final(gate, v0, c, note)
+        v10_final.drop_units(art, failed)
+        for fld, reason, _u, _p in failed:
+            bl.withhold(fld, reason, [], stage="floor")
+        for h, reason in bad.items():
+            bl.withhold(next((k for k, v in bl.SECTION.items() if v == h), "plan"), reason, [], stage="floor")
+        log["frx_t1_withheld"] = [{"field": f, "reason": r} for f, r, _u, _p in failed] + [{"section": h, "reason": r} for h, r in bad.items()]
+        flags = flags_by_pointer(art)
+        note, llm_rem = _fallback_note_ex(art, flags, banned)
+        view, t1errs = view_of(note)
+    final = check(view) + span_errors(llm_rem)
+    if V10.ACTIVE:
+        served = (getattr(client, "served_ids", {}) or {}).get(opts.model)
+        view["generator"]["served_model_id"] = served
+        if served:
+            view["generator"]["model"] = served  # A52: the id the provider response named, not the alias-table id
+        view["generator"]["model_id_source"] = "provider_response" if served else "request_alias_unverified"
+        view["generator"]["stage_a_version"], view["generator"]["stage_b_version"] = opts.stage_a, opts.stage_b
+    art = view
     if llm_rem:  # only when a span was removed, so a consult with none keeps a byte-identical log
         log["sanitize_removed"] = len(llm_rem)
     log.update({"final_errors": final, "final_valid": not final, "written": not final,

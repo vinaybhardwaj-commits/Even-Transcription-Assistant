@@ -44,7 +44,8 @@ def test_rules_catch_planted_shapes():
 
 def test_no_identity_shapes_anywhere_in_the_tool():
     files = [p for p in PKG.rglob("*") if p.is_file() and p.suffix in (".py", ".json", ".md", ".txt", ".tsv", ".yml", ".ini")
-             and "__pycache__" not in p.parts and p.name != "test_fixtures.py"]
+             and "__pycache__" not in p.parts and p.name != "test_fixtures.py"
+             and "contract_v1" not in p.parts]  # the contract bundle is invented text with its own sweep (HANDOFF-INDEX.md); its hashes look like phone numbers
     assert len(files) > 20
     assert offenders(files) == []
 

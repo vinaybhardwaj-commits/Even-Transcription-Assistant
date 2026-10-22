@@ -110,6 +110,8 @@ class NumberGate:
 
     @staticmethod
     def _same(a: Slot, b: Slot) -> bool:
+        if a.kind == "date" or b.kind == "date":
+            return a.kind == b.kind and a.meta.get("date") == b.meta.get("date")
         if a.kind != b.kind or len(a.values) != len(b.values) or any(abs(x - y) > 1e-9 for x, y in zip(a.values, b.values)):
             return False
         for key in ("analyte", "vital", "daily", "label"):
@@ -243,6 +245,26 @@ class NumberGate:
                 if not vs:
                     return None
                 worst = vs[0].code
+        return worst
+
+    def check_date(self, iso: str, fld: str, turns: list[int]) -> str | None:
+        """None when a cited span (order-capable for an order field) says this calendar date as a full date, veto-free (the follow-up date Stage A reports)."""
+        cited = [t for t in dict.fromkeys(turns) if 0 <= t < len(self.c.turns) and t not in self.quarantined]
+        worst = "frame"
+        for t in cited:
+            if fld in ORDER_FIELDS and t not in self.oc:
+                continue
+            en, _nat = self._turn_texts(t)
+            qs = self._quote_slots(en)
+            for q in qs:
+                if q.kind == "date" and q.meta.get("date") == iso:
+                    if t in self.drug_spans:
+                        worst = "veto_detector"
+                        continue
+                    vs = vetoes.window_vetoes(en, (q.nums[0][0], q.nums[-1][1]), qs, mode="en")
+                    if not vs:
+                        return None
+                    worst = vs[0].code
         return worst
 
     # --- write-back and FRX-T1 ------------------------------------------------------------------------------------------------

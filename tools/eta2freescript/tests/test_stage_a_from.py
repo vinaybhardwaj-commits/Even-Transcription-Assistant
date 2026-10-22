@@ -245,17 +245,24 @@ src = Path(sys.argv[5]).read_text()
 G = {}
 exec(src, G)
 from tools.eta2freescript.models import FakeClient
-from tools.eta2freescript.pipeline import run_consult
+from tools.eta2freescript.pipeline import Options, run_consult
 import tools.eta2freescript.pipeline as pl
+try:  # FRX-V10: compare the retired 2.5.0 path (prompts v2 / v9, medicine rows) with the base tree
+    from tools.eta2freescript.v10 import config as _v10
+    _v10.ACTIVE = False
+    import tools.eta2freescript.boundary as _bd
+    _bd.LEAD_GAP_S = 1e12  # Addendum A F4 is new behaviour; the comparison is with the base
+except ImportError:
+    pass
 assert Path(pl.__file__).resolve().is_relative_to(Path(tree).resolve()), pl.__file__
 cs = [G["gen_consult"](i, seed) for i in range(n)]
 G["NTURNS"].update({i: len(c.turns) for i, c in enumerate(cs)})
 fake = FakeClient(G["responder"](0, seed))
 for c in cs:
-    run_consult(c, fake, Path(out))
+    run_consult(c, fake, Path(out), Options(stage_a="stageA-v2", stage_b="stageB-v9"))
 def norm(o):
     if isinstance(o, dict):
-        return {k: ("<n>" if k in ("created_at", "code_sha256", "run_id", "artifact_id", "secs_stageA", "secs_stageB", "secs_total") else norm(v)) for k, v in o.items()}
+        return {k: ("<n>" if k in ("created_at", "code_sha256", "run_id", "artifact_id", "version", "secs_stageA", "secs_stageB", "secs_total") else norm(v)) for k, v in o.items()}
     if isinstance(o, list):
         return [norm(x) for x in o]
     return o

@@ -442,7 +442,7 @@ def base():
     return _base_mapper()
 
 
-VOLATILE = {"artifact_id", "created_at", "run_id", "code_sha256"}
+VOLATILE = {"artifact_id", "created_at", "run_id", "code_sha256", "version"}  # version: the mapper is 3.0.0 (FRX-V10)
 
 
 def stable(node):
@@ -454,7 +454,7 @@ def stable(node):
 
 
 def test_oracle_plain_string_input_is_byte_identical_to_base(base):
-    assert base.MAPPER_VERSION == M.MAPPER_VERSION and not hasattr(base, "as_text")
+    assert not hasattr(base, "as_text")
     for seed in range(N_CASES):
         g = Gen(20_000 + seed, "str")
         enc = g.enc()
@@ -626,7 +626,7 @@ def base_c1():
 
 
 def test_c1_oracle_plain_string_input_is_byte_identical_to_7130c5a7(base_c1):
-    assert base_c1.MAPPER_VERSION == M.MAPPER_VERSION and hasattr(base_c1, "as_text")
+    assert hasattr(base_c1, "as_text")
     n = 2500
     for seed in range(n):
         g = Gen(40_000 + seed, "str")

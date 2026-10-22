@@ -117,6 +117,20 @@ def build() -> dict:
         "translation_conflict", "unresolved_name", "molecule_conflict",
         "dose_binding_conflict", "implausible_strength", "lab_dx_conflict",
     ]
+    # FRX-V10 (pipeline 3.0.0): additive and optional, so a v0.3 reader (the ingest route) still accepts the artifact
+    props["prompt_id"] = {"type": ["string", "null"]}
+    props["flags"]["items"]["enum"] += ["field_withheld", "combination_unexpanded"]
+    s["properties"]["completion_required"]["items"]["properties"]["kind"] = {"enum": COMPLETION_KINDS + ["field_withheld"]}
+    s["properties"]["generator"]["properties"]["data_files"] = {"type": "object", "additionalProperties": {"type": "string"}}
+    s["properties"]["generator"]["properties"]["profile_version"] = {"type": ["string", "null"]}
+    s["properties"]["generator"]["properties"]["served_model_id"] = {"type": ["string", "null"]}
+    s["properties"]["generator"]["properties"]["model_id_source"] = {"enum": ["provider_response", "request_alias_unverified"]}
+    s["properties"]["generator"]["properties"]["stage_a_version"] = {"type": "string"}
+    s["properties"]["generator"]["properties"]["stage_b_version"] = {"type": "string"}
+    s["properties"]["policy"] = {"type": "object"}
+    for key in ("roster", "spans", "confirm_prompts", "withheld", "red_flags", "doctor_words", "kept_out"):
+        s["properties"][key] = {"type": "array", "items": {"type": "object"}}
+    s["properties"]["confirm_internal"] = {"type": "object"}
     for clause in pi.get("allOf", []):
         enum = clause.get("if", {}).get("properties", {}).get("status", {}).get("enum")
         if enum and "discussed_only" in enum and "prescribed" not in enum:

@@ -87,6 +87,36 @@
           "type": "string",
           "minLength": 4,
           "maxLength": 80
+        },
+        "data_files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "profile_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "served_model_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_id_source": {
+          "enum": [
+            "provider_response",
+            "request_alias_unverified"
+          ]
+        },
+        "stage_a_version": {
+          "type": "string"
+        },
+        "stage_b_version": {
+          "type": "string"
         }
       }
     },
@@ -316,7 +346,8 @@
               "inferred_confirm",
               "allergy_check",
               "boundary_review",
-              "lab_dx_conflict"
+              "lab_dx_conflict",
+              "field_withheld"
             ]
           },
           "item_id": {
@@ -730,6 +761,54 @@
           }
         }
       }
+    },
+    "policy": {
+      "type": "object"
+    },
+    "roster": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "spans": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "confirm_prompts": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "withheld": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "red_flags": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "doctor_words": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "kept_out": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "confirm_internal": {
+      "type": "object"
     }
   },
   "definitions": {
@@ -1187,7 +1266,9 @@
               "molecule_conflict",
               "dose_binding_conflict",
               "implausible_strength",
-              "lab_dx_conflict"
+              "lab_dx_conflict",
+              "field_withheld",
+              "combination_unexpanded"
             ]
           }
         },
@@ -1221,6 +1302,12 @@
         },
         "follow_up": {
           "type": "object"
+        },
+        "prompt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "allOf": [

@@ -19,7 +19,10 @@ visible means the window is not sent to Jev.
 
 from __future__ import annotations
 
+import json
 import re
+from functools import lru_cache
+from pathlib import Path
 from dataclasses import dataclass, field
 
 TAG_PATIENT_NAME = "[PATIENT_NAME]"
@@ -242,11 +245,32 @@ def _sub_labeled_id(text: str, counts: dict[str, int]) -> str:
     return _outside(text, apply)
 
 
+@lru_cache(maxsize=1)
+def _drug_names() -> frozenset[str]:
+    """Drug names a name cue must never mask (Addendum A F5, case ahpierb3: a painkiller brand became [name]): the first word of every Pulse catalogue name
+    (data/drug-lexicon.json) and the combination brands of eta2freescript. A missing file leaves the set empty, never an error."""
+    out: set[str] = set()
+    try:
+        names = json.loads((Path(__file__).resolve().parents[2] / "data" / "drug-lexicon.json").read_text(encoding="utf-8")).get("names", [])
+        for n in names:
+            m = re.match(r"\s*([A-Za-z]{3,})", str(n))
+            if m:
+                out.add(m.group(1).lower())
+    except (OSError, ValueError):
+        pass
+    try:
+        from tools.eta2freescript.combinations import CATALOGUE
+        out.update(CATALOGUE)
+    except Exception:  # noqa: BLE001 - the allowlist is an addition; the masker must work without it
+        pass
+    return frozenset(out)
+
+
 def _trim_name(raw: str) -> str | None:
     kept: list[str] = []
     for tok in raw.split():
         bare = tok.strip(".").lower()
-        if bare in _STOP:
+        if bare in _STOP or (not kept and re.sub(r"[^a-z]", "", bare) in _drug_names()):
             break
         kept.append(tok)
         if len(kept) == 3:

@@ -208,13 +208,14 @@ def _assemble(sections: dict[str, list[str]]) -> str:
     return "\n".join(lines)
 
 
-def repair_note(llm: str, gx: dict, flags: dict | None = None, banned_names: list[str] | None = None, groups: list | None = None) -> str:
+def repair_note(llm: str, gx: dict, flags: dict | None = None, banned_names: list[str] | None = None, groups: list | None = None,
+                med_lines: list[str] | None = None) -> str:
     """Force the 11 headings. List sections always come from gp_extraction. Free-text lines stay when they are clean.
     `groups` (combination_groups) makes the Medication section brand-first, exactly as render_note does."""
     from .validate import V
 
     banned = [n for n in (banned_names or []) if n]
-    det = _split_sections(render_note(gx, flags, banned, groups))
+    det = _split_sections(render_note(gx, flags, banned, groups, med_lines))
     got = _split_sections(llm or "")
     out: dict[str, list[str]] = {}
     for h in HEADINGS:
@@ -238,7 +239,8 @@ def flags_by_pointer(art: dict) -> dict:
 def _clean(s) -> str:
     """One rendered entry. None is empty; a non-string is its str. Brackets and braces pass through untouched: FRX-N1 rejects them."""
     s = "" if s is None else s if isinstance(s, str) else str(s)
-    return s.replace(":", " -").replace("\n", " ").strip()
+    keep = "Medication changes discussed: see the confirm list."  # FRX-V10: the one line that keeps its colon (spec, Medicines)
+    return s.replace(keep, "\x00K\x00").replace(":", " -").replace("\n", " ").replace("\x00K\x00", keep).strip()
 
 
 def _t(v) -> str:
@@ -283,7 +285,8 @@ def _valid_groups(groups, n: int) -> dict[int, tuple[str, list[int]]]:
     return out
 
 
-def render_note(gx: dict, flags: dict | None = None, banned_names: list[str] | None = None, groups: list | None = None) -> str:
+def render_note(gx: dict, flags: dict | None = None, banned_names: list[str] | None = None, groups: list | None = None,
+                med_lines: list[str] | None = None) -> str:
     flags = flags or {}
     banned = [n for n in (banned_names or []) if n]
     pc, pom, fu = gx.get("presenting_complaints") or {}, gx.get("plan_of_management") or {}, gx.get("follow_up") or {}
@@ -322,7 +325,7 @@ def render_note(gx: dict, flags: dict | None = None, banned_names: list[str] | N
         "Diagnoses": [("?" if d.get("is_differential_diagnosis") else "") + _clean(d.get("diagnosis_or_impression")) for d in pc.get("diagnoses") or []],
         "Plan of Management": [_clean(pom.get("management_plan"))],
         "Surgery or Procedure": [_clean(s.get("name")) for s in pom.get("surgery_or_procedure_recommendations") or []],
-        "Medication": meds_out,
+        "Medication": meds_out if med_lines is None else list(med_lines),  # FRX-V10: rendered from the confirm prompts by code
         "Further Investigation": [_clean(_t(i.get("name")) + (" (" + ins + ")" if (ins := _scrub(_t(i.get("instruction")), banned, [i.get("name"), i.get("raw_name")])) else "")) for i in gx.get("further_investigations") or []],
         "Follow up": [follow_up_line(fu)] if fu else [],
         "Refer to": [_clean(_t(r.get("speciality")) + (" - " + notes if (notes := _scrub(_t(r.get("notes")), banned, [r.get("speciality")])) else "")) for r in gx.get("referrals") or []],

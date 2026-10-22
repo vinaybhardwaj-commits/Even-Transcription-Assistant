@@ -184,6 +184,33 @@ def _long_gap(c: Consult, b: Boundary, foreign: set[int], labelled: bool) -> Non
             b.add("long_gap:unconfirmed")
 
 
+# Addendum A F4 (cases 6fqhvv8f, 7s815msg): a goodbye, a silence of 20 s or more, then a greeting, a name call or "come, sit" means everything
+# before the silence was the previous patient.
+LEAD_GAP_S = 20.0
+_GOODBYE = re.compile(r"\b(?:good\s?bye|bye|take care|see you|thank(?:s| you)|dhanyavad\w*|dhanyawad\w*|shukriya|namaste|namaskara|dhanyavadagalu|barthini|bartini)\b", re.I)
+_OPENING = re.compile(
+    r"\b(?:hello|hi|namaste|namaskara|good\s+(?:morning|afternoon|evening)|come\s+(?:in|here|inside)|come,?\s+sit|please\s+sit|sit\s+down|have\s+a\s+seat|"
+    r"baithiye|baitho|next|(?:mr|mrs|ms|shri|smt|sri)\.?\s+[A-Za-z]+)\b", re.I)
+_NAME_CALL = re.compile(r"^\s*[A-Z][a-z]{2,}(?:\s+(?:ji|garu|avare|madam|sir|amma|bhai))?\s*[.?!,]*\s*$")
+
+
+def _leading_goodbye(c: Consult, b: Boundary) -> None:
+    n = len(c.turns)
+    for i in range(0, n - 1):
+        if i + 1 > 0.6 * n:
+            break
+        t, nxt = c.turns[i], c.turns[i + 1]
+        if (nxt.t0_ms - t.t1_ms) / 1000 < LEAD_GAP_S:
+            continue
+        if not _GOODBYE.search(t.text or ""):
+            continue
+        opening = _OPENING.search(nxt.text or "") or _NAME_CALL.match((nxt.text or "").strip())
+        if not opening or _speech(c.turns[i + 1:]) <= 0:
+            continue
+        b.add("leading_goodbye_gap", range(0, i + 1))
+        return
+
+
 def detect(c: Consult, stage_a_boundary: dict | None = None) -> Boundary:
     """Pre-Stage-A call: stage_a_boundary None. Post-Stage-A call: pass encounter['consult_boundary']."""
     b = Boundary()
@@ -193,6 +220,7 @@ def detect(c: Consult, stage_a_boundary: dict | None = None) -> Boundary:
     # Greetings at the clip edge are not another consult, even if Stage A listed them.
     foreign = {i for i in raw_foreign if not (_admin(c.turns[i].text) and _at_edge(c, c.turns[i]))}
     _two_consults(c, b)
+    _leading_goodbye(c, b)
     _second_patient(c, b, foreign, stage_a_boundary is not None)
     _long_gap(c, b, foreign, stage_a_boundary is not None)
     if foreign:

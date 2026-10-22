@@ -223,14 +223,15 @@ def test_repair_path_uses_the_same_groups():
     assert plain == ORACLE.repair_note("Medication: nonsense", a["gp_extraction"], flags_by_pointer(a), [])
 
 
-def test_default_stage_b_is_v9_and_the_prompt_receives_the_groups(tmp_path):
-    assert STAGE_B_VERSION == "v9"
+def test_default_stage_b_is_v10_and_stage_b_v9_receives_the_groups(tmp_path):
+    from tools.eta2freescript.pipeline import Options
+    assert STAGE_B_VERSION == "v10"
     c = mk_consult([(0, 8, "0", "Take Augmentin 625 twice a day for five days.")], roles=DOC)
     enc = empty_encounter(examination=EXAM, prescription=[rx("Augmentin 625")])
     note = ("Co-morbidities:\nPresenting Complaint:\nExamination:\nDiagnoses:\nPlan of Management:\nSurgery or Procedure:\n"
             "Medication: Augmentin 625 (amoxicillin + clavulanic acid) twice a day x for five days\nFurther Investigation:\nFollow up:\nRefer to:\nGeneral Advice:")
     fake = FakeClient({"stageA": json.dumps(enc), "stageB-v9": note})
-    lg = run_consult(c, fake, tmp_path)
+    lg = run_consult(c, fake, tmp_path, Options(stage_a="stageA-v2", stage_b="stageB-v9"))  # the retired 2.5.0 prompts: only v9 lists combination groups
     b = [x for x in fake.calls if x["tag"].startswith("stageB")]
     assert b and b[0]["tag"].startswith("stageB-v9") and "{{" not in b[0]["prompt"]
     assert "Augmentin 625 -> medicines [0, 1]" in b[0]["prompt"]
@@ -240,7 +241,8 @@ def test_default_stage_b_is_v9_and_the_prompt_receives_the_groups(tmp_path):
 def test_prompt_says_none_when_no_groups(tmp_path):
     uid = "synth-fever-dose"
     fake = FakeClient({"stageA": json.dumps(stage_a(uid)), "stageB": (MODEL / uid / "stageB.txt").read_text()})
-    run_consult(load_consult(CONSULTS, uid), fake, tmp_path)
+    from tools.eta2freescript.pipeline import Options
+    run_consult(load_consult(CONSULTS, uid), fake, tmp_path, Options(stage_a="stageA-v2", stage_b="stageB-v9"))
     b = [x for x in fake.calls if x["tag"].startswith("stageB")][0]
     assert b["tag"].startswith("stageB-v9") and b["prompt"].count("\nnone\n") == 1
 

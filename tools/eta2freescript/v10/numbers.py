@@ -200,3 +200,20 @@ def has_number(text) -> bool:
 
 def words_only(num: Num) -> bool:
     return num.kind in ("word", "glued", "agram")
+
+
+_AFTER_NUM = re.compile(r"^\s*(?:/\s*\d+\s*)?(?:mg|mcg|µg|ug|gms?|grams?|ml|mls|iu|units?|%|k\b)?", re.I)
+
+
+def redact(text) -> str:
+    """`text` with every number token (and a dose unit glued to it) removed, for audit strings that must hold no strength (C4)."""
+    t = norm(text)
+    out, cur = [], 0
+    for n in find_numbers(t):
+        if n.start < cur:
+            continue
+        m = _AFTER_NUM.match(t[n.end:])
+        out.append(t[cur:n.start])
+        cur = n.end + (m.end() if m else 0)
+    out.append(t[cur:])
+    return re.sub(r"[ \t]{2,}", " ", "".join(out)).strip(" ,;-")

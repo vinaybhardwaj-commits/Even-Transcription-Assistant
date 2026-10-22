@@ -422,15 +422,17 @@ def list_consults(data_dir: Path) -> list[str]:
     return sorted(p.name for p in Path(data_dir).iterdir() if p.is_dir() and (p / "transcript.json").exists())
 
 
-def format_transcript(c: Consult, quarantined: set[int] = frozenset()) -> str:
-    """Stage A input. `T<i> [S<spk>|<role>] (mm:ss) text`; the role is shown only when it came from the role track."""
+def format_transcript(c: Consult, quarantined: set[int] = frozenset(), spans: bool = False) -> str:
+    """Stage A input. `T<i> [S<spk>|<role>] (mm:ss) text`; the role is shown only when it came from the role track.
+    spans=True (Stage A v3): `s<i> [speaker_<n>|<role>] ...`, the span id the model cites."""
     out = []
+    lead = "s" if spans else "T"
     for t in c.turns:
         rel = max(0, (t.t0_ms - c.clip_t0_ms) // 1000)
-        who = f"S{t.speaker}" + (f"|{t.role}" if t.role_source == "role_track" else "")
+        who = (f"speaker_{t.speaker}" if spans else f"S{t.speaker}") + (f"|{t.role}" if t.role_source == "role_track" else "")
         q = " [QUARANTINED: possible other consult]" if t.idx in quarantined else ""
         if t.native_text:
-            out.append(f"T{t.idx} [{who}] ({rel // 60:02d}:{rel % 60:02d}){q} NATIVE[{t.native_lang or c.lang}]: {t.native_text} | ENGLISH: {t.text}")
+            out.append(f"{lead}{t.idx} [{who}] ({rel // 60:02d}:{rel % 60:02d}){q} NATIVE[{t.native_lang or c.lang}]: {t.native_text} | ENGLISH: {t.text}")
         else:
-            out.append(f"T{t.idx} [{who}] ({rel // 60:02d}:{rel % 60:02d}){q} {t.text}")
+            out.append(f"{lead}{t.idx} [{who}] ({rel // 60:02d}:{rel % 60:02d}){q} {t.text}")
     return "\n".join(out)

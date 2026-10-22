@@ -45,7 +45,7 @@ V01_KINDS = {
     "management_plan", "advice", "follow_up", "referral",
 }
 V01_STATUS = {"prescribed", "continued", "stopped", "not_given", "discussed_only"}
-EXTRA_PROV = ("evidence_state", "decision", "for_this_patient", "medicine", "diagnosis", "investigation", "procedure", "follow_up")
+EXTRA_PROV = ("prompt_id", "evidence_state", "decision", "for_this_patient", "medicine", "diagnosis", "investigation", "procedure", "follow_up")
 EXTRA_EV = ("quote", "quote_native", "speaker", "speaker_source")
 LISTS = {
     "/medicines": "medicine",
@@ -60,6 +60,7 @@ FOLLOW_TYPES = {
     "FOLLOW_UP_WITH_REPORT_AND_REFERRAL_PRESCRIPTION", "MANDATORY_FOLLOW_UP", "IF_REQUIRED",
 }
 COMPLETION_KINDS = {
+    "field_withheld",
     "pick_drug", "dose_unstated", "drug_history", "exam_missing", "follow_up_unstated", "follow_up_missing",
     "surgery_confirm", "inferred_confirm", "allergy_check", "boundary_review", "lab_dx_conflict",
 }
@@ -202,8 +203,13 @@ def to_v01(art: dict) -> dict:
     a = copy.deepcopy(art)
     a["note_text"] = _expanded_note(art)  # v0.1 is one line per entry: a brand-first combination line repeats per component
     a["schema_version"] = "eta.freescript.v0.1"
-    for key in ("completion_required", "clip_boundary", "slots", "room_facts"):
+    for key in ("completion_required", "clip_boundary", "slots", "room_facts", "roster", "spans", "confirm_prompts", "confirm_internal", "withheld", "red_flags",
+                "policy", "doctor_words", "kept_out"):
         a.pop(key, None)
+    for k in ("data_files", "profile_version", "served_model_id", "model_id_source", "stage_a_version", "stage_b_version"):
+        (a.get("generator") or {}).pop(k, None)
+    if "confirm_prompts" in art:  # FRX-V10: Medication is a confirm list; v0.1 has no such section, so the projection leaves it empty
+        a["note_text"] = re.sub(r"(?ms)^Medication:.*?(?=^Further Investigation:)", "Medication:\n", a["note_text"])
     enc = a.get("encounter") or {}
     enc.pop("visit_date_ist", None)
     (a.get("generator") or {}).pop("run_id", None)
@@ -919,6 +925,20 @@ def _has_content(node) -> bool:
     return node is not None and node is not False and node != 0
 
 
+def V10_ACTIVE() -> bool:
+    from .v10 import config
+    return config.ACTIVE
+
+
+def _whole_meta(body: str) -> bool:
+    """FRX-N1 on doctor speech (newcat-orch 16 Oct F2 ruling): a missing-value phrase withholds a field only when the whole value is a meta-statement
+    ("dose not stated"), not when the phrase sits inside a longer sentence the doctor said."""
+    return len(re.findall(r"\w+", body)) <= 6
+
+
+V10_MED_LINE = re.compile(r"(?: — confirm(?: generic)?|^Draft list, not a prescription; the treating doctor checks each drug\.)$")
+
+
 def printable_errors(text: str, prompts: list[str]) -> list[str]:
     """The FRX-N1 errors for one note_text and its completion prompts (index = completion_required index)."""
     e: list[str] = []
@@ -937,6 +957,8 @@ def printable_errors(text: str, prompts: list[str]) -> list[str]:
         e.append("FRX-N1 note_text contains an x/XX unit slot")
     for head, body, is_dx, sec in _note_entries(note):
         where = head or "un-headed line"
+        if V10_MED_LINE.search(body.strip()):
+            continue  # FRX-V10: the Medication draft line and the "— confirm" lines are rendered by code from the confirm prompts
         text = body.lstrip()
         if is_dx and text.startswith("?"):
             text = text[1:]
@@ -944,7 +966,7 @@ def printable_errors(text: str, prompts: list[str]) -> list[str]:
             e.append(f"FRX-N1 '?' outside the Diagnoses differential prefix ({where})")
         if FILLER.match(body):
             e.append(f"FRX-N1 filler line body ({where})")
-        if sec in _D2_SECTIONS:
+        if sec in _D2_SECTIONS and (not V10_ACTIVE() or _whole_meta(body)):
             for m in _D1.finditer(body):
                 e.append(f"FRX-N1 d1 missing-value phrase '{m.group(0).lower()}' ({where})")
         if sec in _D2_SECTIONS:

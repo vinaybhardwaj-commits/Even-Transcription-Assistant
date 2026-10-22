@@ -25,7 +25,7 @@ PKG = Path(__file__).resolve().parents[1]
 
 # --- K1 ----------------------------------------------------------------------------------------------------------------
 def _fake(uid="synth-fever-dose"):
-    return FakeClient({"stageA-v2": json.dumps(stage_a(uid)), "stageB-v9": (MODEL / uid / "stageB.txt").read_text()})
+    return FakeClient({"stageA-v3": json.dumps(stage_a(uid)), "stageB-v10": (MODEL / uid / "stageB.txt").read_text()})
 
 
 def test_k1_reject_keeps_the_artifact_beside_the_validation_file(tmp_path, monkeypatch):

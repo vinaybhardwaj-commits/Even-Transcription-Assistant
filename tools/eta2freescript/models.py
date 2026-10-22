@@ -67,8 +67,25 @@ def cost_for_uid(ledger: UsageLedger | None, uid: str) -> float | None:
     return round(total, 5) if found else None
 
 
+def served_model_id(resp) -> str | None:
+    """The model id a provider response says served the call (A52, D8): `modelId` / `model` in the body, or a model-id response header. None when the
+    response names none; the alias-table id is never substituted for it."""
+    if not isinstance(resp, dict):
+        return None
+    for k in ("modelId", "model_id", "model"):
+        v = resp.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    hdr = ((resp.get("ResponseMetadata") or {}).get("HTTPHeaders") or {}) if isinstance(resp.get("ResponseMetadata"), dict) else {}
+    for k, v in hdr.items():
+        if isinstance(k, str) and k.lower() in ("x-amzn-bedrock-model-id", "x-amzn-bedrock-invoked-model-id", "x-amzn-bedrock-served-model-id") and isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
 class ModelClient:
     ledger: UsageLedger = UsageLedger(None)
+    served_ids: dict = {}  # alias -> the model id read back from the last response (never the alias-table id)
 
     def resolve(self, alias: str) -> tuple[str, str]:
         raise NotImplementedError
@@ -87,6 +104,7 @@ class BedrockClient(ModelClient):
 
     def __init__(self, ledger: UsageLedger | None = None, region: str | None = None):
         self.ledger = ledger or UsageLedger(None)
+        self.served_ids = {}
         self.region = region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
         self._rt = None
 
@@ -117,6 +135,7 @@ class BedrockClient(ModelClient):
         text = "".join(c.get("text", "") for c in resp["output"]["message"]["content"])
         u = resp.get("usage", {})
         self.ledger.record(alias, tag, time.time() - t0, u.get("inputTokens", 0), u.get("outputTokens", 0), resp.get("stopReason"))
+        self.served_ids[alias] = served_model_id(resp)
         return text
 
 
@@ -125,6 +144,7 @@ class GatewayClient(ModelClient):
 
     def __init__(self, ledger: UsageLedger | None = None, path: str | None = None):
         self.ledger = ledger or UsageLedger(None)
+        self.served_ids = {}
         p = path or os.environ.get("ETA2FS_EVENGW_PATH")
         if p and p not in sys.path:
             sys.path.insert(0, p)
@@ -146,14 +166,17 @@ class GatewayClient(ModelClient):
                 time.sleep(10 * (attempt + 1))
         u = resp.get("usage", {})
         self.ledger.record(alias, tag, time.time() - t0, u.get("inputTokens", 0), u.get("outputTokens", 0), resp.get("stopReason"))
+        self.served_ids[alias] = served_model_id(resp)
         return text
 
 
 class FakeClient(ModelClient):
     """Test double. `responder(tag, prompt, system) -> text`, or a dict keyed by tag prefix (e.g. "stageA")."""
 
-    def __init__(self, responder: Callable[[str, str, str], str] | dict, model_id: str = "anthropic.claude-test", route: str = "converse"):
+    def __init__(self, responder: Callable[[str, str, str], str] | dict, model_id: str = "anthropic.claude-test", route: str = "converse",
+                 served_id: str | None = None):
         self.responder, self.model_id, self.route = responder, model_id, route
+        self.served_ids = {"sonnet": served_id} if served_id else {}
         self.calls: list[dict] = []
 
     def resolve(self, alias):

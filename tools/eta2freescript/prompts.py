@@ -42,4 +42,4 @@ def sha(*paths: Path) -> str:
 
 
 def code_paths() -> list[Path]:
-    return sorted(p for p in PKG.glob("*.py"))
+    return sorted(list(PKG.glob("*.py")) + list(PKG.glob("v10/*.py")))
