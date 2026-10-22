@@ -212,3 +212,12 @@ def test_m2_final_check_withholds_other_person_cues_on_both_paths():
     _o, bad = finalize.note_final(g, _art_with_advice_turn(0), g.c, _note("Previous patient Rose had fever"))
     assert bad.get("General Advice") == "other_person"
     assert [f[1] for f in finalize.gp_final(g, _gp_art("general_advice", "Kamala's wife has cough"), g.c)] == ["other_person"]
+
+
+def test_pr2_a_plan_withheld_at_the_final_check_neutralises_the_conditional_procedure():
+    from tools.eta2freescript.validate import check
+    c = mk_consult([(0, 4, "0", "Tell me."), (5, 9, "1", "My knee hurts."), (10, 20, "0", "If the pain stays consider knee arthroscopy and take rest.")], roles={"0": "doctor", "1": "patient"})
+    enc = empty_encounter(procedures=[{"name": "knee arthroscopy", "raw_name": "knee arthroscopy", "advised_kind": "conditional", "notes": "if the pain stays", "decision_turn": 2, "basis": "said", "source_turns": [2]}],
+                          plan=[{"text": "take rest, previous patient Rose also", "basis": "said", "source_turns": [2]}])
+    a = build_artifact(c, empty_encounter(**{k: v for k, v in enc.items() if k in ("procedures", "plan")}))
+    assert [e for e in check(a) if "PR2" in e] == [], check(a)

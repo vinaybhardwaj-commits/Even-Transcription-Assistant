@@ -220,6 +220,12 @@ def drop_units(art: dict, failed) -> None:
     """Remove the units `gp_final` reported from a TOKENISED artifact (a field is deleted, a list entry removed), and point the provenance items
     of later list entries at their new index; an item of a removed entry becomes kept-out."""
     gx = art.get("gp_extraction") or {}
+    if any(f[0] == "plan" for f in failed):  # a conditional procedure lives in management_plan (FRX-PR2): when that text is withheld it is no longer "conditional"
+        for p in art.get("provenance") or []:
+            if p.get("kind") == "procedure" and p.get("status") == "conditional":
+                p["status"] = "discussed_only"
+                p.pop("procedure", None)
+                p["text"] = "[conditional_procedure_withheld] procedure held out of the plan"
     by_list: dict[tuple, list[int]] = {}
     for _f, _r, unit, path in failed:
         if unit == "field":
