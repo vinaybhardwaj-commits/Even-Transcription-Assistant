@@ -42,6 +42,13 @@ class Options:
     write_v01: bool = True
 
 
+def _mix_sections(note: str, det: str, bad: dict) -> str:
+    """`note` with each heading in `bad` replaced by the deterministic note's section."""
+    from . import note as N
+    got, base = N._split_sections(note), N._split_sections(det)
+    return N._assemble({h: (base.get(h) or []) if h in bad else (got.get(h) or []) for h in N.HEADINGS})
+
+
 def _med_lines(art: dict):
     """FRX-V10: the Medication section, rendered from the confirm prompts."""
     return v10_meds.medication_lines(art.get("confirm_prompts") or [])
@@ -133,17 +140,21 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
            "boundary": art["clip_boundary"], "completion_required": len(art["completion_required"]),
            "guard_issues": enc["_guard"]["issues"]}
 
+    _vo: dict = {}
+
     def view_of(note: str) -> tuple[dict, list[str]]:
         """The artifact as it would be written with this note: slot values written back and FRX-T1 run (rules 4 and 12). Returns (artifact, FRX-T1 errors)."""
         v = copy.deepcopy(art)
         v10_projection.split_completion(v)  # recover.py may have added entries since build()
-        failed = v10_final.gp_final(gate, v, c)
+        failed = v10_final.gp_final(gate, v, c, remove=False)
+        v10_final.drop_units(v, failed)  # Fix3 B1: a unit the floor drops also repoints the provenance, so the note is judged against a gp_extraction with no dangling pointer (G1 / G6)
         v["provenance"] = v10_final.writeback_tree(gate, v["provenance"])
         v["completion_required"] = v10_final.writeback_tree(gate, v["completion_required"])
         v["slots"] = v10_final.writeback_tree(gate, v["slots"])
         for key in ("doctor_words", "red_flags"):
             v[key] = v10_final.writeback_tree(gate, v[key])
         final, bad = v10_final.note_final(gate, v, c, note)
+        _vo["bad"] = bad
         v["note_text"] = final
         return v, [f"FRX-T1 gp {f}:{r}" for f, r, _u, _p in failed] + [f"FRX-T1 note {h}:{r}" for h, r in bad.items()]
 
@@ -165,6 +176,17 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
                 note, llm_rem = sanitize_note_ex(repair_note(txt, art["gp_extraction"], flags, banned, combination_groups(art), _med_lines(art)))
                 view, t1errs = view_of(note)
                 repaired = check(view) + span_errors(llm_rem) + t1errs
+                if repaired and not span_errors(llm_rem):
+                    # Fix3 B1: a section that still fails FRX-T1/T2/N1/V9 takes that section's deterministic render (which already passes the floor); every other section stays the
+                    # model's. The full check() reruns on the mixed note, so nothing is posted that the deterministic path would withhold.
+                    bad = {h: r for h, r in (_vo.get("bad") or {}).items() if h != "(structure)"}
+                    if bad:
+                        mixed, mixed_rem = sanitize_note_ex(_mix_sections(note, det, bad))
+                        view, t1errs = view_of(mixed)
+                        again = check(view) + span_errors(mixed_rem) + t1errs
+                        if not again:
+                            note, llm_rem, repaired = mixed, mixed_rem, []
+                            log["note_sections_repaired"] = sorted(bad)
                 log["note_repaired"] = not repaired
                 llm_errs = [] if not repaired else repaired
         except Exception as e:  # a failed Stage B call falls back like an invalid note

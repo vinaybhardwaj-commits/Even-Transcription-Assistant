@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from ..ingest import Consult
-from . import drugs, spans, vetoes, words
+from . import data, drugs, spans, vetoes, words
 from .numbers import INF, Num, find_numbers, norm, value
 from .slots import ALLOWED, Ctx, Slot, find_slots
 
@@ -146,7 +146,104 @@ class NumberGate:
                         continue
                     return None
                 worst = vs[0].code if vs else "frame"
+            if self._relaxed(sl, en):  # Fix3 C3/C4: the same value in the cited quote, with its head in front of it (no strict closed frame in the speech)
+                if t in self.drug_spans:
+                    worst = "veto_detector"
+                    continue
+                if nat and nat != en and self._native_vetoed(nat, sl, t):
+                    worst = "veto_dosing_word"
+                    continue
+                return None
         return worst
+
+    # --- Fix3 C3 / C4: quote-side support by head + value ------------------------------------------------------------------------------------------------
+    def _relaxed(self, sl: Slot, en: str) -> bool:
+        """True when the cited quote `en` says the posted frame `sl` loosely: its head word, then (hedges) and the same value (and unit, for a time frame).
+
+        Safety argument (DBG19 / eta2freescript ruling): the posted string must still be a full closed in-bounds frame of its own field (that is checked before this runs); the
+        value must equal the posted value (and for a time frame its unit); quarantine, order-capable, drug-span and native rules sit in `_support` and are unchanged; the
+        quote-window vetoes (dosing word, drug detector, out-of-dictionary, dose unit) run on the quote's number exactly as for a strict match; FRX-T1 and FRX-T2 run on the
+        final text. Only the wording of the cited quote is matched more loosely, by closed lists in data/support_hedges.v1.json. C4 (lab and vital): the head is the LAST head
+        word of any analyte or vital before the value and is this frame's own, and no other number stands between them, so a head of one analyte never supports the value
+        of another. C5 (a head in an earlier turn) is not adopted."""
+        H = data.load(data.SUPPORT_HEDGES)
+        toks = words.tokenize(en)
+        if not toks:
+            return False
+        lows = [tk.low for tk in toks]
+        nums = find_numbers(en)
+        qs = self._quote_slots(en)
+        hedge = set(H["hedge_words"])
+        maxh = int(H["max_hedge_tokens"])
+
+        def clean(a: int, b: int) -> bool:
+            return not vetoes.window_vetoes(en, (a, b), qs, mode="en")
+
+        # the candidate value positions: every number of the quote equal to the posted value(s)
+        cands: list[tuple[int, int]] = []
+        if len(sl.values) == 2:
+            for a, b in zip(nums, nums[1:]):
+                if abs(a.value - sl.values[0]) < 1e-9 and abs(b.value - sl.values[1]) < 1e-9 and len(words.tokenize(en[a.end:b.start])) <= 1:
+                    cands.append((a.start, b.end))
+        else:
+            cands = [(n.start, n.end) for n in nums if abs(n.value - sl.values[0]) < 1e-9]
+        for a, b in cands:
+            if not clean(a, b):
+                continue
+            ti = next((i for i, tk in enumerate(toks) if tk.start >= a), None)
+            if ti is None:
+                continue
+            if sl.kind in ("lab", "vital"):
+                own, others = self._heads_of(sl, H)
+                heads = [(m.start(), m.end(), True) for h in own for m in re.finditer(rf"(?<![A-Za-z0-9]){re.escape(h)}(?![A-Za-z0-9])", en, re.I) if m.end() <= a]
+                heads += [(m.start(), m.end(), False) for h in others for m in re.finditer(rf"(?<![A-Za-z0-9]){re.escape(h)}(?![A-Za-z0-9])", en, re.I) if m.end() <= a]
+                if not heads:
+                    continue
+                s0, e0, mine = max(heads, key=lambda x: (x[1], -x[0]))
+                if not mine or re.search(r"(?<![A-Za-z])for\s*$", en[:s0], re.I):
+                    continue  # the nearest head is another analyte's, or the frame is "for <analyte>" (rule 2)
+                between = [lows[i] for i, tk in enumerate(toks) if tk.start >= e0 and tk.end <= a]
+                if len(between) <= maxh and all(w in hedge for w in between):
+                    return True  # C3
+                if not any(e0 <= n.start and n.end <= a for n in nums if (n.start, n.end) != (a, b)):
+                    return True  # C4: head earlier in the same turn, no competing head and no other number between
+            elif sl.kind in ("illness", "followup", "advice"):
+                nxt = lows[ti + (2 if len(sl.values) == 2 else 1)] if ti + 1 < len(lows) else ""
+                from .slots import _UNITS_T
+                if _UNITS_T.get(nxt) != sl.unit:
+                    continue
+                fill = set(H["time_filler_words"]) | hedge
+                back = lows[max(0, ti - maxh):ti]
+                heads = set(H["time_heads"][sl.kind])
+                j = max((i for i, w in enumerate(back) if w in heads), default=None)
+                if j is not None and all(w in heads or w in fill for w in back[j:]):
+                    return True
+                after = lows[ti + 2] if ti + 2 < len(lows) else ""
+                if after in set(H["time_heads_after_unit"].get(sl.kind, [])):
+                    return True
+            elif sl.kind == "age":
+                nxt = lows[ti + 1] if ti + 1 < len(lows) else ""
+                from .slots import _UNITS_T
+                if nxt in _UNITS_T and _UNITS_T[nxt] != "years":
+                    continue  # "for 25 days" is not an age
+                win = lows[max(0, ti - 3):ti + 4]
+                lead = lows[max(0, ti - 2):ti]
+                if set(H["age_words"]) & set(win) and all(w in hedge or w in set(H["age_lead_words"]) or w in set(H["age_words"]) for w in lead):
+                    return True
+        return False
+
+    def _heads_of(self, sl: Slot, H: dict) -> tuple[set[str], set[str]]:
+        """(this frame's own head words, every other analyte and vital head word)."""
+        from .slots import _an
+        _d, alias, _rx, _sh = _an()
+        vh = {k: set(v) for k, v in H["vital_heads"].items()}
+        allv = set().union(*vh.values())
+        if sl.kind == "lab":
+            key = sl.meta.get("analyte")
+            own = {a for a, v in alias.items() if v["key"] == key}
+            return own, (set(alias) - own) | allv
+        own = vh.get(sl.meta.get("vital"), set())
+        return own, (set(alias) | allv) - own
 
     def _native_vetoed(self, nat: str, sl: Slot, t: int) -> bool:
         """The value, found in the native text, sits in a vetoed window and has no veto-free occurrence."""

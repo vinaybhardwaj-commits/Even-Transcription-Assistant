@@ -147,6 +147,7 @@ def force_collisions(on: bool):
 
 _DO_ENGLISH_NEXT = frozenset("not n't you we they i he she it this that the your these those so also please take try keep avoid eat drink exercise come check get go use stop continue "
                              "start rest walk see call visit follow maintain wear apply remember inform report".split())
+_MODALS = frozenset("should will to can may must not would could might shall cannot".split())
 _WORD_TOK = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)?")
 
 
@@ -165,6 +166,8 @@ def _collisions_as_numbers(t: str) -> str:
             continue
         if tk.low == "do" and i + 1 < len(toks) and toks[i + 1].low in _DO_ENGLISH_NEXT:
             continue  # English "do not / do you / do take rest": the auxiliary or the imperative, not Hindi two
+        if tk.low in ("be", "do") and i and toks[i - 1].low in _MODALS:
+            continue  # Fix3 B3: "should be taken", "will do", "can be": English syntax after a modal or auxiliary; a real numeral or digit is still gated
         lo, hi = max(0, i - 3), min(len(toks), i + 4)
         near = False
         for j in range(lo, hi):

@@ -1,0 +1,852 @@
+{
+ "version": "whitelist-abbrev.v1",
+ "spec": "Fix3 ruling 6 (eta2freescript 22 Oct 2026): standard clinical abbreviations, 3-6 letters, written by the debugger BEFORE looking at transcript tokens (~/wt/frx-v10-dbg19/.bc/work/abbrev_curated.txt, sha256 recorded below), from OHCM 10e, Stedman's Abbreviations 5e and the NHS Data Dictionary. Excludes dose frequency/route/form, units, medicines, drug classes and lexicon number words. Nothing transcript-informed may be added.",
+ "source_sha256": "8ccf0d324ad6535747cba0d1b52eeebe49e5e0df92e30fa54d63924e5fb65c67",
+ "count": 211,
+ "entries": [
+  {
+   "word": "aki",
+   "category": "conditions"
+  },
+  {
+   "word": "ards",
+   "category": "conditions"
+  },
+  {
+   "word": "asd",
+   "category": "conditions"
+  },
+  {
+   "word": "vsd",
+   "category": "conditions"
+  },
+  {
+   "word": "pda",
+   "category": "conditions"
+  },
+  {
+   "word": "afib",
+   "category": "conditions"
+  },
+  {
+   "word": "svt",
+   "category": "conditions"
+  },
+  {
+   "word": "chf",
+   "category": "conditions"
+  },
+  {
+   "word": "ccf",
+   "category": "conditions"
+  },
+  {
+   "word": "hfref",
+   "category": "conditions"
+  },
+  {
+   "word": "hfpef",
+   "category": "conditions"
+  },
+  {
+   "word": "acs",
+   "category": "conditions"
+  },
+  {
+   "word": "stemi",
+   "category": "conditions"
+  },
+  {
+   "word": "nstemi",
+   "category": "conditions"
+  },
+  {
+   "word": "pvd",
+   "category": "conditions"
+  },
+  {
+   "word": "pad",
+   "category": "conditions"
+  },
+  {
+   "word": "aaa",
+   "category": "conditions"
+  },
+  {
+   "word": "dka",
+   "category": "conditions"
+  },
+  {
+   "word": "hhs",
+   "category": "conditions"
+  },
+  {
+   "word": "gdm",
+   "category": "conditions"
+  },
+  {
+   "word": "igt",
+   "category": "conditions"
+  },
+  {
+   "word": "ifg",
+   "category": "conditions"
+  },
+  {
+   "word": "nafld",
+   "category": "conditions"
+  },
+  {
+   "word": "nash",
+   "category": "conditions"
+  },
+  {
+   "word": "cld",
+   "category": "conditions"
+  },
+  {
+   "word": "esrd",
+   "category": "conditions"
+  },
+  {
+   "word": "eskd",
+   "category": "conditions"
+  },
+  {
+   "word": "capd",
+   "category": "conditions"
+  },
+  {
+   "word": "avf",
+   "category": "conditions"
+  },
+  {
+   "word": "gbs",
+   "category": "conditions"
+  },
+  {
+   "word": "als",
+   "category": "conditions"
+  },
+  {
+   "word": "adhd",
+   "category": "conditions"
+  },
+  {
+   "word": "ocd",
+   "category": "conditions"
+  },
+  {
+   "word": "ptsd",
+   "category": "conditions"
+  },
+  {
+   "word": "gad",
+   "category": "conditions"
+  },
+  {
+   "word": "mdd",
+   "category": "conditions"
+  },
+  {
+   "word": "bpad",
+   "category": "conditions"
+  },
+  {
+   "word": "sah",
+   "category": "conditions"
+  },
+  {
+   "word": "sdh",
+   "category": "conditions"
+  },
+  {
+   "word": "ich",
+   "category": "conditions"
+  },
+  {
+   "word": "tbi",
+   "category": "conditions"
+  },
+  {
+   "word": "lbp",
+   "category": "conditions"
+  },
+  {
+   "word": "pivd",
+   "category": "conditions"
+  },
+  {
+   "word": "ivdp",
+   "category": "conditions"
+  },
+  {
+   "word": "osa",
+   "category": "conditions"
+  },
+  {
+   "word": "uri",
+   "category": "conditions"
+  },
+  {
+   "word": "ild",
+   "category": "conditions"
+  },
+  {
+   "word": "ipf",
+   "category": "conditions"
+  },
+  {
+   "word": "hap",
+   "category": "conditions"
+  },
+  {
+   "word": "bppv",
+   "category": "conditions"
+  },
+  {
+   "word": "aom",
+   "category": "conditions"
+  },
+  {
+   "word": "ome",
+   "category": "conditions"
+  },
+  {
+   "word": "csom",
+   "category": "conditions"
+  },
+  {
+   "word": "asom",
+   "category": "conditions"
+  },
+  {
+   "word": "dns",
+   "category": "conditions"
+  },
+  {
+   "word": "pud",
+   "category": "conditions"
+  },
+  {
+   "word": "ibd",
+   "category": "conditions"
+  },
+  {
+   "word": "ugib",
+   "category": "conditions"
+  },
+  {
+   "word": "itp",
+   "category": "conditions"
+  },
+  {
+   "word": "ttp",
+   "category": "conditions"
+  },
+  {
+   "word": "dic",
+   "category": "conditions"
+  },
+  {
+   "word": "hus",
+   "category": "conditions"
+  },
+  {
+   "word": "scd",
+   "category": "conditions"
+  },
+  {
+   "word": "ida",
+   "category": "conditions"
+  },
+  {
+   "word": "aiha",
+   "category": "conditions"
+  },
+  {
+   "word": "aps",
+   "category": "conditions"
+  },
+  {
+   "word": "jia",
+   "category": "conditions"
+  },
+  {
+   "word": "pmr",
+   "category": "conditions"
+  },
+  {
+   "word": "gca",
+   "category": "conditions"
+  },
+  {
+   "word": "arf",
+   "category": "conditions"
+  },
+  {
+   "word": "rhd",
+   "category": "conditions"
+  },
+  {
+   "word": "mvp",
+   "category": "conditions"
+  },
+  {
+   "word": "hpv",
+   "category": "conditions"
+  },
+  {
+   "word": "hsv",
+   "category": "conditions"
+  },
+  {
+   "word": "cmv",
+   "category": "conditions"
+  },
+  {
+   "word": "ebv",
+   "category": "conditions"
+  },
+  {
+   "word": "vzv",
+   "category": "conditions"
+  },
+  {
+   "word": "rsv",
+   "category": "conditions"
+  },
+  {
+   "word": "hav",
+   "category": "conditions"
+  },
+  {
+   "word": "hev",
+   "category": "conditions"
+  },
+  {
+   "word": "mdr",
+   "category": "conditions"
+  },
+  {
+   "word": "xdr",
+   "category": "conditions"
+  },
+  {
+   "word": "mrsa",
+   "category": "conditions"
+  },
+  {
+   "word": "covid",
+   "category": "conditions"
+  },
+  {
+   "word": "std",
+   "category": "conditions"
+  },
+  {
+   "word": "sti",
+   "category": "conditions"
+  },
+  {
+   "word": "aub",
+   "category": "conditions"
+  },
+  {
+   "word": "dub",
+   "category": "conditions"
+  },
+  {
+   "word": "pph",
+   "category": "conditions"
+  },
+  {
+   "word": "prom",
+   "category": "conditions"
+  },
+  {
+   "word": "pprom",
+   "category": "conditions"
+  },
+  {
+   "word": "iugr",
+   "category": "conditions"
+  },
+  {
+   "word": "icsi",
+   "category": "conditions"
+  },
+  {
+   "word": "iui",
+   "category": "conditions"
+  },
+  {
+   "word": "fhr",
+   "category": "conditions"
+  },
+  {
+   "word": "bpp",
+   "category": "conditions"
+  },
+  {
+   "word": "ctg",
+   "category": "conditions"
+  },
+  {
+   "word": "nvd",
+   "category": "conditions"
+  },
+  {
+   "word": "svd",
+   "category": "conditions"
+  },
+  {
+   "word": "niddm",
+   "category": "conditions"
+  },
+  {
+   "word": "iddm",
+   "category": "conditions"
+  },
+  {
+   "word": "rta",
+   "category": "conditions"
+  },
+  {
+   "word": "fbc",
+   "category": "investigations"
+  },
+  {
+   "word": "ogtt",
+   "category": "investigations"
+  },
+  {
+   "word": "gtt",
+   "category": "investigations"
+  },
+  {
+   "word": "inr",
+   "category": "investigations"
+  },
+  {
+   "word": "aptt",
+   "category": "investigations"
+  },
+  {
+   "word": "vbg",
+   "category": "investigations"
+  },
+  {
+   "word": "ana",
+   "category": "investigations"
+  },
+  {
+   "word": "anca",
+   "category": "investigations"
+  },
+  {
+   "word": "ccp",
+   "category": "investigations"
+  },
+  {
+   "word": "hla",
+   "category": "investigations"
+  },
+  {
+   "word": "psa",
+   "category": "investigations"
+  },
+  {
+   "word": "cea",
+   "category": "investigations"
+  },
+  {
+   "word": "afp",
+   "category": "investigations"
+  },
+  {
+   "word": "bnp",
+   "category": "investigations"
+  },
+  {
+   "word": "cpk",
+   "category": "investigations"
+  },
+  {
+   "word": "ckmb",
+   "category": "investigations"
+  },
+  {
+   "word": "ldh",
+   "category": "investigations"
+  },
+  {
+   "word": "alp",
+   "category": "investigations"
+  },
+  {
+   "word": "alt",
+   "category": "investigations"
+  },
+  {
+   "word": "ast",
+   "category": "investigations"
+  },
+  {
+   "word": "sgot",
+   "category": "investigations"
+  },
+  {
+   "word": "sgpt",
+   "category": "investigations"
+  },
+  {
+   "word": "ggt",
+   "category": "investigations"
+  },
+  {
+   "word": "ldl",
+   "category": "investigations"
+  },
+  {
+   "word": "hdl",
+   "category": "investigations"
+  },
+  {
+   "word": "vldl",
+   "category": "investigations"
+  },
+  {
+   "word": "bun",
+   "category": "investigations"
+  },
+  {
+   "word": "uacr",
+   "category": "investigations"
+  },
+  {
+   "word": "acr",
+   "category": "investigations"
+  },
+  {
+   "word": "hrct",
+   "category": "investigations"
+  },
+  {
+   "word": "ctpa",
+   "category": "investigations"
+  },
+  {
+   "word": "mra",
+   "category": "investigations"
+  },
+  {
+   "word": "cta",
+   "category": "investigations"
+  },
+  {
+   "word": "pet",
+   "category": "investigations"
+  },
+  {
+   "word": "dexa",
+   "category": "investigations"
+  },
+  {
+   "word": "dxa",
+   "category": "investigations"
+  },
+  {
+   "word": "ivp",
+   "category": "investigations"
+  },
+  {
+   "word": "mcu",
+   "category": "investigations"
+  },
+  {
+   "word": "hsg",
+   "category": "investigations"
+  },
+  {
+   "word": "fev",
+   "category": "investigations"
+  },
+  {
+   "word": "fvc",
+   "category": "investigations"
+  },
+  {
+   "word": "pefr",
+   "category": "investigations"
+  },
+  {
+   "word": "dlco",
+   "category": "investigations"
+  },
+  {
+   "word": "psg",
+   "category": "investigations"
+  },
+  {
+   "word": "csf",
+   "category": "investigations"
+  },
+  {
+   "word": "rast",
+   "category": "investigations"
+  },
+  {
+   "word": "ige",
+   "category": "investigations"
+  },
+  {
+   "word": "igg",
+   "category": "investigations"
+  },
+  {
+   "word": "igm",
+   "category": "investigations"
+  },
+  {
+   "word": "hpe",
+   "category": "investigations"
+  },
+  {
+   "word": "fna",
+   "category": "investigations"
+  },
+  {
+   "word": "pap",
+   "category": "investigations"
+  },
+  {
+   "word": "lbc",
+   "category": "investigations"
+  },
+  {
+   "word": "abpm",
+   "category": "investigations"
+  },
+  {
+   "word": "hbpm",
+   "category": "investigations"
+  },
+  {
+   "word": "smbg",
+   "category": "investigations"
+  },
+  {
+   "word": "cgm",
+   "category": "investigations"
+  },
+  {
+   "word": "gcs",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "bsa",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "bmr",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "crt",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "rom",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "slr",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "dtr",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "perrla",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "rapd",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "iop",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "bcva",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "eom",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "nad",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "wnl",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "sob",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "doe",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "pnd",
+   "category": "vitals_examination"
+  },
+  {
+   "word": "pci",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "tavi",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "avr",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "mvr",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "turbt",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "pcnl",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "urs",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "rirs",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "eswl",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "tka",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "tha",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "acdf",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "esi",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "fess",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "smr",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "lasik",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "iol",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "phaco",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "sics",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "ect",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "niv",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "cpap",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "bipap",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "hfnc",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "icd",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "hdu",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "ccu",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "ipd",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "adl",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "qol",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "hpi",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "pmh",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "dob",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "nbm",
+   "category": "procedures_settings"
+  },
+  {
+   "word": "npo",
+   "category": "procedures_settings"
+  }
+ ]
+}

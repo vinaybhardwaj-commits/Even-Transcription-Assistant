@@ -185,7 +185,28 @@ def in_dictionary(low: str) -> bool:
     # possessive and simple plural of an allowed word
     if low.endswith("'s") and low[:-2] in dictionary():
         return True
-    return False
+    return _contraction_ok(low)
+
+
+_IRREGULAR_CONTRACTIONS = frozenset({"can't", "won't", "shan't", "ain't"})
+_CONTRACTION_TAILS = ("s", "t", "ll", "ve", "re", "d", "m")
+
+
+def _contraction_ok(low: str) -> bool:
+    """Fix3 C1 (debugger DBG19). A token X'Y is one dictionary word when Y is s, t, ll, ve, re, d or m and the base X (X without its final n for n't) is already a dictionary
+    word, plus can't, won't, shan't, ain't. Safety argument: a brand or a name base is still out of dictionary, so "Zorbex's" and "Ramesh'll" stay OOD; the whole token is one
+    word, so find_numbers never reads it as a numeral; dose-unit, dosing-word and detector vetoes are untouched."""
+    low = low.replace("\u2019", "'")
+    if low in _IRREGULAR_CONTRACTIONS:
+        return True
+    base, sep, tail = low.partition("'")
+    if not sep or tail not in _CONTRACTION_TAILS or not base.isalpha():
+        return False
+    if tail == "t":
+        if not base.endswith("n") or len(base) < 3:
+            return False
+        base = base[:-1]
+    return in_dictionary(base) and not (is_dosing_word(base) or is_dose_unit(base))
 
 
 # --- FRX-T2 "words by dictionary" (Fix2 ruling): the word analogue of FRX-T1 ---------------------------------------------------------------------------------
@@ -195,7 +216,7 @@ _SLOT_TOKEN = re.compile(r"\u27e6S\d+\u27e7")
 @lru_cache(maxsize=1)
 def extra_whitelist() -> frozenset[str]:
     """data/whitelist_extra.v1.json: curated counselling vocabulary (food, activity, home remedy). No names, places, number words or drug names."""
-    return frozenset(e["word"].lower() for e in data.load(data.WHITELIST_EXTRA)["entries"])
+    return frozenset(e["word"].lower() for e in data.load(data.WHITELIST_EXTRA)["entries"]) | frozenset(e["word"].lower() for e in data.load(data.WHITELIST_ABBREV)["entries"])
 
 
 @lru_cache(maxsize=1)

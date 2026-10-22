@@ -1,0 +1,135 @@
+{
+ "version": "support-hedges.v1",
+ "spec": "Fix3 C3 / C4 (DBG19, eta2freescript ruling 22 Oct 2026): closed lists for the quote-side support of a posted frame. The cited quote must still hold the same value; the head word of the frame (analyte, vital, time head, age word) must stand in front of it with at most max_hedge_tokens hedge tokens between (C3), or earlier in the same cited turn with no competing head and no other number between (C4, lab and vital only). Nothing here weakens a veto: the quote-window vetoes, the native veto, quarantine, order-capable and drug-span rules run unchanged.",
+ "max_hedge_tokens": 4,
+ "hedge_words": [
+  "a",
+  "about",
+  "almost",
+  "also",
+  "an",
+  "approx",
+  "approximately",
+  "around",
+  "at",
+  "be",
+  "been",
+  "came",
+  "come",
+  "comes",
+  "coming",
+  "had",
+  "hai",
+  "has",
+  "have",
+  "is",
+  "it",
+  "its",
+  "just",
+  "level",
+  "levels",
+  "like",
+  "nearly",
+  "now",
+  "of",
+  "oh",
+  "only",
+  "reading",
+  "report",
+  "roughly",
+  "showed",
+  "shows",
+  "some",
+  "still",
+  "tha",
+  "that",
+  "the",
+  "then",
+  "thi",
+  "this",
+  "to",
+  "uh",
+  "um",
+  "value",
+  "was"
+ ],
+ "time_heads": {
+  "followup": [
+   "after",
+   "in"
+  ],
+  "illness": [
+   "for",
+   "since",
+   "past",
+   "last"
+  ],
+  "advice": [
+   "for"
+  ]
+ },
+ "time_heads_after_unit": {
+  "followup": [
+   "baad"
+  ],
+  "illness": [
+   "se"
+  ],
+  "advice": []
+ },
+ "time_filler_words": [
+  "the",
+  "past",
+  "last",
+  "a",
+  "an"
+ ],
+ "age_words": [
+  "years",
+  "year",
+  "yrs",
+  "old",
+  "age",
+  "aged"
+ ],
+ "age_lead_words": [
+  "am",
+  "i",
+  "is",
+  "he",
+  "she",
+  "patient"
+ ],
+ "vital_heads": {
+  "bp": [
+   "bp",
+   "blood pressure",
+   "pressure"
+  ],
+  "pulse": [
+   "pulse",
+   "heart rate"
+  ],
+  "spo2": [
+   "saturation",
+   "spo2",
+   "oxygen"
+  ],
+  "temp": [
+   "temperature",
+   "fever",
+   "temp"
+  ],
+  "weight": [
+   "weight"
+  ],
+  "height": [
+   "height"
+  ],
+  "rr": [
+   "respiratory rate",
+   "respiration",
+   "breathing"
+  ]
+ }
+}

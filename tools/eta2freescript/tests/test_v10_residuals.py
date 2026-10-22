@@ -87,7 +87,7 @@ def test_contract_bundle_checks_pass_and_do_not_rewrite_the_dictionary():
 def test_c7_provenance_names_every_data_file():
     p = data.provenance()
     assert set(p) == {"dictionary_sha256", "clinical_whitelist_sha256", "catalogue_snapshot_sha256", "catalogue_snapshot_date", "dosing_words_sha256", "analytes_sha256",
-                      "number_lexicon_sha256", "detector_thresholds_sha256", "slot_bounds_sha256", "whitelist_extra_sha256"}
+                      "number_lexicon_sha256", "detector_thresholds_sha256", "slot_bounds_sha256", "whitelist_extra_sha256", "whitelist_abbrev_sha256", "support_hedges_sha256"}
     assert all(len(v) == 64 for k, v in p.items() if k.endswith("sha256")) and p["catalogue_snapshot_date"]
 
 

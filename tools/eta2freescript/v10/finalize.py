@@ -63,7 +63,7 @@ STRING_KEYS = {"symptoms", "examination", "management_plan", "general_advice", "
                "instruction", "notes", "speciality"}
 
 
-def gp_final(gate: NumberGate, art: dict, c) -> list[tuple[str, str, str, tuple]]:
+def gp_final(gate: NumberGate, art: dict, c, *, remove: bool = True) -> list[tuple[str, str, str, tuple]]:
     """Write back and check gp_extraction in place. Returns [(field, reason, unit, path)] for each unit that failed; the failing leaf is removed."""
     gx = art.get("gp_extraction") or {}
     allowed = allowed_drug_tokens(art, c, gate.drug_spans)
@@ -86,7 +86,8 @@ def gp_final(gate: NumberGate, art: dict, c) -> list[tuple[str, str, str, tuple]
         if bad:
             failed.append((fld, bad, unit, path))
             if unit == "field":
-                holder.pop(path[-1], None)
+                if remove:
+                    holder.pop(path[-1], None)
             else:
                 drop_entries.append((path, fld))
     # FRX-D1 (found on real text): when the primary diagnosis is withheld, the others are not promoted; they are withheld with it
@@ -100,7 +101,7 @@ def gp_final(gate: NumberGate, art: dict, c) -> list[tuple[str, str, str, tuple]
                 if i not in gone_dx:
                     drop_entries.append(((*dx_path, i), "diagnoses"))
                     failed.append(("diagnoses", "primary_withheld", "entry", (*dx_path, i)))
-    for path, _fld in sorted(drop_entries, key=lambda x: -x[0][-1]):
+    for path, _fld in (sorted(drop_entries, key=lambda x: -x[0][-1]) if remove else []):
         node = gx
         for k in path[:-1]:
             node = node[k]
