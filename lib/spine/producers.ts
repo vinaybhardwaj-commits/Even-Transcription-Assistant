@@ -4,7 +4,7 @@
  * timeline = runTimelineLeaveForRoomDay (encounter_timeline_shadow(_run), the spine's timeline proxy), every tick, only when the timeline flag is on.
  * Order per room-day: acoustic (when due), then leave. voice.ts runs v3, leave, then acoustic (or fused); no reader depends on the order (the acoustic reader filters to source 'acoustic').
  * shadow-v3 (runTimelineShadowForRoomDay) is NOT run here (R3, interim pending fable): the spine reads none of its output and it asks Jev (paid) per segment per tick with no cache.
- * The room-day list is rotated by the tick index so the 45 s stop and the max bound never starve the same tail rooms. Blind room-days are never run.
+ * The room-day list is rotated by the tick index (by the hour index on acoustic-due ticks) so the 45 s stop and the max bound never starve the same tail rooms. Blind room-days are never run.
  * A timeline flag that cannot be parsed (parseFlag throws) skips leave and is counted; acoustic still runs. Failures are counted by CLASS; no id or text leaves this module.
  */
 export type RoomDayRef = { id: string; room_id: string; ist_date: string };
@@ -37,10 +37,12 @@ export function acousticDue(nowMs: number): boolean {
   return new Date(nowMs + IST_MS).getUTCMinutes() < 15;
 }
 
-/** The list rotated left by the tick index (floor(now / 15 min) mod n): the head moves each tick, so a bounded run does not always serve the same rooms. */
-export function rotateByTick<T>(list: readonly T[], nowMs: number): T[] {
+export const HOUR_MS = 3_600_000;
+
+/** The list rotated left by floor(now / periodMs) mod n (default one tick, 15 min): the head moves each period, so a bounded run does not always serve the same rooms. */
+export function rotateByTick<T>(list: readonly T[], nowMs: number, periodMs: number = TICK_MS): T[] {
   if (list.length === 0) return [];
-  const k = Math.floor(nowMs / TICK_MS) % list.length;
+  const k = Math.floor(nowMs / periodMs) % list.length;
   return [...list.slice(k), ...list.slice(0, k)];
 }
 
@@ -59,7 +61,8 @@ export async function runProducers(days: readonly RoomDayRef[], max: number, dep
   const start = deps.now();
   const due = acousticDue(start);
   c.acoustic_due = due;
-  for (const d of rotateByTick(days, start)) {
+  // Acoustic ticks are 4 apart, so rotating them by the tick index only reaches offsets = 2 mod gcd(4,n) and starves the rest (R3 F4): rotate due ticks by the hour index.
+  for (const d of rotateByTick(days, start, due ? HOUR_MS : TICK_MS)) {
     if (c.room_days >= max || deps.now() - start >= STOP_AFTER_MS) break;
     c.room_days++;
     let blind = true;   // fail closed: if the check itself fails the day is treated as blind

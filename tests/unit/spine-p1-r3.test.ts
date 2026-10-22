@@ -38,6 +38,8 @@ describe("F4: the room-day list is rotated by the tick index", () => {
     expect(rotateByTick([1, 2, 3, 4], TICK_MS)).toEqual([2, 3, 4, 1]);
     expect(rotateByTick([1, 2, 3, 4], 5 * TICK_MS)).toEqual([2, 3, 4, 1]);
     expect(rotateByTick([], 7 * TICK_MS)).toEqual([]);
+    expect(rotateByTick([1, 2, 3, 4], 3_600_000, 3_600_000)).toEqual([2, 3, 4, 1]);
+    expect(rotateByTick([1, 2, 3, 4], 3_600_000 - 1, 3_600_000)).toEqual([1, 2, 3, 4]);
   });
   it("20 room-days, a budget that fits 5: successive ticks serve different rooms and every room is served within a day", async () => {
     const days = Array.from({ length: 20 }, (_, i) => day(i + 1));
