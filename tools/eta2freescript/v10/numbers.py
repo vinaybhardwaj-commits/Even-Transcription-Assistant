@@ -53,6 +53,10 @@ _ENGLISH_NUMERALS = frozenset(("zero one two three four five six seven eight nin
                                "third fourth fifth sixth seventh eighth ninth tenth sat").split())
 
 
+# Hindi numbers that are English words too but are read as numbers everywhere (S3 lexicon, unconditional): "bees" (20), "teen" (3)
+_STAYS_A_NUMBER = frozenset({"bees", "teen"})
+
+
 @lru_cache(maxsize=1)
 def collision_words() -> frozenset[str]:
     """Fix2: lexicon words that are also ordinary English (do, be, so, don, tin, ...): the dictionary words of the lexicon minus the English numerals, plus `collision_extra`.
@@ -60,7 +64,9 @@ def collision_words() -> frozenset[str]:
     from . import words
     d = data.load(data.NUMBER_LEXICON)
     lex = {w for w in d["words"] if isinstance(w, str) and w.isascii() and w.isalpha()}
-    col = {w for w in lex if words.in_dictionary(w) and w not in _ENGLISH_NUMERALS}
+    common = words.common_english()
+    # a lexicon word that is ordinary, common English (bees, saw, tin, don, be, so, do) is conditional; one that is in the big list only by accident (vanda, tees, padi) stays a number
+    col = {w for w in lex if words.in_dictionary(w) and w not in _ENGLISH_NUMERALS and (w in common or len(w) <= 3) and w not in _STAYS_A_NUMBER}
     return frozenset(col | {w.lower() for w in d.get("collision_extra", [])})
 
 

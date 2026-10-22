@@ -118,6 +118,12 @@ def english() -> frozenset[str]:
 
 
 @lru_cache(maxsize=1)
+def common_english() -> frozenset[str]:
+    """The contract's minimal list of common English words (english_words_min.json)."""
+    return frozenset(w.lower() for w in data.load(data.CONTRACT / "english_words_min.json")["words"])
+
+
+@lru_cache(maxsize=1)
 def whitelist_words() -> frozenset[str]:
     wl = data.load(data.WHITELIST)
     ex = data.load(data.CONTRACT / "clinical_vocab_extra.json")
