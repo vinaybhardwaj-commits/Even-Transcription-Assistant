@@ -139,8 +139,9 @@ class SeedTests(unittest.TestCase):
             self.assertEqual(sub2.quiet, {"r1"})                                      # unknown rooms are not seeded
             clock.adv(30); sub2.on_line("kiosk/r1/health", "{}")
             self.assertIsNone(router2.store.get_open("r1", "guardian_quiet"))
-            self.assertEqual(len(router2.store.list_notes()), 1)              # R2: the CLOSED note is queued; the router tick sends it
-            router2.tick(bus); self.assertEqual(len([m for m in bus.msgs if "CLOSED" in m["body"]]), 1)
+            self.assertEqual(len(router2.store.list_notes()), 1)              # R2: the CLOSED note is queued; FR1 D7: only the 21:00 digest sends it
+            router2.tick(bus); self.assertEqual(len([m for m in bus.msgs if "CLOSED" in m["body"]]), 0)
+            clock.t = T0 + 10 * 3600 + 60; router2.tick(bus); self.assertEqual(len([m for m in bus.msgs if "CLOSED" in m["body"]]), 1)
 
 
 # ---- coreaudio heal alerts (kiosk/<room>/heal kinds -> durable cases)
@@ -648,7 +649,7 @@ class CAResultGateTests(unittest.TestCase):
         for _ in range(6): e.health({"zero_ratio": 0.0}); e.clock.adv(10)
         self.assertIn("recorder_disturbed", e.open())                                         # audio back does not close it
         e.clock.adv(1800); e.router.tick(e.bus); self.assertTrue(e.v_texts())                 # V inside 07:00-21:35
-        cid = e.open()["recorder_disturbed"]["first_id"]; e.bus.human("fleet", f"ACK room-alert-{cid}", f"room-alert-{cid}"); e.clock.adv(30); e.router.tick(e.bus)
+        cid = e.open()["recorder_disturbed"]["first_id"]; e.bus.human("fleet", f"ACK room-alert-{cid}", f"room-alert-{cid}"); e.clock.adv(ar.ACK_READ_S); e.router.tick(e.bus)   # FR1 D7: next ack read 120 s on
         self.assertEqual(e.open(), {})
 
     def test_validate_heal_drops_ok_for_kind_lines(self):

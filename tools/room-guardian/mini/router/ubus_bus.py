@@ -1,6 +1,7 @@
 """ubus_bus.py -- router bus over ubus (Phase 0 build; the C4 template posts to the eta-bus). Same interface as router_relay.RouterBus:
 post(subject, body, priority, thread_id), thread_messages(thread_id) -> [{"from","subject","body"}], close().
-Talks to the ubus stdio MCP shim as handle room-guardian. Routing (to, ackers, test label, wake) comes from etc/router.json, read on every
+Talks to the ubus stdio MCP shim as handle room-guardian, session h:room-guardian (FR1 D7-2: the session of the existing live row, so
+nothing is renamed; set, never inherited; checked with ubus_whoami before anything is sent). thread_messages raises UbusDenied on forbidden / not_registered. Routing (to, ackers, test label, wake) comes from etc/router.json, read on every
 construction, so switching from TEST routing to production routing needs no restart. Metadata only is logged, never subject or body text."""
 import hashlib, json, os, select, subprocess, time
 
@@ -11,8 +12,30 @@ MACHINE = os.environ.get("UBUS_MACHINE") or __import__("socket").gethostname().s
 PRIO = {"urgent": "high", "high": "high", "normal": "normal", "low": "low"}   # ubus_send enum is low|normal|high
 
 
+SESSION, RUNTIME, OWNER, ORCHESTRATOR = "h:room-guardian", "other", "fable", "guardian-lead"   # FR1 D7-2: the live row's session; a fixed session makes the shim identity deterministic (no hook cache read)
+
+
 class UbusError(Exception):
     pass
+
+
+class UbusIdentityError(UbusError):
+    """ubus_whoami did not answer handle room-guardian, registered. Nothing is sent; the router raises the ROUTER SILENT line."""
+    def __init__(self, handle, registered):
+        super().__init__(f"identity {str(handle)[:60]}" + (" registered=false" if registered is False else ""))
+        self.identity, self.registered = str(handle)[:60], registered
+
+
+class UbusDenied(UbusError):
+    """ubus answered forbidden or not_registered for a read. The router counts it as "no ack yet" and backs that case off."""
+    denied = True
+
+
+def shim_env(base=None):
+    """The shim's environment: the caller's, minus herdr and Claude Code markers, with the five identity vars set unconditionally (never inherited)."""
+    env = {k: v for k, v in (os.environ if base is None else base).items() if not k.startswith("HERDR") and k != "CLAUDECODE"}
+    env.update({"UBUS_HANDLE": HANDLE, "UBUS_SESSION": SESSION, "UBUS_RUNTIME": RUNTIME, "UBUS_OWNER": OWNER, "UBUS_ORCHESTRATOR": ORCHESTRATOR})
+    return env
 
 
 def load_cfg(path=None):
@@ -35,13 +58,20 @@ def load_cfg(path=None):
 class UbusBus:
     def __init__(self, cfg=None, timeout=30):
         self.cfg = cfg or load_cfg()
-        env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR") and k != "CLAUDECODE"}
-        env["UBUS_HANDLE"] = HANDLE
-        self.p = subprocess.Popen([SHIM], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, text=True)
+        self.p = subprocess.Popen([SHIM], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=shim_env(), text=True)
         self.timeout, self.n = timeout, 0
-        self._rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "room-guardian", "version": "1"}})
-        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        self._tool("ubus_register", {"handle": HANDLE, "machine": MACHINE, "runtime": "other", "owner": "fable", "orchestrator": "herdr-lead"})
+        try:
+            self._rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "room-guardian", "version": "1"}})
+            self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            self._tool("ubus_register", {"handle": HANDLE, "machine": MACHINE, "runtime": RUNTIME, "session": SESSION, "owner": OWNER, "orchestrator": ORCHESTRATOR})
+            got = self._tool("ubus_whoami", {})
+            who = got.get("handle") if isinstance(got, dict) else None
+            self.identity = {"handle": who, "registered": got.get("registered") if isinstance(got, dict) else None}
+            if who != HANDLE or self.identity["registered"] is False:   # FR1 D7: never send under another name (the 22 Oct ubus-refuter twin), nor unregistered
+                raise UbusIdentityError(who, self.identity["registered"])
+        except Exception:
+            self.close()
+            raise
 
     def _send(self, o):
         self.p.stdin.write(json.dumps(o) + "\n"); self.p.stdin.flush()
@@ -90,8 +120,8 @@ class UbusBus:
         try:
             return self._tool("ubus_thread", {"handle": HANDLE, "thread_id": thread_id}).get("messages", [])
         except UbusError as e:
-            if "forbidden" in str(e):          # ubus answers "forbidden" for a thread this handle is not yet a party to (none exists): no messages
-                return []
+            if "forbidden" in str(e) or "not_registered" in str(e):   # a thread this handle is not a party to, or a lost registration: the router counts it as no ack yet
+                raise UbusDenied(str(e)[:200])
             raise
 
     def close(self):
