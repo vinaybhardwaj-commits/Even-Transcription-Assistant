@@ -101,3 +101,11 @@ def test_a_unit_withheld_in_the_mapper_still_marks_its_note_section_as_about_a_t
     note = "\n".join(f"{h}: {'Grace threes' if h == 'Presenting Complaint' else ''}".rstrip() for h in finalize.N.HEADINGS)
     out, bad = finalize.note_final(g, art, g.c, note)
     assert "Presenting Complaint" in bad and "threes" not in out  # held out by the force rule (reason unslotted or collision, whichever fires first)
+
+
+def test_a_note_line_with_no_provenance_is_judged_against_every_tagged_turn():
+    g = gate_of("a", "b", "x", drug_spans={2})
+    art = {"confirm_prompts": [], "confirm_internal": {}, "gp_extraction": {}, "provenance": []}
+    note = "\n".join(f"{h}: {'for BP Calm threes' if h == 'Diagnoses' else ''}".rstrip() for h in finalize.N.HEADINGS)
+    out, bad = finalize.note_final(g, art, g.c, note)
+    assert "Diagnoses" in bad and "threes" not in out

@@ -191,7 +191,7 @@ def note_final(gate: NumberGate, art: dict, c, note_tok: str, *, allowed=None) -
                     line = _date_slot(gate, art, line)
                 line = N.scrub_identity(line)  # Fix2 M2: the PHI name masker runs on the final Stage B note too (the repair path ends here as well)
                 txt, pos, errs = gate.writeback(line)
-                st = field_turns(art, fld)
+                st = field_turns(art, fld) or set(gate.drug_spans)  # Fix3c: a note line with no provenance behind it is read against every turn Stage A tagged
                 with numbers.force_collisions(bool(st & gate.drug_spans)):  # Fix3b H1: the Stage A drug-turn rule holds on the note path too
                     viol = [Violation("frame", e) for e in errs] or gate.final_check(txt, fld, pos)
                 viol += _unknown_drug_tokens(txt, allowed)
