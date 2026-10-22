@@ -105,7 +105,7 @@ class NumberGate:
     def _quote_slots(self, text: str) -> list[Slot]:
         k = ("q", text)
         if k not in self._qcache:
-            self._qcache[k] = find_slots(text, Ctx(visit=self.ctx.visit))
+            self._qcache[k] = find_slots(text, Ctx(visit=self.ctx.visit), None, resolve=False)
         return self._qcache[k]
 
     @staticmethod

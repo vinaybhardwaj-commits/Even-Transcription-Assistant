@@ -367,7 +367,7 @@ def _misc(t: str, pt: str, ctx: Ctx) -> list[Slot]:
     return out
 
 
-def find_slots(text, ctx: Ctx | None = None, field: str | None = None) -> list[Slot]:
+def find_slots(text, ctx: Ctx | None = None, field: str | None = None, resolve: bool = True) -> list[Slot]:
     """Every closed frame found in `text`, bounds checked, overlaps resolved (earlier start, then the longer span). With `field`, only the kinds
     the table lets post in that field (so "for 3 days" is an illness duration in Presenting Complaint and an advice duration in General Advice)."""
     ctx = ctx or Ctx()
@@ -377,6 +377,8 @@ def find_slots(text, ctx: Ctx | None = None, field: str | None = None) -> list[S
     if field is not None:
         found = [s for s in found if field in ALLOWED[s.kind]]
     found.sort(key=lambda s: (s.start, -(s.end - s.start)))
+    if not resolve:  # every candidate frame, whatever field it is for: a cited span is searched for the kind a posted number needs
+        return found
     out: list[Slot] = []
     for s in found:
         if out and s.start < out[-1].end:
