@@ -36,6 +36,8 @@ const req = (path: string, body: unknown) => new NextRequest(`http://x/api/spine
 const claimReq = (body: unknown) => req("claim", body);
 const reportReq = (body: unknown) => req("report", body);
 const T0 = new Date("2026-10-19T06:00:00Z");
+/** The next time (after now) at the given minute past the hour, IST. Used with fake Date, so route claims do not depend on when CI runs. */
+const atIstMinute = (min: number) => { const IST = 5.5 * 3600e3, t = Date.now(); return new Date(t - (((t + IST) % 3600e3) + 3600e3) % 3600e3 + 3600e3 + min * 60e3); };
 let seq = 100;
 const B32 = "abcdefghijklmnopqrstuvwxyz234567";
 const mkEnc = async (): Promise<string> => {
@@ -132,6 +134,8 @@ d("spine S6 on postgres:16", () => {
   });
 
   it("the claim route returns consult_uid only for live=true", async () => {
+    // acoustics is a K lane, which the claim route withholds from :20 to :45 IST: pin the clock outside that window
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(atIstMinute(10));
     await q("DELETE FROM spine_job");
     const a = await mkJob("acoustics", "c1", "ur");
     await q("INSERT INTO spine_link (encounter_id, key_kind, value, basis) VALUES (?, 'consult_uid', 'uid_test_03', 'exact')", a.e);
@@ -143,6 +147,19 @@ d("spine S6 on postgres:16", () => {
     const sh = await (await claimPOST(claimReq({ owner: "r-sh", limit: 1, live: false }))).json() as { jobs: Array<Record<string, unknown>> };
     expect(sh.jobs[0]).toBeDefined();
     expect("consult_uid" in sh.jobs[0]!).toBe(false);
+    vi.useRealTimers();
+  });
+  it("inside the :20-:45 IST window a live claim does not hand out a K lane (acoustics); a non-K lane is still claimed", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(atIstMinute(30));
+    try {
+      await q("DELETE FROM spine_job");
+      const a = await mkJob("acoustics", "c1", "ur");
+      const r = await mkJob("recut", "c2", "ur");
+      await setCfg({ jobs: "live", "mode.acoustics": "live", "mode.recut": "live" });
+      const got = await (await claimPOST(claimReq({ owner: "r-win", limit: 5, live: true }))).json() as { jobs: Array<{ job_id: number }> };
+      expect(got.jobs.map((j) => j.job_id)).toEqual([r.id]);
+      expect((await q("SELECT status FROM spine_job WHERE job_id = ?::bigint", a.id))[0]!.status).toBe("queued");
+    } finally { vi.useRealTimers(); }
   });
 
   // ------------------------------------------------------------ F4: enqueue wires requeueShadow itself

@@ -1,5 +1,5 @@
 /** spine-queue.test.ts — S5 pure parts and the routes (jobs layer mocked). Synthetic ids only. */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { backoffMs, breakerOpen, nextIstDayStart, resolveOutcome, BACKOFF_CAP_MS } from "@/lib/spine/retry";
 import { modesFrom, parseMode } from "@/lib/spine/config";
 import { checkSpineBearer } from "@/lib/spine/auth";
@@ -112,7 +112,11 @@ describe("routes", () => {
     expect(await r.json()).toEqual({ ok: true, jobs: [] });
     expect(M.claim).not.toHaveBeenCalled();
   });
+  // The claim route skips K lanes (acoustics, nemotron) from :20 to :45 IST; pin the clock so these tests do not depend on when CI runs.
+  const atIstMinute = (min: number) => { const IST = 5.5 * 3600e3, t = Date.now(); return new Date(t - (((t + IST) % 3600e3) + 3600e3) % 3600e3 + 3600e3 + min * 60e3); };
+  afterEach(() => { vi.useRealTimers(); });
   it("claim passes only stages that are not off and whose breaker is closed; live=true narrows to live", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(atIstMinute(10));   // outside the K-lane window
     await claimPOST(req("/api/spine/claim", { owner: "r" }));
     expect(M.claim.mock.calls[0]![1]).toEqual([]);                 // F1: non-live takes shadow stages only (recut shadow but breaker open; acoustics is live)
     M.modes.stages.recut = "live";
@@ -123,6 +127,25 @@ describe("routes", () => {
     expect(M.claim.mock.calls[2]![1]).toEqual([]);
     await claimPOST(req("/api/spine/claim", { owner: "r" }));
     expect(M.claim.mock.calls[3]![1]).toEqual(["acoustics"]);      // shadow, breaker closed
+  });
+  it("inside the :20-:45 IST window a live claim withholds K lanes (acoustics) but still hands out other live stages", async () => {
+    M.modes.stages.recut = "live";
+    M.modes.stages.nemotron = "live";
+    for (const min of [20, 30, 44]) {
+      vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(atIstMinute(min));
+      M.claim.mockClear();
+      await claimPOST(req("/api/spine/claim", { owner: "r", live: true }));
+      expect(M.claim.mock.calls[0]![1]).toEqual([]);   // recut's breaker is open in this mock; acoustics and nemotron are K lanes
+    }
+    M.modes.stages.parts = "live";
+    vi.setSystemTime(atIstMinute(30));
+    M.claim.mockClear();
+    await claimPOST(req("/api/spine/claim", { owner: "r", live: true }));
+    expect(M.claim.mock.calls[0]![1]).toEqual(["parts"]);
+    vi.setSystemTime(atIstMinute(10));
+    M.claim.mockClear();
+    await claimPOST(req("/api/spine/claim", { owner: "r", live: true }));
+    expect(M.claim.mock.calls[0]![1]).toEqual(expect.arrayContaining(["acoustics", "nemotron", "parts"]));
   });
   it("claim and report validate input", async () => {
     expect((await claimPOST(req("/api/spine/claim", { owner: "bad owner!" }))).status).toBe(400);
