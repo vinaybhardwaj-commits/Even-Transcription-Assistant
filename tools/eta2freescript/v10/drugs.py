@@ -205,8 +205,17 @@ def english_brand_spans(text: str, *, initial: bool = False, short_ok: bool = Fa
     toks = words.tokenize(t)
     n_words = sum(1 for tk in toks if tk.is_word)
     out = []
+    from . import numbers
+    tagged = numbers._FORCE.get()  # Fix3c: a unit that cites a turn Stage A tagged as a medicine
     for tk in toks:
-        if not tk.is_word or not words.is_latin(tk.text) or len(tk.text) < 3 or not tk.text[0].isupper() or tk.text.isupper() or tk.low not in weak or tk.low in clinical:
+        if not tk.is_word or not words.is_latin(tk.text) or len(tk.text) < 3 or not tk.text[0].isupper() or tk.text.isupper() or tk.low in clinical:
+            continue
+        if tk.low not in weak:
+            # Fix3c ruling 2: in a drug-tagged unit ANY capitalised mid-sentence token that is not a clinical-vocabulary word or an abbreviation reads as a brand (Duo, Rest, Grace, Calm)
+            if tagged and tk.low not in words.extra_whitelist():
+                before = t[:tk.start].rstrip()
+                if before and before[-1] not in ".!?:;\n(\"'":
+                    out.append((tk.start, tk.end))
             continue
         before = t[:tk.start].rstrip()
         if not before or before[-1] in ".!?:;\n(\"'":

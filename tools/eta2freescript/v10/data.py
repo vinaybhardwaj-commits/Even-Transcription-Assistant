@@ -23,6 +23,7 @@ WHITELIST = DATA / "clinical_whitelist.v1.json"
 WHITELIST_EXTRA = DATA / "whitelist_extra.v1.json"
 WHITELIST_ABBREV = DATA / "whitelist_abbrev.v1.json"
 SUPPORT_HEDGES = DATA / "support_hedges.v1.json"
+NUMBER_HOMOGRAPHS = DATA / "number_homographs.v1.json"
 ANALYTES = DATA / "slots" / "analytes.v1.json"
 SLOT_BOUNDS = DATA / "slots" / "slot_bounds.v1.json"
 DICTIONARY_FILES = (CONTRACT / "scowl_words.json", CONTRACT / "english_words_min.json",
@@ -59,6 +60,7 @@ def provenance() -> dict:
         "whitelist_extra_sha256": file_sha(WHITELIST_EXTRA),
         "whitelist_abbrev_sha256": file_sha(WHITELIST_ABBREV),
         "support_hedges_sha256": file_sha(SUPPORT_HEDGES),
+        "number_homographs_sha256": file_sha(NUMBER_HOMOGRAPHS),
         "catalogue_snapshot_sha256": file_sha(CATALOGUE_FILE),
         "catalogue_snapshot_date": str(cat.get("version") or ""),
         "dosing_words_sha256": file_sha(DOSING_WORDS),

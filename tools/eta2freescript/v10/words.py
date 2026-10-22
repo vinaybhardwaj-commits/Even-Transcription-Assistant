@@ -274,3 +274,32 @@ def other_person(text: str) -> str | None:
     if "'" in s or "\u2019" in s:
         return "other_person" if s[:1].isupper() else None  # the possessive form needs a capitalised name before it
     return "other_person"
+
+
+_CALENDAR = frozenset("monday tuesday wednesday thursday friday saturday sunday january february march april may june july august september october november december".split())
+_BOUNDARY = ".!?:;\n(\"'"
+
+
+def possible_name(text: str) -> str | None:
+    """Fix3c ruling 3: a capitalised token in the MIDDLE of a posted free-text unit that is not a catalogue token, a drug name, an abbreviation, a clinical-vocabulary word, a dosing word or a
+    calendar word may be a person or place name that the dictionary happens to allow (Joy, Daisy, Faith). The unit is withheld, reason `possible_name`. Names that are not English words are
+    already out of dictionary (FRX-T2). The cost is measured, not tuned away."""
+    from . import drugs, numbers
+    t = _SLOT_TOKEN.sub(" ", unicodedata.normalize("NFKC", text or ""))
+    rx = numbers._name_rx()
+    if rx is not None:
+        t = rx.sub(" ", t)
+    t = numbers._SPINE.sub(" ", t)
+    strong = drugs.strong_names()
+    ok_sets = (catalogue_tokens(), extra_whitelist(), whitelist_words(), strong)
+    for tk in tokenize(t):
+        if not tk.is_word or not is_latin(tk.text) or len(tk.text) < 3 or not tk.text[0].isupper() or tk.text.isupper():
+            continue
+        before = t[:tk.start].rstrip()
+        if not before or before[-1] in _BOUNDARY or (before[-1] == "-" and t[:tk.start][-2:-1] in (" ", "")):
+            continue  # the first word of a sentence, a list item or a "Hx - " lead is capitalised anyway
+        low = tk.low
+        if low in _CALENDAR or any(low in s for s in ok_sets) or is_dosing_word(low) or is_dose_unit(low):
+            continue
+        return "possible_name"
+    return None

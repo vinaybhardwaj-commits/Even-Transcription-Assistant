@@ -615,6 +615,9 @@ class Builder:
             if v10_words.ood_tokens(r.text):  # FRX-T2: a word outside the dictionary withholds the unit (this catches a romanised number word in any language, a person name, an unknown brand)
                 self.withhold(fld, "ood_word", cited, red_flag=red_flag)
                 return None
+            if v10_words.possible_name(r.text):  # Fix3c: a capitalised mid-sentence word that is not clinical, a drug or an abbreviation may be a name the dictionary allows
+                self.withhold(fld, "possible_name", cited, red_flag=red_flag)
+                return None
             return r.text
         self.withhold(fld, r.reason or "unslotted", cited, red_flag=red_flag)
         return None

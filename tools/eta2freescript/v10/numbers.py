@@ -305,42 +305,31 @@ def redact(text) -> str:
     return re.sub(r"[ \t]{2,}", " ", "".join(out)).strip(" ,;-")
 
 
-# --- Fix3b H3: number homographs inside a unit that is about a medicine ------------------------------------------------------------------------------
-# Structural, not a word list of homographs: in a drug-tagged or drug-flagged unit ANY token that is a lexicon word, a collision word, or within one edit of a non-English lexicon word
-# (mood ~ moodu, path ~ pathu, dash ~ dosh, teas ~ tees, basso ~ baso, ond ~ ondu, vandal ~ vandalu) is held out, whether or not the dictionary allows it. The only exemption is a closed
-# list of everyday function words (the list can only SHRINK the withholding, never extend what posts).
+# --- Fix3b H3 / Fix3c: number homographs inside a unit that is about a medicine ----------------------------------------------------------------------
+# Structural, not hand-picked: data/number_homographs.v1.json is GENERATED (v10/_build/make_homographs.py) from the shipped English dictionary and the lexicon: every dictionary word whose
+# phonetic key or one-edit form equals that of a number word of any language we carry. In a drug-tagged or drug-flagged unit a token of that list, a lexicon word or a collision word is held
+# out, whether or not the dictionary allows it. Exemptions can only SHRINK the withholding: a closed list of everyday function words and the dosing words / dose units
+# (those have their own veto). Clinical-vocabulary words are NOT exempt (ond, mri, echo are number homographs too).
 _FUNCTION_WORDS = frozenset("the and are has her his was were been done data same made each other either after before with from that this they them then than have here there what when where "
                             "which while will would your you for not can may but all any per one are our its out use new own off who how why too yet few due via nor day days dose did does pain".split())
-
-
 _TWO_LETTER_ENGLISH = frozenset("am an as at be by do go he hi if in is it me my no of ok on or so to up us we oh ye yo".split()) - {"do", "be", "so"}
 
 
 @lru_cache(maxsize=1)
-def _near_buckets() -> dict[int, frozenset[str]]:
-    base = [w for w in (lexicon_set() | collision_words()) if w.isascii() and w.isalpha() and len(w) >= 4 and w not in _ENGLISH_NUMERALS]
-    out: dict[int, set[str]] = {}
-    for w in base:
-        out.setdefault(len(w), set()).add(w)
-    return {k: frozenset(v) for k, v in out.items()}
+def homographs() -> frozenset[str]:
+    return frozenset(data.load(data.NUMBER_HOMOGRAPHS)["words"])
 
 
 def number_like(low: str) -> bool:
-    """A token that is, or is one edit away from, a (non-English) number word of the lexicon."""
+    """A token that is a number word of the lexicon, a collision word, a generated homograph of one, or a 1-2 letter fragment that is not an English word."""
+    from . import words
     low = low.lower()
-    if not low.isalpha() or not low.isascii() or low in _FUNCTION_WORDS:
+    if not low.isalpha() or not low.isascii():
         return False
     if low in lexicon_set() or low in collision_words() or low in _STAYS_A_NUMBER:
         return True
+    if low in _FUNCTION_WORDS or words.is_dosing_word(low) or words.is_dose_unit(low):
+        return False
     if len(low) < 3:
-        return low not in _TWO_LETTER_ENGLISH  # "ak", "ik", "ek"-like fragments: the dictionary allows every 1-2 letter token, so inside a drug unit only real English ones stay
-    L, B = len(low), _near_buckets()
-    for w in B.get(L, ()):
-        if sum(a != b for a, b in zip(low, w)) <= 1:
-            return True
-    for l in (L - 1, L + 1):
-        for w in B.get(l, ()):
-            s, lg = (low, w) if L < l else (w, low)
-            if any(lg[:i] + lg[i + 1:] == s for i in range(len(lg))):
-                return True
-    return False
+        return low not in _TWO_LETTER_ENGLISH
+    return low in homographs()

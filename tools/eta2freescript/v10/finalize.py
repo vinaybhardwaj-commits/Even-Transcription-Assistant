@@ -92,6 +92,8 @@ def _unit_violations(gate: NumberGate, txt: str, turns: set[int]) -> list[Violat
         out.append(Violation("other_person", "op"))
     if gate.collision_unit(txt, turns):
         out.append(Violation("collision", "col"))
+    if words.possible_name(txt):
+        out.append(Violation("possible_name", "pn"))
     return out
 
 
