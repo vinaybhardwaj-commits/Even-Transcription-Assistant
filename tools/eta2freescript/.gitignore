@@ -6,3 +6,4 @@ __pycache__/
 .pytest_cache/
 *.pyc
 usage.jsonl
+tests/fixtures_private/

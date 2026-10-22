@@ -49,6 +49,26 @@ def _heard(item: dict, key: str) -> str | None:
     return p.get("text") if p.get("evidence_state") == "heard_in_room" else None
 
 
+_REVERSAL = re.compile(r"\b(?:no,?\s+wait|wait,?\s+no|actually|sorry|i mean|make it|keep it|instead|rather)\b", re.I)
+_STRENGTH = re.compile(r"\b\d+(?:\.\d+)?\s*(?:mg|mcg|g|gm|ml|iu|units?|%)?", re.I)
+
+
+def reversal(c, t: int | None) -> tuple[str | None, int | None]:
+    """V5F4: the next segment by the same speaker within 2.0 s that reverses the earlier statement ("no wait, keep it at 500") overrides it.
+    Returns (strength text, turn) from that segment, or (None, None)."""
+    if t is None or not 0 <= t < len(c.turns):
+        return None, None
+    for n in spans.neighbours(c, t):
+        if n > t:
+            txt = c.turns[n].text or ""
+            m = _REVERSAL.search(txt)
+            if m:
+                num = _STRENGTH.search(txt, m.end()) or _STRENGTH.search(txt)
+                if num:
+                    return num.group(0).strip(), n
+    return None, None
+
+
 def _cited(item: dict, bl) -> list[int]:
     return bl._cited_turn_ids(item.get("evidence"))
 
@@ -118,7 +138,12 @@ def build_prompts(bl) -> None:
         reasons = ["translator_relay"] if False else []
         if len(grp) >= 2 and not drug.get("components"):
             reasons.append("combination_unexpanded")
+        rev, rev_turn = reversal(c, dec if isinstance(dec, int) else None)
+        if rev:
+            vals["strength"], turns = rev, list(dict.fromkeys(turns + [rev_turn]))
         pr = add(action, drug, None, turns, dec, reasons, vals)
+        if rev:
+            internal[pr["prompt_id"]]["reversal"] = True
         for g in grp:
             by_idx[g]["prompt_id"] = pr["prompt_id"]
             by_idx[g]["json_pointer"] = None

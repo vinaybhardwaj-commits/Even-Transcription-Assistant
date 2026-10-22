@@ -526,6 +526,8 @@ class Builder:
         fl = set(flags)
         if unsure:
             fl.add("speaker_uncertain")
+        if V10.ACTIVE and self._negation_split(turns, lead):
+            fl.add("negation_cue_nearby")
         if evidence_state is None:
             evidence_state = "heard_in_room" if ev else "not_said_in_room"
         if evidence_state == "inferred":
@@ -551,6 +553,20 @@ class Builder:
                      "decision": dec})
         self.prov.append(item)
         return item
+
+    _NEG_TAIL = re.compile(r"(?:\bdon['’]?t|\bdo not|\bnever|\bnot|\bno|\bmat|\bnahi|\bnahin|\bavoid)\W*$", re.I)
+    _NEG_ANY = re.compile(r"\b(?:don['’]?t|do not|never|not|no|mat|nahi|nahin|avoid|stop)\b", re.I)
+
+    def _negation_split(self, turns, lead) -> bool:
+        """S3 LOW (negation lost after a pause over 2 s): the cited turn is not negated, but the same speaker's previous segment, however long the pause
+        (up to 10 s), ends on a bare negation. The item is flagged negation_cue_nearby so a reader checks the polarity; nothing is dropped."""
+        first = lead if isinstance(lead, int) else next((t for t in (turns or []) if isinstance(t, int)), None)
+        if first is None or not 0 < first < len(self.c.turns):
+            return False
+        cur, prev = self.c.turns[first], self.c.turns[first - 1]
+        if prev.speaker != cur.speaker or (cur.t0_ms - prev.t1_ms) / 1000 > 10:
+            return False
+        return bool(self._NEG_TAIL.search((prev.text or "").strip()) and not self._NEG_ANY.search(cur.text or ""))
 
     def review(self, kind: str, item: dict, prompt: str, detail: str | None = None) -> None:
         if V10.ACTIVE:
