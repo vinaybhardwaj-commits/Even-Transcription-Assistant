@@ -141,7 +141,7 @@ def test_index_values_sanitised(data):
            "boundary_source": "x y z", "doctor_name": fake_label(4), "skip_reason": "free text", "span_start": "bad ts text"}
     root.write_text(root.read_text() + json.dumps(bad) + "\n")
     out = json.dumps(tools.index_query(status="skipped"))
-    for leak in ("Ignore", "John", fake_label(3), fake_label(4), "Clinician", "0003", "0004", "free text", "bad ts", "x y z"):
+    for leak in ("Ignore", "John", fake_label(3), fake_label(4), fake_label(3).split()[1], "Clinician", "0003", "0004", "free text", "bad ts", "x y z"):
         assert leak not in out
     assert "doctor_like_group" in out and "pqm" in out
 
@@ -162,7 +162,7 @@ def test_alerts_free_text_dropped(data):
         "kind": "row_stuck", "message": fake_label(5), "room_id": "room_aaa", "count": 3}) + "\n")
     a = tools.alerts_tail(3)["alerts"][0]
     assert "code" not in a and a["kind"] == "row_stuck" and a["room_label"] == "OPD 1" and fake_label(5) not in json.dumps(a)
-    assert "Clinician" not in json.dumps(a) and "0005" not in json.dumps(a)
+    assert fake_label(5).split()[1] not in json.dumps(a) and "Clinician" not in json.dumps(a) and "0005" not in json.dumps(a)
 
 
 def test_read_timeout_not_retried(monkeypatch):

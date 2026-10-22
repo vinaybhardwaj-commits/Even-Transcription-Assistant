@@ -176,11 +176,18 @@ d("spine-s3-r2-oref adversarial", () => {
     const PAGE = 2000; // ROW_LIMIT of the index
     const bind = (sql: string, blind: string[]) => sql.replace("$1", "''").replace(/\$2::text\[\]/g, `ARRAY[${blind.map((b) => `'${b}'`).join(",")}]::text[]`);
     const rowsOf = (sql: string) => q1(`SELECT count(*) || ' ' || md5(coalesce(string_agg(t::text, E'\\n' ORDER BY t.pk COLLATE "C"), '')) FROM (${sql}) t`);
-    /** Plan work from EXPLAIN (ANALYZE): the worst "Rows Removed by Join Filter" of any node, and the rows x loops summed over all nodes. No wall clock. */
+    /** Plan work from EXPLAIN (ANALYZE): the worst "Rows Removed by Join Filter" of any node, and the work summed over all nodes: rows x loops of every node plus the rows each node discarded (scan "Rows Removed by Filter" and "Rows Removed by Join Filter", both reported per loop, so x loops). No wall clock. */
     const cost = (sql: string) => {
       const lines = q1(`EXPLAIN (ANALYZE) ${sql}`).split("\n");
       const removed = lines.map((l) => Number(/Rows Removed by Join Filter: (\d+)/.exec(l)?.[1] ?? 0));
-      const work = lines.reduce((t, l) => { const m = /actual time=\S+ rows=(\d+) loops=(\d+)/.exec(l); return t + (m ? Number(m[1]) * Number(m[2]) : 0); }, 0);
+      let work = 0, loops = 1;
+      for (const l of lines) {
+        const m = /actual time=\S+ rows=(\d+) loops=(\d+)/.exec(l);
+        if (m) { loops = Number(m[2]); work += Number(m[1]) * loops; continue; }
+        // Detail lines belong to the node header above them. A correlated Seq Scan with empty output still reads and discards every row on every loop, so its discards count as work.
+        const d = /Rows Removed by (?:Join )?Filter: (\d+)/.exec(l);
+        if (d) work += Number(d[1]) * loops;
+      }
       return { maxJoinFilterRemoved: Math.max(0, ...removed), work };
     };
     // K: a page may discard up to 10 rows per output row by join filter (a hash join with a residual condition discards a few; the old nested loop discarded 50k per output row).
@@ -215,10 +222,15 @@ d("spine-s3-r2-oref adversarial", () => {
     expect(q1(`SELECT count(*) FROM (${bind(catalogPageSql(PAGE), [])}) t WHERE dup_source`)).not.toBe("0");
     expect(q1(`SELECT count(*) FROM (${bind(catalogPageSql(PAGE), ["2026-10-19|rb"])}) t WHERE blind`)).not.toBe("0");
 
+    // Production binds a default blind list (at least 2 entries), so the plan is measured with it too: a join that is hashable with an empty list may not be with a non-empty one.
+    const BLIND2 = ["2026-10-19|rb", "2026-10-18|rb"];
     const fixed1 = cost(bind(catalogPageSql(PAGE), []));
-    console.log(`A8 catalog page fixed: ${JSON.stringify(fixed1)} old: ${JSON.stringify(cost(bind(OLD_SQL, [])))}`);
+    const fixed1b = cost(bind(catalogPageSql(PAGE), BLIND2));
+    console.log(`A8 catalog page fixed: ${JSON.stringify(fixed1)} blind: ${JSON.stringify(fixed1b)} old: ${JSON.stringify(cost(bind(OLD_SQL, [])))}`);
     expect(fixed1.maxJoinFilterRemoved, "fixed: join-filter discards").toBeLessThanOrEqual(K);
     expect(fixed1.work, "fixed: total plan rows").toBeLessThanOrEqual(WORK_BOUND(60000));
+    expect(fixed1b.maxJoinFilterRemoved, "fixed, blind set: join-filter discards").toBeLessThanOrEqual(K);
+    expect(fixed1b.work, "fixed, blind set: total plan rows").toBeLessThanOrEqual(WORK_BOUND(60000));
     // Negative control: the guard must reject the old plan.
     const old1 = cost(bind(OLD_SQL, []));
     expect(old1.maxJoinFilterRemoved > K || old1.work > WORK_BOUND(60000), `the guard failed to flag the old plan: ${JSON.stringify(old1)}`).toBe(true);
@@ -230,6 +242,9 @@ d("spine-s3-r2-oref adversarial", () => {
     const fixed2 = cost(bind(catalogPageSql(PAGE), []));
     expect(fixed2.maxJoinFilterRemoved, "fixed 2x: join-filter discards").toBeLessThanOrEqual(K);
     expect(fixed2.work, "fixed 2x: total plan rows").toBeLessThanOrEqual(WORK_BOUND(120000));
+    const fixed2b = cost(bind(catalogPageSql(PAGE), BLIND2));
+    expect(fixed2b.maxJoinFilterRemoved, "fixed 2x, blind set: join-filter discards").toBeLessThanOrEqual(K);
+    expect(fixed2b.work, "fixed 2x, blind set: total plan rows").toBeLessThanOrEqual(WORK_BOUND(120000));
     const old2 = cost(bind(OLD_SQL, []));
     expect(old2.maxJoinFilterRemoved > K || old2.work > WORK_BOUND(120000), `the guard failed to flag the old plan at 2x: ${JSON.stringify(old2)}`).toBe(true);
   }, 300000);
