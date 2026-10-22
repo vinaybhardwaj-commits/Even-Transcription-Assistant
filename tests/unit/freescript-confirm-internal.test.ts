@@ -83,10 +83,22 @@ describe("C4: confirm_internal never leaves through a read", () => {
     expect(ingest).not.toMatch(/confirm_internal/);
     expect(ingest).toMatch(/run_id|inserted/);
   });
-  it("only an explicit internal read returns the field", () => {
+  it("only an explicit internal read, with the server-side flag on, returns the field", () => {
     expect(leaks(publicArtifact(artifact()))).toEqual([]);
-    expect(leaks(publicArtifact(artifact(), { internal: true })).length).toBeGreaterThan(0);
+    expect(leaks(publicArtifact(artifact(), { internal: true }))).toEqual([]); // the caller's request alone is not enough
+    process.env.FREESCRIPT_INTERNAL_READ = "1";
+    try {
+      expect(leaks(publicArtifact(artifact(), { internal: true })).length).toBeGreaterThan(0);
+      expect(leaks(publicArtifact(artifact()))).toEqual([]); // the flag alone is not enough either
+    } finally {
+      delete process.env.FREESCRIPT_INTERNAL_READ;
+    }
     expect(publicArtifact(null)).toBeNull();
+  });
+  it("the debug flag is read from the server environment only", () => {
+    for (const f of ["app/api/freescript/day/route.ts", "app/api/freescript/pending/route.ts", "app/api/freescript/ingest/route.ts", "lib/mcp/tools/freescript.ts"]) {
+      expect(readFileSync(f, "utf8")).not.toMatch(/FREESCRIPT_INTERNAL_READ|internal:\s*true/);
+    }
   });
   it("no page or admin surface reads the stored artifact", () => {
     const hits: string[] = [];
