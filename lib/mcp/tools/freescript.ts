@@ -7,7 +7,7 @@
  * Read selectors, exactly one: encounter_id | consult_uid | ist_date | room+date | doctor_uid8+date_from+date_to (<= 92 days).
  * ist_date alone is one IST day. With room and no date, ist_date is the date. action=run accepts a consult or room+date.
  */
-import { publicArtifact } from "@/lib/freescript/internal";
+import { publicArtifact, publicCompletion } from "@/lib/freescript/internal";
 import { sql } from "@/lib/db";
 import { FlagValueError } from "@/lib/flags";
 import { JobArgsError, submitJob, UnknownKindError } from "@/lib/jobs/submit";
@@ -109,7 +109,7 @@ export function rowView(r: Row): Row {
     ist_date: r.ist_date == null ? null : dayOf(r.ist_date),
     doctor_uid8: r.doctor_uid8 ?? null,
     validator: { ok, errors },
-    completion_required: r.completion_required ?? [],
+    completion_required: publicCompletion(r.completion_required ?? []),
     artifact: publicArtifact(r.artifact ?? null),
     generator: { code_sha256: r.generator_code_sha ?? null, prompt_sha256: r.generator_prompt_sha ?? null, model: r.model_id ?? null },
     cost_usd: n(r.cost_usd),

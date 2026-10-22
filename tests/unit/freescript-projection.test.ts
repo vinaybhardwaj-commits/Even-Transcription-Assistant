@@ -24,7 +24,8 @@ const ALLOWED: RegExp[] = [
   /^(schema_version|artifact_id|supersedes|created_at|note_text)$/,
   /^(emission|policy|generator|encounter|pulse_link|qa)\./,
   /^roster\[\d+\]\./,
-  /^(gp_extraction|confirm_prompts|doctor_words|red_flags|withheld|kept_out|completion_required)\b/,
+  /^(gp_extraction|confirm_prompts|doctor_words|red_flags|withheld|kept_out)\b/,
+  /^completion_required\[\d+\]\.(kind|item_id|prompt_id|prompt)$/,
   new RegExp(`^spans\\[\\d+\\]\\.(${SPAN_KEEP})\\b`),
   new RegExp(`^provenance\\[\\d+\\]\\.(${PROV_KEEP})\\b`),
 ];
@@ -86,7 +87,7 @@ describe("H2: the read projection serves only what it lists", () => {
   });
   it("rowView, /day and scribe_freescript serve the same projection", async () => {
     const { artifact, planted } = fullArtifact();
-    const comp = [{ kind: "x", item_id: "i1", prompt: "p" }];
+    const comp = [{ kind: "x", item_id: "i1", prompt_id: "i1", prompt: "p" }];
     H.respond = () => [stored(artifact, comp)];
     expect(notAllowed(leakedPaths(rowView(stored(artifact, comp)), planted))).toEqual([]);
     expect(notAllowed(leakedPaths(await freescriptDayRead("2026-10-05"), planted))).toEqual([]);
@@ -101,7 +102,7 @@ describe("H2: the read projection serves only what it lists", () => {
     expect(leaked.filter((p) => /quote_(en|native)$|^provenance\[\d+\]\.(text|evidence|decision|names)|^room_facts|^confirm_internal|^slots/.test(p))).toEqual([]);
   });
   it("the allowlist is small and every entry is used by the fixture", () => {
-    expect(ALLOWED.length).toBeLessThanOrEqual(7);
+    expect(ALLOWED.length).toBeLessThanOrEqual(8);
     const { artifact, planted } = fullArtifact();
     const served = leakedPaths(publicArtifact(artifact), planted);
     for (const re of ALLOWED) expect(served.some((p) => re.test(p)) || re.source.includes("completion_required")).toBe(true);
