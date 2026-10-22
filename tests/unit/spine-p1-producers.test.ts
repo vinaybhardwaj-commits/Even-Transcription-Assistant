@@ -5,7 +5,7 @@ const M = vi.hoisted(() => ({ cfg: vi.fn(), days: vi.fn(), acoustic: vi.fn(), ti
 vi.mock("@/lib/db", () => ({ sql: (..._a: unknown[]) => M.cfg() }));
 vi.mock("@/lib/room-access/room-days-for-date", () => ({ listRoomDaysForDate: M.days }));
 vi.mock("@/lib/encounter-clock/shadow-io", () => ({ runShadowForRoomDay: M.acoustic }));
-vi.mock("@/lib/encounter-clock/shadow-v3", () => ({ runTimelineShadowForRoomDay: M.timeline }));
+vi.mock("@/lib/encounter-clock/shadow-v3", () => ({ runTimelineShadowForRoomDay: M.timeline }));   // R3: the cron must never call it
 vi.mock("@/lib/encounter-clock/shadow-leave", () => ({ runTimelineLeaveForRoomDay: M.leave }));
 vi.mock("@/lib/room-access/check", () => ({ roomDayIsBlind: M.blindDay }));
 vi.mock("@/lib/encounter-clock/flag", async () => {
@@ -17,6 +17,9 @@ import { GET } from "@/app/api/cron/encounter-shadow/route";
 import { parseProducersMode } from "@/lib/spine/config";
 import { runProducers, parseMax, DEFAULT_MAX, STOP_AFTER_MS, type RoomDayRef } from "@/lib/spine/producers";
 
+// 06:30Z = 12:00 IST: the first tick of an IST hour (acoustic due); its tick index is even, so a 2-day list is not rotated
+const DUE_AT = "2026-10-22T06:30:00Z";
+const DUE_MS = Date.parse(DUE_AT);
 const SAVED = { c: process.env.CRON_SECRET, t: process.env.ENCOUNTER_TIMELINE_SHADOW, g: process.env.ENCOUNTER_GATE_DIAR, m: process.env.SPINE_PRODUCERS_MAX };
 const day = (n: number): RoomDayRef => ({ id: `rd_test${n}`, room_id: `room_test${n}`, ist_date: "2026-10-22" });
 const req = (auth: string | null = "Bearer cron_test") => new Request("https://x.test/api/cron/encounter-shadow", { headers: auth ? { authorization: auth } : {} });
@@ -30,9 +33,10 @@ beforeEach(() => {
   M.timeline.mockReset().mockResolvedValue({ ok: true });
   M.leave.mockReset().mockResolvedValue({ ok: true });
   M.blindDay.mockReset().mockResolvedValue(false);
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date(DUE_AT));
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
-afterEach(() => { restore("CRON_SECRET", SAVED.c); restore("ENCOUNTER_TIMELINE_SHADOW", SAVED.t); restore("ENCOUNTER_GATE_DIAR", SAVED.g); restore("SPINE_PRODUCERS_MAX", SAVED.m); vi.restoreAllMocks(); });
+afterEach(() => { restore("CRON_SECRET", SAVED.c); restore("ENCOUNTER_TIMELINE_SHADOW", SAVED.t); restore("ENCOUNTER_GATE_DIAR", SAVED.g); restore("SPINE_PRODUCERS_MAX", SAVED.m); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("auth", () => {
   it("503 when CRON_SECRET is unset, 401 on a missing or wrong bearer; nothing is read or run", async () => {
@@ -61,6 +65,7 @@ describe("producers gate", () => {
     expect(M.days).not.toHaveBeenCalled();
     expect(M.acoustic).not.toHaveBeenCalled();
     expect(M.timeline).not.toHaveBeenCalled();
+    expect(M.leave).not.toHaveBeenCalled();
   });
   it("parseProducersMode reads shadow, live, {mode}, text-encoded jsonb, and an explicit kill_switch=false", () => {
     expect(parseProducersMode([{ key: "producers", value: "shadow" }])).toBe("shadow");
@@ -73,11 +78,11 @@ describe("producers gate", () => {
 });
 
 describe("producers run", () => {
-  it("acoustic for each room-day with the voice.ts arguments; timeline off by default; counts only", async () => {
+  it("acoustic for each room-day with the voice.ts arguments; timeline (leave) off by default; counts only", async () => {
     const body = await (await GET(req())).json();
     expect(M.acoustic.mock.calls.map((c) => c[0])).toEqual([{ room_id: "room_test1", room_day_id: "rd_test1", ist_date: "2026-10-22" }, { room_id: "room_test2", room_day_id: "rd_test2", ist_date: "2026-10-22" }]);
     expect(M.timeline).not.toHaveBeenCalled();
-    expect(body).toEqual({ mode: "shadow", room_days: 2, acoustic_ok: 2, acoustic_err: 0, timeline_ok: 0, timeline_err: 0, leave_ok: 0, leave_err: 0, blind_skipped: 0, timeline_enabled: false, timeline_flag_invalid: 0 });
+    expect(body).toEqual({ mode: "shadow", room_days: 2, acoustic_ok: 2, acoustic_err: 0, leave_ok: 0, leave_err: 0, blind_skipped: 0, acoustic_due: true, timeline_enabled: false, timeline_flag_invalid: 0 });
   });
   it("a blind room-day is never run (static pair or placement)", async () => {
     M.blindDay.mockImplementation(async (id: string) => id === "rd_test1");
@@ -86,7 +91,7 @@ describe("producers run", () => {
     expect(body.blind_skipped).toBe(1);
     expect(M.acoustic).toHaveBeenCalledTimes(1);
     expect(M.acoustic.mock.calls[0]![0].room_day_id).toBe("rd_test2");
-    expect(M.timeline).toHaveBeenCalledTimes(1);
+    expect(M.leave).toHaveBeenCalledTimes(1);
   });
   it("a blind-check failure fails closed (counted blind, nothing run)", async () => {
     M.blindDay.mockRejectedValue(new Error("db down"));
@@ -94,31 +99,28 @@ describe("producers run", () => {
     expect(body.blind_skipped).toBe(2);
     expect(M.acoustic).not.toHaveBeenCalled();
   });
-  it.each(["1", "true", "YES", " on "])("timeline runs when the flag is %j, with gate_diar from its flag", async (v) => {
+  it.each(["1", "true", "YES", " on "])("leave runs when the flag is %j, with gate_diar from its flag; shadow-v3 never runs", async (v) => {
     process.env.ENCOUNTER_TIMELINE_SHADOW = v; process.env.ENCOUNTER_GATE_DIAR = "1";
-    const body = await (await GET(req())).json();
-    expect(M.timeline.mock.calls.map((c) => c[0])).toEqual([
-      { room_id: "room_test1", room_day_id: "rd_test1", ist_date: "2026-10-22", gate_diar: true },
-      { room_id: "room_test2", room_day_id: "rd_test2", ist_date: "2026-10-22", gate_diar: true },
-    ]);
-    expect(body.timeline_enabled).toBe(true);
-    expect(body.timeline_ok).toBe(2);
-  });
-  it("leave runs with the voice.ts arguments when the flag is truthy, after v3", async () => {
-    process.env.ENCOUNTER_TIMELINE_SHADOW = "1"; process.env.ENCOUNTER_GATE_DIAR = "1";
     const body = await (await GET(req())).json();
     expect(M.leave.mock.calls.map((c) => c[0])).toEqual([
       { room_id: "room_test1", room_day_id: "rd_test1", ist_date: "2026-10-22", gate_diar: true },
       { room_id: "room_test2", room_day_id: "rd_test2", ist_date: "2026-10-22", gate_diar: true },
     ]);
-    expect(M.timeline.mock.invocationCallOrder[0]).toBeLessThan(M.leave.mock.invocationCallOrder[0]);
-    expect(body).toMatchObject({ leave_ok: 2, leave_err: 0 });
+    expect(M.timeline).not.toHaveBeenCalled();
+    expect(body).toMatchObject({ timeline_enabled: true, leave_ok: 2, leave_err: 0 });
+    expect(body).not.toHaveProperty("timeline_ok");
+    expect(body).not.toHaveProperty("timeline_err");
   });
-  it("a leave throw or failure is counted; acoustic and v3 still run for every day", async () => {
+  it("per room-day the order is acoustic, then leave (voice.ts order is v3, leave, acoustic; R3 F5)", async () => {
+    process.env.ENCOUNTER_TIMELINE_SHADOW = "1";
+    await GET(req());
+    expect(M.acoustic.mock.invocationCallOrder[0]).toBeLessThan(M.leave.mock.invocationCallOrder[0]);
+  });
+  it("a leave throw or failure is counted; acoustic still runs for every day", async () => {
     process.env.ENCOUNTER_TIMELINE_SHADOW = "1";
     M.leave.mockRejectedValueOnce(new Error("boom rd_test1")).mockResolvedValueOnce({ ok: false, error: "no_anchors" });
     const body = await (await GET(req())).json();
-    expect(body).toMatchObject({ acoustic_ok: 2, timeline_ok: 2, leave_ok: 0, leave_err: 2 });
+    expect(body).toMatchObject({ acoustic_ok: 2, leave_ok: 0, leave_err: 2 });
     expect(M.leave).toHaveBeenCalledTimes(2);
     expect(vi.mocked(console.error).mock.calls.map((c) => c.join(" ")).join("\n")).not.toMatch(/rd_test|boom/);
   });
@@ -136,7 +138,7 @@ describe("producers run", () => {
     expect(M.leave).not.toHaveBeenCalled();
     expect(M.acoustic).toHaveBeenCalledTimes(2);
   });
-  it("an unrecognised flag value: acoustic still runs, timeline skipped, counted", async () => {
+  it("an unrecognised flag value: acoustic still runs, leave skipped, counted", async () => {
     process.env.ENCOUNTER_TIMELINE_SHADOW = "enabled";
     const r = await GET(req());
     const body = await r.json();
@@ -149,9 +151,9 @@ describe("producers run", () => {
   it("counts failures per runner, one log line per class, with no id in the log", async () => {
     process.env.ENCOUNTER_TIMELINE_SHADOW = "1";
     M.acoustic.mockResolvedValueOnce({ ok: false, error: "no_recorded_audio" }).mockRejectedValueOnce(new Error("boom rd_test2"));
-    M.timeline.mockResolvedValue({ ok: false, error: "jev_disabled" });
+    M.leave.mockResolvedValue({ ok: false, error: "no_anchors" });
     const body = await (await GET(req())).json();
-    expect(body).toMatchObject({ acoustic_ok: 0, acoustic_err: 2, timeline_ok: 0, timeline_err: 2 });
+    expect(body).toMatchObject({ acoustic_ok: 0, acoustic_err: 2, leave_ok: 0, leave_err: 2 });
     const logs = vi.mocked(console.error).mock.calls.map((c) => c.join(" "));
     expect(logs).toHaveLength(3);
     expect(logs.join("\n")).not.toMatch(/rd_test|room_test|boom/);
@@ -172,14 +174,14 @@ describe("producers run", () => {
 });
 
 describe("runProducers bounds", () => {
-  const base = (now: () => number) => ({ now, isBlind: async () => false, acoustic: vi.fn(async () => ({ ok: true })), timeline: vi.fn(async () => ({ ok: true })), leave: vi.fn(async () => ({ ok: true })), timelineEnabled: () => false, gateDiar: () => false });
+  const base = (now: () => number) => ({ now, isBlind: async () => false, acoustic: vi.fn(async () => ({ ok: true })), leave: vi.fn(async () => ({ ok: true })), timelineEnabled: () => false, gateDiar: () => false });
   it("default max is 12; a bad SPINE_PRODUCERS_MAX falls back to it", () => {
     expect(DEFAULT_MAX).toBe(12);
     for (const v of [undefined, "", "0", "-1", "abc", "1.5", "999"]) expect(parseMax(v), String(v)).toBe(12);
     expect(parseMax(" 5 ")).toBe(5);
   });
   it("stops starting new room-days after 45 s on a fake clock, finishing the one in flight", async () => {
-    let t = 1_000_000;
+    let t = DUE_MS;
     const deps = base(() => t);
     deps.acoustic = vi.fn(async () => { t += 20_000; return { ok: true }; });
     const c = await runProducers([day(1), day(2), day(3), day(4), day(5)], 12, deps);
@@ -188,10 +190,10 @@ describe("runProducers bounds", () => {
     expect(deps.acoustic).toHaveBeenCalledTimes(3);
   });
   it("a thrown gate_diar flag counts as an invalid timeline flag too", async () => {
-    const deps = { ...base(() => 0), timelineEnabled: () => true, gateDiar: () => { throw new Error("bad"); } };
+    const deps = { ...base(() => DUE_MS), timelineEnabled: () => true, gateDiar: () => { throw new Error("bad"); } };
     const c = await runProducers([day(1)], 12, deps);
     expect(c.timeline_flag_invalid).toBe(1);
-    expect(deps.timeline).not.toHaveBeenCalled();
+    expect(deps.leave).not.toHaveBeenCalled();
     expect(c.acoustic_ok).toBe(1);
   });
 });

@@ -16,9 +16,10 @@
  *   room_id        "room_" + 8 chars of [a-hjkmnp-z2-9]         lib/room-access/bench.ts:24-27 (scratch rooms, lib/brain/scratch.ts:35, are not spine signals)
  *   room_day_id    "rd_" + 8 chars of the same alphabet         lib/room-access/brain-state.ts:25-26,42
  *   hypothesis_id  "eh_" + 12 chars of the same alphabet        lib/encounter-hypotheses.ts:126,128
+ *   acoustic_key   room_day_id + ":" + epoch minute of the interval start in base 36 (4-6 chars, no 7-digit run)   lib/spine/ingest.ts acousticKey
  *   run_id         "ehr_" + 12 (acoustic) | "ets_" + 18 hex (timeline)   lib/encounter-hypotheses.ts:127; lib/encounter-clock/shadow-leave.ts:40,128
  *   shadow_id      "et_" + 18 hex                               lib/encounter-clock/shadow-leave.ts:40,130
- *   source_key     pulse, timeline -> consult_key; acoustic -> hypothesis_id; pqm, cutter, caa -> consult_uid; nemotron_window -> window_id; doctor_activity -> none (not posted in S1).   lib/spine/ingest.ts:79-87, tools/eta-spine/post_signals.py
+ *   source_key     pulse, timeline -> consult_key; acoustic -> acoustic_key; pqm, cutter, caa -> consult_uid; nemotron_window -> window_id; doctor_activity -> none (not posted in S1).   lib/spine/ingest.ts:79-87, tools/eta-spine/post_signals.py
  */
 import type { Proxy } from "./ingest";
 import RULES from "../../tools/eta-spine/phi-rules.json";

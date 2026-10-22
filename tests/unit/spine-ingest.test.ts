@@ -34,7 +34,7 @@ describe("toSignals rev rule", () => {
   });
   it("acoustic and timeline map ms spans and closed_by", () => {
     const a = toSignals([{ id: "eh_abcdefghjkmn", room_day_id: "rd_abcd2345", room_id: "room_abcd2345", start_ms: "1760760000000", end_ms: 1760760600000, closed_by: "non_speech", created_at: "2026-10-18T05:00:00Z" }], "acoustic");
-    expect(a[0]).toMatchObject({ proxy: "acoustic", source_key: "eh_abcdefghjkmn", t_open: "2025-10-18T04:00:00.000Z", attrs: { close_reason: "non_speech" } });
+    expect(a[0]).toMatchObject({ proxy: "acoustic", source_key: `rd_abcd2345:${Math.floor(1760760000000 / 60000).toString(36)}`, t_open: "2025-10-18T04:00:00.000Z", attrs: { close_reason: "non_speech" } });
     const t = toSignals([{ consult_key: "uidtestaaaaaaaaaaaaaaaaa@mach_test", id: "tl_test_01", run_id: "run_test_01", room_id: null, start_ms: 1760760000000, end_ms: 1760760600000, closed_by: "patient_left", created_at: "2026-10-18T05:00:00Z" }], "timeline");
     expect(t[0]).toMatchObject({ proxy: "timeline", source_key: "uidtestaaaaaaaaaaaaaaaaa@mach_test", room_id: null });
   });

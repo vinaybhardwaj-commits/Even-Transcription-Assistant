@@ -60,7 +60,7 @@ d("spine ingest on the real migrations", () => {
   });
   it("acoustic is acoustic only: the latest acoustic run per room-day, not older, fused or timeline runs; run_id is in attrs.ids", async () => {
     const rows = await q("SELECT source_key, attrs FROM spine_signal WHERE proxy = 'acoustic' ORDER BY 1");
-    expect(rows.map((x) => x.source_key)).toEqual(["eh_acacacacacac"]);
+    expect(rows.map((x) => x.source_key)).toEqual([expect.stringMatching(/^rd_abcd2345:[0-9a-z]{4,6}$/)]);   // R3 F1: stable key, not the hypothesis id
     expect((rows[0].attrs as { ids: Record<string, string> }).ids).toMatchObject({ hypothesis_id: "eh_acacacacacac", run_id: "hr_test_ac" });
   });
   it("a recompute of eta_encounter_windows (delete + reinsert) keeps the rev", async () => {
