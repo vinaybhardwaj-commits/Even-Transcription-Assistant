@@ -1,4 +1,4 @@
-"""Builds tests/c4_fixtures/pipeline_artifact.json THROUGH THE REAL PIPELINE (run_consult, FakeClient) from a synthetic transcript with sentinels planted in the
+"""Builds tests/c4_fixtures/fixtures/synthetic/pipeline_artifact.json THROUGH THE REAL PIPELINE (run_consult, FakeClient) from a synthetic transcript with sentinels planted in the
 turns that hold heard strength / frequency / duration / timing, an unnamed regimen slot, an off-catalogue brand, a quarantined previous-patient turn and a vital.
 Run: python tools/eta2freescript/tests/gen_c4_fixture.py   (tests/test_c4_fixture.py regenerates it and compares). Synthetic only."""
 import json
@@ -10,7 +10,7 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE), str(HERE.parents[2])]
 from conftest import empty_encounter, mk_consult  # noqa: E402
 
-OUT = HERE / "c4_fixtures" / "pipeline_artifact.json"
+OUT = HERE / "c4_fixtures" / "fixtures" / "synthetic" / "pipeline_artifact.json"
 SENTINELS = {"prev": "ZQSENTQ0", "strength": "ZQSENTS1", "freq": "ZQSENTF2", "dur": "ZQSENTD3", "timing": "ZQSENTT4", "slot": "ZQSENTL5", "brand": "ZQSENTB6", "vital": "ZQSENTV7"}
 LINES = [
     (0, 4, "0", f"Previous patient Venkatesh {SENTINELS['prev']} MRN 998877 had fever."),

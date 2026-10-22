@@ -1,0 +1,1023 @@
+{
+ "artifact": {
+  "artifact_id": "fixed",
+  "clip_boundary": {
+   "quarantined_turns": [
+    0
+   ],
+   "reasons": [
+    "stage_a_topic"
+   ],
+   "suspected": true
+  },
+  "completion_required": [
+   {
+    "item_id": "exa2",
+    "kind": "exam_missing",
+    "prompt": "Enter the examination finding",
+    "prompt_id": "exa2"
+   },
+   {
+    "item_id": "slot4",
+    "kind": "pick_drug",
+    "prompt": "Name this drug",
+    "prompt_id": "slot4"
+   },
+   {
+    "item_id": "slot6",
+    "kind": "pick_drug",
+    "prompt": "Name this drug",
+    "prompt_id": "slot6"
+   },
+   {
+    "item_id": "cli8",
+    "kind": "boundary_review",
+    "prompt": "Check the clip for another patient's consult",
+    "prompt_id": "cli8"
+   },
+   {
+    "item_id": "exa9",
+    "kind": "field_withheld",
+    "prompt": "Examination withheld: check the recording",
+    "prompt_id": "exa9"
+   }
+  ],
+  "confirm_internal": {
+   "completion": {
+    "cli8": [
+     {
+      "detail": "stage_a_topic",
+      "kind": "boundary_review"
+     }
+    ],
+    "exa2": [
+     {
+      "kind": "exam_missing",
+      "prompt": "Enter examination findings, if any"
+     }
+    ],
+    "slot4": [
+     {
+      "detail": "twice a day x three days (Zorbexin Plus Forte)",
+      "kind": "pick_drug"
+     }
+    ],
+    "slot6": [
+     {
+      "detail": "at night x a month at night",
+      "kind": "pick_drug"
+     }
+    ]
+   },
+   "p1": {
+    "duration": {
+     "cited_spans": [
+      "s3"
+     ],
+     "support": "supported",
+     "value": "5 days"
+    },
+    "frequency": {
+     "cited_spans": [
+      "s3"
+     ],
+     "support": "supported",
+     "value": "twice daily"
+    },
+    "instruction": {
+     "cited_spans": [
+      "s3"
+     ],
+     "support": "supported",
+     "value": "after food"
+    },
+    "spoken_as_heard": "Glycomet 500",
+    "strength": {
+     "cited_spans": [
+      "s3"
+     ],
+     "support": "supported",
+     "value": "500 mg"
+    },
+    "strength_heard_at": {
+     "clip_mmss": "00:15",
+     "ist": "2026-09-21T19:43:35+05:30"
+    }
+   },
+   "p2": {
+    "duration": {
+     "cited_spans": [],
+     "support": "not_stated",
+     "value": null
+    },
+    "frequency": {
+     "cited_spans": [],
+     "support": "not_stated",
+     "value": null
+    },
+    "instruction": {
+     "cited_spans": [],
+     "support": "not_stated",
+     "value": null
+    },
+    "spoken_as_heard": null,
+    "strength": {
+     "cited_spans": [],
+     "support": "not_stated",
+     "value": null
+    },
+    "strength_heard_at": {
+     "clip_mmss": "00:25",
+     "ist": "2026-09-21T19:43:45+05:30"
+    }
+   },
+   "p3": {
+    "duration": {
+     "cited_spans": [
+      "s4"
+     ],
+     "support": "supported",
+     "value": "three days"
+    },
+    "frequency": {
+     "cited_spans": [
+      "s4"
+     ],
+     "support": "supported",
+     "value": "twice a day"
+    },
+    "instruction": {
+     "cited_spans": [],
+     "support": "not_stated",
+     "value": null
+    },
+    "spoken_as_heard": null,
+    "strength": {
+     "cited_spans": [],
+     "support": "not_stated",
+     "value": null
+    },
+    "strength_heard_at": {
+     "clip_mmss": "00:25",
+     "ist": "2026-09-21T19:43:45+05:30"
+    }
+   },
+   "p4": {
+    "duration": {
+     "cited_spans": [
+      "s5"
+     ],
+     "support": "supported",
+     "value": "a month"
+    },
+    "frequency": {
+     "cited_spans": [
+      "s5"
+     ],
+     "support": "supported",
+     "value": "at night"
+    },
+    "instruction": {
+     "cited_spans": [
+      "s5"
+     ],
+     "support": "supported",
+     "value": "at night"
+    },
+    "spoken_as_heard": null,
+    "strength": {
+     "cited_spans": [],
+     "support": "not_stated",
+     "value": null
+    },
+    "strength_heard_at": {
+     "clip_mmss": "00:35",
+     "ist": "2026-09-21T19:43:55+05:30"
+    }
+   },
+   "v9_tokens": []
+  },
+  "confirm_prompts": [
+   {
+    "action": "start",
+    "cited_spans": [
+     "s3"
+    ],
+    "doctor_confirm_reason": [
+     "notes_only",
+     "brand_unmapped"
+    ],
+    "drug": {
+     "base_molecule": "glycomet",
+     "brand_recognised": null,
+     "components": [],
+     "form": null,
+     "generic": null,
+     "lasa_risk": {
+      "note": "brand with no attested row: generic unresolved",
+      "pair_with": null
+     },
+     "spoken": "Glycomet"
+    },
+    "kind": "medicine",
+    "prompt_id": "p1",
+    "stage": "mapper",
+    "who_said": {
+     "label": "speaker_0",
+     "role": "treating_doctor"
+    }
+   },
+   {
+    "action": "start",
+    "cited_spans": [
+     "s4"
+    ],
+    "doctor_confirm_reason": [
+     "notes_only",
+     "strength_unstated",
+     "brand_unmapped"
+    ],
+    "drug": {
+     "base_molecule": "",
+     "brand_recognised": null,
+     "components": [],
+     "form": null,
+     "generic": null,
+     "lasa_risk": {
+      "note": "brand with no attested row: generic unresolved",
+      "pair_with": null
+     },
+     "spoken": ""
+    },
+    "kind": "medicine",
+    "prompt_id": "p2",
+    "stage": "mapper",
+    "who_said": {
+     "label": "speaker_0",
+     "role": "treating_doctor"
+    }
+   },
+   {
+    "action": "start",
+    "cited_spans": [
+     "s4"
+    ],
+    "doctor_confirm_reason": [
+     "untaped",
+     "notes_only",
+     "strength_unstated",
+     "brand_unmapped"
+    ],
+    "drug": {
+     "base_molecule": "",
+     "brand_recognised": null,
+     "components": [],
+     "form": null,
+     "generic": null,
+     "lasa_risk": {
+      "note": "no drug name was spoken",
+      "pair_with": null
+     },
+     "spoken": "unnamed drug"
+    },
+    "kind": "medicine",
+    "prompt_id": "p3",
+    "slot_id": "slot4",
+    "stage": "mapper",
+    "who_said": {
+     "label": "speaker_0",
+     "role": "treating_doctor"
+    }
+   },
+   {
+    "action": "start",
+    "cited_spans": [
+     "s5"
+    ],
+    "doctor_confirm_reason": [
+     "untaped",
+     "notes_only",
+     "strength_unstated",
+     "brand_unmapped"
+    ],
+    "drug": {
+     "base_molecule": "",
+     "brand_recognised": null,
+     "components": [],
+     "form": null,
+     "generic": null,
+     "lasa_risk": {
+      "note": "no drug name was spoken",
+      "pair_with": null
+     },
+     "spoken": "unnamed drug"
+    },
+    "kind": "medicine",
+    "prompt_id": "p4",
+    "slot_id": "slot6",
+    "stage": "mapper",
+    "who_said": {
+     "label": "speaker_0",
+     "role": "treating_doctor"
+    }
+   }
+  ],
+  "created_at": "fixed",
+  "doctor_words": [],
+  "encounter": {
+   "doctor": {
+    "pulse_doctor_uid": null,
+    "specialty": null
+   },
+   "eta_encounter_id": "synth-c4",
+   "languages": [
+    "en"
+   ],
+   "room": "synth-room",
+   "transcript": {
+    "diarised": true,
+    "english_source": "native",
+    "role_track": {
+     "attender_present": null,
+     "config_hash": null,
+     "diar_partial": null,
+     "two_consults": null
+    },
+    "segment_count": 8,
+    "speaker_source": "role_track"
+   },
+   "visit_date_ist": "2026-09-21",
+   "window_end": "2026-09-21T19:44:21+05:30",
+   "window_start": "2026-09-21T19:43:20+05:30"
+  },
+  "generator": {
+   "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+   "data_files": {
+    "analytes_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "catalogue_snapshot_date": "0000000000000000000000000000000000000000000000000000000000000000",
+    "catalogue_snapshot_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "clinical_whitelist_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "detector_thresholds_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "dictionary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "dosing_words_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "number_lexicon_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "slot_bounds_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "whitelist_extra_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "model": "anthropic.claude-test",
+   "model_id_source": "request_alias_unverified",
+   "model_provider": "aws-bedrock",
+   "name": "eta2freescript",
+   "profile_version": null,
+   "prompt_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+   "run_id": "fixed",
+   "served_model_id": null,
+   "served_model_ids": {
+    "stage_a": "unverified",
+    "stage_b": "unverified"
+   },
+   "stage_a_version": "stageA-v3",
+   "stage_b_version": "stageB-v10",
+   "temperature": 0,
+   "version": "3.0.0",
+   "zdr": true
+  },
+  "gp_extraction": {
+   "follow_up": {
+    "follow_up_instructions": "Review after 1 week",
+    "followup_date": "2026-09-28",
+    "followup_type": "MANDATORY_FOLLOW_UP"
+   },
+   "presenting_complaints": {
+    "symptoms": "Giddiness and cough."
+   }
+  },
+  "kept_out": [
+   {
+    "item_id": "exa2",
+    "kind": "examination",
+    "span_ids": [],
+    "stage": "mapper"
+   },
+   {
+    "item_id": "med3",
+    "kind": "medicine",
+    "span_ids": [
+     "s3"
+    ],
+    "stage": "mapper"
+   },
+   {
+    "item_id": "med5",
+    "kind": "medicine",
+    "span_ids": [
+     "s4"
+    ],
+    "stage": "catalogue"
+   },
+   {
+    "item_id": "cli8",
+    "kind": "clip_boundary",
+    "span_ids": [
+     "s0"
+    ],
+    "stage": "mapper"
+   },
+   {
+    "item_id": "exa9",
+    "kind": "examination",
+    "span_ids": [
+     "s6"
+    ],
+    "stage": "floor"
+   }
+  ],
+  "note_text": "Co-morbidities:\nPresenting Complaint:\nExamination:\nDiagnoses:\nPlan of Management:\nSurgery or Procedure:\nMedication: Draft list, not a prescription; the treating doctor checks each drug.\nGlycomet — confirm generic\nUnrecognised drug — confirm generic\nFurther Investigation:\nFollow up:\nRefer to:\nGeneral Advice:",
+  "policy": {
+   "advice_budget": {
+    "chars": 300,
+    "items": 5
+   },
+   "inputs_mode": "current",
+   "medicine_policy": "notes_only"
+  },
+  "provenance": [
+   {
+    "confidence": 0.8,
+    "decision": {
+     "quote": "I have giddiness and a cough.",
+     "speaker": "patient",
+     "turn": 2
+    },
+    "evidence": [
+     {
+      "lang": "en",
+      "quote": "I have giddiness and a cough.",
+      "quote_en": "I have giddiness and a cough.",
+      "segment_ref": "synth-c4:2",
+      "speaker": "patient",
+      "speaker_source": "role_track",
+      "t0": "2026-09-21T19:43:30+05:30",
+      "t1": "2026-09-21T19:43:34+05:30"
+     }
+    ],
+    "evidence_state": "heard_in_room",
+    "flags": [],
+    "item_id": "sym1",
+    "json_pointer": "/presenting_complaints/symptoms",
+    "kind": "symptoms",
+    "negated": false,
+    "speaker": "patient",
+    "speaker_source": "role_track",
+    "status": "prescribed",
+    "text": "Giddiness and cough"
+   },
+   {
+    "confidence": 0.5,
+    "decision": null,
+    "evidence": [],
+    "evidence_state": "not_said_in_room",
+    "flags": [
+     "low_confidence",
+     "speaker_uncertain"
+    ],
+    "item_id": "exa2",
+    "json_pointer": null,
+    "kind": "examination",
+    "negated": false,
+    "speaker": "unknown",
+    "speaker_source": "role_track",
+    "status": "discussed_only",
+    "text": "[exam_missing] no examination finding said aloud"
+   },
+   {
+    "confidence": 0.9,
+    "decision": {
+     "quote": "Start Glycomet 500 twice daily ZQSENTF2 for 5 days ZQSENTD3 after food ZQSENTT4, strength ZQSENTS1.",
+     "speaker": "doctor",
+     "turn": 3
+    },
+    "evidence": [
+     {
+      "lang": "en",
+      "quote": "Start Glycomet 500 twice daily ZQSENTF2 for 5 days ZQSENTD3 after food ZQSENTT4, strength ZQSENTS1.",
+      "quote_en": "Start Glycomet 500 twice daily ZQSENTF2 for 5 days ZQSENTD3 after food ZQSENTT4, strength ZQSENTS1.",
+      "segment_ref": "synth-c4:3",
+      "speaker": "doctor",
+      "speaker_source": "role_track",
+      "t0": "2026-09-21T19:43:35+05:30",
+      "t1": "2026-09-21T19:43:44+05:30"
+     }
+    ],
+    "evidence_state": "heard_in_room",
+    "flags": [],
+    "item_id": "med3",
+    "json_pointer": null,
+    "kind": "medicine",
+    "medicine": {
+     "dosage_form": null,
+     "duration": {
+      "evidence_state": "heard_in_room"
+     },
+     "explicit_continue": false,
+     "frequency": {
+      "evidence_state": "heard_in_room"
+     },
+     "strength": {
+      "evidence_state": "heard_in_room",
+      "source": "doctor"
+     },
+     "timing": {
+      "evidence_state": "heard_in_room"
+     }
+    },
+    "names": [],
+    "negated": false,
+    "prompt_id": "p1",
+    "speaker": "doctor",
+    "speaker_source": "role_track",
+    "status": "discussed_only",
+    "text": "Glycomet - , oral, daily, days, after food"
+   },
+   {
+    "confidence": 0.5,
+    "decision": {
+     "quote": "Also start Zorbexin Plus Forte ZQSENTB6 tablet twice a day for three days.",
+     "speaker": "doctor",
+     "turn": 4
+    },
+    "evidence": [
+     {
+      "lang": "en",
+      "quote": "Also start Zorbexin Plus Forte ZQSENTB6 tablet twice a day for three days.",
+      "quote_en": "Also start Zorbexin Plus Forte ZQSENTB6 tablet twice a day for three days.",
+      "segment_ref": "synth-c4:4",
+      "speaker": "doctor",
+      "speaker_source": "role_track",
+      "t0": "2026-09-21T19:43:45+05:30",
+      "t1": "2026-09-21T19:43:54+05:30"
+     }
+    ],
+    "evidence_state": "heard_in_room",
+    "flags": [
+     "low_confidence",
+     "unresolved_name"
+    ],
+    "item_id": "med5",
+    "json_pointer": null,
+    "kind": "medicine",
+    "names": [],
+    "negated": false,
+    "prompt_id": "p2",
+    "speaker": "doctor",
+    "speaker_source": "role_track",
+    "status": "discussed_only",
+    "text": "[held_back_unsafe_medicine] Zorbexin Plus Forte"
+   },
+   {
+    "confidence": 0.8,
+    "decision": {
+     "quote": "Come back after one week.",
+     "speaker": "doctor",
+     "turn": 7
+    },
+    "evidence": [
+     {
+      "lang": "en",
+      "quote": "Come back after one week.",
+      "quote_en": "Come back after one week.",
+      "segment_ref": "synth-c4:7",
+      "speaker": "doctor",
+      "speaker_source": "role_track",
+      "t0": "2026-09-21T19:44:13+05:30",
+      "t1": "2026-09-21T19:44:20+05:30"
+     }
+    ],
+    "evidence_state": "heard_in_room",
+    "flags": [],
+    "follow_up": {
+     "interval": {
+      "unit": "WEEKS",
+      "value": 1
+     },
+     "said_text": "Review after 1 week"
+    },
+    "item_id": "fol7",
+    "json_pointer": "/follow_up",
+    "kind": "follow_up",
+    "negated": false,
+    "speaker": "doctor",
+    "speaker_source": "role_track",
+    "status": "prescribed",
+    "text": "MANDATORY_FOLLOW_UP 2026-09-28 - Review after 1 week"
+   },
+   {
+    "confidence": 0.5,
+    "decision": {
+     "quote": "held out: another patient",
+     "speaker": "doctor",
+     "turn": 0
+    },
+    "evidence": [
+     {
+      "lang": "en",
+      "quote": "held out: another patient",
+      "quote_en": "held out: another patient",
+      "segment_ref": "synth-c4:0",
+      "speaker": "doctor",
+      "speaker_source": "role_track",
+      "t0": "2026-09-21T19:43:20+05:30",
+      "t1": "2026-09-21T19:43:24+05:30"
+     }
+    ],
+    "evidence_state": "heard_in_room",
+    "flags": [
+     "low_confidence"
+    ],
+    "item_id": "cli8",
+    "json_pointer": null,
+    "kind": "clip_boundary",
+    "negated": false,
+    "speaker": "doctor",
+    "speaker_source": "role_track",
+    "status": "discussed_only",
+    "text": "[boundary_review] clip may include another consult (stage_a_topic)"
+   },
+   {
+    "confidence": 0.5,
+    "decision": {
+     "quote": "Your pulse is 84 ZQSENTV7.",
+     "speaker": "doctor",
+     "turn": 6
+    },
+    "evidence": [
+     {
+      "lang": "en",
+      "quote": "Your pulse is 84 ZQSENTV7.",
+      "quote_en": "Your pulse is 84 ZQSENTV7.",
+      "segment_ref": "synth-c4:6",
+      "speaker": "doctor",
+      "speaker_source": "role_track",
+      "t0": "2026-09-21T19:44:05+05:30",
+      "t1": "2026-09-21T19:44:12+05:30"
+     }
+    ],
+    "evidence_state": "heard_in_room",
+    "flags": [
+     "field_withheld",
+     "low_confidence"
+    ],
+    "item_id": "exa9",
+    "json_pointer": null,
+    "kind": "examination",
+    "negated": false,
+    "speaker": "doctor",
+    "speaker_source": "role_track",
+    "status": "discussed_only",
+    "text": "[field_withheld] Examination item withheld (veto_ood)"
+   }
+  ],
+  "pulse_link": {
+   "consult_uid": "synth-c4",
+   "draft_exists": "unknown",
+   "hospital_uid": null,
+   "individual_uid": null,
+   "link_basis": "ETA consult uid taken as the Pulse consult_uid; not verified for this consult",
+   "link_status": "probable",
+   "prescription_uid": null,
+   "type_of_prescription": "HOSPITAL_GP"
+  },
+  "red_flags": [],
+  "room_facts": {
+   "allergies": [],
+   "vitals": []
+  },
+  "roster": [
+   {
+    "armc": {
+     "cos": null,
+     "gate_flag": "off",
+     "margin_next_label": null,
+     "margin_runner_up_centroid": null,
+     "state": "off"
+    },
+    "label": "speaker_0",
+    "order_capable": true,
+    "role": "treating_doctor",
+    "role_votes": {
+     "clef": null,
+     "jev": null,
+     "role_track": "treating_doctor"
+    },
+    "second_doctor": false,
+    "talk_s": 49.0,
+    "three_of_three": false,
+    "translator_of": null,
+    "voiceprint_match": false
+   },
+   {
+    "armc": {
+     "cos": null,
+     "gate_flag": "off",
+     "margin_next_label": null,
+     "margin_runner_up_centroid": null,
+     "state": "off"
+    },
+    "label": "speaker_1",
+    "order_capable": false,
+    "role": "patient",
+    "role_votes": {
+     "clef": null,
+     "jev": null,
+     "role_track": "patient"
+    },
+    "second_doctor": false,
+    "talk_s": 4.0,
+    "three_of_three": false,
+    "translator_of": null,
+    "voiceprint_match": false
+   }
+  ],
+  "schema_version": "eta.freescript.v0.3",
+  "slots": [
+   {
+    "class": {
+     "evidence_state": "heard_in_room",
+     "text": "Zorbexin Plus Forte"
+    },
+    "confidence": 0.5,
+    "decision": {
+     "quote": "Also start Zorbexin Plus Forte ZQSENTB6 tablet twice a day for three days.",
+     "speaker": "doctor",
+     "turn": 4
+    },
+    "duration": {
+     "evidence_state": "heard_in_room"
+    },
+    "evidence": [
+     {
+      "lang": "en",
+      "quote": "Also start Zorbexin Plus Forte ZQSENTB6 tablet twice a day for three days.",
+      "quote_en": "Also start Zorbexin Plus Forte ZQSENTB6 tablet twice a day for three days.",
+      "segment_ref": "synth-c4:4",
+      "speaker": "doctor",
+      "speaker_source": "role_track",
+      "t0": "2026-09-21T19:43:45+05:30",
+      "t1": "2026-09-21T19:43:54+05:30"
+     }
+    ],
+    "flags": [
+     "unresolved_name"
+    ],
+    "form": {
+     "evidence_state": "not_said_in_room"
+    },
+    "frequency": {
+     "evidence_state": "heard_in_room"
+    },
+    "indication": {
+     "evidence_state": "not_said_in_room"
+    },
+    "json_pointer": null,
+    "slot_id": "slot4",
+    "strength": {
+     "evidence_state": "not_said_in_room"
+    },
+    "timing": {
+     "evidence_state": "not_said_in_room"
+    }
+   },
+   {
+    "class": {
+     "evidence_state": "not_said_in_room"
+    },
+    "confidence": 0.5,
+    "decision": {
+     "quote": "Give a sugar tablet at night for a month ZQSENTL5.",
+     "speaker": "doctor",
+     "turn": 5
+    },
+    "duration": {
+     "evidence_state": "heard_in_room"
+    },
+    "evidence": [
+     {
+      "lang": "en",
+      "quote": "Give a sugar tablet at night for a month ZQSENTL5.",
+      "quote_en": "Give a sugar tablet at night for a month ZQSENTL5.",
+      "segment_ref": "synth-c4:5",
+      "speaker": "doctor",
+      "speaker_source": "role_track",
+      "t0": "2026-09-21T19:43:55+05:30",
+      "t1": "2026-09-21T19:44:04+05:30"
+     }
+    ],
+    "form": {
+     "evidence_state": "not_said_in_room"
+    },
+    "frequency": {
+     "evidence_state": "heard_in_room"
+    },
+    "indication": {
+     "evidence_state": "not_said_in_room"
+    },
+    "json_pointer": null,
+    "slot_id": "slot6",
+    "strength": {
+     "evidence_state": "not_said_in_room"
+    },
+    "timing": {
+     "evidence_state": "heard_in_room"
+    }
+   }
+  ],
+  "spans": [
+   {
+    "boundary_quarantined": true,
+    "label": "speaker_0",
+    "lang": "en",
+    "order_capable": true,
+    "quote_en": "",
+    "quote_native": "",
+    "reason": "boundary_quarantined",
+    "relay_of": null,
+    "role": "doctor",
+    "segment_refs": [
+     "synth-c4:0"
+    ],
+    "span_id": "s0",
+    "span_source": "none",
+    "t0": "2026-09-21T19:43:20+05:30",
+    "t1": "2026-09-21T19:43:24+05:30"
+   },
+   {
+    "boundary_quarantined": false,
+    "label": "speaker_1",
+    "lang": "en",
+    "order_capable": false,
+    "quote_en": "I have giddiness and a cough.",
+    "quote_native": "I have giddiness and a cough.",
+    "relay_of": null,
+    "role": "patient",
+    "segment_refs": [
+     "synth-c4:2"
+    ],
+    "span_id": "s2",
+    "span_source": "none",
+    "t0": "2026-09-21T19:43:30+05:30",
+    "t1": "2026-09-21T19:43:34+05:30"
+   },
+   {
+    "boundary_quarantined": false,
+    "label": "speaker_0",
+    "lang": "en",
+    "order_capable": true,
+    "quote_en": "Start Glycomet 500 twice daily ZQSENTF2 for 5 days ZQSENTD3 after food ZQSENTT4, strength ZQSENTS1.",
+    "quote_native": "Start Glycomet 500 twice daily ZQSENTF2 for 5 days ZQSENTD3 after food ZQSENTT4, strength ZQSENTS1.",
+    "relay_of": null,
+    "role": "doctor",
+    "segment_refs": [
+     "synth-c4:3"
+    ],
+    "span_id": "s3",
+    "span_source": "none",
+    "t0": "2026-09-21T19:43:35+05:30",
+    "t1": "2026-09-21T19:43:44+05:30"
+   },
+   {
+    "boundary_quarantined": false,
+    "label": "speaker_0",
+    "lang": "en",
+    "order_capable": true,
+    "quote_en": "Also start Zorbexin Plus Forte ZQSENTB6 tablet twice a day for three days.",
+    "quote_native": "Also start Zorbexin Plus Forte ZQSENTB6 tablet twice a day for three days.",
+    "relay_of": null,
+    "role": "doctor",
+    "segment_refs": [
+     "synth-c4:4"
+    ],
+    "span_id": "s4",
+    "span_source": "none",
+    "t0": "2026-09-21T19:43:45+05:30",
+    "t1": "2026-09-21T19:43:54+05:30"
+   },
+   {
+    "boundary_quarantined": false,
+    "label": "speaker_0",
+    "lang": "en",
+    "order_capable": true,
+    "quote_en": "Give a sugar tablet at night for a month ZQSENTL5.",
+    "quote_native": "Give a sugar tablet at night for a month ZQSENTL5.",
+    "relay_of": null,
+    "role": "doctor",
+    "segment_refs": [
+     "synth-c4:5"
+    ],
+    "span_id": "s5",
+    "span_source": "none",
+    "t0": "2026-09-21T19:43:55+05:30",
+    "t1": "2026-09-21T19:44:04+05:30"
+   },
+   {
+    "boundary_quarantined": false,
+    "label": "speaker_0",
+    "lang": "en",
+    "order_capable": true,
+    "quote_en": "Your pulse is 84 ZQSENTV7.",
+    "quote_native": "Your pulse is 84 ZQSENTV7.",
+    "relay_of": null,
+    "role": "doctor",
+    "segment_refs": [
+     "synth-c4:6"
+    ],
+    "span_id": "s6",
+    "span_source": "none",
+    "t0": "2026-09-21T19:44:05+05:30",
+    "t1": "2026-09-21T19:44:12+05:30"
+   },
+   {
+    "boundary_quarantined": false,
+    "label": "speaker_0",
+    "lang": "en",
+    "order_capable": true,
+    "quote_en": "Come back after one week.",
+    "quote_native": "Come back after one week.",
+    "relay_of": null,
+    "role": "doctor",
+    "segment_refs": [
+     "synth-c4:7"
+    ],
+    "span_id": "s7",
+    "span_source": "none",
+    "t0": "2026-09-21T19:44:13+05:30",
+    "t1": "2026-09-21T19:44:20+05:30"
+   }
+  ],
+  "supersedes": null,
+  "withheld": [
+   {
+    "field_pointer": "/examination",
+    "item_id": "exa9",
+    "prompt_id": "exa9",
+    "reason_code": "veto_ood",
+    "red_flag": false,
+    "span_ids": [
+     "s6"
+    ],
+    "stage": "floor"
+   }
+  ]
+ },
+ "completion_required": [
+  {
+   "item_id": "exa2",
+   "kind": "exam_missing",
+   "prompt": "Enter the examination finding",
+   "prompt_id": "exa2"
+  },
+  {
+   "item_id": "slot4",
+   "kind": "pick_drug",
+   "prompt": "Name this drug",
+   "prompt_id": "slot4"
+  },
+  {
+   "item_id": "slot6",
+   "kind": "pick_drug",
+   "prompt": "Name this drug",
+   "prompt_id": "slot6"
+  },
+  {
+   "item_id": "cli8",
+   "kind": "boundary_review",
+   "prompt": "Check the clip for another patient's consult",
+   "prompt_id": "cli8"
+  },
+  {
+   "item_id": "exa9",
+   "kind": "field_withheld",
+   "prompt": "Examination withheld: check the recording",
+   "prompt_id": "exa9"
+  }
+ ],
+ "heard": [
+  "twice daily",
+  "5 days",
+  "after food",
+  "500",
+  "three days",
+  "a month",
+  "at night",
+  "Zorbexin Plus Forte"
+ ],
+ "sentinels": {
+  "brand": "ZQSENTB6",
+  "dur": "ZQSENTD3",
+  "freq": "ZQSENTF2",
+  "prev": "ZQSENTQ0",
+  "slot": "ZQSENTL5",
+  "strength": "ZQSENTS1",
+  "timing": "ZQSENTT4",
+  "vital": "ZQSENTV7"
+ }
+}

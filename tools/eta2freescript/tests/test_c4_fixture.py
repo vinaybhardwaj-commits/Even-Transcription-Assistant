@@ -1,4 +1,4 @@
-"""The committed C4 fixture (tests/c4_fixtures/pipeline_artifact.json) is what the pipeline builds today from the synthetic transcript in gen_c4_fixture.py."""
+"""The committed C4 fixture (tests/c4_fixtures/fixtures/synthetic/pipeline_artifact.json) is what the pipeline builds today from the synthetic transcript in gen_c4_fixture.py."""
 import json
 
 import gen_c4_fixture as G

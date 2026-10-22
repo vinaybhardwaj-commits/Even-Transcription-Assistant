@@ -1,5 +1,5 @@
 /**
- * Fix2 H2: an artifact built THROUGH THE REAL PIPELINE (tools/eta2freescript/tests/gen_c4_fixture.py -> tests/c4_fixtures/pipeline_artifact.json; synthetic, sentinels
+ * Fix2 H2: an artifact built THROUGH THE REAL PIPELINE (tools/eta2freescript/tests/gen_c4_fixture.py -> tests/c4_fixtures/fixtures/synthetic/pipeline_artifact.json; synthetic, sentinels
  * planted in the turns that hold heard strength, frequency, duration, timing, a slot, an off-catalogue brand, a vital and a previous patient) is fed through
  * publicArtifact, rowView, freescriptDayRead and every freescriptCall selector. No sentinel and no heard value may leave except in a field listed in ALLOWED.
  */
@@ -16,7 +16,7 @@ import type { ToolContext } from "@/lib/mcp/registry";
 import type { McpScope } from "@/lib/mcp/auth";
 
 const READ: ToolContext = { actor: "mcp:test", origin: "https://example.test", scopes: new Set<McpScope>(["read"]) };
-const FIX = JSON.parse(readFileSync("tools/eta2freescript/tests/c4_fixtures/pipeline_artifact.json", "utf8")) as { artifact: Row; completion_required: Row[]; sentinels: Record<string, string>; heard: string[] };
+const FIX = JSON.parse(readFileSync("tools/eta2freescript/tests/c4_fixtures/fixtures/synthetic/pipeline_artifact.json", "utf8")) as { artifact: Row; completion_required: Row[]; sentinels: Record<string, string>; heard: string[] };
 
 // Product content, gated by the number gate and the word gate: it may carry the drug's own words and posted text. Nothing else may carry a heard value.
 const ALLOWED: RegExp[] = [/^(artifact\.)?note_text$/, /^(artifact\.)?gp_extraction\b/, /^(artifact\.)?confirm_prompts\[\d+\]\.drug\.(spoken|generic|brand_recognised|base_molecule)$/];
