@@ -1,9 +1,9 @@
 # Opus refuter scratch tests for the vertex: engine. No network: requests.post and the token
 # endpoint are faked. The RSA key is generated here, fake, never a real credential.
-import io, json, os, sys, tempfile, time, unittest, contextlib
+import io, json, os, shutil, sys, tempfile, time, unittest, contextlib
 from unittest import mock
 
-WT = os.environ["ETA_ROUTER_DIR"]
+WT = os.environ.get("ETA_ROUTER_DIR", os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, WT)
 import router_server as rs  # noqa: E402
 import rsa  # noqa: E402
@@ -54,6 +54,7 @@ class T(unittest.TestCase):
 
     def tearDown(self):
         for x in self.p: x.stop()
+        shutil.rmtree(self.d, ignore_errors=True)
 
     def write(self, proj, key=None):
         with open(self.sa, "w") as fh:
@@ -132,6 +133,7 @@ class T(unittest.TestCase):
             r = rs.translate(HINDI, "hi")
         self.assertEqual(r["translate_engine"], "openrouter:google/gemini-2.5-flash-lite")
         self.assertEqual(self.calls[0][1]["json"]["provider"], {"zdr": True, "data_collection": "deny"} | self.calls[0][1]["json"]["provider"])
+
 
 
 if __name__ == "__main__":

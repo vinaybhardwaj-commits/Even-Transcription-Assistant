@@ -6,7 +6,7 @@
 | lib/jev/translate.ts | `vertexChat` (new, lib/llm/gemini.ts); `deps.chat` seam kept | JEV_TRANSLATE_MODEL / _FALLBACK, default gemini-2.5-flash / gemini-2.5-flash-lite, `model[@region]` |
 | lib/rubrics/llm.ts (llm_zdr engine, consult-llm) | `vertexChat`; test hook kept | first target of LLM_FALLBACK_MODELS (model + region) |
 | services/eta-router router_server.py translate | new `vertex:<model>` engine, now DEFAULT | see below |
-Env names now needed: GCP_PROJECT, GCP_SA_KEY, GCP_LOCATION (existing) + NEW optional GCP_FALLBACK_LOCATION. Old OpenRouter slugs left in LLM_FALLBACK_MODELS / JEV_TRANSLATE_* are DROPPED (parseVertexTargets), never sent to Vertex; unset them anyway.
+Env names now needed: GCP_PROJECT, GCP_SA_KEY, GCP_LOCATION (existing) + NEW optional GCP_FALLBACK_LOCATION. Old OpenRouter slugs left in LLM_FALLBACK_MODELS / JEV_TRANSLATE_* are handled by parseVertexTargets (R2): `google/<m>` is MAPPED to `<m>`, sent, and logged; any other slug is DROPPED with a counted warning. Unset them anyway.
 ## Behaviour changes to know
 - Surface not flagged but Vertex configured: goes straight to the Vertex fallback chain (was OpenRouter). Vertex not configured: `all_failed: vertex_not_configured`, provider none.
 - silent_fallback (scribe_llm_health) and fusion `provider_not_gemini` now treat `gemini:<m>@<region>` (fallback stage) as NOT the primary: meaning unchanged. A fallback equal to the failed primary (model+region) is skipped.

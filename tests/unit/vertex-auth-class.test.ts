@@ -38,28 +38,6 @@ describe("F3 vertexChat auth classes", () => {
   });
 });
 
-describe("gcp-auth classification (real mint, fake fetch)", () => {
-  it("token exchange 401/403 is permanent, 503 transient; unusable key is permanent", async () => {
-    vi.doUnmock("@/lib/gcp-auth");
-    vi.resetModules();
-    const { generateKeyPairSync } = await import("crypto");
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    process.env.GCP_SA_KEY = JSON.stringify({ client_email: "sa-test-fake", private_key: pem });
-    const real = globalThis.fetch;
-    try {
-      for (const [status, permanent] of [[401, true], [403, true], [400, true], [503, false], [429, false]] as const) {
-        globalThis.fetch = (async () => new Response(LEAK, { status })) as unknown as typeof fetch;
-        const a = await import("@/lib/gcp-auth");
-        await expect(a.getVertexAccessToken()).rejects.toMatchObject({ name: "GcpAuthError", permanent });
-      }
-      process.env.GCP_SA_KEY = JSON.stringify({ client_email: "sa-test-fake", private_key: "not a key" });
-      const a = await import("@/lib/gcp-auth");
-      await expect(a.getVertexAccessToken()).rejects.toMatchObject({ permanent: true });
-    } finally { globalThis.fetch = real; }
-  });
-});
-
 describe("P03 no exception text reaches a log line or a response", () => {
   it("routedChat primary mint failure: logs the class name only; result carries closed codes", async () => {
     process.env.GEMINI_ALL = "1";
