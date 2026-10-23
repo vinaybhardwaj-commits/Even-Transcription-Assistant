@@ -80,18 +80,18 @@ def test_fixture_signals_same_verdict_as_ts():
 
 
 def test_a_bad_row_is_skipped_and_counted_not_fatal(tmp_path):
-    good = {"consult_uid": "uidtestaaaaaaaaaaaaaaaaa", "t_open": 1790000000, "close_reason": "pqm", "quality": "pqm"}
-    bad = {"consult_uid": "uidtestbbbbbbbbbbbbbbbbb", "t_open": 1790000000, "close_reason": "patient said chest pain"}
+    good = {"consult_uid": "uidtestaaaaaaaaaaaaaaaaaaa", "t_open": 1790000000, "close_reason": "pqm", "quality": "pqm"}
+    bad = {"consult_uid": "uidtestbbbbbbbbbbbbbbbbbbb", "t_open": 1790000000, "close_reason": "patient said chest pain"}
     f = tmp_path / "w.jsonl"
     f.write_text(json.dumps(good) + "\n" + json.dumps(bad) + "\n")
     sigs, counts = P.build(str(f), "pqm", "2026-10-18T00:00:00Z")
-    assert counts["signals"] == 1 and counts["refused"] == 1 and sigs[0]["source_key"] == "uidtestaaaaaaaaaaaaaaaaa"
+    assert counts["signals"] == 1 and counts["refused"] == 1 and sigs[0]["source_key"] == "uidtestaaaaaaaaaaaaaaaaaaa"
 
 
 def test_post_with_a_refused_row_exits_0_and_reports_it(tmp_path, capsys):
     from unittest import mock
     f = tmp_path / "w.jsonl"
-    f.write_text(json.dumps({"consult_uid": "uidtestaaaaaaaaaaaaaaaaa", "t_open": 1790000000}) + "\n" + json.dumps({"consult_uid": "uidtestbbbbbbbbbbbbbbbbb", "t_open": 1790000000, "quality": "Ravi Kumar"}) + "\n")
+    f.write_text(json.dumps({"consult_uid": "uidtestaaaaaaaaaaaaaaaaaaa", "t_open": 1790000000}) + "\n" + json.dumps({"consult_uid": "uidtestbbbbbbbbbbbbbbbbbbb", "t_open": 1790000000, "quality": "Ravi Kumar"}) + "\n")
     tok = tmp_path / "tok"
     tok.write_text("t\n")
     os.chmod(tok, 0o600)

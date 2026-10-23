@@ -29,7 +29,7 @@ const HAVE = dockerAvailable();
 const pg = pgContainer("eta-oref-p2r3");
 const d = HAVE ? describe : describe.skip;
 
-const KEYS = ["uidtestaaaaaaaaaaaaaaaaa@mach_test", "uidtestbbbbbbbbbbbbbbbbb@mach_test", "uidtestccccccccccccccccc@mach_test"];
+const KEYS = ["uidtestaaaaaaaaaaaaaaaaaaa@mach_test", "uidtestbbbbbbbbbbbbbbbbbbb@mach_test", "uidtestccccccccccccccccccc@mach_test"];
 const NOW = Date.parse("2026-10-18T08:00:00Z");
 const ROOM = "room_abcd2345";
 const iso = (h: number, m = 0, day = 18) => `2026-10-${day}T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00Z`;

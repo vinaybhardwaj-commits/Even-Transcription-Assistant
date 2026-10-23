@@ -29,7 +29,7 @@ const HAVE = dockerAvailable();
 const pg = pgContainer("eta-oref-p2r4");
 const d = HAVE ? describe : describe.skip;
 
-const KEYS = ["uidtestaaaaaaaaaaaaaaaaa@mach_test", "uidtestbbbbbbbbbbbbbbbbb@mach_test", "uidtestccccccccccccccccc@mach_test"];
+const KEYS = ["uidtestaaaaaaaaaaaaaaaaaaa@mach_test", "uidtestbbbbbbbbbbbbbbbbbbb@mach_test", "uidtestccccccccccccccccccc@mach_test"];
 const NOW = Date.parse("2026-10-18T08:00:00Z");
 const ROOM = "room_abcd2345";
 const iso = (h: number, m = 0, day = 18) => `2026-10-${day}T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00Z`;
@@ -195,7 +195,7 @@ d("oref R4 on postgres:16 with ALL migrations", () => {
 
   it("R4 LOW: ambiguous_no_freescript counts confirmed + sp (past grace, not frozen), not candidate", async () => {
     pulse(KA, iso(4), iso(4, 9)); pulse(KB, iso(5), iso(5, 9)); pulse(KEYS[2], iso(6), iso(6, 9));
-    timeline("uidtestddddddddddddddddd@mach_test", iso(6, 30), iso(6, 39)); timeline("uidtesteeeeeeeeeeeeeeeee@mach_test", iso(7, 40), iso(7, 50), { received: iso(7, 55) });
+    timeline("uidtestddddddddddddddddddd@mach_test", iso(6, 30), iso(6, 39)); timeline("uidtesteeeeeeeeeeeeeeeeeee@mach_test", iso(7, 40), iso(7, 50), { received: iso(7, 55) });
     allShadow(); await runSpineMerge(NOW);
     const ids = (await q("SELECT encounter_id FROM spine_encounter WHERE status <> 'merged' ORDER BY t_open")).map((r) => String(r.encounter_id));
     expect(ids.length).toBe(5);
@@ -204,5 +204,25 @@ d("oref R4 on postgres:16 with ALL migrations", () => {
     ids.forEach((id, i) => pg.exec(`UPDATE spine_encounter SET status = '${st[i]}', flags = ${fl[i]} WHERE encounter_id = '${id}';`));
     const c = await enq();
     expect(c.ambiguous_no_freescript).toBe(2); // confirmed + sp; candidate, frozen sp and the in-grace sp (closes 07:50) are not counted
+  });
+
+  it("N2: the tick carries totals (rows per status for the pass's encounters), read after the insert, on a first pass and on a rerun", async () => {
+    const empty = await enq();
+    expect(empty).toEqual({ skipped: "off" });             // no config yet: skipped, nothing to total
+    pulse(KA, iso(4), iso(4, 9));
+    allShadow(); await runSpineMerge(NOW);
+    const first = (await enq()) as unknown as { shadow: number; queued: number; by_stage: Record<string, number>; totals: Record<string, number> };
+    expect(first.shadow).toBeGreaterThan(0);
+    expect(first.totals).toEqual({ shadow: first.shadow });
+    const rerun = (await enq()) as unknown as typeof first;
+    expect(rerun.shadow).toBe(0); expect(rerun.by_stage).toEqual({});
+    expect(rerun.totals).toEqual(first.totals);             // self-explaining: the 0 is "already there", not "nothing planned"
+    expect(await num("SELECT count(*) FROM spine_job")).toBe(first.shadow);
+    const tick = await q("SELECT counts FROM spine_tick WHERE kind = 'enqueue' ORDER BY 1 DESC LIMIT 1");
+    expect((tick[0].counts as Record<string, unknown>).totals).toEqual(first.totals);
+    allLive();                                                // shadow rows are promoted: totals follow the status, per-pass fields unchanged in meaning
+    const live2 = (await enq()) as unknown as typeof first;
+    expect(Object.values(live2.totals).reduce((a, b) => a + b, 0)).toBe(first.shadow);
+    expect(live2.totals.shadow ?? 0).toBe(first.shadow - live2.queued);
   });
 });

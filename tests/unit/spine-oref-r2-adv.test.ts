@@ -18,8 +18,8 @@ describe("cron ingest on the REAL driver shape (Date source rows AND Date priors
     let close = T_CLOSE; const inserted: Array<Record<string, unknown>> = [];
     D.handler = async (t, p) => {
       if (/FROM spine_config/.test(t)) return [{ key: "ingest", value: "shadow" }];
-      if (/FROM eta_encounter_windows/.test(t)) return [{ consult_key: "uidtestaaaaaaaaaaaaaaaaa@mach_test", consult_uid: "uidtestaaaaaaaaaaaaaaaaa", room_id: "room_abcd2345", t_open: new Date(T_OPEN), t_close: new Date(close), close_reason: "endConsult", quality: "clean", computed_at: new Date(T_CLOSE) }];
-      if (/FROM spine_signal WHERE proxy/.test(t)) return p[0] === "pulse" ? [{ source_key: "uidtestaaaaaaaaaaaaaaaaa@mach_test", source_rev: 1, room_id: "room_abcd2345", t_open: new Date(T_OPEN), t_close: new Date(T_CLOSE), close_reason: "endConsult" }] : [];
+      if (/FROM eta_encounter_windows/.test(t)) return [{ consult_key: "uidtestaaaaaaaaaaaaaaaaaaa@mach_test", consult_uid: "uidtestaaaaaaaaaaaaaaaaaaa", room_id: "room_abcd2345", t_open: new Date(T_OPEN), t_close: new Date(close), close_reason: "endConsult", quality: "clean", computed_at: new Date(T_CLOSE) }];
+      if (/FROM spine_signal WHERE proxy/.test(t)) return p[0] === "pulse" ? [{ source_key: "uidtestaaaaaaaaaaaaaaaaaaa@mach_test", source_rev: 1, room_id: "room_abcd2345", t_open: new Date(T_OPEN), t_close: new Date(T_CLOSE), close_reason: "endConsult" }] : [];
       if (/INSERT INTO spine_signal/.test(t)) { const rows = JSON.parse(p[0] as string); inserted.push(...rows); return rows.map((r: Record<string, unknown>) => ({ proxy: r.proxy, source_key: r.source_key, source_rev: r.source_rev })); }
       return [];
     };

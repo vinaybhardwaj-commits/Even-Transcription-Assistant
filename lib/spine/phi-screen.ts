@@ -5,10 +5,11 @@
  *           room_id has the room_id format; source_key has the format of the id key its proxy keys on (SOURCE_KEY_FORMAT; a proxy with no entry has no valid source_key). A name-plus-digits token (ramesh_9845) or a bare phone-like number fits none of them.
  *
  * FORMAT DERIVATION (each regex lives in phi-rules.json; every id is machine-minted, so each is closed to its minting code):
- *   consult_key    `${enc}@${machine}`                          lib/encounter-windows/compute.ts:252. machine is the RAW event machine; it is normalised upstream (letters, digits, . _ -) in lib/encounter-windows/machine-keys.ts:4, so real rows already have that spelling.
+ *   consult_key    `${enc}@${machine}`                          lib/encounter-windows/compute.ts:252. machine is the RAW event machine; it is normalised upstream (letters, digits, . _ -) in lib/encounter-windows/machine-keys.ts:4, so real rows already have that spelling. The machine part keeps the 7-digit guard (unchanged); the enc part is the Pulse form below.
  *   consult_uid    pqm rows: "pqm_" + 22 hex                    tools/eta-consult-cutter/tools/pqm_windows.py:20
- *                  Pulse rows: the Pulse uid, lower-case alnum 20-32   lib/buddy/relay.ts:82 SAFE_CONSULT_UID (enc = the Pulse encounter_id, compute.ts:98, types.ts:23). No other minting code exists in the repo, so no enc_<..> and no uuid form (the R3 enc_ramesh hole).
- *                  Non-hex forms refuse any run of 7+ digits (a phone-like number); the pqm hex form is exempt (hex ids legitimately hold digit runs). The poster counts a guard refusal as `.digit_run`.
+ *                  Pulse rows: the Pulse encounter id (enc = compute.ts:98, types.ts:23; consult_uid IS enc, compute.ts:253). EXACTLY 26 chars of [a-z0-9], with at least one letter and no run of 10+ digits (the pulse_enc_id form). Basis (N2, 23 Oct 2026): the gating-lead's read-only production probe of eta_encounter_windows, 1238 rows: consult_uid length 26 for all, 4 hold a 7-digit run (0.32%), 0 hold a 10-digit run. The earlier 20-32 / 7-digit form came from lib/buddy/relay.ts:82 SAFE_CONSULT_UID, which is a CONSUMER-side validator, not a minting path; no code in this repo mints a Pulse uid, so the probe is the only evidence of its length. The 7-digit guard refused real signals (0.32% by the probe), hence the phone-length 10-run guard.
+ *                  The letter lookahead is implied by the 10-run guard (26 digits always hold a 10-run); it is kept for the exact mirror of pulse_enc_id. So an all-digit value is refused with the plain reason, never `.digit_run` (pinned in the fixture, n2_*_all_digit). In consult_key the lookahead is confined to the enc part.
+ *                  The pqm hex form is exempt from the guards (hex ids legitimately hold digit runs). The poster counts a guard refusal as `.digit_run`.
  *   pulse_enc_id   Allowed for proxies pulse and pqm only (id_key_proxies). Shape from the gating-lead production probe (23 Oct 2026): exactly 26 chars of [a-z0-9]. It needs at least one letter (an all-digit string is not a minted id) and uses a PHONE-LENGTH guard, no run of 10+ digits (Indian mobile = 10, +91 form = 12), not the 7-digit guard: a uniformly random 26-char id holds a 7-9 digit run about 0.19% of the time, and the 10-run rule refuses about 0.0034%. The poster counts a guard refusal as `.digit_run`. The format still admits a name-shaped token of 26 lowercase chars; only the charset, length, letter and phone guards are enforced.
  *   pqm_step_uid   the PQM step uid, copied raw                  pqm_windows.py:55. UNVERIFIED charset: taken as a uuid or 16-64 hex. A row whose step uid is anything else is refused by the poster and counted.
  *   window_id      bench window "bw_<session 8>_<start_ms 13 digits>_<primary|backup>"   lib/bench-window.ts:357 (session id = 8 chars of benchId, lib/room-access/bench.ts:24)
@@ -32,9 +33,9 @@ export const SOURCE_KEY_FORMAT: Readonly<Record<string, string>> = RULES.source_
 export const ID_KEY_PROXIES: Readonly<Record<string, readonly string[]>> = RULES.id_key_proxies;
 /** The 7-digit guard clause; a value that fails its format but passes without it was refused by the guard alone. */
 export const DIGIT_GUARD = "(?!.*[0-9]{7})";
-/** pulse_enc_id's phone-length guard (10+ digits); stripped too when asking whether the guard alone refused a value. */
+/** The phone-length guard (10+ digits) of pulse_enc_id and the Pulse form of consult_uid / consult_key; stripped too when asking whether the guard alone refused a value. */
 export const PHONE_GUARD = "(?!.*[0-9]{10})";
-const UNGUARDED: Readonly<Record<string, RegExp>> = Object.fromEntries(Object.entries(RULES.formats).map(([k, src]) => [k, new RegExp(src.replace(DIGIT_GUARD, "").replace(PHONE_GUARD, ""))]));
+const UNGUARDED: Readonly<Record<string, RegExp>> = Object.fromEntries(Object.entries(RULES.formats).map(([k, src]) => [k, new RegExp(src.replaceAll(DIGIT_GUARD, "").replaceAll(PHONE_GUARD, ""))]));
 
 export const ENUMS: Record<Proxy, { close_reason: ReadonlySet<string>; quality: ReadonlySet<string> }> = Object.fromEntries(
   Object.entries(RULES.enums).map(([p, e]) => [p, { close_reason: new Set(e.close_reason), quality: new Set(e.quality) }]),

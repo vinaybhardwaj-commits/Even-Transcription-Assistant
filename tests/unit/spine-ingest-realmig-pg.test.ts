@@ -35,7 +35,7 @@ d("spine ingest on the real migrations", () => {
       INSERT INTO room (id, slug, name, pin_hash) VALUES ('room_abcd2345', 'room-test-a', 'Room Test A', 'x');
       INSERT INTO room_day (id, room_id, ist_date) VALUES ('rd_abcd2345', 'room_abcd2345', '2026-10-18');
       INSERT INTO eta_encounter_windows (consult_key, consult_uid, machine, room_id, doctor_uid, display_name, attribution, t_open, t_close, close_reason, quality, resolver_version, warehouse_doctor_name, consulting_doctor_name)
-        VALUES ('uidtestaaaaaaaaaaaaaaaaa@mach_test', 'uidtestaaaaaaaaaaaaaaaaa', 'mach_test', 'room_abcd2345', 'doc_test_01', 'Doc Test Display', 'rows', '2026-10-18T04:00:00.123Z', '2026-10-18T04:10:00.456Z', 'endConsult', 'clean', 'rv_test', 'WH Doc Test', 'CD Doc Test');
+        VALUES ('uidtestaaaaaaaaaaaaaaaaaaa@mach_test', 'uidtestaaaaaaaaaaaaaaaaaaa', 'mach_test', 'room_abcd2345', 'doc_test_01', 'Doc Test Display', 'rows', '2026-10-18T04:00:00.123Z', '2026-10-18T04:10:00.456Z', 'endConsult', 'clean', 'rv_test', 'WH Doc Test', 'CD Doc Test');
       INSERT INTO encounter_hypothesis_run (id, room_day_id, smoother_version, gate_version, probes_total, probes_speech, probes_non_speech, probes_unjudged, n_hypotheses, source, created_at)
         VALUES ('hr_test_old', 'rd_abcd2345', 'sv', 'gv', 1, 1, 0, 0, 1, 'acoustic', '2026-10-18T03:00:00Z'),
                ('hr_test_ac', 'rd_abcd2345', 'sv', 'gv', 1, 1, 0, 0, 1, 'acoustic', '2026-10-18T04:00:00Z'),
@@ -46,7 +46,7 @@ d("spine ingest on the real migrations", () => {
       INSERT INTO encounter_timeline_shadow_run (id, room_day_id, model, question_set_sha, prompt_version, calibration_sha, gate_version, fusion_version, params)
         VALUES ('tr_test_01', 'rd_abcd2345', 'm', 'q', 'p', 'c', 'g', 'f', '{}');
       INSERT INTO encounter_timeline_shadow (id, run_id, room_day_id, consult_key, start_ms, end_ms, reason_codes, closed_by, jev_used, cache_hit, cache_key, features)
-        VALUES ('tl_test_01', 'tr_test_01', 'rd_abcd2345', 'uidtestaaaaaaaaaaaaaaaaa@mach_test', ${T0}, ${T0 + 590000}, ARRAY['patient_left'], 'patient_left', false, false, 'ck', '[]');
+        VALUES ('tl_test_01', 'tr_test_01', 'rd_abcd2345', 'uidtestaaaaaaaaaaaaaaaaaaa@mach_test', ${T0}, ${T0 + 590000}, ARRAY['patient_left'], 'patient_left', false, false, 'ck', '[]');
       INSERT INTO spine_config (key, value) VALUES ('ingest', '"shadow"') ON CONFLICT (key) DO NOTHING;
     `);
   }, 300_000);
@@ -65,7 +65,7 @@ d("spine ingest on the real migrations", () => {
   });
   it("a recompute of eta_encounter_windows (delete + reinsert) keeps the rev", async () => {
     pg.exec(`DELETE FROM eta_encounter_windows; INSERT INTO eta_encounter_windows (consult_key, consult_uid, machine, room_id, attribution, t_open, t_close, close_reason, quality, resolver_version)
-      VALUES ('uidtestaaaaaaaaaaaaaaaaa@mach_test', 'uidtestaaaaaaaaaaaaaaaaa', 'mach_test', 'room_abcd2345', 'rows', '2026-10-18T04:00:00.123Z', '2026-10-18T04:10:00.456Z', 'endConsult', 'clean', 'rv_test2');`);
+      VALUES ('uidtestaaaaaaaaaaaaaaaaaaa@mach_test', 'uidtestaaaaaaaaaaaaaaaaaaa', 'mach_test', 'room_abcd2345', 'rows', '2026-10-18T04:00:00.123Z', '2026-10-18T04:10:00.456Z', 'endConsult', 'clean', 'rv_test2');`);
     expect(await ingestSpineSignals(NOW)).toMatchObject({ inserted: { pulse: 0 } });
     expect(await n("proxy = 'pulse'")).toBe(1);
   });
