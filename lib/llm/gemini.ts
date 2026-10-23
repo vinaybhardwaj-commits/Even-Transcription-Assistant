@@ -21,9 +21,42 @@
  * Fallback env: LLM_FALLBACK_MODELS (comma list of `model[@region]`), GCP_FALLBACK_LOCATION (default
  * region of an entry without one; else GCP_LOCATION). No OpenRouter key is read anywhere here.
  */
-import { getVertexAccessToken, MINT_TIMEOUT_MS } from "../gcp-auth";
+import { getVertexAccessToken, GcpAuthError, MINT_TIMEOUT_MS } from "../gcp-auth";
 
-const GCP_LOCATION = process.env.GCP_LOCATION || "asia-south1";
+/** The shape of a Vertex region: `global`, or `<area>-<dir><n>` such as asia-south1, us-central1, me-central2. */
+export const VERTEX_REGION_RE = /^(global|[a-z]+(?:-[a-z]+)+[0-9]+)$/;
+const DEFAULT_VERTEX_REGION = "asia-south1";
+
+/**
+ * Config problems are logged ONCE per distinct problem per process and COUNTED on every occurrence
+ * (`vertexConfigWarnings`, read by tests and by whoever wires a health surface). Values logged are
+ * env config (a region string, a model slug), never a key, a prompt or a response.
+ */
+export const vertexConfigWarnings: Record<string, number> = {};
+const configWarned = new Set<string>();
+function configWarn(kind: string, detail: string): void {
+  vertexConfigWarnings[kind] = (vertexConfigWarnings[kind] ?? 0) + 1;
+  const key = `${kind}:${detail}`;
+  if (configWarned.has(key)) return;
+  configWarned.add(key);
+  console.warn(`[llm] vertex config ${kind}: ${detail.slice(0, 60)}`);
+}
+
+/**
+ * The first VALID region of GCP_FALLBACK_LOCATION, GCP_LOCATION, then asia-south1. An invalid value
+ * is skipped with a counted warning, so a typo (`Asia-South1`, `asia_south1`) can never empty the chain.
+ */
+export function resolveVertexRegion(env: Record<string, string | undefined> = process.env, ...names: string[]): string {
+  for (const n of names.length ? names : ["GCP_FALLBACK_LOCATION", "GCP_LOCATION"]) {
+    const v = (env[n] ?? "").trim();
+    if (!v) continue;
+    if (VERTEX_REGION_RE.test(v)) return v;
+    configWarn("invalid_region", `${n}=${v}`);
+  }
+  return DEFAULT_VERTEX_REGION;
+}
+
+const GCP_LOCATION = resolveVertexRegion(process.env, "GCP_LOCATION");
 const GCP_PROJECT = process.env.GCP_PROJECT || "";
 export const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-pro";
 export const GEMINI_FLASH_MODEL = process.env.GEMINI_FLASH_MODEL || "gemini-2.5-flash";
@@ -46,6 +79,11 @@ export function pickGemini(surface: string, tier: "pro" | "flash" = "pro"): stri
   const on = process.env.GEMINI_ALL === "1" || process.env[`GEMINI_${surface.toUpperCase()}`] === "1";
   if (!on) return undefined;
   return tier === "flash" ? GEMINI_FLASH_MODEL : GEMINI_MODEL;
+}
+
+/** Redacted description of an exception for a log line: the class name only, never its message (google-auth and the token exchange can carry response text). */
+function errClass(e: unknown): string {
+  return e instanceof Error ? e.name : "non_error";
 }
 
 type Msg = { role: string; content: string };
@@ -110,7 +148,7 @@ export async function geminiChatIfOn(
       maxTokens: 8192, timeoutMs: opts.timeoutMs, signal: opts.signal,
     });
   } catch (e) {
-    console.warn(`[llm] gemini (${surface}) threw: ${String(e instanceof Error ? e.message : e).slice(0, 160)}`);
+    console.warn(`[llm] gemini (${surface}) threw: ${errClass(e)}`);
     return { ok: false, content: "", error: "gemini_threw" };
   }
 }
@@ -124,17 +162,23 @@ export function vertexLabel(t: VertexTarget): string {
 }
 
 /**
- * PURE. Parse a comma list of `model[@region]`. An entry that is not a Vertex model name (an old
- * OpenRouter slug such as `meta-llama/llama-4-scout`, or a region that is not [a-z0-9-]) is dropped,
- * so a stale env value can never send a non-Gemini slug to Vertex.
+ * Parse a comma list of `model[@region]`. Old OpenRouter slugs: `google/<m>` is MAPPED to `<m>` and
+ * sent to Vertex (logged once per process); any other slug (`meta-llama/...`, `openai/...`, anything
+ * with `/` or `:`, or not a model name) is DROPPED with a counted warning. A bad per-entry region
+ * (or a bad `defaultRegion`) falls back to a valid region with a counted warning; the entry is kept.
+ * So a list with at least one acceptable model never parses to [].
  */
 export function parseVertexTargets(raw: string, defaultRegion: string): VertexTarget[] {
   const out: VertexTarget[] = [];
+  let dflt = defaultRegion;
+  if (!VERTEX_REGION_RE.test(dflt)) { configWarn("invalid_region", `default=${dflt}`); dflt = DEFAULT_VERTEX_REGION; }
   for (const entry of raw.split(",").map((e) => e.trim()).filter(Boolean)) {
     const [name, reg] = entry.split("@");
-    const model = (name ?? "").trim().replace(/^google\//, "");
-    const region = (reg ?? "").trim() || defaultRegion;
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(model) || !/^[a-z0-9-]+$/.test(region)) continue;
+    let model = (name ?? "").trim();
+    if (model.startsWith("google/")) { model = model.slice("google/".length); configWarn("mapped_google_slug", `google/${model}->${model}`); }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(model)) { configWarn("dropped_slug", (name ?? "").trim()); continue; }
+    let region = (reg ?? "").trim() || dflt;
+    if (!VERTEX_REGION_RE.test(region)) { configWarn("invalid_region", `${model}@${region}`); region = dflt; }
     out.push({ model, region });
   }
   return out;
@@ -143,7 +187,7 @@ export function parseVertexTargets(raw: string, defaultRegion: string): VertexTa
 /** The Vertex fallback chain, in order. Only the env can change it; never Ollama, never OpenRouter. */
 export const LLM_FALLBACK_DEFAULT = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
 export function llmFallbackTargets(env: Record<string, string | undefined> = process.env): VertexTarget[] {
-  const region = (env.GCP_FALLBACK_LOCATION ?? "").trim() || (env.GCP_LOCATION ?? "").trim() || "asia-south1";
+  const region = resolveVertexRegion(env);
   const parsed = parseVertexTargets((env.LLM_FALLBACK_MODELS ?? "").trim(), region);
   return parsed.length > 0 ? parsed : parseVertexTargets(LLM_FALLBACK_DEFAULT.join(","), region);
 }
@@ -173,7 +217,7 @@ export type VertexChatResult = { content: string; model: string; latency_ms: num
  * One chat completion on Vertex (OpenAI-compatible endpoint), for callers that hold their own
  * model chain (lib/jev/translate.ts, lib/rubrics/llm.ts). Same auth and same abort discipline as
  * routedChat. `model` in the result is the label of the target that answered (`gemini:<m>@<region>`).
- * Throws VertexError with a closed code: vertex_not_configured, vertex_auth_failed, vertex_timeout,
+ * Throws VertexError with a closed code: vertex_not_configured, vertex_auth_failed (permanent), vertex_auth_timeout (transient mint failure), vertex_timeout,
  * vertex_abort, vertex_unreachable, vertex_http_<n>, vertex_empty.
  */
 export async function vertexChat(args: {
@@ -185,7 +229,7 @@ export async function vertexChat(args: {
   if (!geminiConfigured()) throw new VertexError("vertex_not_configured");
   const [target] = parseVertexTargets(
     args.region ? `${args.model}@${args.region}` : args.model,
-    (args.env?.GCP_FALLBACK_LOCATION ?? "").trim() || GCP_LOCATION,
+    args.env ? resolveVertexRegion(args.env) : GCP_LOCATION,
   );
   if (!target) throw new VertexError("vertex_bad_model");
   const messages: Msg[] = args.messages ?? [
@@ -196,9 +240,12 @@ export async function vertexChat(args: {
   let token: string;
   try {
     token = await getVertexAccessToken(args.signal, Math.min(MINT_TIMEOUT_MS, args.timeoutMs ?? MINT_TIMEOUT_MS));
-  } catch {
+  } catch (e) {
     if (args.signal?.aborted) throw new VertexError("vertex_abort");
-    throw new VertexError("vertex_auth_failed");
+    // Permanent (bad/unreadable SA, 400/401/403 exchange): vertex_auth_failed. Anything else (a mint
+    // timeout, network, 429/5xx) is transient: vertex_auth_timeout.
+    if (e instanceof GcpAuthError && e.permanent) throw new VertexError("vertex_auth_failed");
+    throw new VertexError("vertex_auth_timeout");
   }
   const r = await openaiChat({
     url: vertexBaseURL(target.region), authToken: token, model: vertexModelName(target.model),
@@ -405,12 +452,12 @@ export async function routedChat(p: {
         if (r.ok) return { ok: true, content: r.content, latency_ms: Date.now() - t0, provider: `gemini:${gModel}` };
         if (deadlineFired) return onDeadline();
         errors.push(`gemini:${r.status ? `http_${r.status}` : "failed"}`);
-        console.warn(`[llm] gemini ${gModel} (${p.surface}) ${r.error ?? "empty"} -> vertex fallback`);
+        console.warn(`[llm] gemini ${gModel} (${p.surface}) ${r.status && r.status !== 200 ? `http_${r.status}` : r.error === "empty_response" ? "empty" : "failed"} -> vertex fallback`);
       } catch (e) {
         if (!(p.signal?.aborted && !deadlineFired) && (e instanceof RoutedChatDeadline || deadlineFired)) return onDeadline();
         if (!token) mintFailed = true; // the credential itself failed: the fallback stages share it
         errors.push("gemini:threw");
-        console.warn(`[llm] gemini (${p.surface}) threw -> vertex fallback: ${String(e instanceof Error ? e.message : e).slice(0, 160)}`);
+        console.warn(`[llm] gemini (${p.surface}) threw -> vertex fallback: ${errClass(e)}`);
       }
     }
     if (p.signal?.aborted) return { ok: false, content: "", error: "aborted", latency_ms: Date.now() - t0, provider: "none" };

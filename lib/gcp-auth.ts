@@ -8,6 +8,17 @@
  */
 import { createSign } from "crypto";
 
+/**
+ * A mint failure with a class. `permanent`: the credential itself is unusable (missing/invalid SA
+ * key, unsignable key, token exchange answered 400/401/403) — retrying cannot help. Otherwise
+ * transient (timeout, abort, network, 429, 5xx). The message may carry Google's response text:
+ * never log or return it, only `name`/`permanent`.
+ */
+export class GcpAuthError extends Error {
+  readonly permanent: boolean;
+  constructor(message: string, permanent: boolean) { super(message); this.name = "GcpAuthError"; this.permanent = permanent; }
+}
+
 type ServiceAccount = { client_email: string; private_key: string; token_uri?: string };
 let cached: { token: string; expiresAt: number } | null = null;
 
@@ -17,15 +28,15 @@ function b64url(input: Buffer | string): string {
 
 function loadServiceAccount(): ServiceAccount {
   const raw = process.env.GCP_SA_KEY;
-  if (!raw) throw new Error("GCP_SA_KEY not set");
+  if (!raw) throw new GcpAuthError("GCP_SA_KEY not set", true);
   let sa: ServiceAccount;
   try {
     const text = raw.trim().startsWith("{") ? raw : Buffer.from(raw, "base64").toString("utf8");
     sa = JSON.parse(text);
   } catch {
-    throw new Error("GCP_SA_KEY is not valid JSON (or base64 JSON)");
+    throw new GcpAuthError("GCP_SA_KEY is not valid JSON (or base64 JSON)", true);
   }
-  if (!sa.client_email || !sa.private_key) throw new Error("GCP_SA_KEY missing client_email/private_key");
+  if (!sa.client_email || !sa.private_key) throw new GcpAuthError("GCP_SA_KEY missing client_email/private_key", true);
   sa.private_key = sa.private_key.replace(/\\n/g, "\n");
   return sa;
 }
@@ -67,7 +78,12 @@ export async function getVertexAccessToken(signal?: AbortSignal, timeoutMs?: num
   const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   const claims = b64url(JSON.stringify({ iss: sa.client_email, scope: "https://www.googleapis.com/auth/cloud-platform", aud: tokenUri, iat, exp: iat + 3600 }));
   const signingInput = `${header}.${claims}`;
-  const signature = b64url(createSign("RSA-SHA256").update(signingInput).sign(sa.private_key));
+  let signature: string;
+  try {
+    signature = b64url(createSign("RSA-SHA256").update(signingInput).sign(sa.private_key));
+  } catch {
+    throw new GcpAuthError("GCP_SA_KEY private_key cannot sign", true);
+  }
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), timeoutMs ?? MINT_TIMEOUT_MS);
   if (signal) {
@@ -81,9 +97,9 @@ export async function getVertexAccessToken(signal?: AbortSignal, timeoutMs?: num
       body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${signingInput}.${signature}` }),
       signal: controller.signal,
     });
-    if (!res.ok) { const d = await res.text().catch(() => ""); throw new Error(`Vertex token exchange failed (${res.status}): ${d.slice(0, 300)}`); }
+    if (!res.ok) { const d = await res.text().catch(() => ""); throw new GcpAuthError(`Vertex token exchange failed (${res.status}): ${d.slice(0, 300)}`, [400, 401, 403].includes(res.status)); }
     const json = (await res.json()) as { access_token?: string; expires_in?: number };
-    if (!json.access_token) throw new Error("Vertex token exchange returned no access_token");
+    if (!json.access_token) throw new GcpAuthError("Vertex token exchange returned no access_token", false);
     cached = { token: json.access_token, expiresAt: now + (json.expires_in ?? 3600) * 1000 };
     return cached.token;
   } finally {

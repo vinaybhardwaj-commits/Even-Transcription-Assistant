@@ -88,9 +88,9 @@ describe("dispatch — the default model, and the env that overrides it", () => 
 
   it("a stale OpenRouter slug in the env is dropped, never sent to Vertex", async () => {
     const { translateChain } = await mod();
-    expect(translateChain({ GCP_LOCATION: "r1", JEV_TRANSLATE_MODEL: "google/gemini-3.8-flash", JEV_TRANSLATE_FALLBACK: "meta-llama/llama-4-scout" }))
-      .toEqual(["gemini-3.8-flash@r1", "gemini-2.5-flash-lite@r1"]);
-    expect(translateChain({ GCP_LOCATION: "r1", JEV_TRANSLATE_MODEL: "meta-llama/llama-4-scout" })[0]).toBe("gemini-2.5-flash@r1");
+    expect(translateChain({ GCP_LOCATION: "us-central1", JEV_TRANSLATE_MODEL: "google/gemini-3.8-flash", JEV_TRANSLATE_FALLBACK: "meta-llama/llama-4-scout" }))
+      .toEqual(["gemini-3.8-flash@us-central1", "gemini-2.5-flash-lite@us-central1"]);
+    expect(translateChain({ GCP_LOCATION: "us-central1", JEV_TRANSLATE_MODEL: "meta-llama/llama-4-scout" })[0]).toBe("gemini-2.5-flash@us-central1");
   });
 
   it("the translator imports neither the qwen client nor the OpenRouter client", () => {

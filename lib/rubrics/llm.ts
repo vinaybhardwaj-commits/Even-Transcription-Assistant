@@ -4,7 +4,7 @@
  *   - model: the FIRST entry of lib/llm/gemini.ts llmFallbackTargets() — env LLM_FALLBACK_MODELS, else gemini-2.5-flash. There is NO fallback model in this module: the other entries of that list are
  *     never used here; a bad answer is retried ONCE on the same model, then the unit fails, and an outage throws so the runner retries the step.
  * temperature 0, JSON mode, the answer validated against the rubric's output schema. Every failure is a CLOSED CODE; no model output or transcript is ever in a code or a log line.
- * A transient infrastructure failure (timeout, 408, 429, 5xx, unreachable, an empty model response) THROWS (the runner retries the step, as for a database error); a missing key or a refusal by the provider (4xx) is a failed unit.
+ * A transient infrastructure failure (timeout, a mint timeout, 408, 429, 5xx, unreachable, an empty model response) THROWS (the runner retries the step, as for a database error); a missing key, a permanent auth failure (vertex_auth_failed: bad/unreadable SA, 401/403) or a refusal by the provider (4xx) is a failed unit (llm_refused).
  */
 import { vertexChat, VertexError, llmFallbackTargets, type VertexChatResult } from "@/lib/llm/gemini";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -42,7 +42,7 @@ export type LlmOutcome =
   | { ok: true; value: Record<string, unknown>; model: string; attempts: number; latency_ms: number }
   | { ok: false; reason: "llm_invalid_json" | "llm_schema_invalid" | "llm_not_configured" | "llm_refused"; model: string | null; attempts: number };
 
-const TRANSIENT = /^(vertex_timeout|vertex_unreachable|vertex_auth_failed|vertex_http_(408|429|5\d\d)|vertex_abort|vertex_empty)/;
+const TRANSIENT = /^(vertex_timeout|vertex_unreachable|vertex_auth_timeout|vertex_http_(408|429|5\d\d)|vertex_abort|vertex_empty)/;
 
 /** Parse the model's text as a JSON object; tolerate a markdown fence around it. Returns null when it is not an object. */
 export function parseJsonObject(text: string): Record<string, unknown> | null {

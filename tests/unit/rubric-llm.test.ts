@@ -82,7 +82,10 @@ describe("the llm client path", () => {
     const boom = (code: string) => L.setRubricChatForTests(async () => { throw new VertexError(code); });
     boom("vertex_not_configured");
     expect(await L.askJson({ system: "s", user: "u", schema: { type: "object" } })).toMatchObject({ ok: false, reason: "llm_not_configured" });
-    for (const c of ["vertex_timeout", "vertex_http_408", "vertex_empty", "vertex_http_429", "vertex_http_503", "vertex_unreachable", "vertex_auth_failed", "vertex_abort"]) { boom(c); await expect(L.askJson({ system: "s", user: "u", schema: { type: "object" } })).rejects.toThrow(/^llm_unavailable/); }
+    for (const c of ["vertex_timeout", "vertex_http_408", "vertex_empty", "vertex_http_429", "vertex_http_503", "vertex_unreachable", "vertex_auth_timeout", "vertex_abort"]) { boom(c); await expect(L.askJson({ system: "s", user: "u", schema: { type: "object" } })).rejects.toThrow(/^llm_unavailable/); }
+    boom("vertex_http_400");
+    boom("vertex_auth_failed");
+    expect(await L.askJson({ system: "s", user: "u", schema: { type: "object" } })).toMatchObject({ ok: false, reason: "llm_refused" });
     boom("vertex_http_400");
     expect(await L.askJson({ system: "s", user: "u", schema: { type: "object" } })).toMatchObject({ ok: false, reason: "llm_refused" });
   });

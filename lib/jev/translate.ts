@@ -40,7 +40,7 @@
  *
  * Logs carry nothing: this module does not log at all, and every error is a code.
  */
-import { vertexChat, VertexError, parseVertexTargets, vertexLabel } from "@/lib/llm/gemini";
+import { vertexChat, VertexError, parseVertexTargets, resolveVertexRegion, vertexLabel } from "@/lib/llm/gemini";
 
 export type TranslateOutcome =
   | { status: "ok"; english: string | null; model: string; latency_ms: number; input_chars: number }
@@ -138,7 +138,7 @@ type Env = Record<string, string | undefined>;
  * empty, or holds nothing that is a Vertex model name.
  */
 export function translateChain(env: Env = process.env): string[] {
-  const region = (env.GCP_FALLBACK_LOCATION ?? "").trim() || (env.GCP_LOCATION ?? "").trim() || "asia-south1";
+  const region = resolveVertexRegion(env);
   const one = (raw: string | undefined, dflt: string) => {
     const t = parseVertexTargets((raw ?? "").trim(), region);
     return t.length > 0 ? t : parseVertexTargets(dflt, region);
