@@ -20,10 +20,18 @@ class UbusError(Exception):
 
 
 class UbusIdentityError(UbusError):
-    """ubus_whoami did not answer handle room-guardian, registered. Nothing is sent; the router raises the ROUTER SILENT line."""
-    def __init__(self, handle, registered):
-        super().__init__(f"identity {str(handle)[:60]}" + (" registered=false" if registered is False else ""))
-        self.identity, self.registered = str(handle)[:60], registered
+    """ubus_whoami did not answer handle room-guardian, registered, or ubus_register was refused. Nothing is sent; the router raises the ROUTER SILENT line.
+    Whoami mismatch: UbusIdentityError(handle, registered). Register or other fault: UbusIdentityError(reason=...). self.identity is the text after
+    "ROUTER SILENT: identity "; self.handle and self.registered feed the startup whoami log line (None: not known)."""
+    def __init__(self, handle=None, registered=None, reason=None):
+        self.handle, self.registered = (None if reason is not None else handle), registered
+        if reason is not None:
+            self.identity = str(reason)[:80]
+            super().__init__(self.identity)
+        else:
+            # FR1 D7-4 NIT-3: the "identity" prefix stays on every handle mismatch, whatever registered is (True, False or None)
+            self.identity = str(handle if handle is not None else "none")[:60]
+            super().__init__(f"identity {self.identity}" + (" registered=false" if registered is False else ""))
 
 
 class UbusDenied(UbusError):
@@ -63,7 +71,11 @@ class UbusBus:
         try:
             self._rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "room-guardian", "version": "1"}})
             self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-            self._tool("ubus_register", {"handle": HANDLE, "machine": MACHINE, "runtime": RUNTIME, "session": SESSION, "owner": OWNER, "orchestrator": ORCHESTRATOR})
+            try:
+                self._tool("ubus_register", {"handle": HANDLE, "machine": MACHINE, "runtime": RUNTIME, "session": SESSION, "owner": OWNER, "orchestrator": ORCHESTRATOR})
+            except UbusError as e:
+                # FR1 D7-3: a refused or failed register is an identity fault
+                raise UbusIdentityError(reason=f"register {str(e)[:80]}")
             got = self._tool("ubus_whoami", {})
             who = got.get("handle") if isinstance(got, dict) else None
             self.identity = {"handle": who, "registered": got.get("registered") if isinstance(got, dict) else None}
