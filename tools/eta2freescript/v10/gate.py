@@ -177,11 +177,15 @@ class NumberGate:
                         if tk.is_word and words.is_latin(tk.text) and len(tk.text) >= 3 and tk.text[0].isupper() and not tk.text.isupper() and i and ws[i - 1].text[-1:] not in ".!?":
                             toks.add(tk.low)
                     lows = [tk.low for tk in ws if tk.is_word]
+                    dn = words.dose_form_nouns()
+                    for i, w_ in enumerate(lows):  # Fix3g H2: a word next to a dosing word or dose-form noun in a tagged turn ("Care tablet SOS", "ultra every day") names the drug
+                        if len(w_) >= 3 and w_ not in _FUNCTION_WORDS and not words.is_dosing_word(w_) and w_ not in dn and any(0 <= j < len(lows) and (words.is_dosing_word(lows[j]) or lows[j] in dn) for j in (i - 1, i + 1)):
+                            toks.add(w_)
                     pairs.update((a, b) for a, b in zip(lows, lows[1:]) if not (a in _FUNCTION_WORDS and b in _FUNCTION_WORDS))
             self._tagged = (frozenset(toks), frozenset(pairs))
         return self._tagged
 
-    def quarantine_echo(self, text: str) -> bool:
+    def quarantine_echo(self, text: str, turns=None) -> bool:
         """Fix3e L1: a posted or served unit that holds a 5-word shingle of a quarantined turn withholds (strict: a phrase that is also said in a kept turn counts too)."""
         if not self.quarantined or not isinstance(text, str):
             return False
@@ -194,7 +198,13 @@ class NumberGate:
                         sh.update(tuple(w[i:i + 5]) for i in range(max(0, len(w) - 4)))
             self._qsh = sh
         w = re.findall(r"[a-z0-9']+", re.sub(r"\u27e6S\d+\u27e7", " ", text).lower())
-        return any(tuple(w[i:i + 5]) in self._qsh for i in range(max(0, len(w) - 4)))
+        if any(tuple(w[i:i + 5]) in self._qsh for i in range(max(0, len(w) - 4))):
+            return True
+        # Fix3g M1: 3+ content tokens of the unit that a quarantined turn holds and no cited current turn holds (a short or paraphrased echo)
+        if getattr(self, "_qct", None) is None:
+            self._qct = frozenset().union(*(words.content_tokens(x) for t in self.quarantined if 0 <= t < len(self.c.turns) for x in (self.c.turns[t].text, self.c.turns[t].native_text) if x))
+        cur = frozenset().union(*(words.content_tokens(x) for t in set(turns or ()) - set(self.quarantined) if 0 <= t < len(self.c.turns) for x in (self.c.turns[t].text, self.c.turns[t].native_text) if x))
+        return len((words.content_tokens(text) & self._qct) - cur) >= 3
 
     def tagged_overlap(self, text: str) -> bool:
         """Fix3e ruling 2 (H1b): the unit holds a drug token of a tagged turn, or two words in a row of one. Then it is read against every tagged turn, whatever turns it cites."""
@@ -218,11 +228,21 @@ class NumberGate:
         from . import names as _names
         t = t.replace(_names.PLAN_LINE, " ").replace(_names.DRAFT_LINE, " ")  # lines the code itself writes
         lows_ = [tk.low for tk in words.tokenize(t) if tk.is_word]
+        if words.med_master_hit(t) or words.supplement_hit(t):  # Fix3g 1 (M5): an exact full name of the Pulse medicine master (or a dietary-supplement name)
+            return True
+        fl = drugs.flags(t)
+        timing = words.timing_present(t)
+        if "insulin" in lows_:  # Fix3g H1: insulin is a medicine, never an analyte: named outside Medication it withholds
+            return True
+        if (timing or words.regimen_verb(t)) and words.class_phrase(t):  # Fix3g H2: a class word (insulin is one, so never an analyte) or "<condition> wali" with a timing word, in any unit
+            return True
+        if timing and (any(f.reason == "catalogue_analyte" for f in fl) or words.analyte_word(t)) and not words.lab_frame(t):  # Fix3g H1: an analyte-named drug (iron, folic acid, zinc, potassium) with a timing word, unless the unit speaks of a lab value
+            return True
         if words.dose_form_nouns() & set(lows_):  # Fix3f a: a dose-form or medicine noun is a drug signal by itself (a class phrase holds one)
             return True
-        if set(turns or ()) & self.drug_spans and any(words.is_dosing_word(w) for w in lows_):  # a unit that cites a tagged turn and holds a dosing word is drug talk
-            return True
         tagged = self.in_drug_unit(t, turns)
+        if tagged and (timing or any(words.is_dosing_word(w) for w in lows_)):  # Fix3g H2: a unit that cites a tagged turn or overlaps one (H1b) and holds a dosing word is drug talk
+            return True
         if tagged:
             toks, _p = self._tagged_index()
             if any(tk.low in toks for tk in words.tokenize(t) if tk.is_word and len(tk.text) >= 3 and (tk.text[0].isupper() or tk.low not in words.common_english())):

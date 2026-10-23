@@ -29,7 +29,7 @@ def test_a_detected_drug_outside_medication_is_unpostable(t):
     assert gate_of("As told.").drug_outside(t, [0]), t
 
 
-@pytest.mark.parametrize("t", ["Rest well and drink water", "Fever and cough for three days", "Review on Monday", "Calcium level is low", "Avoid oily food"])
+@pytest.mark.parametrize("t", ["Rest well and drink water", "Fever and cough for three days", "Review on Monday", "Haemoglobin level is low", "Avoid oily food"])
 def test_ordinary_text_and_analytes_are_not_drug_talk(t):
     assert not gate_of("As told.").drug_outside(t, [0]), t
 

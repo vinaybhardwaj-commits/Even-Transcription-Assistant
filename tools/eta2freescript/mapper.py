@@ -615,7 +615,7 @@ class Builder:
             if v10_words.other_person(r.text):
                 self.withhold(fld, "other_person", cited, red_flag=red_flag)
                 return None
-            if self.gate.quarantine_echo(r.text):  # Fix3e L1
+            if self.gate.quarantine_echo(r.text, cited):  # Fix3e L1
                 self.withhold(fld, "quarantine_echo", cited, red_flag=red_flag)
                 return None
             if self.gate.collision_unit(r.text, cited):  # Fix3b H3

@@ -25,7 +25,8 @@ WHITELIST_ABBREV = DATA / "whitelist_abbrev.v1.json"
 SUPPORT_HEDGES = DATA / "support_hedges.v1.json"
 NUMBER_HOMOGRAPHS = DATA / "number_homographs.v1.json"
 GIVEN_NAMES = DATA / "given_names.v1.json"
-SURNAMES = DATA / "surnames.v1.json"
+SURNAMES = DATA / "surnames.v1.json.gz"
+MED_MASTER = DATA / "med_master_names.v1.json.gz"
 ANALYTES = DATA / "slots" / "analytes.v1.json"
 SLOT_BOUNDS = DATA / "slots" / "slot_bounds.v1.json"
 DICTIONARY_FILES = (CONTRACT / "scowl_words.json", CONTRACT / "english_words_min.json",
@@ -34,6 +35,9 @@ DICTIONARY_FILES = (CONTRACT / "scowl_words.json", CONTRACT / "english_words_min
 
 @lru_cache(maxsize=None)
 def load(path: Path) -> dict:
+    if str(path).endswith(".gz"):  # Fix3g: surnames.v1.json.gz (the plain file is over the scrub size limit)
+        import gzip
+        return json.loads(gzip.decompress(Path(path).read_bytes()).decode("utf-8"))
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
@@ -65,6 +69,7 @@ def provenance() -> dict:
         "number_homographs_sha256": file_sha(NUMBER_HOMOGRAPHS),
         "given_names_sha256": file_sha(GIVEN_NAMES),
         "surnames_sha256": file_sha(SURNAMES),
+        "med_master_sha256": file_sha(MED_MASTER),
         "catalogue_snapshot_sha256": file_sha(CATALOGUE_FILE),
         "catalogue_snapshot_date": str(cat.get("version") or ""),
         "dosing_words_sha256": file_sha(DOSING_WORDS),

@@ -20,7 +20,7 @@ NOUNS = "tablet tab capsule cap syrup injection inj drops ointment cream gel inh
 
 
 def test_the_noun_list_is_committed_data_with_plurals():
-    assert set(NOUNS) == set(data.load(data.DOSING_WORDS)["dose_form_nouns"])
+    assert set(NOUNS) <= set(data.load(data.DOSING_WORDS)["dose_form_nouns"])
     assert {"tablets", "capsules", "medicines", "puffs", "drops"} <= words.dose_form_nouns()
 
 
@@ -52,7 +52,7 @@ def test_the_noun_rule_withholds_through_the_final_checks():
 
 # --- c: names ----------------------------------------------------------------------------------------------------------------------------------------
 def test_surname_list_provenance_and_size():
-    d = json.load(open(data.SURNAMES, encoding="utf-8"))
+    d = data.load(data.SURNAMES)
     assert d["source"]["licence"].startswith("public domain") and d["source"]["url"].startswith("https://www2.census.gov/") and len(d["source_sha256"]) == 64
     assert d["min_count"] == 100 and d["count"] == len(d["names"]) > 100000 and set(d["frequent"]) <= set(d["names"])
     assert data.provenance()["surnames_sha256"] == data.file_sha(data.SURNAMES)

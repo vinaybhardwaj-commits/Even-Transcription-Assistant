@@ -29,7 +29,8 @@ def build(src: Path) -> dict:
 
 def main() -> None:
     d = build(Path(sys.argv[1]))
-    (DATA / "surnames.v1.json").write_text(json.dumps(d, ensure_ascii=False, indent=0) + "\n", encoding="utf-8")
+    import gzip
+    (DATA / "surnames.v1.json.gz").write_bytes(gzip.compress((json.dumps(d, ensure_ascii=False, indent=0) + "\n").encode("utf-8"), 9, mtime=0))  # gzip: the plain file is over the scrub size limit
     print(d["count"], "surnames from source sha", d["source_sha256"][:12])
 
 

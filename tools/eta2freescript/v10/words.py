@@ -85,6 +85,87 @@ def dose_form_nouns() -> frozenset[str]:
     return frozenset(base | {w + "s" for w in base} | {w + "es" for w in base if w.endswith(("h", "s", "x"))})
 
 
+@lru_cache(maxsize=1)
+def _dw() -> dict:
+    return data.load(data.DOSING_WORDS)
+
+
+@lru_cache(maxsize=1)
+def class_words() -> frozenset[str]:
+    """Fix3g H2: the shipped drug-class words (steroid, antibiotic, painkiller, ARB, NSAID, thinner ...)."""
+    return frozenset(w.lower() for w in _dw()["class_words"])
+
+
+def timing_present(text: str) -> bool:
+    """Fix3g H1/H2: a timing or frequency word ("daily", "bedtime", "every", "SOS") or a timing phrase ("after food", "alternate days") in `text`."""
+    toks = [tk for tk in tokenize(text) if tk.is_word]
+    tw = {w.lower() for w in _dw()["timing_words"]}
+    lows = [tk.low for tk in toks]
+    if any(w in tw for w in lows) or bool(dosing_phrase_spans(toks)):
+        return True
+    j = " ".join(lows)
+    return any(re.search(rf"\b{re.escape(p)}\b", j) for p in _dw()["timing_phrases"])
+
+
+def analyte_word(text: str) -> bool:
+    """Fix3g H1: a lab analyte word of the shipped clinical vocabulary (haemoglobin, albumin, glucose ...) in `text`."""
+    return bool({tk.low for tk in tokenize(text) if tk.is_word} & wl_analytes())
+
+
+def supplement_hit(text: str) -> bool:
+    """Fix3g H1: a dietary-supplement name (fish oil, omega 3, multivitamin ...; data/dosing_words.v1.json supplement_names) in `text`."""
+    j = " ".join(tk.low for tk in tokenize(text) if tk.is_word)
+    return any(re.search(rf"\b{re.escape(p)}\b", j) for p in _dw()["supplement_names"])
+
+
+def regimen_verb(text: str) -> bool:
+    return bool({tk.low for tk in tokenize(text) if tk.is_word} & set(_dw()["regimen_verbs"]))
+
+
+def class_phrase(text: str) -> bool:
+    """Fix3g H2: a drug-class word, or "<condition> wali / wala / ki / ka" (sugar wali, BP ki, thyroid wali)."""
+    lows = [tk.low for tk in tokenize(text) if tk.is_word]
+    if class_words() & set(lows):
+        return True
+    heads, suf = set(_dw()["condition_class_heads"]), set(_dw()["class_suffixes"])
+    return any(a in heads and b in suf for a, b in zip(lows, lows[1:]))
+
+
+def lab_frame(text: str) -> bool:
+    """Fix3g H1: the unit speaks of a lab value: a lab word (level, report, value, test, result, range) or a lab unit (mmol, mEq, dL ...)."""
+    lows = {tk.low for tk in tokenize(text) if tk.is_word}
+    return bool(lows & {w.lower() for w in _dw()["lab_frame_words"]}) or bool(lows & {w.lower() for w in _dw()["lab_frame_units"]})
+
+
+@lru_cache(maxsize=1)
+def _med_index() -> dict:
+    idx: dict[str, list[tuple[str, ...]]] = {}
+    for n in data.load(data.MED_MASTER)["names"]:
+        t = tuple(n.split())
+        idx.setdefault(t[0], []).append(t)
+    return idx
+
+
+def med_master_hit(text: str) -> bool:
+    """Fix3g 1 (M5): an exact full name of the Pulse medicine master (enabled, usage >= 1; data/med_master_names.v1.json.gz) stands in `text`, case-insensitive, on whole tokens."""
+    ts = re.findall(r"[a-z0-9]+", unicodedata.normalize("NFKC", text or "").lower())
+    idx = _med_index()
+    return any(tuple(ts[i:i + len(sp)]) == sp for i, t in enumerate(ts) for sp in idx.get(t, ()))
+
+
+_STOP = frozenset("a an the and or but if then than so as of to in on at by for with from into onto over under about after before during since until while is are was were be been being am do does did done "
+                  "have has had having will would shall should can could may might must not no nor i me my we us our you your he him his she her it its they them their this that these those there here "
+                  "what which who whom whose when where why how all any some each every both either neither more most less much many few other such own same also just only very too again once "
+                  "up down out off per via yes ok okay well now today yesterday patient doctor said says say told tell".split())
+
+
+def content_tokens(text: str) -> frozenset[str]:
+    """Fix3g M1: the lowercase alphabetic tokens of `text` of 3+ letters that are neither function words nor dosing words (slot tokens are dropped)."""
+    from . import numbers
+    t = _SLOT_TOKEN.sub(" ", unicodedata.normalize("NFKC", text or ""))
+    return frozenset(tk.low for tk in tokenize(t) if tk.is_word and len(tk.low) >= 3 and tk.low.isalpha() and tk.low not in _STOP and tk.low not in numbers._FUNCTION_WORDS and not is_dosing_word(tk.low))
+
+
 def is_dosing_word(low: str) -> bool:
     return low in _dosing()[0]
 
@@ -268,7 +349,7 @@ def n1_phrase(text: str, fld: str | None) -> str | None:
     return None
 
 
-_NOUN = r"(?:patient|case|lady|man|gentleman|person|one(?!\s+(?:month|week|day|year|hour|time|tablet)s?\b)|aunty|auntie|uncle|woman|boy|girl|child|couple|family)"
+_NOUN = r"(?:patient|case|lady|man|gentleman|person|one(?!\s+(?:month|week|day|year|hour|time|tablet)s?\b)|aunty|auntie|uncle|woman|boy|girl|child|kid|guy|fellow|chap|visitor|attender|admission|couple|family)"
 _ADJ = r"(?:[A-Za-z]+\s+)?"
 _OTHER_PERSON = re.compile(
     rf"\b(?:another|previous|prior|last|earlier|next|other|former|preceding)\s+{_ADJ}{_NOUN}\b"      # Fix3e M3: a pattern, not single phrases
@@ -276,6 +357,10 @@ _OTHER_PERSON = re.compile(
     rf"|\b(?:the\s+)?{_NOUN}\s+(?:who|that)\s+(?:just\s+|had\s+)?(?:left|came\s+before|was\s+(?:here|in)\s+before|went\s+out|was\s+before)\b"
     r"|\b(?:who|that)\s+(?:just\s+)?(?:left|came\s+before)\b"
     rf"|\b(?:the|that|this|those)\s+{_ADJ}(?:lady|man|gentleman|aunty|auntie|uncle|woman)\b|\b(?:that|those)\s+{_ADJ}patient\b"
+    rf"|\b(?:the|that|this|those)\s+{_ADJ}(?:guy|fellow|chap|visitor|attender|admission)\b|\b(?:that|those)\s+{_ADJ}(?:boy|girl|child|kid)\b"      # Fix3g M2
+    rf"|\b(?:the|that|this)\s+{_ADJ}{_NOUN}\s+(?:before|outside|earlier|ahead|waiting)\b"      # Fix3g M2: "the girl before", "the boy outside"
+    r"|\bsomeone\s+else\b|\bthe\s+person\s+waiting\b"
+    r"|\b(?:yesterday|today|this\s+morning)['\u2019]s\s+(?:earlier\s+)?(?:patient|case)\b"
     r"|\b(?:your|her|his|their|my|our|the|a|another)\s+(?:neighbou?r|friend|colleague|relative|cousin|co-?worker)\b"
     r"|\b[A-Z][a-z]+(?:['\u2019]s)\s+(?:mother|wife|husband|son|daughter|father|brother|sister|child|children)\b|\bpatient\s+before\b", re.I)
 
@@ -287,7 +372,7 @@ def other_person(text: str) -> str | None:
     if not m:
         return None
     s = m.group(0)
-    if "'" in s or "\u2019" in s:
+    if ("'" in s or "\u2019" in s) and not re.match(r"(?:yesterday|today|this)", s, re.I):
         return "other_person" if s[:1].isupper() else None  # the possessive form needs a capitalised name before it
     return "other_person"
 
@@ -369,7 +454,7 @@ def possible_name(text: str) -> str | None:
         if not is_latin(tk.text) or len(tk.text) < 3 or tk.low not in names or tk.low in _CALENDAR or tk.low in strong_low or is_dosing_word(tk.low) or is_dose_unit(tk.low) or tk.low in _list_exempt():
             continue
         if tk.text[0].isupper():
-            weak = tk.low not in core and tk.low not in frequent_surnames()  # a rare census surname or a low-frequency given name of some country
+            weak = tk.low in surnames() and tk.low not in frequent_surnames() and tk.low not in given_names() and tk.low in common_english()  # Fix3g M3: only a common English word that is a census surname borne by under 1,000 people and is on no given-name list; Bunty (not a common word), Precious and Rain (given names) stay names
             if tk.low not in core and any(tk.low in x for x in ok_sets):
                 continue  # one that is also a catalogue, clinical or counselling word (Knee, Hip) stays a word
             if weak and not tk.text.isupper() and tk.low in dictionary() and opening(ti):

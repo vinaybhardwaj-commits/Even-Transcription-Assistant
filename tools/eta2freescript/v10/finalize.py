@@ -94,7 +94,7 @@ def _unit_violations(gate: NumberGate, txt: str, turns: set[int]) -> list[Violat
         out.append(Violation("drug_outside_medication", "dom"))
     if words.other_person(txt):
         out.append(Violation("other_person", "op"))
-    if gate.quarantine_echo(txt):  # Fix3e L1
+    if gate.quarantine_echo(txt, turns):  # Fix3e L1
         out.append(Violation("quarantine_echo", "qe"))
     if gate.collision_unit(txt, turns):
         out.append(Violation("collision", "col"))
