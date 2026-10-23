@@ -178,7 +178,7 @@ def test_pr2_a_withheld_plan_unit_does_not_reject_the_consult():
 def test_a1_red_flags_are_not_counted_against_the_advice_budget():
     c = mk_consult([(0, 4, "0", "Tell me."), (5, 9, "1", "I have a cough."), (10, 30, "0", "Rest, drink water, avoid dust, steam twice, gargle, sleep early. Come at once if breathless or if you cough blood.")],
                    roles={"0": "doctor", "1": "patient"})
-    adv = [{"text": t, "basis": "said", "source_turns": [2]} for t in ("rest well at home", "drink plenty of water", "avoid dust and smoke", "do steam inhalation", "gargle with warm salt water", "sleep early at night")]
+    adv = [{"text": t, "basis": "said", "source_turns": [2]} for t in ("rest well at home", "drink plenty of water", "avoid dust and smoke", "do steam inhalation", "avoid cold drinks", "sleep early")]
     reds = [{"text": "Come to the hospital at once if you become breathless", "basis": "said", "source_turns": [2]},
             {"text": "Come to the hospital if you cough up blood or have chest pain", "basis": "said", "source_turns": [2]}]
     a = build_artifact(c, empty_encounter(advice=adv, red_flags_safety_net=reds))
@@ -214,8 +214,8 @@ def test_t2_the_extra_list_is_curated_not_names_or_numbers_or_drugs():
 
 
 def test_t2_withholds_the_unit_with_a_record_and_a_prompt():
-    c = _consult("Take Prednivex panthrandu at night.")
-    a = build_artifact(c, empty_encounter(advice=[{"text": "Prednivex panthrandu at night", "basis": "said", "source_turns": [2]},
+    c = _consult("Take Prednivex panthrandu.")
+    a = build_artifact(c, empty_encounter(advice=[{"text": "Prednivex panthrandu", "basis": "said", "source_turns": [2]},
                                                    {"text": "drink plenty of water", "basis": "said", "source_turns": [2]}]))
     assert "panthrandu" not in json.dumps(a["gp_extraction"]) + a["note_text"] and "water" in a["gp_extraction"]["general_advice"]
     assert [w for w in a["withheld"] if w["reason_code"] == "ood_word" and w["prompt_id"]]

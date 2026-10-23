@@ -31,7 +31,7 @@ def test_fever_doctor_dose_and_follow_up(replay_out):
     assert [d["diagnosis_or_impression"] for d in gx["presenting_complaints"]["diagnoses"]] == ["Viral fever"]
     assert "market" not in gx["presenting_complaints"]["symptoms"]
     assert gx["general_advice"].lower().count("water") == 1
-    assert sorted(c["kind"] for c in art["completion_required"]) == ["field_withheld"] * 4 + ["inferred_confirm"] and not art["clip_boundary"]["suspected"]
+    assert sorted(c["kind"] for c in art["completion_required"]) == ["field_withheld"] * 5 + ["inferred_confirm"] and not art["clip_boundary"]["suspected"]
 
 
 def test_knee_boundary_quarantine_and_fallback(replay_out):
@@ -59,7 +59,7 @@ def test_native_consult_without_role_track(replay_out):
     assert art["encounter"]["transcript"]["role_track"] is None
     assert "medicines" not in art["gp_extraction"] and len(art["confirm_prompts"]) == 2
     assert "followup_date" not in art["gp_extraction"]["follow_up"]  # v10: the interval was not said in the cited turn, so no date is computed
-    assert sorted(c["kind"] for c in art["completion_required"]) == ["field_withheld"] * 3 + ["follow_up_unstated", "inferred_confirm", "pick_drug"]
+    assert sorted(c["kind"] for c in art["completion_required"]) == ["field_withheld"] * 4 + ["follow_up_unstated", "inferred_confirm", "pick_drug"]
 
 
 def test_fake_client_drives_both_stages(tmp_path):

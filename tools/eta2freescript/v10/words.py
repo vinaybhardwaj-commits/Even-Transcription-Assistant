@@ -80,8 +80,10 @@ def _dosing() -> tuple[frozenset[str], tuple[tuple[str, ...], ...], frozenset[st
 
 @lru_cache(maxsize=1)
 def dose_form_nouns() -> frozenset[str]:
-    """Fix3f a: data/dosing_words.v1.json dose_form_nouns with their plurals."""
-    base = {w.lower() for w in data.load(data.DOSING_WORDS)["dose_form_nouns"]}
+    """Fix3f a / Fix3h 4: data/dosing_words.v1.json dose_form_nouns and dose_form_extras, plus the EDQM Standard Terms dose-form head nouns (data/class_forms.v1.json), with their plurals."""
+    dw = data.load(data.DOSING_WORDS)
+    base = {w.lower() for w in dw["dose_form_nouns"]} | {w.lower() for w in dw.get("dose_form_extras", [])}
+    base |= {w.lower() for w in data.load(data.CLASS_FORMS)["dose_form_nouns_edqm"] if re.fullmatch(r"[a-z]+", w)}
     return frozenset(base | {w + "s" for w in base} | {w + "es" for w in base if w.endswith(("h", "s", "x"))})
 
 
@@ -92,12 +94,24 @@ def _dw() -> dict:
 
 @lru_cache(maxsize=1)
 def class_words() -> frozenset[str]:
-    """Fix3g H2: the shipped drug-class words (steroid, antibiotic, painkiller, ARB, NSAID, thinner ...)."""
-    return frozenset(w.lower() for w in _dw()["class_words"])
+    """Fix3g H2 / Fix3h 4: drug-class words: the shipped list, the refute-6 extras, and the WHO ATC level 2-4 plural headings (data/class_forms.v1.json); hyphen forms are joined at match time."""
+    dw, cf = _dw(), data.load(data.CLASS_FORMS)
+    out = {w.lower().replace("-", "") for w in dw["class_words"] + dw.get("class_words_extra", []) + cf["class_words_atc"] if " " not in w}
+    return frozenset(out)
+
+
+@lru_cache(maxsize=1)
+def class_phrases() -> frozenset[tuple[str, ...]]:
+    """Fix3h 4: the multi-word ATC class names ("proton pump inhibitor", "calcium channel blocker"), plus "beta blocker"-style forms."""
+    cf = data.load(data.CLASS_FORMS)
+    out = {tuple(re.findall(r"[a-z0-9]+", p.lower())) for p in cf["class_phrases_atc"]}
+    out |= {("beta", "blocker"), ("beta", "blockers"), ("beta", "blocking", "agent"), ("beta", "blocking", "agents")}
+    return frozenset(x for x in out if len(x) >= 2)
 
 
 def timing_present(text: str) -> bool:
     """Fix3g H1/H2: a timing or frequency word ("daily", "bedtime", "every", "SOS") or a timing phrase ("after food", "alternate days") in `text`."""
+    text = re.sub(r"\bat\s+once\b", " ", text or "", flags=re.I)  # "at once" is "immediately", not a frequency
     toks = [tk for tk in tokenize(text) if tk.is_word]
     tw = {w.lower() for w in _dw()["timing_words"]}
     lows = [tk.low for tk in toks]
@@ -105,6 +119,41 @@ def timing_present(text: str) -> bool:
         return True
     j = " ".join(lows)
     return any(re.search(rf"\b{re.escape(p)}\b", j) for p in _dw()["timing_phrases"])
+
+
+_PERIOD_RE = None
+
+
+def _period_re() -> "re.Pattern":
+    global _PERIOD_RE
+    if _PERIOD_RE is None:
+        per = "|".join(sorted((re.escape(w) for w in _dw()["period_words"]), key=len, reverse=True))
+        meal = "|".join(sorted((re.escape(w) for w in _dw()["meal_daypart_words"]), key=len, reverse=True))
+        _PERIOD_RE = re.compile(
+            rf"\b(?:for|till|until|upto|up\s+to|next|x)\s+(?:[a-z0-9]+\s+){{0,3}}?(?:{per})\b"            # durations: "for a fortnight", "till some weeks", "for the next month"
+            rf"|\b(?:a|per|each|every)\s+(?:{per})\b"                                                      # frequency: "a day", "per week"
+            rf"|\b(?:at|before|after|with|during|around|by|on|upon|every|each|per)\s+(?:the\s+|a\s+|an\s+|my\s+|your\s+|his\s+|her\s+|early\s+|late\s+|mid\s*)?(?:{meal})\b"   # clock / meal / day-part
+            rf"|\b(?:{per})\s+(?:long|course|duration)\b|\b(?:course|duration)\s+of\b|\bfor\s+life\b|\blife\s*long\b|\blong\s+term\b", re.I)
+    return _PERIOD_RE
+
+
+def timing_expression(text: str) -> bool:
+    """Fix3h 1: a timing, frequency or duration expression, by pattern class, not by drug word: clock / meal / day-part phrases (at / before / after / with + meal, bed, night, noon, midnight ...),
+    frequency (daily, OD, BD, TDS, QID, HS, SOS, PRN, "as needed", "every / each <unit>", "<n> times", "alternate days", subah / shaam / raat / din mein) and durations
+    (for / till / until + any period word, lifelong, "some weeks", "a month"). A regimen verb with an object is `regimen_expression`."""
+    t = _SLOT_TOKEN.sub(" ", unicodedata.normalize("NFKC", text or ""))
+    if timing_present(t):
+        return True
+    lows = " ".join(tk.low for tk in tokenize(t) if tk.is_word)
+    return bool(_period_re().search(lows))
+
+
+def regimen_expression(text: str) -> bool:
+    """Fix3h 1: a regimen verb (take, use, give, start, continue, apply, chew, add ...) followed within three words by an object (a word that is not a function word)."""
+    from . import numbers
+    lows = [tk.low for tk in tokenize(_SLOT_TOKEN.sub(" ", unicodedata.normalize("NFKC", text or ""))) if tk.is_word]
+    rv = set(_dw()["regimen_verbs"])
+    return any(w in rv and any(len(x) >= 2 and x not in _STOP and x not in numbers._FUNCTION_WORDS and x not in rv for x in lows[i + 1:i + 4]) for i, w in enumerate(lows))
 
 
 def analyte_word(text: str) -> bool:
@@ -119,22 +168,49 @@ def supplement_hit(text: str) -> bool:
 
 
 def regimen_verb(text: str) -> bool:
-    return bool({tk.low for tk in tokenize(text) if tk.is_word} & set(_dw()["regimen_verbs"]))
+    return bool({tk.low for tk in tokenize(text) if tk.is_word} & (set(_dw()["regimen_verbs"]) | set(_dw().get("regimen_verbs_soft", ()))))
+
+
+_GLUED_SUFFIX = ("waali", "waala", "waale", "wali", "wala", "wale", "vaali", "vali")
+
+
+def _joined_lows(lows: list[str]) -> list[str]:
+    """The lower-case tokens plus "anti"/"non" joined to the next token ("anti-inflammatory" -> "antiinflammatory")."""
+    return lows + [a + b for a, b in zip(lows, lows[1:]) if a in ("anti", "non", "ant")]
 
 
 def class_phrase(text: str) -> bool:
-    """Fix3g H2: a drug-class word, or "<condition> wali / wala / ki / ka" (sugar wali, BP ki, thyroid wali)."""
+    """Fix3g H2 / Fix3h 4: a drug-class word (ATC heading, hyphen and plural forms), a two-or-three-word class name, or "<condition> wali / wala / wale / vali / vaali / waale / ki / ka" glued or hyphenated."""
     lows = [tk.low for tk in tokenize(text) if tk.is_word]
-    if class_words() & set(lows):
+    if class_words() & set(_joined_lows(lows)):
+        return True
+    cp = class_phrases()
+    if any(tuple(lows[i:i + n]) in cp for n in (2, 3) for i in range(len(lows) - n + 1)):
         return True
     heads, suf = set(_dw()["condition_class_heads"]), set(_dw()["class_suffixes"])
-    return any(a in heads and b in suf for a, b in zip(lows, lows[1:]))
+    if any(a in heads and b in suf for a, b in zip(lows, lows[1:])):
+        return True
+    return any(w.endswith(s_) and w[:-len(s_)] in heads for w in lows for s_ in _GLUED_SUFFIX)
+
+
+_CLAUSE = re.compile(r"[.,;:!?()\[\]\n|]+|[\u2014\u2013]|\s-\s|\b(?:and|but|while|whereas|then|also|aur|lekin|par|phir)\b", re.I)
+
+
+def clauses(text: str) -> list[str]:
+    """Fix3h 3: the clauses of a unit (split on punctuation and on and / but / while ...), slot tokens read as spaces."""
+    t = _SLOT_TOKEN.sub(" ", unicodedata.normalize("NFKC", text or ""))
+    return [c for c in _CLAUSE.split(t) if c and c.strip()]
 
 
 def lab_frame(text: str) -> bool:
-    """Fix3g H1: the unit speaks of a lab value: a lab word (level, report, value, test, result, range) or a lab unit (mmol, mEq, dL ...)."""
+    """Fix3g H1: the text speaks of a lab value: a lab word (level, report, value, test, result, range) or a lab unit (mmol, mEq, dL ...)."""
     lows = {tk.low for tk in tokenize(text) if tk.is_word}
     return bool(lows & {w.lower() for w in _dw()["lab_frame_words"]}) or bool(lows & {w.lower() for w in _dw()["lab_frame_units"]})
+
+
+def lab_bound(clause: str) -> bool:
+    """Fix3h 3: the clause is a lab statement: a lab word or lab unit stands in it and it holds no timing expression."""
+    return lab_frame(clause) and not timing_expression(clause)
 
 
 @lru_cache(maxsize=1)
@@ -146,11 +222,33 @@ def _med_index() -> dict:
     return idx
 
 
-def med_master_hit(text: str) -> bool:
-    """Fix3g 1 (M5): an exact full name of the Pulse medicine master (enabled, usage >= 1; data/med_master_names.v1.json.gz) stands in `text`, case-insensitive, on whole tokens."""
+def med_master_hits(text: str) -> list[tuple[str, ...]]:
     ts = re.findall(r"[a-z0-9]+", unicodedata.normalize("NFKC", text or "").lower())
     idx = _med_index()
-    return any(tuple(ts[i:i + len(sp)]) == sp for i, t in enumerate(ts) for sp in idx.get(t, ()))
+    return [sp for i, t in enumerate(ts) for sp in idx.get(t, ()) if tuple(ts[i:i + len(sp)]) == sp]
+
+
+def med_master_hit(text: str) -> bool:
+    """Fix3g 1 (M5): an exact full name of the Pulse medicine master (enabled, usage >= 1; data/med_master_names.v1.json.gz) stands in `text`, case-insensitive, on whole tokens."""
+    return bool(med_master_hits(text))
+
+
+@lru_cache(maxsize=1)
+def med_master_heads() -> frozenset[str]:
+    """Fix3h 2 (H5): the first token of an enabled usage>0 master name (a brand head), 3+ letters, minus function words, number words, timing words and the clinical vocabulary (symptom, exam and analyte words)."""
+    from . import numbers
+    wl = whitelist_words()
+    return frozenset(h for h in _med_index() if len(h) >= 3 and h.isalpha() and h not in _STOP and h not in numbers._FUNCTION_WORDS and h not in wl and h not in wl_analytes() and h not in _timing_vocab()
+                     and not numbers.number_like(h))
+
+
+@lru_cache(maxsize=1)
+def _timing_vocab() -> frozenset[str]:
+    return frozenset(w.lower() for w in _dw()["timing_words"] + _dw()["meal_daypart_words"] + _dw()["period_words"])
+
+
+def med_master_head(text: str) -> bool:
+    return bool(med_master_heads() & {tk.low for tk in tokenize(_SLOT_TOKEN.sub(" ", text or "")) if tk.is_word})
 
 
 _STOP = frozenset("a an the and or but if then than so as of to in on at by for with from into onto over under about after before during since until while is are was were be been being am do does did done "
@@ -164,6 +262,19 @@ def content_tokens(text: str) -> frozenset[str]:
     from . import numbers
     t = _SLOT_TOKEN.sub(" ", unicodedata.normalize("NFKC", text or ""))
     return frozenset(tk.low for tk in tokenize(t) if tk.is_word and len(tk.low) >= 3 and tk.low.isalpha() and tk.low not in _STOP and tk.low not in numbers._FUNCTION_WORDS and not is_dosing_word(tk.low))
+
+
+def lemma(w: str) -> str:
+    """Fix3h 6: simple suffix stripping (ing / ed / s, then a final e) so that knee / knees and ice / icing meet."""
+    for suf in ("ing", "ed", "s"):
+        if w.endswith(suf) and len(w) - len(suf) >= 2:
+            w = w[:-len(suf)]
+            break
+    return w[:-1] if w.endswith("e") and len(w) > 2 else w
+
+
+def lemma_tokens(text: str) -> frozenset[str]:
+    return frozenset(lemma(w) for w in content_tokens(text))
 
 
 def is_dosing_word(low: str) -> bool:
@@ -362,6 +473,10 @@ _OTHER_PERSON = re.compile(
     r"|\bsomeone\s+else\b|\bthe\s+person\s+waiting\b"
     r"|\b(?:yesterday|today|this\s+morning)['\u2019]s\s+(?:earlier\s+)?(?:patient|case)\b"
     r"|\b(?:your|her|his|their|my|our|the|a|another)\s+(?:neighbou?r|friend|colleague|relative|cousin|co-?worker)\b"
+    rf"|\b(?:the|that|this|those|these|her|his|their|your|our)\s+{_ADJ}(?:twins?|couple|drivers?|landlords?|landladys?|teachers?|employers?)\b"      # Fix3h 5
+    r"|\b(?:old|post-?op(?:erative)?|referred|known|previous)\s+cases?\b|\bpatients?\s+(?:before|earlier|ahead)\b"
+    r"|\b(?:patient|case|person)s?\s+(?:in|from)\s+(?:the\s+)?(?:next|other|adjacent|neighbou?ring)\s+(?:room|bed|cubicle|ward)\b"
+    r"|\bdoctor['\u2019]s\s+(?:patient|case)s?\b|\b(?:mrs|mr|ms|miss)\.?\s+[a-z]+['\u2019]s\s+(?:case|patient)\b"
     r"|\b[A-Z][a-z]+(?:['\u2019]s)\s+(?:mother|wife|husband|son|daughter|father|brother|sister|child|children)\b|\bpatient\s+before\b", re.I)
 
 
@@ -372,7 +487,7 @@ def other_person(text: str) -> str | None:
     if not m:
         return None
     s = m.group(0)
-    if ("'" in s or "\u2019" in s) and not re.match(r"(?:yesterday|today|this)", s, re.I):
+    if ("'" in s or "\u2019" in s) and not re.match(r"(?:yesterday|today|this|mrs|mr|ms|miss)|.*\bdoctor['\u2019]s", s, re.I | re.S):
         return "other_person" if s[:1].isupper() else None  # the possessive form needs a capitalised name before it
     return "other_person"
 

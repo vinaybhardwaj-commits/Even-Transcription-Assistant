@@ -185,6 +185,17 @@ class NumberGate:
             self._tagged = (frozenset(toks), frozenset(pairs))
         return self._tagged
 
+    def _tagged_all(self) -> frozenset[str]:
+        """Fix3h 2 (refute-6 rule 1): every content token of the turns Stage A tagged (any case, any position), plus the prescription row words."""
+        if getattr(self, "_tall", None) is None:
+            toks: set[str] = set(self.rx_tokens)
+            for t in self.drug_spans:
+                if 0 <= t < len(self.c.turns):
+                    for txt in (self.c.turns[t].text, self.c.turns[t].native_text):
+                        toks |= words.content_tokens(txt or "")
+            self._tall = frozenset(toks)
+        return self._tall
+
     def quarantine_echo(self, text: str, turns=None) -> bool:
         """Fix3e L1: a posted or served unit that holds a 5-word shingle of a quarantined turn withholds (strict: a phrase that is also said in a kept turn counts too)."""
         if not self.quarantined or not isinstance(text, str):
@@ -200,11 +211,22 @@ class NumberGate:
         w = re.findall(r"[a-z0-9']+", re.sub(r"\u27e6S\d+\u27e7", " ", text).lower())
         if any(tuple(w[i:i + 5]) in self._qsh for i in range(max(0, len(w) - 4))):
             return True
-        # Fix3g M1: 3+ content tokens of the unit that a quarantined turn holds and no cited current turn holds (a short or paraphrased echo)
+        # Fix3g M1 / Fix3h 6: content tokens (suffix-stripped: knee / knees, ice / icing) of the unit that a quarantined turn holds. 3+ of them that no cited current turn holds echo; so do 3+ in all
+        # when at least two of them are not in a cited current turn (a word shared with the current turn still counts when the unit's other words come from the quarantined turn)
         if getattr(self, "_qct", None) is None:
-            self._qct = frozenset().union(*(words.content_tokens(x) for t in self.quarantined if 0 <= t < len(self.c.turns) for x in (self.c.turns[t].text, self.c.turns[t].native_text) if x))
-        cur = frozenset().union(*(words.content_tokens(x) for t in set(turns or ()) - set(self.quarantined) if 0 <= t < len(self.c.turns) for x in (self.c.turns[t].text, self.c.turns[t].native_text) if x))
-        return len((words.content_tokens(text) & self._qct) - cur) >= 3
+            self._qct = frozenset().union(*(words.lemma_tokens(x) for t in self.quarantined if 0 <= t < len(self.c.turns) for x in (self.c.turns[t].text, self.c.turns[t].native_text) if x))
+        cur = frozenset().union(*(words.lemma_tokens(x) for t in set(turns or ()) - set(self.quarantined) if 0 <= t < len(self.c.turns) for x in (self.c.turns[t].text, self.c.turns[t].native_text) if x))
+        hit = words.lemma_tokens(text) & self._qct
+        new = hit - cur
+        return len(new) >= 3 or (len(hit) >= 3 and len(new) >= 2)
+
+    def echo_k2(self, text: str, turns=None) -> bool:
+        """Fix3h 6 (report only): the unit holds exactly two content tokens of a quarantined turn that no cited current turn holds (below the ruled 3)."""
+        if not self.quarantined or not isinstance(text, str) or self.quarantine_echo(text, turns):
+            return False
+        self.quarantine_echo("", turns)
+        cur = frozenset().union(*(words.lemma_tokens(x) for t in set(turns or ()) - set(self.quarantined) if 0 <= t < len(self.c.turns) for x in (self.c.turns[t].text, self.c.turns[t].native_text) if x))
+        return len((words.lemma_tokens(text) & self._qct) - cur) == 2
 
     def tagged_overlap(self, text: str) -> bool:
         """Fix3e ruling 2 (H1b): the unit holds a drug token of a tagged turn, or two words in a row of one. Then it is read against every tagged turn, whatever turns it cites."""
@@ -217,7 +239,34 @@ class NumberGate:
     def in_drug_unit(self, text: str, turns) -> bool:
         return bool(set(turns or ()) & self.drug_spans) or self.tagged_overlap(text)
 
-    def drug_outside(self, text: str, turns) -> bool:
+    INSTRUCTION_FIELDS = frozenset({"plan", "advice", "follow_up"})
+
+    def timing_outside(self, text: str, fld: str | None) -> bool:
+        """Fix3h 1: in an instruction field (plan, advice, follow-up; the note's Plan, General Advice and Follow up; every served doctor_words / red_flags item) any unit that holds a timing,
+        frequency, duration or regimen expression (a regimen verb with an object) is withheld. The signal is the timing, not a drug word. The lines the code writes stay."""
+        if fld not in self.INSTRUCTION_FIELDS or not isinstance(text, str) or not text:
+            return False
+        from . import names as _names
+        t = re.sub(r"\u27e6S\d+\u27e7", " ", text).replace(_names.PLAN_LINE, " ").replace(_names.DRAFT_LINE, " ")
+        return words.timing_expression(t) or words.regimen_expression(t)
+
+    def _analyte_unbound(self, t: str) -> bool:
+        """Fix3h 3 (H2): some clause names an analyte (a catalogue_analyte hit or a clinical analyte word) and is not a lab statement (no lab word or unit in that clause, or a timing expression in it)."""
+        for c in words.clauses(t):
+            if (words.analyte_word(c) or any(f.reason == "catalogue_analyte" for f in drugs.flags(c))) and not words.lab_bound(c):
+                return True
+        return False
+
+    def _master_hit(self, t: str) -> bool:
+        """Fix3g 1 / Fix3h 3: an exact Pulse master name stands in `t`, except an analyte-named single token (Calcium) whose every clause is a lab statement."""
+        wl = words.wl_analytes()
+        for h in words.med_master_hits(t):
+            if len(h) == 1 and h[0] in wl and all(words.lab_bound(c) for c in words.clauses(t) if h[0] in {tk.low for tk in words.tokenize(c) if tk.is_word}):
+                continue
+            return True
+        return False
+
+    def drug_outside(self, text: str, turns, fld: str | None = None) -> bool:
         """Fix3e ruling 1: outside the Medication section a unit may not hold a drug at all: a detector hit (catalogue, denylist, fuzzy, phonetic, English-word brand), a drug token of a tagged
         turn or prescription row, or, in a drug-tagged unit, a capitalised brand-like word. The Medication section and the slot prompts are the only places a medicine is named."""
         if not isinstance(text, str) or not text:
@@ -228,15 +277,16 @@ class NumberGate:
         from . import names as _names
         t = t.replace(_names.PLAN_LINE, " ").replace(_names.DRAFT_LINE, " ")  # lines the code itself writes
         lows_ = [tk.low for tk in words.tokenize(t) if tk.is_word]
-        if words.med_master_hit(t) or words.supplement_hit(t):  # Fix3g 1 (M5): an exact full name of the Pulse medicine master (or a dietary-supplement name)
+        if self._master_hit(t) or words.supplement_hit(t):  # Fix3g 1 (M5): an exact full name of the Pulse medicine master (or a dietary-supplement name)
             return True
-        fl = drugs.flags(t)
-        timing = words.timing_present(t)
+        timing = words.timing_expression(t)  # Fix3h 1: by pattern class (clock / meal / day-part, frequency, duration)
         if "insulin" in lows_:  # Fix3g H1: insulin is a medicine, never an analyte: named outside Medication it withholds
             return True
         if (timing or words.regimen_verb(t)) and words.class_phrase(t):  # Fix3g H2: a class word (insulin is one, so never an analyte) or "<condition> wali" with a timing word, in any unit
             return True
-        if timing and (any(f.reason == "catalogue_analyte" for f in fl) or words.analyte_word(t)) and not words.lab_frame(t):  # Fix3g H1: an analyte-named drug (iron, folic acid, zinc, potassium) with a timing word, unless the unit speaks of a lab value
+        if timing and self._analyte_unbound(t):  # Fix3g H1 / Fix3h 3: an analyte-named drug (iron, folic acid, zinc, potassium) with a timing word, unless the clause that names it is a lab statement
+            return True
+        if timing and (words.med_master_head(t) or (self.drug_spans and words.content_tokens(t) & self._tagged_all())):  # Fix3h 2 (H5, H1b): a master brand head, or any content token of a tagged turn, beside a timing expression
             return True
         if words.dose_form_nouns() & set(lows_):  # Fix3f a: a dose-form or medicine noun is a drug signal by itself (a class phrase holds one)
             return True

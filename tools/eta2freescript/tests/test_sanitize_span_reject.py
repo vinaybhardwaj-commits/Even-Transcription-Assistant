@@ -17,7 +17,8 @@ from tools.eta2freescript.pipeline import run_consult
 from tools.eta2freescript.validate import _D4_FIELDS, check
 
 UID = "synth-fever-dose"
-STAGE_B = (MODEL / UID / "stageB.txt").read_text()
+# Fix3h: "Take rest" is a regimen verb with an object, so an instruction field withholds it; these probes read the same fixture with the advice reworded (the shared fixture files stay as they are)
+STAGE_B = (MODEL / UID / "stageB.txt").read_text().replace("Take rest", "Rest well")
 SPANS = ["[frequency]", "[duration]", "[dose]", "[Name]", "[ STRENGTH ]", "[S1]", "[S0|doctor]", "[dose not stated — doctor to verify]",
          "[?]", "[see note]", "[1]", "[]"]
 
@@ -71,7 +72,7 @@ def test_s1_helper_text_is_byte_identical_to_base():
 
 def _run(tmp_path, stage_b):
     c = load_consult(CONSULTS, UID)
-    fake = FakeClient({"stageA": json.dumps(stage_a(UID)), "stageB": stage_b})
+    fake = FakeClient({"stageA": json.dumps(stage_a(UID)).replace("Take rest", "Rest well"), "stageB": stage_b})
     return run_consult(c, fake, tmp_path), tmp_path / UID
 
 
@@ -88,7 +89,7 @@ def _llm_with(tmp_path, old, new):
 
 
 def test_probe_s1_on_general_advice_posts_with_count(tmp_path):
-    lg, od = _llm_with(tmp_path, "General Advice: Drink plenty of water; Take rest", "General Advice: [S1] Drink plenty of water; Take rest")
+    lg, od = _llm_with(tmp_path, "General Advice: Drink plenty of water; Rest well", "General Advice: [S1] Drink plenty of water; Rest well")
     assert lg["final_valid"] and lg["note_source"].startswith("llm_") and lg["sanitize_removed"] == 1
     assert (od / "artifact.json").exists()
 
@@ -106,7 +107,7 @@ def test_field_word_on_general_advice_rejects_llm_note(tmp_path):
 def test_recorder_clean_notes_identical_and_flips_by_heading(tmp_path):
     r = random.Random(2026)
     c = load_consult(CONSULTS, UID)
-    base_run = run_consult(c, FakeClient({"stageA": json.dumps(stage_a(UID)), "stageB": STAGE_B}), tmp_path)
+    base_run = run_consult(c, FakeClient({"stageA": json.dumps(stage_a(UID)).replace("Take rest", "Rest well"), "stageB": STAGE_B}), tmp_path)
     art = base_run["artifact"]
     n_clean = n_total = 0
     flips: dict[str, int] = {}
@@ -230,7 +231,7 @@ def test_f1_probe_prefixed_follow_up_and_surgery_lines_through_pipeline(tmp_path
 
 
 def test_f1_probe_prefixed_general_advice_posts_with_count(tmp_path):
-    lg, _ = _llm_with(tmp_path, "General Advice: Drink plenty of water; Take rest", "[S1] General Advice: keep warm")
+    lg, _ = _llm_with(tmp_path, "General Advice: Drink plenty of water; Rest well", "[S1] General Advice: keep warm")
     # v10: the span prefix leaves the heading with a leading space (a structure fault): the note is repaired from gp_extraction and posts without the span
     assert lg["final_valid"] and lg["note_source"].startswith("llm_") and lg["note_repaired"] is True and "[" not in lg["artifact"]["note_text"]
 
@@ -249,7 +250,7 @@ def test_m5_recovery_rerender_replaces_the_removed_spans(tmp_path, monkeypatch):
     """A recovery re-render rebuilds the note, so what the sanitiser removed from the LLM note no longer applies."""
     from tools.eta2freescript import pipeline, recover
     monkeypatch.setattr(recover, "soften_f2_m3", lambda art: ["FRX-F2 forced"])
-    lg, _ = _llm_with(tmp_path, "General Advice: Drink plenty of water; Take rest", "General Advice: [S1] Drink plenty of water; Take rest")
+    lg, _ = _llm_with(tmp_path, "General Advice: Drink plenty of water; Rest well", "General Advice: [S1] Drink plenty of water; Rest well")
     assert lg["field_recovery"] and lg["final_valid"] and "sanitize_removed" not in lg
 
 
@@ -402,7 +403,7 @@ def test_fx2_verdict_probes_never_post_the_trimmed_line(tmp_path, extra, emptied
 
 def test_fx2_prefixed_general_advice_and_cf_general_advice_still_post(tmp_path):
     for extra in ("[S1] General Advice: keep warm", "​General Advice: keep warm [S1]", "- general advice : keep warm [S1]"):
-        lg, _ = _llm_with(tmp_path / str(hash(extra)), "General Advice: Drink plenty of water; Take rest", extra)  # v10: a second General Advice heading is a structure fault
+        lg, _ = _llm_with(tmp_path / str(hash(extra)), "General Advice: Drink plenty of water; Rest well", extra)  # v10: a second General Advice heading is a structure fault
         assert lg["final_valid"] and lg["note_source"].startswith("llm_") and "[S1]" not in lg["artifact"]["note_text"], extra
 
 
@@ -542,7 +543,7 @@ def test_fx3_verdict3_variant_heading_probes_never_post_the_trimmed_line(tmp_pat
 
 
 def test_fx3_verdict3_prose_probe_and_field_word_variants(tmp_path):
-    lg, _ = _llm_with(tmp_path, "General Advice: Drink plenty of water; Take rest",
+    lg, _ = _llm_with(tmp_path, "General Advice: Drink plenty of water; Rest well",
                       "General Advice: Drink plenty of water; paracetamol 1 g [three times a day] if fever")
     assert lg["note_source"] == "deterministic_fallback" and any(e.startswith("FRX-L1") for e in lg["llm_note_errors"])
     for sp in ("[do\u200bse]", "[d\u00adose]", "[\uff44\uff4f\uff53\uff45]", "[Dose:]", "[frequency?]", "[dose/frequency]"):
@@ -557,7 +558,7 @@ def test_fx3_colon_map_is_exercised():
 
 
 def test_fx3_s_label_in_a_full_pipeline_still_posts_with_count(tmp_path):
-    lg, _ = _llm_with(tmp_path, "General Advice: Drink plenty of water; Take rest", "General Advice: [ s12 ] Drink plenty of water; Take rest")
+    lg, _ = _llm_with(tmp_path, "General Advice: Drink plenty of water; Rest well", "General Advice: [ s12 ] Drink plenty of water; Rest well")
     assert lg["final_valid"] and lg["note_source"].startswith("llm_") and lg["sanitize_removed"] == 1
 
 
@@ -684,9 +685,9 @@ def test_fx4_refuter_fixed_cases():
 
 
 def test_fx4_pipeline_s1_on_general_advice_posts_and_examination_falls_back(tmp_path):
-    lg, _ = _llm_with(tmp_path / "ga", "General Advice: Drink plenty of water; Take rest", "General Advice: [S1] take at night; Drink plenty of water; Take rest")
+    lg, _ = _llm_with(tmp_path / "ga", "General Advice: Drink plenty of water; Rest well", "General Advice: [S1] sit upright; Drink plenty of water; Rest well")
     assert lg["final_valid"] and lg["note_source"].startswith("llm_") and lg["sanitize_removed"] == 1
-    lg, _ = _llm_with(tmp_path / "glued", "General Advice: Drink plenty of water; Take rest", "General Advice: Drink 2[S1]0 glasses of water; Take rest")
+    lg, _ = _llm_with(tmp_path / "glued", "General Advice: Drink plenty of water; Rest well", "General Advice: Drink 2[S1]0 glasses of water; Take rest")
     assert lg["note_source"] == "deterministic_fallback" and "FRX-L1 bracket span removed from General Advice" in lg["llm_note_errors"]
     ex = next(ln for ln in STAGE_B.split("\n") if ln.startswith("Examination:"))
     lg, _ = _llm_with(tmp_path / "ex", ex, ex + " CVS - [S3] gallop")

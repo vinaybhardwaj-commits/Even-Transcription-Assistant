@@ -62,7 +62,7 @@ def test_a_lab_frame_is_a_lab_word_or_a_lab_unit(t):
 
 def test_analyte_with_lab_frame_is_free_and_insulin_never():
     g = gate_of("As told.")
-    assert not g.drug_outside("Haemoglobin level daily", [0]) and words.lab_frame("Haemoglobin level daily")
+    assert not g.drug_outside("Haemoglobin level is low", [0]) and words.lab_frame("Haemoglobin level daily") and g.drug_outside("Haemoglobin level daily", [0])
     assert g.drug_outside("Insulin level at bedtime", [0])
     assert not g.drug_outside("Potassium is normal", [0])  # an analyte with no timing word is the lab talk it always was
 

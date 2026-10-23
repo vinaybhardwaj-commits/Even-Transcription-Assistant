@@ -21,7 +21,7 @@ def art_of(c=None, **enc):
 
 
 def test_a1_blob_is_split_then_capped_at_item_boundaries():
-    items = ["Walk daily", "Sleep early", "Gargle tonight", "Wear a mask", "Steam inhalation", "Avoid stairs", "No ice cream", "Sit upright"]
+    items = ["Walk slowly", "Sleep early", "Avoid dust", "Wear a mask", "Steam inhalation", "Avoid stairs", "No ice cream", "Sit upright"]
     a = art_of(advice=[{"text": "; ".join(items), "basis": "said", "source_turns": [5]}])
     ga = a["gp_extraction"]["general_advice"]
     assert len(ga.split("; ")) == ADVICE_MAX_ITEMS and len(ga) <= ADVICE_MAX_CHARS

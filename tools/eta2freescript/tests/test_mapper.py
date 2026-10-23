@@ -100,8 +100,8 @@ def adv(text, turn=5, basis="said"):
 
 
 def test_advice_merge_cap_and_said_aloud():
-    a = art_of(advice=[adv("Drink plenty of water"), adv("Drink lots of water every day"), adv("Rest"), adv("Avoid cold drinks", basis="inferred"),
-                       adv("Do not go to work", turn=2)] + [adv(t) for t in ("Avoid oily food", "Sleep early", "Gargle at night", "Wear a mask", "Steam inhalation")])
+    a = art_of(advice=[adv("Drink plenty of water"), adv("Drink lots of water"), adv("Rest"), adv("Avoid cold drinks", basis="inferred"),
+                       adv("Do not go to work", turn=2)] + [adv(t) for t in ("Avoid oily food", "Sleep early", "Avoid dust", "Wear a mask", "Steam inhalation")])
     ga = a["gp_extraction"]["general_advice"]
     assert ga.count("water") == 1 and len(ga) <= ADVICE_MAX_CHARS and len(ga.split("; ")) == 5
     assert kept(a, "[advice_not_said_aloud]") and kept(a, "[advice_not_by_doctor]") and kept(a, "[advice_capped]")
@@ -109,7 +109,7 @@ def test_advice_merge_cap_and_said_aloud():
 
 def test_advice_char_cap():
     long1, long2 = ("rest and drink warm water " * 8).strip(), ("sleep early and walk slowly " * 7).strip()  # real words: FRX-T2 withholds a unit with an out-of-dictionary word
-    a = art_of(advice=[adv("Rest at home " + long1), adv("Walk daily " + long2)])
+    a = art_of(advice=[adv("Rest at home " + long1), adv("Walk slowly " + long2)])
     assert len(a["gp_extraction"]["general_advice"]) <= ADVICE_MAX_CHARS and kept(a, "[advice_capped]")
 
 

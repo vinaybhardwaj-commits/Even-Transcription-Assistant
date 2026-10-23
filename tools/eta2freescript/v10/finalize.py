@@ -87,11 +87,13 @@ def field_turns(art: dict, fld: str, ptr: str | None = None) -> set[int]:
     return out
 
 
-def _unit_violations(gate: NumberGate, txt: str, turns: set[int]) -> list[Violation]:
+def _unit_violations(gate: NumberGate, txt: str, turns: set[int], fld: str | None = None) -> list[Violation]:
     """Fix3b: other-person cues and number homographs in a drug unit, on the final text of one unit."""
     out = []
-    if gate.drug_outside(txt, turns):  # Fix3e ruling 1: no medicine is named outside the Medication section
+    if gate.drug_outside(txt, turns, fld):  # Fix3e ruling 1: no medicine is named outside the Medication section
         out.append(Violation("drug_outside_medication", "dom"))
+    if gate.timing_outside(txt, fld):  # Fix3h 1: no timing, frequency, duration or regimen expression in an instruction field
+        out.append(Violation("timing_outside_medication", "tom"))
     if words.other_person(txt):
         out.append(Violation("other_person", "op"))
     if gate.quarantine_echo(txt, turns):  # Fix3e L1
@@ -120,7 +122,7 @@ def gp_final(gate: NumberGate, art: dict, c, *, remove: bool = True) -> list[tup
             lt = field_turns(art, fld, "/" + "/".join(str(k) for k in path)) if unit == "entry" else field_turns(art, fld)
             with numbers.force_collisions(gate.in_drug_unit(txt, lt)):  # Fix3b H1 / Fix3e H1b: the Stage A drug-turn rule holds on the final check too
                 viol = gate.final_check(txt, fld, pos, allowed_drug_tokens=None) if not errs else [Violation("frame", e) for e in errs]
-            viol += _unit_violations(gate, txt, lt)
+            viol += _unit_violations(gate, txt, lt, fld)
             viol += _unknown_drug_tokens(txt, allowed)
             if viol:
                 bad = bad or viol[0].code
@@ -143,7 +145,7 @@ def gp_final(gate: NumberGate, art: dict, c, *, remove: bool = True) -> list[tup
             txt, pos, errs = gate.writeback(it["text_en"])
             with numbers.force_collisions(gate.in_drug_unit(txt, tl)):
                 viol = [Violation("frame", e) for e in errs] if errs else gate.final_check(txt, "advice", pos)
-            viol += _unit_violations(gate, txt, tl)
+            viol += _unit_violations(gate, txt, tl, "advice")
             if viol:
                 failed.append(("advice", viol[0].code, "served", (key, i)))
                 served.append((key, i))
@@ -222,7 +224,7 @@ def note_final(gate: NumberGate, art: dict, c, note_tok: str, *, allowed=None) -
                     viol = [Violation("frame", e) for e in errs] or gate.final_check(txt, fld, pos)
                 if v9 & set(names_mod.toks(txt)):  # Fix2 M4: a stop / not-given / change drug is named in the confirm prompts only
                     viol.append(Violation("v9_named_drug", "v9"))
-                viol += _unit_violations(gate, txt, st)
+                viol += _unit_violations(gate, txt, st, fld)
                 viol += _unknown_drug_tokens(txt, allowed)
                 lines.append(txt)
             if viol:

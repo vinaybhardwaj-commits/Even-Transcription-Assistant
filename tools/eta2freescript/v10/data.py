@@ -27,6 +27,7 @@ NUMBER_HOMOGRAPHS = DATA / "number_homographs.v1.json"
 GIVEN_NAMES = DATA / "given_names.v1.json"
 SURNAMES = DATA / "surnames.v1.json.gz"
 MED_MASTER = DATA / "med_master_names.v1.json.gz"
+CLASS_FORMS = DATA / "class_forms.v1.json"
 ANALYTES = DATA / "slots" / "analytes.v1.json"
 SLOT_BOUNDS = DATA / "slots" / "slot_bounds.v1.json"
 DICTIONARY_FILES = (CONTRACT / "scowl_words.json", CONTRACT / "english_words_min.json",
@@ -70,6 +71,7 @@ def provenance() -> dict:
         "given_names_sha256": file_sha(GIVEN_NAMES),
         "surnames_sha256": file_sha(SURNAMES),
         "med_master_sha256": file_sha(MED_MASTER),
+        "class_forms_sha256": file_sha(CLASS_FORMS),
         "catalogue_snapshot_sha256": file_sha(CATALOGUE_FILE),
         "catalogue_snapshot_date": str(cat.get("version") or ""),
         "dosing_words_sha256": file_sha(DOSING_WORDS),

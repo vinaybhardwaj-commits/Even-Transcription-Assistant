@@ -50,6 +50,8 @@ from .v10 import projection as v10_projection
 from .v10 import spans as v10_spans
 from .v10.gate import NumberGate
 
+MED_REASONS = frozenset({"drug_outside_medication", "timing_outside_medication"})  # prompt: confirm medicines in the Medication section
+
 MAPPER_VERSION = "3.0.0"
 SCHEMA_VERSION = "eta.freescript.v0.3"
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
@@ -609,8 +611,11 @@ class Builder:
             return None
         r = self.gate.check(text, fld, cited)
         if r.ok:
-            if self.gate.drug_outside(r.text, cited):  # Fix3e ruling 1: a medicine is named in the Medication section and the confirm prompts only
+            if self.gate.drug_outside(r.text, cited, fld):  # Fix3e ruling 1: a medicine is named in the Medication section and the confirm prompts only
                 self.withhold(fld, "drug_outside_medication", cited, red_flag=red_flag)
+                return None
+            if self.gate.timing_outside(r.text, fld):  # Fix3h 1: a timing, frequency, duration or regimen expression in an instruction field is the Medication section's
+                self.withhold(fld, "timing_outside_medication", cited, red_flag=red_flag)
                 return None
             if v10_words.other_person(r.text):
                 self.withhold(fld, "other_person", cited, red_flag=red_flag)
@@ -645,9 +650,9 @@ class Builder:
         if red_flag:
             t0 = next((t for t in (turns or []) if 0 <= t < len(self.c.turns)), None)
             at = "" if t0 is None else f" at {max(0, (self.c.turns[t0].t0_ms - self.c.clip_t0_ms) // 1000) // 60:02d}:{max(0, (self.c.turns[t0].t0_ms - self.c.clip_t0_ms) // 1000) % 60:02d}"
-            self.completion.insert(0, {"kind": "field_withheld", "item_id": item["item_id"], "prompt": f"Red flag said{at}, confirm" + (" medicines in the Medication section" if reason == "drug_outside_medication" else "")})
+            self.completion.insert(0, {"kind": "field_withheld", "item_id": item["item_id"], "prompt": f"Red flag said{at}, confirm" + (" medicines in the Medication section" if reason in MED_REASONS else "")})
         else:
-            self.review("field_withheld", item, f"{sec} withheld: " + ("confirm medicines in the Medication section" if reason == "drug_outside_medication" else "check the recording"))
+            self.review("field_withheld", item, f"{sec} withheld: " + ("confirm medicines in the Medication section" if reason in MED_REASONS else "check the recording"))
         self.withheld.append({"item_id": item["item_id"], "field_pointer": self.POINTER.get(fld, fld), "reason_code": reason, "span_ids": sids,
                               "prompt_id": item["item_id"], "stage": stage, "red_flag": red_flag})
         return item
