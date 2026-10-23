@@ -39,8 +39,12 @@ async function sentSql(stage: string, now: Date): Promise<string> {
   return parts.map((p, i) => p + (i < vals.length ? `'${vals[i]}'` : "")).join("").replace(/::text|::timestamptz/g, "");
 }
 /** Plan work from EXPLAIN (ANALYZE): rows x loops of every node plus rows each node discarded. No wall clock. */
-async function work(sqlText: string): Promise<number> {
-  const lines = psql(`EXPLAIN (ANALYZE) ${sqlText}`);
+async function work(sqlText: string, noIndex = false): Promise<number> {
+  // Plan pinned inside the transaction so the count does not depend on what the planner prefers that run: no parallel workers (per-worker row averages varied under load) and no bitmap scan, always.
+  // `noIndex` also turns off index scans, used for the OLD statement only: left free, it can walk spine_tick_at_idx backwards and stop after 20 matching rows (the 'big' rows are the newest here), which is cheap by luck of the
+  // data and plan, not by its shape. The NEW statement keeps its index (spine_tick_at_idx, migration 0173) because its bound relies on it.
+  const pins = `SET LOCAL max_parallel_workers_per_gather = 0; SET LOCAL enable_bitmapscan = off;${noIndex ? " SET LOCAL enable_indexscan = off; SET LOCAL enable_indexonlyscan = off;" : ""}`;
+  const lines = psql(`BEGIN; ${pins} EXPLAIN (ANALYZE) ${sqlText}; ROLLBACK;`);
   let w = 0, loops = 1;
   for (const l of lines) {
     const m = /actual time=\S+ rows=(\d+) loops=(\d+)/.exec(l);
@@ -94,7 +98,7 @@ d("prelive D-1: breaker read bounded to its window (spine_tick)", () => {
       ANALYZE spine_tick;`);
     expect(await q("SELECT 1 FROM pg_indexes WHERE indexname = 'spine_tick_kind_at_idx'")).toEqual([]);
     const fixed = await work(await sentSql("big", NOW));
-    const old = await work(OLD("big"));
+    const old = await work(OLD("big"), true);
     console.log(`prelive D plan work, no 0177: bounded ${fixed}, old ${old}`);
     expect(fixed, "bounded read").toBeLessThanOrEqual(2000);
     expect(old > 100000, `the guard failed to flag the old statement: ${old}`).toBe(true);
