@@ -24,8 +24,8 @@ def run(argv):
 
 
 PQM = dict(consult_uid="pqm_a1b2c3d4e5f6a7b8c9d0e1", room_id="room_abcd2345", t_open=T0, t_close=T0 + 600, close_reason="pqm", quality="pqm", pqm_step_uid="a1b2c3d4e5f6a7b8c9d0")
-CUT = dict(consult_uid="uidtestaaaaaaaaaaaaaaaaa", room_id="room_abcd2345", span_start="2026-10-18 09:30:00.000", span_end="2026-10-18 09:40:00.500", status="cut", window_id=7)
-CAA = dict(consult_uid="uidtestbbbbbbbbbbbbbbbbb", scope_path="scope/room_abcd2345/x", manifest=dict(t0_ms=1790000000000, t1_ms=1790000600000))
+CUT = dict(consult_uid="uidtestaaaaaaaaaaaaaaaaaaa", room_id="room_abcd2345", span_start="2026-10-18 09:30:00.000", span_end="2026-10-18 09:40:00.500", status="cut", window_id=7)
+CAA = dict(consult_uid="uidtestbbbbbbbbbbbbbbbbbbb", scope_path="scope/room_abcd2345/x", manifest=dict(t0_ms=1790000000000, t1_ms=1790000600000))
 
 
 def test_dry_run_is_default_prints_counts_only_and_makes_no_network_call(tmp_path):
@@ -57,10 +57,10 @@ def test_mappers():
 
 
 def test_cutter_takes_the_latest_row_per_uid(tmp_path):
-    f = write(tmp_path, [CUT, CUT | {"span_end": "2026-10-18 09:45:00.000"}, CUT | {"consult_uid": "uidtestccccccccccccccccc"}])
+    f = write(tmp_path, [CUT, CUT | {"span_end": "2026-10-18 09:45:00.000"}, CUT | {"consult_uid": "uidtestccccccccccccccccccc"}])
     sigs, counts = P.build(f, "cutter", "o")
     assert counts["signals"] == 2
-    assert [s["t_close"] for s in sigs if s["source_key"] == "uidtestaaaaaaaaaaaaaaaaa"] == ["2026-10-18T04:15:00.000Z"]
+    assert [s["t_close"] for s in sigs if s["source_key"] == "uidtestaaaaaaaaaaaaaaaaaaa"] == ["2026-10-18T04:15:00.000Z"]
 
 
 def test_disallowed_keys_are_refused_client_side_at_any_depth_and_never_sent(tmp_path):
@@ -177,7 +177,7 @@ def test_dry_run_counts_refusals_per_reason_and_prints_no_value(tmp_path):
 
 
 def test_the_digit_guard_is_its_own_reason_and_a_real_id_is_never_dropped_silently(tmp_path):
-    guarded = "a" * 8 + "1234567" + "b" * 8                                   # 23 chars of [a-z0-9] with a 7-digit run: a base36 Pulse uid that happens to hold one
+    guarded = "a" * 8 + "1234567890" + "b" * 8                                # 26 chars of [a-z0-9] with a 10-digit run: the phone-length guard (a 7-9 digit run is now a legal Pulse uid)
     f = write(tmp_path, [CUT | {"consult_uid": guarded}, CUT | {"consult_uid": "uid_with_underscore_xxxx"}])
     _, counts = P.build(f, "cutter", "o")
     assert counts["signals"] == 0 and counts["refused"] == 2

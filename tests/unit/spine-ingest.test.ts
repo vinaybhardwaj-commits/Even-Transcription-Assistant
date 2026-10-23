@@ -5,7 +5,7 @@ import { parseIngestMode } from "@/lib/spine/config";
 import { refuseKeys, validateSignals } from "@/lib/spine/signal-validate";
 
 const win = (over: Record<string, unknown> = {}) => ({
-  consult_key: "uidtestaaaaaaaaaaaaaaaaa@mach_test", consult_uid: "uidtestaaaaaaaaaaaaaaaaa", room_id: "room_abcd2345", t_open: "2026-10-18T04:00:00.000Z", t_close: "2026-10-18T04:10:00.000Z",
+  consult_key: "uidtestaaaaaaaaaaaaaaaaaaa@mach_test", consult_uid: "uidtestaaaaaaaaaaaaaaaaaaa", room_id: "room_abcd2345", t_open: "2026-10-18T04:00:00.000Z", t_close: "2026-10-18T04:10:00.000Z",
   close_reason: "endConsult", quality: "clean", computed_at: "2026-10-18T04:11:00.000Z", ...over,
 });
 const prior = (rows: ReturnType<typeof toSignals>): Prior => new Map(rows.map((s) => [s.source_key, { rev: s.source_rev, hash: signalHash({ ...s, close_reason: s.attrs.close_reason }) }]));
@@ -13,7 +13,7 @@ const prior = (rows: ReturnType<typeof toSignals>): Prior => new Map(rows.map((s
 describe("toSignals rev rule", () => {
   it("a new key is rev 1 and maps ids / quality / close_reason only", () => {
     const [s] = toSignals([win()], "pulse");
-    expect(s).toMatchObject({ proxy: "pulse", source_key: "uidtestaaaaaaaaaaaaaaaaa@mach_test", source_rev: 1, room_id: "room_abcd2345", t_close: "2026-10-18T04:10:00.000Z" });
+    expect(s).toMatchObject({ proxy: "pulse", source_key: "uidtestaaaaaaaaaaaaaaaaaaa@mach_test", source_rev: 1, room_id: "room_abcd2345", t_close: "2026-10-18T04:10:00.000Z" });
     expect(Object.keys(s.attrs).sort()).toEqual(["close_reason", "ids", "quality"]);
   });
   it("an unchanged row keeps its rev, whatever else moved (computed_at, quality, ISO spelling)", () => {
@@ -29,14 +29,14 @@ describe("toSignals rev rule", () => {
   it("an open window that closes is a new rev, and the next rev continues from the stored one", () => {
     const open = toSignals([win({ t_close: null, close_reason: "open" })], "pulse");
     expect(open[0].t_close).toBeNull();
-    const p = new Map([["uidtestaaaaaaaaaaaaaaaaa@mach_test", { rev: 4, hash: open[0] ? signalHash({ ...open[0], close_reason: "open" }) : "" }]]);
+    const p = new Map([["uidtestaaaaaaaaaaaaaaaaaaa@mach_test", { rev: 4, hash: open[0] ? signalHash({ ...open[0], close_reason: "open" }) : "" }]]);
     expect(toSignals([win()], "pulse", p)[0].source_rev).toBe(5);
   });
   it("acoustic and timeline map ms spans and closed_by", () => {
     const a = toSignals([{ id: "eh_abcdefghjkmn", room_day_id: "rd_abcd2345", room_id: "room_abcd2345", start_ms: "1760760000000", end_ms: 1760760600000, closed_by: "non_speech", created_at: "2026-10-18T05:00:00Z" }], "acoustic");
     expect(a[0]).toMatchObject({ proxy: "acoustic", source_key: `rd_abcd2345:${Math.floor(1760760000000 / 60000).toString(36)}`, t_open: "2025-10-18T04:00:00.000Z", attrs: { close_reason: "non_speech" } });
-    const t = toSignals([{ consult_key: "uidtestaaaaaaaaaaaaaaaaa@mach_test", id: "tl_test_01", run_id: "run_test_01", room_id: null, start_ms: 1760760000000, end_ms: 1760760600000, closed_by: "patient_left", created_at: "2026-10-18T05:00:00Z" }], "timeline");
-    expect(t[0]).toMatchObject({ proxy: "timeline", source_key: "uidtestaaaaaaaaaaaaaaaaa@mach_test", room_id: null });
+    const t = toSignals([{ consult_key: "uidtestaaaaaaaaaaaaaaaaaaa@mach_test", id: "tl_test_01", run_id: "run_test_01", room_id: null, start_ms: 1760760000000, end_ms: 1760760600000, closed_by: "patient_left", created_at: "2026-10-18T05:00:00Z" }], "timeline");
+    expect(t[0]).toMatchObject({ proxy: "timeline", source_key: "uidtestaaaaaaaaaaaaaaaaaaa@mach_test", room_id: null });
   });
   it("a row with no key or no open time is skipped", () => {
     expect(toSignals([win({ consult_key: null }), win({ t_open: null })], "pulse")).toEqual([]);
@@ -65,7 +65,7 @@ describe("key refusal and validation", () => {
     expect(refuseKeys({ a: { phone_no: 1 } })).toBe("text_key");
     expect(refuseKeys({ a: { b: { c: { PATIENT: 1 } } } })).toBe("text_key");
     expect(refuseKeys([{ a: [{ transcript_en: 1 }] }])).toBe("text_key");
-    expect(refuseKeys({ ids: { consult_uid: "uidtestaaaaaaaaaaaaaaaaa" }, quality: "clean" })).toBeNull();
+    expect(refuseKeys({ ids: { consult_uid: "uidtestaaaaaaaaaaaaaaaaaaa" }, quality: "clean" })).toBeNull();
   });
   it("refuses a pathologically deep body", () => {
     let o: Record<string, unknown> = {};
@@ -83,7 +83,7 @@ describe("key refusal and validation", () => {
     expect(bad([])).toBe("empty");
     expect(bad([{ ...good, proxy: "nope" }])).toBe("proxy");
     expect(bad([{ ...good, attrs: { extra: 1 } }])).toBe("attrs_key");
-    expect(bad([{ ...good, encounter_id: "uidtestaaaaaaaaaaaaaaaaa" }])).toBe("signal_key");
+    expect(bad([{ ...good, encounter_id: "uidtestaaaaaaaaaaaaaaaaaaa" }])).toBe("signal_key");
     expect(bad([{ ...good, source_rev: 0 }])).toBe("source_rev");
     expect(bad([{ ...good, t_open: "x" }])).toBe("t_open");
   });

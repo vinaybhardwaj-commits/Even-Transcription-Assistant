@@ -39,7 +39,7 @@ describe("REQUIRED PROOF — spine P2 runs against a real postgres", () => {
 const NOW = Date.parse("2026-10-18T08:00:00Z");
 const ROOM = "room_abcd2345";
 const iso = (h: number, m = 0) => `2026-10-18T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00Z`;
-const KA = "uidtestaaaaaaaaaaaaaaaaa@mach_test", KB = "uidtestbbbbbbbbbbbbbbbbb@mach_test";
+const KA = "uidtestaaaaaaaaaaaaaaaaaaa@mach_test", KB = "uidtestbbbbbbbbbbbbbbbbbbb@mach_test";
 const d = HAVE_DOCKER ? describe : describe.skip;
 /** The merge counts when the step ran (the skipped shape has none of these); toEqual({skipped}) still works on it. */
 type Ran = { mode: string; days: number; failed_days: number; encounters: number; enc_inserted: number; enc_updated: number; links_written: number; links_moved: number; assigned: number; held_frozen: number; ambiguous: number };

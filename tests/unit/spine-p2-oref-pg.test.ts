@@ -37,7 +37,7 @@ const d = HAVE ? describe : describe.skip;
 const NOW = Date.parse("2026-10-18T08:00:00Z");
 const ROOM = "room_abcd2345";
 const iso = (h: number, m = 0, day = 18) => `2026-10-${day}T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00Z`;
-const KA = "uidtestaaaaaaaaaaaaaaaaa@mach_test", KB = "uidtestbbbbbbbbbbbbbbbbb@mach_test";
+const KA = "uidtestaaaaaaaaaaaaaaaaaaa@mach_test", KB = "uidtestbbbbbbbbbbbbbbbbbbb@mach_test";
 const q = async (text: string): Promise<Array<Record<string, unknown>>> => (await H.tag!(Object.assign([text], { raw: [text] }) as unknown as TemplateStringsArray)) as Array<Record<string, unknown>>;
 const num = async (text: string) => Number(Object.values((await q(text))[0])[0]);
 const setConfig = (key: string, json: string) => pg.exec(`INSERT INTO spine_config (key, value) VALUES ('${key}', '${json}') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;`);
@@ -55,7 +55,7 @@ describe("oref pure: liftAttrs and the S1 shape (FINDING 1)", () => {
   const T = Date.parse("2026-10-18T04:00:00Z");
   const row = (proxy: string, o: number, c: number, attrs: unknown) => ({ proxy, source_key: KA, source_rev: 1, room_id: ROOM, t_open: new Date(T + o * 60_000).toISOString(), t_close: new Date(T + c * 60_000).toISOString(), encounter_id: null, attrs });
   // a pulse 0-10 and its timeline 9-30: overlap 1 min (< 50% of the shorter), so only the consult_key can join them
-  const rows = [row("pulse", 0, 10, { ids: { consult_key: KA, consult_uid: "uidtestaaaaaaaaaaaaaaaaa" }, close_reason: "endConsult" }), row("timeline", 9, 30, { ids: { consult_key: KA }, close_reason: "patient_left" })];
+  const rows = [row("pulse", 0, 10, { ids: { consult_key: KA, consult_uid: "uidtestaaaaaaaaaaaaaaaaaaa" }, close_reason: "endConsult" }), row("timeline", 9, 30, { ids: { consult_key: KA }, close_reason: "patient_left" })];
   it("raw S1-shaped attrs: no key match (2 encounters); lifted: one encounter (the mismatch is real)", () => {
     const raw = rows.map((r) => ({ ...toSignal(r), attrs: r.attrs as Record<string, unknown> })) as SpineSignal[];
     const now = T + 6 * 3_600_000;
@@ -220,7 +220,7 @@ d("oref P2 on postgres:16 with all migrations", () => {
       CREATE TRIGGER oref_poison BEFORE INSERT OR UPDATE ON spine_encounter FOR EACH ROW EXECUTE FUNCTION oref_poison_fn();`);
     pulse(KA, iso(4), iso(4, 10), { room: "room_aaaa", received: iso(6, 0) });
     pulse(KB, iso(4), iso(4, 10), { room: "room_poison", received: iso(6, 1) });
-    pulse("uidtestcccccccccccccccccc@mach_test", iso(4), iso(4, 10), { room: "room_cccc", received: iso(6, 2) });
+    pulse("uidtestccccccccccccccccccc@mach_test", iso(4), iso(4, 10), { room: "room_cccc", received: iso(6, 2) });
     const c1 = await runSpineMerge(NOW);
     expect(c1).toMatchObject({ days: 3, failed_days: 1 });
     expect(await num("SELECT count(*) FROM spine_encounter")).toBe(2);                    // atomic: nothing of the poison day
@@ -238,7 +238,7 @@ d("oref P2 on postgres:16 with all migrations", () => {
   it("PERF: the IST range predicate of loadDay selects exactly the rows of the old (t_open AT TIME ZONE ..)::date = day predicate, incl. IST midnight edges", async () => {
     const edges = ["2026-10-17T18:29:59.999Z", "2026-10-17T18:30:00Z", "2026-10-17T18:30:00.001Z", "2026-10-18T12:00:00Z", "2026-10-18T18:29:59.999999Z", "2026-10-18T18:30:00Z", "2026-10-18T18:30:00.000001Z", "2026-10-19T05:00:00Z"];
     edges.forEach((t, i) => pulse(`uidtest${String(i).padStart(2, "e")}aaaaaaaaaaaaaaa@mach_test`, t, null));
-    pulse("uidtestzzzzzzzzzzzzzzzzzz@mach_test", iso(18, 30), null, { room: "room_other" });
+    pulse("uidtestzzzzzzzzzzzzzzzzzzz@mach_test", iso(18, 30), null, { room: "room_other" });
     for (const day of ["2026-10-17", "2026-10-18", "2026-10-19", "2026-10-20"]) {
       const oldIds = await q(`SELECT source_key FROM spine_signal WHERE room_id = '${ROOM}' AND (t_open AT TIME ZONE 'Asia/Kolkata')::date = '${day}'::date ORDER BY source_key`);
       const newIds = await q(`SELECT source_key FROM spine_signal WHERE room_id = '${ROOM}' AND t_open >= (('${day}'::date)::timestamp AT TIME ZONE 'Asia/Kolkata') AND t_open < ((('${day}'::date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata') ORDER BY source_key`);
@@ -269,10 +269,10 @@ d("oref P2 on postgres:16 with all migrations", () => {
     expect(await runSpineMerge(NOW)).toMatchObject({ failed_days: 1, skipped_days: 1 });
     expect(await cur()).toMatchObject({ cursor_room: "room_aaaa", failing: [{ k: "room_poison|2026-10-18", n: 3 }], skipped_keys: ["room_poison|2026-10-18"] });
     expect(await runSpineMerge(NOW)).toMatchObject({ days: 1, failed_days: 1, skipped_days: 1 });   // still inside the cursor's recent window (its signal is unassigned): retried, skipped again, never blocking
-    pulse("uidtestcccccccccccccccccc@mach_test", iso(5), iso(5, 10), { room: "room_poison", received: iso(7, 0) });
+    pulse("uidtestccccccccccccccccccc@mach_test", iso(5), iso(5, 10), { room: "room_poison", received: iso(7, 0) });
     expect(await runSpineMerge(NOW)).toMatchObject({ days: 1, failed_days: 1, skipped_days: 1 });   // a later signal retries it (still failing: skipped again, never blocking)
     pg.exec("DROP TRIGGER oref_poison ON spine_encounter;");
-    pulse("uidtestdddddddddddddddddd@mach_test", iso(5, 20), iso(5, 30), { room: "room_poison", received: iso(7, 5) });
+    pulse("uidtestddddddddddddddddddd@mach_test", iso(5, 20), iso(5, 30), { room: "room_poison", received: iso(7, 5) });
     expect(await runSpineMerge(NOW)).toMatchObject({ days: 1, failed_days: 0, skipped_days: 0 });
     expect((await cur()).failing).toEqual([]);
   });

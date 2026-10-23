@@ -27,6 +27,9 @@ u AS (
   RETURNING 1
 ) SELECT count(*)::int AS superseded FROM u`;
 
+/** Rows per status over every spine_job of the pass's encounters, read AFTER the insert: a rerun tick (shadow 0, by_stage {}) still shows what is there. */
+export const TOTALS_SQL = `SELECT status, count(*)::int AS n FROM spine_job WHERE encounter_id IN (SELECT jsonb_array_elements_text($1::jsonb)) GROUP BY status`;
+
 export const INSERT_SQL = `
 WITH ins AS (
   INSERT INTO spine_job (encounter_id, stage, cut_version, input_key, status)
@@ -42,7 +45,7 @@ WITH ins AS (
 
 export type EnqueueCounts =
   | { skipped: "off" }
-  | { jobs: "shadow" | "live"; encounters: number; planned: number; shadow: number; queued: number; superseded: number; by_stage: Record<string, number>; ambiguous_no_freescript: number };
+  | { jobs: "shadow" | "live"; encounters: number; planned: number; shadow: number; queued: number; superseded: number; by_stage: Record<string, number>; ambiguous_no_freescript: number; totals: Record<string, number> };
 
 export async function runSpineEnqueue(now: number): Promise<EnqueueCounts> {
   const m = await readModes(FREE_STAGES);
@@ -70,8 +73,10 @@ export async function runSpineEnqueue(now: number): Promise<EnqueueCounts> {
     by_stage[String(r.stage)] = (by_stage[String(r.stage)] ?? 0) + n;
     if (r.status === "shadow") shadow += n; else queued += n;
   }
+  const totals: Record<string, number> = {};
+  if (encs.length) for (const r of await q()(TOTALS_SQL, [JSON.stringify(encs.map((e) => e.encounter_id))])) totals[String(r.status)] = Number(r.n);
   const ambiguous_no_freescript = encs.filter((e) => (e.status === "confirmed" || e.status === "confirmed_single_proxy") && e.flags.includes("ambiguous") && stagesFor(e, now).length > 0).length;
-  const counts = { jobs: m.jobs as "shadow" | "live", encounters: encs.length, planned: plan.length, shadow, queued, superseded: Number(s[0]?.superseded ?? 0), by_stage, ambiguous_no_freescript };
+  const counts = { jobs: m.jobs as "shadow" | "live", encounters: encs.length, planned: plan.length, shadow, queued, superseded: Number(s[0]?.superseded ?? 0), by_stage, ambiguous_no_freescript, totals };
   await q()("INSERT INTO spine_tick (kind, counts) VALUES ($1, $2::jsonb)", ["enqueue", JSON.stringify(counts)]);
   return counts;
 }

@@ -1,5 +1,5 @@
 {
- "_comment": "Shared by tests/unit/spine-phi.test.ts (TS) and tools/eta-spine/tests/test_phi_screen.py (Python). Synthetic only. Placeholders {MS13} {P16} {PHONE10} {PLUS_PHONE} {DIG7} {DIG8} {DIG9} are filled by both tests at run time, so no digit run of 8+ sits in this file. R3: per-key id formats, value cases and key cases ported from the Opus refute (.bc/oref-r2-tests).",
+ "_comment": "Shared by tests/unit/spine-phi.test.ts (TS) and tools/eta-spine/tests/test_phi_screen.py (Python). Synthetic only. Placeholders {MS13} {P16} {PHONE10} {PLUS_PHONE} {DIG7} {DIG8} {DIG9} are filled by both tests at run time, so no digit run of 8+ sits in this file. R3: per-key id formats, value cases and key cases ported from the Opus refute (.bc/oref-r2-tests). N2 (23 Oct): consult_uid / consult_key Pulse form is exactly 26 [a-z0-9] with the pulse_enc_id guards (10-run, letter). The letter lookahead is implied by the 10-run guard (26 digits always hold a 10-run), so an all-digit value is pinned as the plain reason, never .digit_run (n2_*_all_digit cases).",
  "enums": {
   "pulse": {
    "close_reason": [
@@ -177,7 +177,7 @@
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "consult_uid": "uidtestaaaaaaaaaaaaaaaaa",
+      "consult_uid": "uidtestaaaaaaaaaaaaaaaaaaa",
       "pqm_step_uid": "a1b2c3d4e5f6a7b8c9d0"
      },
      "quality": "pqm",
@@ -190,12 +190,12 @@
    "expect": "ok",
    "signal": {
     "proxy": "pulse",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "consult_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test"
+      "consult_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test"
      }
     }
    }
@@ -308,7 +308,7 @@
    "expect": "422",
    "signal": {
     "proxy": "pulse",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -354,8 +354,8 @@
   }
  ],
  "good_ids": {
-  "consult_uid": "uidtestaaaaaaaaaaaaaaaaa",
-  "consult_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+  "consult_uid": "uidtestaaaaaaaaaaaaaaaaaaa",
+  "consult_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
   "pqm_step_uid": "a1b2c3d4e5f6a7b8c9d0",
   "window_id": "bw_abcd2345_{MS13}_primary",
   "room_id": "room_abcd2345",
@@ -366,27 +366,32 @@
   "shadow_id": "et_0a1b2c3d4e5f6a7b8c"
  },
  "good_source_key": {
-  "pulse": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
-  "timeline": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+  "pulse": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
+  "timeline": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
   "acoustic": "rd_abcd2345:z9x8k",
   "pqm": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
-  "cutter": "uidtestaaaaaaaaaaaaaaaaa",
-  "caa": "uidtestaaaaaaaaaaaaaaaaa",
+  "cutter": "uidtestaaaaaaaaaaaaaaaaaaa",
+  "caa": "uidtestaaaaaaaaaaaaaaaaaaa",
   "nemotron_window": "bw_abcd2345_{MS13}_primary"
  },
  "formats_accept": {
   "consult_uid": [
    "pqm_a1b2c3d4e5f6a7b8c9d0e1",
    "pqm_0f9e8d7c6b5a4f3e2d1c0b",
-   "uidtestaaaaaaaaaaaaaaaaa",
-   "abcdefghij0123abcdef",
-   "a1b2c3d4e5f6a7b8c9d0e1f2",
-   "abcdefghjk234567abcdefghjk234567"
+   "pqm_{DIG9}{DIG9}abcd",
+   "uidtestaaaaaaaaaaaaaaaaaaa",
+   "abcdefghij0123abcdefghij01",
+   "a1b2c3d4e5f6a7b8c9d0e1f2g3",
+   "abc{DIG7}defghijklmnopqrs",
+   "ab{DIG9}cdefghijklmnopq"
   ],
   "consult_key": [
-   "uidtestaaaaaaaaaaaaaaaaa@mach_test",
-   "abcdefghij0123abcdef@EHRC-TEST1s-Mac-mini",
-   "a1b2c3d4e5f6a7b8c9d0e1f2@opd-1_mini"
+   "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
+   "abcdefghij0123abcdefghij01@EHRC-TEST1s-Mac-mini",
+   "a1b2c3d4e5f6a7b8c9d0e1f2g3@opd-1_mini",
+   "ab{DIG9}cdefghijklmnopq@m.1",
+   "abc{DIG7}defghijklmnopqrs@m1",
+   "uidtestaaaaaaaaaaaaaaaaaaa@Z"
   ],
   "pqm_step_uid": [
    "a1b2c3d4e5f6a7b8c9d0",
@@ -442,8 +447,8 @@
   "{PLUS_PHONE}",
   "Ravi Kumar",
   "",
-  "uidtestaaaaaaaaaaaaaaaaa\n",
-  "uidtestaaaaaaaaaaaaaaaaa ",
+  "uidtestaaaaaaaaaaaaaaaaaaa\n",
+  "uidtestaaaaaaaaaaaaaaaaaaa ",
   "\uff11\uff12\uff13",
   "enc_test\u200baaaaaaaaaaaa",
   "ENC_TESTAAAAAAAAAAAA",
@@ -461,22 +466,48 @@
    "enc_phone{DIG7}x",
    "uidtest_aaaaaaaaaaaaaaaa",
    "11111111-2222-4333-8444-555555555555",
+   "{DIG7}{DIG7}{DIG7}{DIG7}",
+   "abcdefghij0123abcdef",
+   "a1b2c3d4e5f6a7b8c9d0e1f2",
+   "abcdefghij0123abcdefghij0",
+   "abcdefghij0123abcdefghij012",
+   "abcdefghjk234567abcdefghjk234567",
+   "ab{PHONE10}abcdefghijklmn",
+   "{PHONE10}{PHONE10}123456",
+   "{DIG9}{DIG9}{DIG8}",
+   "uhid{PHONE10}abcdefghijkl",
+   "EHRC{DIG8}ABCDEFGHIJKLMNOPQR",
+   "UH-{DIG8}abcdefghijklmnopq",
+   "pqm_a1b2c3d4e5f6a7b8c9d0e1ab",
    "abcdefghij0123abcde",
    "abcdefghij0123abcdefghij0123abcde",
-   "ABCDEFGHIJ0123ABCDEF",
-   "abcdefghij{DIG7}abcdef",
-   "{DIG7}{DIG7}{DIG7}{DIG7}"
+   "ABCDEFGHIJ0123ABCDEF"
   ],
   "consult_key": [
-   "uidtestaaaaaaaaaaaaaaaaa",
-   "uidtestaaaaaaaaaaaaaaaaa@",
+   "uidtestaaaaaaaaaaaaaaaaaaa",
+   "uidtestaaaaaaaaaaaaaaaaaaa@",
    "@mach_test",
-   "uidtestaaaaaaaaaaaaaaaaa@mach test",
-   "uidtestaaaaaaaaaaaaaaaaa@m_{DIG7}",
+   "uidtestaaaaaaaaaaaaaaaaaaa@mach test",
+   "uidtestaaaaaaaaaaaaaaaaaaa@m_{DIG7}",
    "pqm_a1b2c3d4e5f6a7b8c9d0e1@pqm",
    "enc_x1y2z3@ramesh-9845",
    "enc_ramesh@mach_test",
-   "11111111-2222-4333-8444-555555555555@m1"
+   "11111111-2222-4333-8444-555555555555@m1",
+   "abcdefghij0123abcdef@mach_test",
+   "a1b2c3d4e5f6a7b8c9d0e1f2@mach_test",
+   "abcdefghjk234567abcdefghjk234567@mach_test",
+   "abcdefghij0123abcdefghij012@mach_test",
+   "ab{PHONE10}abcdefghijklmn@mach_test",
+   "{PHONE10}{PHONE10}123456@mach_test",
+   "{DIG9}{DIG9}{DIG8}@mach_test",
+   "uidtestaaaaaaaaaaaaaaaaaaa@m_{PHONE10}",
+   "EHRC{DIG8}ABCDEFGHIJKLMNOPQR@mach_test",
+   "UH-{DIG8}abcdefghijklmnopq@mach_test",
+   "uhid{PHONE10}abcdefghijkl@mach_test",
+   "uidtestaaaaaaaaaaaaaaaaaaa@@mach_test",
+   "uidtestaaaaaaaaaaaaaaaaaaa@-mach",
+   "uidtestaaaaaaaaaaaaaaaaaaa@mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+   "UIDTESTAAAAAAAAAAAAAAAAAAA@mach_test"
   ],
   "pqm_step_uid": [
    "step_test_01",
@@ -868,7 +899,7 @@
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "Consult_uid": "uidtestaaaaaaaaaaaaaaaaa"
+      "Consult_uid": "uidtestaaaaaaaaaaaaaaaaaaa"
      }
     }
    }
@@ -883,7 +914,7 @@
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "consult_uid\u200b": "uidtestaaaaaaaaaaaaaaaaa"
+      "consult_uid\u200b": "uidtestaaaaaaaaaaaaaaaaaaa"
      }
     }
    }
@@ -893,7 +924,7 @@
    "expect": "ok",
    "signal": {
     "proxy": "pulse",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -906,7 +937,7 @@
    "expect": "ok",
    "signal": {
     "proxy": "timeline",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -956,7 +987,7 @@
    "expect": "attrs_quality",
    "signal": {
     "proxy": "caa",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1085,7 +1116,7 @@
    "expect": "ok",
    "signal": {
     "proxy": "cutter",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1099,7 +1130,7 @@
    "expect": "ok",
    "signal": {
     "proxy": "cutter",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1112,7 +1143,7 @@
    "expect": "ok",
    "signal": {
     "proxy": "cutter",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1174,12 +1205,12 @@
    "expect": "ok",
    "signal": {
     "proxy": "timeline",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "consult_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+      "consult_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
       "shadow_id": "et_0a1b2c3d4e5f6a7b8c",
       "run_id": "ets_0a1b2c3d4e5f6a7b8c"
      },
@@ -1212,12 +1243,12 @@
    "expect": "ok",
    "signal": {
     "proxy": "cutter",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
      "ids": {
-      "consult_uid": "uidtestaaaaaaaaaaaaaaaaa",
+      "consult_uid": "uidtestaaaaaaaaaaaaaaaaaaa",
       "window_id": "{P16}"
      },
      "quality": "cut"
@@ -1230,7 +1261,7 @@
    "expect": "source_key",
    "signal": {
     "proxy": "acoustic",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {}
@@ -1241,7 +1272,7 @@
    "expect": "source_key",
    "signal": {
     "proxy": "pulse",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {}
@@ -1263,7 +1294,7 @@
    "expect": "source_key",
    "signal": {
     "proxy": "pqm",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {}
@@ -1285,7 +1316,7 @@
    "expect": "source_key",
    "signal": {
     "proxy": "doctor_activity",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {}
@@ -1307,7 +1338,7 @@
    "expect": "source_key",
    "signal": {
     "proxy": "nemotron_window",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {}
@@ -1373,9 +1404,9 @@
    }
   },
   {
-   "label": "r4_cutter_source_digit_run",
+   "label": "r4_cutter_source_short_with_run",
    "expect": "source_key",
-   "reason": "source_key.digit_run",
+   "reason": "source_key",
    "signal": {
     "proxy": "cutter",
     "source_key": "abcdefghij{DIG7}abcdef",
@@ -1460,7 +1491,7 @@
    "reason": "attrs_ids.pulse_enc_id.digit_run",
    "signal": {
     "proxy": "pulse",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1476,7 +1507,7 @@
    "reason": null,
    "signal": {
     "proxy": "pulse",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa@mach_test",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1508,7 +1539,7 @@
    "reason": "attrs_ids.pulse_enc_id.proxy",
    "signal": {
     "proxy": "cutter",
-    "source_key": "uidtestaaaaaaaaaaaaaaaaa",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa",
     "t_open": "2026-10-18T04:00:00Z",
     "observed_at": "2026-10-18T04:20:00Z",
     "attrs": {
@@ -1588,6 +1619,242 @@
     "attrs": {
      "ids": {
       "window_id": "bw_abcd2345_{MS13}_primary"
+     }
+    }
+   }
+  },
+  {
+   "label": "n2_uid_pulse_form_7run_ok",
+   "expect": "ok",
+   "reason": null,
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "abc{DIG7}defghijklmnopqrs"
+     }
+    }
+   }
+  },
+  {
+   "label": "n2_uid_pulse_form_phone10_run",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.consult_uid.digit_run",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "ab{PHONE10}abcdefghijklmn"
+     }
+    }
+   }
+  },
+  {
+   "label": "n2_uid_all_digit_is_plain_not_digit_run",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.consult_uid",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "{DIG9}{DIG9}{DIG8}"
+     }
+    }
+   }
+  },
+  {
+   "label": "n2_uid_wrong_length_24",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.consult_uid",
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_a1b2c3d4e5f6a7b8c9d0e1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "a1b2c3d4e5f6a7b8c9d0e1f2"
+     }
+    }
+   }
+  },
+  {
+   "label": "n2_uid_pqm_hex_with_digit_run_ok",
+   "expect": "ok",
+   "reason": null,
+   "signal": {
+    "proxy": "pqm",
+    "source_key": "pqm_{DIG9}{DIG9}abcd",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_uid": "pqm_{DIG9}{DIG9}abcd"
+     }
+    }
+   }
+  },
+  {
+   "label": "n2_key_pulse_real_form_ok",
+   "expect": "ok",
+   "reason": null,
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "abc{DIG7}defghijklmnopqrs@m1",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_key": "abc{DIG7}defghijklmnopqrs@m1"
+     }
+    }
+   }
+  },
+  {
+   "label": "n2_key_phone_before_at",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.consult_key.digit_run",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_key": "ab{PHONE10}abcdefghijklmn@mach_test"
+     }
+    }
+   }
+  },
+  {
+   "label": "n2_key_machine_7run",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.consult_key.digit_run",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_key": "uidtestaaaaaaaaaaaaaaaaaaa@m_{DIG7}"
+     }
+    }
+   }
+  },
+  {
+   "label": "n2_key_wrong_length_24",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.consult_key",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_key": "a1b2c3d4e5f6a7b8c9d0e1f2@mach_test"
+     }
+    }
+   }
+  },
+  {
+   "label": "n2_key_all_digit_is_plain",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.consult_key",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "consult_key": "{DIG9}{DIG9}{DIG8}@mach_test"
+     }
+    }
+   }
+  },
+  {
+   "label": "n2_source_pulse_phone_before_at",
+   "expect": "source_key",
+   "reason": "source_key.digit_run",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "ab{PHONE10}abcdefghijklmn@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "n2_source_pulse_machine_7run",
+   "expect": "source_key",
+   "reason": "source_key.digit_run",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@m_{DIG7}",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "n2_source_pulse_wrong_length",
+   "expect": "source_key",
+   "reason": "source_key",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "a1b2c3d4e5f6a7b8c9d0e1f2@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "n2_source_cutter_phone10_run",
+   "expect": "source_key",
+   "reason": "source_key.digit_run",
+   "signal": {
+    "proxy": "cutter",
+    "source_key": "ab{PHONE10}abcdefghijklmn",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "n2_source_cutter_26_ok",
+   "expect": "ok",
+   "reason": null,
+   "signal": {
+    "proxy": "cutter",
+    "source_key": "abc{DIG7}defghijklmnopqrs",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {}
+   }
+  },
+  {
+   "label": "n2_pulse_enc_id_all_digit_is_plain",
+   "expect": "attrs_ids",
+   "reason": "attrs_ids.pulse_enc_id",
+   "signal": {
+    "proxy": "pulse",
+    "source_key": "uidtestaaaaaaaaaaaaaaaaaaa@mach_test",
+    "t_open": "2026-10-18T04:00:00Z",
+    "observed_at": "2026-10-18T04:20:00Z",
+    "attrs": {
+     "ids": {
+      "pulse_enc_id": "{DIG9}{DIG9}{DIG8}"
      }
     }
    }
