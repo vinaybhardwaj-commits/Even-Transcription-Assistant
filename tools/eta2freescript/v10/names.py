@@ -100,7 +100,7 @@ def detector_tokens(text: str, limit: int = 3, fallback: bool = True) -> str | N
         # after a name cue or a possessive, or right after a capitalised out-of-dictionary word (a first name before the surname the detector happens to know)
         return prev.lower() in _NAME_CUES or prev.endswith(("'s", "’s")) or (prev[:1].isupper() and not words.t2_allowed(prev))
 
-    given, exact = words.given_names(), drugs.strong_names()
+    given, exact = words.name_list(), drugs.strong_names() | drugs.english_word_names()  # a catalogue English-word brand head (Pan) is a catalogue name too
 
     def a_name(tok: str) -> bool:
         """Fix3e ruling 4: a token on the published given-name list (any case: Dylan, DYLAN, dylan) is never kept as a drug unless it is an exact strong catalogue name."""

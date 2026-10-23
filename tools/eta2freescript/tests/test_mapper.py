@@ -89,9 +89,9 @@ def test_social_and_place_detail_kept_out_unless_relevant():
     a = art_of(chief_complaint={"text": "Fever", "basis": "said", "source_turns": [1]},
                history=[{"type": "social", "text": "Runs a shop", "basis": "said", "clinically_relevant": False, "source_turns": [1]},
                         {"type": "place", "text": "Came by train", "basis": "said", "source_turns": [1]},
-                        {"type": "occupation", "text": "Works with dust", "basis": "said", "clinically_relevant": True, "source_turns": [1]}])
+                        {"type": "occupation", "text": "Exposed to dust", "basis": "said", "clinically_relevant": True, "source_turns": [1]}])
     sym = a["gp_extraction"]["presenting_complaints"]["symptoms"]
-    assert "shop" not in sym and "train" not in sym and "Hx - Works with dust" in sym
+    assert "shop" not in sym and "train" not in sym and "Hx - Exposed to dust" in sym
     assert len(kept(a, "[history:")) == 2
 
 

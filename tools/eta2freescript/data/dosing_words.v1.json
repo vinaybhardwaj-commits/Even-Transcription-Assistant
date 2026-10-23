@@ -269,5 +269,28 @@
   "saunf",
   "elaichi",
   "kesar"
- ]
+ ],
+ "dose_form_nouns": [
+  "cap",
+  "capsool",
+  "capsule",
+  "cream",
+  "dawa",
+  "dawai",
+  "drops",
+  "gel",
+  "goli",
+  "inhaler",
+  "inj",
+  "injection",
+  "medication",
+  "medicine",
+  "ointment",
+  "puff",
+  "sachet",
+  "syrup",
+  "tab",
+  "tablet"
+ ],
+ "dose_form_nouns_note": "Fix3f (23 Oct 2026): a dose-form or medicine noun is a drug signal by itself outside Medication (plural forms by rule); a class phrase (pressure medicine, sugar tablet, BP tablet) holds one."
 }

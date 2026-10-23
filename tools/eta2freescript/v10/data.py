@@ -25,6 +25,7 @@ WHITELIST_ABBREV = DATA / "whitelist_abbrev.v1.json"
 SUPPORT_HEDGES = DATA / "support_hedges.v1.json"
 NUMBER_HOMOGRAPHS = DATA / "number_homographs.v1.json"
 GIVEN_NAMES = DATA / "given_names.v1.json"
+SURNAMES = DATA / "surnames.v1.json"
 ANALYTES = DATA / "slots" / "analytes.v1.json"
 SLOT_BOUNDS = DATA / "slots" / "slot_bounds.v1.json"
 DICTIONARY_FILES = (CONTRACT / "scowl_words.json", CONTRACT / "english_words_min.json",
@@ -63,6 +64,7 @@ def provenance() -> dict:
         "support_hedges_sha256": file_sha(SUPPORT_HEDGES),
         "number_homographs_sha256": file_sha(NUMBER_HOMOGRAPHS),
         "given_names_sha256": file_sha(GIVEN_NAMES),
+        "surnames_sha256": file_sha(SURNAMES),
         "catalogue_snapshot_sha256": file_sha(CATALOGUE_FILE),
         "catalogue_snapshot_date": str(cat.get("version") or ""),
         "dosing_words_sha256": file_sha(DOSING_WORDS),

@@ -74,9 +74,6 @@ class Violation:
     detail: str
 
 
-_FORMS = frozenset("tablet tablets tab tabs pill pills capsule capsules cap caps injection injections inj syrup drops ointment cream inhaler".split())
-
-
 def _covered(n: Num, spans_: Iterable[tuple[int, int]]) -> bool:
     return any(a <= n.start and n.end <= b for a, b in spans_)
 
@@ -218,17 +215,14 @@ class NumberGate:
         t = re.sub(r"\u27e6S\d+\u27e7", " ", text)
         if any(f.reason in ("catalogue", "denylist", "fuzzy", "phonetic") for f in drugs.flags(t)):  # strong / fuzzy / phonetic hits; an English-word brand needs the capitalised-brand rule below
             return True
-        fl = drugs.flags(t)
-        toks_ = words.tokenize(t)
-        lows_ = [tk.low for tk in toks_]
-        for f in fl:  # an English-word brand ("sugar", "calm") beside a dose-form noun ("sugar tablet") is a medicine named by its class
-            if f.reason == "catalogue_english_word":
-                i = next((j for j, tk in enumerate(toks_) if tk.start == f.start), None)
-                if i is not None and _FORMS & set(lows_[max(0, i - 3):i + 4]):
-                    return True
-        tagged = self.in_drug_unit(t, turns)
+        from . import names as _names
+        t = t.replace(_names.PLAN_LINE, " ").replace(_names.DRAFT_LINE, " ")  # lines the code itself writes
+        lows_ = [tk.low for tk in words.tokenize(t) if tk.is_word]
+        if words.dose_form_nouns() & set(lows_):  # Fix3f a: a dose-form or medicine noun is a drug signal by itself (a class phrase holds one)
+            return True
         if set(turns or ()) & self.drug_spans and any(words.is_dosing_word(w) for w in lows_):  # a unit that cites a tagged turn and holds a dosing word is drug talk
             return True
+        tagged = self.in_drug_unit(t, turns)
         if tagged:
             toks, _p = self._tagged_index()
             if any(tk.low in toks for tk in words.tokenize(t) if tk.is_word and len(tk.text) >= 3 and (tk.text[0].isupper() or tk.low not in words.common_english())):

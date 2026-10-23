@@ -208,7 +208,8 @@ def note_final(gate: NumberGate, art: dict, c, note_tok: str, *, allowed=None) -
         for line in secs.get(h) or []:
             if h == "Medication":
                 viol = gate.final_check(line, None, [])
-                if any(tk.low in words.given_names() and tk.low not in drugs.strong_names() for tk in words.tokenize(line) if tk.is_word):
+                body = line.replace(names_mod.DRAFT_LINE, " ").replace(names_mod.PLAN_LINE, " ")  # lines the code writes
+                if any(tk.low in words.name_list() and tk.low not in drugs.strong_names() and tk.low not in words.dictionary() for tk in words.tokenize(body) if tk.is_word):
                     viol.append(Violation("possible_name", "pn"))  # Fix3e ruling 4: a name never stands in the Medication line (the drug block already drops it at source)
                 lines.append(line)
             else:
