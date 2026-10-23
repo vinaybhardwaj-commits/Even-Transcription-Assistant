@@ -1,5 +1,7 @@
 import os, sys, tempfile, unittest
 from datetime import datetime, timedelta, timezone
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import safenet      # FR1 D7-4: scratch GUARDIAN_HOME / inbox / shim BEFORE any router module is imported
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "router"))
 import alert_router as ar
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'subscriber'))

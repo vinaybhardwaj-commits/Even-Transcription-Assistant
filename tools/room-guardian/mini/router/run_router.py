@@ -19,13 +19,20 @@ alert_router.Router.log_fn = staticmethod(log)      # FR1 D7: denied ack reads, 
 
 
 _whoami_logged = None
+STARTUP_RETRY_S, STARTUP_WINDOW_S = 30, 300      # FR1 D7-3 item 6 / D7-4: a failed startup check is retried 30 s after the failed attempt, until 300 s after the first one
+
+
+def whoami_line(handle, registered, why):
+    """FR1 D7-4 NIT-2: the one line each identity check logs. Metadata only."""
+    return f"whoami handle={'none' if handle is None else str(handle)[:60]} session={ubus_bus.SESSION} registered={'none' if registered is None else registered} why={str(why)[:80]}"
 
 
 class LazyBus:
     """Starts the ubus shim only when the tick has something to say or read (most ticks: nothing open). A failed start (FR1 D7: an identity
-    mismatch on ubus_whoami) is remembered for the rest of the tick, so one tick starts the shim at most once and sends nothing."""
-    def __init__(self, cfg):
-        self.cfg, self.b, self.err = cfg, None, None
+    mismatch on ubus_whoami) is remembered for the rest of the tick, so one tick starts the shim at most once and sends nothing.
+    quiet=True (the startup check): logs nothing itself; startup_check logs its own whoami line on every attempt."""
+    def __init__(self, cfg, quiet=False):
+        self.cfg, self.b, self.err, self.quiet = cfg, None, None, quiet
 
     def _bus(self):
         if self.err is not None:
@@ -35,13 +42,14 @@ class LazyBus:
                 self.b = ubus_bus.UbusBus(self.cfg)
             except Exception as e:
                 self.err = e
-                log(f"bus start failed: {e.__class__.__name__}: {str(e)[:120]}")
+                if not self.quiet:
+                    log(f"bus start failed: {e.__class__.__name__}: {str(e)[:120]}")
                 raise
             global _whoami_logged
             idn = getattr(self.b, "identity", None)
-            if idn != _whoami_logged:                 # the first start of this process, and any change after it: one line
+            if not self.quiet and idn != _whoami_logged:      # the first start of this process, and any change after it: one line
                 _whoami_logged = idn
-                log(f"whoami handle={idn and idn.get('handle')} session={ubus_bus.SESSION} registered={idn and idn.get('registered')}")
+                log(whoami_line(idn and idn.get("handle"), idn and idn.get("registered"), "ok"))
         return self.b
 
     def post(self, *a):
@@ -56,18 +64,34 @@ class LazyBus:
 
 
 def startup_check(router, cfg):
-    """FR1 D7-2: at startup, one shim start and the whoami check even with nothing due, so a wrong identity shows at once (the whoami line, or
-    the ROUTER SILENT line through router.identity_alarm). Returns True when the identity is right."""
-    bus = LazyBus(cfg)
+    """FR1 D7-2: at startup, one shim start and the whoami check even with nothing due, so a wrong identity shows at once (the ROUTER SILENT line
+    through router.identity_alarm). D7-4: every attempt logs one whoami line, with why= (ok, or the refusal). Returns True when the identity is right."""
+    global _whoami_logged
+    bus = LazyBus(cfg, quiet=True)
     try:
         bus._bus()
+        idn = bus.b.identity
+        _whoami_logged = idn                              # the tick-time LazyBus does not repeat this line
+        log(whoami_line(idn.get("handle"), idn.get("registered"), "ok"))
         return True
     except Exception as e:
         if getattr(e, "identity", None) is not None:
             router.identity_alarm(e.identity)
+            log(whoami_line(e.handle, e.registered, e))
+        else:
+            log(whoami_line(None, None, f"{e.__class__.__name__}: {e}"))
         return False
     finally:
         bus.close()
+
+
+def try_startup(router):
+    """One startup_check attempt that never raises."""
+    try:
+        return bool(startup_check(router, ubus_bus.load_cfg()))
+    except Exception as e:                               # never fatal: the loop retries
+        log(f"startup check failed: {e.__class__.__name__}: {str(e)[:120]}")
+        return False
 
 
 def main():
@@ -80,22 +104,16 @@ def main():
     router = alert_router.Router(store, ubus_bus.UbusBus, time.time, os.path.join(HOME, "data", "router-local.json"),
                                  lambda: alert_router.guardian_size_lines(HOME))
     log(f"router started pid={os.getpid()}")
-    # FR1 D7-3 item 6: retry startup_check every 30 s for up to 300 s (an old shim's claim can stay live for 3 min after SIGKILL)
-    startup_ok, startup_first_fail = False, None
-    try:
-        startup_ok = startup_check(router, ubus_bus.load_cfg())
-        if not startup_ok:
-            startup_first_fail = time.time()
-    except Exception as e:                           # never fatal: the loop below retries
-        log(f"startup check failed: {e.__class__.__name__}: {str(e)[:120]}")
-        startup_first_fail = time.time()
+    # FR1 D7-3 item 6 / D7-4 NIT-1: a failed startup check is retried every 30 s (the first retry 30 s after the failed attempt), up to 300 s after
+    # the first attempt, interleaved with normal ticks (an old shim's claim can stay live for 3 min after SIGKILL). Never after a success.
+    first_try = time.time()
+    startup_ok = try_startup(router)
+    next_try = time.time() + STARTUP_RETRY_S
     while True:
-        # retry startup_check if it has not yet succeeded, and we are within 300 s of the first failure
-        if not startup_ok and startup_first_fail is not None and (time.time() - startup_first_fail) < 300:
-            try:
-                startup_ok = startup_check(router, ubus_bus.load_cfg())
-            except Exception as e:
-                log(f"startup check retry: {e.__class__.__name__}: {str(e)[:120]}")
+        now = time.time()
+        if not startup_ok and now >= next_try and now - first_try <= STARTUP_WINDOW_S:
+            startup_ok = try_startup(router)
+            next_try = time.time() + STARTUP_RETRY_S
         try:
             cfg = ubus_bus.load_cfg()
             alert_router.ACKERS = set(cfg["ackers"])
