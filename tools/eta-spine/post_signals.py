@@ -31,7 +31,8 @@ FORMATS = {k: re.compile(v) for k, v in _RULES["formats"].items()}
 SOURCE_KEY_FORMAT = _RULES["source_key_format"]
 ID_KEY_PROXIES = _RULES["id_key_proxies"]
 DIGIT_GUARD = "(?!.*[0-9]{7})"
-_UNGUARDED = {k: re.compile(v.replace(DIGIT_GUARD, "")) for k, v in _RULES["formats"].items()}
+PHONE_GUARD = "(?!.*[0-9]{10})"   # pulse_enc_id's phone-length guard
+_UNGUARDED = {k: re.compile(v.replace(DIGIT_GUARD, "").replace(PHONE_GUARD, "")) for k, v in _RULES["formats"].items()}
 ENUMS = {p: {"close_reason": set(e["close_reason"]), "quality": set(e["quality"])} for p, e in _RULES["enums"].items()}
 _LOOKALIKE = {
     "ı": "i", "а": "a", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c", "т": "t", "у": "y", "х": "x",
@@ -77,7 +78,7 @@ def _fmt(key, v):
 
 
 def _guard_only(key, v):
-    """True when v fails key's format but passes it without the 7-digit guard."""
+    """True when v fails key's format but passes it without its digit guard (7-digit, or pulse_enc_id's 10-digit)."""
     f = _UNGUARDED.get(key) if key is not None else None
     return f is not None and isinstance(v, str) and f.fullmatch(v) is not None
 

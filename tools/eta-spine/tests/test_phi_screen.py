@@ -13,7 +13,7 @@ def nest(n, leaf):
     return leaf if n == 0 else [nest(n - 1, leaf)]
 
 
-FILL = {"{MS13}": "17" + "0" * 11, "{P16}": "1" + "0" * 15, "{PHONE10}": "9" * 10, "{PLUS_PHONE}": "+91" + "9" * 10, "{DIG7}": "1234567", "{DIG8}": "20260101"}
+FILL = {"{MS13}": "17" + "0" * 11, "{P16}": "1" + "0" * 15, "{PHONE10}": "9" * 10, "{PLUS_PHONE}": "+91" + "9" * 10, "{DIG7}": "1234567", "{DIG8}": "20260101", "{DIG9}": "123456789"}
 
 
 def fill(v):
@@ -138,8 +138,6 @@ def test_every_producer_format_accepted_as_ids_value():
 def test_name_digits_phone_and_malformed_refused_by_every_key():
     for k in P.ID_KEYS:
         common = fill(F["formats_refuse_common"])
-        if k in F["pending_probe"]:       # placeholder format: only the charset, length and the 7-digit guard are enforced (a name like ramesh_9845 fits it; PENDING-PROBE)
-            common = [v for v in common if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", v) or re.search(r"[0-9]{7}", v)]
         for v in common + fill(F["formats_refuse"][k]):
             assert not P.FORMATS[k].fullmatch(v), (k, v)
             assert verdict(sig("pqm", {"ids": {k: v}})) == "attrs_ids", (k, v)
