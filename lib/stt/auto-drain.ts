@@ -43,6 +43,11 @@
  *     window verified 18 hours late would arrive "fresh" and jump material recorded minutes ago (R6).
  * This redistributes the slots; it does not add any. Capacity is still one window per tick.
  *
+ * ─── BACKFILL (23 Oct 2026, lib/stt/auto-drain-backfill.ts) ───────────────────────────────────
+ * With AUTO_DRAIN_BACKFILL_SINCE set (no time-of-day gate) and the live set empty this tick, a few windows closed
+ * between SINCE and now - max-age are offered too, behind a Mini load guard. Unset = none of that runs.
+ * Same drain, same guards, same order function; the live path above is unchanged.
+ *
  * SHIPS DARK behind ROOM_AUTO_DRAIN_ENABLED. Unset, this is a clean no-op: no scan, no write, no drain.
  */
 
@@ -53,6 +58,7 @@ import { SYSTEM_ACTOR, actorProblem, type RunActor } from "@/lib/stt/receipt";
 import { drainRoomWindow } from "@/lib/stt/room-drain";
 import { enqueueSubject } from "@/lib/stt/fanout";
 import { ROOM_WINDOW_KIND } from "@/lib/jobs/kinds/room-window-kind";
+import { backfillGuard, backfillPlan, scanBackfillCandidates } from "@/lib/stt/auto-drain-backfill";
 
 export const ROOM_AUTO_DRAIN_ENABLED_ENV = "ROOM_AUTO_DRAIN_ENABLED";
 
@@ -88,6 +94,8 @@ export type AutoDrainResult = {
   /** Held-out windows the scan would otherwise have offered (DRAIN-GUARD). */
   n_blind_excluded: number;
   results: Array<{ window_id: string; step: string; detail?: string; job_id?: string }>;
+  /** Present only when AUTO_DRAIN_BACKFILL_SINCE is set. Counts and reasons only, never window text. */
+  backfill?: { active: boolean; skipped?: string; candidates: number; offered: number; per_room: Record<string, number> };
 };
 
 /** An eligible window as the scan returns it. Times are epoch ms; `last_served_ms` is the room's, or null. */
@@ -141,7 +149,7 @@ const num = (v: unknown): number | null => (v === null || v === undefined ? null
  */
 export async function enqueueAutoDrain(
   origin: string,
-  opts: { limit?: number; log?: (m: string) => void; actor?: RunActor } = {},
+  opts: { limit?: number; log?: (m: string) => void; actor?: RunActor; fetchImpl?: (url: string, init: RequestInit) => Promise<Response> } = {},
 ): Promise<AutoDrainResult> {
   const log = opts.log ?? ((m: string) => console.log(m));
   const result: AutoDrainResult = { enqueued: 0, considered: 0, n_blind_excluded: 0, results: [] };
@@ -208,16 +216,42 @@ export async function enqueueAutoDrain(
        )
   `) as Array<Record<string, unknown>>;
   const blind = new Set(await blindWindowIds());
-  const kept = eligible.filter((e) => !blind.has(String(e.id)));
-  result.n_blind_excluded = eligible.length - kept.length;
-  const windows = orderAutoDrainOffers(
-    kept.map((e) => ({
+  const toCandidates = (rows: Array<Record<string, unknown>>): DrainCandidate[] =>
+    rows.filter((e) => !blind.has(String(e.id))).map((e) => ({
       id: String(e.id), room_id: String(e.room_id),
       start_ms: num(e.start_ms) ?? 0, end_ms: num(e.end_ms) ?? 0, closed_ms: num(e.closed_ms) ?? 0,
       last_served_ms: num(e.last_served_ms),
-    })),
-    limit,
-  );
+    }));
+  const kept = toCandidates(eligible);
+  result.n_blind_excluded = eligible.length - kept.length;
+  let windows = orderAutoDrainOffers(kept, limit);
+
+  // BACKFILL: only when nothing live was offered, and only past the plan and the Mini load guard. It adds
+  // candidates to `windows`; the loop below is the same loop, so the legacy row, the drain and the refusal
+  // stamp are unchanged. Unset SINCE adds no query and no field.
+  const backfillOffered = new Set<string>();
+  const plan = backfillPlan();
+  if (plan.on === false && plan.reason === "unset") {
+    // clean no-op
+  } else if (plan.on === false) {
+    result.backfill = { active: false, skipped: plan.reason, candidates: 0, offered: 0, per_room: {} };
+  } else if (windows.length > 0) {
+    result.backfill = { active: false, skipped: "live_set_busy", candidates: 0, offered: 0, per_room: {} };
+  } else {
+    const why = await backfillGuard(plan.limit, { fetchImpl: opts.fetchImpl });
+    if (why) {
+      result.backfill = { active: false, skipped: why, candidates: 0, offered: 0, per_room: {} };
+    } else {
+      const rows = await scanBackfillCandidates(sql as never, {
+        sinceMs: plan.sinceMs, maxAgeHours: AUTO_DRAIN_MAX_AGE_HOURS, cooldownMinutes: AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES,
+      });
+      const cands = toCandidates(rows);
+      windows = orderAutoDrainOffers(cands, plan.limit);
+      const perRoom: Record<string, number> = {};
+      for (const w of windows) { backfillOffered.add(w.id); perRoom[w.room_id] = (perRoom[w.room_id] ?? 0) + 1; }
+      result.backfill = { active: true, candidates: cands.length, offered: windows.length, per_room: perRoom };
+    }
+  }
   result.considered = windows.length;
 
   for (const w of windows) {
@@ -236,6 +270,10 @@ export async function enqueueAutoDrain(
     } else {
       await sql`UPDATE bench_window SET auto_drain_refused_at = NOW(), auto_drain_refused_reason = ${out.step} WHERE id = ${w.id}`;
     }
+  }
+  if (result.backfill) {
+    const b = result.backfill;
+    log(`[auto-drain] backfill ${b.active ? "ACTIVE" : `skipped (${b.skipped})`}: candidates ${b.candidates}, offered ${b.offered}, per_room ${JSON.stringify(b.per_room)}`);
   }
   log(`[auto-drain] enqueued ${result.enqueued} of ${result.considered} considered window(s) (cap ${limit}, ${AUTO_DRAIN_MAX_AGE_HOURS} h, cooldown ${AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES} min, n_blind_excluded ${result.n_blind_excluded})`);
   return result;
