@@ -63,3 +63,27 @@ def test_second_signal_does_not_reenter_the_kill_and_the_first_signal_sets_the_e
 def test_single_signal_still_exits_143_with_the_child_reaped_first(tmp_path):
     rc, child, out, so, se = _go(tmp_path, signal.SIGTERM, 0)
     assert rc == 143 and "reaped" in out and not _alive(child)
+
+
+# R2 B-1: the first Terminated can be swallowed inside a finaliser ("Exception ignored"); the runner must still die on the NEXT signal.
+SWALLOW = textwrap.dedent('''
+    import os, signal, sys, time
+    sys.path.insert(0, sys.argv[1]); import executors
+    ex = executors.Executors(env=dict(os.environ))
+    executors.install_signal_handlers(ex)
+    class D:
+        def __del__(self): os.kill(os.getpid(), signal.SIGTERM)
+    d = D(); del d   # the handler raises Terminated inside __del__: CPython prints it and drops it
+    print("survived", flush=True)
+    time.sleep(30)
+    print("deaf-to-second", flush=True)
+''')
+
+
+@pytest.mark.parametrize("second,want", [(signal.SIGTERM, 143), (signal.SIGINT, 130)])
+def test_a_swallowed_first_signal_does_not_make_the_runner_deaf(second, want):
+    drv = subprocess.Popen([sys.executable, "-c", SWALLOW, os.path.join(TESTS, "..")], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert drv.stdout.readline().strip() == "survived"
+    drv.send_signal(second)
+    rc = drv.wait(timeout=15)
+    assert rc == want, (rc, drv.stdout.read())

@@ -162,6 +162,7 @@ class Executors:
         e = dict(os.environ if env is None else env)
         self.env = e
         self._children: set[subprocess.Popen] = set()
+        self.reaping = 0   # >0 while a kill/reap is running: a signal landing then is ignored (install_signal_handlers); at any other time it raises
         self._run = run or self._run_group
         self.hourly_from, self.hourly_to = _env_window(e)
         self.clock = clock or time.time
@@ -189,16 +190,23 @@ class Executors:
             try:
                 out, err = p.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
-                self._kill_group(p)
+                self._reap(p)
                 raise
         except BaseException:   # Terminated (a signal) or anything else: the child group dies and is reaped before this propagates
             if p is not None:
-                self._kill_group(p)
+                self._reap(p)
             raise
         finally:
             if p is not None:
                 self._children.discard(p)
         return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+    def _reap(self, p: subprocess.Popen) -> None:
+        self.reaping += 1
+        try:
+            self._kill_group(p)
+        finally:
+            self.reaping -= 1
 
     @staticmethod
     def _kill_group(p: subprocess.Popen) -> None:
@@ -214,7 +222,7 @@ class Executors:
     def kill_children(self) -> None:
         """Kill every running child's process group and wait for it. The caller exits only after this returns."""
         for p in list(self._children):
-            self._kill_group(p)
+            self._reap(p)
         self._children.clear()
 
     def has(self, stage: str) -> bool:
@@ -402,13 +410,11 @@ class Terminated(SystemExit):
 
 def install_signal_handlers(execs: Executors) -> None:
     """SIGTERM / SIGINT: the handler only raises Terminated (exit 143 / 130). _run_group's except path kills the child's process group and waits for it before the exception leaves, so the
-    runner exits only after the child is gone and the hourly lock (the child's too) is never free while a child runs. The FIRST signal wins; any later one is ignored, so the kill/wait cannot be re-entered or interrupted."""
-    fired = []
-
+    runner exits only after the child is gone and the hourly lock (the child's too) is never free while a child runs. A signal that lands WHILE the kill/reap runs (execs.reaping) is ignored, so the kill/wait cannot be re-entered or interrupted;
+    at any other time it raises again, so a first Terminated swallowed in a finaliser ("Exception ignored") cannot leave the runner deaf."""
     def _h(signum, _frame):
-        if fired:
+        if execs.reaping:
             return
-        fired.append(signum)
         raise Terminated(128 + signum)
     signal.signal(signal.SIGTERM, _h)
     signal.signal(signal.SIGINT, _h)
