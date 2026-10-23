@@ -63,7 +63,7 @@ export function nemotronPageSql(limit: number): string {
     FROM (SELECT n.id, n.window_id, n.room_day_id, n.model_rev, n.config_hash, n.payload_sha256, n.status, ${NPK} AS pk
             FROM diarize_nemotron_window n
            WHERE ${NPK} COLLATE "C" > $1 ORDER BY ${NPK} COLLATE "C" LIMIT ${limit}) s ${LINK_WIN}
-    ORDER BY s.pk COLLATE "C"`;
+    ORDER BY s.pk COLLATE "C" LIMIT ${limit}`;
 }
 
 /**
