@@ -478,7 +478,9 @@ USB_ENUM_EV=""
 USB_ENUM_EVID="$STATE_DIR/usb-enum-evid"      # "epoch log|ioreg|hub|none kind": the cached evidence verdict
 USB_ENUM_CW="$STATE_DIR/usb-enum-cw"          # epoch rung C published its would_do in this episode (shadow, kill switch): once per episode like the escalation
 USB_ENUM_EPISODE="$STATE_DIR/usb-enum-episode" # epoch the ladder first saw this fault episode (the kernel-log window starts 10 min before it)
-if [ "${G_RUNMODE:-}" = 1 ]; then readonly USB_ENUM_A USB_ENUM_C USB_ENUM_REBOOT USB_ENUM_SESSION USB_ENUM_EVID USB_ENUM_CW USB_ENUM_EPISODE; fi
+USB_ENUM_LOGV="$STATE_DIR/usb-enum-logv"      # "epoch yes|no": the kernel-log verdict of this episode, whatever the fault kind (N1: a flapping mic must not re-read the log every tick)
+USB_ENUM_BW="$STATE_DIR/usb-enum-bw"          # rung B would_do reasons already published in this episode (shadow, kill switch, allowlist): once per episode like rung C
+if [ "${G_RUNMODE:-}" = 1 ]; then readonly USB_ENUM_A USB_ENUM_C USB_ENUM_REBOOT USB_ENUM_SESSION USB_ENUM_EVID USB_ENUM_CW USB_ENUM_EPISODE USB_ENUM_LOGV USB_ENUM_BW; fi
 
 usb_enum_num() { # file field -> numeric field or empty
   local v; v="$("$G_SED" -n '1p' "$1" 2>/dev/null | awk -v n="$2" '{ print $n }')"
@@ -500,6 +502,8 @@ usb_enum_tick() {
   [ -s "$USB_ENUM_CW" ] && : >"$USB_ENUM_CW"
   [ -s "$USB_ENUM_EPISODE" ] && : >"$USB_ENUM_EPISODE"
   [ -s "$USB_ENUM_EVID" ] && : >"$USB_ENUM_EVID"
+  [ -s "$USB_ENUM_LOGV" ] && : >"$USB_ENUM_LOGV"
+  [ -s "$USB_ENUM_BW" ] && : >"$USB_ENUM_BW"
   printf '%s\n' "$([ "$S_capture_open" = "true" ] && echo true || echo false)" >"$USB_ENUM_SESSION" 2>/dev/null
 }
 
@@ -578,6 +582,19 @@ usb_enum_log_evidence() { # window_start_epoch
   return "$rc"
 }
 
+# The log verdict of the current episode, independent of the fault kind: read `log show` at most once per USB_ENUM_EVID_CACHE_S while the episode lasts (a healthy tick ends it).
+usb_enum_log_cached() { # window_start_epoch
+  local ep c now rc
+  now="$(now_epoch)"
+  ep="$(usb_enum_num "$USB_ENUM_LOGV" 1)"; c="$("$G_SED" -n '1p' "$USB_ENUM_LOGV" 2>/dev/null | awk '{ print $2 }')"
+  if [ -n "$ep" ] && [ "$((now - ep))" -ge 0 ] && [ "$((now - ep))" -lt "$USB_ENUM_EVID_CACHE_S" ]; then
+    case "$c" in yes) return 0 ;; no) return 1 ;; esac
+  fi
+  usb_enum_log_evidence "$1"; rc=$?
+  printf '%s %s\n' "$now" "$([ "$rc" -eq 0 ] && echo yes || echo no)" >"$USB_ENUM_LOGV" 2>/dev/null
+  return "$rc"
+}
+
 # Sets USB_ENUM_EV. Evidence of an enumeration fault: log (the mic's kernel line, this boot, this episode) | ioreg (the mic's own node without interfaces: no_input only) |
 # hub (both halves of a physical hub empty: absent only, rung C) | none. Every verdict, `none` and `hub` included, is cached USB_ENUM_EVID_CACHE_S per fault kind, so the log read
 # runs at most once per window and never on every tick.
@@ -596,7 +613,7 @@ usb_enum_evidence() { # kind
   case "${S_boot_age:-}" in
     ''|*[!0-9]*) ;;
     *) boot=$((now - S_boot_age)); ws=$((epi - 600)); [ "$ws" -ge "$boot" ] || ws="$boot"
-       usb_enum_log_evidence "$ws" && v=log ;;
+       usb_enum_log_cached "$ws" && v=log ;;
   esac
   if [ "$v" = none ] && [ "$1" = no_input ] && usb_enum_ioreg_noiface; then v=ioreg
   elif [ "$v" = none ] && [ "$1" = absent ] && usb_enum_ioreg_emptyhub; then v=hub; fi
@@ -623,6 +640,13 @@ usb_enum_static_gate() { # code
 }
 
 usb_enum_wouldnt() { # why before
+  # the standing gates (shadow, kill switch, allowlist) do not change within an episode: one line per episode, not one per 300 s
+  case "$1" in mode_not_heal|killswitch|code_not_allowlisted)
+    case " $(cat "$USB_ENUM_BW" 2>/dev/null) " in *" $1 "*) return 1 ;; esac
+    printf '%s %s\n' "$(cat "$USB_ENUM_BW" 2>/dev/null)" "$1" >"$USB_ENUM_BW" 2>/dev/null
+    heal_event would_do usb usb_enum_reboot "$2" "" "WOULD-DO blocked=$1" true
+    return 1 ;;
+  esac
   once_per "would:usb:usb_enum:$1" 300 && heal_event would_do usb usb_enum_reboot "$2" "" "WOULD-DO blocked=$1" true
   return 1
 }

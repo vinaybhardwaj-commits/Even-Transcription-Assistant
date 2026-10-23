@@ -477,8 +477,14 @@ test_ue_o10_runmode_ignores_env() {
 
 # O11 the fde seam only in test mode
 test_ue_o11_fde_seam_needs_testmode() {
-  local s; s="$(env -u GUARDIAN_ROOT_TESTMODE GUARDIAN_FDESETUP_BIN=/bin/echo bash "$KDIR/bin/guardian-root.sh" fde-status)"
-  assert_eq "$s" "unknown" "seam ignored without GUARDIAN_ROOT_TESTMODE (real fdesetup absent here)"
+  # portable: a real /usr/bin/fdesetup may exist (macOS) and say Off. The seam writes a marker when it runs; without test mode it must never run, whatever the verdict.
+  local s f; f="$T/seam-marker-bin"
+  printf '#!/bin/bash\ntouch "%s/seam-ran"\necho "FileVault is Off."\n' "$T" >"$f"; chmod +x "$f"
+  s="$(env -u GUARDIAN_ROOT_TESTMODE GUARDIAN_FDESETUP_BIN="$f" bash "$KDIR/bin/guardian-root.sh" fde-status 2>/dev/null)"
+  assert_eq "$([ -e "$T/seam-ran" ] && echo ran || echo not-run)" not-run "seam binary never run without GUARDIAN_ROOT_TESTMODE [$s]"
+  case "$s" in on|off|unknown) ok ;; *) fail "verdict is not one of on|off|unknown: [$s]" ;; esac
+  s="$(GUARDIAN_ROOT_TESTMODE=1 GUARDIAN_FDESETUP_BIN="$f" bash "$KDIR/bin/guardian-root.sh" fde-status 2>/dev/null)"
+  assert_eq "$([ -e "$T/seam-ran" ] && echo ran || echo not-run)" ran "control: with test mode the seam is run [$s]"
 }
 
 # O12 session_was_open is taken from the last healthy tick before the fault
@@ -558,4 +564,77 @@ test_ue_f8_the_publish_happens_before_the_reread() {
   local s; s="$(ue_flip_case nopublish)"
   assert_has "$s" 'pub=1' "reboot_pending is already published when the presence re-read runs [$s]"
   assert_has "$s" 'reboots=1' "all re-reads agree: the reboot goes out [$s]"
+}
+
+# ---- R3: ported from the R2 Opus refuter (N2). ALL ioreg / log shapes are INFERRED. ----
+n_logs() { grep -c '^LOG show --start' "$CALLS"; }
+test_ue_r2_f8_slow_to_root_aborts() {
+  local s; s="$( ( ue_setup
+    eval "$(declare -f act_step | sed '1s/^act_step/orig_act_step/')"
+    act_step() { orig_act_step || return 1; : >"$T/adv"; return 0; }
+    now_epoch() { local c; if [ -e "$T/adv" ]; then c="$(cat "$T/advc" 2>/dev/null || echo 0)"; echo "$((GUARDIAN_FAKE_NOW + c))"; echo "$((c + 2))" >"$T/advc"; else echo "$GUARDIAN_FAKE_NOW"; fi; }
+    ue_tick; echo "$(ue_summary) $(events | grep -o 'aborted_[a-z_]*') stamp=$(cat "$STATE_DIR/usb-enum-reboot")" ) )"
+  assert_has "$s" 'reboots=0 .*aborted_slow_to_root stamp=$' "2 s after the last read: abort, no stamp [$s]"
+}
+test_ue_r2_hub_cache_not_reused_for_no_input() {
+  local s; s="$( ( export EVID=hub MODE=shadow; ue_setup; ue_tick; ue_mode heal; : >"$CALLS"; : >"$T/pub.log"; rm -rf "$STATE_DIR/once"
+    printf 'USB Audio C270 HD\n' >"$T/usb.txt"; ue_tick; ue_summary ) )"
+  assert_has "$s" 'reboots=0' "hub verdict for absent not used for no_input [$s]"
+}
+test_ue_r2_log_window_follows_episode() {
+  local s; s="$( ( export PRESENT=1 EVID=none; ue_setup; echo "$((GUARDIAN_FAKE_NOW - 1800))" >"$STATE_DIR/usb-enum-episode"
+    printf '%s.1 Df kernel C270 HD WEBCAM: enumeration failure\n' "$(ue_ts "$((GUARDIAN_FAKE_NOW - 2100))")" >"$T/log.txt"; ue_tick; ue_reboots ) )"
+  assert_eq "$s" 1 "line 5 min before an episode that began 30 min ago counts"
+  s="$( ( export PRESENT=1 EVID=none; ue_setup; echo "$((GUARDIAN_FAKE_NOW - 1800))" >"$STATE_DIR/usb-enum-episode"
+    printf 'USB Audio C270 HD\n' >"$T/usb.txt"; printf 'C270 engine\n' >"$T/engine.txt"; ue_tick
+    : >"$T/engine.txt"; printf '%s.1 Df kernel C270 HD WEBCAM: enumeration failure\n' "$(ue_ts "$((GUARDIAN_FAKE_NOW - 1500))")" >"$T/log.txt"; ue_tick; ue_reboots ) )"
+  assert_eq "$s" 0 "a healthy tick ends the episode: a line from the old episode no longer counts"
+}
+test_ue_r2_rung_c_rearms_after_healthy_tick() {
+  local s; s="$( ( export EVID=none MODE=shadow; ue_setup; ue_tick; ue_tick
+    printf 'USB Audio C270 HD\n' >"$T/usb.txt"; printf 'C270 engine\n' >"$T/engine.txt"; ue_tick
+    : >"$T/usb.txt"; : >"$T/engine.txt"; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 60)); ue_tick; ue_tick; events | grep -c room_device_unplugged ) )"
+  assert_eq "$s" 2 "two episodes, two lines"
+}
+test_ue_r2_f8_presence_reread_timeout_aborts() {
+  local s; s="$( ( ue_setup; usb_present_now() { sleep 3; return 1; }; ue_tick; echo "$(ue_summary) $(events | grep -o 'aborted_[a-z_]*')" ) )"
+  assert_has "$s" 'reboots=0 .*aborted_device_changed' "timeout = abort [$s]"
+}
+test_ue_r2_unknown_boot_age_no_log_evidence() {
+  local s; s="$( ( export PRESENT=1 EVID=none; ue_setup; printf '#!/bin/bash\nexit 1\n' >"$T/bin/sysctl"; chmod +x "$T/bin/sysctl"
+    printf '%s.1 Df kernel C270 HD WEBCAM: enumeration failure\n' "$(ue_ts "$GUARDIAN_FAKE_NOW")" >"$T/log.txt"; ue_tick; echo "$(ue_summary) logs=$(n_logs)" ) )"
+  assert_has "$s" 'reboots=0 .*logs=0' "boot age unknown: no log read, no reboot [$s]"
+}
+
+# N1: the kernel-log verdict is cached per EPISODE, whatever the fault kind
+test_ue_n1_flapping_kind_reads_the_log_once() {
+  local s; s="$( ( export EVID=none MODE=shadow; ue_setup; for i in 1 2 3 4 5 6 7 8 9 10; do
+      if [ $((i % 2)) = 0 ]; then printf 'USB Audio C270 HD\n' >"$T/usb.txt"; else : >"$T/usb.txt"; fi; ue_tick; done; n_logs ) )"
+  assert_eq "$s" 1 "10 ticks flapping absent/no_input: one log read"
+}
+test_ue_n1_log_reread_after_300s_and_in_a_new_episode() {
+  local s; s="$( ( export EVID=none MODE=shadow; ue_setup; ue_tick; ue_tick; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 320)); export GUARDIAN_FAKE_NOW; ue_tick; n_logs ) )"
+  assert_eq "$s" 2 "episode still on after 300 s: one more read"
+  s="$( ( export EVID=none MODE=shadow; ue_setup; ue_tick
+    printf 'USB Audio C270 HD\n' >"$T/usb.txt"; printf 'C270 engine\n' >"$T/engine.txt"; ue_tick
+    : >"$T/usb.txt"; : >"$T/engine.txt"; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 60)); export GUARDIAN_FAKE_NOW; ue_tick; ue_tick; n_logs ) )"
+  assert_eq "$s" 2 "a healthy tick ends the episode: the next fault episode reads again"
+}
+# Obs: rung B would_do in shadow / kill switch is published once per episode, not every 300 s
+test_ue_obs_rung_b_shadow_would_do_once_per_episode() {
+  local m s; for m in shadow kill; do
+    s="$( ( export EVID=log MODE=$m; ue_setup; for i in $(seq 1 14); do ue_log_now; ue_tick; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 280)); export GUARDIAN_FAKE_NOW; done; events | grep -c 'would_do.*usb_enum_reboot' ) )"
+    assert_eq "$s" 1 "mode $m: one rung B would_do over 70 min"; done
+  s="$( ( export EVID=log MODE=shadow; ue_setup; ue_log_now; ue_tick
+    printf 'USB Audio C270 HD\n' >"$T/usb.txt"; printf 'C270 engine\n' >"$T/engine.txt"; ue_tick; : >"$T/usb.txt"; : >"$T/engine.txt"
+    GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 60)); export GUARDIAN_FAKE_NOW; ue_log_now; ue_tick; events | grep -c 'would_do.*usb_enum_reboot' ) )"
+  assert_eq "$s" 2 "a new episode publishes again"
+}
+
+# every verdict is cached: the IOUSB read (hub evidence) runs once over three ticks, not on every tick (the log read has its own per-episode cache)
+test_ue_n1_hub_verdict_is_cached_per_kind() {
+  local s; s="$( ( export EVID=hub MODE=shadow; ue_setup
+    printf '#!/bin/bash\ncase "$*" in *"-p IOUSB"*) echo IOUSBREAD >>"%s/ioreads" ;; esac\ncat "%s/iousb.txt" 2>/dev/null\n' "$T" "$T" >"$T/bin/ioreg"; chmod +x "$T/bin/ioreg"
+    ue_tick; ue_tick; ue_tick; grep -c IOUSBREAD "$T/ioreads" ) )"
+  assert_eq "$s" 1 "one IOUSB read over 3 ticks"
 }
