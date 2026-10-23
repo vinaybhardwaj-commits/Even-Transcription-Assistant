@@ -81,6 +81,7 @@ F
   cat >"$b/ioreg" <<'F'
 #!/bin/bash
 case "$*" in
+  *"-p IOUSB"*) cat "$T/iousb.txt" 2>/dev/null ;;
   *IOUSBHostDevice*) cat "$T/usb.txt" ;;
   *IOAudioEngine*) cat "$T/engine.txt" ;;
   *IOHIDSystem*) echo "    | |   \"HIDIdleTime\" = $(cat "$T/hid")" ;;

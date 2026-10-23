@@ -475,8 +475,10 @@ USB_ENUM_C="$STATE_DIR/usb-enum-c"            # epoch rung C escalated in this e
 USB_ENUM_REBOOT="$STATE_DIR/usb-enum-reboot"  # "epoch session_was_open pending|done": the 2 h cap stamp (survives the reboot)
 USB_ENUM_SESSION="$STATE_DIR/usb-enum-session" # capture_open (true|false) as of the last healthy tick
 USB_ENUM_EV=""
-USB_ENUM_EVID="$STATE_DIR/usb-enum-evid"      # "epoch log|ioreg|none"
-if [ "${G_RUNMODE:-}" = 1 ]; then readonly USB_ENUM_A USB_ENUM_C USB_ENUM_REBOOT USB_ENUM_SESSION USB_ENUM_EVID; fi
+USB_ENUM_EVID="$STATE_DIR/usb-enum-evid"      # "epoch log|ioreg|hub|none kind": the cached evidence verdict
+USB_ENUM_CW="$STATE_DIR/usb-enum-cw"          # epoch rung C published its would_do in this episode (shadow, kill switch): once per episode like the escalation
+USB_ENUM_EPISODE="$STATE_DIR/usb-enum-episode" # epoch the ladder first saw this fault episode (the kernel-log window starts 10 min before it)
+if [ "${G_RUNMODE:-}" = 1 ]; then readonly USB_ENUM_A USB_ENUM_C USB_ENUM_REBOOT USB_ENUM_SESSION USB_ENUM_EVID USB_ENUM_CW USB_ENUM_EPISODE; fi
 
 usb_enum_num() { # file field -> numeric field or empty
   local v; v="$("$G_SED" -n '1p' "$1" 2>/dev/null | awk -v n="$2" '{ print $n }')"
@@ -487,6 +489,7 @@ usb_enum_session_open() { [ "$(cat "$USB_ENUM_SESSION" 2>/dev/null)" = "true" ] 
 
 # Healthy tick: remember capture_open for session_was_open; if a rung A ran this episode, report the heal; re-arm rung A and rung C.
 usb_enum_tick() {
+  [ "$USB_ENUM_HEAL" = 1 ] || return 0   # flag off: the ladder is fully inert (no read, no publish, no state file)
   [ "$S_usb" = "true" ] && [ "$S_engine" = "true" ] || return 0
   mkdir -p "$STATE_DIR" 2>/dev/null
   if [ -n "$(usb_enum_num "$USB_ENUM_A" 1)" ]; then
@@ -494,12 +497,16 @@ usb_enum_tick() {
   fi
   [ -s "$USB_ENUM_A" ] && : >"$USB_ENUM_A"
   [ -s "$USB_ENUM_C" ] && : >"$USB_ENUM_C"
+  [ -s "$USB_ENUM_CW" ] && : >"$USB_ENUM_CW"
+  [ -s "$USB_ENUM_EPISODE" ] && : >"$USB_ENUM_EPISODE"
+  [ -s "$USB_ENUM_EVID" ] && : >"$USB_ENUM_EVID"
   printf '%s\n' "$([ "$S_capture_open" = "true" ] && echo true || echo false)" >"$USB_ENUM_SESSION" 2>/dev/null
 }
 
 # After a rung B reboot: when the d' verify path proved the device back (verify=healed_pending), report once with session_was_open.
 usb_enum_post_boot() {
   local ep sw st
+  [ "$USB_ENUM_HEAL" = 1 ] || return 0
   [ "$(awk 'NR==1 { print $3 }' "$USB_ENUM_REBOOT" 2>/dev/null)" = "pending" ] || return 0
   ep="$(usb_enum_num "$USB_ENUM_REBOOT" 1)"; sw="$(awk 'NR==1 { print $2 }' "$USB_ENUM_REBOOT" 2>/dev/null)"
   [ -n "$ep" ] || return 0
@@ -517,37 +524,83 @@ usb_enum_post_boot() {
   esac
 }
 
-usb_enum_ioreg_noiface() { # 0 when some IOUSBHostDevice has no IOUSBHostInterface under it (an unenumerated device)
-  ioreg -r -c IOUSBHostDevice -l -d 2 -w0 2>/dev/null | awk '
-    /\+-o .*<class IOUSBHostDevice/ { if (indev && !hasif) bad = 1; indev = 1; hasif = 0; next }
+# F3: 0 when the MIC's own IOUSBHostDevice node (name matches USB_MIC_PATTERN) has no IOUSBHostInterface under it: it is on the bus but did not enumerate. Another device's node never counts.
+usb_enum_ioreg_noiface() {
+  ioreg -r -c IOUSBHostDevice -l -d 2 -w0 2>/dev/null | awk -v p="$USB_MIC_PATTERN" '
+    function fin() { if (indev && ismic && !hasif) bad = 1 }
+    /\+-o .*<class IOUSBHostDevice/ { fin(); indev = 1; hasif = 0; ismic = ($0 ~ p); next }
     /IOUSBHostInterface/ { hasif = 1 }
-    END { if (indev && !hasif) bad = 1; exit(bad ? 0 : 1) }'
+    END { fin(); exit(bad ? 0 : 1) }'
 }
 
-# Amendment 1: a USB hub (root ioreg node whose name has "Hub") with no child IOUSBHostDevice under it: the hub enumerated, its downstream did not.
+# Amendment 1 + F1: empty-hub evidence from the IOUSB plane (`ioreg -p IOUSB`, where a device nests under the hub it hangs off, possibly with port/interface nodes between).
+# A PHYSICAL hub is a USB2 half plus a USB3 half sharing a locationID prefix (the first two hex digits of the name's @location). Evidence holds ONLY when the group has both halves
+# and EVERY hub in it has zero downstream devices. A USB3 half that is empty while the USB2 half carries the webcam or a dongle is the normal healthy state and is NOT evidence.
+# A hub whose half cannot be told (neither USB2 nor USB3 in its name), or without a locationID, can never make evidence. The ioreg shapes are INFERRED, not captured on a kiosk.
 usb_enum_ioreg_emptyhub() {
-  ioreg -r -c IOUSBHostDevice -l -d 2 -w0 2>/dev/null | awk '
-    function close_hub() { if (hub && kids == 0) bad = 1; hub = 0 }
-    /^\+-o / { close_hub(); if ($0 ~ /Hub.*<class IOUSBHostDevice/) { hub = 1; kids = 0 } next }
-    /\+-o .*<class IOUSBHostDevice/ { if (hub) kids++ }
-    END { close_hub(); exit(bad ? 0 : 1) }'
+  ioreg -p IOUSB -w0 -l 2>/dev/null | awk '
+    {
+      i = index($0, "+-o "); if (i == 0) next
+      line = substr($0, i + 4); d = i
+      while (top > 0 && hd[st[top]] >= d) top--
+      if (line !~ /<class [A-Za-z0-9]*USB[A-Za-z0-9]*Device[,>]/) next
+      for (k = 1; k <= top; k++) kids[st[k]]++
+      nm = line; sub(/  *<class.*/, "", nm)
+      if (nm !~ /Hub/) next
+      loc = ""; if (match(nm, /@[0-9a-fA-F]+/)) loc = substr(nm, RSTART + 1, RLENGTH - 1)
+      half = 0
+      if (nm ~ /USB ?3|SuperSpeed|3\.[01]/) half = 3; else if (nm ~ /USB ?2|2\.0/) half = 2
+      nh++; hd[nh] = d; hh[nh] = half; hp[nh] = substr(loc, 1, 2); st[++top] = nh
+    }
+    END {
+      for (j = 1; j <= nh; j++) {
+        if (hp[j] == "") continue
+        if (hh[j] == 0 || kids[j] > 0) busy[hp[j]] = 1
+        else has[hp[j], hh[j]] = 1
+      }
+      for (j = 1; j <= nh; j++) if (hp[j] != "" && has[hp[j], 2] && has[hp[j], 3] && !busy[hp[j]]) ok = 1
+      exit(ok ? 0 : 1)
+    }'
 }
 
-# Sets USB_ENUM_EV. Evidence of an enumeration fault: log (kernel log, last 24 h) | ioreg (device node without interfaces) | none. Cached USB_ENUM_EVID_CACHE_S.
-usb_enum_evidence() {
-  local c ep now out="$STATE_DIR/usb_enum_log.out" v=none
-  now="$(now_epoch)"
-  ep="$(usb_enum_num "$USB_ENUM_EVID" 1)"; c="$("$G_SED" -n '1p' "$USB_ENUM_EVID" 2>/dev/null | awk '{ print $2 }')"
-  if [ -n "$ep" ] && [ "$((now - ep))" -ge 0 ] && [ "$((now - ep))" -lt "$USB_ENUM_EVID_CACHE_S" ]; then
-    case "$c" in log|ioreg|none) USB_ENUM_EV="$c"; return 0 ;; esac
-  fi
-  if run_capped "$USB_ENUM_LOG_CAP_S" "$out" g_clean_exec "$G_LOG" show --last 24h --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS "enumeration failure" OR eventMessage CONTAINS "hardware connection lost")' \
-     && "$G_GREP" -i -E "enumeration failure|hardware connection lost.*(usb|audio|webcam|mic|$USB_MIC_PATTERN)|(usb|audio|webcam|mic|$USB_MIC_PATTERN).*hardware connection lost" "$out" >/dev/null 2>&1; then v=log
-  elif usb_enum_ioreg_noiface; then v=ioreg
-  elif usb_enum_ioreg_emptyhub; then v=hub; fi
+usb_enum_ts() { "$G_DATE" -r "$1" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || "$G_DATE" -d "@$1" '+%Y-%m-%d %H:%M:%S' 2>/dev/null; }
+
+# F2: 0 when a kernel line names the room's mic device (USB_MIC_PATTERN, case-sensitive like conf.sh) AND says "enumeration failure" or "hardware connection lost" AND is stamped no
+# earlier than <start>. <start> is already inside the current boot and no earlier than 10 min before the fault episode. `log show --start` narrows the read; the awk repeats the
+# bound on the line's own timestamp (compact style: "YYYY-MM-DD HH:MM:SS.mmm ...", local time, so the string order is the time order).
+usb_enum_log_evidence() { # window_start_epoch
+  local out="$STATE_DIR/usb_enum_log.out" st rc
+  st="$(usb_enum_ts "$1")"; [ -n "$st" ] || return 1
+  run_capped "$USB_ENUM_LOG_CAP_S" "$out" g_clean_exec "$G_LOG" show --start "$st" --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS "enumeration failure" OR eventMessage CONTAINS "hardware connection lost")' || { : >"$out" 2>/dev/null; return 1; }
+  "$G_GREP" -- "$USB_MIC_PATTERN" "$out" 2>/dev/null | "$G_GREP" -E 'enumeration failure|hardware connection lost' | awk -v s="$st" 'substr($0, 1, 19) >= s { f = 1 } END { exit(f ? 0 : 1) }'
+  rc=$?
   : >"$out" 2>/dev/null
+  return "$rc"
+}
+
+# Sets USB_ENUM_EV. Evidence of an enumeration fault: log (the mic's kernel line, this boot, this episode) | ioreg (the mic's own node without interfaces: no_input only) |
+# hub (both halves of a physical hub empty: absent only, rung C) | none. Every verdict, `none` and `hub` included, is cached USB_ENUM_EVID_CACHE_S per fault kind, so the log read
+# runs at most once per window and never on every tick.
+usb_enum_evidence() { # kind
+  local c k ep now epi ws boot v=none
+  now="$(now_epoch)"
+  ep="$(usb_enum_num "$USB_ENUM_EVID" 1)"
+  c="$("$G_SED" -n '1p' "$USB_ENUM_EVID" 2>/dev/null | awk '{ print $2 }')"; k="$("$G_SED" -n '1p' "$USB_ENUM_EVID" 2>/dev/null | awk '{ print $3 }')"
+  if [ -n "$ep" ] && [ "$k" = "$1" ] && [ "$((now - ep))" -ge 0 ] && [ "$((now - ep))" -lt "$USB_ENUM_EVID_CACHE_S" ]; then
+    case "$c" in log|ioreg|hub|none) USB_ENUM_EV="$c"; return 0 ;; esac
+  fi
   mkdir -p "$STATE_DIR" 2>/dev/null
-  printf '%s %s\n' "$now" "$v" >"$USB_ENUM_EVID" 2>/dev/null
+  epi="$(usb_enum_num "$USB_ENUM_EPISODE" 1)"
+  if [ -z "$epi" ] || [ "$epi" -gt "$now" ]; then epi="$now"; printf '%s\n' "$now" >"$USB_ENUM_EPISODE" 2>/dev/null; fi
+  # the window: this boot only (an unknown boot age = no log evidence) and no earlier than 10 min before the episode began
+  case "${S_boot_age:-}" in
+    ''|*[!0-9]*) ;;
+    *) boot=$((now - S_boot_age)); ws=$((epi - 600)); [ "$ws" -ge "$boot" ] || ws="$boot"
+       usb_enum_log_evidence "$ws" && v=log ;;
+  esac
+  if [ "$v" = none ] && [ "$1" = no_input ] && usb_enum_ioreg_noiface; then v=ioreg
+  elif [ "$v" = none ] && [ "$1" = absent ] && usb_enum_ioreg_emptyhub; then v=hub; fi
+  printf '%s %s %s\n' "$now" "$v" "$1" >"$USB_ENUM_EVID" 2>/dev/null
   USB_ENUM_EV="$v"
 }
 
@@ -562,9 +615,8 @@ usb_enum_capped() {
   [ "$((now - ep))" -lt "$USB_ENUM_CAP_S" ]
 }
 
-# first static gate that stops the ladder acting: constant, allowlist, kill switch, mode. Prints the reason or nothing.
+# first static gate that stops the ladder acting: allowlist, kill switch, mode. Prints the reason or nothing. (The constant is checked by usb_enum_ladder itself, before anything runs.)
 usb_enum_static_gate() { # code
-  [ "$USB_ENUM_HEAL" = 1 ] || { echo usb_enum_heal_off; return; }
   if [ -n "$1" ]; then case " $SENTINEL_HEAL_CODES " in *" $1 "*) ;; *) echo code_not_allowlisted; return ;; esac; fi
   killswitch_engaged && { echo killswitch; return; }
   [ "$(current_mode)" = heal ] || { echo mode_not_heal; return; }
@@ -581,19 +633,23 @@ usb_enum_fde() { local r; r="$(root_do fde-status 2>/dev/null)"; case "$r" in on
 usb_enum_autologin() { [ -n "$(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null)" ]; }
 
 usb_enum_ladder() {
-  local kind idle ev before why sw idate prior now rc a_done=0
+  local kind idle ev before why sw idate prior now rc t_act a_done=0
+  # F4: with the constant at 0 the ladder is fully inert: no evidence read, no log, no ioreg, no publish, no state file. Everything below runs only at 1.
+  [ "$USB_ENUM_HEAL" = 1 ] || return 0
   kind="$(usb_enum_fault_kind)"
   [ -n "$kind" ] || return 0
   now="$(now_epoch)"
   idle="$(hid_idle_s)"; case "$idle" in ''|*[!0-9]*) idle="" ;; esac
   sw="$(usb_enum_session_open)"
   before="kind=$kind usb_mic_present=${S_usb:-null} audio_engine_present=${S_engine:-null} hid_idle_s=${idle:-null} capture_open=${S_capture_open:-null}"
-  usb_enum_evidence; ev="$USB_ENUM_EV"   # not in $(): run_capped leaves its timer holding a substitution pipe open
-  # rung C: the mic class is not on the bus at all and nothing says it failed to enumerate: no software fix. Once per episode.
+  usb_enum_evidence "$kind"; ev="$USB_ENUM_EV"   # not in $(): run_capped leaves its timer holding a substitution pipe open
+  # rung C: the mic class is not on the bus at all and nothing says it failed to enumerate: no software fix. Once per episode, in every mode (F7).
   if [ "$kind" = absent ] && [ "$ev" = none ]; then
     why="$(usb_enum_static_gate "")"   # publish-only: the code allowlist is for the reboot
-    case "$why" in usb_enum_heal_off|mode_not_heal|killswitch)
-      once_per "would:usb:usb_enum:rungC:$why" 300 && heal_event would_do usb room_device_unplugged "$before" "" "WOULD-DO blocked=$why" true
+    case "$why" in mode_not_heal|killswitch)
+      [ -z "$(usb_enum_num "$USB_ENUM_CW" 1)" ] || return 0
+      printf '%s\n' "$now" >"$USB_ENUM_CW" 2>/dev/null
+      heal_event would_do usb room_device_unplugged "$before" "" "WOULD-DO blocked=$why" true
       return 0 ;;
     esac
     [ -z "$(usb_enum_num "$USB_ENUM_C" 1)" ] || return 0
@@ -625,27 +681,43 @@ usb_enum_ladder() {
   if usb_lock_active; then usb_enum_wouldnt rung_locked "$before"; return 0; fi
   if [ -f "$USB_STATE" ] && [ "$(usb_state_get verify)" = pending ]; then usb_enum_wouldnt verify_pending "$before"; return 0; fi
   if usb_enum_capped; then usb_enum_wouldnt reboot_cap_2h "$before"; return 0; fi
+  # F5: one budget with 2.4 d' (shared usb-reboot state, 1 per IST day / USB_BUDGET_S, and the same 24 h lock above). Anything but "none" = spent or unreadable = no reboot.
+  idate="$(ist_date)"
+  case "$idate" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) usb_enum_wouldnt ist_date_failed "$before"; return 0 ;; esac
+  if [ "$(usb_budget_state "$idate")" != none ]; then usb_enum_wouldnt reboot_budget "$before"; return 0; fi
   if ! capture_idle; then usb_enum_wouldnt capture_open "$before"; return 0; fi
   if [ -z "$idle" ] || [ "$idle" -le "$USB_ENUM_HID_IDLE_MIN_S" ]; then usb_enum_wouldnt hid_busy "$before"; return 0; fi
   if ! usb_enum_autologin; then usb_enum_wouldnt no_autologin "$before"; return 0; fi
   case "$(usb_enum_fde)" in off) ;; on) usb_enum_wouldnt filevault_on "$before"; return 0 ;; *) usb_enum_wouldnt filevault_unknown "$before"; return 0 ;; esac
-  idate="$(ist_date)"
-  case "$idate" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) usb_enum_wouldnt ist_date_failed "$before"; return 0 ;; esac
   act_begin usb usb_enum_reboot "$before" || return 0
   prior="$("$G_CAT" "$USB_STATE" 2>/dev/null)"
   if ! usb_state_write "$idate" "$now" "$S_rec_pid" "$S_ca_pid" "$S_boot_age" "enum"; then
     heal_event heal usb usb_enum_reboot "$before" "" "state_write_failed" false "$(target_for usb_reboot_failed)" page
     return 0
   fi
-  if ! act_step || ! capture_idle; then
+  audit "usb-enum-reboot: issuing reboot kind=$kind evidence=$ev session_was_open=$sw"
+  heal_event kiosk_reboot usb usb_enum_reboot "$before evidence=$ev" "reboot_pending session_was_open=$sw" reboot_pending false "$(target_for usb_device_missing)" info
+  # F8: the publish above can take seconds, so every guard is re-read AFTER it and nothing slow sits between the last read and the root call (as in d', R15 S-2).
+  # Order: the mic device on the bus (absent must stay absent, no_input must stay present; a timeout is not "absent"), the capture state, and last the kill switch/mode.
+  why=""
+  run_capped 1 "$STATE_DIR/usb_present.out" usb_present_now; rc=$?
+  : >"$STATE_DIR/usb_present.out" 2>/dev/null
+  case "$kind:$rc" in absent:1|no_input:0) ;; *) why=device_changed ;; esac
+  if [ -z "$why" ] && ! capture_idle; then why=capture_open; fi
+  if [ -z "$why" ] && ! act_step; then why=killswitch; fi
+  t_act="$(now_epoch)"
+  if [ -n "$why" ]; then
     usb_state_restore "$prior"
-    heal_event abort usb usb_enum_reboot "$before" "" "aborted_before_reboot" false
+    heal_event abort usb usb_enum_reboot "$before" "" "aborted_$why" false
     return 0
   fi
   printf '%s %s pending\n' "$now" "$sw" >"$USB_ENUM_REBOOT" 2>/dev/null
   : >"$USB_ENUM_A" 2>/dev/null
-  audit "usb-enum-reboot: issuing reboot kind=$kind evidence=$ev session_was_open=$sw"
-  heal_event kiosk_reboot usb usb_enum_reboot "$before evidence=$ev" "reboot_pending session_was_open=$sw" reboot_pending false "$(target_for usb_device_missing)" info
+  if [ "$(( $(now_epoch) - t_act ))" -gt 1 ]; then
+    usb_state_restore "$prior"; : >"$USB_ENUM_REBOOT" 2>/dev/null
+    heal_event abort usb usb_enum_reboot "$before" "" "aborted_slow_to_root" false
+    return 0
+  fi
   root_do reboot >/dev/null 2>&1; rc=$?
   if [ "$rc" -eq 0 ]; then
     USB_REBOOT_ISSUED=1

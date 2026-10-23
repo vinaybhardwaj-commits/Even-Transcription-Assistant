@@ -88,12 +88,14 @@ case "$verb" in
     ;;
   pmset-baseline) /usr/bin/pmset -a sleep 0 autorestart 1 ;;
   fde-status)
-    # read-only. Anything but a clear "FileVault is Off." is unknown. Test seam GUARDIAN_FDESETUP_BIN: only when NOT root and GUARDIAN_ROOT_TESTMODE=1, like the others.
+    # read-only; the verb alone (like reboot), extra arguments are refused. The WHOLE output must be exactly "FileVault is Off." (one line, nothing else) to read off: a second line
+    # such as "Deferred enablement ..." means FileVault turns on at the next restart, so it is unknown. Test seam GUARDIAN_FDESETUP_BIN: only when NOT root and GUARDIAN_ROOT_TESTMODE=1.
+    if [ "$#" -ne 0 ]; then echo "bad_args" >&2; exit 2; fi
     fb=/usr/bin/fdesetup
     if [ "$G_RUID" != 0 ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_FDESETUP_BIN:-}" ]; then fb="$GUARDIAN_FDESETUP_BIN"; fi
     case "$("$fb" status 2>/dev/null)" in
-      "FileVault is Off."*) echo off ;;
-      "FileVault is On."*) echo on ;;
+      "FileVault is Off.") echo off ;;
+      "FileVault is On.") echo on ;;
       *) echo unknown ;;
     esac
     ;;
