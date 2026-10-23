@@ -9,7 +9,7 @@
 import { sql } from "@/lib/db";
 import { queueOpsAlert } from "@/lib/alerts/ops-alert";
 import { readModes, type Mode } from "./config";
-import { breakerOpen, LEASE_MS, MAX_ATTEMPTS, resolveOutcome, type Outcome } from "./retry";
+import { breakerOpen, BREAKER_OPEN_MS, LEASE_MS, MAX_ATTEMPTS, resolveOutcome, type Outcome } from "./retry";
 
 export type SpineJob = { job_id: number; encounter_id: string; stage: string; cut_version: string; input_key: string; attempts: number; lease_until: string | null; consult_uid?: string | null };
 /** What a done report may carry (S6): a REF to the artefact (box path relative to the store, never a body) and its sha256. Becomes one spine_artefact row, create-only. */
@@ -173,9 +173,14 @@ async function recordArtefact(encounter_id: string, stage: string, cut_version: 
 export async function openBreakers(stages: string[], now: Date): Promise<string[]> {
   const open: string[] = [];
   for (const s of stages) {
+    // The breaker can only be open if a failure is newer than BREAKER_OPEN_MS (breakerOpen). That test is bounded to the window, so an index on ticked_at serves it and the table is never scanned in full;
+    // only when a recent failure exists are the last 20 outcomes read (same rows, same order as before, so the verdict is unchanged).
+    const since = new Date(now.getTime() - BREAKER_OPEN_MS).toISOString();
+    const kind = "attempt:" + s;
     const rows = (await sql`
       SELECT CASE WHEN counts->>'failed' = '1' THEN 'failed' ELSE 'done' END AS status, ticked_at AS done_at FROM spine_tick
-       WHERE kind = ${"attempt:" + s}::text
+       WHERE kind = ${kind}::text
+         AND EXISTS (SELECT 1 FROM spine_tick f WHERE f.kind = ${kind}::text AND f.ticked_at > ${since}::timestamptz AND f.counts->>'failed' = '1')
        ORDER BY ticked_at DESC, id DESC LIMIT 20`) as Array<{ status: string; done_at: string }>;
     if (breakerOpen(rows, now)) open.push(s);
   }

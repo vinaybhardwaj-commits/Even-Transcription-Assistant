@@ -176,20 +176,28 @@ class Executors:
     def _run_group(self, argv, cwd=None, timeout=None, pass_fds=(), **_kw) -> subprocess.CompletedProcess:
         """subprocess.run, but the child leads its own process group, so a timeout or a signal kills the child AND whatever it spawned; pass_fds are inherited."""
         # SIGTERM/SIGINT are blocked across spawn + register, so a signal cannot land between Popen() and _children.add() and orphan the child; the child gets the old mask back before exec.
+        # The handler only raises Terminated (below); the kill and the wait for the child happen HERE, in normal flow, never inside a signal handler.
+        p = None
         old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
         try:
-            p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, pass_fds=tuple(pass_fds),
-                                 preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, old))
-            self._children.add(p)
-        finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, old)   # a pending signal is delivered here, with the child already registered
-        try:
-            out, err = p.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self._kill_group(p)
+            try:
+                p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, pass_fds=tuple(pass_fds),
+                                     preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, old))
+                self._children.add(p)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, old)   # a pending signal is delivered here (Terminated), with the child already registered
+            try:
+                out, err = p.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self._kill_group(p)
+                raise
+        except BaseException:   # Terminated (a signal) or anything else: the child group dies and is reaped before this propagates
+            if p is not None:
+                self._kill_group(p)
             raise
         finally:
-            self._children.discard(p)
+            if p is not None:
+                self._children.discard(p)
         return subprocess.CompletedProcess(argv, p.returncode, out, err)
 
     @staticmethod
@@ -388,10 +396,19 @@ class Executors:
                                      "sha256": sha, "object_key": f"tracks/{os.path.basename(path)}"})
 
 
+class Terminated(SystemExit):
+    """Raised by the signal handler in the main thread: exit code 128 + signum, after the unwinding code has killed and reaped the children."""
+
+
 def install_signal_handlers(execs: Executors) -> None:
-    """SIGTERM / SIGINT: kill the children's process groups, wait for them, and only then exit (143 / 130). The hourly lock is the child's too, so it is never free while a child runs."""
+    """SIGTERM / SIGINT: the handler only raises Terminated (exit 143 / 130). _run_group's except path kills the child's process group and waits for it before the exception leaves, so the
+    runner exits only after the child is gone and the hourly lock (the child's too) is never free while a child runs. The FIRST signal wins; any later one is ignored, so the kill/wait cannot be re-entered or interrupted."""
+    fired = []
+
     def _h(signum, _frame):
-        execs.kill_children()
-        sys.exit(128 + signum)
+        if fired:
+            return
+        fired.append(signum)
+        raise Terminated(128 + signum)
     signal.signal(signal.SIGTERM, _h)
     signal.signal(signal.SIGINT, _h)

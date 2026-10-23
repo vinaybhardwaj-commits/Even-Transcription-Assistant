@@ -46,17 +46,24 @@ export function rebPageSql(limit: number): string {
     WHERE ${PK_ID} COLLATE "C" > $1 ORDER BY ${PK_ID} COLLATE "C" LIMIT ${limit}`;
 }
 
+/**
+ * The page is chosen by pk FIRST (the inner SELECT ... ORDER BY ... LIMIT, which the planner cannot flatten), and only then does the blind expression run, over those `limit` rows. With the
+ * blind subqueries in the same SELECT as the ORDER BY/LIMIT they were evaluated for every row of the table (480 ms at 5k rows, 1,457 ms at 20k; S3 R4 F-B).
+ */
 export function nemotronPageSql(limit: number): string {
   const day = blindDaySql("rd.ist_date", "rd.room_id");
+  const NPK = "lpad(n.id::text, 20, '0')";
   return `SELECT s.id, s.window_id, s.model_rev, s.config_hash, s.payload_sha256, s.status,
       (cardinality($2::text[]) > 0 AND (
         NOT EXISTS (SELECT 1 FROM room_day r0 WHERE r0.id = s.room_day_id)
         OR EXISTS (SELECT 1 FROM room_day rd WHERE ${day} AND (rd.id = s.room_day_id
           OR rd.id IN (SELECT w.room_day_id FROM bench_window w WHERE w.id = s.window_id)
           OR rd.id IN (SELECT dw.room_day_id FROM room_diarize_window dw WHERE dw.window_id = s.window_id))))) AS blind,
-      l.encounter_id, ${PK_ID} AS pk
-    FROM diarize_nemotron_window s ${LINK_WIN}
-    WHERE ${PK_ID} COLLATE "C" > $1 ORDER BY ${PK_ID} COLLATE "C" LIMIT ${limit}`;
+      l.encounter_id, s.pk
+    FROM (SELECT n.id, n.window_id, n.room_day_id, n.model_rev, n.config_hash, n.payload_sha256, n.status, ${NPK} AS pk
+            FROM diarize_nemotron_window n
+           WHERE ${NPK} COLLATE "C" > $1 ORDER BY ${NPK} COLLATE "C" LIMIT ${limit}) s ${LINK_WIN}
+    ORDER BY s.pk COLLATE "C"`;
 }
 
 /**
