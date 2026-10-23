@@ -6,6 +6,9 @@
 -- WHAT. One CREATE INDEX IF NOT EXISTS. No data change, no seed, no other schema change. No retention prune (a proposal only; not in this migration).
 -- IDEMPOTENT. Safe to run twice. The code works without the index (it falls back to spine_tick_at_idx); the index only makes it cheaper as the table grows.
 -- UNDO. db/rollbacks/0177_spine_tick_breaker_idx.down.sql (run by hand, never from here).
+-- NOT CONCURRENTLY. app/api/run-migrations applies each file inside sql.transaction([...]) (route.ts:13-17, :183), and
+--      CREATE INDEX CONCURRENTLY cannot run in a transaction (same constraint as 0100). A plain CREATE INDEX takes a SHARE lock on
+--      spine_tick for the build, so tick inserts (cron writes) wait until it finishes; at spine_tick's current size that is short (fable, 23 Oct).
 -- =====================================================================
 
 BEGIN;
