@@ -2,7 +2,7 @@
  * lib/rubrics/engines/consult-llm.ts — S7-1: the two llm_zdr consult rubrics, consult_chair_affect and consult_surgical_pitch.
  *
  * ONE PATH. consult text (readConsultText: timestamped doctor / other / unknown lines) -> a system prompt RENDERED from the rubric's own `definition` (anchors, anti-defaults, codes, scales: the
- * prompt cannot drift from the rubric file) plus the fixed rules in prompt.json -> askJson (lib/rubrics/llm.ts: the existing ZDR OpenRouter client, temperature 0, JSON validated against the
+ * prompt cannot drift from the rubric file) plus the fixed rules in prompt.json -> askJson (lib/rubrics/llm.ts: Vertex Gemini via vertexChat, temperature 0, JSON validated against the
  * rubric's `output` schema, one retry) -> a score of enums and numbers, findings of codes, and an evidence object for R2.
  * QUOTES. Every evidence quote is checked against the transcript; the timestamp on a stored quote is the TRANSCRIPT LINE's, not the model's; a quote that is not in the transcript is dropped and counted.
  * NO TEXT IN THE TABLE. `score` holds enums, booleans and numbers; `findings` holds closed codes. Quotes exist only in `evidence` (R2).

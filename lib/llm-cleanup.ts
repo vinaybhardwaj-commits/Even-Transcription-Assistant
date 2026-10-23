@@ -9,7 +9,7 @@
  * Target latency: ~1-2 s on Gemini flash. Soft-fail: on any error
  * the caller falls back to the raw text.
  *
- * Runs through routedChat (live surface, flash tier): Vertex Gemini, then OpenRouter. It used to
+ * Runs through routedChat (live surface, flash tier): Vertex Gemini, then the Vertex fallback chain. It used to
  * call llama3.1:8b on the Mini's Ollama directly; no local chat model remains in ETA. `model` on the
  * result is the provider that ANSWERED, so the client is told what actually cleaned the text.
  */

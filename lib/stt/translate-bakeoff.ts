@@ -34,7 +34,7 @@ async function scoreTranslate(encounterId: string, native: string): Promise<void
     rows.map((r, i) => `TRANSLATION ${labels[i]}:\n${(r.transcript_english || "").slice(0, 5000)}`).join("\n\n");
   let scores: Record<string, number> = {};
   try {
-    // Judge through routedChat (stt_lab surface, flash): Vertex Gemini, then OpenRouter. Was qwen.
+    // Judge through routedChat (stt_lab surface, flash): Vertex Gemini, then the Vertex fallback chain. Was qwen.
     const j = await routedChatJson<{ scores?: Record<string, number> }>({
       surface: "stt_lab", tier: "flash",
       messages: [{ role: "system", content: JUDGE_SYS }, { role: "user", content: body }],

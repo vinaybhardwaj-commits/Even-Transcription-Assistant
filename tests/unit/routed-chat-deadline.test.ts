@@ -1,7 +1,7 @@
 /**
  * tests/unit/routed-chat-deadline.test.ts — F1: an OVERALL deadline on routedChat.
  *
- * routed-chat-fallback.test.ts pins the chain (Gemini -> OpenRouter, never Ollama) with fetch steps
+ * routed-chat-fallback.test.ts pins the chain (Vertex primary -> two Vertex fallback targets, never OpenRouter or Ollama) with fetch steps
  * that resolve or reject immediately. This file adds the case that test file cannot express: a
  * stage that HANGS past its own per-call timeout. The fake fetch below only settles when its
  * request's AbortSignal fires — exactly what a genuinely stuck backend looks like — so these tests
@@ -47,10 +47,10 @@ vi.mock("@/lib/gcp-auth", async (importOriginal) => {
   };
 });
 
-const FAKE_KEY = "sk-or-v1-FAKEKEY-must-never-appear-anywhere-0123456789abcdef";
+
 const MSGS = [{ role: "system", content: "Reply with one word." }, { role: "user", content: "ok" }];
 const ENV_KEYS = [
-  "GCP_PROJECT", "GCP_SA_KEY", "GCP_LOCATION", "GEMINI_ALL", "GEMINI_NOTE",
+  "GCP_PROJECT", "GCP_SA_KEY", "GCP_LOCATION", "GCP_FALLBACK_LOCATION", "GEMINI_ALL", "GEMINI_NOTE",
   "OPENROUTER_API_KEY", "OPENROUTER_API_KEY_FILE", "OPENROUTER_API_URL", "LLM_FALLBACK_MODELS",
   "ETA_ROUTED_CHAT_DEADLINE_MS",
 ];
@@ -62,11 +62,9 @@ let hits: Array<{ url: string; signal?: AbortSignal }> = [];
 let script: Step[] = [];
 
 function isVertex(u: string) { return u.includes("aiplatform.googleapis.com"); }
-function isOpenRouter(u: string) { return u.includes("openrouter.ai"); }
 
 beforeEach(() => {
   for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
-  process.env.OPENROUTER_API_KEY = FAKE_KEY;
   hits = [];
   script = [];
   gcpMock.getToken = async () => "vertex-token-not-a-secret";
@@ -103,6 +101,8 @@ function geminiOn() {
   process.env.GCP_PROJECT = "proj";
   process.env.GCP_SA_KEY = "{}";
   process.env.GCP_LOCATION = "global";
+  // a different region, so the first fallback is never the same target as the primary (which routedChat skips)
+  process.env.GCP_FALLBACK_LOCATION = "us-central1";
   process.env.GEMINI_ALL = "1";
 }
 async function router() { return import("@/lib/llm/gemini"); }
@@ -152,16 +152,16 @@ describe("routedChatDeadlineMs — pure (Fable's ruling, 22 Sep, replacing the f
     // default (2 fallbacks): (10000 mint + 1000 + 2*1000) * 1.10 = 14300 — same as the earlier test.
     expect(routedChatDeadlineMs(1_000, {})).toBe(14_300);
     // a 3-model chain must be summed as 3, not silently still 2: (10000+1000+3*1000)*1.10 = 15400.
-    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a/one,b/two,c/three" })).toBe(15_400);
+    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a,b,c" })).toBe(15_400);
     // a single-model chain: (10000+1000+1*1000)*1.10 = 13200.
-    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a/one" })).toBe(13_200);
+    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a" })).toBe(13_200);
   });
 
   it("round 3: an explicit fallbackCount override (what routedChat itself passes) wins over resolving LLM_FALLBACK_MODELS again", async () => {
     const { routedChatDeadlineMs } = await router();
     // env says a 3-model chain, but the caller (routedChat) hands its OWN already-resolved count —
     // proving the two can never silently disagree once routedChat threads its count through.
-    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a/one,b/two,c/three" }, 2)).toBe(14_300);
+    expect(routedChatDeadlineMs(1_000, { LLM_FALLBACK_MODELS: "a,b,c" }, 2)).toBe(14_300);
   });
 
   it("ETA_ROUTED_CHAT_DEADLINE_MS overrides the formula outright", async () => {
@@ -178,7 +178,7 @@ describe("routedChatDeadlineMs — pure (Fable's ruling, 22 Sep, replacing the f
 });
 
 describe("the deadline aborts an in-flight call and reports which stage", () => {
-  it("Gemini hangs past the overall deadline: aborted, OpenRouter is never even tried", async () => {
+  it("Gemini hangs past the overall deadline: aborted, the Vertex fallback is never even tried", async () => {
     geminiOn();
     process.env.ETA_ROUTED_CHAT_DEADLINE_MS = "40";
     script = [{ kind: "hang" }];
@@ -193,7 +193,7 @@ describe("the deadline aborts an in-flight call and reports which stage", () => 
     warn.mockRestore();
   }, 5_000);
 
-  it("Gemini fails fast, then OpenRouter's first model hangs: aborted mid-fallback, second model never tried", async () => {
+  it("Gemini fails fast, then the first Vertex fallback hangs: aborted mid-fallback, second model never tried", async () => {
     geminiOn();
     process.env.ETA_ROUTED_CHAT_DEADLINE_MS = "50";
     script = [{ kind: "http", status: 500 }, { kind: "hang" }];
@@ -201,9 +201,9 @@ describe("the deadline aborts an in-flight call and reports which stage", () => 
     const r = await routedChat({ surface: "note", tier: "flash", messages: MSGS, timeoutMs: 60_000 });
     expect(r.ok).toBe(false);
     expect(r.provider).toBe("none");
-    expect(r.error).toMatch(/^deadline_exceeded:openrouter:google\/gemini-3\.8-flash$/);
-    expect(hits).toHaveLength(2); // gemini + the one hung openrouter call; llama-4-scout never reached
-    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : isOpenRouter(h.url) ? "openrouter" : h.url))).toEqual(["vertex", "openrouter"]);
+    expect(r.error).toMatch(/^deadline_exceeded:gemini:gemini-2\.5-flash@us-central1$/);
+    expect(hits).toHaveLength(2); // gemini + the one hung fallback call; the second fallback never reached
+    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : h.url))).toEqual(["vertex", "vertex"]);
   }, 5_000);
 
   it("getVertexAccessToken itself hangs: routedChat still returns at the deadline, labelled gemini", async () => {
@@ -242,6 +242,7 @@ describe("the deadline aborts an in-flight call and reports which stage", () => 
   });
 
   it("a caller's own AbortSignal still works exactly as before: 'aborted', not 'deadline_exceeded'", async () => {
+    geminiOn();
     script = [{ kind: "hang" }];
     const controller = new AbortController();
     const { routedChat } = await router();
@@ -292,22 +293,22 @@ describe("the DEFAULT deadline (no env override) after a REAL first-stage hang �
 
   it("the first fallback still ANSWERS after the primary's full hang (old rule would have starved it)", async () => {
     geminiOn();
-    script = [{ kind: "hang" }, { kind: "ok", content: "answer", model: "google/gemini-3.8-flash-001" }];
+    script = [{ kind: "hang" }, { kind: "ok", content: "answer", model: "unused" }];
     const { routedChat } = await router();
     const r = await routedChat({ surface: "note", tier: "flash", messages: MSGS, timeoutMs: TIMEOUT_MS });
-    expect(r).toMatchObject({ ok: true, provider: "openrouter:google/gemini-3.8-flash-001" });
+    expect(r).toMatchObject({ ok: true, provider: "gemini:gemini-2.5-flash@us-central1" });
     expect(hits).toHaveLength(2);
-    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "openrouter"))).toEqual(["vertex", "openrouter"]);
+    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "other"))).toEqual(["vertex", "vertex"]);
   }, 5_000);
 
   it("a THIRD stage (the second fallback) is reachable: primary hangs, first fallback fails fast, second fallback still runs and can answer", async () => {
     geminiOn();
-    script = [{ kind: "hang" }, { kind: "http", status: 500 }, { kind: "ok", content: "answer", model: "meta-llama/llama-4-scout-17b" }];
+    script = [{ kind: "hang" }, { kind: "http", status: 500 }, { kind: "ok", content: "answer", model: "unused" }];
     const { routedChat } = await router();
     const r = await routedChat({ surface: "note", tier: "flash", messages: MSGS, timeoutMs: TIMEOUT_MS });
-    expect(r).toMatchObject({ ok: true, provider: "openrouter:meta-llama/llama-4-scout-17b" });
+    expect(r).toMatchObject({ ok: true, provider: "gemini:gemini-2.5-flash-lite@us-central1" });
     expect(hits).toHaveLength(3);
-    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "openrouter"))).toEqual(["vertex", "openrouter", "openrouter"]);
+    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "other"))).toEqual(["vertex", "vertex", "vertex"]);
   }, 5_000);
 });
 
@@ -327,7 +328,7 @@ describe("round 2 (ETA-Refuter, 23 Sep): a fallback is capped to ITS OWN budget,
 
   it("note-generation's exact shape: primary hangs its full 240s, the first fallback aborts at its OWN 60s cap (not 240s), the second fallback still runs and answers", async () => {
     geminiOn();
-    script = [{ kind: "hang" }, { kind: "hang" }, { kind: "ok", content: "answer", model: "meta-llama/llama-4-scout-17b" }];
+    script = [{ kind: "hang" }, { kind: "hang" }, { kind: "ok", content: "answer", model: "unused" }];
     const { routedChat } = await router();
     const p = routedChat({ surface: "note", tier: "flash", messages: MSGS, timeoutMs: 240_000 });
     // 240,000 (primary's own timer) + 60,000 (the fallback's CAPPED timer, if the fix holds) + a
@@ -336,19 +337,19 @@ describe("round 2 (ETA-Refuter, 23 Sep): a fallback is capped to ITS OWN budget,
     // and the assertions below never run before the test's own timeout fails it.
     await vi.advanceTimersByTimeAsync(300_050);
     const r = await p;
-    expect(r).toMatchObject({ ok: true, provider: "openrouter:meta-llama/llama-4-scout-17b" });
+    expect(r).toMatchObject({ ok: true, provider: "gemini:gemini-2.5-flash-lite@us-central1" });
     expect(hits).toHaveLength(3);
-    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "openrouter"))).toEqual(["vertex", "openrouter", "openrouter"]);
+    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "other"))).toEqual(["vertex", "vertex", "vertex"]);
   }, 15_000);
 
   it("isolates the fallback cap itself: a fast-failing primary, then a hung fallback that must abort by ~60s regardless of the caller's 240s timeoutMs", async () => {
     geminiOn();
-    script = [{ kind: "http", status: 500 }, { kind: "hang" }, { kind: "ok", content: "answer", model: "meta-llama/llama-4-scout-17b" }];
+    script = [{ kind: "http", status: 500 }, { kind: "hang" }, { kind: "ok", content: "answer", model: "unused" }];
     const { routedChat } = await router();
     const p = routedChat({ surface: "note", tier: "flash", messages: MSGS, timeoutMs: 240_000 });
     await vi.advanceTimersByTimeAsync(60_050); // only the fallback's own cap, not anywhere near 240s
     const r = await p;
-    expect(r).toMatchObject({ ok: true, provider: "openrouter:meta-llama/llama-4-scout-17b" });
+    expect(r).toMatchObject({ ok: true, provider: "gemini:gemini-2.5-flash-lite@us-central1" });
     expect(hits).toHaveLength(3);
   }, 15_000);
 });
@@ -361,7 +362,7 @@ describe("round 3 (ETA-Refuter, 23 Sep note, promoted to a fix): the mint gets i
   //   elapsed if the mint takes 9,000ms then the primary and first fallback each hang their own
   //   full 6,000ms: 9,000+6,000+6,000 = 21,000ms — inside the fixed deadline, PAST the unfixed one.
   // A version that forgot the mint would abort the first fallback's hang early (at 19,800ms) and
-  // return `deadline_exceeded:openrouter:...` instead of ever reaching the second fallback.
+  // return `deadline_exceeded:gemini:...@...` instead of ever reaching the second fallback.
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
 
@@ -369,14 +370,14 @@ describe("round 3 (ETA-Refuter, 23 Sep note, promoted to a fix): the mint gets i
     geminiOn();
     // A "cold" mint: slow, but it succeeds — distinct from a mint that times out on its own cap.
     gcpMock.getToken = () => new Promise<string>((resolve) => { setTimeout(() => resolve("vertex-token-not-a-secret"), 9_000); });
-    script = [{ kind: "hang" }, { kind: "hang" }, { kind: "ok", content: "answer", model: "meta-llama/llama-4-scout-17b" }];
+    script = [{ kind: "hang" }, { kind: "hang" }, { kind: "ok", content: "answer", model: "unused" }];
     const { routedChat } = await router();
     const p = routedChat({ surface: "note", tier: "flash", messages: MSGS, timeoutMs: 6_000 });
     await vi.advanceTimersByTimeAsync(21_100);
     const r = await p;
-    expect(r).toMatchObject({ ok: true, provider: "openrouter:meta-llama/llama-4-scout-17b" });
+    expect(r).toMatchObject({ ok: true, provider: "gemini:gemini-2.5-flash-lite@us-central1" });
     expect(hits).toHaveLength(3);
-    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "openrouter"))).toEqual(["vertex", "openrouter", "openrouter"]);
+    expect(hits.map((h) => (isVertex(h.url) ? "vertex" : "other"))).toEqual(["vertex", "vertex", "vertex"]);
   }, 15_000);
 });
 
@@ -392,12 +393,12 @@ describe("the ordinary case is never affected", () => {
     warn.mockRestore();
   });
 
-  it("a normal Gemini-fails-then-OpenRouter-succeeds run is unaffected by the new deadline plumbing", async () => {
+  it("a normal Gemini-fails-then-the-fallback-succeeds run is unaffected by the new deadline plumbing", async () => {
     geminiOn();
-    script = [{ kind: "http", status: 500 }, { kind: "ok", content: "ok", model: "google/gemini-3.8-flash-001" }];
+    script = [{ kind: "http", status: 500 }, { kind: "ok", content: "ok", model: "unused" }];
     const { routedChat } = await router();
     const r = await routedChat({ surface: "note", tier: "flash", messages: MSGS });
-    expect(r).toMatchObject({ ok: true, provider: "openrouter:google/gemini-3.8-flash-001" });
+    expect(r).toMatchObject({ ok: true, provider: "gemini:gemini-2.5-flash@us-central1" });
   });
 
   it("total failure (no hang, every stage answers with an error) is still all_failed, not deadline_exceeded", async () => {

@@ -48,7 +48,7 @@ export type CdmssPipelineEvent =
 
 
 // No per-pass local model: every pass routes through routedChat (cds surface, pro tier) — Vertex
-// Gemini, then OpenRouter. The provider that answered is recorded per pass in llmCalls.
+// Gemini, then the Vertex fallback chain. The provider that answered is recorded per pass in llmCalls.
 const DRAFT_TIMEOUT_MS = 100_000;
 const CRITIQUE_TIMEOUT_MS = 30_000;
 const REVISE_TIMEOUT_MS = 75_000;
@@ -143,7 +143,7 @@ async function callJson<T>(
   opts: { signal?: AbortSignal; temperature?: number } = {},
 ): Promise<{ ok: true; data: T; latency_ms: number; raw: string; provider: string } | { ok: false; error: string; latency_ms: number; provider: string }> {
   // CDS reasoning passes (draft/critique/revise): Gemini (cds surface, pro tier) when flagged +
-  // configured, then OpenRouter. No local model in the chain.
+  // configured, then the Vertex fallback. No local model in the chain.
   const rc = await routedChat({
     surface: "cds", tier: "pro",
     messages: [
@@ -154,7 +154,7 @@ async function callJson<T>(
   });
   const latency_ms = rc.latency_ms;
   // Verbatim, per call. Each pass routes independently, so draft can be served by Gemini and
-  // critique by an OpenRouter fallback in the same run — one label for the whole run would hide that.
+  // critique by a Vertex fallback stage in the same run — one label for the whole run would hide that.
   const provider = rc.provider;
   if (!rc.ok) return { ok: false, error: rc.error ?? "llm_failed", latency_ms, provider };
   const content = rc.content;

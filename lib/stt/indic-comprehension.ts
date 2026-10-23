@@ -31,7 +31,7 @@ export async function generateNativeAnalysis(nativeTranscript: string, lang: str
   if (t.length < 10) return null;
   const user = `Language: ${lang ?? "unknown"}\nTranscript:\n${t.slice(0, 9000)}`;
   // Native analysis through routedChat (native surface, flash): Vertex Gemini when flagged, then
-  // OpenRouter. It used to try Gemini and then fall through to local qwen on its own; the router
+  // the Vertex fallback. It used to try Gemini and then fall through to local qwen on its own; the router
   // now owns the fallback, so there is one chain and it reports which provider answered.
   const r = await routedChatJson<NativeAnalysis>({
     surface: "native", tier: "flash",

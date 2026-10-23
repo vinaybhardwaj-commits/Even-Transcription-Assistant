@@ -35,7 +35,7 @@ export async function GET(req: NextRequest) {
 
   const results = [];
   for (const s of surfaces) {
-    const wouldUse = pickGemini(s.surface, s.tier); // undefined => straight to the OpenRouter chain
+    const wouldUse = pickGemini(s.surface, s.tier); // undefined => straight to the Vertex fallback chain
     const t0 = Date.now();
     try {
       const rc = await routedChat({

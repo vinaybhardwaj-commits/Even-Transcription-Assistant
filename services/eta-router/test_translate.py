@@ -81,6 +81,159 @@ class Base(unittest.TestCase):
         return mock.patch.object(rs.requests, "post", side_effect=fake)
 
 
+def vx_ok(text="I have a fever", model="gemini-2.5-flash-lite"):
+    return Resp(200, {"modelVersion": model, "candidates": [{"content": {"parts": [{"text": text}]}}]})
+
+
+class VertexEngine(Base):
+    """The vertex: engine. The network and the service-account file are mocked: no real key is read."""
+    SA = '{"client_email":"sa@proj.iam.test","private_key":"FAKE-NOT-A-KEY","project_id":"proj-test"}'
+
+    def setUp(self):
+        super().setUp()
+        self.sa = tempfile.NamedTemporaryFile("w", delete=False)
+        self.sa.write(self.SA); self.sa.close()
+        self.vp = [
+            mock.patch.object(rs, "VERTEX_SA_FILE", self.sa.name),
+            mock.patch.object(rs, "VERTEX_PROJECT", ""),
+            mock.patch.object(rs, "VERTEX_LOCATION", "global"),
+            mock.patch.object(rs, "TRANSLATE_ENGINE", "vertex:gemini-2.5-flash-lite"),
+            mock.patch.object(rs, "TRANSLATE_FALLBACK", ["vertex:gemini-2.5-flash", "indictrans2"]),
+        ]
+        rs._VERTEX_TOKEN_CACHE.clear()
+        # the token mint (google-auth) is faked at its seam: a fake credentials module
+        fake_sa = mock.MagicMock()
+        def from_info(info, scopes):
+            c = mock.MagicMock(); c.token = "tok-not-a-secret"; c.expiry = None; c.refresh = lambda req: None
+            return c
+        fake_sa.Credentials.from_service_account_info.side_effect = from_info
+        self.mods = mock.patch.dict(sys.modules, {
+            "google": mock.MagicMock(), "google.oauth2": mock.MagicMock(service_account=fake_sa),
+            "google.oauth2.service_account": fake_sa,
+            "google.auth": mock.MagicMock(), "google.auth.transport": mock.MagicMock(),
+            "google.auth.transport.requests": mock.MagicMock(Request=mock.MagicMock()),
+        })
+        for p in self.vp: p.start()
+        self.mods.start()
+
+    def tearDown(self):
+        self.mods.stop()
+        for p in self.vp: p.stop()
+        os.unlink(self.sa.name)
+        super().tearDown()
+
+    def test_default_engine_calls_vertex_global_with_system_instruction_and_temperature_0(self):
+        with self.post(vx_ok()):
+            r = rs.translate(HINDI, "hi")
+        self.assertEqual(r["english"], "I have a fever")
+        self.assertEqual(r["translate_engine"], "vertex:gemini-2.5-flash-lite")
+        c = self.calls[0]
+        self.assertEqual(c["url"], "https://aiplatform.googleapis.com/v1/projects/proj-test/locations/global/publishers/google/models/gemini-2.5-flash-lite:generateContent")
+        self.assertEqual(c["headers"]["Authorization"], "Bearer tok-not-a-secret")
+        self.assertEqual(c["json"]["generationConfig"], {"temperature": 0})
+        self.assertEqual(c["json"]["systemInstruction"]["parts"][0]["text"], rs.TRANSLATE_SYSTEM_PROMPT)
+        self.assertEqual(c["json"]["contents"][0]["parts"][0]["text"], HINDI)
+        self.assertNotIn("provider", c["json"])
+        self.assertFalse(any("openrouter" in x["url"] for x in self.calls))
+
+    def test_regional_location_uses_the_regional_host(self):
+        with mock.patch.object(rs, "VERTEX_LOCATION", "asia-south1"), self.post(vx_ok()):
+            rs.translate(HINDI, "hi")
+        self.assertTrue(self.calls[0]["url"].startswith("https://asia-south1-aiplatform.googleapis.com/v1/projects/proj-test/locations/asia-south1/"))
+
+    def test_label_is_what_the_response_reported_and_fallback_is_a_second_vertex_model(self):
+        with self.post(Resp(503), vx_ok("I have a fever", "gemini-2.5-flash-002")):
+            r = rs.translate(HINDI, "hi")
+        self.assertEqual(r["translate_engine"], "vertex:gemini-2.5-flash")
+        self.assertEqual(r["translate_model"], "gemini-2.5-flash-002")
+        self.assertIn("models/gemini-2.5-flash:generateContent", self.calls[1]["url"])
+
+    def test_pool_key_is_the_engine_string(self):
+        self.assertIsNot(rs._pool_for("vertex:gemini-2.5-flash-lite"), rs._pool_for("vertex:gemini-2.5-flash"))
+
+    def test_failure_taxonomy_closed_codes(self):
+        cases = [
+            (requests.Timeout("x"), "vertex_timeout"),
+            (requests.ConnectionError("secret-ish detail"), "vertex_unreachable:ConnectionError"),
+            (Resp(429), "vertex_http_429"),
+            (Resp(200, ValueError("bad json")), "vertex_bad_response"),
+            (Resp(200, {"candidates": []}), "vertex_bad_response"),
+            (Resp(200, {"candidates": [{"content": {"parts": [{"text": "  "}]}}]}), "vertex_empty"),
+            (Resp(200, {"candidates": [{"content": {"parts": [{"text": ["list"]}]}}]}), "vertex_bad_response"),
+        ]
+        for resp, code in cases:
+            with self.post(resp):
+                with self.assertRaises(rs.TranslateError) as cm:
+                    rs.vertex_translate(HINDI, "hi", "gemini-2.5-flash-lite")
+            self.assertEqual(str(cm.exception), code)
+            self.assertNotIn("secret-ish", str(cm.exception))
+
+    def test_total_failure_never_returns_source_text_as_english(self):
+        with self.post(Resp(500), Resp(502), Resp(503)):
+            with mock.patch.object(rs, "INDICTRANS2_URL", "http://yoga.test:8086"):
+                r = rs.translate(HINDI, "hi")
+        self.assertIsNone(r["english"])
+        self.assertIn("vertex_http_500", r["translate_error"])
+
+    def test_sa_file_problems_are_closed_codes_and_nothing_is_sent(self):
+        for setup, code in [
+            (lambda: mock.patch.object(rs, "VERTEX_SA_FILE", ""), "vertex_sa_file_unset"),
+            (lambda: mock.patch.object(rs, "VERTEX_SA_FILE", "/nonexistent/sa.json"), "vertex_sa_unreadable"),
+        ]:
+            with setup(), self.post():
+                with self.assertRaises(rs.TranslateError) as cm:
+                    rs.vertex_translate(HINDI, "hi", "m")
+            self.assertEqual(str(cm.exception), code)
+            self.assertEqual(self.calls, [])
+        with open(self.sa.name, "w") as fh: fh.write("not json")
+        with self.assertRaises(rs.TranslateError) as cm: rs.vertex_translate(HINDI, "hi", "m")
+        self.assertEqual(str(cm.exception), "vertex_sa_invalid")
+        with open(self.sa.name, "w") as fh: fh.write('{"client_email":"a"}')
+        with self.assertRaises(rs.TranslateError) as cm: rs.vertex_translate(HINDI, "hi", "m")
+        self.assertEqual(str(cm.exception), "vertex_sa_invalid")
+
+    def test_sa_file_is_read_at_call_time_so_project_follows_the_file(self):
+        with self.post(vx_ok()):
+            rs.translate(HINDI, "hi")
+        with open(self.sa.name, "w") as fh:
+            fh.write(self.SA.replace("proj-test", "proj-rotated"))
+        rs._VERTEX_TOKEN_CACHE.clear()
+        with self.post(vx_ok()):
+            rs.translate(HINDI, "hi")
+        self.assertIn("/projects/proj-rotated/", self.calls[1]["url"])
+
+    def test_token_is_cached_per_file_version(self):
+        with self.post(vx_ok(), vx_ok()):
+            rs.translate(HINDI, "hi"); rs.translate(HINDI, "hi")
+        import sys as _s
+        mints = _s.modules["google.oauth2.service_account"].Credentials.from_service_account_info.call_count
+        self.assertEqual(mints, 1)
+
+    def test_missing_google_auth_is_a_coded_failure_not_a_crash(self):
+        with mock.patch.dict(sys.modules, {"google.oauth2": None, "google.oauth2.service_account": None}), self.post():
+            with self.assertRaises(rs.TranslateError) as cm:
+                rs.vertex_translate(HINDI, "hi", "m")
+        self.assertEqual(str(cm.exception), "vertex_auth_lib_missing")
+
+    def test_key_material_and_token_never_reach_logs_or_results(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), self.post(Resp(500), Resp(500)):
+            r = rs.translate(HINDI, "hi")
+        blob = out.getvalue() + err.getvalue() + json.dumps(r, ensure_ascii=False)
+        for secret in ("FAKE-NOT-A-KEY", "tok-not-a-secret", "sa@proj.iam.test"):
+            self.assertNotIn(secret, blob)
+
+    def test_override_allowlist_admits_the_configured_vertex_engines_only(self):
+        with self.post():
+            r = rs.translate(HINDI, "hi", "vertex:some-other-model")
+        self.assertIn("engine_not_allowed:vertex:some-other-model", r["translate_error"])
+        self.assertEqual(self.calls, [])
+
+    def test_deadline_for_vertex(self):
+        with mock.patch.object(rs, "VERTEX_TIMEOUT", 7.0):
+            self.assertEqual(rs._deadline_for("vertex:x"), 7.0)
+
+
 class Dispatch(Base):
     def test_openrouter_engine_calls_openrouter_with_its_model(self):
         with self.post(or_ok()):
@@ -112,8 +265,9 @@ class Dispatch(Base):
         self.assertEqual(self.calls, [])
 
     def test_no_default_or_fallback_is_ollama(self):
-        self.assertEqual(DEFAULT_ENGINE, "openrouter:google/gemini-2.5-flash-lite")
-        self.assertEqual(DEFAULT_FALLBACK, ["openrouter:openai/gpt-5-nano", "indictrans2"])
+        self.assertEqual(DEFAULT_ENGINE, "vertex:gemini-2.5-flash-lite")
+        self.assertEqual(DEFAULT_FALLBACK, ["vertex:gemini-2.5-flash", "indictrans2"])
+        self.assertFalse(any(e.startswith("openrouter") for e in [DEFAULT_ENGINE] + DEFAULT_FALLBACK))
         self.assertFalse(any(e.startswith("ollama") for e in [DEFAULT_ENGINE] + DEFAULT_FALLBACK))
 
     def test_ollama_override_is_refused(self):

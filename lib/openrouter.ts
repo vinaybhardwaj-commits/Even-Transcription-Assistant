@@ -1,4 +1,6 @@
 /**
+ * UNUSED since V's order of 23 Oct (OpenRouter -> Vertex): nothing in lib/ or app/ imports this file any more
+ * (tests/unit/no-openrouter-runtime.test.ts pins that). Kept in the tree, not deleted.
  * lib/openrouter.ts — one chat-completion call to OpenRouter, on the same contract as the router's
  * translate backend (`~/eta-router/router_server.py`, `openrouter_translate`).
  *

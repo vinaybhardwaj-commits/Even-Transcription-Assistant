@@ -156,19 +156,22 @@ vi.mock("@/lib/db", () => ({
   },
 }));
 
-// The model call is faked at the NETWORK seam translate.ts now uses (22 Sep: off qwen, onto
-// OpenRouter). Same tripwire and counters as before, so every existing impl still reads as it did:
-// an impl returns the old `{ json: { english } }` shape and the adapter maps it to a chat result.
-// Nothing here can reach the real OpenRouter, and this shell has a live key in its environment.
-vi.mock("@/lib/openrouter", () => ({
-  OpenRouterError: class OpenRouterError extends Error { code: string; constructor(code: string) { super(code); this.name = "OpenRouterError"; this.code = code; } },
-  openrouterChat: async (a: { system: string; user: string; model: string }) => {
-    QWEN.calls += 1; QWEN.userLens.push(a.user.length);
-    if (!QWEN.impl) throw new Error("MODEL CALLED IN TEST — openrouterChat called with no impl; this must never happen");
-    const r = await QWEN.impl(a.system, a.user);
-    return { content: typeof r.json?.english === "string" ? r.json.english : "", model: r.model ?? a.model, latency_ms: r.latency_ms ?? 0 };
-  },
-}));
+// The model call is faked at the seam translate.ts uses (`vertexChat`; 22 Sep off qwen, 23 Oct off
+// OpenRouter onto Vertex). Same tripwire and counters as before, so every existing impl still reads as
+// it did: an impl returns the old `{ json: { english } }` shape and the adapter maps it to a chat
+// result. Nothing here can reach Vertex or the network.
+vi.mock("@/lib/llm/gemini", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/llm/gemini")>();
+  return {
+    ...actual,
+    vertexChat: async (a: { system: string; user: string; model: string }) => {
+      QWEN.calls += 1; QWEN.userLens.push(a.user.length);
+      if (!QWEN.impl) throw new Error("MODEL CALLED IN TEST — vertexChat called with no impl; this must never happen");
+      const r = await QWEN.impl(a.system, a.user);
+      return { content: typeof r.json?.english === "string" ? r.json.english : "", model: r.model ?? a.model, latency_ms: r.latency_ms ?? 0 };
+    },
+  };
+});
 
 import { jevEnglishKind, JEV_ENGLISH_KIND, JEV_TRANSLATE_BATCH } from "@/lib/jobs/kinds/jev-english";
 import { TRANSLATE_CHAR_CAP } from "@/lib/jev/translate";

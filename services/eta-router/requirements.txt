@@ -1,0 +1,3 @@
+# Added 23 Oct (OpenRouter -> Vertex): the vertex: translate engine mints its token with google-auth.
+# The twin venv already has fastapi, uvicorn, python-multipart, requests; google-auth pulls pyasn1-modules, rsa, cachetools (pure Python).
+google-auth==2.35.0

@@ -49,7 +49,7 @@ export const MINT_TIMEOUT_MS = 10_000;
  * `signal` and `timeoutMs` are both OPTIONAL and additive — every existing caller that passes
  * neither behaves exactly as before, bounded only by `MINT_TIMEOUT_MS`. Builds its OWN
  * `AbortController` and combines it with a caller's `signal`, the same pattern openaiChat and
- * openrouterChat already use, so this fetch can be bounded by ITS OWN timer as well as cancelled
+ * openaiChat already uses, so this fetch can be bounded by ITS OWN timer as well as cancelled
  * from outside — previously it had neither: routedChat's deadline could stop WAITING on it (F1
  * round 2, raceSignal) but never actually cancel the fetch, and there was no timeout of its own at
  * all (round-3 Refuter note: the mint was paid entirely out of the overall deadline's 10% slack,

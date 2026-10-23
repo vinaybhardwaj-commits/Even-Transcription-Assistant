@@ -667,6 +667,13 @@ describe("9 — X4: arms B and C write NOTHING when the provider is not gemini",
     expect(visitRows.size).toBe(0);
   });
 
+  it("flash refuses a Vertex FALLBACK stage (gemini:<model>@<region>) too — a different model than the arm asked for", async () => {
+    rcImpl = () => ({ ok: true, content: JSON.stringify({ visits: [{ opened_by: "svc_1", state: "in_chair", confidence: 0.9 }] }), latency_ms: 5, provider: "gemini:gemini-2.5-flash-lite@us-central1" });
+    const out = await call({ room_day_id: DAY, arm: "flash", dry_run: false });
+    expect(out).toMatchObject({ ok: false, error: "provider_not_gemini", provider: "gemini:gemini-2.5-flash-lite@us-central1", written: 0 });
+    expect(visitRows.size).toBe(0);
+  });
+
   it("hybrid refuses too — a successful ollama answer is exactly the failure being guarded", async () => {
     rcImpl = () => ({ ok: true, content: JSON.stringify({ decisions: [] }), latency_ms: 5, provider: "ollama" });
     const out = await call({ room_day_id: DAY, arm: "hybrid", dry_run: false });

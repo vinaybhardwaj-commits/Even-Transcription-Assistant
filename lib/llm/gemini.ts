@@ -1,10 +1,11 @@
 /**
  * Gemini (Vertex AI) router — every ETA chat completion goes through here.
  *
- * ORDER: Vertex Gemini for the surface (when configured + flagged) → OpenRouter
- * (LLM_FALLBACK_MODELS, default google/gemini-3.8-flash then meta-llama/llama-4-scout — the same
- * pair lib/jev/translate.ts defaults to, V's choice, matching the router; ETA-Refuter round 2, 22
- * Sep, D5).
+ * ORDER: Vertex Gemini for the surface (when configured + flagged) → a SECOND Vertex model and/or
+ * region (LLM_FALLBACK_MODELS, entries `model[@region]`; default gemini-2.5-flash then
+ * gemini-2.5-flash-lite, in GCP_FALLBACK_LOCATION or else GCP_LOCATION). V, 23 Oct: nothing in ETA
+ * calls OpenRouter any more, so the fallback is Vertex too; same auth (lib/gcp-auth.ts), same
+ * deadline discipline.
  *
  * THERE IS NO OLLAMA IN ANY CHAIN (V, 22 Sep: qwen out of ETA entirely). qwen2.5:14b was the
  * local default and the fallback; it cost 11.55 GB on a 24 GB Mini and was reached from Vercel
@@ -12,18 +13,15 @@
  * the KB corpus is nomic-768 — but nothing in this file talks to Ollama at all.
  *
  * THE PROVIDER COMES FROM THE CALL. routedChat returns `gemini:<model>` or
- * `openrouter:<model the RESPONSE reported>` — never a literal. In August this router swallowed
+ * `gemini:<model>@<region>` for a fallback stage — what actually answered, never a literal. In August this router swallowed
  * Gemini errors and served qwen for two months while traces said Gemini; scribe_llm_health now
  * reads this value verbatim and names a fallback on a Gemini-flagged surface `silent_fallback`.
  *
  * Vertex env: GCP_SA_KEY, GCP_PROJECT, GCP_LOCATION, and a flag — GEMINI_ALL=1 or GEMINI_<SURFACE>=1.
- * The Vertex primary models (GEMINI_MODEL, GEMINI_FLASH_MODEL) are UNCHANGED by D5 — only the
- * OpenRouter fallback pair moved.
- * OpenRouter: OPENROUTER_API_KEY (Vercel) or OPENROUTER_API_KEY_FILE (the Mini); ZDR on every call
- * (lib/openrouter.ts — one client for all of ETA).
+ * Fallback env: LLM_FALLBACK_MODELS (comma list of `model[@region]`), GCP_FALLBACK_LOCATION (default
+ * region of an entry without one; else GCP_LOCATION). No OpenRouter key is read anywhere here.
  */
 import { getVertexAccessToken, MINT_TIMEOUT_MS } from "../gcp-auth";
-import { openrouterChat, OpenRouterError } from "../openrouter";
 
 const GCP_LOCATION = process.env.GCP_LOCATION || "asia-south1";
 const GCP_PROJECT = process.env.GCP_PROJECT || "";
@@ -34,15 +32,15 @@ export function geminiConfigured(): boolean {
   return Boolean(GCP_PROJECT && process.env.GCP_SA_KEY);
 }
 
-function vertexBaseURL(): string {
-  const host = GCP_LOCATION === "global" ? "aiplatform.googleapis.com" : `${GCP_LOCATION}-aiplatform.googleapis.com`;
-  return `https://${host}/v1beta1/projects/${GCP_PROJECT}/locations/${GCP_LOCATION}/endpoints/openapi`;
+function vertexBaseURL(region: string = GCP_LOCATION): string {
+  const host = region === "global" ? "aiplatform.googleapis.com" : `${region}-aiplatform.googleapis.com`;
+  return `https://${host}/v1beta1/projects/${GCP_PROJECT}/locations/${region}/endpoints/openapi`;
 }
 function vertexModelName(model: string): string {
   return model.startsWith("google/") ? model : `google/${model}`;
 }
 
-/** The Gemini model to use for `surface`, or undefined to go straight to the OpenRouter chain. */
+/** The Gemini model to use for `surface`, or undefined to go straight to the Vertex fallback chain. */
 export function pickGemini(surface: string, tier: "pro" | "flash" = "pro"): string | undefined {
   if (!geminiConfigured()) return undefined;
   const on = process.env.GEMINI_ALL === "1" || process.env[`GEMINI_${surface.toUpperCase()}`] === "1";
@@ -117,12 +115,41 @@ export async function geminiChatIfOn(
   }
 }
 
-/** The OpenRouter fallback chain, in order. Only the env can change it; never Ollama. */
-export const LLM_FALLBACK_DEFAULT = ["google/gemini-3.8-flash", "meta-llama/llama-4-scout"];
+/** One Vertex model in one region. `model` is bare (no `google/`). */
+export type VertexTarget = { model: string; region: string };
+
+/** The label of what answered, derived from the target that was called — never a literal. */
+export function vertexLabel(t: VertexTarget): string {
+  return `gemini:${t.model}@${t.region}`;
+}
+
+/**
+ * PURE. Parse a comma list of `model[@region]`. An entry that is not a Vertex model name (an old
+ * OpenRouter slug such as `meta-llama/llama-4-scout`, or a region that is not [a-z0-9-]) is dropped,
+ * so a stale env value can never send a non-Gemini slug to Vertex.
+ */
+export function parseVertexTargets(raw: string, defaultRegion: string): VertexTarget[] {
+  const out: VertexTarget[] = [];
+  for (const entry of raw.split(",").map((e) => e.trim()).filter(Boolean)) {
+    const [name, reg] = entry.split("@");
+    const model = (name ?? "").trim().replace(/^google\//, "");
+    const region = (reg ?? "").trim() || defaultRegion;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(model) || !/^[a-z0-9-]+$/.test(region)) continue;
+    out.push({ model, region });
+  }
+  return out;
+}
+
+/** The Vertex fallback chain, in order. Only the env can change it; never Ollama, never OpenRouter. */
+export const LLM_FALLBACK_DEFAULT = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+export function llmFallbackTargets(env: Record<string, string | undefined> = process.env): VertexTarget[] {
+  const region = (env.GCP_FALLBACK_LOCATION ?? "").trim() || (env.GCP_LOCATION ?? "").trim() || "asia-south1";
+  const parsed = parseVertexTargets((env.LLM_FALLBACK_MODELS ?? "").trim(), region);
+  return parsed.length > 0 ? parsed : parseVertexTargets(LLM_FALLBACK_DEFAULT.join(","), region);
+}
+/** The same chain as `model@region` strings. */
 export function llmFallbackModels(env: Record<string, string | undefined> = process.env): string[] {
-  const raw = (env.LLM_FALLBACK_MODELS ?? "").trim();
-  const list = raw ? raw.split(",").map((m) => m.trim()).filter(Boolean) : LLM_FALLBACK_DEFAULT;
-  return list;
+  return llmFallbackTargets(env).map((t) => `${t.model}@${t.region}`);
 }
 
 /**
@@ -132,7 +159,58 @@ export function llmFallbackModels(env: Record<string, string | undefined> = proc
  */
 export function firstRoute(surface: string, tier: "pro" | "flash" = "pro"): string {
   const g = pickGemini(surface, tier);
-  return g ? `gemini:${g}` : `openrouter:${llmFallbackModels()[0]}`;
+  return g ? `gemini:${g}` : vertexLabel(llmFallbackTargets()[0]!);
+}
+
+/** A Vertex failure with a closed code. Safe to store on a row and to log: never a message, header or token. */
+export class VertexError extends Error {
+  readonly code: string;
+  constructor(code: string) { super(code); this.name = "VertexError"; this.code = code; }
+}
+export type VertexChatResult = { content: string; model: string; latency_ms: number };
+
+/**
+ * One chat completion on Vertex (OpenAI-compatible endpoint), for callers that hold their own
+ * model chain (lib/jev/translate.ts, lib/rubrics/llm.ts). Same auth and same abort discipline as
+ * routedChat. `model` in the result is the label of the target that answered (`gemini:<m>@<region>`).
+ * Throws VertexError with a closed code: vertex_not_configured, vertex_auth_failed, vertex_timeout,
+ * vertex_abort, vertex_unreachable, vertex_http_<n>, vertex_empty.
+ */
+export async function vertexChat(args: {
+  model: string; region?: string;
+  messages?: Msg[]; system?: string; user?: string;
+  temperature?: number; responseJson?: boolean; maxTokens?: number; timeoutMs?: number; signal?: AbortSignal;
+  env?: Record<string, string | undefined>;
+}): Promise<VertexChatResult> {
+  if (!geminiConfigured()) throw new VertexError("vertex_not_configured");
+  const [target] = parseVertexTargets(
+    args.region ? `${args.model}@${args.region}` : args.model,
+    (args.env?.GCP_FALLBACK_LOCATION ?? "").trim() || GCP_LOCATION,
+  );
+  if (!target) throw new VertexError("vertex_bad_model");
+  const messages: Msg[] = args.messages ?? [
+    { role: "system", content: args.system ?? "" },
+    { role: "user", content: args.user ?? "" },
+  ];
+  const t0 = Date.now();
+  let token: string;
+  try {
+    token = await getVertexAccessToken(args.signal, Math.min(MINT_TIMEOUT_MS, args.timeoutMs ?? MINT_TIMEOUT_MS));
+  } catch {
+    if (args.signal?.aborted) throw new VertexError("vertex_abort");
+    throw new VertexError("vertex_auth_failed");
+  }
+  const r = await openaiChat({
+    url: vertexBaseURL(target.region), authToken: token, model: vertexModelName(target.model),
+    messages, temperature: args.temperature, responseJson: args.responseJson,
+    maxTokens: args.maxTokens, timeoutMs: args.timeoutMs ?? FALLBACK_STAGE_CAP_MS, signal: args.signal,
+  });
+  if (r.ok) return { content: r.content, model: vertexLabel(target), latency_ms: Date.now() - t0 };
+  if (r.status && r.status !== 200) throw new VertexError(`vertex_http_${r.status}`);
+  if (r.error === "empty_response") throw new VertexError("vertex_empty");
+  if (args.signal?.aborted) throw new VertexError("vertex_abort");
+  if (/abort/i.test(r.error ?? "")) throw new VertexError("vertex_timeout");
+  throw new VertexError("vertex_unreachable");
 }
 
 export type RoutedChatResult = { ok: boolean; content: string; error?: string; latency_ms: number; provider: string };
@@ -141,24 +219,24 @@ export type RoutedChatResult = { ok: boolean; content: string; error?: string; l
 // F1 — an OVERALL deadline, on top of each stage's own per-call timeout
 // ---------------------------------------------------------------------------
 //
-// routedChat is Gemini once, then up to two OpenRouter models — each already bounded by its own
-// `timeoutMs` (or GEMINI_DEFAULT_TIMEOUT_MS / openrouterChat's 60_000 default when none is
+// routedChat is the Vertex primary once, then up to two more Vertex targets — each already bounded by its own
+// `timeoutMs` (or GEMINI_DEFAULT_TIMEOUT_MS / the 60_000 fallback-stage cap when none is
 // passed). Nothing bounded the SUM: a caller with a generous per-call timeout could wait 3x it if
 // every stage stalled to its own ceiling. This is that missing outer bound — it changes nothing
 // for the ordinary case where one stage answers within its own timeout.
 
 export const ROUTED_CHAT_DEADLINE_ENV = "ETA_ROUTED_CHAT_DEADLINE_MS";
 
-/** Ceiling on a single fallback stage's OWN slice of the deadline — openrouterChat's own default
- * per-call timeout, so a fallback stage is never budgeted more than it would use unprompted.
- * Exported so routedChat's own call to openrouterChat can hand each stage this SAME number rather
+/** Ceiling on a single fallback stage's OWN slice of the deadline — the former OpenRouter client's
+ * default per-call timeout, kept as is, so a fallback stage is never budgeted more than it would use unprompted.
+ * Exported so routedChat's own fallback call can hand each stage this SAME number rather
  * than a second, independently-maintained copy of it (round 2 fix, below). */
 export const FALLBACK_STAGE_CAP_MS = 60_000;
 
 /**
  * A fallback stage's own budget: never more than FALLBACK_STAGE_CAP_MS, and never more than the
  * caller's own timeoutMs when that is smaller. ONE place, used by both the deadline sum and the
- * actual openrouterChat call (round-3 Refuter trivia: the expression used to be duplicated
+ * actual fallback call (round-3 Refuter trivia: the expression used to be duplicated
  * textually in both places, which made "the same number" a claim rather than something the code
  * enforced).
  */
@@ -202,13 +280,13 @@ export { MINT_TIMEOUT_MS };
  *   primary budget   = the caller's timeoutMs, or GEMINI_DEFAULT_TIMEOUT_MS (240 s) when none given
  *                       — Vertex's OWN default, unchanged from before;
  *   fallback budget  = fallbackBudgetMs(timeoutMs) = min(caller's timeoutMs, FALLBACK_STAGE_CAP_MS)
- *                       — an OpenRouter stage never inherits a giant primary timeout, and never
+ *                       — a fallback stage never inherits a giant primary timeout, and never
  *                       needs more than its own default would give it unprompted;
  *   fallback count   = `fallbackCount`, the caller's resolved chain length when routedChat passes
  *                       one (so this and the loop that actually iterates the chain are PROVABLY
  *                       reading the same list, not two separately-resolved calls to
  *                       llmFallbackModels that happen to agree today — round-3 Refuter trivia), or
- *                       llmFallbackModels(env).length when called standalone (round-2 fix: a fixed
+ *                       llmFallbackTargets(env).length when called standalone (round-2 fix: a fixed
  *                       2 silently mis-summed the moment `LLM_FALLBACK_MODELS` configured a
  *                       different-length chain);
  *   deadline         = (mint + primary + fallback count x fallback budget) x 1.10.
@@ -225,7 +303,7 @@ export { MINT_TIMEOUT_MS };
 export function routedChatDeadlineMs(
   perCallTimeoutMs: number | undefined,
   env: Record<string, string | undefined> = process.env,
-  fallbackCount: number = llmFallbackModels(env).length,
+  fallbackCount: number = llmFallbackTargets(env).length,
 ): number {
   const raw = env[ROUTED_CHAT_DEADLINE_ENV];
   const override = raw !== undefined ? Number(raw) : NaN;
@@ -265,15 +343,16 @@ function raceSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 /**
- * Run a chat completion: Vertex Gemini for `surface` when flagged + configured, then the OpenRouter
- * chain. `provider` names whichever call answered — `gemini:<model>` or `openrouter:<model>` — and
+ * Run a chat completion: Vertex Gemini for `surface` when flagged + configured, then the Vertex
+ * fallback chain. `provider` names whichever call answered — `gemini:<model>` (primary) or
+ * `gemini:<model>@<region>` (a fallback stage) — and
  * `none` only when nothing did. A Gemini failure is logged by name before the fallback runs, so a
  * fallback is never silent in the logs either.
  *
  * OVERALL DEADLINE (F1, ETA_ROUTED_CHAT_DEADLINE_MS / routedChatDeadlineMs): a single AbortSignal
  * — `deadline.signal` below — is passed to every stage's `signal` argument INSTEAD OF `p.signal`
  * directly (it still fires on `p.signal` too; the two are combined). When it fires mid-stage,
- * openaiChat / openrouterChat abort their own in-flight fetch immediately, exactly as they already
+ * openaiChat aborts their own in-flight fetch immediately, exactly as they already
  * do for `p.signal` today — nothing new was needed there. The stage running when it fires is
  * logged by name. `error` on a deadline is `deadline_exceeded:<stage>`, distinct from `aborted`
  * (the caller's own signal) and from `all_failed: ...` (every stage ran to its own conclusion).
@@ -290,11 +369,11 @@ export async function routedChat(p: {
   const t0 = Date.now();
   const errors: string[] = [];
   // Resolved ONCE and reused for both the sum below and the loop that actually iterates it, so the
-  // two are provably the same list rather than two separate calls to llmFallbackModels that happen
+  // two are provably the same list rather than two separate calls to llmFallbackTargets that happen
   // to agree today (round-3 Refuter trivia: budgeting one chain and running another was possible
   // only in theory, since both read plain `process.env` here, but nothing enforced it).
-  const fallbackModels = llmFallbackModels();
-  const deadlineMs = routedChatDeadlineMs(p.timeoutMs, process.env, fallbackModels.length);
+  const fallbackTargets = llmFallbackTargets();
+  const deadlineMs = routedChatDeadlineMs(p.timeoutMs, process.env, fallbackTargets.length);
   const deadline = new AbortController();
   let deadlineFired = false;
   let stage = "start";
@@ -304,6 +383,9 @@ export async function routedChat(p: {
     else p.signal.addEventListener("abort", () => deadline.abort(), { once: true });
   }
   const signal = deadline.signal;
+  // ONE mint per call, shared by every stage: the deadline sum counts a single MINT_TIMEOUT_MS.
+  let token: string | undefined;
+  let mintFailed = false;
   const onDeadline = (): RoutedChatResult => {
     console.warn(`[llm] routedChat (${p.surface}) deadline exceeded after ${deadlineMs}ms during ${stage}`);
     return { ok: false, content: "", error: `deadline_exceeded:${stage}`, latency_ms: Date.now() - t0, provider: "none" };
@@ -314,7 +396,7 @@ export async function routedChat(p: {
     if (gModel) {
       stage = `gemini:${gModel}`;
       try {
-        const token = await raceSignal(getVertexAccessToken(signal, MINT_TIMEOUT_MS), signal);
+        token = await raceSignal(getVertexAccessToken(signal, MINT_TIMEOUT_MS), signal);
         const r = await openaiChat({
           url: vertexBaseURL(), authToken: token, model: vertexModelName(gModel),
           messages: p.messages, temperature: p.temperature, responseJson: p.responseJson,
@@ -323,11 +405,12 @@ export async function routedChat(p: {
         if (r.ok) return { ok: true, content: r.content, latency_ms: Date.now() - t0, provider: `gemini:${gModel}` };
         if (deadlineFired) return onDeadline();
         errors.push(`gemini:${r.status ? `http_${r.status}` : "failed"}`);
-        console.warn(`[llm] gemini ${gModel} (${p.surface}) ${r.error ?? "empty"} -> openrouter fallback`);
+        console.warn(`[llm] gemini ${gModel} (${p.surface}) ${r.error ?? "empty"} -> vertex fallback`);
       } catch (e) {
-        if (e instanceof RoutedChatDeadline || deadlineFired) return onDeadline();
+        if (!(p.signal?.aborted && !deadlineFired) && (e instanceof RoutedChatDeadline || deadlineFired)) return onDeadline();
+        if (!token) mintFailed = true; // the credential itself failed: the fallback stages share it
         errors.push("gemini:threw");
-        console.warn(`[llm] gemini (${p.surface}) threw -> openrouter fallback: ${String(e instanceof Error ? e.message : e).slice(0, 160)}`);
+        console.warn(`[llm] gemini (${p.surface}) threw -> vertex fallback: ${String(e instanceof Error ? e.message : e).slice(0, 160)}`);
       }
     }
     if (p.signal?.aborted) return { ok: false, content: "", error: "aborted", latency_ms: Date.now() - t0, provider: "none" };
@@ -338,19 +421,34 @@ export async function routedChat(p: {
     // the bug: the arithmetic capped it, the runtime didn't, so a merely-slow fallback (not even
     // hung) could consume the whole remaining deadline and leave the next stage unreachable.
     const fallbackTimeoutMs = fallbackBudgetMs(p.timeoutMs);
-    for (const model of fallbackModels) {
-      stage = `openrouter:${model}`;
+    if (!geminiConfigured()) {
+      // No Vertex credential at all: there is nowhere left to go (no OpenRouter, no Ollama).
+      return { ok: false, content: "", error: "all_failed: vertex_not_configured", latency_ms: Date.now() - t0, provider: "none" };
+    }
+    if (mintFailed) {
+      return { ok: false, content: "", error: `all_failed: ${errors.join("; ")}`.slice(0, 300), latency_ms: Date.now() - t0, provider: "none" };
+    }
+    for (const target of fallbackTargets) {
+      // Do not spend a stage re-asking the exact model+region that just failed as the primary.
+      if (gModel && target.model === gModel.replace(/^google\//, "") && target.region === GCP_LOCATION) continue;
+      const label = vertexLabel(target);
+      stage = label;
       try {
-        const r = await openrouterChat({
-          model, messages: p.messages, temperature: p.temperature, responseJson: p.responseJson,
-          maxTokens: p.maxTokens, timeoutMs: fallbackTimeoutMs, signal,
+        token ??= await raceSignal(getVertexAccessToken(signal, MINT_TIMEOUT_MS), signal);
+        const r = await openaiChat({
+          url: vertexBaseURL(target.region), authToken: token, model: vertexModelName(target.model),
+          messages: p.messages, temperature: p.temperature, responseJson: p.responseJson,
+          maxTokens: p.maxTokens ?? 8192, timeoutMs: fallbackTimeoutMs, signal,
         });
-        return { ok: true, content: r.content, latency_ms: Date.now() - t0, provider: `openrouter:${r.model}` };
-      } catch (e) {
+        if (r.ok) return { ok: true, content: r.content, latency_ms: Date.now() - t0, provider: label };
         if (deadlineFired) return onDeadline();
-        // A closed code only (lib/openrouter.ts never puts a message, a header or the key in one).
-        const code = e instanceof OpenRouterError ? e.code : "openrouter_error";
-        errors.push(`openrouter:${model}=${code}`);
+        // A closed code only: a status number or a word, never the response text.
+        errors.push(`${label}=${r.status && r.status !== 200 ? `http_${r.status}` : r.error === "empty_response" ? "empty" : "failed"}`);
+        if (p.signal?.aborted) break;
+      } catch (e) {
+        if (p.signal?.aborted && !deadlineFired) break; // the caller aborted: reported as `aborted` below
+        if (e instanceof RoutedChatDeadline || deadlineFired) return onDeadline();
+        errors.push(`${label}=threw`);
         if (p.signal?.aborted) break;
       }
     }

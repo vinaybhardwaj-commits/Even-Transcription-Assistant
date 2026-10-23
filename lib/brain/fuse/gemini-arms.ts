@@ -77,7 +77,8 @@ async function gemini(surface: string, tier: "pro" | "flash", system: string, us
   }
   // X4. The check is on provider, not on ok: a SUCCESSFUL Ollama answer is exactly the failure
   // being guarded against, and it looks like success everywhere else.
-  if (!rc.provider.startsWith("gemini:")) return { ok: false, error: "provider_not_gemini", provider: rc.provider };
+  // A Vertex fallback stage (`gemini:<model>@<region>`) is a different model than the arm asked for.
+  if (!rc.provider.startsWith("gemini:") || rc.provider.includes("@")) return { ok: false, error: "provider_not_gemini", provider: rc.provider };
   if (!rc.ok || !rc.content) return { ok: false, error: rc.error ?? "empty_response", provider: rc.provider };
   return { ok: true, content: rc.content, provider: rc.provider };
 }

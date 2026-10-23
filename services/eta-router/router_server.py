@@ -39,6 +39,7 @@ import shutil
 import tempfile
 import threading
 import subprocess
+from datetime import timezone
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 import requests
@@ -213,7 +214,13 @@ def ollama_translate(text: str, lang_code: str, model: str | None = None) -> str
 # memory hog on the box, and the reason the pressure watchdog went STOP_ on busy afternoons. V ruled
 # on 22 Sep that qwen goes. Translation now dispatches on an ENGINE NAME:
 #
-#     openrouter:<model-id>   OpenRouter chat completions, ZDR + data_collection=deny
+#     vertex:<model-id>       Vertex Gemini generateContent (DEFAULT since V's 23 Oct order:
+#                             OpenRouter -> Vertex). Project terms: customer data is not used to
+#                             train, and nothing here enables caching or logging of prompts. There is
+#                             NO per-request zdr flag on Vertex (the OpenRouter body had one): the
+#                             no-retention stance is the GCP project's, stated here, not asserted per call.
+#     openrouter:<model-id>   OpenRouter chat completions, ZDR + data_collection=deny (still
+#                             supported when NAMED; no default uses it, so its key file may be unset)
 #     indictrans2             IndicTrans2 on the Yoga (ETA_INDICTRANS2_URL)
 #     ollama:<model>          the old local path — reachable ONLY by naming it; no default uses it
 #     none                    no translation
@@ -227,9 +234,15 @@ def ollama_translate(text: str, lang_code: str, model: str | None = None) -> str
 # `transcript_english`. Nothing here returns source text on failure. The one place source text is
 # returned is when the input is already English — and then the label says so (`skip:english`).
 # --------------------------------------------------------------------------- #
-TRANSLATE_ENGINE   = os.environ.get("ETA_TRANSLATE_ENGINE", "openrouter:google/gemini-2.5-flash-lite")
+TRANSLATE_ENGINE   = os.environ.get("ETA_TRANSLATE_ENGINE", "vertex:gemini-2.5-flash-lite")
 TRANSLATE_FALLBACK = [e.strip() for e in os.environ.get(
-    "ETA_TRANSLATE_FALLBACK", "openrouter:openai/gpt-5-nano,indictrans2").split(",") if e.strip()]
+    "ETA_TRANSLATE_FALLBACK", "vertex:gemini-2.5-flash,indictrans2").split(",") if e.strip()]
+# Vertex: the service-account JSON is read from the FILE this names, at CALL time (never cached as a
+# key, never logged, never in argv). Project comes from ETA_VERTEX_PROJECT, else the file's project_id.
+VERTEX_SA_FILE     = os.environ.get("ETA_VERTEX_SA_FILE", "")
+VERTEX_PROJECT     = os.environ.get("ETA_VERTEX_PROJECT", "")
+VERTEX_LOCATION    = os.environ.get("ETA_VERTEX_LOCATION", "global")
+VERTEX_TIMEOUT     = float(os.environ.get("ETA_VERTEX_TIMEOUT", "60"))
 OPENROUTER_URL      = os.environ.get("ETA_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 OPENROUTER_KEY_FILE = os.environ.get("ETA_OPENROUTER_KEY_FILE", "")
 OPENROUTER_TIMEOUT  = float(os.environ.get("ETA_OPENROUTER_TIMEOUT", "60"))
@@ -271,6 +284,94 @@ def _openrouter_key() -> str:
     if not key:
         raise TranslateError("openrouter_key_empty")
     return key
+
+
+_VERTEX_TOKEN_CACHE: dict = {}   # (sa path, mtime_ns) -> (access token, expiry epoch). A ~1 h token, never the key.
+_VERTEX_TOKEN_LOCK = threading.Lock()
+
+
+def _vertex_token_and_project() -> tuple[str, str]:
+    """-> (access token, project id). The SA file is read at CALL time; a missing, unreadable, empty
+    or malformed file is an engine failure with a closed code. google-auth is imported lazily, so
+    the router still starts (and every other engine still works) where it is not installed."""
+    if not VERTEX_SA_FILE:
+        raise TranslateError("vertex_sa_file_unset")
+    try:
+        st = os.stat(VERTEX_SA_FILE)
+        with open(VERTEX_SA_FILE, "r", encoding="utf-8") as fh:
+            info = json.loads(fh.read())
+    except OSError:
+        raise TranslateError("vertex_sa_unreadable")
+    except ValueError:
+        raise TranslateError("vertex_sa_invalid")
+    if not isinstance(info, dict) or not info.get("private_key") or not info.get("client_email"):
+        raise TranslateError("vertex_sa_invalid")
+    project = VERTEX_PROJECT or str(info.get("project_id") or "")
+    if not project:
+        raise TranslateError("vertex_no_project")
+    key = (VERTEX_SA_FILE, st.st_mtime_ns)
+    with _VERTEX_TOKEN_LOCK:
+        hit = _VERTEX_TOKEN_CACHE.get(key)
+        if hit and hit[1] - 300 > time.time():
+            return hit[0], project
+    try:
+        from google.oauth2 import service_account  # type: ignore
+        from google.auth.transport.requests import Request  # type: ignore
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        creds.refresh(Request())
+        token, expiry = creds.token, creds.expiry
+    except ImportError:
+        raise TranslateError("vertex_auth_lib_missing")
+    except Exception as ex:
+        # The exception CLASS only: a message can carry the request or key material.
+        raise TranslateError(f"vertex_auth_failed:{type(ex).__name__}")
+    if not isinstance(token, str) or not token:
+        raise TranslateError("vertex_auth_failed:empty")
+    exp = expiry.replace(tzinfo=timezone.utc).timestamp() if expiry is not None else time.time() + 1800
+    with _VERTEX_TOKEN_LOCK:
+        _VERTEX_TOKEN_CACHE.clear()
+        _VERTEX_TOKEN_CACHE[key] = (token, exp)
+    return token, project
+
+
+def _vertex_url(project: str, model: str) -> str:
+    loc = VERTEX_LOCATION
+    host = "aiplatform.googleapis.com" if loc == "global" else f"{loc}-aiplatform.googleapis.com"
+    return (f"https://{host}/v1/projects/{project}/locations/{loc}/publishers/google/models/"
+            f"{model}:generateContent")
+
+
+def vertex_translate(text: str, lang_code: str, model: str) -> tuple[str, str]:
+    """-> (translation, model the RESPONSE reported). Vertex Gemini generateContent, temperature 0."""
+    token, project = _vertex_token_and_project()
+    body = {
+        "systemInstruction": {"parts": [{"text": TRANSLATE_SYSTEM_PROMPT}]},
+        "contents": [{"role": "user", "parts": [{"text": text}]}],
+        "generationConfig": {"temperature": 0},
+    }
+    try:
+        r = requests.post(_vertex_url(project, model), json=body, timeout=VERTEX_TIMEOUT,
+                          headers={"Authorization": f"Bearer {token}",
+                                   "Content-Type": "application/json"})
+    except requests.Timeout:
+        raise TranslateError("vertex_timeout")
+    except requests.RequestException as ex:
+        raise TranslateError(f"vertex_unreachable:{type(ex).__name__}")
+    if r.status_code != 200:
+        raise TranslateError(f"vertex_http_{r.status_code}")
+    try:
+        j = r.json()
+        parts = j["candidates"][0]["content"]["parts"]
+        texts = [p.get("text") for p in parts if isinstance(p, dict) and not p.get("thought")]
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        raise TranslateError("vertex_bad_response")
+    if any(t is not None and not isinstance(t, str) for t in texts):
+        raise TranslateError("vertex_bad_response")
+    out = "".join(t for t in texts if t).strip()
+    if not out:
+        raise TranslateError("vertex_empty")
+    return out, str(j.get("modelVersion") or model)
 
 
 def openrouter_translate(text: str, lang_code: str, model: str) -> tuple[str, str]:
@@ -403,6 +504,11 @@ def verified_english(text: str) -> bool:
 
 def _dispatch(engine: str, text: str, lang_code: str) -> tuple[str, str]:
     """One engine, one attempt. Raises TranslateError on any failure."""
+    if engine.startswith("vertex:"):
+        model = engine.split(":", 1)[1].strip()
+        if not model:
+            raise TranslateError("vertex_no_model")
+        return vertex_translate(text, lang_code, model)
     if engine.startswith("openrouter:"):
         model = engine.split(":", 1)[1].strip()
         if not model:
@@ -462,6 +568,8 @@ def _deadline_for(engine: str) -> float:
     """The WALL-CLOCK bound for one call, read at call time. `requests`' own `timeout` is per socket
     read: a server trickling a byte every 0.5 s kept a 1 s call alive 8 s and it succeeded
     (ETA-Refuter, D2). This bound is the whole call — connect, headers and body."""
+    if engine.startswith("vertex:"):
+        return VERTEX_TIMEOUT
     if engine.startswith("openrouter:"):
         return OPENROUTER_TIMEOUT
     if engine == "indictrans2":

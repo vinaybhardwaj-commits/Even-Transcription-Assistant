@@ -4,7 +4,7 @@
  * Runs the same audio through:
  *   1. Deepgram nova-3-medical (cloud, existing)   — ./transcribe.ts
  *   2. Whisper large-v3-turbo on the Mac Mini       — ./whisper.ts
- * In parallel. Then asks routedChat (Gemini, then OpenRouter) to judge the
+ * In parallel. Then asks routedChat (Gemini, then the Vertex fallback chain) to judge the
  * two transcripts on a 1-10 quality scale and pick a winner.
  *
  * Returns the full comparison record. Callers persist it to

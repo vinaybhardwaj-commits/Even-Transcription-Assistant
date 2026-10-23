@@ -88,7 +88,7 @@ export async function runCdmssStub(
       ]
   ).join("\n");
 
-  // CDS stub through routedChat (cds surface, FLASH tier): Vertex Gemini, then OpenRouter. It used to
+  // CDS stub through routedChat (cds surface, FLASH tier): Vertex Gemini, then the Vertex fallback chain. It used to
   // call llama3.1:8b on the Mini directly — a small, cheap model — so it stays on the cheap tier
   // rather than the pro tier the full CDMSS pipeline uses. `model` is the provider that answered.
   const rc = await routedChat({

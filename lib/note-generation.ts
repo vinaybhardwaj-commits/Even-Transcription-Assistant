@@ -5,7 +5,7 @@
  * Output: structured JSON document covering the clinical sections a
  * receiving physician needs — CC, HPI, exam, assessment, plan.
  *
- * Model: routedChat (note surface, flash tier) — Vertex Gemini, then OpenRouter. No local model.
+ * Model: routedChat (note surface, flash tier) — Vertex Gemini, then the Vertex fallback chain. No local model.
  * JSON mode via response_format. Temperature 0 for determinism.
  *
  * Fail mode: caller catches; encounter status stays "processing" and
@@ -495,7 +495,7 @@ export function noteHasContent(note: AnyNote | null | undefined, noteType?: stri
 }
 
 /**
- * `provider` is routedChat's verbatim answer — 'gemini:<model>' | 'openrouter:<model>' | 'none' — and it
+ * `provider` is routedChat's verbatim answer — 'gemini:<model>' | 'gemini:<model>@<region>' | 'none' — and it
  * is on BOTH branches because a failed note still ran somewhere, and which somewhere is
  * exactly what a trace needs to record. `unknown` when nothing ran (bad config, empty
  * transcript) or when the call threw: never a guess, and never a default that looks like a
@@ -540,7 +540,7 @@ export async function generateNote(
   // the provider that actually served rather than a literal.
   let provider = "unknown";
   try {
-    // Note generation: Gemini (note surface, flash tier) when flagged + configured, then OpenRouter.
+    // Note generation: Gemini (note surface, flash tier) when flagged + configured, then the Vertex fallback.
     const rc = await routedChat({
       surface: "note", tier: "flash",
       messages: [

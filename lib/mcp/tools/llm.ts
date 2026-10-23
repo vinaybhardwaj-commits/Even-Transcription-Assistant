@@ -6,14 +6,14 @@
  *                     encounter, no cue, no row of any kind.
  *
  * WHY THIS EXISTS. routedChat() has always returned the truth — `gemini:<model>` |
- * `openrouter:<model>` | `none` (it returned `ollama` until qwen left ETA on 22 Sep) — and until now that value was read in exactly two places, neither of which the
+ * `gemini:<model>@<region>` (a Vertex fallback stage) | `none` (it returned `ollama` until qwen left ETA on 22 Sep) — and until now that value was read in exactly two places, neither of which the
  * orchestrator can reach: lib/use-flash-translate.ts (a hook) and GET /api/admin/llm-selftest,
  * which is bearer-gated on MIGRATION_SECRET. So nobody had checked in two months, and the
  * traces were recording a hardcoded literal. This tool puts the same answer behind the MCP
  * token, which the orchestrator does have.
  *
  * `provider` is rc.provider VERBATIM. It is not normalised, prettified or mapped. If a surface
- * that is configured and flagged for Gemini answers `openrouter:…`, that IS the finding, and the row
+ * that is configured and flagged for Gemini answers `gemini:<model>@<region>`, that IS the finding, and the row
  * names it itself with warning:"silent_fallback" rather than leaving a reader to spot it.
  *
  * NO SECRETS. Model ids are returned because they are not secrets and they are the thing you
@@ -63,7 +63,7 @@ const SURFACE_TIMEOUT_MS = 10_000;
  * Bounded, but not tiny, and this is deliberate. max_tokens is a CEILING, not a spend — a
  * one-word reply costs one word whatever the cap. Setting it to ~8 would risk a 2.5-series
  * model spending its budget on thinking tokens and returning EMPTY, which openaiChat reports
- * as empty_response, which makes routedChat fall back to OpenRouter, which would make this tool
+ * as empty_response, which makes routedChat fall back to the Vertex fallback, which would make this tool
  * report a silent_fallback that never happened. A probe that lies in exactly the way it exists
  * to detect is worse than a slightly larger cap.
  */
@@ -96,7 +96,7 @@ function flagOn(surface: string): boolean {
 export async function probeLlmSurface(s: { surface: string; tier: "pro" | "flash" }): Promise<LlmSurfaceHealth> {
   const configured = geminiConfigured();
   const flag_on = flagOn(s.surface);
-  // What the router will try FIRST — Gemini when flagged, else the head of the OpenRouter chain.
+  // What the router will try FIRST — Gemini when flagged, else the head of the Vertex fallback chain.
   // A configuration fact for the row, not the answer: `provider` below is the answer.
   const model = firstRoute(s.surface, s.tier);
   const t0 = Date.now();
@@ -136,14 +136,16 @@ export async function probeLlmSurface(s: { surface: string; tier: "pro" | "flash
   // The CDMSS failure, naming itself: we asked for Gemini, we were told Gemini was on, and
   // something else answered. Nothing errors when this happens, which is exactly why it needs
   // to be a field rather than something a reader is expected to notice.
-  if (configured && flag_on && !provider.startsWith("gemini:")) row.warning = "silent_fallback";
+  // A fallback stage answers `gemini:<model>@<region>` — also Gemini, but NOT the primary; only the bare
+  // `gemini:<model>` is the flagged surface's own answer.
+  if (configured && flag_on && (!provider.startsWith("gemini:") || provider.includes("@"))) row.warning = "silent_fallback";
   return row;
 }
 
 const llmHealth: McpTool = {
   name: "scribe_llm_health",
   description:
-    "Which LLM provider actually serves each surface (note, cds, native, fusion, live, notegen_analyze). Fires ONE trivial one-word probe per surface through routedChat and reports { surface, tier, configured, flag_on, provider, model, ok, latency_ms, error? }. `provider` is verbatim: 'gemini:<model>' | 'openrouter:<model>' | 'none' — there is no Ollama in the chain. A surface that is configured AND flagged but answers anything other than gemini: gets warning:'silent_fallback' — that is the failure this tool exists to catch. Sequential, 10s hard cap per surface. Writes NOTHING: no trace, no encounter, no cue. Returns no secret, no token and no prompt or model text.",
+    "Which LLM provider actually serves each surface (note, cds, native, fusion, live, notegen_analyze). Fires ONE trivial one-word probe per surface through routedChat and reports { surface, tier, configured, flag_on, provider, model, ok, latency_ms, error? }. `provider` is verbatim: 'gemini:<model>' (primary) | 'gemini:<model>@<region>' (Vertex fallback stage) | 'none' — there is no Ollama in the chain. A surface that is configured AND flagged but answers anything other than the primary gemini:<model> gets warning:'silent_fallback' — that is the failure this tool exists to catch. Sequential, 10s hard cap per surface. Writes NOTHING: no trace, no encounter, no cue. Returns no secret, no token and no prompt or model text.",
   scope: "read",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   handler: async () =>

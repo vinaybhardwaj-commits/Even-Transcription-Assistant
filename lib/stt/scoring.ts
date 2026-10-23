@@ -70,7 +70,7 @@ async function judgeTranscripts(items: ScoreItem[], labels: string[]): Promise<J
   if (items.length < 2) return null;
   const user = items.map((it, i) => `Transcript ${labels[i]}:\n${(it.text || "").slice(0, 4000)}`).join("\n\n---\n\n");
   try {
-    // STT lab judge: routedChat (stt_lab surface, flash) — Vertex Gemini, then OpenRouter. Was qwen.
+    // STT lab judge: routedChat (stt_lab surface, flash) — Vertex Gemini, then the Vertex fallback chain. Was qwen.
     const r = await routedChatJson<JudgeOut>({
       surface: "stt_lab", tier: "flash",
       messages: [{ role: "system", content: JUDGE_SYSTEM }, { role: "user", content: user }],
@@ -178,7 +178,7 @@ const EXTRACT_SYSTEM = `You extract the clinically critical terms from a medical
 type Term = { term: string; type: string };
 
 /** Extract critical terms from the gold reference. Prefers a cloud LLM (OPENAI_API_KEY)
- *  per the Q1 decision; falls back to routedChat (Gemini, then OpenRouter) so it works without one. */
+ *  per the Q1 decision; falls back to routedChat (Gemini, then the Vertex fallback chain) so it works without one. */
 export async function extractCriticalTerms(reference: string): Promise<{ terms: Term[]; model: string }> {
   const text = (reference || "").slice(0, 8000);
   if (!text.trim()) return { terms: [], model: "none" };

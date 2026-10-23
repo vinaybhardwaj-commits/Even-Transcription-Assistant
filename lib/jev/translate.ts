@@ -4,15 +4,18 @@
  * ─── OFF QWEN (V, 22 Sep) ──────────────────────────────────────────────────────────────────────
  * This used to call qwen2.5:14b through `lib/qwen.ts` — 11.55 GB on the Mini, reached from Vercel
  * through the Cloudflare tunnel, reloaded at 08:12 IST on 22 Sep by exactly this path after the
- * router had already moved off it. It now speaks OpenRouter on the router's contract
- * (`~/eta-router/router_server.py`): the same system prompt, the same verified-English skip, ZDR on
- * every call. There is no qwen in the default or the fallback, and no import of `lib/qwen.ts`.
+ * router had already moved off it. It spoke OpenRouter after that; since V's order of
+ * 23 Oct (OpenRouter -> Vertex) it speaks Vertex Gemini, with the same auth as `routedChat`
+ * (`vertexChat` in lib/llm/gemini.ts: lib/gcp-auth.ts token, GCP_* env). The same system prompt, the
+ * same verified-English skip. There is no qwen and no OpenRouter in the default or the fallback.
  *
- *   model     JEV_TRANSLATE_MODEL     default google/gemini-3.8-flash
- *   fallback  JEV_TRANSLATE_FALLBACK  default meta-llama/llama-4-scout (comma list, tried in order)
+ *   model     JEV_TRANSLATE_MODEL     default gemini-2.5-flash
+ *   fallback  JEV_TRANSLATE_FALLBACK  default gemini-2.5-flash-lite (comma list, tried in order)
  *
- * (ETA-Refuter round 2, 22 Sep, D5): these are V's choice, matching the router. `lib/llm/gemini.ts`
- * (`routedChat`'s OpenRouter fallback) uses the same pair — only the Vertex primary models differ.
+ * Entries are `model[@region]` (region defaults to GCP_FALLBACK_LOCATION, else GCP_LOCATION); an old
+ * OpenRouter slug in either variable is dropped, not sent to Vertex. The retention stance is Vertex's
+ * (the project's Google Cloud terms), not a per-request flag. `routedChat`'s fallback chain is the
+ * same pair of intent: a flash model, then a smaller second one.
  *
  * ─── FAILURE IS NOT ABSENCE (Refuter round 2, unchanged) ───────────────────────────────────────
  * Every model failing returns `{ status: "failed", reason }` with a CLOSED code, so the kind records
@@ -37,17 +40,17 @@
  *
  * Logs carry nothing: this module does not log at all, and every error is a code.
  */
-import { openrouterChat, OpenRouterError } from "@/lib/openrouter";
+import { vertexChat, VertexError, parseVertexTargets, vertexLabel } from "@/lib/llm/gemini";
 
 export type TranslateOutcome =
   | { status: "ok"; english: string | null; model: string; latency_ms: number; input_chars: number }
   | { status: "failed"; reason: string };
 
-/** The seam the tests share: the real implementation is `openrouterChat`. */
-export type ChatFn = typeof openrouterChat;
+/** The seam the tests share: the real implementation is `vertexChat`. */
+export type ChatFn = typeof vertexChat;
 
-export const JEV_TRANSLATE_MODEL_DEFAULT = "google/gemini-3.8-flash";
-export const JEV_TRANSLATE_FALLBACK_DEFAULT = "meta-llama/llama-4-scout";
+export const JEV_TRANSLATE_MODEL_DEFAULT = "gemini-2.5-flash";
+export const JEV_TRANSLATE_FALLBACK_DEFAULT = "gemini-2.5-flash-lite";
 export const SKIP_ENGLISH_LABEL = "skip:english";
 
 /**
@@ -130,20 +133,27 @@ export function verifiedEnglish(text: string): boolean {
 
 type Env = Record<string, string | undefined>;
 
-/** The models to try, in order. Defaults only when the env var is absent or empty. */
+/**
+ * The models to try, in order, as `model[@region]` strings. Defaults only when the env var is absent,
+ * empty, or holds nothing that is a Vertex model name.
+ */
 export function translateChain(env: Env = process.env): string[] {
-  const primary = (env.JEV_TRANSLATE_MODEL ?? "").trim() || JEV_TRANSLATE_MODEL_DEFAULT;
-  const fallbackRaw = env.JEV_TRANSLATE_FALLBACK;
-  const fallback = (fallbackRaw === undefined || fallbackRaw.trim() === "" ? JEV_TRANSLATE_FALLBACK_DEFAULT : fallbackRaw)
-    .split(",").map((m) => m.trim()).filter(Boolean);
-  return [primary, ...fallback.filter((m) => m !== primary)];
+  const region = (env.GCP_FALLBACK_LOCATION ?? "").trim() || (env.GCP_LOCATION ?? "").trim() || "asia-south1";
+  const one = (raw: string | undefined, dflt: string) => {
+    const t = parseVertexTargets((raw ?? "").trim(), region);
+    return t.length > 0 ? t : parseVertexTargets(dflt, region);
+  };
+  const primary = one(env.JEV_TRANSLATE_MODEL, JEV_TRANSLATE_MODEL_DEFAULT)[0]!;
+  const fallback = one(env.JEV_TRANSLATE_FALLBACK, JEV_TRANSLATE_FALLBACK_DEFAULT);
+  const all = [primary, ...fallback].map((t) => `${t.model}@${t.region}`);
+  return all.filter((m, i) => all.indexOf(m) === i);
 }
 
 /** A closed code — never an exception message (no transcript, no key). */
 function codeFor(e: unknown): string {
-  // The client rejects a blank answer as `openrouter_empty`; the kind has always recorded that
+  // The client rejects a blank answer as `vertex_empty`; the kind has always recorded that
   // outcome as `empty_output`, so it keeps its name here whichever layer noticed it.
-  if (e instanceof OpenRouterError) return e.code === "openrouter_empty" ? "empty_output" : e.code;
+  if (e instanceof VertexError) return e.code === "vertex_empty" ? "empty_output" : e.code;
   if ((e as { name?: unknown } | null)?.name === "AbortError") return "translate_abort";
   return "translate_error";
 }
@@ -165,7 +175,7 @@ export async function translateToEnglish(
   }
 
   const env = deps.env ?? process.env;
-  const chat = deps.chat ?? openrouterChat;
+  const chat = deps.chat ?? vertexChat;
   const perCallTimeoutMs = Number(env.JEV_TRANSLATE_TIMEOUT_MS) > 0 ? Number(env.JEV_TRANSLATE_TIMEOUT_MS) : JEV_TRANSLATE_CALL_TIMEOUT_MS_DEFAULT;
   const totalBudgetMs = Number(env.JEV_TRANSLATE_TOTAL_MS) > 0 ? Number(env.JEV_TRANSLATE_TOTAL_MS) : JEV_TRANSLATE_TOTAL_BUDGET_MS_DEFAULT;
   // D4: one deadline for the whole chain, not one per model. A later model's own timeoutMs shrinks
@@ -173,12 +183,14 @@ export async function translateToEnglish(
   const deadline = Date.now() + totalBudgetMs;
   const codes: string[] = [];
 
-  for (const model of translateChain(env)) {
+  for (const entry of translateChain(env)) {
+    const [model, region] = entry.split("@") as [string, string];
     const remaining = deadline - Date.now();
     if (remaining <= 0) { codes.push("translate_deadline_exceeded"); break; }
     try {
       const r = await chat({
         model,
+        region,
         system: TRANSLATE_SYSTEM_PROMPT,
         user: original.slice(0, TRANSLATE_CHAR_CAP),
         timeoutMs: Math.min(perCallTimeoutMs, remaining),

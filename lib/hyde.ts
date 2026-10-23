@@ -10,7 +10,7 @@
  * concatenates with the original to keep both lexical-and-semantic
  * signals in the embedding.
  *
- * Model: routedChat (cds surface, flash tier) — Vertex Gemini, then OpenRouter. It runs on every
+ * Model: routedChat (cds surface, flash tier) — Vertex Gemini, then the Vertex fallback chain. It runs on every
  * CDMSS pass, so it stays on the cheap tier. It used to call llama3.1:8b on the Mini's Ollama
  * directly; no local chat model remains in ETA.
  */

@@ -439,7 +439,7 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
       expect(JSON.parse(mem.get(b.job.result.report_key)!).population).toMatch(/Meet teleconsult.*no room tape/);
       expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result`)[0] as { n: number }).n).toBe(0);
       // a model outage mid-run THROWS: the step is retried, nothing is stored as a failed unit
-      LLM.setRubricChatForTests(async () => { throw new (await import("@/lib/openrouter")).OpenRouterError("openrouter_http_503"); });
+      LLM.setRubricChatForTests(async () => { throw new (await import("@/lib/llm/gemini")).VertexError("vertex_http_503"); });
       const down = await runJob("rubric_run", { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["enc1@m1"] });
       expect(down.job.status).not.toBe("done");
       expect(((await pg.sql`SELECT count(*)::int AS n FROM rubric_result WHERE status = 'failed'`)[0] as { n: number }).n).toBe(0);
@@ -786,10 +786,10 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
 
   it("G80 — a model outage (llm_unavailable) MID-BATCH keeps the calls already made: the failed step records progress.llm_calls = every attempt so far and the position, so a retry neither forgets nor repeats them (run path)", async () => {
     const LLM = await import("@/lib/rubrics/llm");
-    const { OpenRouterError } = await import("@/lib/openrouter");
+    const { VertexError } = await import("@/lib/llm/gemini");
     for (const k of ["encA@m1", "encB@m1", "encC@m1"]) await pg.sql`INSERT INTO eta_encounter_windows (consult_key, room_id, t_open, t_close) VALUES (${k}, 'r1', ${IST("10:00:00")}::timestamptz, ${IST("10:00:30")}::timestamptz)`;
     let calls = 0;
-    LLM.setRubricChatForTests(async () => { calls++; if (calls > 2 && calls <= 9) throw new OpenRouterError("openrouter_timeout"); return { content: JSON.stringify({ scorable: false }), model: "fake/model", latency_ms: 1 }; });
+    LLM.setRubricChatForTests(async () => { calls++; if (calls > 2 && calls <= 9) throw new VertexError("vertex_timeout"); return { content: JSON.stringify({ scorable: false }), model: "fake/model", latency_ms: 1 }; });
     try {
       // units 1-2 are scored (2 calls); unit 3 throws on every claim: 3 failures (MAX_FAILURES) end the job. Every attempt is a real call: 2 + 3 = 5.
       const run = await runJob("rubric_run", { rubric_id: "consult_chair_affect", lab: true, unit_keys: ["enc1@m1", "encA@m1", "encB@m1", "encC@m1"] });
@@ -804,9 +804,9 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
 
   it("G80 — the same on the bench path (labelled bench): the throwing batch keeps llm_calls and the position", async () => {
     const LLM = await import("@/lib/rubrics/llm");
-    const { OpenRouterError } = await import("@/lib/openrouter");
+    const { VertexError } = await import("@/lib/llm/gemini");
     let calls = 0;
-    LLM.setRubricChatForTests(async () => { calls++; if (calls > 2 && calls <= 9) throw new OpenRouterError("openrouter_timeout"); return { content: JSON.stringify({ surgery_recommended: false }), model: "fake/model", latency_ms: 1 }; });
+    LLM.setRubricChatForTests(async () => { calls++; if (calls > 2 && calls <= 9) throw new VertexError("vertex_timeout"); return { content: JSON.stringify({ surgery_recommended: false }), model: "fake/model", latency_ms: 1 }; });
     try {
       const rows = ["g1", "g2", "g3", "g4"].map((k) => JSON.stringify({ unit_key: k, expected: { surgery_recommended: false } })).join("\n") + "\n";
       mem.set("rubric/bench/consult_surgical_pitch/gold.jsonl", rows);
@@ -823,11 +823,11 @@ describe.runIf(HAVE)("rubric_run and rubric_bench through the real runner", () =
   it("Q2-1 — the same on the evr_perturb bench path (evaluateEvrStep): an outage on the 2nd window keeps llm_calls and the position; without the progress patch the record is the pre-step one", async () => {
     const LLM = await import("@/lib/rubrics/llm");
     const REC = await import("@/lib/rubrics/evr/record");
-    const { OpenRouterError } = await import("@/lib/openrouter");
+    const { VertexError } = await import("@/lib/llm/gemini");
     await pg.sql`UPDATE eta_encounter_windows SET consult_uid = 'ConsultUidEnc1AaaaaaaaaaaZ', warehouse_prescription_uid = 'recA' WHERE consult_key = 'enc1@m1'`;
     REC.setMetabaseForTests(async () => [{ rec_uid: "recA", uploaded_at: "2026-10-08T10:00:00Z", exam: "", complaints: [], plan: [], ai_meta: {}, meds: [{ generic_name: "Alphamox", strength: "500 mg", frequency: "BD" }], investigations: [], refer_to: [], advice: [] }]);
     let calls = 0;
-    LLM.setRubricChatForTests(async () => { calls++; if (calls > 1 && calls <= 9) throw new OpenRouterError("openrouter_timeout"); return { content: JSON.stringify({ scorable: true, meds: [{ name: "Alphamox", dose: "500 mg", freq: "BD", quote: "alpha" }] }), model: "fake/model", latency_ms: 1 }; });
+    LLM.setRubricChatForTests(async () => { calls++; if (calls > 1 && calls <= 9) throw new VertexError("vertex_timeout"); return { content: JSON.stringify({ scorable: true, meds: [{ name: "Alphamox", dose: "500 mg", freq: "BD", quote: "alpha" }] }), model: "fake/model", latency_ms: 1 }; });
     try {
       // three explicit windows (the same consult three times: the fixture has one that qualifies); window 1 is scored, window 2 meets the outage on every claim
       mem.set("rubric/bench/encounter_vs_record/evr_perturb.jsonl", [{ header: { seed: 5, n_windows: 40 } }, { unit_key: "enc1@m1" }, { unit_key: "enc1@m1" }, { unit_key: "enc1@m1" }].map((x) => JSON.stringify(x)).join("\n") + "\n");

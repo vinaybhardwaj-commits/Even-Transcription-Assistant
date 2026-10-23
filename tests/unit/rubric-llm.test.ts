@@ -20,7 +20,7 @@ const V = await import("@/lib/rubrics/schema");
 const E = await import("@/lib/rubrics/engines/consult-llm");
 const { evaluateUnit } = await import("@/lib/rubrics/engines");
 const { getRubric, canRun, RUBRIC_PROMPTS } = await import("@/lib/rubrics/registry");
-const { OpenRouterError } = await import("@/lib/openrouter");
+const { VertexError } = await import("@/lib/llm/gemini");
 const { parseBenchSet, compareItem } = await import("@/lib/rubrics/bench");
 
 const affect = getRubric("consult_chair_affect")!;
@@ -51,16 +51,16 @@ describe("the schema subset", () => {
 });
 
 describe("the llm client path", () => {
-  it("uses the existing ZDR client and existing env names: temperature 0, JSON mode, the first model of LLM_FALLBACK_MODELS", async () => {
+  it("goes through Vertex with the existing env names: temperature 0, JSON mode, the first target of LLM_FALLBACK_MODELS (model + region)", async () => {
     const calls: Array<Record<string, unknown>> = [];
     L.setRubricChatForTests(async (a) => { calls.push(a as never); return answer({ scorable: false }); });
-    const r = await L.askJson({ system: "s", user: "u", schema: { type: "object" }, env: { LLM_FALLBACK_MODELS: "vendor/one,vendor/two" } });
+    const r = await L.askJson({ system: "s", user: "u", schema: { type: "object" }, env: { LLM_FALLBACK_MODELS: "gem-one@us-central1,gem-two", GCP_LOCATION: "asia-south1" } });
     expect(r).toMatchObject({ ok: true, attempts: 1 });
-    expect(calls[0]).toMatchObject({ model: "vendor/one", temperature: 0, responseJson: true });
+    expect(calls[0]).toMatchObject({ model: "gem-one", region: "us-central1", temperature: 0, responseJson: true });
     const fs = await import("node:fs");
-    const src = fs.readFileSync("lib/openrouter.ts", "utf8");
-    expect(src).toContain("zdr: true"); // the client every call goes through sends ZDR and data_collection deny on every body
-    expect(src).toContain('data_collection: "deny"');
+    const own = fs.readFileSync("lib/rubrics/llm.ts", "utf8");
+    expect(own).not.toMatch(/from ["']@\/lib\/openrouter["']/); // V, 23 Oct: no OpenRouter client; the door is vertexChat
+    expect(own).toContain("vertexChat");
     expect(fs.readFileSync("lib/rubrics/llm.ts", "utf8")).not.toMatch(/process\.env\.[A-Z_]+/); // no env name of its own
   });
   it("invalid JSON or a schema violation gets exactly one retry on the same model, then fails with a closed reason", async () => {
@@ -79,11 +79,11 @@ describe("the llm client path", () => {
   it("a fenced JSON answer is accepted; no key is a failed unit; a timeout / 429 / 5xx THROWS so the runner retries; a 4xx is a refusal", async () => {
     L.setRubricChatForTests(async () => ({ content: "```json\n{\"a\":1}\n```", model: "m", latency_ms: 1 }));
     expect(await L.askJson({ system: "s", user: "u", schema: { type: "object" } })).toMatchObject({ ok: true });
-    const boom = (code: string) => L.setRubricChatForTests(async () => { throw new OpenRouterError(code); });
-    boom("openrouter_no_key");
+    const boom = (code: string) => L.setRubricChatForTests(async () => { throw new VertexError(code); });
+    boom("vertex_not_configured");
     expect(await L.askJson({ system: "s", user: "u", schema: { type: "object" } })).toMatchObject({ ok: false, reason: "llm_not_configured" });
-    for (const c of ["openrouter_timeout", "openrouter_http_408", "openrouter_empty", "openrouter_http_429", "openrouter_http_503", "openrouter_unreachable:TypeError"]) { boom(c); await expect(L.askJson({ system: "s", user: "u", schema: { type: "object" } })).rejects.toThrow(/^llm_unavailable/); }
-    boom("openrouter_http_400");
+    for (const c of ["vertex_timeout", "vertex_http_408", "vertex_empty", "vertex_http_429", "vertex_http_503", "vertex_unreachable", "vertex_auth_failed", "vertex_abort"]) { boom(c); await expect(L.askJson({ system: "s", user: "u", schema: { type: "object" } })).rejects.toThrow(/^llm_unavailable/); }
+    boom("vertex_http_400");
     expect(await L.askJson({ system: "s", user: "u", schema: { type: "object" } })).toMatchObject({ ok: false, reason: "llm_refused" });
   });
 });
