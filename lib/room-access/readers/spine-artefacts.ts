@@ -56,9 +56,9 @@ export function nemotronPageSql(limit: number): string {
   return `SELECT s.id, s.window_id, s.model_rev, s.config_hash, s.payload_sha256, s.status,
       (cardinality($2::text[]) > 0 AND (
         NOT EXISTS (SELECT 1 FROM room_day r0 WHERE r0.id = s.room_day_id)
-        OR EXISTS (SELECT 1 FROM room_day rd WHERE ${day} AND (rd.id = s.room_day_id
-          OR rd.id IN (SELECT w.room_day_id FROM bench_window w WHERE w.id = s.window_id)
-          OR rd.id IN (SELECT dw.room_day_id FROM room_diarize_window dw WHERE dw.window_id = s.window_id))))) AS blind,
+        OR EXISTS (SELECT 1 FROM room_day rd WHERE rd.id = s.room_day_id AND ${day})
+        OR EXISTS (SELECT 1 FROM bench_window w JOIN room_day rd ON rd.id = w.room_day_id WHERE w.id = s.window_id AND ${day})
+        OR EXISTS (SELECT 1 FROM room_diarize_window dw JOIN room_day rd ON rd.id = dw.room_day_id WHERE dw.window_id = s.window_id AND ${day}))) AS blind,
       l.encounter_id, s.pk
     FROM (SELECT n.id, n.window_id, n.room_day_id, n.model_rev, n.config_hash, n.payload_sha256, n.status, ${NPK} AS pk
             FROM diarize_nemotron_window n

@@ -13,7 +13,7 @@
 - Shard 1 first failed on spine-artefacts-r2 "ORDER BY .+ LIMIT 2000$" (my C had no outer LIMIT): fixed, shard rerun green. Shard 4 first showed 11 container-readiness failures (pg-harness, spine-p2-oref*) while I ran a targeted vitest in the same worktree; rerun clean.
 - pytest tools/eta-spine: 303 passed (-n 4), 8 runs, 7 clean.
 ## Mutants (all killed unless noted)
-- A 60 s: killed. B old handler: killed (4). C inner LIMIT removed: killed (2). D EXISTS bound removed: killed (2). E release loop removed: killed (2).
+- A 60 s: killed. B old handler: killed (4). C inner LIMIT removed: SURVIVES all 7 nemotron/artefact files (61/61; R1 refute mutant C3). CORRECTED in R2 (C-1): the earlier 'killed (2)' was wrong; the inner fence is unobservable on PG16. D EXISTS bound removed: killed (2). E release loop removed: killed (2).
 ## Findings / assumptions
 - C: F-B is NOT reproducible on postgres:16. The OLD statement already defers its subplans past the LIMIT (Result above Sort); its work stays flat when room_diarize_window has an index. The refuter's growth matches the test stub's unindexed room_diarize_window (seq scan 4000 rows x 1600 loops), not a table-wide blind. The fix is a structural fence with identical rows (equality on 3 fixtures x 3 blind sets x 4 cursors). The guard's negative control is therefore a MATERIALIZED table-wide shape (16.2M vs 1.6M plan rows), not the old SQL as written. UNPROVEN that production ever ran table-wide.
 - B: the storm test test_sigterm_storm_no_orphan hung 1 run in 3 at base under load (refuter saw the same); 8 runs after the fix, 1 hang (first full run), 7 clean; could not reproduce in 280 isolated storms. Possible residual flake, cause not pinned.

@@ -83,21 +83,25 @@ d("prelive C: nemotron page, blind work bounded to the page", () => {
     expect(Number(flagged(["2026-09-03|rb"]))).toBeLessThan(300);
   }, 120000);
 
-  it("plan work is linear in the PAGE, not the table: 5k and 20k rows cost the same; a table-wide evaluation of the blind flag is rejected by the same guard", () => {
+  it("plan work is linear in the PAGE: independent of the table size (5k vs 20k rows) AND of room_day (1,000 vs 5,000 days); the old statement and a table-wide evaluation are rejected by the same guard", () => {
     const BLIND = ["2026-09-03|rb", "2026-09-10|r1"];
-    // Control with teeth: the blind flag computed for EVERY row of the table (a MATERIALIZED CTE over the whole table), then paged. This is the shape F-B described.
+    // Control with teeth: the blind flag computed for EVERY row of the table (a MATERIALIZED CTE over the whole table), then paged. This is the shape S3 R4 F-B described.
     const tableWide = () => `WITH a AS MATERIALIZED (${oldNemotronPageSql(100000000)}) SELECT * FROM a ORDER BY pk COLLATE "C" LIMIT ${PAGE}`;
-    const measure = (n: number) => {
-      seed(n, 1000);
+    const measure = (n: number, days: number) => {
+      seed(n, days);
       return { fixed: cost(bind(nemotronPageSql(PAGE), "", BLIND)), old: cost(bind(oldNemotronPageSql(PAGE), "", BLIND)), wide: cost(bind(tableWide(), "", BLIND)) };
     };
-    const small = measure(5000), big = measure(20000);
-    console.log(`prelive C plan work: fixed 5k ${JSON.stringify(small.fixed)} 20k ${JSON.stringify(big.fixed)}; old statement as written (the planner already defers its subplans past the LIMIT on postgres:16, so it is NOT flagged) 5k ${JSON.stringify(small.old)} 20k ${JSON.stringify(big.old)}; table-wide control 5k ${JSON.stringify(small.wide)} 20k ${JSON.stringify(big.wide)}`);
-    // Bound: a fixed number of plan rows per page row (each blind probe scans the 1000 room_day rows), independent of the table size.
-    const WORK_BOUND = 1000 * PAGE;
-    expect(big.fixed.work, "fixed 20k: total plan rows").toBeLessThanOrEqual(WORK_BOUND);
-    expect(small.fixed.work, "fixed 5k: total plan rows").toBeLessThanOrEqual(WORK_BOUND);
-    expect(big.fixed.work, "fixed: 4x the table must not cost 4x").toBeLessThan(small.fixed.work * 1.5);
-    expect(big.wide.work > WORK_BOUND || big.wide.work > small.wide.work * 1.5, `the guard failed to flag a table-wide evaluation: ${JSON.stringify({ small: small.wide, big: big.wide })}`).toBe(true);
-  }, 180000);
+    const small = measure(5000, 1000), big = measure(20000, 1000), manyDays = measure(5000, 5000);
+    const j = (m: { fixed: unknown; old: unknown; wide: unknown }) => `fixed ${JSON.stringify(m.fixed)} old ${JSON.stringify(m.old)} wide ${JSON.stringify(m.wide)}`;
+    console.log(`prelive C plan work: 5k rows/1000 days: ${j(small)}; 20k/1000: ${j(big)}; 5k/5000 days: ${j(manyDays)}`);
+    // The page's own work is a constant number of plan rows per page row, and the table / room_day terms are one pass each: the pk scan + top-N sort reads the table once (the page is chosen by a computed pk,
+    // so that pass is inherent), and the blind probes read room_day once per page (hashed subplans), not once per page row. The old OR seq-scanned room_day for EVERY page row (days x PAGE).
+    const bound = (n: number, days: number) => 20 * PAGE + 2 * n + 8 * days;
+    for (const [name, m, n, days] of [["5k/1000d", small, 5000, 1000], ["20k/1000d", big, 20000, 1000], ["5k/5000d", manyDays, 5000, 5000]] as const) expect(m.fixed.work, `fixed ${name}: total plan rows`).toBeLessThanOrEqual(bound(n, days));
+    expect(big.fixed.work - small.fixed.work, "fixed: +15k table rows costs at most one extra pass over them").toBeLessThanOrEqual(2 * 15000);
+    expect(manyDays.fixed.work - small.fixed.work, "fixed: +4k room days costs at most one extra pass over them").toBeLessThanOrEqual(8 * 4000);
+    expect(manyDays.old.work - small.old.work, "old: +4k room days costs a pass per PAGE ROW").toBeGreaterThan(PAGE * 4000 * 0.5);
+    expect(manyDays.old.work > bound(5000, 5000) && small.old.work > bound(5000, 1000), `the guard failed to flag the old OR statement at 5,000 days: ${JSON.stringify(manyDays.old)}`).toBe(true);
+    expect(big.wide.work > bound(20000, 1000) || big.wide.work > small.wide.work * 1.5, `the guard failed to flag a table-wide evaluation: ${JSON.stringify({ small: small.wide, big: big.wide })}`).toBe(true);
+  }, 240000);
 });
