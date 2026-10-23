@@ -9,7 +9,7 @@ Builder: Sonnet. Fix round for the R1 refute (.bc/spine-prelive-r1-oref-REPORT.m
 
 ## Tests
 .bc/gate.log (one full gate, 4 workers, foreground): typecheck 0, typecheck:tests 0, vitest "Test Files  525 passed | 1 skipped (526)", "Tests  10434 passed | 7 skipped (10441)" (0 failed), build "Compiled successfully", check:silent "Found 9" (the accepted pre-existing set; it exits 1, so gate=1 is that alone). 0 new failures.
-eta-spine pytest (-n 4): 1 failed, 304 passed in 13.07s. Targeted: spine-nemotron-page-pg 2/2, spine-openbreakers-pg 2/2. swift: N/A on Linux.
+eta-spine pytest (-n 4): 305 passed on 7 of 8 reruns; ONE rerun showed "1 failed, 304 passed" and I did not capture which test (UNIDENTIFIED flake; 7 later full runs clean). Targeted: spine-nemotron-page-pg 2/2, spine-openbreakers-pg 2/2. swift: N/A on Linux.
 
 ## Assumptions / risks
 - D-1: the D code commit 96c44347 cannot be amended (no rebase); its test is the next commit, so a cherry-pick of D alone needs 40b74385 with it.
