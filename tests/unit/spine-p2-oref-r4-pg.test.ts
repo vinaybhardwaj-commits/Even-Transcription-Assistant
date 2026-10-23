@@ -218,7 +218,7 @@ d("oref R4 on postgres:16 with ALL migrations", () => {
     expect(rerun.shadow).toBe(0); expect(rerun.by_stage).toEqual({});
     expect(rerun.totals).toEqual(first.totals);             // self-explaining: the 0 is "already there", not "nothing planned"
     expect(await num("SELECT count(*) FROM spine_job")).toBe(first.shadow);
-    const tick = await q("SELECT counts FROM spine_tick WHERE kind = 'enqueue' ORDER BY 1 DESC LIMIT 1");
+    const tick = await q("SELECT counts FROM spine_tick WHERE kind = 'enqueue' ORDER BY id DESC LIMIT 1");
     expect((tick[0].counts as Record<string, unknown>).totals).toEqual(first.totals);
     allLive();                                                // shadow rows are promoted: totals follow the status, per-pass fields unchanged in meaning
     const live2 = (await enq()) as unknown as typeof first;
