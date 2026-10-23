@@ -261,7 +261,16 @@ def n1_phrase(text: str, fld: str | None) -> str | None:
     return None
 
 
-_OTHER_PERSON = re.compile(r"\b(?:previous|last|next|earlier|other)\s+patient\b|\b[A-Z][a-z]+(?:['\u2019]s)\s+(?:mother|wife|husband|son|daughter|father|brother|sister)\b|\bpatient\s+before\b", re.I)
+_NOUN = r"(?:patient|case|lady|man|gentleman|person|one(?!\s+(?:month|week|day|year|hour|time|tablet)s?\b)|aunty|auntie|uncle|woman|boy|girl|child|couple|family)"
+_ADJ = r"(?:[A-Za-z]+\s+)?"
+_OTHER_PERSON = re.compile(
+    rf"\b(?:another|previous|prior|last|earlier|next|other|former|preceding)\s+{_ADJ}{_NOUN}\b"      # Fix3e M3: a pattern, not single phrases
+    rf"|\b(?:that|the)\s+(?:previous|prior|last|earlier|next|other|former|preceding)\s+{_ADJ}{_NOUN}\b"
+    rf"|\b(?:the\s+)?{_NOUN}\s+(?:who|that)\s+(?:just\s+|had\s+)?(?:left|came\s+before|was\s+(?:here|in)\s+before|went\s+out|was\s+before)\b"
+    r"|\b(?:who|that)\s+(?:just\s+)?(?:left|came\s+before)\b"
+    rf"|\b(?:the|that|this|those)\s+{_ADJ}(?:lady|man|gentleman|aunty|auntie|uncle|woman)\b|\b(?:that|those)\s+{_ADJ}patient\b"
+    r"|\b(?:your|her|his|their|my|our|the|a|another)\s+(?:neighbou?r|friend|colleague|relative|cousin|co-?worker)\b"
+    r"|\b[A-Z][a-z]+(?:['\u2019]s)\s+(?:mother|wife|husband|son|daughter|father|brother|sister|child|children)\b|\bpatient\s+before\b", re.I)
 
 
 def other_person(text: str) -> str | None:

@@ -435,6 +435,12 @@ class Builder:
         visit = dt.datetime.fromtimestamp(c.clip_t0_ms / 1000, IST).date()
         dm = [v10_spans.span_index(x) for x in (enc.get("drug_mention_spans") or [])]
         self.gate = NumberGate(c, quarantined=b.quarantined, drug_spans={x for x in dm if x is not None}, visit=visit)
+        for rx_ in enc.get("prescription") or []:  # Fix3e: the words of a prescription row's brand / generic are drug tokens wherever they appear outside Medication
+            for k_ in ("brand_as_said", "generic"):
+                for m_ in re.finditer(r"[A-Za-z]{3,}", str(rx_.get(k_) or "") if isinstance(rx_, dict) else ""):
+                    w_ = m_.group()
+                    if w_.lower() not in v10_words.common_english() or w_[0].isupper():
+                        self.gate.rx_tokens.add(w_.lower())
         self.oc = v10_spans.order_capable_turns(c)
         self.withheld: list[dict] = []
         self.confirm_prompts: list[dict] = []
@@ -603,8 +609,14 @@ class Builder:
             return None
         r = self.gate.check(text, fld, cited)
         if r.ok:
+            if self.gate.drug_outside(r.text, cited):  # Fix3e ruling 1: a medicine is named in the Medication section and the confirm prompts only
+                self.withhold(fld, "drug_outside_medication", cited, red_flag=red_flag)
+                return None
             if v10_words.other_person(r.text):
                 self.withhold(fld, "other_person", cited, red_flag=red_flag)
+                return None
+            if self.gate.quarantine_echo(r.text):  # Fix3e L1
+                self.withhold(fld, "quarantine_echo", cited, red_flag=red_flag)
                 return None
             if self.gate.collision_unit(r.text, cited):  # Fix3b H3
                 self.withhold(fld, "collision", cited, red_flag=red_flag)
@@ -633,9 +645,9 @@ class Builder:
         if red_flag:
             t0 = next((t for t in (turns or []) if 0 <= t < len(self.c.turns)), None)
             at = "" if t0 is None else f" at {max(0, (self.c.turns[t0].t0_ms - self.c.clip_t0_ms) // 1000) // 60:02d}:{max(0, (self.c.turns[t0].t0_ms - self.c.clip_t0_ms) // 1000) % 60:02d}"
-            self.completion.insert(0, {"kind": "field_withheld", "item_id": item["item_id"], "prompt": f"Red flag said{at}, confirm"})
+            self.completion.insert(0, {"kind": "field_withheld", "item_id": item["item_id"], "prompt": f"Red flag said{at}, confirm" + (" medicines in the Medication section" if reason == "drug_outside_medication" else "")})
         else:
-            self.review("field_withheld", item, f"{sec} withheld: check the recording")
+            self.review("field_withheld", item, f"{sec} withheld: " + ("confirm medicines in the Medication section" if reason == "drug_outside_medication" else "check the recording"))
         self.withheld.append({"item_id": item["item_id"], "field_pointer": self.POINTER.get(fld, fld), "reason_code": reason, "span_ids": sids,
                               "prompt_id": item["item_id"], "stage": stage, "red_flag": red_flag})
         return item
@@ -941,7 +953,7 @@ class Builder:
         meds = []
         for rx in self.enc.get("prescription") or []:
             rx = self._txt(rx, RX_TEXT, "medicine")
-            action = rx.get("action") or "start"
+            action = str(rx.get("action") or "start").strip().lower()  # Fix3e M4: the action is read case-insensitively
             generic, brand = rx.get("generic"), rx.get("brand_as_said")
             heard_name = str(brand or generic or "").strip()
             if instruction_only(heard_name):
@@ -967,7 +979,7 @@ class Builder:
                 self.slot({"dosage_form": form, "frequency": rx.get("frequency"), "duration": rx.get("duration"),
                            "timing": rx.get("instructions"), "strength": rx.get("strength"), "drug_class_said": class_label(rx),
                            "source_turns": turns, "confidence": rx.get("confidence"),
-                           "quote_turn": dec if isinstance(dec, int) else None}, lead=dec)
+                           "quote_turn": dec if isinstance(dec, int) else None, "_action": action}, lead=dec)  # Fix3e M4: an unnamed row keeps its action
                 continue
             name = strip_form_prefix(label)
             names = [name, generic, brand] + heard
@@ -1493,6 +1505,7 @@ class Builder:
 
     def slot(self, s: dict, lead=None):
         s = dict(s)
+        act = s.pop("_action", None)
         turns = self.turns(s) + ([s["quote_turn"]] if isinstance(s.get("quote_turn"), int) and s["quote_turn"] not in self.turns(s) else [])
         if self.quarantined(turns):
             self.quarantine("medicine", "unnamed drug in a quarantined turn", turns, names=[], lead=lead)
@@ -1508,9 +1521,13 @@ class Builder:
         ident = self._slot_identity(s)
         if ident and ident in self._slot_ids:
             self._merge_slot(self._slot_ids[ident], s)
+            if act and act not in ("start", "continue"):
+                self.slot_actions[self._slot_ids[ident]] = act  # a later change / hold / stop on the same regimen wins: never a start prompt
             return
         self.n += 1
         sid = f"slot{self.n}"
+        if act:
+            self.slot_actions[sid] = act
         dec = self._decision(lead if isinstance(lead, int) else s.get("quote_turn"), turns)
         ev = self.evidence(turns, lead=dec["turn"] if isinstance(dec, dict) else lead)
         cited = self._cited_turn_ids(ev)

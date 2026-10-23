@@ -43,7 +43,7 @@ def test_a_homograph_withholds_inside_a_drug_unit_and_does_nothing_outside_one()
 
 def test_everyday_function_and_dosing_words_are_not_held_out():
     g = gate_of("As told.")
-    assert not g.collision_unit("Glycomet for the pain, take it after food and drink water", [0])
+    assert not g.collision_unit("Glycomet with the pain, take it after food and drink water", [0])
 
 
 # --- 2: any capitalised mid-sentence token in a drug-tagged unit reads as a brand --------------------------------------------------------------------------

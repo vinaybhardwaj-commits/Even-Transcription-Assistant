@@ -310,9 +310,9 @@ def redact(text) -> str:
 # phonetic key or one-edit form equals that of a number word of any language we carry. In a drug-tagged or drug-flagged unit a token of that list, a lexicon word or a collision word is held
 # out, whether or not the dictionary allows it. Exemptions can only SHRINK the withholding: a closed list of everyday function words and the dosing words / dose units
 # (those have their own veto). Clinical-vocabulary words are NOT exempt (ond, mri, echo are number homographs too).
-_FUNCTION_WORDS = frozenset("the and are has her his was were been done data same made each other either after before with from that this they them then than have here there what when where "
-                            "which while will would your you for not can may but all any per one are our its out use new own off who how why too yet few due via day days dose did does pain".split())
-_TWO_LETTER_ENGLISH = frozenset("am an as at be by do go he hi if in is it me my no of ok on or so to up us we oh ye yo".split()) - {"do", "be", "so"}
+_FUNCTION_WORDS = frozenset("the and has her his was were been done data same made each other either after before with from that this they them have here there what where "
+                            "which while will would your you not can may but all any one its out use off who how why yet few due via day days dose did does pain".split())  # Fix3e ruling 3: for, too, our, are, then, new, than, per, own, number homophones and NOT exempt
+_TWO_LETTER_ENGLISH = frozenset("am an as at be by do go he hi if in is it me my no of ok on or so up us we oh ye yo".split()) - {"do", "be", "so"}  # Fix3e: "to" is the homophone of two
 
 
 @lru_cache(maxsize=1)

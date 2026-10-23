@@ -140,7 +140,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         if pre:
             v10_final.drop_units(art, pre)
             for fld, reason, _u, _p in pre:
-                bl.withhold(fld, reason, [], stage="floor")
+                bl.withhold(fld, reason, [], stage="floor", red_flag=_u == "served" and _p[0] == "red_flags")
             art["completion_required"] = bl.completion
     flags = flags_by_pointer(art)
     banned = [n for p in art["provenance"] if not p.get("json_pointer") for n in (p.get("names") or []) if n]
@@ -221,7 +221,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         failed = v10_final.gp_final(gate, v0, c)
         v10_final.drop_units(art, failed)
         for fld, reason, _u, _p in failed:
-            bl.withhold(fld, reason, [], stage="floor")
+            bl.withhold(fld, reason, [], stage="floor", red_flag=_u == "served" and _p[0] == "red_flags")
         # the note is rendered again from what is left; only a section that STILL fails takes its gp units with it (a surviving entry such as the CBC next to a withheld assay is kept)
         flags = flags_by_pointer(art)
         note, llm_rem = _fallback_note_ex(art, flags, banned)
@@ -232,7 +232,7 @@ def run_consult(c: Consult, client: ModelClient, out_dir: Path, opts: Options | 
         if extra:
             v10_final.drop_units(art, extra)
             for fld, reason, _u, _p in failed2:
-                bl.withhold(fld, reason, [], stage="floor")
+                bl.withhold(fld, reason, [], stage="floor", red_flag=_u == "served" and _p[0] == "red_flags")
             failed = failed + failed2
         for h, reason in bad.items():
             bl.withhold(next((k for k, v in bl.SECTION.items() if v == h), "plan"), reason, [], stage="floor")

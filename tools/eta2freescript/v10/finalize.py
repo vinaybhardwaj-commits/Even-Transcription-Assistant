@@ -90,8 +90,12 @@ def field_turns(art: dict, fld: str, ptr: str | None = None) -> set[int]:
 def _unit_violations(gate: NumberGate, txt: str, turns: set[int]) -> list[Violation]:
     """Fix3b: other-person cues and number homographs in a drug unit, on the final text of one unit."""
     out = []
+    if gate.drug_outside(txt, turns):  # Fix3e ruling 1: no medicine is named outside the Medication section
+        out.append(Violation("drug_outside_medication", "dom"))
     if words.other_person(txt):
         out.append(Violation("other_person", "op"))
+    if gate.quarantine_echo(txt):  # Fix3e L1
+        out.append(Violation("quarantine_echo", "qe"))
     if gate.collision_unit(txt, turns):
         out.append(Violation("collision", "col"))
     if words.possible_name(txt):
@@ -114,10 +118,10 @@ def gp_final(gate: NumberGate, art: dict, c, *, remove: bool = True) -> list[tup
                 continue
             txt, pos, errs = gate.writeback(v)
             lt = field_turns(art, fld, "/" + "/".join(str(k) for k in path)) if unit == "entry" else field_turns(art, fld)
-            with numbers.force_collisions(bool(lt & gate.drug_spans)):  # Fix3b H1: the Stage A drug-turn rule holds on the final check too
+            with numbers.force_collisions(gate.in_drug_unit(txt, lt)):  # Fix3b H1 / Fix3e H1b: the Stage A drug-turn rule holds on the final check too
                 viol = gate.final_check(txt, fld, pos, allowed_drug_tokens=None) if not errs else [Violation("frame", e) for e in errs]
-            viol += _unknown_drug_tokens(txt, allowed)
             viol += _unit_violations(gate, txt, lt)
+            viol += _unknown_drug_tokens(txt, allowed)
             if viol:
                 bad = bad or viol[0].code
             else:
@@ -129,6 +133,25 @@ def gp_final(gate: NumberGate, art: dict, c, *, remove: bool = True) -> list[tup
                     holder.pop(path[-1], None)
             else:
                 drop_entries.append((path, fld))
+    # Fix3e ruling 1: doctor_words and red_flags are served too (publicArtifact): the same drug / name / number-word checks run on each item
+    served: list[tuple[str, int]] = []
+    for key in ("doctor_words", "red_flags"):
+        for i, it in enumerate(art.get(key) or []):
+            if not isinstance(it, dict) or not isinstance(it.get("text_en"), str):
+                continue
+            tl = {int(x[1:]) for x in it.get("cited_spans") or [] if isinstance(x, str) and re.fullmatch(r"s\d+", x)}
+            txt, pos, errs = gate.writeback(it["text_en"])
+            with numbers.force_collisions(gate.in_drug_unit(txt, tl)):
+                viol = [Violation("frame", e) for e in errs] if errs else gate.final_check(txt, "advice", pos)
+            viol += _unit_violations(gate, txt, tl)
+            if viol:
+                failed.append(("advice", viol[0].code, "served", (key, i)))
+                served.append((key, i))
+            else:
+                it["text_en"] = txt
+    if remove:
+        for key, i in sorted(served, key=lambda x: -x[1]):
+            art[key].pop(i)
     # FRX-D1 (found on real text): when the primary diagnosis is withheld, the others are not promoted; they are withheld with it
     dx_path = ("presenting_complaints", "diagnoses")
     gone_dx = {p[-1] for p, _f in drop_entries if tuple(p[:-1]) == dx_path}
@@ -185,6 +208,8 @@ def note_final(gate: NumberGate, art: dict, c, note_tok: str, *, allowed=None) -
         for line in secs.get(h) or []:
             if h == "Medication":
                 viol = gate.final_check(line, None, [])
+                if any(tk.low in words.given_names() and tk.low not in drugs.strong_names() for tk in words.tokenize(line) if tk.is_word):
+                    viol.append(Violation("possible_name", "pn"))  # Fix3e ruling 4: a name never stands in the Medication line (the drug block already drops it at source)
                 lines.append(line)
             else:
                 if h == "Follow up":
@@ -192,12 +217,12 @@ def note_final(gate: NumberGate, art: dict, c, note_tok: str, *, allowed=None) -
                 line = N.scrub_identity(line)  # Fix2 M2: the PHI name masker runs on the final Stage B note too (the repair path ends here as well)
                 txt, pos, errs = gate.writeback(line)
                 st = field_turns(art, fld) or set(gate.drug_spans)  # Fix3c: a note line with no provenance behind it is read against every turn Stage A tagged
-                with numbers.force_collisions(bool(st & gate.drug_spans)):  # Fix3b H1: the Stage A drug-turn rule holds on the note path too
+                with numbers.force_collisions(gate.in_drug_unit(txt, st)):  # Fix3b H1 / Fix3e H1b: a line that holds a tagged turn's drug word is judged against every tagged turn: the Stage A drug-turn rule holds on the note path too
                     viol = [Violation("frame", e) for e in errs] or gate.final_check(txt, fld, pos)
-                viol += _unknown_drug_tokens(txt, allowed)
-                viol += _unit_violations(gate, txt, st)
                 if v9 & set(names_mod.toks(txt)):  # Fix2 M4: a stop / not-given / change drug is named in the confirm prompts only
                     viol.append(Violation("v9_named_drug", "v9"))
+                viol += _unit_violations(gate, txt, st)
+                viol += _unknown_drug_tokens(txt, allowed)
                 lines.append(txt)
             if viol:
                 bad.setdefault(h, viol[0].code)
@@ -249,7 +274,13 @@ def drop_units(art: dict, failed) -> None:
                 p.pop("procedure", None)
                 p["text"] = "[conditional_procedure_withheld] procedure held out of the plan"
     by_list: dict[tuple, list[int]] = {}
+    for key in ("doctor_words", "red_flags"):  # Fix3e: served items that failed the final check
+        for i in sorted((p[1] for _f, _r, u, p in failed if u == "served" and p[0] == key), reverse=True):
+            if i < len(art.get(key) or []):
+                art[key].pop(i)
     for _f, _r, unit, path in failed:
+        if unit == "served":
+            continue
         if unit == "field":
             node = gx
             for k in path[:-1]:

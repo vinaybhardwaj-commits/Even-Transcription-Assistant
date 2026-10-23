@@ -74,6 +74,9 @@ class Violation:
     detail: str
 
 
+_FORMS = frozenset("tablet tablets tab tabs pill pills capsule capsules cap caps injection injections inj syrup drops ointment cream inhaler".split())
+
+
 def _covered(n: Num, spans_: Iterable[tuple[int, int]]) -> bool:
     return any(a <= n.start and n.end <= b for a, b in spans_)
 
@@ -92,6 +95,8 @@ class NumberGate:
         self.recs: dict[int, SlotRec] = {}
         self._n = 0
         self._qcache: dict = {}
+        self.rx_tokens: set[str] = set()  # Fix3e: the words of the brand / generic Stage A put in a prescription row (the mapper fills it)
+        self._tagged = None
 
     # --- quotes ---------------------------------------------------------------------------------------------------------------
     def _turn_texts(self, t: int) -> tuple[str, str | None]:
@@ -156,9 +161,85 @@ class NumberGate:
                 return None
         return worst
 
+    def _tagged_index(self) -> tuple[frozenset[str], frozenset[tuple[str, str]]]:
+        """(drug tokens, word pairs) of the turns Stage A tagged. Drug tokens: a detector flag, or a capitalised mid-sentence word, in a tagged turn, plus the prescription row words."""
+        if self._tagged is None:
+            from .numbers import _FUNCTION_WORDS
+            toks: set[str] = set(self.rx_tokens)
+            pairs: set[tuple[str, str]] = set()
+            for t in self.drug_spans:
+                if not 0 <= t < len(self.c.turns):
+                    continue
+                tn = self.c.turns[t]
+                for txt in (tn.text, tn.native_text):
+                    if not txt:
+                        continue
+                    toks.update(f.token.lower() for f in drugs.flags(txt) if f.reason != "catalogue_analyte")
+                    ws = words.tokenize(txt)
+                    for i, tk in enumerate(ws):
+                        if tk.is_word and words.is_latin(tk.text) and len(tk.text) >= 3 and tk.text[0].isupper() and not tk.text.isupper() and i and ws[i - 1].text[-1:] not in ".!?":
+                            toks.add(tk.low)
+                    lows = [tk.low for tk in ws if tk.is_word]
+                    pairs.update((a, b) for a, b in zip(lows, lows[1:]) if not (a in _FUNCTION_WORDS and b in _FUNCTION_WORDS))
+            self._tagged = (frozenset(toks), frozenset(pairs))
+        return self._tagged
+
+    def quarantine_echo(self, text: str) -> bool:
+        """Fix3e L1: a posted or served unit that holds a 5-word shingle of a quarantined turn withholds (strict: a phrase that is also said in a kept turn counts too)."""
+        if not self.quarantined or not isinstance(text, str):
+            return False
+        if getattr(self, "_qsh", None) is None:
+            sh: set[tuple[str, ...]] = set()
+            for t in self.quarantined:
+                if 0 <= t < len(self.c.turns):
+                    for txt in (self.c.turns[t].text, self.c.turns[t].native_text):
+                        w = re.findall(r"[a-z0-9']+", (txt or "").lower())
+                        sh.update(tuple(w[i:i + 5]) for i in range(max(0, len(w) - 4)))
+            self._qsh = sh
+        w = re.findall(r"[a-z0-9']+", re.sub(r"\u27e6S\d+\u27e7", " ", text).lower())
+        return any(tuple(w[i:i + 5]) in self._qsh for i in range(max(0, len(w) - 4)))
+
+    def tagged_overlap(self, text: str) -> bool:
+        """Fix3e ruling 2 (H1b): the unit holds a drug token of a tagged turn, or two words in a row of one. Then it is read against every tagged turn, whatever turns it cites."""
+        if not self.drug_spans or not isinstance(text, str):
+            return False
+        toks, pairs = self._tagged_index()
+        lows = [tk.low for tk in words.tokenize(re.sub(r"\u27e6S\d+\u27e7", " ", text)) if tk.is_word]
+        return any(w in toks for w in lows if len(w) >= 3) or any(p in pairs for p in zip(lows, lows[1:]))
+
+    def in_drug_unit(self, text: str, turns) -> bool:
+        return bool(set(turns or ()) & self.drug_spans) or self.tagged_overlap(text)
+
+    def drug_outside(self, text: str, turns) -> bool:
+        """Fix3e ruling 1: outside the Medication section a unit may not hold a drug at all: a detector hit (catalogue, denylist, fuzzy, phonetic, English-word brand), a drug token of a tagged
+        turn or prescription row, or, in a drug-tagged unit, a capitalised brand-like word. The Medication section and the slot prompts are the only places a medicine is named."""
+        if not isinstance(text, str) or not text:
+            return False
+        t = re.sub(r"\u27e6S\d+\u27e7", " ", text)
+        if any(f.reason in ("catalogue", "denylist", "fuzzy", "phonetic") for f in drugs.flags(t)):  # strong / fuzzy / phonetic hits; an English-word brand needs the capitalised-brand rule below
+            return True
+        fl = drugs.flags(t)
+        toks_ = words.tokenize(t)
+        lows_ = [tk.low for tk in toks_]
+        for f in fl:  # an English-word brand ("sugar", "calm") beside a dose-form noun ("sugar tablet") is a medicine named by its class
+            if f.reason == "catalogue_english_word":
+                i = next((j for j, tk in enumerate(toks_) if tk.start == f.start), None)
+                if i is not None and _FORMS & set(lows_[max(0, i - 3):i + 4]):
+                    return True
+        tagged = self.in_drug_unit(t, turns)
+        if set(turns or ()) & self.drug_spans and any(words.is_dosing_word(w) for w in lows_):  # a unit that cites a tagged turn and holds a dosing word is drug talk
+            return True
+        if tagged:
+            toks, _p = self._tagged_index()
+            if any(tk.low in toks for tk in words.tokenize(t) if tk.is_word and len(tk.text) >= 3 and (tk.text[0].isupper() or tk.low not in words.common_english())):
+                return True
+        from . import numbers
+        with numbers.force_collisions(tagged):
+            return bool(drugs.english_brand_spans(t))  # mid-sentence only: a sentence-initial common word (Body, Cold, Rest) is English, not a brand
+
     def drugish(self, text: str, turns) -> bool:
         """A unit is about a medicine when a cited turn is one Stage A tagged, or the detector flags a drug in it (an English-word brand counts), or it names an English-word brand."""
-        if set(turns or ()) & self.drug_spans:
+        if self.in_drug_unit(text, turns):
             return True
         return any(f.reason != "catalogue_english_word" for f in drugs.flags(text)) or bool(drugs.english_brand_spans(text, initial=True, short_ok=True))
 

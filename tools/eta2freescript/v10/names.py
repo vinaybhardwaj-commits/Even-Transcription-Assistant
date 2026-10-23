@@ -100,20 +100,30 @@ def detector_tokens(text: str, limit: int = 3, fallback: bool = True) -> str | N
         # after a name cue or a possessive, or right after a capitalised out-of-dictionary word (a first name before the surname the detector happens to know)
         return prev.lower() in _NAME_CUES or prev.endswith(("'s", "’s")) or (prev[:1].isupper() and not words.t2_allowed(prev))
 
+    given, exact = words.given_names(), drugs.strong_names()
+
+    def a_name(tok: str) -> bool:
+        """Fix3e ruling 4: a token on the published given-name list (any case: Dylan, DYLAN, dylan) is never kept as a drug unless it is an exact strong catalogue name."""
+        low = tok.lower()
+        return low in given and low not in exact
+
     fl = drugs.flags(t)
     strong = {(f.start, f.end) for f in fl if f.reason in ("catalogue", "catalogue_english_word", "denylist", "phonetic")}
     out: list[str] = []
     for f in sorted(fl, key=lambda f: f.start):
         for m in toks:
-            if m.start() >= f.start and m.end() <= f.end and not after_cue(m):
+            if m.start() >= f.start and m.end() <= f.end and not after_cue(m) and not a_name(m.group()):
                 ok = ((f.start, f.end) in strong and not _number_like(m.group())) or words.t2_allowed(m.group())
+                # Fix3e ruling 4: after the first drug token, a further token is kept only when it is an exact strong catalogue name (a fuzzy or phonetic hit beside a drug is how a name ("Dylan", "Sharma") got in)
+                if ok and out and m.group().lower() not in exact:
+                    ok = False
                 if ok and m.group().lower() not in {x.lower() for x in out}:
                     out.append(m.group())
     if not out and fallback:
         # a catalogue brand that is an ordinary English word (Pan, Dart, Alex) is not flagged without a dosing word beside it; as the brand_as_said of a prescription it is the drug
         strong_heads, weak_heads = drugs._heads_from_catalogue()
         for m in toks:
-            if m.group().lower() in weak_heads and not after_cue(m):
+            if m.group().lower() in weak_heads and not after_cue(m) and not a_name(m.group()):
                 out.append(m.group())
                 break
     return _clean_spoken(" ".join(out[:limit])) or None

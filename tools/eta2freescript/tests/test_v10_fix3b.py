@@ -74,14 +74,14 @@ def test_h3_a_homograph_in_a_drug_flagged_unit_is_held_out(w):
 
 def test_h3_ordinary_words_in_a_drug_unit_are_not_held_out():
     g = gate_of("Glycomet as told.")
-    for t in ("Glycomet for fever and cough", "take the tablet after food", "Glycomet has helped, the pain is done"):
+    for t in ("Glycomet with fever and cough", "take the tablet after food", "Glycomet has helped, the pain is done"):  # Fix3e: "for" is the homophone of four and is no longer exempt
         assert not g.collision_unit(t, [0]), t
 
 
 def test_h3_through_the_mapper_the_unit_is_withheld_with_a_collision_record():
     c = mk_consult([(0, 4, "0", "Tell me."), (5, 9, "1", "I have a cough."), (10, 16, "0", "Glycomet ond as before and rest.")], roles={"0": "doctor", "1": "patient"})
     a = build_artifact(c, empty_encounter(advice=[{"text": "Glycomet ond as before", "basis": "said", "source_turns": [2]}, {"text": "drink water", "basis": "said", "source_turns": [2]}]))
-    assert [w for w in a["withheld"] if w["reason_code"] in ("collision", "veto_detector", "ood_word")] and "ond" not in a["note_text"]
+    assert [w for w in a["withheld"] if w["reason_code"] in ("collision", "veto_detector", "ood_word", "drug_outside_medication")] and "ond" not in a["note_text"]
     assert "water" in a["gp_extraction"].get("general_advice", "")
 
 

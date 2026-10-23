@@ -35,8 +35,11 @@ def build() -> dict:
     keys = {k for k in (drugs._skeleton(w) for w in lex) if len(k) >= 2}
     near: set[str] = set()
     for w in lex:
-        if len(w) >= EDIT1_MIN_LEN and w not in numbers._ENGLISH_NUMERALS:
+        if len(w) >= EDIT1_MIN_LEN:
             near |= neighbours(w)
+    for w in sorted(numbers._ENGLISH_NUMERALS):  # Fix3e ruling 3: the English numerals give one-edit forms (fife, wan, then, calf, twine) and plurals (twos, fives, hundreds) too
+        if len(w) >= EDIT1_MIN_LEN and w.isalpha():
+            near |= neighbours(w) | {w + "s", w + "es"}
     out = []
     for w in sorted(words.dictionary() | words.catalogue_tokens()):  # the dictionary T2 allows: English + clinical + catalogue name tokens
         if not (w.isascii() and w.isalpha() and WORD_MIN <= len(w) <= WORD_MAX) or w in numbers._ENGLISH_NUMERALS or w in lex:

@@ -1,7 +1,7 @@
 {
  "version": "whitelist-extra.v1",
  "spec": "FRX-T2 (Fix2 H2 ruling, eta2freescript 22 Oct 2026): curated counselling vocabulary the English list lacks. No person names, no place names, no number words, no drug names. Max 300 entries.",
- "count": 143,
+ "count": 137,
  "entries": [
   {
    "word": "roti",
@@ -220,31 +220,7 @@
    "category": "snack_sweet"
   },
   {
-   "word": "adrak",
-   "category": "spice_herb_home_remedy"
-  },
-  {
-   "word": "lehsun",
-   "category": "spice_herb_home_remedy"
-  },
-  {
    "word": "pyaz",
-   "category": "spice_herb_home_remedy"
-  },
-  {
-   "word": "jeera",
-   "category": "spice_herb_home_remedy"
-  },
-  {
-   "word": "ajwain",
-   "category": "spice_herb_home_remedy"
-  },
-  {
-   "word": "hing",
-   "category": "spice_herb_home_remedy"
-  },
-  {
-   "word": "laung",
    "category": "spice_herb_home_remedy"
   },
   {

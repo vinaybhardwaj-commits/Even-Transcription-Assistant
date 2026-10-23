@@ -35,7 +35,7 @@ def split_completion(art: dict) -> None:
         generic = GENERIC_PROMPT.get(kind, "Check the recording")
         prompt = c.get("prompt")
         # a "Red flag said at mm:ss, confirm" prompt and the section prompts of field_withheld hold no heard word: they stay
-        keep = kind == "field_withheld" and isinstance(prompt, str) and ("withheld: check the recording" in prompt or prompt.startswith("Red flag said"))
+        keep = kind == "field_withheld" and isinstance(prompt, str) and ("withheld: check the recording" in prompt or "withheld: confirm medicines in the Medication section" in prompt or prompt.startswith("Red flag said"))
         pub = {"kind": kind, "item_id": iid, "prompt_id": c.get("prompt_id") or iid, "prompt": prompt if keep else generic}
         extra = {k: v for k, v in c.items() if k not in PUBLIC_KEYS}
         if (not keep and prompt and prompt != generic) or extra:
