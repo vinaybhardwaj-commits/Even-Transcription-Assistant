@@ -8,6 +8,7 @@
 #   pmset-baseline                 pmset -a sleep 0 autorestart 1
 #   log-grab <minutes>             bounded audit lines around a grant flip
 #   reboot                         run exactly `/sbin/shutdown -r now` (2.4 d'); NO arguments accepted, anything else is refused
+#   fde-status                     print on, off or unknown (fdesetup status, read-only)
 # Root is never trusted with the caller's environment. The test seam below only works when NOT root.
 # R16 (GR15-10): PATH is pinned as the first statement and every tool is called by absolute path, so a planted `killall` or `sqlite3` earlier on the caller's PATH never runs as root.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
@@ -86,6 +87,16 @@ case "$verb" in
     exec "$sd" -r now
     ;;
   pmset-baseline) /usr/bin/pmset -a sleep 0 autorestart 1 ;;
+  fde-status)
+    # read-only. Anything but a clear "FileVault is Off." is unknown. Test seam GUARDIAN_FDESETUP_BIN: only when NOT root and GUARDIAN_ROOT_TESTMODE=1, like the others.
+    fb=/usr/bin/fdesetup
+    if [ "$G_RUID" != 0 ] && [ "${GUARDIAN_ROOT_TESTMODE:-}" = "1" ] && [ -n "${GUARDIAN_FDESETUP_BIN:-}" ]; then fb="$GUARDIAN_FDESETUP_BIN"; fi
+    case "$("$fb" status 2>/dev/null)" in
+      "FileVault is Off."*) echo off ;;
+      "FileVault is On."*) echo on ;;
+      *) echo unknown ;;
+    esac
+    ;;
   log-grab)
     m="$1"; case "$m" in ''|*[!0-9]*) m=2 ;; esac
     # the test seam GUARDIAN_ROOT_LOG_BIN is honoured only when NOT root and GUARDIAN_ROOT_TESTMODE=1, like the other two seams

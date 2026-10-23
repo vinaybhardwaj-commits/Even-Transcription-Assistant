@@ -93,6 +93,22 @@ g_const USB_CC_MAX_AGE_S 900        # the cable-detect line must be inside the l
 g_const USB_LOG_CAP_S 4             # cap on the log probe
 g_const USB_VERIFY_S 600            # the kiosk-side verify window after the reboot
 g_const USB_LOCK_S 86400            # lock after a failed verify
+# USB enumeration-failure self-heal ladder (rung A coreaudiod, rung B reboot, rung C unplugged). Ships INERT: USB_ENUM_HEAL is 0 in run mode, whatever the conf says.
+# Turning it on is a one-line commit (0 -> 1 in the run-mode branch below) after the Fable gate. Library tests set GUARDIAN_TEST_USB_ENUM_HEAL / GUARDIAN_TEST_SENTINEL_HEAL_CODES
+# (the same seam pattern as USB_DPRIME_HEAL); guardian.sh run|check never read them.
+# G7: SENTINEL_HEAL_CODES is the allowlist of heal codes the kiosk may act on; the reboot rung's code is usb_enum_reboot.
+if [ "${G_RUNMODE:-}" = 1 ]; then
+  g_const USB_ENUM_HEAL 0
+  g_const SENTINEL_HEAL_CODES "usb_enum_reboot"
+else
+  g_const USB_ENUM_HEAL "${GUARDIAN_TEST_USB_ENUM_HEAL:-0}"
+  g_const SENTINEL_HEAL_CODES "${GUARDIAN_TEST_SENTINEL_HEAL_CODES-usb_enum_reboot}"
+fi
+g_const USB_ENUM_HID_IDLE_MIN_S 300   # HID idle needed before the enumeration-failure reboot
+g_const USB_ENUM_CAP_S 7200           # at most one such reboot per kiosk per 2 h
+g_const USB_ENUM_RECHECK_S 15         # rung A: wait this long after killing coreaudiod before judging
+g_const USB_ENUM_LOG_CAP_S 20         # cap on the 24 h kernel-log evidence read
+g_const USB_ENUM_EVID_CACHE_S 300     # the evidence verdict is cached this long
 # Fixed predicate (INFERRED from the OPD 5 log lines): kernel, subsystem com.apple.usb:all, message contains the cable-detect text.
 g_const USB_LOG_PREDICATE 'process == "kernel" AND processID == 0 AND subsystem == "com.apple.usb:all" AND eventMessage CONTAINS "AppleUSBHostPort::cableChangeOccurred: powering off"'
 g_def IDLE_MIN_S 600

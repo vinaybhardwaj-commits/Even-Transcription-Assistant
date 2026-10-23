@@ -483,7 +483,7 @@ test_usb_s7_root_helper_never_resolves_id_through_path() {
   local h="$KDIR/bin/guardian-root.sh"
   assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c 'id -u')" "1" "S7/R16c: one id -u in the helper"
   assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c '/usr/bin/id -u')" "1" "S7/R16c: and it is the absolute path"
-  assert_eq "$(grep -c 'G_RUID. != 0' "$h")" "3" "S7/R16c: all three test seams (db, shutdown, log) test the real uid"
+  assert_eq "$(grep -c 'G_RUID. != 0' "$h")" "4" "S7/R16c: all four test seams (db, shutdown, log, fdesetup) test the real uid"
   assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c 'EUID')" "0" "S7/R16c: the helper never reads EUID"
 }
 

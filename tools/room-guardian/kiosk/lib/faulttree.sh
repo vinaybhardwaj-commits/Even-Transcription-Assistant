@@ -116,3 +116,15 @@ drift_faults() {
   fi
   if [ ! -e "$RR_PLIST" ]; then echo "drift|launchagent_missing|plist_present=false"; fi
 }
+
+# USB enumeration-failure ladder trigger (kept out of fault_tree so its verdict list is unchanged).
+# Prints "absent" (the mic class is off the USB bus and the d' power-off rung does not own it), "no_input" (on the bus, zero CoreAudio input engine), or nothing.
+# New codes: usb_enum_reboot (rung B, the allowlisted heal code), room_device_unplugged (rung C, escalate only).
+usb_enum_fault_kind() {
+  if [ "$S_usb" = "false" ]; then
+    [ "${S_usb_ticks:-0}" -ge "$USB_ABSENT_MIN_TICKS" ] 2>/dev/null && [ "${S_usb_span:-0}" -ge "$USB_ABSENT_MIN_SPAN_S" ] 2>/dev/null || return 0
+    case "${S_cc_age:-}" in ''|*[!0-9]*) echo absent ;; esac   # a fresh cable-detect line = rung d', which has priority
+  elif [ "$S_usb" = "true" ] && [ "$S_engine" = "false" ]; then
+    echo no_input
+  fi
+}
