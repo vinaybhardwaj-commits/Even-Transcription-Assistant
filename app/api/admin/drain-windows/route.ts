@@ -68,9 +68,8 @@ function isFailure(r: AutoDrainResult["results"][number]): boolean {
 async function run(req: NextRequest, actor?: RunActor) {
   const p = req.nextUrl.searchParams;
   const rawLimit = Number(p.get("limit"));
-  const limit = Number.isFinite(rawLimit) && rawLimit > 0
-    ? Math.min(AUTO_DRAIN_BATCH_LIMIT, Math.trunc(rawLimit))
-    : AUTO_DRAIN_BATCH_LIMIT;
+  const explicit = Number.isFinite(rawLimit) && rawLimit > 0;
+  const limit = explicit ? Math.min(AUTO_DRAIN_BATCH_LIMIT, Math.trunc(rawLimit)) : AUTO_DRAIN_BATCH_LIMIT;
 
   // ─── A FAILED DRAIN MUST NOT LOOK LIKE SUCCESS ─────────────────────────────────────────────
   // A bad flag value, an unusable actor, or a failed read or write throws; a drain that could not
@@ -79,7 +78,7 @@ async function run(req: NextRequest, actor?: RunActor) {
   // refused by name" (flag_off, wrong_state, ...), never "we could not look".
   let result;
   try {
-    result = await enqueueAutoDrain(req.nextUrl.origin, { limit, ...(actor ? { actor } : {}) });
+    result = await enqueueAutoDrain(req.nextUrl.origin, { ...(explicit ? { limit: Math.trunc(rawLimit) } : {}), ...(actor ? { actor } : {}) });
   } catch (e) {
     return respondError("PIPELINE_FAILED", `auto-drain failed: ${String((e as Error)?.message ?? e).slice(0, 160)} — no job refs are valid for this call`);
   }
@@ -90,7 +89,7 @@ async function run(req: NextRequest, actor?: RunActor) {
       `auto-drain had ${failed.length} failure(s) (${failed.map((r) => (r.detail ? `${r.step}:${r.detail}` : r.step)).join(",")}): considered=${result.considered} enqueued=${result.enqueued}`,
     );
   }
-  return respondOk({ ...result, cap: limit, max_age_hours: AUTO_DRAIN_MAX_AGE_HOURS, refusal_cooldown_minutes: AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES });
+  return respondOk({ ...result, cap: limit, ...(result.backfill?.cap !== undefined ? { backfill_cap: result.backfill.cap } : {}), max_age_hours: AUTO_DRAIN_MAX_AGE_HOURS, refusal_cooldown_minutes: AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES });
 }
 
 export async function GET(req: NextRequest) {

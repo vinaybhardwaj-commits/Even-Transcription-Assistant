@@ -32,7 +32,7 @@ const B = await import("@/lib/stt/auto-drain-backfill");
 const FLAG = "ROOM_AUTO_DRAIN_ENABLED";
 const SINCE = "AUTO_DRAIN_BACKFILL_SINCE";
 const LIMIT = "AUTO_DRAIN_BACKFILL_LIMIT";
-const ENV_KEYS = [FLAG, SINCE, LIMIT, "ETA_ROUTER_URL", "ETA_ROUTER_URLS", "ETA_ROUTER_BULK_URLS"];
+const ENV_KEYS = [FLAG, SINCE, LIMIT, "ETA_ROUTER_URL", "ETA_ROUTER_URLS", "ETA_ROUTER_BULK_URLS", "BULK_AGE_MINUTES", "POOL_BULK_FALLBACK_LIVE"];
 let saved: Record<string, string | undefined> = {};
 const silent = () => {};
 
@@ -112,10 +112,10 @@ describe("routerHealthy", () => {
     expect(seen!.id).toBe("id.access");
   });
 
-  it("with a bulk pool it probes the bulk endpoints, and any one answering ok is enough", async () => {
+  it("with BULK_AGE_MINUTES set it probes the bulk endpoints, and any one answering ok is enough (more cases: auto-drain-backfill-oref.test.ts)", async () => {
     const urls: string[] = [];
     const f = async (u: string) => { urls.push(u); return new Response(JSON.stringify({ ok: u.startsWith("https://b2") }), { status: 200 }); };
-    expect(await B.routerHealthy(f, { ETA_ROUTER_BULK_URLS: "https://b1.test,https://b2.test" })).toBe(true);
+    expect(await B.routerHealthy(f, { ETA_ROUTER_BULK_URLS: "https://b1.test,https://b2.test", BULK_AGE_MINUTES: "60" }, 360)).toBe(true);
     expect(urls).toEqual(["https://b1.test/healthz", "https://b2.test/healthz"]);
   });
 });
@@ -274,7 +274,7 @@ describe.skipIf(!HAVE_DOCKER)("backfill through enqueueAutoDrain", () => {
     await tick();
     expect(offered()).toHaveLength(1);
     H.drained.length = 0;
-    pg.exec("TRUNCATE bench_window, scribe_job, stt_subject_job;");
+    // no reset: three newer windows (a later grid slot per room) are what the next tick sees
     for (const r of ["a", "b", "c"]) win(`bw2_${r}`, `sess_${r}`, BACKLOG_AGE);
     process.env[LIMIT] = "9";
     await tick();
@@ -294,18 +294,24 @@ describe.skipIf(!HAVE_DOCKER)("backfill through enqueueAutoDrain", () => {
     win("bw_back", "sess_b", BACKLOG_AGE);
     for (let i = 0; i < 6; i++) { win(`bw_h${i}`, "sess_a", BACKLOG_AGE + 500 + i); job(`j_h${i}`, `bw_h${i}`, i < 4 ? "failed" : "done", { finishedMinAgo: 10 + i }); }
     expect((await tick()).backfill).toMatchObject({ skipped: "recent_failure_rate" });
-    pg.exec("TRUNCATE scribe_job;");
-    for (let i = 0; i < 6; i++) job(`j_k${i}`, `bw_h${i}`, i < 1 ? "failed" : "done", { finishedMinAgo: 10 + i });
+    // append-only: ten newer successful runs push the failures out of the 10-job sample
+    for (let i = 0; i < 10; i++) job(`j_k${i}`, `bw_none_${i}`, "done", { finishedMinAgo: 0.5 + i * 0.5 });
     await tick();
     expect(offered()).toEqual(["bw_back"]);
   });
 
-  it("guard: a slow recent average skips; failures older than 12 h are not counted", async () => {
+  it("guard: a slow recent average skips; ten newer fast runs clear it", async () => {
     win("bw_back", "sess_b", BACKLOG_AGE);
     for (let i = 0; i < 5; i++) { win(`bw_s${i}`, "sess_a", BACKLOG_AGE + 500 + i); job(`j_s${i}`, `bw_s${i}`, "done", { finishedMinAgo: 10 + i, runS: 2400 }); }
     expect((await tick()).backfill).toMatchObject({ skipped: "recent_latency" });
-    pg.exec("TRUNCATE scribe_job;");
-    for (let i = 0; i < 5; i++) job(`j_o${i}`, `bw_s${i}`, "failed", { finishedMinAgo: 13 * 60 + i });
+    for (let i = 0; i < 10; i++) job(`j_f${i}`, `bw_none_${i}`, "done", { finishedMinAgo: 0.5 + i * 0.5, runS: 300 });
+    await tick();
+    expect(offered()).toEqual(["bw_back"]);
+  });
+
+  it("guard: failures older than 12 h are not counted (fresh fixture)", async () => {
+    win("bw_back", "sess_b", BACKLOG_AGE);
+    for (let i = 0; i < 5; i++) { win(`bw_o${i}`, "sess_a", BACKLOG_AGE + 500 + i); job(`j_o${i}`, `bw_o${i}`, "failed", { finishedMinAgo: 13 * 60 + i }); }
     await tick();
     expect(offered()).toEqual(["bw_back"]);
   });

@@ -24,7 +24,7 @@
 import { sql as defaultSql } from "@/lib/db";
 import { ROOM_WINDOW_KIND } from "@/lib/jobs/kinds/room-window-kind";
 const IST_OFFSET_MS = 5.5 * 3_600_000;
-import { poolEndpoints } from "@/lib/service-pool";
+import { BULK_FALLBACK_LIVE_ENV, bulkAgeMinutes, poolEndpoints } from "@/lib/service-pool";
 import { ROUTER_DEFAULT_URL } from "@/lib/stt/eta-router";
 import { withServiceAccess } from "@/lib/service-access";
 
@@ -57,6 +57,33 @@ export const BACKFILL_GUARD_MAX_FAIL_RATE = 0.3;
 export const BACKFILL_GUARD_MAX_AVG_JOB_S = 1800;
 /** Backlog windows are served from rooms' history, so "last served" looks back this far (the live look-back is the max age). */
 export const BACKFILL_SERVED_HORIZON_HOURS = 24;
+
+/**
+ * A backlog window refused for a PERMANENT reason is offered at most this many times, then left alone. 3 is
+ * the drain's own DRAIN_MAX_ATTEMPTS (C7): the same "three tries, then park" the codebase already applies to a
+ * failing window. One refusal can be a race and two a coincidence; a third identical deterministic refusal
+ * (the same window, the same unchanging fact) will not change on a fourth.
+ */
+export const BACKFILL_MAX_PERMANENT_REFUSALS = 3;
+/** Steps that are a fact about the window itself and cannot change between ticks. Everything else (flag_off, join_*, engine_failed, no_chunks, ...) is transient and keeps the plain cooldown. */
+const PERMANENT_STEPS = new Set(["too_long", "no_room_day", "not_found", "wrong_state"]);
+
+/** PURE — is this drain outcome a permanent refusal? `wrong_state: claim_lost` is a race with another claimer, so transient. */
+export function isPermanentRefusal(step: string, detail?: string): boolean {
+  return PERMANENT_STEPS.has(step) && !(step === "wrong_state" && detail === "claim_lost");
+}
+
+/** PURE — the refusal count carried in a backfill-stamped reason (`too_long#2` -> 2), else 0. */
+export function refusalCount(reason: unknown, step?: string): number {
+  const m = /^(.*)#(\d{1,3})$/.exec(String(reason ?? ""));
+  if (!m) return 0;
+  return step === undefined || m[1] === step ? Number(m[2]) : 0;
+}
+
+/** PURE — the reason to stamp for a backfill refusal: permanent ones carry their running count in the existing text column (no new column). */
+export function backfillRefusalReason(step: string, detail: string | undefined, priorReason: unknown): string {
+  return isPermanentRefusal(step, detail) ? `${step}#${refusalCount(priorReason, step) + 1}` : step;
+}
 
 export function backfillLimit(env: Env = process.env): number {
   return clampedIntEnv(BACKFILL_LIMIT_ENV, 2, 1, 5, env);
@@ -100,21 +127,49 @@ export function guardVerdict(s: GuardStats, limit: number): string | null {
 type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
 
 /**
- * GET <router base>/healthz on the bulk pool's endpoints (backfill windows are bulk work), same base URL
- * resolution and same service-access headers as the router client. Healthy when ANY endpoint answers a parsed
- * `ok: true` — branched on the body, never the status. Never throws.
+ * GET <router base>/healthz on exactly the endpoint list(s) the backfill's room_window jobs will use, same base
+ * URL resolution and service-access headers as the router client. `poolBulk` (room-window.ts) sends a job to the
+ * bulk pool only when BULK_AGE_MINUTES is set AND the window closed longer ago than that, so:
+ *   - BULK_AGE_MINUTES unset  -> the ordinary list only (a bulk list set without it is never used);
+ *   - set                     -> the bulk list; and, when the age is longer than `maxAgeMinutes` (some backlog
+ *                                windows are younger than it), the ordinary list as well. EVERY list must pass.
+ * A list passes when ANY of its endpoints answers a parsed `ok: true` (branched on the body, never the status).
+ * The bulk list is judged WITHOUT the POOL_BULK_FALLBACK_LIVE tail: the fallback is for an endpoint that dies
+ * mid-job, and must not let a dead bulk pool pass because the Mini answers. Never throws.
  */
-export async function routerHealthy(fetchImpl: Fetcher = (u, i) => fetch(u, i), env: Env = process.env): Promise<boolean> {
-  const bases = poolEndpoints("router", { bulk: true, fallback: ROUTER_DEFAULT_URL }, env);
-  for (const base of bases) {
+export async function routerHealthy(
+  fetchImpl: Fetcher = (u, i) => fetch(u, i),
+  env: Env = process.env,
+  maxAgeMinutes = 0,
+): Promise<boolean> {
+  const age = bulkAgeMinutes(env);
+  const ordinary = poolEndpoints("router", { fallback: ROUTER_DEFAULT_URL }, env);
+  const pools: string[][] = [];
+  if (age === null) pools.push(ordinary);
+  else {
+    pools.push(poolEndpoints("router", { bulk: true, fallback: ROUTER_DEFAULT_URL }, { ...env, [BULK_FALLBACK_LIVE_ENV]: undefined }));
+    if (age > maxAgeMinutes) pools.push(ordinary);
+  }
+  const seen = new Map<string, boolean>();
+  const probe = async (base: string): Promise<boolean> => {
+    const hit = seen.get(base);
+    if (hit !== undefined) return hit;
+    let ok = false;
     try {
       const url = `${base.replace(/\/+$/, "")}/healthz`;
       const res = await fetchImpl(url, withServiceAccess(url, { signal: AbortSignal.timeout(BACKFILL_HEALTHZ_TIMEOUT_MS), cache: "no-store" }, env));
       const body: unknown = await res.json().catch(() => null);
-      if (body && typeof body === "object" && (body as { ok?: unknown }).ok === true) return true;
-    } catch { /* next endpoint */ }
+      ok = !!body && typeof body === "object" && (body as { ok?: unknown }).ok === true;
+    } catch { /* endpoint down */ }
+    seen.set(base, ok);
+    return ok;
+  };
+  for (const pool of pools) {
+    let any = false;
+    for (const base of pool) if (await probe(base)) { any = true; break; }
+    if (!any) return false;
   }
-  return false;
+  return true;
 }
 
 type SqlFn = (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown[]>;
@@ -147,23 +202,25 @@ export async function readGuardStats(sql: SqlFn = defaultSql as unknown as SqlFn
 /** Why a backfill tick did not offer, or null when it may. Order: cheap SQL first, then the network probe. */
 export async function backfillGuard(
   limit: number,
-  deps: { sql?: SqlFn; fetchImpl?: Fetcher; env?: Env } = {},
+  deps: { sql?: SqlFn; fetchImpl?: Fetcher; env?: Env; maxAgeHours?: number } = {},
 ): Promise<string | null> {
   const verdict = guardVerdict(await readGuardStats(deps.sql), limit);
   if (verdict) return verdict;
-  return (await routerHealthy(deps.fetchImpl, deps.env)) ? null : "router_unhealthy";
+  return (await routerHealthy(deps.fetchImpl, deps.env, (deps.maxAgeHours ?? 0) * 60)) ? null : "router_unhealthy";
 }
+
+type ScanOpts = { sinceMs: number; maxAgeHours: number; cooldownMinutes: number; blind: string[]; maxRefusals: number };
 
 /**
  * The backlog candidates: closed between SINCE and now - maxAge, Transcript-on rooms, grid-aligned with a
- * room_day, not refused within the cooldown, NO room_window job in any state yet. Same row shape as the live
- * scan, so orderAutoDrainOffers ranks them. `last_served_ms` looks back BACKFILL_SERVED_HORIZON_HOURS.
+ * room_day, not blind, not refused within the cooldown, not parked by BACKFILL_MAX_PERMANENT_REFUSALS, NO
+ * room_window job in any state yet. ONE ROW PER ROOM, chosen in SQL (DISTINCT ON room_id, newest grid slot first,
+ * the same total order as orderAutoDrainOffers' `newer`), so a ~10k-window backlog does not cross the wire every
+ * tick; orderAutoDrainOffers still ranks the rooms. Blind windows are excluded BEFORE the pick, so a blind newest
+ * window cannot hide a room's older eligible one. `last_served_ms` looks back BACKFILL_SERVED_HORIZON_HOURS.
  * Read-only.
  */
-export async function scanBackfillCandidates(
-  sql: SqlFn,
-  o: { sinceMs: number; maxAgeHours: number; cooldownMinutes: number },
-): Promise<Array<Record<string, unknown>>> {
+export async function scanBackfillCandidates(sql: SqlFn, o: ScanOpts): Promise<Array<Record<string, unknown>>> {
   return (await sql`
     WITH offered AS (
       SELECT ss.room_id, j.created_at AS offered_at
@@ -182,7 +239,8 @@ export async function scanBackfillCandidates(
     served AS (
       SELECT room_id, MAX(offered_at) AS last_served_at FROM offered GROUP BY room_id
     )
-    SELECT w.id, s.room_id, w.start_ms, w.end_ms,
+    SELECT DISTINCT ON (s.room_id)
+           w.id, s.room_id, w.start_ms, w.end_ms, w.auto_drain_refused_reason AS refused_reason,
            (EXTRACT(EPOCH FROM w.closed_at) * 1000)::float8 AS closed_ms,
            (EXTRACT(EPOCH FROM served.last_served_at) * 1000)::float8 AS last_served_ms
       FROM bench_window w
@@ -192,14 +250,30 @@ export async function scanBackfillCandidates(
      WHERE w.state = 'closed'
        AND w.grid_aligned = TRUE
        AND w.room_day_id IS NOT NULL
+       AND w.id <> ALL(${o.blind}::text[])
        AND w.closed_at >= to_timestamp(${o.sinceMs}::float8 / 1000.0)
        AND w.closed_at < NOW() - (${o.maxAgeHours}::int * INTERVAL '1 hour')
        AND (w.auto_drain_refused_at IS NULL
             OR w.auto_drain_refused_at < NOW() - (${o.cooldownMinutes}::int * INTERVAL '1 minute'))
+       AND NOT (COALESCE(substring(w.auto_drain_refused_reason from '#([0-9]{1,3})$')::int, 0) >= ${o.maxRefusals}::int)
        AND NOT EXISTS (
          SELECT 1 FROM scribe_job j
           WHERE j.kind = ${ROOM_WINDOW_KIND}
             AND j.args->>'window_id' = w.id
        )
+     ORDER BY s.room_id, w.end_ms DESC, w.start_ms DESC, w.closed_at DESC, w.id ASC
   `) as Array<Record<string, unknown>>;
+}
+
+/** How many in-range backlog windows are parked by the permanent-refusal cap (for the tick log). Read-only. */
+export async function countParkedBackfill(sql: SqlFn, o: Pick<ScanOpts, "sinceMs" | "maxAgeHours" | "maxRefusals">): Promise<number> {
+  const rows = (await sql`
+    SELECT COUNT(*)::int AS n
+      FROM bench_window w
+     WHERE w.state = 'closed'
+       AND w.closed_at >= to_timestamp(${o.sinceMs}::float8 / 1000.0)
+       AND w.closed_at < NOW() - (${o.maxAgeHours}::int * INTERVAL '1 hour')
+       AND COALESCE(substring(w.auto_drain_refused_reason from '#([0-9]{1,3})$')::int, 0) >= ${o.maxRefusals}::int
+  `) as Array<Record<string, unknown>>;
+  return Number(rows[0]?.n ?? 0);
 }
