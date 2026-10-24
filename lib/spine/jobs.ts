@@ -60,13 +60,15 @@ export async function enqueue(
   return (await modeOf(j.stage)) === "live" ? put(true) : null;
 }
 
-/** Leased rows whose lease ran out on the LAST allowed attempt can never be claimed again: they die here (once, by the UPDATE). */
-export async function reapExhausted(now: Date, notifier: Notifier = stubNotifier): Promise<number> {
+/** Leased rows whose lease ran out on the LAST allowed attempt can never be claimed again: they die here (once, by the UPDATE). `stages` limits the reap to those stages (the server cron reaps only its own). */
+export async function reapExhausted(now: Date, notifier: Notifier = stubNotifier, stages?: readonly string[]): Promise<number> {
+  const only = stages ? [...stages] : null;
   const rows = (await sql`
     WITH upd AS (
       UPDATE spine_job
          SET status = 'dead', done_at = ${now.toISOString()}::timestamptz, lease_owner = NULL, lease_until = NULL, last_error_class = 'transient', last_error_code = 'lease_expired'
        WHERE status = 'leased' AND attempts >= ${MAX_ATTEMPTS}::int AND lease_until < ${now.toISOString()}::timestamptz
+         AND (${only}::text[] IS NULL OR stage = ANY(${only}::text[]))
       RETURNING job_id, stage, encounter_id
     ), tick AS (
       INSERT INTO spine_tick (kind, ticked_at, counts) SELECT 'attempt:' || stage, ${now.toISOString()}::timestamptz, '{"failed":1}'::jsonb FROM upd

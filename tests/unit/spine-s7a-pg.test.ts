@@ -33,6 +33,7 @@ import { readCoveringWindows, readRunTexts } from "@/lib/room-access/readers/spi
 import { CLOSE_GRACE_MS, FREE_STAGES } from "@/lib/spine/enqueue";
 import { RELEASE_BACKOFF_MS } from "@/lib/spine/retry";
 import { POST as claimPost } from "@/app/api/spine/claim/route";
+import { POST as reportPost } from "@/app/api/spine/report/route";
 
 const HAVE_DOCKER = dockerAvailable();
 const ALLOW_SKIP = process.env.ETA_ALLOW_SKIP_E2E === "1";
@@ -77,7 +78,7 @@ const win = (w: Win): CoveringWindow => ({
   run_id: w.run_id === undefined ? (w.state === undefined || w.state === "transcribed" ? `run_${w.id}` : null) : w.run_id,
   run_at_ms: w.run_at_ms === undefined ? NOW - 3_600_000 : w.run_at_ms, closed_at_ms: w.closed_at_ms ?? T_OPEN, refused_at_ms: w.refused_at_ms ?? null, refused_reason: w.refused_reason ?? null, job_open: w.job_open ?? false,
 });
-function room(windows: CoveringWindow[], o: { drainOn?: boolean; blind?: number; engine?: string } = {}) {
+function room(windows: CoveringWindow[], o: { drainOn?: boolean; blind?: number; engine?: string; room?: string } = {}) {
   const st = { windows, offered: [] as string[], reads: 0, blind: o.blind ?? 0 };
   const deps: Deps = {
     readWindows: async () => { st.reads += 1; return { windows: st.windows, blind_excluded: st.blind }; },
@@ -95,9 +96,18 @@ d("spine S7a transcript_final on postgres:16", () => {
     H.tag = pg.sql;
     pg.exec("CREATE TABLE schema_migrations (version integer PRIMARY KEY, name text NOT NULL);");
     pg.exec(UP);
+    // minimal room tables: only what the read-time held-out filter of the feed touches (windowsBlindAny); the room reader's own SQL is proven in the last describe
+    pg.exec(`
+      CREATE TABLE room_day (id text PRIMARY KEY, room_id text NOT NULL, ist_date date NOT NULL);
+      CREATE TABLE bench_window (id text PRIMARY KEY, room_day_id text);
+      CREATE TABLE room_diarize_window (window_id text, room_day_id text);
+      CREATE TABLE room_turn_speaker (window_id text, room_day_id text);
+      CREATE TABLE jev_window_text (window_id text, room_day_id text);
+      CREATE TABLE room_span_emotion (window_id text, room_day_id text);
+    `);
   });
   afterAll(() => { pg.stop(); });
-  beforeEach(() => { pg.exec("TRUNCATE spine_signal, spine_encounter, spine_link, spine_job, spine_artefact, spine_tick, spine_config RESTART IDENTITY CASCADE;"); });
+  beforeEach(() => { pg.exec("TRUNCATE spine_signal, spine_encounter, spine_link, spine_job, spine_artefact, spine_tick, spine_config RESTART IDENTITY CASCADE; TRUNCATE room_day, bench_window;"); });
 
   describe("enqueue (P2): which encounters get the stage", () => {
     it("CONFIRMED only: never candidate, confirmed_single_proxy, merged or rejected; not inside the grace; idempotent rerun writes 0 rows", async () => {
@@ -176,7 +186,7 @@ d("spine S7a transcript_final on postgres:16", () => {
       expect(ev.length).toBe(1);
       expect(ev[0]).toMatchObject({
         event: "encounter.transcript_final", mode: "live", encounter_id: ENC, cut_version: "r0", room_id: ROOM, ist_date: "2026-10-18", engine: "route",
-        windows: { covering: 3, transcribed: 2, silent: 1, refused: 0, pending: 0, blind_excluded: 0 }, run_ids: ["run_w0", "run_w1"], window_ids: ["w0", "w1", "w2"],
+        windows: { covering: 3, transcribed: 2, silent: 1, refused: 0, pending: 0 }, run_ids: ["run_w0", "run_w1"], window_ids: ["w0", "w1", "w2"],
         stamps: { t_close: iso(T_CLOSE), final_at: iso(later), windows_ready_at: iso(NOW + MIN) },
       });
       expect((ev[0].stamps as Record<string, string>).enqueued_at).toBeTruthy();
@@ -186,7 +196,7 @@ d("spine S7a transcript_final on postgres:16", () => {
     });
 
     it("idempotent: a rerun (and a direct second record) adds 0 rows", async () => {
-      const r = room([win({ id: "w0", start: 0 })]);
+      const r = room([win({ id: "w0", start: 0 }), win({ id: "w1", start: 1 })]);
       await runTranscriptFinal(NOW, ORIGIN, r.deps);
       const snap = async () => [await num("SELECT count(*) FROM spine_artefact"), await num("SELECT count(*) FROM spine_tick WHERE kind = 'transcript_final_event'"), await num("SELECT count(*) FROM spine_job")];
       const before = await snap();
@@ -232,11 +242,129 @@ d("spine S7a transcript_final on postgres:16", () => {
       expect(r.st.offered).toEqual([]);
     });
 
-    it("never offers more than the cap per pass, nor a window already in the drain's queue or refused within the cooldown", async () => {
+    it("never offers a window already in the drain's queue or refused within the cooldown, and one window per room per pass", async () => {
       const r = room([win({ id: "w0", start: 0, state: "closed", job_open: true }), win({ id: "w1", start: 1, state: "closed", refused_at_ms: NOW - MIN, refused_reason: "flag_off" }),
         win({ id: "w2", start: 2, state: "closed" }), win({ id: "w3", start: 3, state: "closed" }), win({ id: "w4", start: 4, state: "closed" })]);
       await runTranscriptFinal(NOW, ORIGIN, r.deps);
-      expect(r.st.offered).toEqual(["w2", "w3"]);
+      expect(r.st.offered).toEqual(["w2"]);
+    });
+
+    it("F3: the offer budget is shared by every job of the pass (MAX_OFFERS_PER_PASS in all) and a room gets one window per pass", async () => {
+      // four more confirmed encounters: two in one room, two in two other rooms; every one has a pending closed window
+      const rooms = ["room_aaaa1111", "room_aaaa1111", "room_bbbb2222", "room_cccc3333"];
+      rooms.forEach((rm, i) => enc(`enc_${"fghi"[i]}aaaaaaaaaaaaaaa`, { room: rm }));
+      await runSpineEnqueue(NOW);
+      pg.exec(`UPDATE spine_job SET status = 'done' WHERE encounter_id = '${ENC}';`);
+      const r = room([win({ id: "w0", start: 0, state: "closed" }), win({ id: "w1", start: 1, state: "closed" })]);
+      const c = await runTranscriptFinal(NOW, ORIGIN, r.deps);
+      expect(c).toMatchObject({ claimed: 3, waiting: 3 });
+      expect(r.st.offered.length).toBe(2);                      // not 3 jobs x 1
+      expect(await runTranscriptFinal(NOW + RELEASE_BACKOFF_MS + 1, ORIGIN, r.deps)).toMatchObject({ claimed: 3 });
+      expect(r.st.offered.length).toBeLessThanOrEqual(4);          // 2 more at most
+    });
+
+    it("F2: held-out windows are counted in the pass tick only, never in the event, and no id is written", async () => {
+      const r = room([win({ id: "w0", start: 0 }), win({ id: "w1", start: 1 })], { blind: 2 });
+      expect(await runTranscriptFinal(NOW, ORIGIN, r.deps)).toMatchObject({ done: 1, blind_excluded: 2 });
+      const ev = (await events())[0].counts as { windows: Record<string, number> };
+      expect(ev.windows.blind_excluded).toBeUndefined();
+      expect(JSON.stringify(ev)).not.toContain("blind");
+      expect((await q("SELECT counts FROM spine_tick WHERE kind = 'transcript_final' ORDER BY id DESC LIMIT 1"))[0].counts).toMatchObject({ blind_excluded: 2 });
+    });
+
+    it("F5: a hole at the tail keeps the job waiting; the tail window arriving completes it", async () => {
+      const r = room([win({ id: "w0", start: 0 })]);                // 04:00-04:15 of 04:00-04:20
+      expect(await runTranscriptFinal(NOW, ORIGIN, r.deps)).toMatchObject({ waiting: 1, done: 0 });
+      expect(await events()).toEqual([]);
+      r.st.windows.push(win({ id: "w1", start: 1 }));
+      expect(await runTranscriptFinal(NOW + RELEASE_BACKOFF_MS + 1, ORIGIN, r.deps)).toMatchObject({ done: 1 });
+    });
+
+    it("F6: a job that failed windows_not_ready is revived once its windows are all terminal and covering; it ends done and is not revived again", async () => {
+      const r = room([win({ id: "w0", start: 0, state: "closed" }), win({ id: "w1", start: 1 })]);
+      const late = T_CLOSE + CLOSE_GRACE_MS + MAX_WAIT_MS + RELEASE_BACKOFF_MS;
+      await runTranscriptFinal(late, ORIGIN, r.deps);
+      expect(await jobs()).toMatchObject([{ status: "failed", last_error_code: "windows_not_ready" }]);
+      const BREAKER = 31 * MIN;                                                                                // the failure above counts toward the stage breaker for 30 min
+      expect(await runTranscriptFinal(late + BREAKER, ORIGIN, r.deps)).toMatchObject({ revived: 0, claimed: 0 });   // still pending: not revived
+      r.st.windows[0] = win({ id: "w0", start: 0 });                                                           // the window transcribes later
+      expect(await runTranscriptFinal(late + BREAKER + MIN, ORIGIN, r.deps)).toMatchObject({ revived: 1, claimed: 1, done: 1 });
+      expect(await jobs()).toMatchObject([{ status: "done", attempts: 1 }]);
+      expect((await events()).length).toBe(1);
+      expect(await runTranscriptFinal(late + BREAKER + 2 * MIN, ORIGIN, r.deps)).toMatchObject({ revived: 0, claimed: 0 });
+      expect((await events()).length).toBe(1);
+    });
+
+    it("F6: a job that failed for another reason (frozen, blind, not confirmed) or whose windows are still not covering is never revived", async () => {
+      pg.exec(`UPDATE spine_encounter SET flags = '{frozen}' WHERE encounter_id = '${ENC}';`);
+      const r = room([win({ id: "w0", start: 0 }), win({ id: "w1", start: 1 })]);
+      await runTranscriptFinal(NOW, ORIGIN, r.deps);
+      expect(await jobs()).toMatchObject([{ status: "failed", last_error_code: "frozen" }]);
+      pg.exec(`UPDATE spine_encounter SET flags = '{}' WHERE encounter_id = '${ENC}';`);
+      expect(await runTranscriptFinal(NOW + 31 * MIN, ORIGIN, r.deps)).toMatchObject({ revived: 0, claimed: 0 });
+    });
+
+    it("F7: a later route run for the same windows appends ONE `transcript_final_revised` event (keyed by the new sha); a rerun adds none; the feed returns both in order", async () => {
+      const r = room([win({ id: "w0", start: 0 }), win({ id: "w1", start: 1 })]);
+      await runTranscriptFinal(NOW, ORIGIN, r.deps);
+      expect((await events()).length).toBe(1);
+      const first = (await events())[0].counts as { text: { sha256: string }; run_ids: string[] };
+      expect(await runTranscriptFinal(NOW + MIN, ORIGIN, r.deps)).toMatchObject({ revised: 0 });
+      r.st.windows[1] = win({ id: "w1", start: 1, run_id: "run_w1_redo" });                // a forced re-transcription: a newer route run
+      expect(await runTranscriptFinal(NOW + 2 * MIN, ORIGIN, r.deps)).toMatchObject({ revised: 1 });
+      expect(await runTranscriptFinal(NOW + 3 * MIN, ORIGIN, r.deps)).toMatchObject({ revised: 0 });
+      const ev = (await events()).map((e) => e.counts as { event: string; run_ids: string[]; revises_sha256?: string; text: { sha256: string } });
+      expect(ev.map((e) => e.event)).toEqual(["encounter.transcript_final", "encounter.transcript_final_revised"]);
+      expect(ev[1].run_ids).toEqual(["run_w0", "run_w1_redo"]);
+      expect(ev[1].revises_sha256).toBe(first.text.sha256);
+      expect(ev[1].text.sha256).not.toBe(first.text.sha256);
+      expect((await readFinalEvents()).events.map((e) => e.event)).toEqual(["encounter.transcript_final", "encounter.transcript_final_revised"]);
+      expect(await num("SELECT count(*) FROM spine_artefact")).toBe(1);                      // the artefact stays create-only
+      expect(JSON.stringify(ev)).not.toContain("placeholder words");
+      // flip back to the first run set: a second revision (latest-event keyed), still append-only
+      r.st.windows[1] = win({ id: "w1", start: 1 });
+      expect(await runTranscriptFinal(NOW + 4 * MIN, ORIGIN, r.deps)).toMatchObject({ revised: 1 });
+      expect((await events()).length).toBe(3);
+    });
+
+    it("a lease that ran out on the last attempt is reaped by the cron pass (this stage only)", async () => {
+      pg.exec(`UPDATE spine_job SET status = 'leased', attempts = 6, lease_owner = 'spine-cron:transcript_final', lease_until = '${iso(NOW - MIN)}' WHERE stage = 'transcript_final';
+               UPDATE spine_job SET status = 'leased', attempts = 6, lease_owner = 'box_x', lease_until = '${iso(NOW - MIN)}' WHERE stage = 'recut';`);
+      expect(await runTranscriptFinal(NOW, ORIGIN, room([]).deps)).toMatchObject({ reaped: 1 });
+      expect(await jobs()).toMatchObject([{ status: "dead", last_error_code: "lease_expired" }]);
+      expect((await jobs("recut"))[0].status).toBe("leased");
+    });
+
+    it("/api/spine/report refuses a job of a server stage, even with the cron's own owner", async () => {
+      process.env.SPINE_BEARER_TOKEN = "tok_test";
+      pg.exec(`UPDATE spine_job SET status = 'leased', attempts = 1, lease_owner = 'spine-cron:transcript_final', lease_until = now() + interval '10 minutes' WHERE stage = 'transcript_final';`);
+      const id = Number((await q("SELECT job_id FROM spine_job WHERE stage = 'transcript_final'"))[0].job_id);
+      const res = await reportPost(new Request("https://x.test/api/spine/report", { method: "POST", headers: { authorization: "Bearer tok_test" }, body: JSON.stringify({ job_id: id, owner: "spine-cron:transcript_final", outcome: "done" }) }) as never);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ ok: false, error: "server_stage" });
+      expect((await jobs())[0].status).toBe("leased");
+      delete process.env.SPINE_BEARER_TOKEN;
+    });
+
+    it("F1: the feed drops, at read time, an event whose room-day or covering window is held out NOW; the cursor still advances", async () => {
+      const r = room([win({ id: "w0", start: 0 }), win({ id: "w1", start: 1 })]);
+      await runTranscriptFinal(NOW, ORIGIN, r.deps);
+      const all = await readFinalEvents();
+      expect(all.events.length).toBe(1);
+      // window-level: w0 now has a held-out placement
+      pg.exec(`INSERT INTO room_day VALUES ('rd_blind', 'room_blindtest', '2026-10-18'); INSERT INTO bench_window VALUES ('w0', 'rd_blind');`);
+      const f = await readFinalEvents();
+      expect(f.events).toEqual([]);
+      expect(f.next_after).toBe(all.next_after);
+      // (the room-day level is proven in spine-s7a-r2-adv-pg A2, where the held-out set can change under a written event)
+    });
+
+    it("M19: the read limit is clamped to 200 rows", async () => {
+      const ev = { event: "encounter.transcript_final", v: 1, mode: "live", encounter_id: ENC, cut_version: "r0", room_id: ROOM, ist_date: "2026-10-18", engine: "route", stamps: { t_close: iso(T_CLOSE), enqueued_at: iso(T_CLOSE), windows_ready_at: iso(T_CLOSE), final_at: iso(T_CLOSE) }, windows: {}, window_ids: [], run_ids: [], text: { native_chars: 0, english_chars: 0, sha256: "0".repeat(64), ref: "transcription_run:" } };
+      pg.exec(`INSERT INTO spine_tick (kind, counts) SELECT 'transcript_final_event', '${JSON.stringify(ev)}'::jsonb || jsonb_build_object('n', g) FROM generate_series(1, 230) g;`);
+      expect((await readFinalEvents({ limit: 100000 })).events.length).toBe(200);
+      expect((await readFinalEvents({ limit: 0 })).events.length).toBe(1);
+      expect((await readFinalEvents({ limit: 3 })).events.length).toBe(3);
     });
 
     it("a blind room-day is refused before ANY room read", async () => {
@@ -246,12 +374,6 @@ d("spine S7a transcript_final on postgres:16", () => {
       expect(r.st.reads).toBe(0);
       expect((await jobs())[0]).toMatchObject({ status: "failed", last_error_code: "blind_room_day" });
       expect(await events()).toEqual([]);
-    });
-
-    it("blind windows are only counted, never assembled", async () => {
-      const r = room([win({ id: "w0", start: 0 })], { blind: 2 });
-      await runTranscriptFinal(NOW, ORIGIN, r.deps);
-      expect(((await events())[0].counts as { windows: { blind_excluded: number } }).windows.blind_excluded).toBe(2);
     });
 
     it("an encounter that is no longer confirmed (merged after the job was queued) gets no event", async () => {
@@ -270,7 +392,7 @@ d("spine S7a transcript_final on postgres:16", () => {
     });
 
     it("O4: a run of any engine but route is refused at assembly (the job goes back, retried, no event)", async () => {
-      const r = room([win({ id: "w0", start: 0 })], { engine: "sarvam" });
+      const r = room([win({ id: "w0", start: 0 }), win({ id: "w1", start: 1 })], { engine: "sarvam" });
       expect(await runTranscriptFinal(NOW, ORIGIN, r.deps)).toMatchObject({ errors: 1, done: 0 });
       expect(await events()).toEqual([]);
       expect(await num("SELECT count(*) FROM spine_artefact")).toBe(0);
@@ -284,7 +406,7 @@ d("spine S7a transcript_final on postgres:16", () => {
     });
 
     it("a boundary change makes a NEW event for the new cut; the old one stays and is no longer current", async () => {
-      const r = room([win({ id: "w0", start: 0 })]);
+      const r = room([win({ id: "w0", start: 0 }), win({ id: "w1", start: 1 })]);
       await runTranscriptFinal(NOW, ORIGIN, r.deps);
       pg.exec(`UPDATE spine_encounter SET boundary_rev = 1 WHERE encounter_id = '${ENC}';`);
       await runSpineEnqueue(NOW + MIN);
@@ -351,6 +473,8 @@ d("spine S7a room reader (stub room tables)", () => {
     pg2.start();
     H.tag = pg2.sql;
     pg2.exec(`
+      CREATE TABLE room (id text PRIMARY KEY, transcript_enabled boolean NOT NULL DEFAULT false);
+      INSERT INTO room VALUES ('room_abcd2345', true), ('room_blindtest', true), ('room_offf2345', false);
       CREATE TABLE room_day (id text PRIMARY KEY, room_id text NOT NULL, ist_date date NOT NULL);
       CREATE TABLE bench_session (id text PRIMARY KEY, room_id text NOT NULL);
       CREATE TABLE bench_window (id text PRIMARY KEY, session_id text NOT NULL, room_day_id text, start_ms bigint NOT NULL, end_ms bigint NOT NULL, source_mic text NOT NULL, grid_aligned boolean NOT NULL DEFAULT true, state text NOT NULL, closed_at timestamptz, auto_drain_refused_at timestamptz, auto_drain_refused_reason text);
@@ -360,8 +484,8 @@ d("spine S7a room reader (stub room tables)", () => {
       CREATE TABLE room_span_emotion (window_id text, room_day_id text);
       CREATE TABLE scribe_job (kind text, args jsonb, status text);
       CREATE TABLE transcription_run (id text PRIMARY KEY, subject_type text, subject_id text, engine text, error text, transcript_original text, transcript_english text, created_at timestamptz DEFAULT now());
-      INSERT INTO room_day VALUES ('rd_1', 'room_abcd2345', '2026-10-18'), ('rd_2', 'room_abcd2345', '2026-10-19'), ('rd_b', 'room_blindtest', '2026-10-18');
-      INSERT INTO bench_session VALUES ('s1', 'room_abcd2345'), ('s2', 'room_blindtest');
+      INSERT INTO room_day VALUES ('rd_1', 'room_abcd2345', '2026-10-18'), ('rd_2', 'room_abcd2345', '2026-10-19'), ('rd_b', 'room_blindtest', '2026-10-18'), ('rd_o', 'room_offf2345', '2026-10-18');
+      INSERT INTO bench_session VALUES ('s1', 'room_abcd2345'), ('s2', 'room_blindtest'), ('s3', 'room_offf2345');
     `);
   });
   afterAll(() => { pg2.stop(); H.tag = pg.sql; });
@@ -382,7 +506,7 @@ d("spine S7a room reader (stub room tables)", () => {
         ('run_wb', 'bench_window', 'wb', 'route', 'alpha words', 'beta words'), ('run_sarvam_wb', 'bench_window', 'wb', 'sarvam', 'other', 'other'), ('run_we', 'bench_window', 'we', 'route', 'x', 'y');
       INSERT INTO scribe_job VALUES ('room_window', '{"window_id":"wc"}', 'running');
     `);
-    const r = await readCoveringWindows({ room_id: ROOM, ist_date: "2026-10-18", t_open_ms: T_OPEN, t_close_ms: T_CLOSE });
+    const r = await readCoveringWindows({ room_id: ROOM, t_open_ms: T_OPEN, t_close_ms: T_CLOSE });
     expect(r.blind_excluded).toBe(0);
     expect(r.windows.map((x) => [x.id, x.state, x.run_id, x.job_open])).toEqual([["wb", "transcribed", "run_wb", false], ["wc", "closed", null, true]]);
     const t = await readRunTexts(["run_wb", "run_sarvam_wb"]);
@@ -394,8 +518,27 @@ d("spine S7a room reader (stub room tables)", () => {
       ${w("wh", "s1", "rd_1", 0, 15, "transcribed", "backup")}
       INSERT INTO room_turn_speaker VALUES ('wh', 'rd_b');
     `);
-    const r = await readCoveringWindows({ room_id: ROOM, ist_date: "2026-10-18", t_open_ms: T_OPEN, t_close_ms: T_CLOSE });
+    const r = await readCoveringWindows({ room_id: ROOM, t_open_ms: T_OPEN, t_close_ms: T_CLOSE });
     expect(r.blind_excluded).toBe(1);
     expect(r.windows.map((x) => x.id)).not.toContain("wh");
+  });
+
+  it("F4: a window of a Transcript-OFF room is not returned at all", async () => {
+    pg2.exec(w("wo", "s3", "rd_o", 0, 15, "closed"));
+    const r = await readCoveringWindows({ room_id: "room_offf2345", t_open_ms: T_OPEN, t_close_ms: T_CLOSE });
+    expect(r.windows).toEqual([]);
+  });
+
+  it("F5: a span across IST midnight reads both room-days (23:50 -> 00:10 IST), a span inside one day reads only that day", async () => {
+    const open = Date.parse("2026-10-18T18:20:00Z"), close = Date.parse("2026-10-18T18:40:00Z");
+    pg2.exec(`
+      INSERT INTO bench_window (id, session_id, room_day_id, start_ms, end_ms, source_mic, grid_aligned, state) VALUES
+        ('wm1', 's1', 'rd_1', ${Date.parse("2026-10-18T18:15:00Z")}, ${Date.parse("2026-10-18T18:30:00Z")}, 'primary', true, 'transcribed'),
+        ('wm2', 's1', 'rd_2', ${Date.parse("2026-10-18T18:30:00Z")}, ${Date.parse("2026-10-18T18:45:00Z")}, 'primary', true, 'transcribed');
+    `);
+    const r = await readCoveringWindows({ room_id: ROOM, t_open_ms: open, t_close_ms: close });
+    expect(r.windows.map((x) => x.id)).toEqual(["wm1", "wm2"]);
+    const one = await readCoveringWindows({ room_id: ROOM, t_open_ms: Date.parse("2026-10-18T18:15:00Z"), t_close_ms: Date.parse("2026-10-18T18:25:00Z") });
+    expect(one.windows.map((x) => x.id)).toEqual(["wm1"]);
   });
 });

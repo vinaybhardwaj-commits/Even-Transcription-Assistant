@@ -93,6 +93,7 @@ const M = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/spine/config", async (orig) => ({ ...(await orig<typeof import("@/lib/spine/config")>()), readModes: async () => M.modes, readMode: async () => "off" }));
 vi.mock("@/lib/spine/jobs", () => ({ claimJobs: M.claim, reportJob: M.report, openBreakers: async () => ["recut"], reapExhausted: async () => 0, opsAlertNotifier: {}, stubNotifier: {} }));
+vi.mock("@/lib/db", () => ({ sql: async () => [] }));   // the report route looks the job's stage up (server stages are refused); no row = not a server stage
 import { NextRequest } from "next/server";
 import { POST as claimPOST } from "@/app/api/spine/claim/route";
 import { POST as reportPOST } from "@/app/api/spine/report/route";

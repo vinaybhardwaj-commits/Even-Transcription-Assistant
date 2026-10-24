@@ -1,9 +1,11 @@
 /**
  * Reader spine_transcript — SPINE S7a: the room-table reads of the `transcript_final` stage. lib/spine holds no room-table SQL text of its own.
  *
- *  - readCoveringWindows: the grid-aligned bench windows of one encounter's room-day that overlap [t_open, t_close], with their state, their stored ROUTE run (engine = 'route', no error) and the drain's own
+ *  - readCoveringWindows: the grid-aligned bench windows of one encounter's room-day(s) (both days when the span crosses IST midnight) that overlap [t_open, t_close], of a room whose Transcript switch is ON
+ *    (room.transcript_enabled, read directly as the auto-drain does: a window of a Transcript-off room is neither read nor offered), with their state, their stored ROUTE run (engine = 'route', no error) and the drain's own
  *    marks (an open room_window job, the last refusal). Metadata only: no text column. A window with ANY held-out placement is dropped and only COUNTED (lib/room-access/check windowsBlindAny). A window with no
  *    room_day cannot be placed and is not returned (fail closed). The caller refuses a blind room-day itself, before it calls this.
+ *  - blindWindowsAny: which of the named windows are held out NOW (the read-time filter of the event feed).
  *  - readRunTexts: the text of named route runs. Called only once every covering window is terminal; the caller never logs it.
  *  - markWindowOffered: the one write, the drain's own refusal mark (see its comment).
  */
@@ -14,20 +16,21 @@ import { FINAL_ENGINE, type CoveringWindow, type RunText } from "@/lib/spine/tra
 
 const ms = (v: unknown): number | null => (v === null || v === undefined ? null : Number.isNaN(Date.parse(String(v))) ? null : Date.parse(String(v)));
 
-export async function readCoveringWindows(a: { room_id: string; ist_date: string; t_open_ms: number; t_close_ms: number }): Promise<{ windows: CoveringWindow[]; blind_excluded: number }> {
+export async function readCoveringWindows(a: { room_id: string; t_open_ms: number; t_close_ms: number }): Promise<{ windows: CoveringWindow[]; blind_excluded: number }> {
   const rows = (await sql`
     SELECT w.id, w.start_ms::float8 AS start_ms, w.end_ms::float8 AS end_ms, w.source_mic, w.state, w.closed_at, w.auto_drain_refused_at, w.auto_drain_refused_reason,
            EXISTS (SELECT 1 FROM scribe_job j WHERE j.kind = ${ROOM_WINDOW_KIND} AND j.args->>'window_id' = w.id AND j.status IN ('queued', 'running')) AS job_open,
            r.id AS run_id, r.created_at AS run_at
       FROM bench_window w
       JOIN bench_session s ON s.id = w.session_id
+      JOIN room rm ON rm.id = s.room_id AND rm.transcript_enabled = TRUE
       JOIN room_day rd ON rd.id = w.room_day_id
       LEFT JOIN LATERAL (
         SELECT id, created_at FROM transcription_run
          WHERE subject_type = 'bench_window' AND subject_id = w.id AND engine = ${FINAL_ENGINE} AND error IS NULL
          ORDER BY created_at DESC, id DESC LIMIT 1
       ) r ON TRUE
-     WHERE s.room_id = ${a.room_id}::text AND rd.room_id = ${a.room_id}::text AND rd.ist_date = ${a.ist_date}::date
+     WHERE s.room_id = ${a.room_id}::text AND rd.room_id = ${a.room_id}::text AND rd.ist_date BETWEEN (to_timestamp(${a.t_open_ms}::float8 / 1000.0) AT TIME ZONE 'Asia/Kolkata')::date AND (to_timestamp(${a.t_close_ms}::float8 / 1000.0) AT TIME ZONE 'Asia/Kolkata')::date
        AND w.grid_aligned = TRUE
        AND w.start_ms < ${a.t_close_ms}::float8 AND w.end_ms > ${a.t_open_ms}::float8
      ORDER BY w.start_ms, w.source_mic, w.id
@@ -43,6 +46,11 @@ export async function readCoveringWindows(a: { room_id: string; ist_date: string
       job_open: r.job_open === true,
     })),
   };
+}
+
+/** The subset of these window ids that is held out at this moment (any placement, lib/room-access/check windowsBlindAny's rule). */
+export async function blindWindowsAny(windowIds: readonly string[]): Promise<Set<string>> {
+  return windowsBlindAny(windowIds);
 }
 
 export async function readRunTexts(runIds: readonly string[]): Promise<RunText[]> {
