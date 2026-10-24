@@ -18,7 +18,9 @@ export type IngestMode = Mode;
 /** Paid stages stay off until V rules on D4/D5/D9: never claimable, whatever the config says. */
 export const PAID_STAGES: readonly string[] = ["sarvam", "gapfill", "role", "llm-roles", "parts"];
 /** Every stage the queue knows; an unknown stage is never claimed. */
-export const KNOWN_STAGES: readonly string[] = ["recut", "acoustics", "nemotron", "sarvam", "gapfill", "role", "llm-roles", "parts", "collector", "freescript"];
+export const KNOWN_STAGES: readonly string[] = ["recut", "acoustics", "nemotron", "sarvam", "gapfill", "role", "llm-roles", "parts", "collector", "freescript", "transcript_final"];
+/** Stages the SERVER runs itself (the spine cron, S7a). The box runner is never handed one: /api/spine/claim filters them out. */
+export const SERVER_STAGES: readonly string[] = ["transcript_final"];
 
 export function parseMode(v: unknown): Mode {
   const m = v && typeof v === "object" && !Array.isArray(v) ? (v as { mode?: unknown }).mode : v;

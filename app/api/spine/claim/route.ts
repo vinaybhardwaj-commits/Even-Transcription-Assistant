@@ -6,7 +6,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { checkSpineBearer } from "@/lib/spine/auth";
-import { KNOWN_STAGES, claimRules, readMode, readModes } from "@/lib/spine/config";
+import { KNOWN_STAGES, SERVER_STAGES, claimRules, readMode, readModes } from "@/lib/spine/config";
 import { K_LANE_STAGES, kLaneBlockedNow } from "@/lib/spine/window";
 import { claimJobs, openBreakers, reapExhausted, opsAlertNotifier, stubNotifier } from "@/lib/spine/jobs";
 
@@ -29,7 +29,8 @@ export async function POST(req: NextRequest) {
     if (body.live === true && modes.jobs !== "live") return NextResponse.json({ ok: true, jobs: [] });   // S6: jobs=shadow caps every stage at shadow (as the enqueuer does): a live claim takes nothing, whatever mode.<stage> says
     const want = body.live === true ? "live" : "shadow";   // a non-live (would_run) claim never takes a live-mode stage: it would consume the job as shadow
     // S6 room scoping: the claim rules come from THE ROOM RULE (lib/spine/config.ts), as the enqueuer's planned status does. A live claim takes only rooms whose mode is live; a would_run claim only rooms whose mode is shadow.
-    const allRules = claimRules(want, modes.jobs, modes.stages, modes.scopes, KNOWN_STAGES);
+    // S7a: server stages (transcript_final) are run by the spine cron, never by the box: they are removed before the room rule.
+    const allRules = claimRules(want, modes.jobs, modes.stages, modes.scopes, KNOWN_STAGES.filter((s) => !SERVER_STAGES.includes(s)));
     const allowed = allRules.map((r) => r.stage);
     const open = new Set(await openBreakers(allowed, now));
     const gap = want === "live" && kLaneBlockedNow(now);   // the box refuses K lanes in the hourly window: do not hand them out (a refusal would only bounce)

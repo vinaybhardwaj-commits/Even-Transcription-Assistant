@@ -68,7 +68,7 @@ d("oref R4 on postgres:16 with ALL migrations", () => {
     pulse(KA, iso(4), iso(4, 9));
     allShadow();
     await runSpineMerge(NOW); await enq();
-    const sts = ["leased", "done", "failed", "dead", "leased"];
+    const sts = ["leased", "done", "failed", "dead", "leased", "done"];   // one per planned plain row (6 since S7a: transcript_final)
     pg.exec(`UPDATE spine_job SET status = (ARRAY['${sts.join("','")}'])[job_id], attempts = 3, next_attempt_at = '2026-10-18T09:00:00Z', lease_owner = 'w_test', lease_until = '2026-10-18T09:00:00Z', last_error_class = 'transient', last_error_code = 'e_test', done_at = '2026-10-18T07:00:00Z';`);
     const plain = () => snap().then((rs) => rs.filter((x) => !String(x.input_key).startsWith("sp:")));
     const before = await plain();
@@ -86,9 +86,9 @@ d("oref R4 on postgres:16 with ALL migrations", () => {
     pg.exec(`UPDATE spine_job SET status = 'superseded', attempts = 4, next_attempt_at = '2026-10-18T09:00:00Z', lease_owner = 'w_test', lease_until = '2026-10-18T09:00:00Z', last_error_class = 'permanent', last_error_code = 'e_test', done_at = '2026-10-18T07:00:00Z' WHERE encounter_id = '${ids[0]}';`);
     pg.exec(`DELETE FROM spine_job WHERE encounter_id = '${ids[1]}';`);
     const c = await enq();
-    expect(c.shadow).toBe(10);
+    expect(c.shadow).toBe(12);
     const rows = await q("SELECT job_id, encounter_id, stage, status, priority, attempts, next_attempt_at, lease_owner, lease_until, last_error_class, last_error_code, done_at FROM spine_job ORDER BY encounter_id, stage");
-    expect(rows.length).toBe(10);
+    expect(rows.length).toBe(12);
     const strip = (r: Record<string, unknown>) => { const { job_id: _a, encounter_id: _b, ...rest } = r; return rest; };
     const a = rows.filter((r) => r.encounter_id === ids[0]), b = rows.filter((r) => r.encounter_id === ids[1]);
     expect(a.map(strip)).toEqual(b.map(strip));
@@ -110,11 +110,11 @@ d("oref R4 on postgres:16 with ALL migrations", () => {
     pg.exec("UPDATE spine_job SET status = 'superseded' WHERE input_key LIKE 'sp:%';");
     await enq();
     expect(await num("SELECT count(*) FROM spine_job WHERE input_key LIKE 'sp:%' AND status <> 'shadow'")).toBe(0);
-    expect(await num("SELECT count(*) FROM spine_job WHERE input_key NOT LIKE 'sp:%' AND status = 'queued'")).toBe(1);
+    expect(await num("SELECT count(*) FROM spine_job WHERE input_key NOT LIKE 'sp:%' AND status = 'queued'")).toBe(2);   // recut + transcript_final (no upstream)
     expect(await num("SELECT count(*) FROM spine_job WHERE input_key NOT LIKE 'sp:%' AND stage = 'recut' AND status = 'queued'")).toBe(1);
     pg.exec("UPDATE spine_job SET status = 'done' WHERE stage = 'recut' AND input_key NOT LIKE 'sp:%';");
     await enq();
-    expect((await q("SELECT stage FROM spine_job WHERE input_key NOT LIKE 'sp:%' AND status = 'queued' ORDER BY stage")).map((r) => r.stage)).toEqual(["acoustics", "collector", "nemotron"]);
+    expect((await q("SELECT stage FROM spine_job WHERE input_key NOT LIKE 'sp:%' AND status = 'queued' ORDER BY stage")).map((r) => r.stage)).toEqual(["acoustics", "collector", "nemotron", "transcript_final"]);
   });
 
   it("R4d: random config sweep (60): after every flap, an sp row is never queued; every planned key is live exactly once; rerun writes 0", async () => {
@@ -138,16 +138,17 @@ d("oref R4 on postgres:16 with ALL migrations", () => {
     }
   });
 
-  it("R4 flap 1: demote/re-promote twice (confirmed -> sp -> confirmed -> sp -> confirmed): 10 rows total, live set always matches status", async () => {
+  it("R4 flap 1: demote/re-promote twice (confirmed -> sp -> confirmed -> sp -> confirmed): 11 rows total, live set always matches status", async () => {
     pulse(KA, iso(4), iso(4, 9));
     allShadow(); await runSpineMerge(NOW); await enq();
     for (const s of ["confirmed_single_proxy", "confirmed", "confirmed_single_proxy", "confirmed"]) {
       setEnc(`status = '${s}'`); await enq();
       const sp = s === "confirmed_single_proxy";
-      expect(await num(`SELECT count(*) FROM spine_job WHERE status = 'shadow' AND (input_key LIKE 'sp:%') = ${sp}`)).toBe(5);
-      expect(await num(`SELECT count(*) FROM spine_job WHERE status = 'superseded' AND (input_key LIKE 'sp:%') = ${!sp}`)).toBe(5);
+      // 5 sp rows (no transcript_final for single_proxy) and 6 plain rows (S7a adds transcript_final for confirmed)
+      expect(await num(`SELECT count(*) FROM spine_job WHERE status = 'shadow' AND (input_key LIKE 'sp:%') = ${sp}`)).toBe(sp ? 5 : 6);
+      expect(await num(`SELECT count(*) FROM spine_job WHERE status = 'superseded' AND (input_key LIKE 'sp:%') = ${!sp}`)).toBe(sp ? 6 : 5);
     }
-    expect(await num("SELECT count(*) FROM spine_job")).toBe(10);
+    expect(await num("SELECT count(*) FROM spine_job")).toBe(11);
   });
 
   it("R4 flap 2: ambiguous on/off/on, shadow then live: freescript superseded/revived/superseded; the other 4 untouched", async () => {
@@ -161,7 +162,7 @@ d("oref R4 on postgres:16 with ALL migrations", () => {
     expect(await other()).toEqual(o0);
     allLive(); pg.exec("UPDATE spine_job SET status = 'done' WHERE stage = 'collector';");
     for (const [f, want] of [["ARRAY[]::text[]", "queued"], ["ARRAY['ambiguous']", "superseded"], ["ARRAY[]::text[]", "queued"]] as Array<[string, string]>) { setEnc(`flags = ${f}`); await enq(); expect(await fs()).toBe(want); }
-    expect(await num("SELECT count(*) FROM spine_job")).toBe(5);
+    expect(await num("SELECT count(*) FROM spine_job")).toBe(6);
     expect(await num("SELECT attempts FROM spine_job WHERE stage = 'freescript'")).toBe(0);
   });
 
@@ -171,26 +172,26 @@ d("oref R4 on postgres:16 with ALL migrations", () => {
     const cnt = (cut: string, sp: boolean, st: string) => num(`SELECT count(*) FROM spine_job WHERE cut_version = '${cut}' AND (input_key LIKE 'sp:%') = ${sp} AND status = '${st}'`);
     expect(await cnt("r0", true, "shadow")).toBe(5);
     setEnc("status = 'confirmed', boundary_rev = 1"); await enq();
-    expect(await cnt("r0", true, "superseded")).toBe(5); expect(await cnt("r1", false, "shadow")).toBe(5);
+    expect(await cnt("r0", true, "superseded")).toBe(5); expect(await cnt("r1", false, "shadow")).toBe(6);
     setEnc("status = 'confirmed_single_proxy'"); await enq();
-    expect(await cnt("r0", true, "superseded")).toBe(5); expect(await cnt("r1", false, "superseded")).toBe(5); expect(await cnt("r1", true, "shadow")).toBe(5);
+    expect(await cnt("r0", true, "superseded")).toBe(5); expect(await cnt("r1", false, "superseded")).toBe(6); expect(await cnt("r1", true, "shadow")).toBe(5);
     setEnc("status = 'confirmed'"); await enq();
-    expect(await cnt("r0", true, "superseded")).toBe(5); expect(await cnt("r1", true, "superseded")).toBe(5); expect(await cnt("r1", false, "shadow")).toBe(5);
-    expect(await num("SELECT count(*) FROM spine_job")).toBe(15);
+    expect(await cnt("r0", true, "superseded")).toBe(5); expect(await cnt("r1", true, "superseded")).toBe(5); expect(await cnt("r1", false, "shadow")).toBe(6);
+    expect(await num("SELECT count(*) FROM spine_job")).toBe(16);
   });
 
   it("R4 merged/rejected then back at the same cut, and flag-off: off/killed/default never revive or write", async () => {
     pulse(KA, iso(4), iso(4, 9));
     allShadow(); await runSpineMerge(NOW); await enq();
     setEnc("status = 'rejected'"); await enq();
-    expect(await live("superseded")).toBe(5);
+    expect(await live("superseded")).toBe(6);
     setEnc("status = 'confirmed'");
     const s0 = await snap(); const t0 = await num("SELECT count(*) FROM spine_tick");
     for (const off of [() => pg.exec("DELETE FROM spine_config;"), () => { allLive(); setConfig("kill_switch", "true"); }, () => { pg.exec("DELETE FROM spine_config;"); setConfig("jobs", '"bogus"'); }, () => { allShadow(); setConfig("jobs", '"off"'); }]) {
       off(); expect(await enq()).toEqual({ skipped: "off" });
     }
     expect(await snap()).toEqual(s0); expect(await num("SELECT count(*) FROM spine_tick")).toBe(t0);
-    allShadow(); await enq(); expect(await live("shadow")).toBe(5);
+    allShadow(); await enq(); expect(await live("shadow")).toBe(6);
   });
 
   it("R4 LOW: ambiguous_no_freescript counts confirmed + sp (past grace, not frozen), not candidate", async () => {
