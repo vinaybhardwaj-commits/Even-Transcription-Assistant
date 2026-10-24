@@ -113,7 +113,7 @@ export type ReportResult = { ok: true; status: string; artefact?: "recorded" | "
  * `artefact` (S6): only on `done`. Create-only on (encounter, stage, engine, version, cfg8, cut_version): the same sha is idempotent; a DIFFERENT sha never overwrites, and the job fails permanent `sha_conflict`.
  */
 export async function reportJob(
-  a: { job_id: number; owner: string; outcome: Outcome; error_code?: string | null; artefact?: ArtefactReport | null; now: Date; rng: () => number },
+  a: { job_id: number; owner: string; outcome: Outcome; error_code?: string | null; artefact?: ArtefactReport | null; now: Date; rng: () => number; noBreakerTick?: boolean },
   notifier: Notifier = stubNotifier,
   modeOf?: (stage: string) => Promise<Mode>,
 ): Promise<ReportResult> {
@@ -134,7 +134,7 @@ export async function reportJob(
   const code = outcome === "done" || outcome === "shadow" || outcome === "release" ? null : errorCode;   // blocked keeps its code (no_consult_uid)
   // Breaker bookkeeping (no schema change): one spine_tick row 'attempt:<stage>' per finished attempt, written in the SAME statement as the owner-matched
   // UPDATE, so a lost lease records nothing. done = failed 0; transient / permanent / dead = failed 1. budget, shadow, release and blocked give the attempt back: not recorded (blocked is no failure of the engine, F3).
-  const recorded = outcome === "done" || outcome === "transient" || outcome === "permanent";
+  const recorded = (outcome === "done" || outcome === "transient" || outcome === "permanent") && a.noBreakerTick !== true;   // noBreakerTick: a data-driven end (S7a I1), not an engine outcome
   const failedTick = outcome === "done" ? 0 : 1;
   const upd = (await sql`
     WITH u AS (

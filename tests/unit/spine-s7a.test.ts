@@ -198,7 +198,7 @@ describe("O4: no Sarvam or paid call is reachable from the S7a modules", () => {
   const code = (f: string) => readFileSync(f, "utf8").split("\n").filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join("\n");
   it("imports no engine adapter, Sarvam, llm-roles or CLEF module; the only transcription entry is drainRoomWindow", () => {
     for (const f of files) {
-      const imports = [...code(f).matchAll(/(?:from|import\(?)\s*["']([^"']+)["']/g)].map((m) => m[1]);
+      const imports = [...code(f).matchAll(/(?:from|import\s*\(?|require\s*\()\s*["']([^"']+)["']/g)].map((m) => m[1]);
       for (const i of imports) expect(i, `${f} imports ${i}`).not.toMatch(/sarvam|llm-roles|clef|adapters|gemini|bedrock|openrouter|stt\/engines|stt\/transcribe/i);
     }
     const store = code("lib/spine/transcript-final-store.ts");
@@ -206,11 +206,13 @@ describe("O4: no Sarvam or paid call is reachable from the S7a modules", () => {
     expect(store).not.toMatch(/submitJob|transcribe\(|fetch\(/);
   });
   it("the scan sees a side-effect import and a dynamic import too (M20)", () => {
-    const re = /(?:from|import\(?)\s*["']([^"']+)["']/g;
+    const re = /(?:from|import\s*\(?|require\s*\()\s*["']([^"']+)["']/g;
     const hits = (src: string) => [...src.matchAll(re)].map((m) => m[1]);
     expect(hits('import "@/lib/stt/adapters/sarvam";')).toEqual(["@/lib/stt/adapters/sarvam"]);
     expect(hits('const m = await import("@/lib/stt/adapters/sarvam");')).toEqual(["@/lib/stt/adapters/sarvam"]);
     expect(hits('import { a } from "@/x";')).toEqual(["@/x"]);
+    expect(hits('const m = await import ("@/lib/stt/adapters/sarvam");')).toEqual(["@/lib/stt/adapters/sarvam"]);
+    expect(hits('const m = require("@/lib/stt/adapters/sarvam");')).toEqual(["@/lib/stt/adapters/sarvam"]);
   });
   it("the room reader takes only route runs", () => {
     const r = readFileSync("lib/room-access/readers/spine-transcript.ts", "utf8");

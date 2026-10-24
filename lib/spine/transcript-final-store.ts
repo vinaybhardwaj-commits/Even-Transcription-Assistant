@@ -24,7 +24,7 @@ import {
   assemble, buildEvent, CLAIM_LIMIT, decide, EVENT_KIND, FINAL_CFG8, FINAL_ENGINE, FINAL_VERSION, istDateOf, newBudget, PASS_KIND, REVISED_EVENT, rotate, SHADOW_KIND, SWEEP_LIMIT, takeOffers,
   type CoveringWindow, type Decision, type FinalEvent, type OfferBudget, type RunText,
 } from "./transcript-final";
-import { markWindowOffered, readCoveringWindows, readRunTexts } from "@/lib/room-access/readers/spine-transcript";
+import { blindWindowsAny, markWindowOffered, readCoveringWindows, readRunTexts } from "@/lib/room-access/readers/spine-transcript";
 
 export const OWNER = "spine-cron:transcript_final";
 const SHADOW_LIMIT = 20;
@@ -170,16 +170,17 @@ export async function realDeps(origin: string): Promise<Deps> {
   };
 }
 
+export const REVIVED_KIND = "transcript_final_revived";
 const REVIVABLE = ["windows_not_ready", "no_covering_windows"];
 
 /** Failed windows_not_ready / no_covering_windows jobs of a still-current confirmed encounter, newest first (bounded to the spine horizon). */
 async function revivable(now: number, d: Deps): Promise<number> {
   const rows = (await sql`
-    SELECT j.job_id FROM spine_job j JOIN spine_encounter e ON e.encounter_id = j.encounter_id
+    SELECT j.job_id, j.encounter_id, j.cut_version, j.last_error_code FROM spine_job j JOIN spine_encounter e ON e.encounter_id = j.encounter_id
      WHERE j.stage = ${TRANSCRIPT_FINAL_STAGE}::text AND j.status = 'failed' AND j.last_error_code = ANY(${REVIVABLE}::text[])
        AND e.status = 'confirmed' AND j.cut_version = 'r' || e.boundary_rev::text AND NOT (e.flags @> ARRAY['frozen']::text[])
        AND j.done_at >= ${new Date(now - HORIZON_MS).toISOString()}::timestamptz
-     ORDER BY j.job_id DESC LIMIT 100`) as Array<{ job_id: unknown }>;
+     ORDER BY j.job_id DESC LIMIT 100`) as Array<{ job_id: unknown; encounter_id: unknown; cut_version: unknown; last_error_code: unknown }>;
   let revived = 0;
   for (const r of rotate(rows, SWEEP_LIMIT, now)) {
     const encs = await ENC_SQL(Number(r.job_id));
@@ -187,9 +188,16 @@ async function revivable(now: number, d: Deps): Promise<number> {
     const a = await assess(toEnc(encs[0] as Record<string, unknown>), now, d);
     if ("ineligible" in a || a.decision.kind !== "ready") continue;
     // every covering window is terminal and the union covers the span: a NEW attempt (the same key, attempts reset), claimed by this very pass. It ends in `done`, so it cannot be revived again.
+    // The failure stays visible: the same statement appends a `transcript_final_revived` tick naming the job and the error it had (ids and a code, no text).
     const up = (await sql`
-      UPDATE spine_job SET status = 'queued', attempts = 0, next_attempt_at = NULL, lease_owner = NULL, lease_until = NULL, last_error_class = NULL, last_error_code = NULL, done_at = NULL
-       WHERE job_id = ${Number(r.job_id)}::bigint AND status = 'failed' AND last_error_code = ANY(${REVIVABLE}::text[]) RETURNING job_id`) as Array<unknown>;
+      WITH u AS (
+        UPDATE spine_job SET status = 'queued', attempts = 0, next_attempt_at = NULL, lease_owner = NULL, lease_until = NULL, last_error_class = NULL, last_error_code = NULL, done_at = NULL
+         WHERE job_id = ${Number(r.job_id)}::bigint AND status = 'failed' AND last_error_code = ANY(${REVIVABLE}::text[]) RETURNING job_id
+      ), t AS (
+        INSERT INTO spine_tick (kind, counts)
+        SELECT ${REVIVED_KIND}::text, jsonb_build_object('job_id', u.job_id, 'encounter_id', ${String(r.encounter_id)}::text, 'cut_version', ${String(r.cut_version)}::text, 'prior_error_code', ${String(r.last_error_code)}::text) FROM u
+      )
+      SELECT job_id FROM u`) as Array<unknown>;
     revived += up.length;
   }
   return revived;
@@ -215,6 +223,9 @@ async function revisionCandidates(now: number): Promise<Array<{ e: EncRow & { cu
 async function sweepRevisions(now: number, d: Deps): Promise<number> {
   let revised = 0;
   for (const { e, last } of rotate(await revisionCandidates(now), SWEEP_LIMIT, now)) {
+    // I2: a window of the last event that is held out NOW hides that event from the feed; a revision of it would name a hidden sha. Skip: no revision follows a hold-out change.
+    const hidden = await blindWindowsAny(last.window_ids);
+    if (last.window_ids.some((id) => hidden.has(id))) continue;
     const a = await assess(e, now, d);
     if ("ineligible" in a || a.decision.kind !== "ready") continue;
     const dec = a.decision;
@@ -265,13 +276,13 @@ export async function runTranscriptFinal(now: number, origin: string, deps?: Dep
       const jobs: SpineJob[] = await claimJobs(OWNER, [TRANSCRIPT_FINAL_STAGE], CLAIM_LIMIT, at, LEASE_MS);
       for (const j of jobs) {
         c.claimed += 1;
-        const report = (outcome: "done" | "release" | "permanent" | "transient", code?: string) =>
-          reportJob({ job_id: j.job_id, owner: OWNER, outcome, error_code: code ?? null, now: at, rng: d.rng });
+        const report = (outcome: "done" | "release" | "permanent" | "transient", code?: string, noTick = false) =>
+          reportJob({ job_id: j.job_id, owner: OWNER, outcome, error_code: code ?? null, now: at, rng: d.rng, noBreakerTick: noTick });
         try {
           const ev = await evaluate(j, "live", now, d);
           c.blind_excluded += ev.blind;
-          if (ev.kind === "ineligible") { c.failed += 1; await report("permanent", ev.reason); }
-          else if (ev.kind === "fail") { c.failed += 1; await report("permanent", ev.decision.reason); }
+          if (ev.kind === "ineligible") { c.failed += 1; await report("permanent", ev.reason, true); }   // I1: data-driven, not an engine failure: no breaker tick
+          else if (ev.kind === "fail") { c.failed += 1; await report("permanent", ev.decision.reason, true); }
           else if (ev.kind === "wait") {
             c.waiting += 1;
             for (const id of takeOffers(budget, ev.room_id, ev.decision.offers)) { await d.offer(id); c.offered += 1; }
