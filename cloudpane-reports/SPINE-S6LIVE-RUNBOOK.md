@@ -2,7 +2,7 @@
 Branch spine/s6live-readiness. Facts marked UNVERIFIED were not checked on the box (this lane cannot reach it).
 
 ## 1. Precondition (fable's rule)
-**Lane B (spine/sigb-signals, the signal state machine) must be merged AND deployed before ANY stage goes live.** Nothing in this branch depends on B's code.
+**Lane B (the signal state machine) is MERGED on main (#208, e88ab333), and this branch now contains it (main merged in).** Install the runner ONLY from a checkout that contains both B and this branch (main after this PR merges): an older runner.py/executors.py still deadlocks on a single SIGTERM.
 
 ## 2. Audit: enqueue -> claim -> executor -> report -> artefact -> readers
 Path: cron `/api/cron/spine` (5 min) runs ingest, merge, `runSpineEnqueue` (lib/spine/enqueue-store.ts) -> spine_job `queued` -> runner `POST /api/spine/claim {live:true}` (app/api/spine/claim/route.ts) -> `executors.py` -> `POST /api/spine/report` -> `reportJob` (lib/spine/jobs.ts) -> one spine_artefact row (create-only) + one spine_tick.
@@ -35,15 +35,15 @@ Env file `~/.config/spine-runner/env` (mode 600), names only:
   plus whatever the recut child needs (G9): CONSULT_R2_WRITE_FILE, CONSULT_DIARIZE_PKG_DIR, CONSULT_DIARIZE_MODULE
   optional: SPINE_DATA_DIR (default ~/eta-data), SPINE_GPU_LOCK, SPINE_POLL_SECONDS (60), SPINE_RUNNER_OWNER, SPINE_HOURLY_FROM_MIN/_TO_MIN (the app reads the same names; keep both sides equal or leave at 25/45)
 Steps:
- 0. Precondition: the B PR (spine/sigb-signals, the signal state machine) MUST be merged and deployed to the runner box BEFORE install. main's signal handler deadlocks on a single SIGTERM (handler -> kill_children -> communicate/wait re-enters Popen while the outer communicate holds its waitpid lock; S6 readiness refute item 6): `systemctl stop` then hangs until systemd SIGKILLs the cgroup after TimeoutStopSec (90 s default), exit not 143. Run `python3 -m pytest tools/eta-spine` on the box checkout.
+ 0. Precondition: the runner box checkout must contain B (merged as #208) AND this branch, i.e. main after this PR merges; verify with `git merge-base --is-ancestor e88ab333 HEAD` on the box. Without B, the old signal handler deadlocks on a single SIGTERM (handler -> kill_children -> communicate/wait re-enters Popen while the outer communicate holds its waitpid lock; S6 readiness refute item 6): `systemctl stop` then hangs until systemd SIGKILLs the cgroup after TimeoutStopSec (90 s default), exit not 143. Run `python3 -m pytest tools/eta-spine` on the box checkout.
  1. `systemctl --user daemon-reload; systemctl --user enable --now spine-runner` — WITHOUT --live (would_run). Needs spine_config `jobs=shadow` + `mode.<stage>=shadow`. This proves ONLY auth and connectivity: each would_run claim pass returns 200 with an empty list, because shadow rows are never claimable (refute-proven: 30 enqueue+would_run passes = 0 jobs). Expect no `claim status=` lines, no `would_run job=..` lines, no tool process. For a real dry run, seed ONE queued job for ONE test room under the room scoping in step 3 (a queued row for a room listed in `mode.<stage>.rooms`) and run with --live on that room only.
- 2. (a) B merged and deployed to the box. (b) `spine_config jobs=live` (also `kill_switch=false`; optionally `dead_alert=live`). Only recut first: `mode.recut=live`, acoustics/nemotron stay shadow (they wait on recut `done` anyway, STAGE_NEEDS).
+ 2. (a) The box runs a checkout containing B and this branch (step 0). (b) `spine_config jobs=live` (also `kill_switch=false`; optionally `dead_alert=live`). Only recut first, and ONLY in the rooms form: `mode.recut = {"mode":"live","rooms":["<room_a>"]}`; acoustics/nemotron stay shadow (they wait on recut `done` anyway, STAGE_NEEDS). NEVER use the plain string `mode.recut=live` here: it means ALL rooms and queues every room's 72 h backlog at once.
  3. (c) Per-room flip (room scoping, `mode.<stage> = {"mode":"live","rooms":[...]}`; one room rule for enqueue, claim and report). Sequence:
     - `mode.recut = {"mode":"live","rooms":["<room_a>"]}`: one room, one stage first. Rooms outside the list stay shadow.
     - Watch `spine_job` and `spine_artefact` counts (checks below) for that room: queued falls, one artefact per done job, no failed/dead.
     - Add the next room to the `rooms` array, watch again; repeat. Only after the recut rooms are clean, repeat the same sequence for acoustics, then nemotron.
  4. (d) (after steps 2 and 3 are in place) Edit the unit: ExecStart gets ` --live`; `systemctl --user daemon-reload; systemctl --user restart spine-runner`. The first live pass logs `stage=recut outcome=...` (codes only, never a uid or argv).
- 5. After 5 clean recuts: `mode.acoustics=live` (then `mode.nemotron=live`). K lanes are never handed out :20-:45 IST.
+ 5. After 5 clean recuts in a room: `mode.acoustics = {"mode":"live","rooms":[<the rooms already clean for recut>]}`, then the same for `mode.nemotron`, growing each list room by room as in step 3. Never the plain `"live"` string (all rooms). K lanes are never handed out :20-:45 IST.
 Checks to watch (counts only):
   SELECT stage, status, count(*) FROM spine_job GROUP BY 1,2;  — queued must fall; leased > 1 per stage means two runners.
   SELECT stage, status, count(*) FROM spine_artefact WHERE store='box' GROUP BY 1,2;  — one row per done job.
@@ -52,4 +52,5 @@ Checks to watch (counts only):
 Rollback (fastest first):
   - Stop NOW incl. a running cut: `systemctl --user stop spine-runner` (kills the child group).
   - No new claims: `kill_switch=true` (any non-false value counts as killed), or `jobs=off` (or `shadow`, F1), or `mode.<stage>=off`.
-  - Back to would_run (or narrow the `rooms` array to drop a room): remove ` --live`, daemon-reload, restart. Queued live jobs stay queued and resume when the mode returns to live; shadow reports for a live stage are re-queued (N3), never consumed.
+  - Drop one room: remove it from `mode.<stage>.rooms` (its queued rows are no longer claimed live; nothing is deleted). An empty or malformed `rooms` list means live for NO room (fail closed).
+  - Back to would_run: remove ` --live`, daemon-reload, restart. Queued live jobs stay queued and resume when the mode returns to live; shadow reports for a live stage are re-queued (N3), never consumed.
