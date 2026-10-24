@@ -162,6 +162,7 @@ class Executors:
         e = dict(os.environ if env is None else env)
         self.env = e
         self._children: set[subprocess.Popen] = set()
+        self.state, self.stop_signum, self.signals_seen = self.RUNNING, None, 0
         self._run = run or self._run_group
         self.hourly_from, self.hourly_to = _env_window(e)
         self.clock = clock or time.time
@@ -173,23 +174,77 @@ class Executors:
         self.clips = os.path.join(self.data, "consult", "clips")
         self.reb = os.path.join(self.data, "reb")
 
+    # Signal handling (SIGTERM / SIGINT). The handler is one rule, so there is no race to get wrong:
+    #   - it ALWAYS records the signal: the first signum is kept (it fixes the exit code), later ones are only counted;
+    #   - while a child group is registered it NEVER raises: _run_group polls in <= POLL_S slices, sees the recorded stop, kills the group ONCE, reaps it, and then exits 143 / 130 by normal control flow;
+    #   - with no child registered it raises SystemExit(128 + first signum), so an idle runner still stops at once. If that raise is swallowed (e.g. in a finaliser) the next signal raises again (the runner loop checks the recorded stop before each claim and exits 128+signum, and a child started after a swallowed stop is killed at its first poll). A recorded stop is never forgotten.
+    # state is REAPING only while a kill + reap runs (a timeout reap too), otherwise RUNNING.
+    RUNNING, REAPING = "RUNNING", "REAPING"
+    POLL_S = 0.5
+
+    @property
+    def reaping(self) -> int:
+        return 1 if self.state == self.REAPING else 0
+
+    def on_signal(self, signum: int) -> None:
+        if self.stop_signum is None:
+            self.stop_signum = signum
+        self.signals_seen += 1
+        if self._children:
+            return
+        raise SystemExit(128 + self.stop_signum)
+
+    def raise_pending(self) -> None:
+        if self.stop_signum is not None:
+            raise SystemExit(128 + self.stop_signum)
+
+    def _reap(self, p: subprocess.Popen) -> None:
+        """The one kill + reap of a child's group. REAPING for its duration."""
+        self.state = self.REAPING
+        try:
+            self._kill_group(p)
+        finally:
+            self.state = self.RUNNING
+
     def _run_group(self, argv, cwd=None, timeout=None, pass_fds=(), **_kw) -> subprocess.CompletedProcess:
         """subprocess.run, but the child leads its own process group, so a timeout or a signal kills the child AND whatever it spawned; pass_fds are inherited."""
         # SIGTERM/SIGINT are blocked across spawn + register, so a signal cannot land between Popen() and _children.add() and orphan the child; the child gets the old mask back before exec.
         old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
+        p = None
         try:
-            p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, pass_fds=tuple(pass_fds),
-                                 preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, old))
-            self._children.add(p)
-        finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, old)   # a pending signal is delivered here, with the child already registered
-        try:
-            out, err = p.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self._kill_group(p)
+            try:
+                p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, pass_fds=tuple(pass_fds),
+                                     preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, old))
+                self._children.add(p)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, old)   # a pending signal is delivered here, with the child already registered: recorded, not raised
+            deadline = None if timeout is None else time.monotonic() + timeout
+            timed_out = False
+            while True:
+                if self.stop_signum is not None:
+                    self._reap(p)   # the one kill; a signal during it is only recorded
+                    break
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    self._reap(p)
+                    timed_out = True
+                    break
+                try:
+                    out, err = p.communicate(timeout=self.POLL_S if remaining is None else min(self.POLL_S, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except BaseException:
+            if p is not None:   # no poll() guard: the direct child may be gone while a grandchild still holds the group (and the pipes); killpg on a dead group is swallowed
+                self._reap(p)
             raise
         finally:
-            self._children.discard(p)
+            if p is not None:
+                self._children.discard(p)
+        # Child gone and unregistered: from here the handler raises by itself, and anything recorded while the child was registered (also during a timeout reap) is raised now. Never lost.
+        self.raise_pending()
+        if timed_out:
+            raise subprocess.TimeoutExpired(argv, timeout)
         return subprocess.CompletedProcess(argv, p.returncode, out, err)
 
     @staticmethod
@@ -202,12 +257,6 @@ class Executors:
             p.communicate()   # reap, and drain the pipes
         except Exception:   # noqa: BLE001
             pass
-
-    def kill_children(self) -> None:
-        """Kill every running child's process group and wait for it. The caller exits only after this returns."""
-        for p in list(self._children):
-            self._kill_group(p)
-        self._children.clear()
 
     def has(self, stage: str) -> bool:
         return stage in EXECUTOR_STAGES
@@ -389,9 +438,9 @@ class Executors:
 
 
 def install_signal_handlers(execs: Executors) -> None:
-    """SIGTERM / SIGINT: kill the children's process groups, wait for them, and only then exit (143 / 130). The hourly lock is the child's too, so it is never free while a child runs."""
+    """SIGTERM / SIGINT: the handler records the signal (see Executors.on_signal); with a child running _run_group kills the child's group once, reaps it, and only then does the process exit (143 / 130).
+    The hourly lock is the child's too, so it is never free while a child runs."""
     def _h(signum, _frame):
-        execs.kill_children()
-        sys.exit(128 + signum)
+        execs.on_signal(signum)
     signal.signal(signal.SIGTERM, _h)
     signal.signal(signal.SIGINT, _h)

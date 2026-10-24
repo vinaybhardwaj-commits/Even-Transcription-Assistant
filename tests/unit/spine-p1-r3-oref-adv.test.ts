@@ -107,7 +107,7 @@ describe("F1 key collisions", () => {
 describe("F1 TS and Python acoustic_key screens agree", () => {
   const cases = ["rd_abcd2345:z9x8k", "rd_abcd2345:abcd", "rd_abcd2345:zzzzzz", "rd_abcd2345:abc", "rd_abcd2345:abcdefg", "rd_abcd2345:1234567", "rd_abcd2345:123456", "rd_abcd2345:abcd\n", "rd_abcd2345:ABCD", "rd_abci2345:abcd", " rd_abcd2345:abcd", "rd_abcd2345:abcd ", "rd_abcd2345::abcd", "rd_abcd2345:аbcd"];
   it("same verdict for every case", () => {
-    const py = JSON.parse(execFileSync(`${process.env.HOME}/dev/spine-venv/bin/python`, ["-I", "-c",
+    const py = JSON.parse(execFileSync("python3", ["-I", "-c",
       "import sys,json; sys.path.insert(0,'tools/eta-spine'); import post_signals as p; print(json.dumps([bool(p._fmt('acoustic_key', c)) for c in json.loads(sys.argv[1])]))", JSON.stringify(cases)], { encoding: "utf8" }));
     expect(cases.map((c) => FORMATS.acoustic_key!.test(c))).toEqual(py);
   });
