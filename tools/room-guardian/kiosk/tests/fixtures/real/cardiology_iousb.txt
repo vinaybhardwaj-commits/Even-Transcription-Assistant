@@ -1,0 +1,32 @@
++-o Root  <class IORegistryEntry, id 0x100000100, retain 33>
+  +-o AppleT8132USBXHCI@02000000  <class AppleT8132USBXHCI, id 0x10000036d, registered, matched, active, busy 0 (31 ms), retain 66>
+  | |   "locationID" = 33554432
+  | +-o USB3 Gen2 Hub@02200000  <class IOUSBHostDevice, id 0x100000925, registered, matched, active, busy 0 (2 ms), retain 31>
+  | |     "USB Vendor Name" = "Apple"
+  | |     "USB Product Name" = "USB3 Gen2 Hub"
+  | |     "idProduct" = 32780
+  | |     "locationID" = 35651584
+  | +-o USB2 Hub@02100000  <class IOUSBHostDevice, id 0x100000941, registered, matched, active, busy 0 (8 ms), retain 31>
+  |       "USB Vendor Name" = "Apple"
+  |       "USB Product Name" = "USB2 Hub"
+  |       "idProduct" = 32779
+  |       "locationID" = 34603008
+  +-o AppleT8132USBXHCI@01000000  <class AppleT8132USBXHCI, id 0x100000496, registered, matched, active, busy 0 (83 ms), retain 114>
+  | |   "locationID" = 16777216
+  | +-o C270 HD WEBCAM@01100000  <class IOUSBHostDevice, id 0x100000980, registered, matched, active, busy 0 (75 ms), retain 104>
+  |       "idProduct" = 2085
+  |       "USB Product Name" = "C270 HD WEBCAM"
+  |       "locationID" = 17825792
+  +-o AppleT8132USBXHCI@00000000  <class AppleT8132USBXHCI, id 0x10000039d, registered, matched, active, busy 0 (491 ms), retain 54>
+  | |   "locationID" = 0
+  | +-o 2.4G Mouse@00100000  <class IOUSBHostDevice, id 0x100000984, registered, matched, active, busy 0 (484 ms), retain 42>
+  |       "idProduct" = 102
+  |       "USB Product Name" = "2.4G Mouse"
+  |       "locationID" = 1048576
+  +-o AppleT8132USBXHCI@03000000  <class AppleT8132USBXHCI, id 0x1000003b4, registered, matched, active, busy 0 (483 ms), retain 46>
+    |   "locationID" = 50331648
+    +-o TONOR TM20 Audio Device@03100000  <class IOUSBHostDevice, id 0x100000982, registered, matched, active, busy 0 (477 ms), retain 40>
+          "idProduct" = 308
+          "USB Product Name" = "TONOR TM20 Audio Device"
+          "locationID" = 51380224
+          "USB Vendor Name" = "FuZhou Kingwayinfo CO.,LTD"

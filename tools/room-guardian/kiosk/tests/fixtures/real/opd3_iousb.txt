@@ -1,0 +1,10 @@
++-o Root  <class IORegistryEntry, id 0x100000100, retain 33>
+  +-o AppleT8132USBXHCI@02000000  <class AppleT8132USBXHCI, id 0x100000355, registered, matched, active, busy 0 (24 ms), retain 66>
+  | +-o USB3 Gen2 Hub@02200000  <class IOUSBHostDevice, id 0x10000091c, registered, matched, active, busy 0 (6 ms), retain 27>
+  | +-o USB2 Hub@02100000  <class IOUSBHostDevice, id 0x10000093f, registered, matched, active, busy 0 (9 ms), retain 27>
+  +-o AppleT8132USBXHCI@00000000  <class AppleT8132USBXHCI, id 0x100000485, registered, matched, active, busy 0 (152 ms), retain 46>
+  | +-o TONOR TM20 Audio Device@00100000  <class IOUSBHostDevice, id 0x100000985, registered, matched, active, busy 0 (145 ms), retain 36>
+  +-o AppleT8132USBXHCI@01000000  <class AppleT8132USBXHCI, id 0x1000003d8, registered, matched, active, busy 0 (194 ms), retain 54>
+  | +-o 2.4G Keyboard Mouse@01100000  <class IOUSBHostDevice, id 0x100000fa5, registered, matched, active, busy 0 (36 ms), retain 36>
+  +-o AppleT8132USBXHCI@03000000  <class AppleT8132USBXHCI, id 0x10000059c, registered, matched, active, busy 0 (67 ms), retain 114>
+    +-o C270 HD WEBCAM@03100000  <class IOUSBHostDevice, id 0x100000982, registered, matched, active, busy 0 (65 ms), retain 100>

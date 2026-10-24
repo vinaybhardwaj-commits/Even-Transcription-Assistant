@@ -554,12 +554,14 @@ usb_enum_ioreg_noiface() {
     END { fin(); exit(bad ? 0 : 1) }'
 }
 
-# Amendment 1 + F1: empty-hub evidence from the IOUSB plane (`ioreg -p IOUSB`, where a device nests under the hub it hangs off, possibly with port/interface nodes between).
-# A PHYSICAL hub is a USB2 half plus a USB3 half sharing a locationID prefix (the first two hex digits of the name's @location). Evidence holds ONLY when the group has both halves
-# and EVERY hub in it has zero downstream devices. A USB3 half that is empty while the USB2 half carries the webcam or a dongle is the normal healthy state and is NOT evidence.
-# A hub whose half cannot be told (neither USB2 nor USB3 in its name), or without a locationID, can never make evidence. The ioreg shapes are INFERRED, not captured on a kiosk.
-usb_enum_ioreg_emptyhub() {
-  ioreg -p IOUSB -w0 -l 2>/dev/null | awk '
+# Amendment 1 + F1 + R5: empty-hub evidence from the IOUSB plane (`ioreg -p IOUSB -l -w0`: Root > AppleT8132USBXHCI@<ctl>000000 > devices; a hub's downstream devices nest under the hub).
+# REAL (4 kiosks, 24 Oct): every Mac mini has a BUILT-IN pair "USB3 Gen2 Hub@02200000" + "USB2 Hub@02100000" on controller 02, and it is EMPTY on healthy kiosks too, because the mic and the
+# webcam hang straight off controllers 00/01/03. So "both halves empty" alone is true everywhere. A hub pair is evidence ONLY when it is the mic's own: $1 = the first two hex digits of the
+# mic's last seen locationID (usb-enum-loc, stamped on a healthy tick). No stamp, or a different controller = no evidence. The pair is a USB2 half plus a USB3 half sharing that prefix
+# and EVERY hub in it has zero downstream devices. A hub whose half cannot be told (neither USB2 nor USB3 in its name), or without a locationID, can never make evidence.
+usb_enum_ioreg_emptyhub() { # mic_controller_prefix (2 hex digits)
+  case "$1" in [0-9a-fA-F][0-9a-fA-F]) ;; *) return 1 ;; esac
+  ioreg -p IOUSB -w0 -l 2>/dev/null | awk -v want="$1" '
     {
       i = index($0, "+-o "); if (i == 0) next
       line = substr($0, i + 4); d = i
@@ -579,12 +581,12 @@ usb_enum_ioreg_emptyhub() {
         if (hh[j] == 0 || kids[j] > 0) busy[hp[j]] = 1
         else has[hp[j], hh[j]] = 1
       }
-      for (j = 1; j <= nh; j++) if (hp[j] != "" && has[hp[j], 2] && has[hp[j], 3] && !busy[hp[j]]) ok = 1
+      for (j = 1; j <= nh; j++) if (tolower(hp[j]) == tolower(want) && has[hp[j], 2] && has[hp[j], 3] && !busy[hp[j]]) ok = 1
       exit(ok ? 0 : 1)
     }'
 }
 
-# the mic's USB locationID (hex) from its own IOUSBHostDevice node; empty when it is not on the bus. INFERRED shape: "name@<hex locationID>".
+# the mic's USB locationID (hex) from its own IOUSBHostDevice node; empty when it is not on the bus. REAL shape: "TONOR TM20 Audio Device@03100000" (8 hex digits; the property "locationID" is the same number in decimal).
 usb_enum_loc_now() {
   ioreg -r -c IOUSBHostDevice -l -d 2 -w0 2>/dev/null | awk -v p="$USB_MIC_PATTERN" '/\+-o .*<class IOUSBHostDevice/ { if ($0 ~ p && match($0, /@[0-9a-fA-F]+/)) { print substr($0, RSTART + 1, RLENGTH - 1); exit } }'
 }
@@ -611,20 +613,28 @@ usb_enum_recorder_back() {
 
 usb_enum_ts() { "$G_DATE" -r "$1" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || "$G_DATE" -d "@$1" '+%Y-%m-%d %H:%M:%S' 2>/dev/null; }
 
-# F2: 0 when a kernel line names the room's mic device (USB_MIC_PATTERN, case-sensitive like conf.sh) AND says "enumeration failure" or "hardware connection lost" AND is stamped no
+# F2 + R5: 0 when a kernel line names the room's mic device (USB_MIC_PATTERN, case-sensitive like conf.sh) AND says "enumeration failure" or "hardware connection lost" AND is stamped no
 # earlier than <start>. <start> is already inside the current boot and no earlier than 10 min before the fault episode. `log show --start` narrows the read; the awk repeats the
 # bound on the line's own timestamp (compact style: "YYYY-MM-DD HH:MM:SS.mmm ...", local time, so the string order is the time order).
+# REAL: "usb-drd3-port-hs@03100000: AppleUSBHostPort::terminateDevice: destroying 0x0d8c/0134/0100 (TONOR TM20 Audio Device): hardware connection lost" is also what a HAND unplug logs (the same
+# line, then a flurry of 0xe00002ed, appears for an iPhone pulled out). A loss is therefore dropped when another device enumerates on the SAME port afterwards ("<port>: AppleUSBHostPort::
+# enumerateDeviceComplete_block_invoke: enumerated ... (iPhone / 1)"): someone plugged something else into the mic's port.
 usb_enum_log_evidence() { # window_start_epoch
   local out="$STATE_DIR/usb_enum_log.out" st rc
   st="$(usb_enum_ts "$1")"; [ -n "$st" ] || return 1
-  run_capped "$USB_ENUM_LOG_CAP_S" "$out" g_clean_exec "$G_LOG" show --start "$st" --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS "enumeration failure" OR eventMessage CONTAINS "hardware connection lost")' || { : >"$out" 2>/dev/null; return 1; }
-  "$G_GREP" -- "$USB_MIC_PATTERN" "$out" 2>/dev/null | "$G_GREP" -E 'enumeration failure|hardware connection lost' | awk -v s="$st" 'substr($0, 1, 19) >= s { f = 1 } END { exit(f ? 0 : 1) }'
+  run_capped "$USB_ENUM_LOG_CAP_S" "$out" g_clean_exec "$G_LOG" show --start "$st" --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS "enumeration failure" OR eventMessage CONTAINS "hardware connection lost" OR eventMessage CONTAINS "enumerateDeviceComplete")' || { : >"$out" 2>/dev/null; return 1; }
+  awk -v s="$st" -v p="$USB_MIC_PATTERN" '
+    substr($0, 1, 19) < s { next }
+    { port = ""; if (match($0, /[^ ]+: AppleUSBHostPort::/)) { port = substr($0, RSTART, RLENGTH); sub(/: AppleUSBHostPort::$/, "", port) } }
+    $0 ~ p && /enumeration failure|hardware connection lost/ { lost[++n] = port; swapped[n] = 0; next }
+    port != "" && /AppleUSBHostPort::enumerateDeviceComplete/ && $0 !~ p { for (i = 1; i <= n; i++) if (lost[i] == port) swapped[i] = 1 }
+    END { for (i = 1; i <= n; i++) if (!swapped[i]) exit 0; exit 1 }' "$out" 2>/dev/null
   rc=$?
   : >"$out" 2>/dev/null
   return "$rc"
 }
 
-# R4: the episode tag. 0 when the kernel logged AppleUSBIORequest / IOUSBHost errors within +-USB_ENUM_BUS_S of the episode start (cached per episode like the log verdict).
+# R4 + R5: the episode tag. 0 when the kernel logged AppleUSBIORequest / IOUSBHost errors NAMING THE MIC (USB_MIC_PATTERN; REAL: every device's errors look alike, an iPhone's included) within +-USB_ENUM_BUS_S of the episode start (cached per episode like the log verdict).
 usb_enum_usbio_cached() { # episode_start_epoch
   local ep c now rc out="$STATE_DIR/usb_enum_bus.out" a b
   now="$(now_epoch)"
@@ -636,7 +646,7 @@ usb_enum_usbio_cached() { # episode_start_epoch
   rc=1
   if [ -n "$a" ] && [ -n "$b" ]; then
     if run_capped "$USB_ENUM_LOG_CAP_S" "$out" g_clean_exec "$G_LOG" show --start "$a" --end "$b" --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS "AppleUSBIORequest" OR eventMessage CONTAINS "IOUSBHost")'; then
-      "$G_GREP" -E 'AppleUSBIORequest|IOUSBHost' "$out" 2>/dev/null | awk -v a="$a" -v b="$b" 'substr($0, 1, 19) >= a && substr($0, 1, 19) <= b { f = 1 } END { exit(f ? 0 : 1) }'; rc=$?
+      "$G_GREP" -E 'AppleUSBIORequest|IOUSBHost' "$out" 2>/dev/null | awk -v a="$a" -v b="$b" -v p="$USB_MIC_PATTERN" 'substr($0, 1, 19) >= a && substr($0, 1, 19) <= b && $0 ~ p { f = 1 } END { exit(f ? 0 : 1) }'; rc=$?
     fi
     : >"$out" 2>/dev/null
   fi
@@ -678,7 +688,7 @@ usb_enum_evidence() { # kind
        usb_enum_log_cached "$ws" && v=log ;;
   esac
   if [ "$v" = none ] && [ "$1" = no_input ] && usb_enum_ioreg_noiface; then v=ioreg
-  elif [ "$v" = none ] && [ "$1" = absent ] && usb_enum_ioreg_emptyhub; then v=hub
+  elif [ "$v" = none ] && [ "$1" = absent ] && usb_enum_ioreg_emptyhub "$("$G_SED" -n '1s/^\(..\).*/\1/p' "$USB_ENUM_LOC" 2>/dev/null)"; then v=hub
   elif [ "$1" = rec_failed ]; then
     # R4: the recorder's own start failure. Evidence = the mic's kernel line (above), kernel USB errors within +-60 s of the episode, or the IOKit not-responding code itself.
     if usb_enum_usbio_cached "$epi"; then [ "$v" != none ] || v=usbio; fi

@@ -1,0 +1,11 @@
+Press Ctrl-C to stop cleanly.
+micmode skipped: os 15
+Capture format: <AVAudioFormat 0x6000000995e0:  1 ch,  48000 Hz, Float32>
+Audio acquisition cycle 1 failed: The operation couldn’t be completed. (com.apple.coreaudio.avfaudio error -536870163.)
+micmode skipped: os 15
+Capture format: <AVAudioFormat 0x600000098dc0:  1 ch,  48000 Hz, Float32>
+Audio acquisition cycle 2 failed: The operation couldn’t be completed. (com.apple.coreaudio.avfaudio error -536870163.)
+micmode skipped: os 15
+Capture format: <AVAudioFormat 0x60000009c1e0:  1 ch,  48000 Hz, Float32>
+Audio acquisition cycle 3 failed: The operation couldn’t be completed. (com.apple.coreaudio.avfaudio error -536870163.)
+tapewriter: physical_fallback_required: durable audio did not grow after two five-second acquisition retries; unplug the input USB device for at least five seconds, then reconnect it

@@ -132,7 +132,16 @@ usb_enum_fault_kind() {
 }
 
 # R4: the recorder itself reports the start failure (state=failed with the tapewriter start-failure signature in last_error). rec_ioret = the IOKit code kIOReturnNotResponding (0xE00002ED = -536870163).
-usb_enum_rec_ioret() { case "${S_last_error:-}" in *-536870163*|*0xE00002ED*|*0xe00002ed*) return 0 ;; esac; return 1; }
+# REAL: status.json last_error is only "tapewriter exited with status 1"; the code lives in the newest capture segment's tapewriter.log ("... avfaudio error -536870163.)" per failed acquisition
+# cycle, then "tapewriter: physical_fallback_required: ..."), so the log's tail counts too, while it is fresh (written within 15 min). Only with the ladder armed.
+usb_enum_tw_log_ioret() {
+  local f; [ "${USB_ENUM_HEAL:-0}" = 1 ] || return 1
+  # shellcheck disable=SC2012
+  f="$(ls -t "$RR_ROOT"/captures/*/seg_*/tapewriter.log 2>/dev/null | head -n1)"; [ -n "$f" ] || return 1
+  [ -n "$(find "$f" -mmin -15 2>/dev/null)" ] || return 1
+  "$G_TAIL" -n 40 "$f" 2>/dev/null | "$G_GREP" -q -i -E -- '-536870163|0xe00002ed'
+}
+usb_enum_rec_ioret() { case "${S_last_error:-}" in *-536870163*|*0xE00002ED*|*0xe00002ed*) return 0 ;; esac; usb_enum_tw_log_ioret; }
 usb_enum_rec_trigger() {
   [ "${S_state:-}" = failed ] || return 1
   case "${S_last_error:-}" in *"tapewriter exited with status 1"*|*physical_fallback_required*) return 0 ;; esac

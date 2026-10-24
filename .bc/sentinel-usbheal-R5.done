@@ -1,0 +1,1 @@
+bc/sentinel-usb-enum-heal 9954174e PASS R5 real-capture pass: 9 INFERRED->REAL changes (hub evidence gated on mic controller, mic-named bus evidence, hand-swap filter, tapewriter.log IOKit signature); usb_enum_heal 84/84, flag0 identical, shellcheck+scrub rc 0, 6/7 mutants killed (1 equivalent); macOS UNPROVEN

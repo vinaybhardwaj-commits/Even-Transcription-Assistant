@@ -1,0 +1,9 @@
++-o Root  <class IORegistryEntry, id 0x100000100, retain 33>
+  +-o AppleT8132USBXHCI@02000000  <class AppleT8132USBXHCI, id 0x100000381, registered, matched, active, busy 0 (23 ms), retain 66>
+  | +-o USB3 Gen2 Hub@02200000  <class IOUSBHostDevice, id 0x10000091d, registered, matched, active, busy 0 (4 ms), retain 28>
+  | +-o USB2 Hub@02100000  <class IOUSBHostDevice, id 0x10000096b, registered, matched, active, busy 0 (7 ms), retain 28>
+  +-o AppleT8132USBXHCI@00000000  <class AppleT8132USBXHCI, id 0x1000003b1, registered, matched, active, busy 0 (11 ms), retain 37>
+  +-o AppleT8132USBXHCI@01000000  <class AppleT8132USBXHCI, id 0x100000424, registered, matched, active, busy 0 (77 ms), retain 114>
+  | +-o C270 HD WEBCAM@01100000  <class IOUSBHostDevice, id 0x100000981, registered, matched, active, busy 0 (65 ms), retain 101>
+  +-o AppleT8132USBXHCI@03000000  <class AppleT8132USBXHCI, id 0x1000003fe, registered, matched, active, busy 0 (168 ms), retain 54>
+    +-o 2.4G Mouse@03100000  <class IOUSBHostDevice, id 0x100000983, registered, matched, active, busy 0 (162 ms), retain 39>

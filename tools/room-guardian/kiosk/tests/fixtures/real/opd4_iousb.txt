@@ -1,0 +1,24 @@
++-o Root  <class IORegistryEntry, id 0x100000100, retain 35>
+  +-o AppleT8132USBXHCI@02000000  <class AppleT8132USBXHCI, id 0x1000003bd, registered, matched, active, busy 0 (32 ms), retain 68>
+  | |   "locationID" = 33554432
+  | +-o USB3 Gen2 Hub@02200000  <class IOUSBHostDevice, id 0x1000009de, registered, matched, active, busy 0 (4 ms), retain 27>
+  | |     "USB Vendor Name" = "Apple"
+  | |     "USB Product Name" = "USB3 Gen2 Hub"
+  | |     "idProduct" = 32780
+  | |     "locationID" = 35651584
+  | +-o USB2 Hub@02100000  <class IOUSBHostDevice, id 0x1000009fe, registered, matched, active, busy 0 (10 ms), retain 27>
+  |       "USB Vendor Name" = "Apple"
+  |       "USB Product Name" = "USB2 Hub"
+  |       "idProduct" = 32779
+  |       "locationID" = 34603008
+  +-o AppleT8132USBXHCI@00000000  <class AppleT8132USBXHCI, id 0x1000003ce, registered, matched, active, busy 0 (69 ms), retain 68>
+  |     "locationID" = 0
+  +-o AppleT8132USBXHCI@01000000  <class AppleT8132USBXHCI, id 0x1000003c2, registered, matched, active, busy 0 (53 ms), retain 54>
+  | |   "locationID" = 16777216
+  | +-o 2.4G Keyboard Mouse@01100000  <class IOUSBHostDevice, id 0x100007ac7, registered, matched, active, busy 0 (43 ms), retain 33>
+  |       "idProduct" = 16641
+  |       "USB Product Name" = "2.4G Keyboard Mouse"
+  |       "locationID" = 17825792
+  |       "USB Vendor Name" = "MOSART Semi."
+  +-o AppleT8132USBXHCI@03000000  <class AppleT8132USBXHCI, id 0x1000003b2, registered, matched, active, busy 0 (366 ms), retain 43>
+        "locationID" = 50331648

@@ -75,7 +75,7 @@ ue_setup() {
     ioreg) printf '+-o USB Audio C270 HD@01110000  <class IOUSBHostDevice, id 0x1, registered>\n' >"$T/usb.txt"; : >"$T/log.txt" ;;
     none) : >"$T/usb.txt"; : >"$T/log.txt" ;;
     # OPD 4 shape (INFERRED, no real capture yet): the physical hub = USB2 half + USB3 half sharing the locationID prefix 01, BOTH with zero children; the dongle hangs off another port
-    hub) ue_iousb hub_empty; printf '+-o Keyboard Dongle@02100000  <class IOUSBHostDevice, id 0x9, registered>\n' >"$T/usb.txt"; : >"$T/log.txt" ;;
+    hub) ue_iousb hub_empty; [ "${CONST:-1}" = 0 ] || printf '01110000\n' >"$USB_ENUM_LOC"; printf '+-o Keyboard Dongle@02100000  <class IOUSBHostDevice, id 0x9, registered>\n' >"$T/usb.txt"; : >"$T/log.txt" ;;
     # healthy (INFERRED): the USB2 half carries a dongle, the USB3 half is empty. NOT evidence.
     hubok) ue_iousb hub_dongle; printf '+-o Keyboard Dongle@01120000  <class IOUSBHostDevice, id 0x5, registered>\n' >"$T/usb.txt"; : >"$T/log.txt" ;;
   esac
@@ -368,13 +368,15 @@ test_ue_f4_would_do_only_when_constant_is_one() {
 # F1: IOUSB-plane hub evidence. The fixture shapes are INFERRED (no real capture yet).
 test_ue_f1_hub_parser_on_the_three_shapes() {
   ue_setup
-  ue_iousb hub_healthy;  usb_enum_ioreg_emptyhub; assert_rc "$?" 1 "healthy: USB2 half has the C270 and a dongle, USB3 half empty: NO evidence"
-  ue_iousb hub_dongle;   usb_enum_ioreg_emptyhub; assert_rc "$?" 1 "USB2 half with a dongle behind a port node, USB3 empty: NO evidence"
-  ue_iousb hub_empty;    usb_enum_ioreg_emptyhub; assert_rc "$?" 0 "OPD 4: both halves empty, only the dongle on another port: evidence"
-  ue_iousb nohub;        usb_enum_ioreg_emptyhub; assert_rc "$?" 1 "no hub at all: no evidence"
-  ue_iousb hub_two;      usb_enum_ioreg_emptyhub; assert_rc "$?" 0 "a second physical hub with both halves empty is evidence even beside a healthy hub (grouped by locationID prefix)"
-  ue_iousb usb2_half_only; usb_enum_ioreg_emptyhub; assert_rc "$?" 1 "one half only cannot be shown to be a whole physical hub: no evidence"
-  : >"$T/iousb.txt";     usb_enum_ioreg_emptyhub; assert_rc "$?" 1 "empty capture: no evidence"
+  ue_iousb hub_healthy;  usb_enum_ioreg_emptyhub 01; assert_rc "$?" 1 "healthy: USB2 half has the C270 and a dongle, USB3 half empty: NO evidence"
+  ue_iousb hub_dongle;   usb_enum_ioreg_emptyhub 01; assert_rc "$?" 1 "USB2 half with a dongle behind a port node, USB3 empty: NO evidence"
+  ue_iousb hub_empty;    usb_enum_ioreg_emptyhub 01; assert_rc "$?" 0 "OPD 4: both halves empty, only the dongle on another port: evidence"
+  ue_iousb nohub;        usb_enum_ioreg_emptyhub 01; assert_rc "$?" 1 "no hub at all: no evidence"
+  ue_iousb hub_two;      usb_enum_ioreg_emptyhub 03; assert_rc "$?" 0 "a second physical hub with both halves empty is evidence even beside a healthy hub (grouped by locationID prefix)"
+  usb_enum_ioreg_emptyhub 01; assert_rc "$?" 1 "R5: the healthy hub (prefix 01) is not evidence just because another hub is empty"
+  usb_enum_ioreg_emptyhub ""; assert_rc "$?" 1 "R5: no stamped mic location: no hub evidence"
+  ue_iousb usb2_half_only; usb_enum_ioreg_emptyhub 01; assert_rc "$?" 1 "one half only cannot be shown to be a whole physical hub: no evidence"
+  : >"$T/iousb.txt";     usb_enum_ioreg_emptyhub 01; assert_rc "$?" 1 "empty capture: no evidence"
 }
 
 test_ue_f1_hub_evidence_at_the_ladder_level() {
@@ -734,7 +736,7 @@ test_ue_r4_tapewriter_signature_triggers() {
 }
 
 test_ue_r4_kernel_usb_errors_tag_the_episode_and_count_as_evidence() {
-  local s; s="$( ( ue_rf UE_ERR="$UE_SIG1"; printf '%s.9 Df  kernel[0:1] [com.apple.usb:all] AppleUSBIORequest: pipe stalled\n' "$(ue_ts "$GUARDIAN_FAKE_NOW")" >"$T/log.txt"
+  local s; s="$( ( ue_rf UE_ERR="$UE_SIG1"; printf '%s.9 Df  kernel[0:1] [com.apple.usb:all] AppleUSBIORequest: AppleUSBIORequest::complete: device 2 (C270 HD WEBCAM@01100000) endpoint 0x00: status 0xe00002ed (transaction error)\n' "$(ue_ts "$GUARDIAN_FAKE_NOW")" >"$T/log.txt"
     ue_tick; ue_summary; events | grep -c usb_bus_event ) | tr '\n' ' ')"
   assert_has "$s" 'reboots=1 ' "kernel AppleUSBIORequest error near the failure is evidence: reboot [$s]"
   assert_has "$s" ' [1-9][0-9]* $' "the events carry usb_bus_event=true [$s]"
@@ -816,4 +818,107 @@ test_ue_am1_guardian_never_touches_login_credentials_or_the_attestation() {
   local h="$KDIR/lib/heal.sh"
   assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c 'kcpassword\|authonly')" "0" "no credential read or test"
   assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c '>[[:space:]]*"\?\$FLAG_DIR/reboot-attested')" "0" "never writes the attestation"
+}
+
+
+# ---- R5: REAL captures (24 Oct 2026, tests/fixtures/real/). Trimmed from the kiosks' own ioreg / log / tapewriter output; formatting and wording untouched. ----
+RF="$KDIR/tests/fixtures/real"
+ue_epoch() { date -j -f '%Y-%m-%d %H:%M:%S' "$1" +%s 2>/dev/null || date -d "$1" +%s; }
+
+# (a) OPD 4: the real IOUSB plane. The built-in pair on controller 02 is empty; the 2.4G dongle hangs off controller 01; no webcam anywhere.
+test_ue_r5_real_hub_shape_is_the_mac_minis_builtin_pair_empty_on_every_kiosk() {
+  ue_setup
+  local k
+  cp "$RF/opd4_iousb.txt" "$T/iousb.txt"
+  usb_enum_ioreg_emptyhub 02; assert_rc "$?" 0 "OPD 4 real ioreg: USB3 Gen2 Hub@02200000 + USB2 Hub@02100000, both empty: hub evidence for a mic last seen on controller 02"
+  usb_enum_ioreg_emptyhub 01; assert_rc "$?" 1 "...but not for a mic last seen on controller 01 (the dongle's controller)"
+  usb_enum_ioreg_emptyhub ""; assert_rc "$?" 1 "...and not without a stamped location"
+  for k in cardiology thirdfloor opd3; do
+    cp "$RF/${k}_iousb.txt" "$T/iousb.txt"
+    usb_enum_ioreg_emptyhub 02; assert_rc "$?" 0 "$k (a HEALTHY kiosk): the very same empty built-in pair, so the parser alone cannot tell a fault: that is why the controller prefix gates it"
+    usb_enum_ioreg_emptyhub 03; assert_rc "$?" 1 "$k: a mic on another controller than the hub pair is no hub evidence"
+  done
+}
+test_ue_r5_real_mic_location_is_8_hex_digits_in_the_node_name() {
+  ue_setup
+  cp "$RF/cardiology_iousb.txt" "$T/usb.txt"; USB_MIC_PATTERN=TONOR
+  assert_eq "$(usb_enum_loc_now)" "03100000" "TONOR TM20 Audio Device@03100000"
+  cp "$RF/opd3_iousb.txt" "$T/usb.txt"
+  assert_eq "$(usb_enum_loc_now)" "00100000" "OPD 3: TONOR on controller 00"
+}
+# the ladder-level OPD 4 answer: last seen on the hub's controller (02), now absent
+test_ue_r5_real_opd4_absent_with_stamped_hub_controller_reboots_otherwise_unplugged() {
+  local s
+  s="$( ( export EVID=none; ue_setup; cp "$RF/opd4_iousb.txt" "$T/iousb.txt"; printf '02110000\n' >"$USB_ENUM_LOC"; ue_tick; ue_summary ) )"
+  assert_has "$s" 'reboots=1 shutdowns=1 A=1' "mic last seen behind the 02 pair, pair empty now: rung A then one reboot [$s]"
+  s="$( ( export EVID=none; ue_setup; cp "$RF/opd4_iousb.txt" "$T/iousb.txt"; printf '01110000\n' >"$USB_ENUM_LOC"; ue_tick; ue_summary ) )"
+  assert_has "$s" 'reboots=0 .*room_device_unplugged' "mic last seen on controller 01: the empty built-in pair says nothing: unplugged, no reboot [$s]"
+  s="$( ( export EVID=none; ue_setup; cp "$RF/opd4_iousb.txt" "$T/iousb.txt"; ue_tick; ue_summary ) )"
+  assert_has "$s" 'reboots=0 .*room_device_unplugged' "never stamped: unplugged, no reboot [$s]"
+}
+
+# (b) + (c): Cardiology 16:00:49 TONOR loss, the C270 cascade, the iPhone plugged into the same port 6 s later, unplugged at 16:09:44.
+ue_card_case() { # sed_script window_start_hms
+  ( export USB_MIC_PATTERN=TONOR; ue_setup; sed -n "$1" "$RF/cardiology_kernel_1600.txt" >"$T/log.txt"
+    usb_enum_log_evidence "$(ue_epoch "2026-10-24 $2")" && echo yes || echo no )
+}
+test_ue_r5_real_cardiology_tonor_loss_names_the_mic() {
+  assert_eq "$(ue_card_case '1,2p' 16:00:00)" yes "the loss line alone (real wording, mic-named, window includes it): kernel evidence"
+  assert_eq "$(ue_card_case '1,2p' 16:00:50)" no "window opened after the line: no evidence"
+  assert_eq "$(ue_card_case '2,3p' 16:00:00)" no "only AppleUSBIORequest errors of the mic, no loss line: not the log rule"
+  assert_eq "$(ue_card_case '3,18p' 16:00:00)" no "the C270 cascade and coreaudiod lines never name the TONOR as lost"
+}
+test_ue_r5_real_iphone_plug_and_unplug_never_matches_the_mic_rule() {
+  assert_eq "$(ue_card_case '10,$p' 16:00:00)" no "iPhone enumerate / exclusive-open errors / unplug at 16:09:44 (mic pattern TONOR): no evidence"
+  assert_eq "$( ( export USB_MIC_PATTERN=C270; ue_setup; sed -n '10,$p' "$RF/cardiology_kernel_1600.txt" >"$T/log.txt"; usb_enum_log_evidence "$(ue_epoch '2026-10-24 16:00:00')" && echo yes || echo no ) )" no "same with the webcam pattern"
+}
+test_ue_r5_real_tonor_loss_followed_by_another_device_on_the_same_port_is_a_hand_swap() {
+  assert_eq "$(ue_card_case '1,$p' 16:00:00)" no "TONOR lost at 16:00:49, an iPhone enumerates on usb-drd3-port-hs@03100000 at 16:00:55: someone swapped the plug, not an enumeration fault: NO evidence"
+  assert_eq "$(ue_card_case '1,2p;3,$s/iPhone/TONOR TM20/p' 16:00:00)" yes "control: the same lines with the 'other' device being the mic itself: still evidence"
+}
+# rec_failed's own bus-event evidence must name the mic too
+test_ue_r5_real_usbio_evidence_needs_the_mic_named() {
+  local s
+  s="$( ( export USB_MIC_PATTERN=TONOR; ue_rf; sed -n '10,$p' "$RF/cardiology_kernel_1600.txt" >"$T/log.txt"; GUARDIAN_FAKE_NOW="$(ue_epoch '2026-10-24 16:09:50')"; export GUARDIAN_FAKE_NOW
+    usb_enum_usbio_cached "$(ue_epoch '2026-10-24 16:09:44')" && echo yes || echo no ) )"
+  assert_eq "$s" no "an iPhone's AppleUSBIORequest errors at the episode start are not the mic's"
+  s="$( ( export USB_MIC_PATTERN=TONOR; ue_rf; sed -n '1,3p' "$RF/cardiology_kernel_1600.txt" >"$T/log.txt"; GUARDIAN_FAKE_NOW="$(ue_epoch '2026-10-24 16:00:50')"; export GUARDIAN_FAKE_NOW
+    usb_enum_usbio_cached "$(ue_epoch '2026-10-24 16:00:49')" && echo yes || echo no ) )"
+  assert_eq "$s" yes "the TONOR's own errors within +-60 s: evidence"
+}
+
+# (d) Third Floor + OPD 3: the recorder's real last_error is "tapewriter exited with status 1"; the IOKit code and physical_fallback_required are only in tapewriter.log.
+ue_collect() { write_status state=failed err="$UE_ERR"; collect_all; }
+ue_tw_place() { # fixture [age_minutes]
+  local d="$RR_ROOT/captures/bs_real/seg_real"; mkdir -p "$d"; cp "$1" "$d/tapewriter.log"
+  [ -z "${2:-}" ] || touch -d "@$(( $(date +%s) - $2 * 60 ))" "$d/tapewriter.log"
+}
+test_ue_r5_real_tapewriter_failure_triggers_and_the_log_carries_the_code() {
+  local k s
+  for k in thirdfloor opd3; do
+    s="$( ( ue_rf UE_ERR='tapewriter exited with status 1'; ue_tw_place "$RF/${k}_tapewriter_failed.txt"; ue_collect; usb_enum_rec_trigger && echo trig; usb_enum_rec_ioret && echo ioret ) | tr '\n' ' ')"
+    assert_eq "$s" "trig ioret " "$k: real last_error triggers rec_failed; the IOKit code is found in the segment's tapewriter.log"
+    s="$( ( ue_rf UE_ERR='tapewriter exited with status 1'; ue_tw_place "$RF/${k}_tapewriter_healthy.txt"; ue_collect; usb_enum_rec_trigger && echo trig; usb_enum_rec_ioret && echo ioret ) | tr '\n' ' ')"
+    assert_eq "$s" "trig " "$k: a healthy tapewriter.log (micmode lines only) carries no code"
+    s="$( ( ue_rf UE_ERR='tapewriter exited with status 1'; ue_tw_place "$RF/${k}_tapewriter_failed.txt" 60; usb_enum_rec_ioret && echo ioret ) | tr '\n' ' ')"
+    assert_eq "$s" "" "$k: a stale (60 min old) failed log is not evidence"
+    s="$( ( ue_rf UE_ERR='tapewriter exited with status 1' CONST=0; ue_tw_place "$RF/${k}_tapewriter_failed.txt"; usb_enum_rec_ioret && echo ioret ) | tr '\n' ' ')"
+    assert_eq "$s" "" "$k: flag 0 never reads the log"
+  done
+  rm -rf "$RR_ROOT/captures/bs_real"   # the loop above left its fixture in the shared sandbox
+  # the real log lines, as last_error text, still work for a recorder that copies them
+  s="$( ( ue_rf UE_ERR="$(sed -n '4p' "$RF/thirdfloor_tapewriter_failed.txt")"; ue_collect; usb_enum_rec_ioret && echo ioret; usb_enum_rec_trigger && echo trig ) | tr '\n' ' ')"
+  assert_eq "$s" "ioret trig " "the real 'Audio acquisition cycle 1 failed ... error -536870163.)' line"
+  s="$( ( ue_rf UE_ERR="$(grep physical_fallback "$RF/opd3_tapewriter_failed.txt")"; ue_collect; usb_enum_rec_trigger && echo trig; usb_enum_rec_ioret && echo ioret ) | tr '\n' ' ')"
+  assert_eq "$s" "trig " "the real 'tapewriter: physical_fallback_required: ...' line triggers; it carries no IOKit code, so it is not evidence by itself"
+}
+test_ue_r5_real_tapewriter_failure_reaches_the_ladder_with_the_log_as_evidence() {
+  local s k
+  for k in thirdfloor opd3; do
+    s="$( ( ue_rf UE_ERR='tapewriter exited with status 1'; ue_tw_place "$RF/${k}_tapewriter_failed.txt"; ue_tick; ue_summary; echo "boot=$(ue_n 'launchctl bootout') nh=$(ue_nh)" ) | tr '\n' ' ')"
+    assert_has "$s" 'boot=1' "$k: rung R relaunch runs [$s]"
+    assert_has "$s" 'reboots=1' "$k: relaunch did not cure it, the log's IOKit code is evidence: rung A then rung B [$s]"
+    s="$( ( ue_rf UE_ERR='tapewriter exited with status 1'; ue_tw_place "$RF/${k}_tapewriter_healthy.txt"; ue_tick; ue_summary; echo "nh=$(ue_nh)" ) | tr '\n' ' ')"
+    assert_has "$s" 'reboots=0 .*blocked=no_enum_evidence.*nh=1' "$k: without the code anywhere: needs_hands, never a reboot [$s]"
+  done
 }
