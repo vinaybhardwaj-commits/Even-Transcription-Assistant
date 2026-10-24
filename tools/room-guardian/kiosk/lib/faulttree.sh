@@ -127,4 +127,14 @@ usb_enum_fault_kind() {
   elif [ "$S_usb" = "true" ] && [ "$S_engine" = "false" ]; then
     echo no_input
   fi
+  [ "$S_usb" = "false" ] || [ "$S_engine" = "false" ] || { usb_enum_rec_trigger && echo rec_failed; }
+  return 0
+}
+
+# R4: the recorder itself reports the start failure (state=failed with the tapewriter start-failure signature in last_error). rec_ioret = the IOKit code kIOReturnNotResponding (0xE00002ED = -536870163).
+usb_enum_rec_ioret() { case "${S_last_error:-}" in *-536870163*|*0xE00002ED*|*0xe00002ed*) return 0 ;; esac; return 1; }
+usb_enum_rec_trigger() {
+  [ "${S_state:-}" = failed ] || return 1
+  case "${S_last_error:-}" in *"tapewriter exited with status 1"*|*physical_fallback_required*) return 0 ;; esac
+  usb_enum_rec_ioret
 }

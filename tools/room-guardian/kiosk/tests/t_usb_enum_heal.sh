@@ -90,8 +90,19 @@ ue_setup() {
   chmod +x "$T/bin/defaults" "$T/bin/fakefde"
   export GUARDIAN_FDESETUP_BIN="$T/bin/fakefde"
   command -v sqlite3 >/dev/null 2>&1 && mk_tcc 2
+  ue_attest "${ATT:-fresh}"
   write_status capture_open="${CAP:-false}"
   ue_mode "${MODE:-heal}"
+}
+# AMENDMENT 1: the fleet-written attestation file. ATT fresh|stale|writable|groupw|none|symlink|future|foreign
+ue_attest() {
+  local f="$FLAG_DIR/reboot-attested" t="$GUARDIAN_FAKE_NOW"
+  rm -f "$f"; [ "$1" = none ] && return 0
+  case "$1" in stale) t=$((GUARDIAN_FAKE_NOW - 8 * 86400)) ;; future) t=$((GUARDIAN_FAKE_NOW + 3600)) ;; esac
+  if [ "$1" = symlink ]; then printf 'x\n' >"$FLAG_DIR/real-att"; ln -s "$FLAG_DIR/real-att" "$f"; return 0; fi
+  printf 'attested\n' >"$f"
+  case "$1" in writable) chmod 666 "$f" ;; groupw) chmod 660 "$f" ;; foreign) chmod 600 "$f" ;; *) chmod 600 "$f" ;; esac
+  touch -d "@$t" "$f" 2>/dev/null || touch -t "$(date -r "$t" '+%Y%m%d%H%M.%S')" "$f"
 }
 ue_mode() {
   case "$1" in
@@ -103,10 +114,10 @@ ue_mode() {
 }
 # one health tick pair (ticks >= 2 and span >= 20 s) then the heal cycle
 ue_tick() {
-  write_status capture_open="${CAP:-false}"
+  write_status capture_open="${CAP:-false}" state="${UE_STATE:-recording}" err="${UE_ERR:-}" extra="${UE_EXTRA:-}"
   rm -f "$STATE_DIR/flags.cache"; flag_fetch; collect_all
   GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 20)); export GUARDIAN_FAKE_NOW
-  write_status capture_open="${CAP:-false}"
+  write_status capture_open="${CAP:-false}" state="${UE_STATE:-recording}" err="${UE_ERR:-}" extra="${UE_EXTRA:-}"
   rm -f "$STATE_DIR/flags.cache"; flag_fetch; collect_all
   heal_cycle >/dev/null 2>&1
 }
@@ -144,9 +155,9 @@ test_ue_each_guard_false_gives_no_reboot_with_exact_reason() {
   assert_has "$(ue_case_a CAP=true)" 'reboots=0 .*blocked=capture_open' "capture open"
   assert_has "$(ue_case_a HID=300)" 'reboots=0 .*blocked=hid_busy' "HID idle exactly 300 s is not over 300"
   assert_has "$(ue_case_a HID=20)" 'reboots=0 .*blocked=hid_busy' "HID busy"
-  assert_has "$(ue_case_a AUTOL=0)" 'reboots=0 .*blocked=no_autologin' "no autoLoginUser"
-  assert_has "$(ue_case_a FDE=on)" 'reboots=0 .*blocked=filevault_on' "FileVault on"
-  assert_has "$(ue_case_a FDE=unknown)" 'reboots=0 .*blocked=filevault_unknown' "FileVault unknown is off-limits"
+  assert_has "$(ue_case_a AUTOL=0)" 'reboots=0 .*blocked=preflight_autologin' "no autoLoginUser"
+  assert_has "$(ue_case_a FDE=on)" 'reboots=0 .*blocked=preflight_fv' "FileVault on"
+  assert_has "$(ue_case_a FDE=unknown)" 'reboots=0 .*blocked=preflight_fv' "FileVault unknown is off-limits"
   assert_has "$(ue_case EVID=ioreg)" 'reboots=1' "evidence by ioreg alone (a device node without interfaces) is enough"
 }
 
@@ -259,7 +270,7 @@ test_ue_session_was_open_recorded_in_the_reboot_event() {
 
 test_ue_no_room_or_recorder_commands() {
   ue_setup; ue_tick
-  assert_not "$(cat "$CALLS")" 'start_""day\|restart_engine\|^room-recorder\|^launchctl boot' "no room or recorder command from the kiosk"
+  assert_not "$(cat "$CALLS")" 'start_""day\|restart_engine\|^room-recorder\|launchctl kickstart' "no room command and no kickstart from the kiosk (R4: the rung R bootout/bootstrap relaunch is the one recorder action)"
 }
 
 test_ue_helper_fde_verb() {
@@ -454,7 +465,7 @@ test_ue_o8_filevault_deferred_enablement_is_not_off() {
   local s; s="$( ( ue_setup
     printf '#!/bin/bash\nprintf "FileVault is Off.\\nDeferred enablement appears to be active for user kiosk.\\n"\n' >"$T/bin/fakefde"
     ue_tick; ue_tick; ue_summary ) )"
-  assert_has "$s" 'reboots=0 .*blocked=filevault_unknown' "deferred enablement: no reboot [$s]"
+  assert_has "$s" 'reboots=0 .*blocked=preflight_fv' "deferred enablement: no reboot [$s]"
 }
 
 # O9 / F7: rung C in shadow (and with the kill switch): one line per episode, not every 5 min
@@ -571,7 +582,7 @@ n_logs() { grep -c '^LOG show --start' "$CALLS"; }
 test_ue_r2_f8_slow_to_root_aborts() {
   local s; s="$( ( ue_setup
     eval "$(declare -f act_step | sed '1s/^act_step/orig_act_step/')"
-    act_step() { orig_act_step || return 1; : >"$T/adv"; return 0; }
+    act_step() { orig_act_step || return 1; [ "$ACT_LAYER" = usb ] && : >"$T/adv"; return 0; }
     now_epoch() { local c; if [ -e "$T/adv" ]; then c="$(cat "$T/advc" 2>/dev/null || echo 0)"; echo "$((GUARDIAN_FAKE_NOW + c))"; echo "$((c + 2))" >"$T/advc"; else echo "$GUARDIAN_FAKE_NOW"; fi; }
     ue_tick; echo "$(ue_summary) $(events | grep -o 'aborted_[a-z_]*') stamp=$(cat "$STATE_DIR/usb-enum-reboot")" ) )"
   assert_has "$s" 'reboots=0 .*aborted_slow_to_root stamp=$' "2 s after the last read: abort, no stamp [$s]"
@@ -637,4 +648,172 @@ test_ue_n1_hub_verdict_is_cached_per_kind() {
     printf '#!/bin/bash\ncase "$*" in *"-p IOUSB"*) echo IOUSBREAD >>"%s/ioreads" ;; esac\ncat "%s/iousb.txt" 2>/dev/null\n' "$T" "$T" >"$T/bin/ioreg"; chmod +x "$T/bin/ioreg"
     ue_tick; ue_tick; ue_tick; grep -c IOUSBREAD "$T/ioreads" ) )"
   assert_eq "$s" 1 "one IOUSB read over 3 ticks"
+}
+
+
+# ---- R4: ruled rung order W -> R (recorder relaunch) -> A (coreaudiod) -> B (idle-gated reboot) -> needs_hands. ALL ioreg / log / status shapes are INFERRED. ----
+# rec_failed scenario: the mic is on the bus WITH an input engine; only the recorder reports the tapewriter start failure.
+UE_SIG1='tapewriter exited with status 1'
+UE_SIGIO='avfaudio error -536870163'
+ue_rf() { # knob=value ... : fresh rec_failed scenario, no tick yet
+  export UE_STATE=failed UE_ERR="$UE_SIG1: $UE_SIGIO" EVID=none PRESENT=1
+  for kv in "$@"; do export "${kv?}"; done
+  ue_setup; printf 'C270 engine\n' >"$T/engine.txt"
+}
+ue_rf_case() { ( ue_rf "$@"; ue_tick; ue_summary; echo "boot=$(ue_n 'launchctl bootout') bs=$(ue_n 'launchctl bootstrap') kick=$(ue_n 'launchctl kickstart') nh=$(ue_nh)" ) | tr '\n' ' '; }
+ue_n() { grep -c "^$1" "$CALLS"; }
+ue_nh() { events | grep -c '"reason":"needs_hands"'; }
+# a recorder that comes back after the relaunch: the status turns healthy and the tape grows once the poll window starts
+ue_rf_recovers() {
+  gsleep() { case "$1" in 10) UE_STATE=recording; UE_ERR=""; write_status capture_open=false; tape_stats_2s() { echo "-30.0 0.1 0.2"; } ;; *) echo "$((10000 + RANDOM))" >"$T/ca_pid" ;; esac; return 0; }
+}
+
+test_ue_r4_rung_order_end_to_end_relaunch_then_coreaudiod_then_reboot() {
+  local s; s="$( ( ue_rf; ue_tick; ue_summary; echo "ORDER $(grep -n '^launchctl bootout\|^launchctl bootstrap\|coreaudiod-kill\|guardian-root.sh reboot$' "$CALLS" | sed 's/^[0-9]*://' | tr '\n' ',')" ) )"
+  assert_has "$s" 'reboots=1 shutdowns=1 A=1' "recorder failed: relaunch did not cure it, rung A ran, then one reboot [$s]"
+  assert_has "$s" 'ORDER launchctl bootout.*launchctl bootstrap.*coreaudiod-kill.*reboot' "order: bootout, bootstrap, coreaudiod kill, reboot [$s]"
+  assert_eq "$(ue_rf_case | grep -o 'kick=[0-9]*')" "kick=0" "never kickstart"
+}
+
+test_ue_r4_rung_w_waits_while_the_marker_is_present_then_continues() {
+  local s; s="$( ( ue_rf UE_EXTRA=',"device_state":"not_responding"'; ue_tick; ue_tick; ue_summary; echo "boot=$(ue_n 'launchctl bootout') wait=$(events | grep -c usb_enum_wait)"
+    GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 780)); export GUARDIAN_FAKE_NOW; ue_tick; echo "T880 boot=$(ue_n 'launchctl bootout')"
+    GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 100)); export GUARDIAN_FAKE_NOW; ue_tick; echo "T920 boot=$(ue_n 'launchctl bootout') reboots=$(ue_reboots)" ) | tr '\n' ' ')"
+  assert_has "$s" 'reboots=0 shutdowns=0 A=0 .*boot=0 wait=1 ' "marker present: no action, one wait line over two ticks [$s]"
+  assert_has "$s" 'T880 boot=0' "still inside the 15 min [$s]"
+  assert_has "$s" 'T920 boot=1 reboots=1' "after 15 min the ladder continues with R [$s]"
+  s="$(ue_rf_case)"
+  assert_has "$s" 'boot=1' "marker absent (today's recorder): W is skipped, R runs at once [$s]"
+}
+
+test_ue_r4_rung_r_guards_skip_with_the_exact_reason() {
+  assert_has "$(ue_rf_case CAP=true)" 'reboots=0 .*blocked=capture_open.*boot=0 bs=0' "capture open: no relaunch, exact reason"
+  assert_has "$(ue_rf_case MODE=shadow)" 'reboots=0 .*blocked=mode_not_heal.*boot=0' "shadow: no relaunch"
+  assert_has "$(ue_rf_case MODE=kill)" 'reboots=0 .*blocked=killswitch.*boot=0' "kill switch: no relaunch"
+  assert_has "$(ue_rf_case ALLOW=)" 'reboots=0 .*blocked=code_not_allowlisted.*boot=0' "allowlist: no relaunch"
+  assert_has "$(ue_rf_case CONST=0)" 'reboots=0 shutdowns=0 A=0 *boot=0 bs=0 kick=0 nh=0' "flag 0: nothing"
+}
+
+test_ue_r4_relaunch_is_once_per_episode_and_never_with_capture_open() {
+  local s; s="$( ( ue_rf; ue_tick; ue_tick; ue_tick; echo "boot=$(ue_n 'launchctl bootout')" ) )"
+  assert_has "$s" 'boot=1' "three ticks of one episode: one relaunch [$s]"
+  s="$( ( ue_rf CAP=true; ue_tick; ue_tick; ue_tick; echo "boot=$(ue_n 'launchctl bootout') relaunch_events=$(events | grep -c usb_enum_relaunch)" ) )"
+  assert_has "$s" 'boot=0 relaunch_events=0' "capture open on every tick: never a relaunch, not even an attempt event [$s]"
+  # a capture that opens after R decided: R does not repeat; A and B still refuse
+  s="$( ( ue_rf; ue_tick; CAP=true; : >"$CALLS"; ue_tick; echo "boot=$(ue_n 'launchctl bootout') reboots=$(ue_reboots)" ) )"
+  assert_has "$s" 'boot=0 reboots=0' "later tick with capture open: nothing [$s]"
+}
+
+test_ue_r4_relaunch_that_cures_it_stops_the_ladder() {
+  local s; s="$( ( ue_rf; ue_rf_recovers; ue_tick; ue_summary; echo "boot=$(ue_n 'launchctl bootout')"; ue_tick; echo "healed=$(events | grep -c usb_enum_relaunch)" ) | tr '\n' ' ')"
+  assert_has "$s" 'reboots=0 shutdowns=0 A=0 .*boot=1' "recorder back and producing tape inside the window: no rung A, no reboot [$s]"
+  assert_has "$s" 'healed=[2-9]' "the relaunch and the heal report are published [$s]"
+}
+
+test_ue_r4_same_signature_relaunch_inside_30_min_is_skipped() {
+  local s now
+  s="$( ( ue_rf; printf '%s 1\n' "$((GUARDIAN_FAKE_NOW - 600))" >"$STATE_DIR/usb-enum-rl"; ue_tick; ue_summary; echo "boot=$(ue_n 'launchctl bootout')" ) | tr '\n' ' ')"
+  assert_has "$s" 'blocked=relaunch_same_signature_30m.*boot=0' "a relaunch under 0xE00002ED 10 min ago: skipped with the exact reason [$s]"
+  assert_has "$s" 'A=1' "rung A still runs after the skip [$s]"
+  s="$( ( ue_rf; printf '%s 1\n' "$((GUARDIAN_FAKE_NOW - 1900))" >"$STATE_DIR/usb-enum-rl"; ue_tick; echo "boot=$(ue_n 'launchctl bootout')" ) )"
+  assert_has "$s" 'boot=1' "31 min ago: relaunch again [$s]"
+  s="$( ( ue_rf; printf '%s 0\n' "$((GUARDIAN_FAKE_NOW - 600))" >"$STATE_DIR/usb-enum-rl"; ue_tick; echo "boot=$(ue_n 'launchctl bootout')" ) )"
+  assert_has "$s" 'boot=1' "the earlier relaunch was a different signature: relaunch [$s]"
+  s="$( ( ue_rf UE_ERR="$UE_SIG1"; printf '%s 1\n' "$((GUARDIAN_FAKE_NOW - 600))" >"$STATE_DIR/usb-enum-rl"; ue_tick; echo "boot=$(ue_n 'launchctl bootout')" ) )"
+  assert_has "$s" 'boot=1' "this error has no 0xE00002ED code: the skip does not apply [$s]"
+  s="$( ( ue_rf; ue_tick; echo "rl=$(cat "$STATE_DIR/usb-enum-rl")" ) )"
+  assert_has "$s" 'rl=[0-9]* 1' "the relaunch stamp records the signature [$s]"
+}
+
+test_ue_r4_tapewriter_signature_triggers() {
+  assert_has "$(ue_rf_case UE_ERR='tapewriter exited with status 1')" 'boot=1' "tapewriter exited with status 1"
+  assert_has "$(ue_rf_case UE_ERR='physical_fallback_required: no input')" 'boot=1' "physical_fallback_required"
+  assert_has "$(ue_rf_case UE_ERR='avfaudio error -536870163')" 'boot=1' "-536870163"
+  assert_has "$(ue_rf_case UE_ERR='something else entirely')" 'reboots=0 shutdowns=0 A=0 *boot=0' "another last_error: no trigger"
+  assert_has "$(ue_rf_case UE_STATE=recording)" 'reboots=0 shutdowns=0 A=0 *boot=0' "signature but state is not failed: no trigger"
+}
+
+test_ue_r4_kernel_usb_errors_tag_the_episode_and_count_as_evidence() {
+  local s; s="$( ( ue_rf UE_ERR="$UE_SIG1"; printf '%s.9 Df  kernel[0:1] [com.apple.usb:all] AppleUSBIORequest: pipe stalled\n' "$(ue_ts "$GUARDIAN_FAKE_NOW")" >"$T/log.txt"
+    ue_tick; ue_summary; events | grep -c usb_bus_event ) | tr '\n' ' ')"
+  assert_has "$s" 'reboots=1 ' "kernel AppleUSBIORequest error near the failure is evidence: reboot [$s]"
+  assert_has "$s" ' [1-9][0-9]* $' "the events carry usb_bus_event=true [$s]"
+  s="$( ( ue_rf UE_ERR="$UE_SIG1"; ue_tick; ue_summary ) | tr '\n' ' ')"
+  assert_has "$s" 'reboots=0 .*blocked=no_enum_evidence' "no kernel error, no IOKit code, no mic line: no evidence, no reboot [$s]"
+  s="$( ( ue_rf UE_ERR="$UE_SIG1"; printf '%s.9 Df  kernel[0:1] AppleUSBIORequest: x\n' "$(ue_ts "$((GUARDIAN_FAKE_NOW - 600))")" >"$T/log.txt"; ue_tick; ue_summary ) | tr '\n' ' ')"
+  assert_has "$s" 'reboots=0 ' "a kernel error 10 min before the failure is outside +-60 s [$s]"
+  s="$( ( ue_rf; ue_tick; ue_summary ) | tr '\n' ' ')"
+  assert_has "$s" 'reboots=1 ' "the IOKit not-responding code in last_error is itself evidence [$s]"
+}
+
+test_ue_r4_needs_hands_once_per_episode() {
+  local s; s="$( ( ue_rf FDE=on; ue_tick; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 700)); export GUARDIAN_FAKE_NOW; ue_tick; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 700)); export GUARDIAN_FAKE_NOW; ue_tick; ue_summary; echo "nh=$(ue_nh)"; events | grep -o 'unplug_5s_same_port' | head -1 ) | tr '\n' ' ')"
+  assert_has "$s" 'blocked=preflight_fv.* nh=1 unplug_5s_same_port' "reboot cannot apply (FileVault on): needs_hands once over three ticks spaced past the 10 min escalate dedupe, with the instruction [$s]"
+  assert_has "$s" 'reboots=0' "and no reboot [$s]"
+  s="$( ( ue_rf HID=20; ue_tick; ue_tick; echo "nh=$(ue_nh)" ) )"
+  assert_has "$s" 'nh=0' "a transient guard (HID busy) is a wait, not needs_hands [$s]"
+  s="$( ( ue_rf FDE=on; ue_tick; export UE_STATE=recording UE_ERR=""; ue_tick; GUARDIAN_FAKE_NOW=$((GUARDIAN_FAKE_NOW + 700)); export GUARDIAN_FAKE_NOW; export UE_STATE=failed UE_ERR="$UE_SIG1: $UE_SIGIO"; ue_tick; echo "nh=$(ue_nh)" ) )"
+  assert_has "$s" 'nh=2' "a new episode (healthy tick between, past the 10 min escalate dedupe) escalates again [$s]"
+  s="$( ( ue_rf; printf 'USB Audio C270 HD@14100000  <class IOUSBHostDevice, id 0x1, registered>\n' >"$T/usb.txt"; EVID=none; export FDE=on; ue_rf FDE=on; printf '+-o USB Audio C270 HD@14100000  <class IOUSBHostDevice, id 0x1, registered>\n' >"$T/usb.txt"; ue_tick; events | grep -o 'usb_location_id=[0-9a-f]*' | head -1 ) )"
+  assert_has "$s" 'usb_location_id=14100000' "the message carries the device location id [$s]"
+}
+
+test_ue_r4_failed_reboot_verify_escalates_needs_hands_once() {
+  local s; s="$( ( ue_setup; printf 'USB Audio C270 HD\n' >"$T/usb.txt"; : >"$T/engine.txt"; rm -f "$T/usb.txt"; : >"$T/usb.txt"
+    printf '%s true pending\n' "$((GUARDIAN_FAKE_NOW - 700))" >"$STATE_DIR/usb-enum-reboot"
+    printf 'date=%s\nepoch=%s\nrecorder_pid=1\ncoreaudiod_pid=1\nboot_age_s=1\nport=p\nverify=failed\n' "$(ist_date)" "$((GUARDIAN_FAKE_NOW - 700))" >"$STATE_DIR/usb-reboot"
+    usb_enum_post_boot; usb_enum_post_boot; echo "nh=$(ue_nh)" ) )"
+  assert_has "$s" 'nh=1' "verify failed after the reboot: needs_hands once [$s]"
+}
+
+test_ue_r4_g6_three_actions_an_hour_then_escalate_once() {
+  local s; s="$( ( ue_rf; local i; for i in 1 2 3; do echo "$GUARDIAN_FAKE_NOW x:y" >>"$STATE_DIR/actions"; done; ue_tick; ue_tick; ue_summary; echo "boot=$(ue_n 'launchctl bootout') rl=$(events | grep -c heal_rate_limited)" ) | tr '\n' ' ')"
+  assert_has "$s" 'reboots=0 shutdowns=0 A=0 .*boot=0 rl=1' "G6: no relaunch, one heal_rate_limited escalation [$s]"
+}
+
+test_ue_r4_flag_zero_is_inert_for_the_recorder_signature() {
+  local s; s="$( ( ue_rf CONST=0; ue_tick; ue_tick; echo "files=$(ue_state_files) ev=$(ev_ue) boot=$(ue_n 'launchctl bootout') log=$(n_log)" ) )"
+  assert_has "$s" 'files=0 ev=0 boot=0 log=0' "flag 0 with a failed recorder: no state file, no event, no relaunch, no log read [$s]"
+}
+
+test_ue_r4_failed_recorder_keeps_the_episode_open() {
+  local s; s="$( ( ue_rf FDE=on; ue_tick; ue_tick; echo "nh=$(ue_nh) r=$(cat "$STATE_DIR/usb-enum-r" | wc -c | tr -d ' ')" ) )"
+  assert_has "$s" 'nh=1 r=[1-9]' "mic and engine are both present but the recorder is failed: the tick does not end the episode [$s]"
+}
+
+# ---- AMENDMENT 1 (fable 17:22): reboot pre-flight = FileVault off + autoLoginUser set + a fresh, safe fleet attestation. Unknown = NO. ----
+test_ue_am1_each_preflight_item_false_or_unknown_blocks_with_the_exact_reason() {
+  assert_has "$(ue_case_a FDE=on)" 'reboots=0 .*blocked=preflight_fv' "FileVault on"
+  assert_has "$(ue_case_a FDE=unknown)" 'reboots=0 .*blocked=preflight_fv' "FileVault unknown"
+  assert_has "$(ue_case_a AUTOL=0)" 'reboots=0 .*blocked=preflight_autologin' "no autoLoginUser"
+  assert_has "$(ue_case_a ATT=none)" 'reboots=0 .*blocked=preflight_attest' "no attestation file"
+  assert_has "$(ue_case ATT=none)" 'reboots=0 .*blocked=preflight_attest' "no attestation file, whole ladder in one tick"
+  assert_has "$(ue_case ATT=fresh)" 'reboots=1' "control: all three pass"
+}
+test_ue_am1_stale_writable_symlink_or_future_attestation_blocks() {
+  assert_has "$(ue_case_a ATT=stale)" 'reboots=0 .*blocked=preflight_attest' "older than 7 days"
+  assert_has "$(ue_case_a ATT=writable)" 'reboots=0 .*blocked=preflight_attest' "world-writable"
+  assert_has "$(ue_case_a ATT=groupw)" 'reboots=0 .*blocked=preflight_attest' "group-writable"
+  assert_has "$(ue_case_a ATT=symlink)" 'reboots=0 .*blocked=preflight_attest' "a symlink"
+  assert_has "$(ue_case_a ATT=future)" 'reboots=0 .*blocked=preflight_attest' "dated in the future"
+}
+test_ue_am1_attestation_age_edge_is_7_days() {
+  local s; s="$( ( ue_setup; touch -d "@$((GUARDIAN_FAKE_NOW - 604800))" "$FLAG_DIR/reboot-attested"; usb_enum_attested && echo in6 || echo out6; touch -d "@$((GUARDIAN_FAKE_NOW - 604801))" "$FLAG_DIR/reboot-attested"; usb_enum_attested && echo in7 || echo out7 ) | tr '\n' ' ')"
+  assert_has "$s" 'in6 out7' "exactly 7 d is fine, 7 d + 1 s is stale [$s]"
+}
+test_ue_am1_needs_hands_once_per_episode_names_the_failing_item() {
+  local s; s="$( ( ue_rf ATT=none; ue_tick; ue_tick; ue_tick; echo "nh=$(ue_nh)"; events | grep -o 'reason=preflight_attest' | head -1 ) | tr '\n' ' ')"
+  assert_has "$s" 'nh=1 reason=preflight_attest' "once per episode, exact item [$s]"
+}
+test_ue_am1_the_attestation_is_rechecked_right_before_the_reboot() {
+  local s; s="$( ( ue_setup
+    eval "$(declare -f usb_enum_preflight | sed '1s/^usb_enum_preflight/orig_preflight/')"
+    usb_enum_preflight() { local n; n="$(cat "$T/pfn" 2>/dev/null || echo 0)"; echo $((n + 1)) >"$T/pfn"; if [ "$n" -ge 1 ]; then rm -f "$FLAG_DIR/reboot-attested"; fi; orig_preflight; }
+    ue_tick; ue_summary; events | grep -o 'aborted_preflight_[a-z]*' ) | tr '\n' ' ')"
+  assert_has "$s" 'reboots=0 .*aborted_preflight_attest' "the file vanishes after the first check: abort with the exact reason [$s]"
+}
+test_ue_am1_guardian_never_touches_login_credentials_or_the_attestation() {
+  local h="$KDIR/lib/heal.sh"
+  assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c 'kcpassword\|authonly')" "0" "no credential read or test"
+  assert_eq "$(grep -v '^[[:space:]]*#' "$h" | grep -c '>[[:space:]]*"\?\$FLAG_DIR/reboot-attested')" "0" "never writes the attestation"
 }

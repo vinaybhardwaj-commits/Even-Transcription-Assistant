@@ -109,6 +109,11 @@ g_const USB_ENUM_CAP_S 7200           # at most one such reboot per kiosk per 2 
 g_const USB_ENUM_RECHECK_S 15         # rung A: wait this long after killing coreaudiod before judging
 g_const USB_ENUM_LOG_CAP_S 20         # cap on the 24 h kernel-log evidence read
 g_const USB_ENUM_EVID_CACHE_S 300     # the evidence verdict is cached this long
+g_const USB_ENUM_R_WAIT_S 60          # rung R: how long the relaunched recorder has to be back and producing tape before rung A
+g_const USB_ENUM_R_STEP_S 10          # rung R: poll step inside that window
+g_const USB_ENUM_RL_S 1800            # rung R is skipped when a relaunch under the same 0xE00002ED signature ran inside this
+g_const USB_ENUM_W_S 900              # rung W: no action for this long while the recorder publishes device_state=not_responding
+g_const USB_ENUM_BUS_S 60             # kernel USB-error evidence window around the episode start (+- this many seconds)
 # Fixed predicate (INFERRED from the OPD 5 log lines): kernel, subsystem com.apple.usb:all, message contains the cable-detect text.
 g_const USB_LOG_PREDICATE 'process == "kernel" AND processID == 0 AND subsystem == "com.apple.usb:all" AND eventMessage CONTAINS "AppleUSBHostPort::cableChangeOccurred: powering off"'
 g_def IDLE_MIN_S 600
