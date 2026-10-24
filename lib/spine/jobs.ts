@@ -8,7 +8,7 @@
  */
 import { sql } from "@/lib/db";
 import { queueOpsAlert } from "@/lib/alerts/ops-alert";
-import { readModes, type Mode } from "./config";
+import { readModes, ruleAllows, type ClaimRule, type Mode } from "./config";
 import { breakerOpen, BREAKER_OPEN_MS, LEASE_MS, MAX_ATTEMPTS, resolveOutcome, type Outcome } from "./retry";
 
 export type SpineJob = { job_id: number; encounter_id: string; stage: string; cut_version: string; input_key: string; attempts: number; lease_until: string | null; consult_uid?: string | null };
@@ -78,15 +78,26 @@ export async function reapExhausted(now: Date, notifier: Notifier = stubNotifier
   return rows.length;
 }
 
-/** `stages` is what the caller found allowed (config + breaker); an empty list claims nothing. */
-export async function claimJobs(owner: string, stages: string[], limit: number, now: Date, leaseMs = LEASE_MS, withUid = false): Promise<SpineJob[]> {
+/**
+ * `stages` is what the caller found allowed (config + breaker); an empty list claims nothing.
+ * `rules` (S6 room scoping, config.claimRules): when given, a job is claimed only if a rule for its stage lets the room of its encounter through (the same test as config.ruleAllows;
+ * an unknown room is "not listed"). A stage with no rule claims nothing. Absent = no room test (the stage list alone decides).
+ */
+export async function claimJobs(owner: string, stages: string[], limit: number, now: Date, leaseMs = LEASE_MS, withUid = false, rules?: ClaimRule[]): Promise<SpineJob[]> {
   if (!owner || stages.length === 0 || limit < 1) return [];
+  if (rules && rules.length === 0) return [];
+  const rj = rules ? JSON.stringify(rules.map((r) => ({ stage: r.stage, all: r.all, rooms: r.rooms, negate: r.negate }))) : null;
   const at = now.toISOString();
   const rows = (await sql`
     WITH claimable AS (
       SELECT job_id
         FROM spine_job
        WHERE stage = ANY(${stages}::text[])
+         AND (${rj}::jsonb IS NULL OR EXISTS (
+               SELECT 1 FROM jsonb_to_recordset(${rj}::jsonb) AS r(stage text, "all" boolean, rooms jsonb, negate boolean)
+                WHERE r.stage = spine_job.stage
+                  AND (r."all" OR (CASE WHEN (SELECT e.room_id FROM spine_encounter e WHERE e.encounter_id = spine_job.encounter_id LIMIT 1) IS NULL THEN false
+                                        ELSE jsonb_exists(r.rooms, (SELECT e.room_id FROM spine_encounter e WHERE e.encounter_id = spine_job.encounter_id LIMIT 1)) END) <> r.negate)))
          AND attempts < ${MAX_ATTEMPTS}::int
          AND ((status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ${at}::timestamptz))
               OR (status = 'leased' AND lease_until < ${at}::timestamptz))
@@ -115,7 +126,7 @@ export type ReportResult = { ok: true; status: string; artefact?: "recorded" | "
 export async function reportJob(
   a: { job_id: number; owner: string; outcome: Outcome; error_code?: string | null; artefact?: ArtefactReport | null; now: Date; rng: () => number; noBreakerTick?: boolean },
   notifier: Notifier = stubNotifier,
-  modeOf?: (stage: string) => Promise<Mode>,
+  modeOf?: (stage: string, encounterId: string) => Promise<Mode>,
 ): Promise<ReportResult> {
   const cur = (await sql`
     SELECT stage, encounter_id, attempts, cut_version FROM spine_job
@@ -124,7 +135,7 @@ export async function reportJob(
   const attempts = num(cur[0].attempts);
   let outcome: Outcome = a.outcome;
   let errorCode = a.error_code ?? null;
-  if (outcome === "shadow" && modeOf && (await modeOf(String(cur[0].stage))) === "live") outcome = "release";
+  if (outcome === "shadow" && modeOf && (await modeOf(String(cur[0].stage), String(cur[0].encounter_id))) === "live") outcome = "release";
   let artefact: "recorded" | "existing" | "conflict" | undefined;
   if (outcome === "done" && a.artefact) {
     artefact = await recordArtefact(String(cur[0].encounter_id), String(cur[0].stage), String(cur[0].cut_version), a.artefact);

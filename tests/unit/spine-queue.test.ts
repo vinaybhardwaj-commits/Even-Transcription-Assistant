@@ -64,9 +64,9 @@ describe("config: missing or malformed means off", () => {
   });
   it("jobs off, kill switch, paid stages and unknown stages are off", () => {
     const rows = [{ key: "jobs", value: "shadow" }, { key: "mode.recut", value: "live" }, { key: "mode.sarvam", value: "live" }, { key: "mode.bogus", value: "live" }];
-    expect(modesFrom(rows, ["recut", "sarvam", "bogus", "acoustics"])).toEqual({ jobs: "shadow", stages: { recut: "live", sarvam: "off", bogus: "off", acoustics: "off" } });
+    expect(modesFrom(rows, ["recut", "sarvam", "bogus", "acoustics"])).toEqual({ jobs: "shadow", stages: { recut: "live", sarvam: "off", bogus: "off", acoustics: "off" }, scopes: { recut: null, sarvam: null, bogus: null, acoustics: null } });
     expect(modesFrom(rows.slice(1), ["recut"]).stages.recut).toBe("off");
-    expect(modesFrom([...rows, { key: "kill_switch", value: true }], ["recut"])).toEqual({ jobs: "off", stages: { recut: "off" } });
+    expect(modesFrom([...rows, { key: "kill_switch", value: true }], ["recut"])).toEqual({ jobs: "off", stages: { recut: "off" }, scopes: { recut: null } });
   });
   it("F4: a kill_switch that is not exactly false / {on:false} is KILLED", () => {
     const base = [{ key: "jobs", value: "live" }, { key: "mode.recut", value: "live" }];
@@ -91,7 +91,7 @@ const M = vi.hoisted(() => ({
   modes: { jobs: "shadow", stages: { recut: "shadow", acoustics: "live" } } as { jobs: string; stages: Record<string, string> },
   claim: vi.fn(async (..._a: unknown[]) => [] as unknown[]), report: vi.fn(async () => ({ ok: true, status: "shadow" }) as unknown),
 }));
-vi.mock("@/lib/spine/config", async (orig) => ({ ...(await orig<typeof import("@/lib/spine/config")>()), readModes: async () => M.modes, readMode: async () => "off" }));
+vi.mock("@/lib/spine/config", async (orig) => ({ ...(await orig<typeof import("@/lib/spine/config")>()), readModes: async () => ({ scopes: {}, ...M.modes }), readMode: async () => "off" }));
 vi.mock("@/lib/spine/jobs", () => ({ claimJobs: M.claim, reportJob: M.report, openBreakers: async () => ["recut"], reapExhausted: async () => 0, opsAlertNotifier: {}, stubNotifier: {} }));
 vi.mock("@/lib/db", () => ({ sql: async () => [] }));   // the report route looks the job's stage up (server stages are refused); no row = not a server stage
 import { NextRequest } from "next/server";
@@ -107,6 +107,11 @@ describe("routes", () => {
     delete process.env.SPINE_BEARER_TOKEN;
     expect((await reportPOST(req("/api/spine/report", {}))).status).toBe(503);
   });
+  it("S6: a live claim takes nothing when jobs=shadow, whatever mode.<stage> says", async () => {
+    M.modes = { jobs: "shadow", stages: { recut: "live", acoustics: "live" } };
+    expect(await (await claimPOST(req("/api/spine/claim", { owner: "r", live: true }))).json()).toEqual({ ok: true, jobs: [] });
+    expect(M.claim).not.toHaveBeenCalled();
+  });
   it("claim returns nothing and never touches the queue when jobs=off", async () => {
     M.modes = { jobs: "off", stages: {} };
     const r = await claimPOST(req("/api/spine/claim", { owner: "r" }));
@@ -121,6 +126,7 @@ describe("routes", () => {
     await claimPOST(req("/api/spine/claim", { owner: "r" }));
     expect(M.claim.mock.calls[0]![1]).toEqual([]);                 // F1: non-live takes shadow stages only (recut shadow but breaker open; acoustics is live)
     M.modes.stages.recut = "live";
+    M.modes.jobs = "live";   // S6: a live claim needs jobs=live
     await claimPOST(req("/api/spine/claim", { owner: "r", live: true }));
     expect(M.claim.mock.calls[1]![1]).toEqual(["acoustics"]);
     M.modes.stages.acoustics = "shadow";
@@ -130,6 +136,7 @@ describe("routes", () => {
     expect(M.claim.mock.calls[3]![1]).toEqual(["acoustics"]);      // shadow, breaker closed
   });
   it("inside the :20-:45 IST window a live claim withholds K lanes (acoustics) but still hands out other live stages", async () => {
+    M.modes.jobs = "live";   // S6: a live claim needs jobs=live
     M.modes.stages.recut = "live";
     M.modes.stages.nemotron = "live";
     for (const min of [20, 30, 44]) {

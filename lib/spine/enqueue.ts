@@ -10,7 +10,7 @@
  * Job key: (encounter_id, stage, cut_version = r<boundary_rev>, input_key = hash8(stage, stage config)).
  */
 import { createHash } from "node:crypto";
-import { PAID_STAGES, type Mode } from "./config";
+import { PAID_STAGES, effectiveRoomMode, type Mode, type RoomScope } from "./config";
 
 export const CANDIDATE_STAGES = ["recut", "acoustics", "nemotron"] as const;
 export const CONFIRMED_ONLY_STAGES = ["collector", "freescript"] as const;
@@ -23,7 +23,7 @@ export const CLOSE_GRACE_MS = 15 * 60_000;
 /** Bump a stage's config string to re-key its jobs. */
 const STAGE_CFG: Readonly<Record<string, string>> = { recut: "v1", acoustics: "v1", nemotron: "v1", collector: "v1", freescript: "v1", transcript_final: "v1" };
 
-export type EncounterRow = { encounter_id: string; status: string; boundary_rev: number; flags: readonly string[]; t_close: number | null };
+export type EncounterRow = { encounter_id: string; status: string; boundary_rev: number; flags: readonly string[]; t_close: number | null; room_id?: string | null };
 export type PlannedJob = { encounter_id: string; stage: string; cut_version: string; input_key: string; status: "shadow" | "queued" };
 
 export const SP_PREFIX = "sp:";
@@ -53,11 +53,15 @@ export function stagesFor(e: EncounterRow, now: number): string[] {
   return out.filter((s) => FREE_STAGES.includes(s) && !PAID_STAGES.includes(s));
 }
 
-export function planJobs(encs: readonly EncounterRow[], modes: Readonly<Record<string, Mode>>, now: number): PlannedJob[] {
+/**
+ * `modes` are the DECLARED stage modes; `scopes` (S6) their room lists and `jobs` the queue mode, so the status of a planned row comes from config.effectiveRoomMode (THE ROOM RULE, the same
+ * function the claim route's rules are built from). With no scopes and jobs=live (the defaults) `modes` may be the already-capped effectiveModes, as before.
+ */
+export function planJobs(encs: readonly EncounterRow[], modes: Readonly<Record<string, Mode>>, now: number, scopes: Readonly<Record<string, RoomScope>> = {}, jobs: Mode = "live"): PlannedJob[] {
   const out: PlannedJob[] = [];
   for (const e of encs) {
     for (const stage of stagesFor(e, now)) {
-      const m = modes[stage];
+      const m = effectiveRoomMode(jobs, modes[stage] ?? "off", scopes[stage] ?? null, e.room_id);
       if (m !== "shadow" && m !== "live") continue;
       const sp = e.status === "confirmed_single_proxy";
       out.push({ encounter_id: e.encounter_id, stage, cut_version: cutVersion(e.boundary_rev), input_key: sp ? SP_PREFIX + inputKey(stage) : inputKey(stage), status: m === "live" && !sp ? "queued" : "shadow" });

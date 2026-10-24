@@ -8,7 +8,7 @@ Optional env: SPINE_DATA_DIR (default ~/eta-data), SPINE_GPU_LOCK (default ~/gpu
 NOTE (F8): SPINE_DATA_DIR moves OUR lock and track paths only. clip_lanes keeps its own root and its own ~/gpu.lock (hard-coded in the lab), so it does not follow SPINE_DATA_DIR or SPINE_GPU_LOCK. A missing SPINE_*_DIR / _PY is ExecutorUnconfigured: the runner releases the job untouched.
 
 LOCKS (the same ones the timers take, so the runner and the hourly never run one stage for one uid at once):
-  recut      cutter.lock is taken by the cutter itself (non-waiting with --only; busy prints {"locked": true}); we also probe it first, and refuse inside the :35 gap
+  recut      cutter.lock is taken by the cutter itself (non-waiting with --only; busy prints {"locked": true}); we also probe it first, and REFUSE (release timer_gap: attempt given back, no breaker tick) inside the :35 gap
              (the 180 s after a firing, and when the next firing is under 720 s away: recut_queue's rule).
   K lanes    <data>/reb/_hourly.lock is held by US (flock, non-blocking) for the whole child run, and the CHILD INHERITS the fd (pass_fds), so the lock lives as long as the child even if
              this runner is SIGKILLed. A busy lock is transient and nothing is spawned. palimpsest-hourly starts at :40 and skips its WHOLE run when it cannot take the lock, so K lanes are
@@ -21,7 +21,7 @@ Every busy lock is TRANSIENT (backoff, attempt counted, breaker-visible). Nothin
 ERROR MAP (Result.outcome / code):
   rc 0 + cut / written / skipped_existing   done, with an artefact REF + sha256 of the file the engine wrote
   silent_audio, blind_room_day, blind_refused   permanent (the audio will not change; retrying cannot help)
-  locked, gpu busy, timer gap, timeout, lane failed, no tape yet, clip not cut yet, stopped, any other rc   transient
+  locked, gpu busy, timeout, lane failed, no tape yet, clip not cut yet, stopped, any other rc   transient
   rc 2 from clip_lanes or the cutter (usage / validation)   permanent
   no consult_uid link   BLOCKED (not a failure): no breaker tick, no attempt spent, not retried until a link appears
 No uid, path, argv or child output is ever logged or reported: only the codes below. Stdlib only.
@@ -282,7 +282,7 @@ class Executors:
     def recut(self, uid: str) -> Result:
         now = self.clock()
         if seconds_since_timer(now) < TIMER_LAUNCH_S or seconds_to_next_timer(now) < MIN_BEFORE_TIMER_S:
-            return Result("transient", "timer_gap")
+            return Result("release", "timer_gap")   # nothing ran and it is not the job's fault (recut_queue just waits): the attempt is given back, no breaker tick
         try:
             if not probe_flock(self.cutter_lock):
                 return Result("transient", "lock_busy")
