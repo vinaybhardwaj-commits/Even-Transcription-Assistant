@@ -264,7 +264,7 @@ def test_cutter_lock_taken_between_probe_and_spawn_is_still_transient(box, monke
 def test_recut_refuses_inside_the_35_gap(box, minute, second):
     ex = executors.Executors(env=box.env, clock=lambda: at(minute, second))
     r = ex.execute("recut", UID)
-    assert (r.outcome, r.code) == ("transient", "timer_gap") and box.calls() == []
+    assert (r.outcome, r.code) == ("release", "timer_gap") and box.calls() == []
 
 
 def test_recut_runs_between_the_gaps(box):

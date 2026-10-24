@@ -1,6 +1,6 @@
 /**
  * POST /api/spine/claim — the box runner takes spine jobs. Bearer (SPINE_BEARER_TOKEN). Body {owner, limit?, live?}.
- * Returns {ok, jobs:[...]} — EMPTY when spine_config jobs is off, the kill switch is on, a stage is off (paid stages always are), or the stage's breaker is open.
+ * Returns {ok, jobs:[...]} — EMPTY when spine_config jobs is off (a live claim also needs jobs=live), the kill switch is on, a stage is off (paid stages always are), or the stage's breaker is open.
  * live=true never returns K-lane (acoustics, nemotron) jobs from :20 to :45 IST (lib/spine/window.ts). live=true only returns jobs of stages whose mode is live, each with its consult_uid link (null when none; a would_run claim never sees it); a non-live claim only returns jobs of SHADOW stages. Each job carries its stage mode.
  */
 import { NextRequest, NextResponse } from "next/server";
@@ -25,6 +25,7 @@ export async function POST(req: NextRequest) {
   try {
     const modes = await readModes();
     if (modes.jobs === "off") return NextResponse.json({ ok: true, jobs: [] });
+    if (body.live === true && modes.jobs !== "live") return NextResponse.json({ ok: true, jobs: [] });   // S6: jobs=shadow caps every stage at shadow (as the enqueuer does): a live claim takes nothing, whatever mode.<stage> says
     const want = body.live === true ? "live" : "shadow";   // a non-live (would_run) claim never takes a live-mode stage: it would consume the job as shadow
     const allowed = KNOWN_STAGES.filter((s) => modes.stages[s] === want);
     const open = new Set(await openBreakers(allowed, now));

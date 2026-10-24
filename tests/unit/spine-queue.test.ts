@@ -106,6 +106,11 @@ describe("routes", () => {
     delete process.env.SPINE_BEARER_TOKEN;
     expect((await reportPOST(req("/api/spine/report", {}))).status).toBe(503);
   });
+  it("S6: a live claim takes nothing when jobs=shadow, whatever mode.<stage> says", async () => {
+    M.modes = { jobs: "shadow", stages: { recut: "live", acoustics: "live" } };
+    expect(await (await claimPOST(req("/api/spine/claim", { owner: "r", live: true }))).json()).toEqual({ ok: true, jobs: [] });
+    expect(M.claim).not.toHaveBeenCalled();
+  });
   it("claim returns nothing and never touches the queue when jobs=off", async () => {
     M.modes = { jobs: "off", stages: {} };
     const r = await claimPOST(req("/api/spine/claim", { owner: "r" }));
@@ -120,6 +125,7 @@ describe("routes", () => {
     await claimPOST(req("/api/spine/claim", { owner: "r" }));
     expect(M.claim.mock.calls[0]![1]).toEqual([]);                 // F1: non-live takes shadow stages only (recut shadow but breaker open; acoustics is live)
     M.modes.stages.recut = "live";
+    M.modes.jobs = "live";   // S6: a live claim needs jobs=live
     await claimPOST(req("/api/spine/claim", { owner: "r", live: true }));
     expect(M.claim.mock.calls[1]![1]).toEqual(["acoustics"]);
     M.modes.stages.acoustics = "shadow";
@@ -129,6 +135,7 @@ describe("routes", () => {
     expect(M.claim.mock.calls[3]![1]).toEqual(["acoustics"]);      // shadow, breaker closed
   });
   it("inside the :20-:45 IST window a live claim withholds K lanes (acoustics) but still hands out other live stages", async () => {
+    M.modes.jobs = "live";   // S6: a live claim needs jobs=live
     M.modes.stages.recut = "live";
     M.modes.stages.nemotron = "live";
     for (const min of [20, 30, 44]) {
