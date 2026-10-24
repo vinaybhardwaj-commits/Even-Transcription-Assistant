@@ -33,7 +33,22 @@ export async function readFinalEvents(o: { after?: number; limit?: number; shado
     };
   });
   const blindWin = await blindWindowsAny(evs.flatMap((e) => e.window_ids));
-  const events = evs.filter((e) => !blindDay(e) && !e.window_ids.some((id) => blindWin.has(id)));
+  const hidden = (e: FinalEvent, win: Set<string>) => blindDay(e) || e.window_ids.some((id) => win.has(id));
+  const events = evs.filter((e) => !hidden(e, blindWin));
+  // A revision names its predecessor's sha. If the read filter drops (or storage lacks) that predecessor, the served event must not name it: omit revises_sha256 (the chain stays intact in storage).
+  const wanted = [...new Set(events.flatMap((e) => (e.revises_sha256 === undefined ? [] : [e.revises_sha256])))];
+  if (wanted.length) {
+    const preds = (await sql`
+      SELECT t.counts FROM spine_tick t
+       WHERE t.kind = ${kind}::text AND t.counts->'text'->>'sha256' = ANY(${wanted}::text[])`) as Array<Record<string, unknown>>;
+    const pe = preds.map((r) => (typeof r.counts === "string" ? JSON.parse(r.counts) : r.counts) as FinalEvent);
+    const pWin = await blindWindowsAny(pe.flatMap((e) => e.window_ids));
+    const visible = new Set(pe.filter((e) => !hidden(e, pWin)).map((e) => `${e.encounter_id}:${e.text.sha256}`));
+    for (let i = 0; i < events.length; i++) {
+      const { revises_sha256: rv, ...rest } = events[i];
+      if (rv !== undefined && !visible.has(`${events[i].encounter_id}:${rv}`)) events[i] = rest as FinalEventRow;
+    }
+  }
   return { events, next_after: evs.length ? evs[evs.length - 1].event_id : after };
 }
 
