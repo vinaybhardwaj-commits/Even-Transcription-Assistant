@@ -5,7 +5,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { checkSpineBearer } from "@/lib/spine/auth";
-import { KNOWN_STAGES, readMode, readModes } from "@/lib/spine/config";
+import { KNOWN_STAGES, SERVER_STAGES, readMode, readModes } from "@/lib/spine/config";
 import { K_LANE_STAGES, kLaneBlockedNow } from "@/lib/spine/window";
 import { claimJobs, openBreakers, reapExhausted, opsAlertNotifier, stubNotifier } from "@/lib/spine/jobs";
 
@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
     const modes = await readModes();
     if (modes.jobs === "off") return NextResponse.json({ ok: true, jobs: [] });
     const want = body.live === true ? "live" : "shadow";   // a non-live (would_run) claim never takes a live-mode stage: it would consume the job as shadow
-    const allowed = KNOWN_STAGES.filter((s) => modes.stages[s] === want);
+    const allowed = KNOWN_STAGES.filter((s) => !SERVER_STAGES.includes(s) && modes.stages[s] === want);   // server stages (transcript_final) are run by the spine cron, never by the box
     const open = new Set(await openBreakers(allowed, now));
     const gap = want === "live" && kLaneBlockedNow(now);   // the box refuses K lanes in the hourly window: do not hand them out (a refusal would only bounce)
     const stages = allowed.filter((s) => !open.has(s) && !(gap && K_LANE_STAGES.includes(s)));

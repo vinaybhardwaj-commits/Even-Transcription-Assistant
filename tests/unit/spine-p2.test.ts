@@ -73,20 +73,20 @@ describe("enqueue plan", () => {
   const after = T + CLOSE_GRACE_MS;
   it("candidate: free engines only; confirmed adds collector + freescript; ambiguous never freescript", () => {
     expect(stagesFor(e("candidate"), after)).toEqual(["recut", "acoustics", "nemotron"]);
-    expect(stagesFor(e("confirmed"), after)).toEqual(["recut", "acoustics", "nemotron", "collector", "freescript"]);
-    expect(stagesFor(e("confirmed", ["ambiguous"]), after)).toEqual(["recut", "acoustics", "nemotron", "collector"]);
+    expect(stagesFor(e("confirmed"), after)).toEqual(["recut", "acoustics", "nemotron", "collector", "freescript", "transcript_final"]);
+    expect(stagesFor(e("confirmed", ["ambiguous"]), after)).toEqual(["recut", "acoustics", "nemotron", "collector", "transcript_final"]);
   });
   it("nothing for rejected, merged, frozen, open, or inside the 15 min grace", () => {
     for (const x of [e("rejected"), e("merged"), e("confirmed", ["frozen"]), e("confirmed", [], null)]) expect(stagesFor(x, after)).toEqual([]);
     expect(stagesFor(e("confirmed"), after - 1)).toEqual([]);
   });
   it("no paid stage is ever planned, whatever the modes say; jobs=shadow caps live at shadow; a missing mode is off", () => {
-    const all = Object.fromEntries(["recut", "acoustics", "nemotron", "collector", "freescript", "sarvam", "gapfill", "role", "llm-roles", "parts"].map((k) => [k, "live" as const]));
+    const all = Object.fromEntries(["recut", "acoustics", "nemotron", "collector", "freescript", "transcript_final", "sarvam", "gapfill", "role", "llm-roles", "parts"].map((k) => [k, "live" as const]));
     const m = effectiveModes("shadow", all);
     expect(Object.keys(m).sort()).toEqual([...FREE_STAGES].sort());
     expect(Object.values(m).every((x) => x === "shadow")).toBe(true);
     const jobs = planJobs([e("confirmed")], effectiveModes("live", all), after);
-    expect(jobs.map((j) => j.stage)).toEqual(["recut", "acoustics", "nemotron", "collector", "freescript"]);
+    expect(jobs.map((j) => j.stage)).toEqual(["recut", "acoustics", "nemotron", "collector", "freescript", "transcript_final"]);
     expect(jobs.every((j) => j.status === "queued")).toBe(true);
     expect(planJobs([e("confirmed")], effectiveModes("shadow", {}), after)).toEqual([]);
     expect(effectiveModes("off", all).recut).toBe("off");

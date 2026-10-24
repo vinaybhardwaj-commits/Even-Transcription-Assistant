@@ -78,8 +78,8 @@ d("oref R3 on postgres:16 with ALL migrations", () => {
     await runSpineMerge(NOW); await runSpineEnqueue(NOW);
     const flip = async (s: string) => { pg.exec(`UPDATE spine_encounter SET status = '${s}';`); await runSpineEnqueue(NOW); };
     await flip("confirmed"); await flip("confirmed_single_proxy"); await flip("confirmed");
-    // the encounter is confirmed: it must have its 5 normal-keyed rows not superseded
-    expect(await num("SELECT count(*) FROM spine_job WHERE input_key NOT LIKE 'sp:%' AND status = 'shadow'")).toBe(5);
+    // the encounter is confirmed: it must have its 6 normal-keyed rows (5 + transcript_final, S7a) not superseded
+    expect(await num("SELECT count(*) FROM spine_job WHERE input_key NOT LIKE 'sp:%' AND status = 'shadow'")).toBe(6);
     await flip("confirmed_single_proxy");
     expect(await num("SELECT count(*) FROM spine_job WHERE input_key LIKE 'sp:%' AND status = 'shadow'")).toBe(5);
   });

@@ -4,6 +4,7 @@
  *  - D4: a candidate gets recut, acoustics, nemotron. A confirmed encounter also gets collector and freescript.
  *  - R1: an encounter flagged `ambiguous` never gets freescript.
  *  - RULING B: `confirmed_single_proxy` (timeline-only) gets the confirmed stage set, but ALWAYS as status `shadow` (hard cap, whatever jobs / mode.<stage> say) with input_key `sp:` + hash. Promotion to confirmed supersedes the sp: rows.
+ *  - S7a: a `confirmed` encounter (not single_proxy, not candidate) also gets transcript_final, after the close grace; a boundary change is a new cut_version.
  *  - D6: nothing is planned until CLOSE_GRACE_MS after the encounter closed.
  *  - frozen / rejected / merged encounters get nothing.
  * Job key: (encounter_id, stage, cut_version = r<boundary_rev>, input_key = hash8(stage, stage config)).
@@ -13,12 +14,14 @@ import { PAID_STAGES, type Mode } from "./config";
 
 export const CANDIDATE_STAGES = ["recut", "acoustics", "nemotron"] as const;
 export const CONFIRMED_ONLY_STAGES = ["collector", "freescript"] as const;
-export const FREE_STAGES: readonly string[] = [...CANDIDATE_STAGES, ...CONFIRMED_ONLY_STAGES];
+/** S7a: the final transcript, FREE (the route engine through the existing drain; never Sarvam, O4). Status `confirmed` ONLY: not candidate, not confirmed_single_proxy. Run by the server cron, not the box. */
+export const TRANSCRIPT_FINAL_STAGE = "transcript_final";
+export const FREE_STAGES: readonly string[] = [...CANDIDATE_STAGES, ...CONFIRMED_ONLY_STAGES, TRANSCRIPT_FINAL_STAGE];
 /** Upstream FREE stages that must be `done` (same cut) before a LIVE job is queued. Paid upstream stages are not required while none can be enqueued. Shadow rows are not gated. */
-export const STAGE_NEEDS: Readonly<Record<string, readonly string[]>> = { recut: [], acoustics: ["recut"], nemotron: ["recut"], collector: ["recut"], freescript: ["collector"] };
+export const STAGE_NEEDS: Readonly<Record<string, readonly string[]>> = { recut: [], acoustics: ["recut"], nemotron: ["recut"], collector: ["recut"], freescript: ["collector"], transcript_final: [] };
 export const CLOSE_GRACE_MS = 15 * 60_000;
 /** Bump a stage's config string to re-key its jobs. */
-const STAGE_CFG: Readonly<Record<string, string>> = { recut: "v1", acoustics: "v1", nemotron: "v1", collector: "v1", freescript: "v1" };
+const STAGE_CFG: Readonly<Record<string, string>> = { recut: "v1", acoustics: "v1", nemotron: "v1", collector: "v1", freescript: "v1", transcript_final: "v1" };
 
 export type EncounterRow = { encounter_id: string; status: string; boundary_rev: number; flags: readonly string[]; t_close: number | null };
 export type PlannedJob = { encounter_id: string; stage: string; cut_version: string; input_key: string; status: "shadow" | "queued" };
@@ -46,6 +49,7 @@ export function stagesFor(e: EncounterRow, now: number): string[] {
     out.push("collector");
     if (!e.flags.includes("ambiguous")) out.push("freescript");
   }
+  if (e.status === "confirmed") out.push(TRANSCRIPT_FINAL_STAGE);
   return out.filter((s) => FREE_STAGES.includes(s) && !PAID_STAGES.includes(s));
 }
 

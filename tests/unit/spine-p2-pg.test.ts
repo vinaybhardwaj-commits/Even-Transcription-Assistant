@@ -253,7 +253,7 @@ d("spine P2 writer and enqueuer on postgres:16", () => {
     vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(NOW);
     const get = () => GET(new Request("https://x.test/api/cron/spine", { headers: { authorization: "Bearer cron_test" } }));
     fixture();
-    expect(await (await get()).json()).toEqual({ ok: true, ingest: { skipped: "off" }, merge: { skipped: "off" }, enqueue: { skipped: "off" } });
+    expect(await (await get()).json()).toEqual({ ok: true, ingest: { skipped: "off" }, merge: { skipped: "off" }, enqueue: { skipped: "off" }, transcript_final: { skipped: "off" } });
     expect(await num("SELECT count(*) FROM spine_tick")).toBe(0);
     setConfig("merge", '"shadow"');
     const b = await (await get()).json();

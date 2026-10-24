@@ -1,0 +1,198 @@
+/**
+ * lib/spine/transcript-final-store.ts — SPINE S7a executor for the `transcript_final` stage, run SERVER-SIDE by the spine cron (the box runner is never handed this stage: config.SERVER_STAGES).
+ *
+ * Gate: spine_config `jobs` + `mode.transcript_final` + kill_switch through config.readModes / enqueue.effectiveModes (missing, malformed or killed = off => { skipped: "off" }, nothing read or written).
+ *  - live:   claim queued transcript_final jobs (the ordinary queue, lease and breaker), and per job: re-read the encounter (must still be `confirmed`, same cut, not frozen, not a blind room-day), read the covering
+ *            windows through lib/room-access/readers/spine-transcript, ask the EXISTING drain for windows not yet transcribed (offer; ROOM_AUTO_DRAIN_ENABLED must be on), requeue (`release`, a short next_attempt)
+ *            until every covering window is terminal, then assemble from the stored ROUTE runs and record: one spine_artefact row (ref only, source_table transcription_run) AND one event (spine_tick kind
+ *            `transcript_final_event`) in ONE statement, then report the job done. Past MAX_WAIT_MS the job fails `windows_not_ready` / `no_covering_windows`.
+ *  - shadow: NOTHING is offered, claimed, leased or emitted. Shadow jobs (status `shadow`) are evaluated read-only; a job that WOULD emit writes one `transcript_final_shadow` tick (the same event shape, mode shadow) once.
+ * One `transcript_final` tick per pass carries the counts. No text, name or phone is ever written or logged: ids, counts, stamps, a sha256.
+ * O4: no paid or Sarvam call exists in this path; the only transcription is the existing drain (drainRoomWindow -> room_window job -> the route engine).
+ */
+import { sql } from "@/lib/db";
+import { isBlindRoomDay } from "@/lib/rubrics/blind-room-days";
+import { readModes } from "./config";
+import { effectiveModes, TRANSCRIPT_FINAL_STAGE } from "./enqueue";
+import { HORIZON_MS } from "./merge";
+import { claimJobs, openBreakers, reportJob, type SpineJob } from "./jobs";
+import { LEASE_MS } from "./retry";
+import {
+  assemble, buildEvent, CLAIM_LIMIT, decide, EVENT_KIND, FINAL_CFG8, FINAL_ENGINE, FINAL_VERSION, PASS_KIND, SHADOW_KIND,
+  type CoveringWindow, type Decision, type FinalEvent, type RunText,
+} from "./transcript-final";
+import { markWindowOffered, readCoveringWindows, readRunTexts } from "@/lib/room-access/readers/spine-transcript";
+
+export const OWNER = "spine-cron:transcript_final";
+const SHADOW_LIMIT = 20;
+
+export type Deps = {
+  readWindows: (a: { room_id: string; ist_date: string; t_open_ms: number; t_close_ms: number }) => Promise<{ windows: CoveringWindow[]; blind_excluded: number }>;
+  readRuns: (ids: readonly string[]) => Promise<RunText[]>;
+  /** ask the EXISTING drain for one window (enqueueSubject + drainRoomWindow). Returns the drain's step name. */
+  offer: (windowId: string) => Promise<string>;
+  drainOn: () => boolean;
+  cooldownMs: number;
+  rng: () => number;
+};
+
+type EncRow = { encounter_id: string; status: string; boundary_rev: number; flags: string[]; room_id: string | null; ist_date: string; t_open: number; t_close: number | null; enqueued_at: number };
+
+export type TfCounts =
+  | { skipped: "off" }
+  | { mode: "shadow" | "live"; claimed: number; done: number; waiting: number; failed: number; offered: number; would_offer: number; would_emit: number; errors: number; breaker_open: boolean };
+
+const ENC_SQL = (jobId: number) => sql`
+  SELECT e.encounter_id, e.status, e.boundary_rev, e.flags::text AS flags, e.room_id, e.ist_date::text AS ist_date, e.t_open, e.t_close, j.created_at AS enqueued_at, j.cut_version
+    FROM spine_job j JOIN spine_encounter e ON e.encounter_id = j.encounter_id WHERE j.job_id = ${jobId}::bigint`;
+
+const toMs = (v: unknown): number => Date.parse(String(v));
+function toEnc(r: Record<string, unknown>): EncRow & { cut_version: string } {
+  return {
+    encounter_id: String(r.encounter_id), status: String(r.status), boundary_rev: Number(r.boundary_rev),
+    flags: Array.isArray(r.flags) ? (r.flags as unknown[]).map(String) : String(r.flags ?? "").replace(/[{}]/g, "").split(",").filter(Boolean),
+    room_id: r.room_id == null ? null : String(r.room_id), ist_date: String(r.ist_date), t_open: toMs(r.t_open), t_close: r.t_close == null ? null : toMs(r.t_close),
+    enqueued_at: toMs(r.enqueued_at), cut_version: String(r.cut_version),
+  };
+}
+
+/** Why this encounter may not get a final transcript for this job's cut, or null. A permanent reason: the job fails with it, no event. */
+export function ineligible(e: EncRow & { cut_version: string }): string | null {
+  if (e.status !== "confirmed") return "not_confirmed";
+  if (e.cut_version !== `r${e.boundary_rev}`) return "stale_cut";
+  if (e.flags.includes("frozen")) return "frozen";
+  if (e.t_close === null || e.room_id === null) return "not_closed";
+  if (isBlindRoomDay(e.ist_date, e.room_id)) return "blind_room_day";
+  return null;
+}
+
+type Evaluated =
+  | { kind: "ineligible"; reason: string }
+  | { kind: "wait"; decision: Extract<Decision, { kind: "wait" }> }
+  | { kind: "fail"; decision: Extract<Decision, { kind: "fail" }> }
+  | { kind: "ready"; event: FinalEvent; run_ids: string[]; sha256: string; empty: boolean };
+
+/** Read-only: where is this job? (No offer, no write.) */
+async function evaluate(job: { job_id: number }, mode: "shadow" | "live", now: number, d: Deps): Promise<Evaluated> {
+  const encs = await ENC_SQL(job.job_id);
+  if (!encs[0]) return { kind: "ineligible", reason: "no_encounter" };
+  const e = toEnc(encs[0] as Record<string, unknown>);
+  const why = ineligible(e);
+  if (why) return { kind: "ineligible", reason: why };
+  const { windows, blind_excluded } = await d.readWindows({ room_id: e.room_id as string, ist_date: e.ist_date, t_open_ms: e.t_open, t_close_ms: e.t_close as number });
+  const decision = decide({ windows, blindExcluded: blind_excluded, now, tCloseMs: e.t_close as number, drainOn: d.drainOn(), cooldownMs: d.cooldownMs });
+  if (decision.kind === "wait" || decision.kind === "fail") return { kind: decision.kind, decision } as Evaluated;
+  const runs = await d.readRuns(decision.run_ids);
+  const text = assemble(decision.run_ids, runs);
+  const event = buildEvent({ mode, encounter_id: e.encounter_id, boundary_rev: e.boundary_rev, room_id: e.room_id, ist_date: e.ist_date, tCloseMs: e.t_close as number, enqueuedAtMs: e.enqueued_at, now, ready: decision, text });
+  return { kind: "ready", event, run_ids: text.run_ids, sha256: text.sha256, empty: decision.counts.transcribed === 0 };
+}
+
+/**
+ * The artefact (ref only) and the event, ONE statement: both land or neither does. Idempotent: an event for (encounter, cut_version) is written once; the artefact is create-only on its key
+ * (a rerun with a different sha does not overwrite: a changed text is a new cut_version, never an edit).
+ */
+export async function recordFinal(ev: FinalEvent, x: { run_ids: string[]; sha256: string; empty: boolean }): Promise<{ event: boolean; artefact: boolean }> {
+  const rows = (await sql`
+    WITH ev AS (
+      INSERT INTO spine_tick (kind, counts)
+      SELECT ${EVENT_KIND}::text, ${JSON.stringify(ev)}::jsonb
+       WHERE NOT EXISTS (SELECT 1 FROM spine_tick t WHERE t.kind = ${EVENT_KIND}::text AND t.counts->>'encounter_id' = ${ev.encounter_id}::text AND t.counts->>'cut_version' = ${ev.cut_version}::text)
+      RETURNING id
+    ), art AS (
+      INSERT INTO spine_artefact (encounter_id, stage, engine, version, cfg8, cut_version, store, bucket, object_key, sha256, status, source_table)
+      VALUES (${ev.encounter_id}, ${TRANSCRIPT_FINAL_STAGE}, ${FINAL_ENGINE}, ${FINAL_VERSION}, ${FINAL_CFG8()}, ${ev.cut_version}, 'neon', NULL, ${ev.text.ref}, ${x.sha256}, ${x.empty ? "empty" : "ok"}, 'transcription_run')
+      ON CONFLICT ON CONSTRAINT spine_artefact_key_uq DO NOTHING
+      RETURNING id
+    )
+    SELECT (SELECT count(*) FROM ev)::int AS ev, (SELECT count(*) FROM art)::int AS art`) as Array<{ ev: number; art: number }>;
+  return { event: Number(rows[0]?.ev) > 0, artefact: Number(rows[0]?.art) > 0 };
+}
+
+async function recordShadow(ev: FinalEvent): Promise<boolean> {
+  const rows = (await sql`
+    INSERT INTO spine_tick (kind, counts)
+    SELECT ${SHADOW_KIND}::text, ${JSON.stringify(ev)}::jsonb
+     WHERE NOT EXISTS (SELECT 1 FROM spine_tick t WHERE t.kind = ${SHADOW_KIND}::text AND t.counts->>'encounter_id' = ${ev.encounter_id}::text AND t.counts->>'cut_version' = ${ev.cut_version}::text)
+    RETURNING id`) as Array<unknown>;
+  return rows.length > 0;
+}
+
+/** The default deps: the real room reads and the real drain (imported lazily so a unit test of the pure parts loads neither). */
+export async function realDeps(origin: string): Promise<Deps> {
+  const { drainRoomWindow } = await import("@/lib/stt/room-drain");
+  const { enqueueSubject } = await import("@/lib/stt/fanout");
+  const { SYSTEM_ACTOR } = await import("@/lib/stt/receipt");
+  const { ROOM_AUTO_DRAIN_ENABLED_ENV, AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES } = await import("@/lib/stt/auto-drain");
+  const { parseFlag } = await import("@/lib/flags");
+  return {
+    readWindows: readCoveringWindows, readRuns: readRunTexts,
+    drainOn: () => { try { return parseFlag(ROOM_AUTO_DRAIN_ENABLED_ENV); } catch { return false; } },   // a malformed flag is off, never a guess
+    cooldownMs: AUTO_DRAIN_REFUSAL_COOLDOWN_MINUTES * 60_000,
+    rng: Math.random,
+    // The same three steps the auto-drain makes for a window it offers (lib/stt/auto-drain.ts): the legacy queue row first, the drain, then the refusal mark that paces the next offer.
+    offer: async (windowId) => {
+      await enqueueSubject("bench_window", windowId, "asr");
+      const out = await drainRoomWindow(windowId, origin, { actor: SYSTEM_ACTOR, via: "cron" });
+      await markWindowOffered(windowId, out.step);
+      return out.step;
+    },
+  };
+}
+
+export async function runTranscriptFinal(now: number, origin: string, deps?: Deps): Promise<TfCounts> {
+  const m = await readModes([TRANSCRIPT_FINAL_STAGE]);
+  const mode = effectiveModes(m.jobs, m.stages)[TRANSCRIPT_FINAL_STAGE];
+  if (m.jobs === "off" || (mode !== "shadow" && mode !== "live")) return { skipped: "off" };
+  const d = deps ?? (await realDeps(origin));
+  const c = { mode, claimed: 0, done: 0, waiting: 0, failed: 0, offered: 0, would_offer: 0, would_emit: 0, errors: 0, breaker_open: false };
+  const at = new Date(now);
+
+  if (mode === "shadow") {
+    const rows = (await sql`
+      SELECT j.job_id FROM spine_job j JOIN spine_encounter e ON e.encounter_id = j.encounter_id
+       WHERE j.stage = ${TRANSCRIPT_FINAL_STAGE}::text AND j.status = 'shadow' AND e.status = 'confirmed' AND j.cut_version = 'r' || e.boundary_rev::text
+         AND j.created_at >= ${new Date(now - HORIZON_MS).toISOString()}::timestamptz
+         AND NOT EXISTS (SELECT 1 FROM spine_tick t WHERE t.kind = ${SHADOW_KIND}::text AND t.counts->>'encounter_id' = j.encounter_id AND t.counts->>'cut_version' = j.cut_version)
+       ORDER BY j.job_id DESC LIMIT ${SHADOW_LIMIT}::int`) as Array<{ job_id: unknown }>;
+    for (const r of rows) {
+      c.claimed += 1;
+      try {
+        const ev = await evaluate({ job_id: Number(r.job_id) }, "shadow", now, d);
+        if (ev.kind === "ready") { if (await recordShadow(ev.event)) c.would_emit += 1; }
+        else if (ev.kind === "wait") { c.waiting += 1; c.would_offer += ev.decision.offers.length; }
+        else c.failed += 1;
+      } catch (e) { c.errors += 1; console.error("spine transcript_final shadow failed", (e as { code?: string }).code ?? "unknown"); }
+    }
+  } else {
+    if ((await openBreakers([TRANSCRIPT_FINAL_STAGE], at)).length > 0) c.breaker_open = true;
+    else {
+      const jobs: SpineJob[] = await claimJobs(OWNER, [TRANSCRIPT_FINAL_STAGE], CLAIM_LIMIT, at, LEASE_MS);
+      for (const j of jobs) {
+        c.claimed += 1;
+        const report = (outcome: "done" | "release" | "permanent" | "transient", code?: string) =>
+          reportJob({ job_id: j.job_id, owner: OWNER, outcome, error_code: code ?? null, now: at, rng: d.rng });
+        try {
+          const ev = await evaluate(j, "live", now, d);
+          if (ev.kind === "ineligible") { c.failed += 1; await report("permanent", ev.reason); }
+          else if (ev.kind === "fail") { c.failed += 1; await report("permanent", ev.decision.reason); }
+          else if (ev.kind === "wait") {
+            c.waiting += 1;
+            for (const id of ev.decision.offers) { await d.offer(id); c.offered += 1; }
+            await report("release");
+          } else {
+            await recordFinal(ev.event, ev);
+            c.done += 1;
+            await report("done");
+          }
+        } catch (e) {
+          c.errors += 1;
+          console.error("spine transcript_final failed", (e as { code?: string }).code ?? "unknown");
+          await report("transient", "exec_error").catch(() => undefined);
+        }
+      }
+    }
+  }
+  await sql`INSERT INTO spine_tick (kind, counts) VALUES (${PASS_KIND}::text, ${JSON.stringify(c)}::jsonb)`;
+  return c;
+}
