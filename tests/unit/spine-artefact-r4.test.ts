@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import { parseArtefact } from "@/lib/spine/artefact";
-import { resolveOutcome, RELEASE_BACKOFF_MS } from "@/lib/spine/retry";
+import { resolveOutcome, RELEASE_BACKOFF_MS, RUNNER_POLL_MS } from "@/lib/spine/retry";
 
 const base = { engine: "nemotron", version: "v1", cfg8: "0a1b2c3d", store: "box", status: "ok", sha256: "a".repeat(64) };
 const ok = (k: string) => parseArtefact({ ...base, object_key: k }) !== null;
@@ -21,8 +22,14 @@ describe("R4 F6b: object_key is a CLOSED shape", () => {
 
 describe("R4: a release backs off", () => {
   const now = new Date("2026-10-20T06:00:00Z");
-  it("release: queued 60 s ahead, attempt given back", () => {
-    expect(RELEASE_BACKOFF_MS).toBe(60_000);
-    expect(resolveOutcome("release", 1, now, 0.5)).toMatchObject({ status: "queued", nextAttemptAt: new Date(now.getTime() + 60_000), attemptsDelta: -1, errorClass: null });
+  it("release: queued 180 s (3 runner polls) ahead, attempt given back", () => {
+    expect(RELEASE_BACKOFF_MS).toBe(180_000);
+    expect(resolveOutcome("release", 1, now, 0.5)).toMatchObject({ status: "queued", nextAttemptAt: new Date(now.getTime() + 180_000), attemptsDelta: -1, errorClass: null });
+  });
+  it("pre-live A: the runner's real default poll is RUNNER_POLL_MS, and a release outlasts at least two polls", () => {
+    const m = /^DEFAULT_POLL\s*=\s*([0-9.]+)/m.exec(readFileSync("tools/eta-spine/runner.py", "utf8"));
+    expect(m).not.toBeNull();
+    expect(Number(m![1]) * 1000).toBe(RUNNER_POLL_MS);
+    expect(RELEASE_BACKOFF_MS).toBeGreaterThanOrEqual(2 * RUNNER_POLL_MS + 1);
   });
 });

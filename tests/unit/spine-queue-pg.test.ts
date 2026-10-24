@@ -188,8 +188,8 @@ d("spine queue on postgres:16", () => {
     await reportJob({ job_id: b.id, owner: "r", outcome: "release", now: T0, rng: () => 0.5 });
     expect(await row(a.id)).toMatchObject({ status: "shadow", attempts: 0 });
     expect(await row(b.id)).toMatchObject({ status: "queued", attempts: 0 });
-    expect(await claimJobs("r", ["shad"], 5, new Date(T0.getTime() + 59_000))).toEqual([]);   // R4: a release backs off 60 s
-    expect((await claimJobs("r", ["shad"], 5, new Date(T0.getTime() + 60_000))).map((j) => j.job_id)).toEqual([b.id]);
+    expect(await claimJobs("r", ["shad"], 5, new Date(T0.getTime() + 179_000))).toEqual([]);   // pre-live A: a release backs off 3 polls (180 s)
+    expect((await claimJobs("r", ["shad"], 5, new Date(T0.getTime() + 180_000))).map((j) => j.job_id)).toEqual([b.id]);
   });
 
   it("the dead transition fires the sink exactly once, via report or via an expired last lease", async () => {

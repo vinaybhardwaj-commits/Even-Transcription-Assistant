@@ -13,8 +13,10 @@ export const BREAKER_FAIL_RATIO = 0.3;
 export const BREAKER_OPEN_MS = 30 * 60_000;
 
 export type ErrorClass = "transient" | "permanent" | "budget";
-/** A released job (box refused it: window, budget, unconfigured) is not re-handed at the head of the queue at once (R4). */
-export const RELEASE_BACKOFF_MS = 60_000;
+/** The live runner's default poll (tools/eta-spine/runner.py DEFAULT_POLL, 60 s). SPINE_POLL_SECONDS may raise it; the margin below is against the default. */
+export const RUNNER_POLL_MS = 60_000;
+/** A released job (box refused it: window, budget, unconfigured) is not re-handed at the head of the queue at once (R4). Strictly longer than the runner's poll: at 60 s it was claimable on the very next poll (pre-live A). Three polls: the job survives two full polls plus scheduling slack. */
+export const RELEASE_BACKOFF_MS = 3 * RUNNER_POLL_MS;
 export type Outcome = "done" | "transient" | "permanent" | "budget" | "shadow" | "release" | "blocked";
 
 /** `attempts` counts the attempt that just failed (1-based). `rand01` is in [0,1). */
