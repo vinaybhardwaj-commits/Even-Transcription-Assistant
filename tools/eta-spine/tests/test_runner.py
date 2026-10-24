@@ -248,3 +248,25 @@ def test_malformed_poll_seconds_falls_back_with_one_error_line(monkeypatch, caps
     err = capsys.readouterr().err
     assert err.count("bad SPINE_POLL_SECONDS") == 6
     assert runner.poll_seconds("15") == 15.0 and runner.poll_seconds(None) == 60.0
+
+
+def test_r3_loop_exits_on_a_recorded_idle_stop_before_claiming():
+    """F-B': a stop recorded (and swallowed) while idle ends the runner loop at the next pass, 128+signum, without a claim."""
+    import runner
+    class Ex:
+        def __init__(self): self.n = 0
+        def raise_pending(self): raise SystemExit(143)
+    r = runner.Runner("http://x", "t", "o", live=True, post=lambda *a, **k: (_ for _ in ()).throw(AssertionError("claimed")), execs=Ex())
+    import os, pytest
+    env = {"SPINE_BASE_URL": "http://x", "SPINE_BEARER_TOKEN": "t"}
+    orig = runner.Runner
+    runner.Runner = lambda *a, **k: r
+    try:
+        with pytest.MonkeyPatch.context() as m:
+            for k, v in env.items(): m.setenv(k, v)
+            m.setattr(runner.executors, "install_signal_handlers", lambda e: None)
+            with pytest.raises(SystemExit) as ei:
+                runner.main(["--live"])
+    finally:
+        runner.Runner = orig
+    assert ei.value.code == 143
