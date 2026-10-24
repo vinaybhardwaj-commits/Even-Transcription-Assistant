@@ -23,13 +23,14 @@ def _cleanup(*pids):
         except OSError: pass
 
 
-# Y1: swallowed first TERM, then a child runs, then the 2nd signal arrives: the child group is killed and reaped, exit 143/130.
+# Y1 (R3: changed from "swallowed first, then a SECOND signal"): a stop swallowed while idle is no longer forgotten, so a child started afterwards is killed and reaped at its first poll and the
+# runner exits 143/130 with NO second signal. (Old semantics: _run_group reset the swallowed stop at entry and needed another signal.)
 SWALLOW_THEN_RUN = textwrap.dedent('''
     import os, signal, sys
     sys.path.insert(0, sys.argv[1]); import executors
     ex = executors.Executors(env=dict(os.environ)); executors.install_signal_handlers(ex)
     class D:
-        def __del__(self): os.kill(os.getpid(), signal.SIGTERM)
+        def __del__(self): os.kill(os.getpid(), sys.argv[3] and int(sys.argv[3]))
     D()
     print("survived", flush=True)
     ex._run_group([sys.executable, "-c", sys.argv[2]])
@@ -38,19 +39,19 @@ SWALLOW_THEN_RUN = textwrap.dedent('''
 
 
 @pytest.mark.parametrize("sig,want", [(signal.SIGTERM, 143), (signal.SIGINT, 130)])
-def test_y1_swallowed_first_then_second_signal_during_a_child_kills_and_reaps(tmp_path, sig, want):
+def test_y1_swallowed_stop_is_kept_and_kills_the_next_child(tmp_path, sig, want):
     pf = tmp_path / "pf"
-    drv = subprocess.Popen([sys.executable, "-c", SWALLOW_THEN_RUN, PKG, CHILD], env=dict(os.environ, PF=str(pf)), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    drv = subprocess.Popen([sys.executable, "-c", SWALLOW_THEN_RUN, PKG, CHILD, str(int(sig))], env=dict(os.environ, PF=str(pf)), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     assert drv.stdout.readline().strip() == "survived"
-    child, grand = map(int, _wait_file(pf).split())
-    try:
-        drv.send_signal(sig)
-        assert drv.wait(timeout=10) == want
-        time.sleep(0.2)
-        assert not _alive(child) and not _alive(grand)
-        assert "NOT KILLED" not in drv.stdout.read()
-    finally:
-        _cleanup(child, grand)
+    assert drv.wait(timeout=10) == want
+    time.sleep(0.2)
+    if pf.exists() and pf.read_text().strip():
+        child, grand = map(int, pf.read_text().split())
+        try:
+            assert not _alive(child) and not _alive(grand)
+        finally:
+            _cleanup(child, grand)
+    assert "NOT KILLED" not in drv.stdout.read()
 
 
 # Y2: signal lands while SIGTERM/SIGINT are blocked across spawn+register (between "claim" and the child being registered): it is delivered at unblock, the child is killed and reaped.

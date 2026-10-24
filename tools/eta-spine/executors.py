@@ -177,8 +177,7 @@ class Executors:
     # Signal handling (SIGTERM / SIGINT). The handler is one rule, so there is no race to get wrong:
     #   - it ALWAYS records the signal: the first signum is kept (it fixes the exit code), later ones are only counted;
     #   - while a child group is registered it NEVER raises: _run_group polls in <= POLL_S slices, sees the recorded stop, kills the group ONCE, reaps it, and then exits 143 / 130 by normal control flow;
-    #   - with no child registered it raises SystemExit(128 + first signum), so an idle runner still stops at once. If that raise is swallowed (e.g. in a finaliser) the next signal raises again (_run_group forgets an idle
-    #     swallowed stop at entry, so first-signal-wins cannot return). A stop recorded WITH a child registered is never lost: the poll loop acts on it.
+    #   - with no child registered it raises SystemExit(128 + first signum), so an idle runner still stops at once. If that raise is swallowed (e.g. in a finaliser) the next signal raises again (the runner loop checks the recorded stop before each claim and exits 128+signum, and a child started after a swallowed stop is killed at its first poll). A recorded stop is never forgotten.
     # state is REAPING only while a kill + reap runs (a timeout reap too), otherwise RUNNING.
     RUNNING, REAPING = "RUNNING", "REAPING"
     POLL_S = 0.5
@@ -195,7 +194,7 @@ class Executors:
             return
         raise SystemExit(128 + self.stop_signum)
 
-    def _raise_pending(self) -> None:
+    def raise_pending(self) -> None:
         if self.stop_signum is not None:
             raise SystemExit(128 + self.stop_signum)
 
@@ -209,8 +208,6 @@ class Executors:
 
     def _run_group(self, argv, cwd=None, timeout=None, pass_fds=(), **_kw) -> subprocess.CompletedProcess:
         """subprocess.run, but the child leads its own process group, so a timeout or a signal kills the child AND whatever it spawned; pass_fds are inherited."""
-        if not self._children:   # an idle raise that was swallowed earlier (no child was running): forget it, the next signal must still kill and exit
-            self.stop_signum = None
         # SIGTERM/SIGINT are blocked across spawn + register, so a signal cannot land between Popen() and _children.add() and orphan the child; the child gets the old mask back before exec.
         old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
         p = None
@@ -238,14 +235,14 @@ class Executors:
                 except subprocess.TimeoutExpired:
                     continue
         except BaseException:
-            if p is not None and p.poll() is None:
+            if p is not None:   # no poll() guard: the direct child may be gone while a grandchild still holds the group (and the pipes); killpg on a dead group is swallowed
                 self._reap(p)
             raise
         finally:
             if p is not None:
                 self._children.discard(p)
         # Child gone and unregistered: from here the handler raises by itself, and anything recorded while the child was registered (also during a timeout reap) is raised now. Never lost.
-        self._raise_pending()
+        self.raise_pending()
         if timed_out:
             raise subprocess.TimeoutExpired(argv, timeout)
         return subprocess.CompletedProcess(argv, p.returncode, out, err)

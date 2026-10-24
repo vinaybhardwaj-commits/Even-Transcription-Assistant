@@ -153,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     r.log(f"spine-runner start mode={'live' if a.live else 'would_run'} owner={owner}")
     poll = poll_seconds(os.environ.get("SPINE_POLL_SECONDS"))
     while True:
+        r.execs.raise_pending()   # an idle stop swallowed by a finaliser is not lost: exit 128+signum before claiming anything
         rc = r.run_once()
         if rc or a.once:
             return rc
