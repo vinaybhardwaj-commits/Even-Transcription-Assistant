@@ -96,7 +96,7 @@ const IST = 5.5 * 3600e3;
 // Each test lives on its OWN IST day (24 Oct + n), so the breaker ticks and encounters an earlier test left behind are old history to it (nothing is deleted to make room).
 let dayN = -1;
 const istMs = (hh: number, mm: number) => Date.UTC(2026, 9, 24 + dayN, hh, mm) - IST;
-const istDate = () => `2026-10-${24 + dayN}`;
+const istDate = () => new Date(Date.UTC(2026, 9, 24 + dayN)).toISOString().slice(0, 10);
 let T_1210 = 0;
 let nowMs = 0;
 const setNow = (ms: number) => { nowMs = ms; vi.setSystemTime(new Date(ms)); };
@@ -201,7 +201,7 @@ d("spine S6 live path on postgres:16 (all migrations), real routes, real runner,
     setNow(T_1210);
     // whatever an earlier test left waiting is retired the way the enqueuer retires it (superseded, never deleted), so each test sees only its own jobs
     await q("UPDATE spine_encounter SET status = 'rejected' WHERE status <> 'rejected'");   // an earlier test's encounters are no longer planned (the merger rejects encounters too), or the enqueuer would revive their jobs
-    await q("UPDATE spine_job SET status = 'superseded', done_at = now() WHERE status IN ('queued', 'leased', 'shadow')");
+    await runSpineEnqueue(T_1210);   // production path: encounters now rejected, so the enqueuer supersedes their queued/shadow jobs (it never touches a leased row)
     await upsertCfg(LIVE);
     seen.leasedAtReport.length = 0;
   }, 120_000);

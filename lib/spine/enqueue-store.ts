@@ -40,7 +40,9 @@ WITH ins AS (
    WHERE x.status = 'shadow' OR NOT EXISTS (
      SELECT 1 FROM unnest(x.needs) n WHERE NOT EXISTS (SELECT 1 FROM spine_job d WHERE d.encounter_id = x.encounter_id AND d.stage = n AND d.cut_version = x.cut_version AND d.status = 'done'))
   ON CONFLICT ON CONSTRAINT spine_job_key_uq DO UPDATE
-     SET status = EXCLUDED.status, attempts = 0, next_attempt_at = NULL, lease_owner = NULL, lease_until = NULL, last_error_class = NULL, last_error_code = NULL, done_at = NULL
+     SET status = EXCLUDED.status,
+         -- a blocked-job revive keeps its spent attempts (a transient -> unlink -> relink cycle must not refresh the budget)
+         attempts = CASE WHEN spine_job.status = 'queued' AND spine_job.next_attempt_at = 'infinity'::timestamptz THEN spine_job.attempts ELSE 0 END, next_attempt_at = NULL, lease_owner = NULL, lease_until = NULL, last_error_class = NULL, last_error_code = NULL, done_at = NULL
    WHERE (EXCLUDED.status = 'queued' AND spine_job.status = 'shadow') OR spine_job.status = 'superseded'
       -- S6: a job the runner HELD as blocked (no consult_uid link: queued, next_attempt_at infinity) comes back once an active consult_uid link exists. Nothing else called enqueue({unblock}), so it stayed held for ever.
       OR (EXCLUDED.status = 'queued' AND spine_job.status = 'queued' AND spine_job.next_attempt_at = 'infinity'::timestamptz
