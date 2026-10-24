@@ -745,7 +745,7 @@ Both fail identically on main fd871ea1, d37c554e and 82c0d398, and on every spin
 
 ## 23 Oct 2026 — spine merge writer (logged by spine-deputy for fable)
 
-- **B32** `lib/spine/merge-store.ts` (P2): when a Pulse signal's `consult_key` changes between ingests, the encounter linked under the old key stays `confirmed` with no live signal behind it (orphaned); the new key forms a second encounter. Shadow-only today (merge and jobs are off by default). Found by the P2 R2+R3 Opus refute; predates the confirmed_single_proxy change. Fix in P3: re-key the encounter (move the link by alias) or retire the orphan with a reason. Owner: spine (OPEN).
+- **B32** `lib/spine/merge-store.ts` (P2): when a Pulse signal's `consult_key` changes between ingests, the encounter linked under the old key stays `confirmed` with no live signal behind it (orphaned); the new key forms a second encounter. Shadow-only today (merge and jobs are off by default). Found by the P2 R2+R3 Opus refute; predates the confirmed_single_proxy change. Fix in P3: re-key the encounter (move the link by alias) or retire the orphan with a reason. Owner: spine. NOT REACHABLE with the current producer (pulse source_key = consult_key = enc@machine, so a key change is a new source; the same enc on another machine is the designed multi_machine case). Reopen if a producer re-keys in place.
 
 ## 23 Oct 2026 — CI red on main after #205 (logged by spine-deputy for fable)
 
