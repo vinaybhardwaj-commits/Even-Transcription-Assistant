@@ -5,7 +5,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { checkSpineBearer } from "@/lib/spine/auth";
-import { readMode } from "@/lib/spine/config";
+import { readMode, readRoomMode } from "@/lib/spine/config";
 import { parseArtefact } from "@/lib/spine/artefact";
 import type { ArtefactReport } from "@/lib/spine/jobs";
 import { opsAlertNotifier, reportJob, stubNotifier } from "@/lib/spine/jobs";
@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
   }
   try {
     const notifier = (await readMode("dead_alert")) === "live" ? opsAlertNotifier : stubNotifier;
-    const r = await reportJob({ job_id: b.job_id as number, owner: b.owner, outcome: b.outcome as Outcome, error_code: (b.error_code as string | null | undefined) ?? null, artefact, now: new Date(), rng: Math.random }, notifier, (stage) => readMode(`mode.${stage}`));
+    const r = await reportJob({ job_id: b.job_id as number, owner: b.owner, outcome: b.outcome as Outcome, error_code: (b.error_code as string | null | undefined) ?? null, artefact, now: new Date(), rng: Math.random }, notifier, readRoomMode);
     return r.ok ? NextResponse.json(r) : NextResponse.json(r, { status: 409 });
   } catch (e) {
     return NextResponse.json({ ok: false, error: `db:${(e as { code?: string }).code ?? "unknown"}` }, { status: 503 });

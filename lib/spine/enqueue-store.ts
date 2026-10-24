@@ -3,6 +3,8 @@
  * into spine_job. A stage in `shadow` is inserted with status `shadow` (never claimable); a stage in `live` is inserted `queued` (and a spent `shadow` row of the same key goes back to
  * `queued`; a `superseded` row of the same key is a re-plan and takes the planned status again). A paid stage is never planned. Idempotent on (encounter_id, stage, cut_version, input_key). Jobs of an older cut_version of the same encounter, and queued / shadow
  * jobs of a merged or rejected encounter, are marked `superseded` (never deleted). One spine_tick row (kind `enqueue`) per live pass.
+ * S6 room scoping: a stage may be live for listed rooms only (config.ts THE ROOM RULE); an unlisted room's rows are planned `shadow`. A queued row of a room later taken out of the list is left as is (nothing deleted): the claim only
+ * hands it to a would_run claim, and a room put back revives its shadow rows by the same ON CONFLICT rule as any live flip.
  * Gate: spine_config `jobs` (missing / malformed = off) and `mode.<stage>` per stage (missing = off); kill_switch respected (config.readModes).
  */
 import { sql } from "@/lib/db";
@@ -15,7 +17,7 @@ const q = (): Q => sql as unknown as Q;
 
 const READ_LIMIT = 2000;
 
-const SELECT_SQL = `SELECT encounter_id, status, boundary_rev, flags, t_close FROM spine_encounter
+const SELECT_SQL = `SELECT encounter_id, status, boundary_rev, flags, t_close, room_id FROM spine_encounter
  WHERE ist_date >= (($1::timestamptz) AT TIME ZONE 'Asia/Kolkata')::date ORDER BY t_open DESC LIMIT ${READ_LIMIT}`;
 
 /** Older cuts, sp: rows of an encounter that is no longer confirmed_single_proxy (and non-sp rows of one that is), stages the encounter no longer plans (ambiguous loses freescript; candidate loses collector / freescript), and every queued / shadow job of an encounter that is merged / rejected (cut_version null), become superseded. */
@@ -59,8 +61,9 @@ export async function runSpineEnqueue(now: number): Promise<EnqueueCounts> {
     encounter_id: String(r.encounter_id), status: String(r.status), boundary_rev: Number(r.boundary_rev),
     flags: Array.isArray(r.flags) ? (r.flags as unknown[]).map(String) : String(r.flags ?? "").replace(/[{}]/g, "").split(",").filter(Boolean),
     t_close: r.t_close == null ? null : Date.parse(String(r.t_close)),
+    room_id: r.room_id == null ? null : String(r.room_id),
   }));
-  const plan = planJobs(encs, modes, now);
+  const plan = planJobs(encs, m.stages, now, m.scopes, m.jobs);
   const sup = encs.filter((e) => e.status === "merged" || e.status === "rejected" || e.status === "confirmed" || e.status === "candidate" || e.status === "confirmed_single_proxy")
     .map((e) => ({
       encounter_id: e.encounter_id, cut_version: e.status === "merged" || e.status === "rejected" ? null : cutVersion(e.boundary_rev), sp: e.status === "confirmed_single_proxy",

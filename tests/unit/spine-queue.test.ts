@@ -64,9 +64,9 @@ describe("config: missing or malformed means off", () => {
   });
   it("jobs off, kill switch, paid stages and unknown stages are off", () => {
     const rows = [{ key: "jobs", value: "shadow" }, { key: "mode.recut", value: "live" }, { key: "mode.sarvam", value: "live" }, { key: "mode.bogus", value: "live" }];
-    expect(modesFrom(rows, ["recut", "sarvam", "bogus", "acoustics"])).toEqual({ jobs: "shadow", stages: { recut: "live", sarvam: "off", bogus: "off", acoustics: "off" } });
+    expect(modesFrom(rows, ["recut", "sarvam", "bogus", "acoustics"])).toEqual({ jobs: "shadow", stages: { recut: "live", sarvam: "off", bogus: "off", acoustics: "off" }, scopes: { recut: null, sarvam: null, bogus: null, acoustics: null } });
     expect(modesFrom(rows.slice(1), ["recut"]).stages.recut).toBe("off");
-    expect(modesFrom([...rows, { key: "kill_switch", value: true }], ["recut"])).toEqual({ jobs: "off", stages: { recut: "off" } });
+    expect(modesFrom([...rows, { key: "kill_switch", value: true }], ["recut"])).toEqual({ jobs: "off", stages: { recut: "off" }, scopes: { recut: null } });
   });
   it("F4: a kill_switch that is not exactly false / {on:false} is KILLED", () => {
     const base = [{ key: "jobs", value: "live" }, { key: "mode.recut", value: "live" }];
@@ -91,7 +91,7 @@ const M = vi.hoisted(() => ({
   modes: { jobs: "shadow", stages: { recut: "shadow", acoustics: "live" } } as { jobs: string; stages: Record<string, string> },
   claim: vi.fn(async (..._a: unknown[]) => [] as unknown[]), report: vi.fn(async () => ({ ok: true, status: "shadow" }) as unknown),
 }));
-vi.mock("@/lib/spine/config", async (orig) => ({ ...(await orig<typeof import("@/lib/spine/config")>()), readModes: async () => M.modes, readMode: async () => "off" }));
+vi.mock("@/lib/spine/config", async (orig) => ({ ...(await orig<typeof import("@/lib/spine/config")>()), readModes: async () => ({ scopes: {}, ...M.modes }), readMode: async () => "off" }));
 vi.mock("@/lib/spine/jobs", () => ({ claimJobs: M.claim, reportJob: M.report, openBreakers: async () => ["recut"], reapExhausted: async () => 0, opsAlertNotifier: {}, stubNotifier: {} }));
 import { NextRequest } from "next/server";
 import { POST as claimPOST } from "@/app/api/spine/claim/route";
